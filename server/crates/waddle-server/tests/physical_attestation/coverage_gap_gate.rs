@@ -77,8 +77,6 @@ fn known_gaps_are_unique_and_evidence_files_exist() {
         CoverageGapId::PermissionBackend,
         CoverageGapId::Inbox,
         CoverageGapId::StreamManagement,
-        CoverageGapId::DurableStreamManagement,
-        CoverageGapId::AccountBindings,
         CoverageGapId::PendingDelivery,
         CoverageGapId::IngressEpoch,
         CoverageGapId::ReceiptJournal,

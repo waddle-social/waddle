@@ -16,7 +16,7 @@ use waddle_server::db::physical_attestation::{
     CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::{DarkMigrationLedgerPins, Database, DatabaseConfig, DatabaseDriver};
-use waddle_server::ingress_substrate::{EffectReceiptKind, EPOCH_GUARDED_TABLES};
+use waddle_server::ingress_substrate::{EffectReceiptKind, INGRESS_GUARDED_TABLES};
 use waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema;
 use waddle_xmpp::ingress::MessageKey;
 
@@ -203,7 +203,7 @@ pub(super) async fn setup(
         ),
     )
     .await;
-    for table in EPOCH_GUARDED_TABLES {
+    for table in INGRESS_GUARDED_TABLES {
         sql(
             fixture,
             &format!(
@@ -451,7 +451,7 @@ async fn pinned_receipt_holds_fences_and_recovers_only_positive_results() {
     // the pinned profile fail. The outsider has no guarded-table writes, so
     // the older ingress-only alternate-definer scan would miss this bypass.
     let rogue = format!("{}.p21_rogue_lease_renew(uuid)", fixture.target);
-    for table in EPOCH_GUARDED_TABLES {
+    for table in INGRESS_GUARDED_TABLES {
         let can_write: bool = sqlx::query_scalar(
             "SELECT pg_catalog.has_table_privilege($1,$2::pg_catalog.regclass,\
              'INSERT,UPDATE,DELETE,TRUNCATE') OR \

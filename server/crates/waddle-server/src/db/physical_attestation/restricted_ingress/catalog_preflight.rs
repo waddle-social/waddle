@@ -8,7 +8,7 @@ use sqlx::PgConnection;
 
 use super::manifest::Manifest;
 use super::{RestrictedIngressProfileError, Result};
-use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
+use crate::ingress_substrate::INGRESS_GUARDED_TABLES;
 
 const PREFLIGHT_SQL: &str = include_str!("preflight.sql");
 const EXPRESSION_DEPENDENCIES_SQL: &str = include_str!("expression_dependencies.sql");
@@ -63,7 +63,7 @@ pub(super) async fn verify(
     schema: &str,
     manifest: &Manifest,
 ) -> Result<()> {
-    let mut tables = EPOCH_GUARDED_TABLES.to_vec();
+    let mut tables = INGRESS_GUARDED_TABLES.to_vec();
     tables.extend([
         "ingress_protocol_epoch",
         "ingress_epoch_guard_manifest",

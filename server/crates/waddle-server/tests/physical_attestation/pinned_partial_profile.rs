@@ -11,7 +11,7 @@ use waddle_server::db::physical_attestation::{
     PinnedSelectedEntry, PinnedSelectedEntryError,
 };
 use waddle_server::db::DarkLedgerPreflightError;
-use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
+use waddle_server::ingress_substrate::INGRESS_GUARDED_TABLES;
 use waddle_server::pubsub::DatabasePubSubStorage;
 
 use super::pinned_pubsub_inventory::InventoryFixture;
@@ -107,7 +107,7 @@ pub(super) async fn exercise(
 ) -> anyhow::Result<()> {
     let (runtime, api, helper, migrator, owner) = roles;
     ensure!(
-        PinnedPartialProfilePinsV1::ingress_relation_names() == &EPOCH_GUARDED_TABLES,
+        PinnedPartialProfilePinsV1::ingress_relation_names() == &INGRESS_GUARDED_TABLES,
         "V1 ingress names differ from the fixed guarded list"
     );
     ensure!(

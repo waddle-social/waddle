@@ -22,6 +22,7 @@ use super::row::{self, StoredResource};
 use super::schema::bootstrap_schema_owner;
 use super::store::{AccountBindingStore, PresentationMark, StoredExecution};
 use crate::db::{Database, DatabaseDriver, Transaction};
+use crate::ingress_substrate::EnteredTransaction;
 
 /// Longest a store transaction waits for a row or relation lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -67,25 +68,18 @@ impl DatabaseAccountBindingStore {
     /// which serializes every store transaction. PostgreSQL runs READ
     /// COMMITTED with bounded lock and statement waits, so a transaction
     /// that meets a held row lock fails instead of waiting without limit.
-    async fn begin_write(&self) -> Result<Transaction<'_>, AccountBindingStoreError> {
-        let mut tx = match self.db.driver() {
-            DatabaseDriver::Sqlite => self.db.begin_immediate().await?,
-            DatabaseDriver::Postgres => self.db.begin().await?,
-        };
-        if self.db.driver() == DatabaseDriver::Postgres {
-            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                .await?;
-            if !crate::ingress_substrate::set_local_transaction_timeouts(
-                &mut tx,
-                LOCK_TIMEOUT,
-                STATEMENT_TIMEOUT,
-            )
-            .await?
-            {
-                return Err(AccountBindingStoreError::BoundsUnproven);
-            }
-        }
-        Ok(tx)
+    ///
+    /// The resource relations are under the ingress epoch guard, so the
+    /// transaction proves the live protocol epoch before its first
+    /// statement: a write this binary's epoch does not cover is refused
+    /// here, and the epoch row lock precedes the claim and resource locks.
+    async fn begin_write(&self) -> Result<EnteredTransaction<'_>, AccountBindingStoreError> {
+        Ok(crate::ingress_substrate::begin_guarded_store_writer(
+            &self.db,
+            LOCK_TIMEOUT,
+            STATEMENT_TIMEOUT,
+        )
+        .await?)
     }
 
     /// Begin a write under `authority`. On a clustered store the exact
@@ -97,7 +91,7 @@ impl DatabaseAccountBindingStore {
         &self,
         authority: &UserClaimIdentity,
         full_jid: &FullJid,
-    ) -> Result<Transaction<'_>, AccountBindingStoreError> {
+    ) -> Result<EnteredTransaction<'_>, AccountBindingStoreError> {
         check_account(authority, full_jid)?;
         let mut tx = self.begin_write().await?;
         if self.clustered && !claim_is_held(&mut tx, authority).await? {

@@ -15,6 +15,7 @@ use super::record::{self, DurableSessionRecord};
 use super::resume::ResumedCommit;
 use super::store::DurableSmStore;
 use crate::db::Transaction;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::sm_persistence::durable_rows;
 
 /// The owner's projection of its resource at the moment its transport ends.
@@ -460,7 +461,7 @@ impl DurableSmStore {
         &self,
         session: SmSessionKey,
         claim: Option<&SmClaimFence>,
-    ) -> Result<(Transaction<'_>, DurableSessionRecord), LifecycleRejection> {
+    ) -> Result<(EnteredTransaction<'_>, DurableSessionRecord), LifecycleRejection> {
         let claim = self.write_claim(claim)?;
         let mut tx = self.begin_write().await?;
         if let Some(claim) = claim {
@@ -493,7 +494,7 @@ async fn lock_generation(
 }
 
 async fn finish(
-    mut tx: Transaction<'_>,
+    mut tx: EnteredTransaction<'_>,
     stored: &DurableSessionRecord,
     now: DateTime<Utc>,
 ) -> Result<(), LifecycleError> {

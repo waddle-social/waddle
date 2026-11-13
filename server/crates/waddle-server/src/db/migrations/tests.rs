@@ -97,6 +97,25 @@ async fn pre_v1033_catalog_refuses_a_v1033_ledger() {
 }
 
 #[tokio::test]
+async fn pre_v1034_catalog_refuses_a_v1034_ledger() {
+    let db = Database::in_memory("authority-guard-old-catalog")
+        .await
+        .expect("SQLite database");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("current catalog");
+    let mut prior = global::all();
+    prior.extend(waddle::all().into_iter().filter(|m| m.version <= 1033));
+    assert!(matches!(
+        MigrationRunner::new(prior).run(&db).await,
+        Err(DatabaseError::MigrationLedger(
+            MigrationLedgerError::UnknownVersion { version: 1034, .. }
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn test_migration_runner_global() {
     let db = Database::in_memory("test-global").await.unwrap();
     let runner = MigrationRunner::global();
@@ -126,10 +145,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1033) still dominates
+    // the ledger max, which the waddle namespace (V1034) still dominates
     // after global V0015.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1033));
+    assert_eq!(version, Some(1034));
 }
 
 #[tokio::test]
@@ -247,7 +266,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
             1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029,
-            1030, 1031, 1032, 1033
+            1030, 1031, 1032, 1033, 1034
         ]
     );
 
@@ -268,7 +287,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1033));
+    assert_eq!(version, Some(1034));
 }
 
 #[tokio::test]
@@ -327,7 +346,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1033 (the waddle
+    // so the runner also reports applying 1001 through 1034 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -339,7 +358,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
-            1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
 
@@ -403,7 +422,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1033),
+        Some(1034),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -564,7 +583,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
             1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029,
-            1030, 1031, 1032, 1033
+            1030, 1031, 1032, 1033, 1034
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
@@ -877,7 +896,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
         applied,
         vec![
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
     assert_eq!(
@@ -1096,7 +1115,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
             1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029,
-            1030, 1031, 1032, 1033
+            1030, 1031, 1032, 1033, 1034
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
@@ -2476,7 +2495,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         vec![
             6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
             1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
-            1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2554,7 +2573,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
 
@@ -3208,7 +3227,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
 
@@ -3483,7 +3502,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         vec![
             1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
             1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030,
-            1031, 1032, 1033
+            1031, 1032, 1033, 1034
         ]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
@@ -4185,7 +4204,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .expect("apply V1012 through V1014"),
         vec![
             1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
-            1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
     assert_nonterminal_monitoring_index(&db).await;
@@ -4251,7 +4270,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .expect("apply V1012 through V1014"),
         vec![
             1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
-            1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
@@ -4287,7 +4306,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .expect("apply V1014"),
         vec![
             1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027,
-            1028, 1029, 1030, 1031, 1032, 1033
+            1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
 
@@ -4322,7 +4341,7 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .expect("apply V1014 at live epoch"),
             vec![
                 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027,
-                1028, 1029, 1030, 1031, 1032, 1033
+                1028, 1029, 1030, 1031, 1032, 1033, 1034
             ]
         );
         assert_v1014_cutover_result(&db, epoch).await;
@@ -4572,7 +4591,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .expect("cutover migration"),
         vec![
             1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
-            1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033
+            1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034
         ]
     );
     drop(storage);
@@ -4861,7 +4880,7 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             .expect("apply custody cutover migration"),
         vec![
             1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032,
-            1033
+            1033, 1034
         ]
     );
     let conn = db
@@ -5321,7 +5340,7 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
             .run(db)
             .await
             .expect("append V1025"),
-        vec![1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033]
+        vec![1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034]
     );
     let conn = db.guard().await.expect("catalog");
     let references_query = match db.driver() {
@@ -5404,7 +5423,7 @@ async fn assert_v1026_preserves_envelopes_and_expands_versions(db: &Database) {
     }
     assert_eq!(
         MigrationRunner::single().run(db).await.expect("V1026"),
-        vec![1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033]
+        vec![1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034]
     );
     assert!(MigrationRunner::single()
         .run(db)
@@ -5560,7 +5579,7 @@ async fn assert_v1027_preserves_sm_sources_and_adopts_ack_journal(
             .run(db)
             .await
             .expect("apply additive ACK migration"),
-        vec![1027, 1028, 1029, 1030, 1031, 1032, 1033]
+        vec![1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034]
     );
     assert!(MigrationRunner::single()
         .run(db)

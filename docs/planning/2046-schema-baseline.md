@@ -284,7 +284,7 @@ is converted.
 | MAM | `mam_messages` | `X/mam/storage/sqlx_store/schema.rs`, `MIG/owner/mam.rs` | Folds. The `waddle-xmpp` initializer keeps its DDL for the crate's own tests and stops being called by the server's owner phase. |
 | Webhook ledger | `webhook_deliveries` | `S/server/routes/webhook_delivery.rs` | Folds on both engines. This adds the table to SQLite at startup, where it is lazy today. |
 | P21 receipt journal | `p21_receipt_operation_results`, `waddle_p21_record_effect_receipt` | `MIG/owner/p21_receipt_journal_{postgres,sqlite}.sql` | Folds, function as a template. |
-| Durable stream management | `sm_durable_sessions`, `sm_durable_operations` | the owner phase | Folds. |
+| Durable stream management and account bindings | `sm_durable_sessions`, `sm_durable_operations`, `account_resource_bindings`, `account_resource_operations` | migration V1034 on PostgreSQL, with their epoch guards; the store initializers on SQLite | Folds. |
 | Physical attestor | `waddle_attestation.read_physical_identity()` | `install-attestor` | Stays (section 2). |
 
 ## 5. Existing database: the stamp

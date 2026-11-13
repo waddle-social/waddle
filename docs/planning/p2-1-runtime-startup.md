@@ -1008,6 +1008,14 @@ and push outboxes use, and `PostgresIngressSubstrate::begin`. On a handle
 without attestation the substrate keeps its own sequence, and the raw writer
 begins in the same module's `begin_unattested_raw_writer`, which first probes
 for the descendant foundation so a standalone store without it stays usable.
+The durable session authority and the account binding store, whose four
+tables are epoch-guarded without being ingress tables, begin their writes in
+the same module's `begin_guarded_store_writer`: the entry under the
+registered guard with the store's own lock and statement bounds on an
+attested pool, the unattested raw writer otherwise. Their helpers take a
+bare transaction and lie outside the check script's ingress modules, so for
+those four tables the guard trigger, not the compiler, refuses a write that
+skipped the entry.
 A request names, as typed values, what the callers differ in:
 
 - the authority: unattested (SQLite, or PostgreSQL without attestation), the

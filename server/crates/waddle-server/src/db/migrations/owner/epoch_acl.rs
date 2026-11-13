@@ -14,7 +14,9 @@ use crate::db::migrations::waddle::{
 };
 use crate::db::physical_attestation::PgRoleName;
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
-use crate::ingress_substrate::{supported_protocol_epoch, EPOCH_GUARDED_TABLES};
+use crate::ingress_substrate::{
+    supported_protocol_epoch, EPOCH_GUARDED_TABLES, INGRESS_GUARDED_TABLES,
+};
 
 // The candidate is a laboratory asset, not a registered migration. Its single
 // source is shared with the tests and included in the release source fileset.
@@ -425,7 +427,10 @@ async fn inspect_catalog_with_epoch_policy(
         }
         live_relations.push(row.get::<String>(0)?);
     }
-    let mut expected_relations = EPOCH_GUARDED_TABLES.to_vec();
+    // The relations named `ingress_*` are the substrate's own guarded tables
+    // and the two epoch relations; the guarded authority tables carry other
+    // names and are checked through the manifest and their trigger pairs.
+    let mut expected_relations = INGRESS_GUARDED_TABLES.to_vec();
     expected_relations.extend(["ingress_epoch_guard_manifest", "ingress_protocol_epoch"]);
     expected_relations.sort_unstable();
     if live_relations
@@ -547,6 +552,22 @@ pub(super) async fn correlate_runtime(
         DarkMigrationOwnerError::RuntimeSessionUnverified,
     )
     .await
+}
+
+/// Whether `source` is the body of an epoch guard trigger function this
+/// source tree installs: the V1009 `waddle_ingress_truncate_guard`, or
+/// `waddle_ingress_epoch_guard` as V1009 or the relation-guard candidate
+/// defines it. A store attachment uses this to pin the function behind the
+/// guard triggers of its own relations.
+pub(crate) fn is_installed_epoch_guard_body(name: &str, source: &str) -> bool {
+    let v1009 = source_body(V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES, name);
+    match name {
+        "waddle_ingress_truncate_guard" => v1009 == Some(source),
+        "waddle_ingress_epoch_guard" => {
+            v1009 == Some(source) || source_body(RELATION_GUARD_CANDIDATE, name) == Some(source)
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn source_body<'a>(sql: &'a str, name: &str) -> Option<&'a str> {
@@ -909,10 +930,14 @@ async fn check_guarded_relation_acls(
             | "ingress_send_attempts"
             | "ingress_room_requests"
             | "ingress_room_occupants"
-            | "ingress_direct_requests" => (true, true, true, true),
-            "ingress_origin_aliases" | "ingress_sm_refs" | "ingress_deliveries" => {
-                (true, true, false, true)
-            }
+            | "ingress_direct_requests"
+            | "sm_durable_sessions"
+            | "account_resource_bindings" => (true, true, true, true),
+            "ingress_origin_aliases"
+            | "ingress_sm_refs"
+            | "ingress_deliveries"
+            | "sm_durable_operations"
+            | "account_resource_operations" => (true, true, false, true),
             "ingress_effect_intents"
             | "ingress_effect_descendants"
             | "ingress_mailbox_lanes"
@@ -926,8 +951,10 @@ async fn check_guarded_relation_acls(
             _ => return Err(DarkMigrationOwnerError::EpochCatalogDrift),
         };
         // V1011 grants pg_monitor SELECT on the first six guarded tables;
-        // later ingress migrations extend that same read profile to the rest.
-        let monitor_select = true;
+        // later ingress migrations extend that same read profile to the
+        // rest. The authority tables hold resume-token digests, full JIDs
+        // and presence payloads, and V1034 grants the monitor nothing.
+        let monitor_select = INGRESS_GUARDED_TABLES.contains(&table);
         require(
             tx,
             r#"SELECT c.relkind = 'r' AND c.relpersistence = 'p' AND c.relowner = owner.oid

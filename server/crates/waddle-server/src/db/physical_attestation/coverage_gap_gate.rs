@@ -63,8 +63,6 @@ pub enum CoverageGapId {
     PermissionBackend,
     Inbox,
     StreamManagement,
-    DurableStreamManagement,
-    AccountBindings,
     PendingDelivery,
     IngressEpoch,
     ReceiptJournal,
@@ -144,23 +142,16 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/src/sm_persistence/runtime_attach.rs",
         "server/crates/waddle-server/src/db/runtime_store_acl.rs",
     ]),
-    gap!(DurableStreamManagement, "The durable session authority has an owner initializer and a runtime attach profile; they are not joined to the all-family contract.", ["sm_durable_sessions", "sm_durable_operations"], [
-        "server/crates/waddle-server/src/sm_authority/schema.rs",
-        "server/crates/waddle-server/src/sm_persistence/runtime_attach.rs",
-        "server/crates/waddle-server/src/db/runtime_store_acl.rs",
-    ]),
-    gap!(AccountBindings, "Account resource rows have an owner initializer and a runtime attach profile; they are not joined to the all-family contract.", ["account_resource_bindings", "account_resource_operations"], [
-        "server/crates/waddle-server/src/account_bindings/schema.rs",
-        "server/crates/waddle-server/src/account_bindings/runtime_attach.rs",
-        "server/crates/waddle-server/src/db/runtime_store_acl.rs",
-    ]),
     gap!(PendingDelivery, "Pending delivery is prepared separately; its complete joint object and ACL matrix is not established.", ["pending_delivery", "pending_delivery_sm_promotions"], [
         "server/crates/waddle-server/src/pending_delivery/database/runtime_attach.rs",
         "server/crates/waddle-server/src/db/runtime_store_acl.rs",
     ]),
-    gap!(IngressEpoch, "The pinned diagnostic covers only a named subset; functions, triggers, indexes and other dependencies are not a complete profile.", ["ingress_messages", "ingress_protocol_epoch", "ingress_epoch_guard_manifest"], [
+    gap!(IngressEpoch, "The pinned diagnostic covers only a named subset; functions, triggers, indexes and other dependencies are not a complete profile. The durable session and account binding relations are migrated under the same epoch guard and checked by the epoch ACL diagnostic and their stores' attachments, which pin their guard triggers; the pinned and definer profiles do not cover them.", ["ingress_messages", "ingress_protocol_epoch", "ingress_epoch_guard_manifest", "sm_durable_sessions", "sm_durable_operations", "account_resource_bindings", "account_resource_operations"], [
         "server/crates/waddle-server/src/db/physical_attestation/pinned_partial_profile.rs",
         "server/crates/waddle-server/src/db/migrations/waddle.rs",
+        "server/crates/waddle-server/src/db/migrations/authority_guards_postgres.sql",
+        "server/crates/waddle-server/src/db/migrations/owner/epoch_acl.rs",
+        "server/crates/waddle-server/src/db/runtime_store_acl.rs",
     ]),
     gap!(ReceiptJournal, "The V1030 journal and callable receipt functions have not been joined to a complete all-family graph.", ["p21_receipt_operation_results", "waddle_p21_record_effect_receipt"], [
         "server/crates/waddle-server/src/db/migrations/owner/p21_receipt_journal_postgres.sql",

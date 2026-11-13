@@ -141,7 +141,9 @@ pub use substrate::MessageWriteOutcome;
 pub use substrate::PostgresIngressSubstrate;
 pub use substrate::TerminalizeOutcome;
 pub use substrate::ALIAS_RETENTION;
+pub use substrate::AUTHORITY_GUARDED_TABLES;
 pub use substrate::EPOCH_GUARDED_TABLES;
+pub use substrate::INGRESS_GUARDED_TABLES;
 pub(crate) use substrate::{
     assert_relayed_alias_in_prepared_transaction, insert_sm_ref_in_prepared_transaction,
     lock_message_for_child_in_prepared_transaction, prepared_ingress_relation,
@@ -153,7 +155,7 @@ pub(crate) use substrate::{
 pub(crate) use typed_entry::acquire_within_deadline;
 pub use typed_entry::EnteredTransaction;
 pub(crate) use typed_entry::{
-    begin_ingress_entry, begin_unattested_raw_writer, IngressEntryAcquisition,
-    IngressEntryAuthority, IngressEntryClamp, IngressEntryError, IngressEntryRequest,
-    IngressEntryTransaction, PreparedAttestedReceiptWriter,
+    begin_guarded_store_writer, begin_ingress_entry, begin_unattested_raw_writer,
+    GuardedStoreWriterError, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
+    IngressEntryError, IngressEntryRequest, IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };

@@ -14,6 +14,8 @@
 //! PostgreSQL through `WADDLE_TEST_REQUIRE_POSTGRES=1` and fail if it is missing.
 #![cfg(feature = "test-support")]
 
+#[path = "restricted_runtime_startup/authority_guard.rs"]
+mod authority_guard;
 #[cfg(feature = "clustering")]
 #[path = "restricted_runtime_startup/clustered.rs"]
 mod clustered;

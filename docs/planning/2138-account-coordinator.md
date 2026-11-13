@@ -189,8 +189,15 @@ and present only when it returns `true`.
 
 - **Rows.** `account_resource_bindings` holds one row per full JID and
   `account_resource_operations` the committed outcome of each operation
-  identity (`waddle-server/src/account_bindings`). An owner initializer
-  creates them in the owner phase; the runtime role attaches and verifies.
+  identity (`waddle-server/src/account_bindings`). On PostgreSQL migration
+  V1034 creates them under the ingress epoch guard; the owner initializer
+  issues the same statements for SQLite and for a database without the
+  migration catalog. The runtime role attaches and verifies, including the
+  guard pair on each table. Every write begins through
+  `begin_guarded_store_writer`, so it proves the live protocol epoch before
+  the claim and resource locks and fails as
+  `AccountBindingStoreError::EpochUnproven` at an epoch the binary does not
+  implement.
   `AccountBindingStore::execute` rebuilds the slot from the row under its
   lock, applies the pure transition and writes the result, so the store
   and the coordinator share one set of rules.

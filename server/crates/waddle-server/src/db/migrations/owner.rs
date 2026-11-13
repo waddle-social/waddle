@@ -35,6 +35,7 @@ mod transition_lab;
 // without registering or installing it through the migration runner.
 const _: &str = include_str!("owner/ingress_definer_api_candidate.sql");
 
+pub(crate) use epoch_acl::is_installed_epoch_guard_body;
 pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
 pub use ledger_preflight::{
     acquire_dark_shared_migration_ledger_v1023, acquire_dark_shared_migration_ledger_v1030_read,

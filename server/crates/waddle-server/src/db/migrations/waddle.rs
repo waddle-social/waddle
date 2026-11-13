@@ -1765,6 +1765,16 @@ SELECT 1;
 pub const V1033_INGRESS_DIRECT_REQUESTS_POSTGRES: &str =
     include_str!("direct_requests_postgres.sql");
 
+/// The durable session authority and account binding relations, created
+/// under the epoch guard. The guard exists only on PostgreSQL; SQLite's
+/// relations come from each store's owner initializer, so it records the
+/// version alone.
+pub const V1034_AUTHORITY_EPOCH_GUARDS: &str = r#"
+SELECT 1;
+"#;
+pub const V1034_AUTHORITY_EPOCH_GUARDS_POSTGRES: &str =
+    include_str!("authority_guards_postgres.sql");
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1969,6 +1979,12 @@ pub fn all() -> Vec<Migration> {
             description: "Create direct requests for the mailbox".to_string(),
             sql_sqlite: V1033_INGRESS_DIRECT_REQUESTS,
             sql_postgres: V1033_INGRESS_DIRECT_REQUESTS_POSTGRES,
+        },
+        Migration {
+            version: 1034,
+            description: "Guard the durable session and account binding relations".to_string(),
+            sql_sqlite: V1034_AUTHORITY_EPOCH_GUARDS,
+            sql_postgres: V1034_AUTHORITY_EPOCH_GUARDS_POSTGRES,
         },
     ]
 }

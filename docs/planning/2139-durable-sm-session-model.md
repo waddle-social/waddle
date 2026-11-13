@@ -195,6 +195,23 @@ transport. Whether or not the close arrives, the superseded owner cannot
 admit, acknowledge, detach, complete or compensate: each of those names its
 old generation and binding and fails the fence.
 
+## Schema and the epoch guard
+
+On PostgreSQL, migration V1034 creates `sm_durable_sessions` and
+`sm_durable_operations` with the ingress epoch guard triggers and enrolls
+them in `ingress_epoch_guard_manifest`. The owner initializer
+(`S/sm_authority/schema.rs`) issues the same `CREATE ... IF NOT EXISTS`
+statements for SQLite and for a database without the migration catalog. A
+later column is a new migration or a repeatable statement in the
+initializer.
+
+Every write transaction begins in `DurableSmStore::begin_write`, which calls
+`begin_guarded_store_writer`: the epoch row lock and the transaction-local
+proof precede the claim and session row locks, and a live epoch the binary
+does not implement fails the write as `DurableSmError::EpochUnproven` before
+any statement. Reads open a plain transaction. The runtime attachment
+refuses either table unless it carries exactly its guard pair.
+
 ## Not in this model
 
 - Retention interlock between a retained frame and its canonical

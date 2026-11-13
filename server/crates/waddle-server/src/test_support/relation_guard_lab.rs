@@ -375,7 +375,7 @@ impl Lab {
         let mut owner_connection = PgConnection::connect_with(&owner_options).await?;
         let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM guarded._migrations")
             .fetch_one(&mut owner_connection).await?;
-        ensure!(latest == 1033, "expected catalog through V1033, got {latest}");
+        ensure!(latest == 1034, "expected catalog through V1034, got {latest}");
         if candidate_guard {
             sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
             sqlx::query("CREATE TABLE guarded.waddle_epoch_transition_lab_marker (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, attempt_id UUID NOT NULL)")
@@ -390,8 +390,8 @@ impl Lab {
             format!("GRANT SELECT ON guarded._lineage TO {definer}"),
             format!("GRANT SELECT ON guarded.ingress_protocol_epoch, guarded.ingress_epoch_guard_manifest TO {runtime}"),
             format!("GRANT SELECT ON guarded._migrations TO {runtime}"),
-            format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.ingress_messages, guarded.ingress_sm_streams, guarded.ingress_send_attempts, guarded.ingress_room_requests, guarded.ingress_room_occupants, guarded.ingress_direct_requests TO {runtime}"),
-            format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_origin_aliases, guarded.ingress_sm_refs, guarded.ingress_deliveries TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.ingress_messages, guarded.ingress_sm_streams, guarded.ingress_send_attempts, guarded.ingress_room_requests, guarded.ingress_room_occupants, guarded.ingress_direct_requests, guarded.sm_durable_sessions, guarded.account_resource_bindings TO {runtime}"),
+            format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_origin_aliases, guarded.ingress_sm_refs, guarded.ingress_deliveries, guarded.sm_durable_operations, guarded.account_resource_operations TO {runtime}"),
             format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_intents TO {runtime}"),
             format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_descendants, guarded.ingress_mailbox_lanes, guarded.ingress_mailbox_entries TO {runtime}"),
             format!("GRANT SELECT, INSERT ON guarded.ingress_effect_receipts, guarded.ingress_carbon_receipts, guarded.ingress_delivery_receipts, guarded.ingress_archive_dispatch, guarded.ingress_owner_rejections, guarded.ingress_room_responses TO {runtime}"),

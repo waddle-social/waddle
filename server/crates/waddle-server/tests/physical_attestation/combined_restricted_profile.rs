@@ -25,7 +25,7 @@ use waddle_server::db::physical_attestation::{
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_server::inbox::{bootstrap_inbox_owner_schema, DatabaseInboxStorage};
-use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
+use waddle_server::ingress_substrate::INGRESS_GUARDED_TABLES;
 use waddle_server::ingress_uow::{
     prepare_dark_room_observation_schema, verify_attested_room_observation_schema,
     verify_attested_room_observation_schema_v1, RoomObservationSchemaError,
@@ -462,7 +462,7 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         format!("GRANT UPDATE(id) ON guarded.ingress_protocol_epoch, guarded.sessions TO {api}"),
         format!("GRANT SELECT ON guarded.ingress_protocol_epoch, guarded.ingress_epoch_guard_manifest TO {runtime}"),
     ] { sqlx::query(&statement).execute(&mut owner_connection).await?; }
-    for table in EPOCH_GUARDED_TABLES {
+    for table in INGRESS_GUARDED_TABLES {
         sqlx::query(&format!(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.{table} TO {api}"
         ))

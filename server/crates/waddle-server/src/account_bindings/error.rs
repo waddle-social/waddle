@@ -3,6 +3,7 @@ use waddle_xmpp::ownership::account_resource_transition::AccountResourceRestoreE
 
 use super::runtime_attach::AccountBindingAttachError;
 use crate::db::DatabaseError;
+use crate::ingress_substrate::{GuardedStoreWriterError, IngressSubstrateError};
 
 /// A failure of the account binding store that is not a decision about the
 /// resource. Returned before a commit is attempted, it means nothing
@@ -18,6 +19,11 @@ pub enum AccountBindingStoreError {
     Restore(#[from] AccountResourceRestoreError),
     #[error("the transaction's lock and statement bounds could not be installed")]
     BoundsUnproven,
+    /// The resource relations are epoch-guarded and the write could not
+    /// prove the live protocol epoch: it is one this binary does not
+    /// implement, or the connection is not the attested one.
+    #[error("the account binding write could not prove the live protocol epoch")]
+    EpochUnproven(#[source] IngressSubstrateError),
     #[error("the account binding schema could not be verified for runtime attachment")]
     RuntimeAttach(#[from] AccountBindingAttachError),
     #[error("a clustered account binding store requires PostgreSQL")]
@@ -50,4 +56,14 @@ pub enum AccountBindingStoreError {
     /// The in-memory store was told to refuse, to exercise callers.
     #[error("the account binding store is unavailable")]
     Unavailable,
+}
+
+impl From<GuardedStoreWriterError> for AccountBindingStoreError {
+    fn from(error: GuardedStoreWriterError) -> Self {
+        match error {
+            GuardedStoreWriterError::Database(error) => Self::Database(error),
+            GuardedStoreWriterError::BoundsUnproven => Self::BoundsUnproven,
+            GuardedStoreWriterError::EpochUnproven(error) => Self::EpochUnproven(error),
+        }
+    }
 }

@@ -4,7 +4,7 @@ use sqlx::postgres::types::Oid;
 use sqlx::{PgConnection, Row};
 
 use super::{RestrictedIngressProfileError, Result};
-use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
+use crate::ingress_substrate::{EPOCH_GUARDED_TABLES, INGRESS_GUARDED_TABLES};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct CatalogPin {
@@ -75,7 +75,10 @@ pub(super) async fn verify_roles_and_tables(
     }
     let runtime_oid = row.try_get::<Oid, _>("runtime_oid")?.0;
     let api_oid = row.try_get::<Oid, _>("api_oid")?.0;
-    let mut expected: Vec<String> = EPOCH_GUARDED_TABLES
+    // The definer profile reserves the ingress heaps to the API role. The
+    // guarded authority tables are written by the runtime role itself and
+    // are outside this profile; only their manifest rows are checked here.
+    let mut expected: Vec<String> = INGRESS_GUARDED_TABLES
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
@@ -91,7 +94,7 @@ pub(super) async fn verify_roles_and_tables(
             "guarded relation inventory",
         ));
     }
-    let guarded: Vec<String> = EPOCH_GUARDED_TABLES
+    let guarded: Vec<String> = INGRESS_GUARDED_TABLES
         .iter()
         .map(|s| (*s).to_owned())
         .collect();

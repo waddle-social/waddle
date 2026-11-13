@@ -207,7 +207,7 @@ pub(super) async fn verify_functions_and_triggers(
             "API owner function inventory",
         ));
     }
-    let mut guarded: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    let mut guarded: Vec<&str> = crate::ingress_substrate::INGRESS_GUARDED_TABLES.to_vec();
     if guarded_receipt {
         guarded.extend(["singleton_candidate_slot", "singleton_candidate_leases"]);
     }
@@ -266,7 +266,7 @@ pub(super) async fn verify_structure(
     schema: &str,
     manifest: &Manifest,
 ) -> Result<()> {
-    let mut tables: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    let mut tables: Vec<&str> = crate::ingress_substrate::INGRESS_GUARDED_TABLES.to_vec();
     tables.extend([
         "ingress_protocol_epoch",
         "ingress_epoch_guard_manifest",

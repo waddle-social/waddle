@@ -31,6 +31,7 @@ pub use baseline::{
 pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;
 pub use namespace::{MigrationNamespace, WADDLE_NAMESPACE_START};
+pub(crate) use owner::is_installed_epoch_guard_body;
 pub(crate) use owner::verify_relation_guard_candidate_in_transaction;
 pub(crate) use owner::verify_room_observation_migration_v1023_in_transaction;
 pub use owner::{

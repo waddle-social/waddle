@@ -23,6 +23,7 @@ use super::operations::{self, OperationKind, OperationOutcome};
 use super::record::{self, DurableSessionRecord};
 use super::store::DurableSmStore;
 use crate::db::Transaction;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::sm_persistence::durable_rows;
 
 /// One countable outbound stanza offered for custody.
@@ -371,7 +372,7 @@ impl DurableSmStore {
         &self,
         fence: &OwnerFence,
         claim: Option<&SmClaimFence>,
-    ) -> Result<(Transaction<'_>, DurableSessionRecord), OwnerRejection> {
+    ) -> Result<(EnteredTransaction<'_>, DurableSessionRecord), OwnerRejection> {
         let claim = self.write_claim(claim)?;
         let mut tx = self.begin_write().await?;
         if let Some(claim) = claim {
