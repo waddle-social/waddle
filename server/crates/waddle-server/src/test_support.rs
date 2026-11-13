@@ -1019,3 +1019,71 @@ where
     )
     .await
 }
+
+/// Bind `resource` as a live local connection the way a WebSocket bind
+/// does, and return the receiver of its outbound channel.
+///
+/// The account coordinator is the only account authority, and live delivery
+/// hands a stanza only to the local registry entry that carries the binding
+/// the coordinator names. A suite that drives ingress effects without a
+/// socket therefore records the binding at the coordinator (published, then
+/// confirmed active), registers the connection entry for that exact binding
+/// and mirrors it into the `UserActor`, as registration does.
+///
+/// # Panics
+/// Panics if the state has no selected coordinator or the coordinator does
+/// not activate the binding.
+pub async fn bind_live_resource(
+    state: &WebSocketState,
+    resource: &jid::FullJid,
+    capacity: usize,
+) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
+    use crate::account_coordinator::{
+        AccountBindingAuthority, ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome,
+    };
+    use waddle_xmpp::ownership::joint_identity::ResourceLifetime;
+    use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+    let authority = state
+        .deps
+        .app_state
+        .account_authority()
+        .authority()
+        .cloned()
+        .expect("the fixture selects the account coordinator");
+    let publisher = CoordinatorBindingPublisher::new(authority as Arc<dyn AccountBindingAuthority>);
+    let binding = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let PublishOutcome::Published(published) = publisher
+        .publish(resource, &binding, ResourceLifetime::fresh())
+        .await
+        .expect("the coordinator answers the bind")
+    else {
+        panic!("the coordinator did not publish the binding of {resource}");
+    };
+    let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
+    let registry = &state.deps.protocol.connection_registry;
+    registry.register_entry(
+        resource.clone(),
+        waddle_xmpp::registry::ConnectionEntry::new_for_binding(sender, binding),
+    );
+    assert!(
+        matches!(
+            publisher
+                .confirm(resource, &published)
+                .await
+                .expect("the coordinator answers the confirmation"),
+            ConfirmOutcome::Confirmed(_)
+        ),
+        "the coordinator did not activate the binding of {resource}"
+    );
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: resource.clone(),
+            entry: registry.entry(resource).expect("registered connection"),
+        })
+        .await
+        .expect("registered user resource");
+    receiver
+}

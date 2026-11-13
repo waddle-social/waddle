@@ -744,36 +744,35 @@ async fn assert_inbox_wire(
     fixture: &IngressFixture,
     decision: &waddle_server::ingress::IngressDecision,
 ) {
-    use kameo::actor::Spawn;
+    use std::sync::Arc;
+    use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
     use waddle_server::ingress::execute::execute_effects;
-    use waddle_server::ingress::{Deps, ImmediateSink};
-    use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
+    use waddle_server::ingress::{ImmediateSink, RecoveryEnvironment};
+    use waddle_server::test_support::{bind_live_resource, websocket_state_with_ingress};
     use waddle_xmpp::xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX};
     use waddle_xmpp::Stanza;
-    let registry = ConnectionRegistry::new();
-    let users = UserRegistryActor::spawn(UserRegistryActor::new());
+    let pool = Arc::new(
+        DatabasePool::try_new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared database pool"),
+    );
+    let authority = Arc::new(fixture.authority().await);
+    let state = websocket_state_with_ingress(pool, authority.clone()).await;
     let resource = fixture
         .principal
         .bare_jid()
         .with_resource_str("phone")
         .expect("resource");
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
-    registry.register_with_carbons(resource.clone(), sender, false);
-    users
-        .ask(RegisterUserResource {
-            entry: registry.entry(&resource).expect("entry"),
-            jid: resource,
-        })
-        .await
-        .expect("register");
-    let mut deps = Deps::new(&registry, "example.com");
-    deps.user_registry = Some(&users);
+    let mut receiver = bind_live_resource(&state, &resource, 4).await;
     execute_effects(
         &fixture.uow,
         &fixture.db,
         decision,
         &ImmediateSink,
-        &deps,
+        &state.recovery_deps(),
         Duration::from_secs(5),
     )
     .await;
@@ -799,6 +798,7 @@ async fn assert_inbox_wire(
             .expect("committed projection")
     );
     assert!(receiver.try_recv().is_err());
+    assert!(authority.drain_and_join(Duration::from_secs(5)).await);
 }
 backend_tests!(
     monotonic_inbox_sqlite,
