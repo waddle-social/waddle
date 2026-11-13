@@ -393,6 +393,10 @@ impl Lab {
             format!("GRANT SELECT ON guarded._lineage TO {definer}"),
             format!("GRANT SELECT ON guarded.ingress_protocol_epoch, guarded.ingress_epoch_guard_manifest TO {runtime}"),
             format!("GRANT SELECT ON guarded._migrations TO {runtime}"),
+            // Retention keeps a message whose archive dispatch still names a
+            // pending-delivery row, so its eligibility check reads the table
+            // the schema baseline creates, as the production runtime does.
+            format!("GRANT SELECT ON guarded.pending_delivery TO {runtime}"),
             format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.ingress_messages, guarded.ingress_sm_streams, guarded.ingress_send_attempts, guarded.ingress_room_requests, guarded.ingress_room_occupants, guarded.ingress_direct_requests, guarded.sm_durable_sessions, guarded.account_resource_bindings TO {runtime}"),
             format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_origin_aliases, guarded.ingress_sm_refs, guarded.ingress_deliveries, guarded.sm_durable_operations, guarded.account_resource_operations TO {runtime}"),
             format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_intents TO {runtime}"),

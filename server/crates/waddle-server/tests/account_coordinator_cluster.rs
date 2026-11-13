@@ -173,6 +173,8 @@ impl Scenario {
 /// Delete the binding rows earlier scenarios left in the shared database.
 /// Their nodes are gone, and a row that names a binding keeps its account
 /// bound. The relations do not exist before the first node has started.
+/// Only the schema the statements below resolve to counts: other tests
+/// create these relations in their own schemas of the same database.
 ///
 /// The relations accept a write only from a transaction that proves the
 /// live protocol epoch, so the proof and the deletes run as one statement.
@@ -180,7 +182,8 @@ async fn forget_bindings(db: &Database) {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
         .query(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name IN \
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = pg_catalog.current_schema() AND table_name IN \
              ('account_resource_operations', 'account_resource_bindings', \
              'ingress_protocol_epoch', 'pending_delivery')",
             (),
