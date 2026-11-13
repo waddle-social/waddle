@@ -1142,6 +1142,36 @@ describe("tearDownActiveCall", () => {
     expect($lastCallError.get()).not.toBeNull();
   });
 
+  test("MUC teardown sends leave presence and terminate using the WASM client receiver (#1712)", async () => {
+    const sender: CallWireSender & RawIqSender & { sent: unknown[][] } = {
+      sent: [],
+      async update_muji_presence(...args) {
+        this.sent.push(["presence", ...args]);
+      },
+      async send_muji_session_terminate(...args) {
+        this.sent.push(["terminate", ...args]);
+      },
+    };
+    $callState.set({
+      phase: "active",
+      peer: "room@muc.waddle.test",
+      sid: "muc-receiver",
+      media: audioVideo,
+      join: { ...join, room: "room@muc.waddle.test" },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+
+    await tearDownActiveCall(sender, "success");
+
+    expect(sender.sent).toEqual([
+      ["presence", "room@muc.waddle.test", "alice", false, false, false, { handRaised: false, muted: false }],
+      ["terminate", "room@muc.waddle.test", "muc-receiver", expect.any(String)],
+    ]);
+    expect($lastCallError.get()).toBeNull();
+  });
+
   test("MUC terminate timeout cancels the underlying IQ inside the wasm driver (#1606 review)", async () => {
     // A stale room-scoped terminate must not linger in the driver's
     // pending/deferred queues once the JS deadline gives up on it: the
