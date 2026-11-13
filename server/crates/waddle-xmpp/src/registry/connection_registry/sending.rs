@@ -10,6 +10,13 @@ use crate::ownership::BindingRef;
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 
+/// No locally hosted connection carries the binding a send named: the
+/// resource is not connected here, or another binding holds it. Nothing was
+/// enqueued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("no local connection carries the named binding")]
+pub struct StaleBinding;
+
 /// Capacity reserved for one pending-delivery frame on an exact connection.
 /// Dropping this value returns the capacity without publishing a frame.
 #[derive(Debug)]
@@ -589,6 +596,37 @@ impl ConnectionRegistry {
                 BroadcastOutcome::NotConnected
             }
         }
+    }
+
+    /// Non-blocking send of an already-tagged outbound frame to the locally
+    /// hosted connection that carries exactly `binding`.
+    ///
+    /// The account coordinator names a resource's current binding; this
+    /// registry is only the transport index that finds its endpoint. An
+    /// entry that is absent, hosted elsewhere, or that carries another
+    /// binding of the same full JID is refused with [`StaleBinding`] and
+    /// nothing is enqueued, so a binding the coordinator has not seen yet
+    /// cannot receive a frame selected for its predecessor.
+    pub fn try_send_outbound_to_binding(
+        &self,
+        jid: &FullJid,
+        binding: &BindingRef,
+        outbound: OutboundStanza,
+    ) -> Result<BroadcastOutcome, StaleBinding> {
+        let owner = self
+            .connections
+            .get(jid)
+            .filter(|entry| entry.is_locally_hosted() && entry.binding_ref() == Some(binding))
+            .map(|entry| entry.binding_id())
+            .ok_or(StaleBinding)?;
+        Ok(self.try_send_outbound_if_owner(jid, &owner, outbound))
+    }
+
+    /// Whether a locally hosted connection carries exactly `binding`.
+    pub fn hosts_binding(&self, jid: &FullJid, binding: &BindingRef) -> bool {
+        self.connections
+            .get(jid)
+            .is_some_and(|entry| entry.is_locally_hosted() && entry.binding_ref() == Some(binding))
     }
 
     /// Non-blocking send of an already-tagged outbound frame, gated on the

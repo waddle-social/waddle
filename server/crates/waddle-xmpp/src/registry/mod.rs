@@ -33,7 +33,7 @@ pub use connection_registry::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,
     PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry, SendResult,
     SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
-    SocketOutboundReceiver, SocketWriteInterruption, TerminalOrderingRetryLease,
+    SocketOutboundReceiver, SocketWriteInterruption, StaleBinding, TerminalOrderingRetryLease,
     WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 pub use selection::{

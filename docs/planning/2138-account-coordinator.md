@@ -401,28 +401,61 @@ Decisions this wiring makes:
 
 ### What still writes the registry and the mirrors
 
-The coordinator decides which resources receive a stanza. It does not
-deliver one: delivery resolves the outbound endpoint through the
-connection registry and the account's `UserActor`. Both are therefore
-written under either selection, and with the coordinator selected a
-binding is recorded in all three. The reads that need the legacy writes:
+The coordinator decides which resources receive a stanza and names the
+exact binding of each. The connection registry and the account's
+`UserActor` are still written under either selection, and with the
+coordinator selected a binding is recorded in all three, because the
+readers listed below still need the legacy writes.
 
-- full-JID delivery (`deliver_one_via_actor_at`, `deliver_peer_to_live_only`
-  in `server/routes/interpret/routing.rs`), which asks the `UserActor` for
-  the resource's endpoint;
-- the inbox-update push and the group-DM leave
-  (`groupchat_archive.rs`, `admin/channels.rs`);
-- stream-management promotion (`sm_promotion/live.rs`);
-- the cluster route bridge's receiver, registration snapshots and
-  side effects (`clustering/route_bridge`);
-- direct sends through the connection registry: presence probe answers and
-  directed presence, block-list pushes, MUC invites, PubSub fan-out, Muji;
+**Delivery with the coordinator selected.** A stanza for a full JID goes to
+the binding `AccountView::bindings` names (`S/server/routes/interpret/bound_delivery.rs`):
+
+- A binding this node hosts is found in the connection registry, which is
+  only the transport index: `ConnectionRegistry::try_send_outbound_to_binding`
+  sends to the local entry whose `BindingRef` is the coordinator's and
+  refuses an entry that carries any other binding of the full JID. A
+  refused stanza is reported `Unavailable`, so the caller runs its
+  fallback; it is never handed to the replacement. A binding whose
+  connection is gone sends the stanza to the detached stream-management
+  path.
+- A binding another node hosts is reached by a bound direct request
+  addressed to that node (`OrderedRelayDeliveryBridge::deliver_bound`,
+  [`2173-direct-lanes.md`](2173-direct-lanes.md), "Bound requests"). The
+  hosting node hands the stanza to the same exact binding.
+- A resource without an active binding takes the detached path.
+
+The `UserActor` and the remote channel mirrors are not read on these
+paths in that mode: full-JID delivery through the interpreter
+(`deliver_peer_to_full_with_registered_remote_at`,
+`deliver_direct_to_full_with_registered_remote_at`, the live-only DM
+attempt), the registered-remote entry points of the route bridge (which
+carbons, roster and block-list pushes and MUC presence reach through
+`clustering::addressing`), the route bridge's receiver (full-JID and
+processed copies, IQs, bare-JID presence fan-out, the target-refresh
+fallback), the direct-request worker's presence check, the inbox-update
+push and the group-DM leave (`admin/channels.rs`).
+
+Readers that still read the `UserActor` or a remote channel mirror with
+the coordinator selected:
+
+- stream-management promotion (`sm_promotion/live.rs`,
+  `sm_promotion/pending.rs`), which selects live targets and bounce
+  targets from the `UserActor`;
+- the deferred link-preview reply (`W/handlers/iq/link_preview_lookup.rs`),
+  which is delivered through the `UserActor`;
+- the cluster route bridge's registration snapshots and side effects
+  (`clustering/route_bridge/registration`), which maintain the mirrors
+  themselves;
+- direct sends through the connection registry that can reach a
+  remote-hosted registry entry: presence probe answers and directed
+  presence, MUC invites, PubSub fan-out and Muji;
 - connection cleanup and registration, pending-delivery flush and
-  recovery, the extension host's presence query and the admin channel
-  command.
+  recovery, and the extension host's presence query.
 
 The registry's presence state, last activity and pending subscription
 stanzas are still written by the presence handlers for the same readers.
+With the registry selected every path above reads the registry and the
+`UserActor` as before.
 
 ## The binding publisher
 

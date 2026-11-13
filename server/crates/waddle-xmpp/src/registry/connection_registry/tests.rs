@@ -1877,6 +1877,53 @@ fn update_presence_state_if_owner_refuses_absent_entry() {
 }
 
 #[test]
+fn send_to_binding_refuses_a_binding_the_entry_does_not_carry() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("binding");
+    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let current = BindingRef::fresh(connection.clone());
+    let stale = BindingRef::fresh(connection);
+    let (tx, mut rx) = mpsc::channel(4);
+    registry.register_entry(
+        jid.clone(),
+        ConnectionEntry::new_for_binding(tx, current.clone()),
+    );
+
+    assert!(!registry.hosts_binding(&jid, &stale));
+    assert_eq!(
+        registry.try_send_outbound_to_binding(
+            &jid,
+            &stale,
+            OutboundStanza::peer_stanza(Stanza::Message(make_test_message("binding@example.com"))),
+        ),
+        Err(super::StaleBinding)
+    );
+    assert!(rx.try_recv().is_err(), "a stale binding receives nothing");
+    assert_eq!(
+        registry.try_send_outbound_to_binding(
+            &test_jid("absent"),
+            &current,
+            OutboundStanza::new(Stanza::Message(make_test_message("absent@example.com"))),
+        ),
+        Err(super::StaleBinding)
+    );
+
+    assert!(registry.hosts_binding(&jid, &current));
+    assert_eq!(
+        registry.try_send_outbound_to_binding(
+            &jid,
+            &current,
+            OutboundStanza::peer_stanza(Stanza::Message(make_test_message("binding@example.com"))),
+        ),
+        Ok(BroadcastOutcome::Delivered)
+    );
+    let outbound = rx
+        .try_recv()
+        .expect("the current binding receives the frame");
+    assert_eq!(outbound.kind, DeliveryKind::PeerStanza);
+}
+
+#[test]
 fn try_send_outbound_if_owner_preserves_kind_and_refuses_stale_owner() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("alice");

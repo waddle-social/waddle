@@ -124,8 +124,8 @@ impl Fixture {
             .await
             .expect("migration version");
         assert_eq!(
-            last, 1036,
-            "laboratory must use the actual catalog through V1036"
+            last, 1037,
+            "laboratory must use the actual catalog through V1037"
         );
         sqlx::raw_sql(CANDIDATE)
             .execute(&mut owner_connection)

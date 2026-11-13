@@ -14,6 +14,10 @@
 //! collector takes only request rows, with `SKIP LOCKED`, and reaches
 //! entries through the cascade; it never locks a lane.
 //!
+//! A request may name a target: the node that hosts the recipient's
+//! binding and that binding. Such a request is decided by the hosting node,
+//! not by the account owner.
+//!
 //! The table exists only on PostgreSQL, and no definer API covers it.
 
 use std::time::Duration;
@@ -22,7 +26,7 @@ use jid::Jid;
 use thiserror::Error;
 use waddle_xmpp::ingress::mailbox::{DirectRequestKey, MailboxOwnerDecision};
 use waddle_xmpp::ingress::MessageKey;
-use waddle_xmpp::ownership::Entity;
+use waddle_xmpp::ownership::{BindingRef, Entity, NodeIdentity};
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::clustering::ordered_relay::OrderedRelayPayload;
@@ -59,6 +63,8 @@ pub enum DirectRequestError {
     PayloadUnserializable,
     #[error("direct request key is already used by a different request")]
     KeyReuse,
+    #[error("only the target node of a direct request decides it, except to refuse it as hosted elsewhere")]
+    NotTargetNode,
     #[error("direct request already records {recorded:?}, not {attempted:?}")]
     ConflictingDecision {
         recorded: DirectDecision,
@@ -66,15 +72,24 @@ pub enum DirectRequestError {
     },
 }
 
-/// Why the account owner rejected a direct request.
+/// Why the deciding node rejected a direct request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectRefusal {
     /// Nothing took the stanza: the resource is not present, or the
     /// recipient pipeline delivered to nobody.
     NotDelivered,
-    /// The recipient's session is hosted by a node other than the account
-    /// owner, which cannot take custody for it.
+    /// The request names a target node other than the node that worked
+    /// it, which cannot take custody for the target's binding. A lane
+    /// adopted by a new account owner after its claim moved is refused
+    /// this way, and its origin resolves the binding again.
     HostedElsewhere,
+}
+
+/// The node a request is addressed to and the exact binding it hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectTarget {
+    pub node: NodeIdentity,
+    pub binding: BindingRef,
 }
 
 /// The account owner's decision on a direct request.
@@ -105,6 +120,9 @@ pub struct NewDirectRequest {
     pub payload: OrderedRelayPayload,
     /// The canonical message that owns this copy, if one does.
     pub message_key: Option<MessageKey>,
+    /// The hosting node and binding, for a request that the account owner
+    /// does not decide.
+    pub target: Option<DirectTarget>,
 }
 
 /// A stored direct request.
@@ -115,7 +133,8 @@ pub struct StoredDirectRequest {
     pub sender_entity: Entity,
     pub payload: OrderedRelayPayload,
     pub message_key: Option<MessageKey>,
-    /// `None` while the account owner has not decided.
+    pub target: Option<DirectTarget>,
+    /// `None` while the deciding node has not decided.
     pub decision: Option<DirectDecision>,
     pub settled: bool,
 }
@@ -194,7 +213,48 @@ fn relations(
 }
 
 const REQUEST_COLUMNS: &str = "request_key::text, recipient_jid, sender_entity, payload, \
-    message_key::text, owner_decision::int, refusal::int, (settled_at IS NOT NULL)";
+    message_key::text, owner_decision::int, refusal::int, (settled_at IS NOT NULL), \
+    target_node_id, target_node_epoch, target_binding";
+
+/// A target as its three stored columns: node id, node epoch, binding.
+struct StoredTarget {
+    node_id: Option<String>,
+    node_epoch: Option<String>,
+    binding: Option<String>,
+}
+
+fn encode_target(target: Option<&DirectTarget>) -> Result<StoredTarget, DirectRequestError> {
+    let Some(target) = target else {
+        return Ok(StoredTarget {
+            node_id: None,
+            node_epoch: None,
+            binding: None,
+        });
+    };
+    let binding = serde_json::to_string(&target.binding)
+        .map_err(|_| DirectRequestError::PayloadUnserializable)?;
+    Ok(StoredTarget {
+        node_id: Some(target.node.node_id.clone()),
+        node_epoch: Some(target.node.node_epoch.clone()),
+        binding: Some(binding),
+    })
+}
+
+fn decode_target(
+    node_id: Option<String>,
+    node_epoch: Option<String>,
+    binding: Option<String>,
+) -> Result<Option<DirectTarget>, DirectRequestError> {
+    match (node_id, node_epoch, binding) {
+        (None, None, None) => Ok(None),
+        (Some(node_id), Some(node_epoch), Some(binding)) => Ok(Some(DirectTarget {
+            node: NodeIdentity::new(node_id, node_epoch),
+            binding: serde_json::from_str(&binding)
+                .map_err(|_| DirectRequestError::InvalidStored)?,
+        })),
+        _ => Err(DirectRequestError::InvalidStored),
+    }
+}
 
 fn decode_request(row: &crate::db::Row) -> Result<StoredDirectRequest, IngressUowError> {
     let invalid = || DirectRequestError::InvalidStored;
@@ -206,6 +266,9 @@ fn decode_request(row: &crate::db::Row) -> Result<StoredDirectRequest, IngressUo
     let decision: i32 = row.get(5)?;
     let refusal: Option<i32> = row.get(6)?;
     let settled: bool = row.get(7)?;
+    let target_node_id: Option<String> = row.get(8)?;
+    let target_node_epoch: Option<String> = row.get(9)?;
+    let target_binding: Option<String> = row.get(10)?;
     let recipient: Jid = recipient.parse().map_err(|_| invalid())?;
     let payload: OrderedRelayPayload = serde_json::from_slice(&payload).map_err(|_| invalid())?;
     if payload_recipient(&payload) != Some(&recipient) {
@@ -223,6 +286,7 @@ fn decode_request(row: &crate::db::Row) -> Result<StoredDirectRequest, IngressUo
         sender_entity: serde_json::from_str(&sender_entity).map_err(|_| invalid())?,
         payload,
         message_key,
+        target: decode_target(target_node_id, target_node_epoch, target_binding)?,
         decision: decision_from_storage(decision, refusal)?,
         settled,
     })
@@ -235,7 +299,8 @@ pub struct DirectRequestRepository;
 impl DirectRequestRepository {
     /// Insert a request, or find the one already stored under its key.
     /// `true` when this call inserted it. A stored request with another
-    /// recipient or sender is a reused key and is refused.
+    /// recipient, sender, canonical message or target is a reused key and
+    /// is refused.
     pub async fn insert(
         transaction: &mut IngressUowTransaction<'_>,
         request: &NewDirectRequest,
@@ -243,13 +308,15 @@ impl DirectRequestRepository {
         let payload = encode_payload(&request.recipient, &request.payload)?;
         let sender_entity = serde_json::to_string(&request.sender_entity)
             .map_err(|_| DirectRequestError::PayloadUnserializable)?;
+        let target = encode_target(request.target.as_ref())?;
         let (tx, prepared) = transaction.prepared_parts();
         let relations = relations(tx, prepared)?;
         let inserted = tx
             .execute(
                 &format!(
                     "INSERT INTO {} (request_key, recipient_jid, sender_entity, payload, \
-                     message_key) VALUES (?::uuid, ?, ?, ?, ?::uuid) \
+                     message_key, target_node_id, target_node_epoch, target_binding) \
+                     VALUES (?::uuid, ?, ?, ?, ?::uuid, ?, ?, ?) \
                      ON CONFLICT (request_key) DO NOTHING",
                     relations.requests
                 ),
@@ -259,6 +326,9 @@ impl DirectRequestRepository {
                     sender_entity,
                     payload,
                     request.message_key.map(|key| key.to_storage().to_string()),
+                    target.node_id,
+                    target.node_epoch,
+                    target.binding,
                 ],
             )
             .await?;
@@ -271,6 +341,7 @@ impl DirectRequestRepository {
         if existing.recipient != request.recipient
             || existing.sender_entity != request.sender_entity
             || existing.message_key != request.message_key
+            || existing.target != request.target
         {
             return Err(DirectRequestError::KeyReuse.into());
         }
@@ -337,12 +408,13 @@ impl DirectRequestRepository {
         decode_request(&row).map(Some)
     }
 
-    /// Record the account owner's decision. It moves once, from undecided:
+    /// Record the deciding node's decision. It moves once, from undecided:
     /// the recorded decision is returned, and a different one is refused.
     ///
-    /// The caller holds the request's lane, has asserted the account's
-    /// claim, and records the same decision on the request's mailbox entry
-    /// in this transaction.
+    /// The caller holds the request's lane as its target, has proven its
+    /// authority to decide (the account's claim for a request without a
+    /// target, the request's target node otherwise), and records the same
+    /// decision on the request's mailbox entry in this transaction.
     pub async fn latch_decision(
         transaction: &mut IngressUowTransaction<'_>,
         key: DirectRequestKey,
@@ -470,6 +542,32 @@ mod tests {
         assert!(decision_from_storage(1, Some(1)).is_err());
         assert!(decision_from_storage(2, None).is_err());
         assert!(decision_from_storage(2, Some(3)).is_err());
+    }
+
+    #[test]
+    fn a_target_is_stored_whole_or_not_at_all() {
+        use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
+        let node = NodeIdentity::new("node-b", "epoch-b");
+        let binding = BindingRef::fresh(ConnectionRef::fresh(
+            NodeLeaseIdentity::from_node_identity(&node),
+        ));
+        let target = DirectTarget {
+            node: node.clone(),
+            binding,
+        };
+        let stored = encode_target(Some(&target)).expect("encodes");
+        assert_eq!(
+            decode_target(
+                stored.node_id.clone(),
+                stored.node_epoch.clone(),
+                stored.binding.clone()
+            )
+            .ok(),
+            Some(Some(target))
+        );
+        assert_eq!(decode_target(None, None, None).ok(), Some(None));
+        assert!(decode_target(stored.node_id.clone(), None, stored.binding.clone()).is_err());
+        assert!(decode_target(stored.node_id, stored.node_epoch, Some("{}".to_owned())).is_err());
     }
 
     #[test]

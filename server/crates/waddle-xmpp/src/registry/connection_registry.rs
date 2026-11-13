@@ -61,7 +61,8 @@ pub use outbound::{
 };
 pub use sending::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,
-    PendingFlushReserveError, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
+    PendingFlushReserveError, StaleBinding, WriteAcceptanceEnqueueOutcome,
+    WriteAcceptanceEnqueueRejection,
 };
 pub use state::{LastActivityState, PresenceState};
 pub use write_interruption::SocketWriteInterruption;

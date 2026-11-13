@@ -42,6 +42,7 @@ pub(super) mod remote_socket;
 pub(super) mod telemetry;
 
 pub(super) use direct::decide_direct;
+pub(crate) use direct::BoundDelivery;
 pub(super) use local::*;
 pub(crate) use muc::reserved::RelayFrameCompletion;
 pub(super) use muc::reserved::{

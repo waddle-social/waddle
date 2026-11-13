@@ -9,6 +9,11 @@
 //! lane's cursor. The origin reads the decision in the transaction that
 //! consumes the entry and settles the request.
 //!
+//! A request addressed to the node that hosts the recipient's binding
+//! (a bound request) is decided by that node instead. Its lane names the
+//! hosting node as target; the account's claim still supplies both epochs
+//! of the lane's fence, so a claim that moves supersedes the lane.
+//!
 //! A hint, a relay reply or a timeout proves nothing: the only evidence is
 //! the entry's disposition checked against the request's decision. An
 //! origin that committed a request and did not read a decision reports the
@@ -16,21 +21,21 @@
 
 use std::time::Duration;
 
-use jid::{BareJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::ingress::mailbox::{
     DirectRequestKey, MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxEntryDisposition,
     MailboxLaneFence, MailboxLaneIdentity, MailboxLaneOrigin, MailboxLaneRecipient,
     MailboxOperationKey,
 };
 use waddle_xmpp::ingress::MessageKey;
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, NodeIdentity};
+use waddle_xmpp::ownership::{BindingRef, ClaimEpoch, Entity, EntityType, NodeIdentity};
 
 use super::IngressAuthority;
 use crate::clustering::ordered_relay::OrderedRelayPayload;
 use crate::ingress_uow::{
-    ClaimRepository, DirectDecision, DirectRequestError, DirectRequestRepository, IngressUowError,
-    IngressUowTransaction, MailboxError, MailboxLaneId, MailboxRepository, MailboxTargetFence,
-    NewDirectRequest, StoredDirectRequest,
+    ClaimRepository, DirectDecision, DirectRefusal, DirectRequestError, DirectRequestRepository,
+    DirectTarget, IngressUowError, IngressUowTransaction, MailboxError, MailboxLaneId,
+    MailboxRepository, MailboxTargetFence, NewDirectRequest, StoredDirectRequest,
 };
 
 /// Pending-entry caps for direct requests. A lane is one origin's stanzas
@@ -50,6 +55,21 @@ pub struct DirectSubmission {
     pub origin: MailboxLaneOrigin,
     /// The origin's claim epoch, as the relay channel carries it.
     pub origin_epoch: ClaimEpoch,
+    pub sender_entity: Entity,
+    pub payload: OrderedRelayPayload,
+    pub message_key: Option<MessageKey>,
+}
+
+/// A stanza for one bound resource, addressed to the node that hosts its
+/// binding.
+#[derive(Debug, Clone)]
+pub struct BoundSubmission {
+    pub key: DirectRequestKey,
+    pub recipient: FullJid,
+    /// The node that hosts `binding`.
+    pub node: NodeIdentity,
+    /// The binding the account coordinator named for `recipient`.
+    pub binding: BindingRef,
     pub sender_entity: Entity,
     pub payload: OrderedRelayPayload,
     pub message_key: Option<MessageKey>,
@@ -76,6 +96,9 @@ pub enum DirectCommit {
     /// The lane or the account owner's node is at its pending cap. Nothing
     /// was written.
     Refused(MailboxAdmissionRefusal),
+    /// The lane still owes another node decisions, so it cannot be
+    /// addressed to this request's node yet. Nothing was written.
+    LaneRetargetPending,
     Committed(PendingDirectRequest),
 }
 
@@ -242,6 +265,7 @@ impl IngressAuthority {
                 sender_entity: submission.sender_entity,
                 payload: submission.payload,
                 message_key: submission.message_key,
+                target: None,
             },
         )
         .await?;
@@ -259,6 +283,96 @@ impl IngressAuthority {
             lane,
             origin_epoch: submission.origin_epoch,
             target_owner,
+        }))
+    }
+
+    /// Commit a bound request and its pending mailbox entry.
+    ///
+    /// One ingress transaction reads the recipient account's `UserActor`
+    /// claim, whose epoch fences both sides of the lane, and locks the lane
+    /// of (the account, the full JID) with the hosting node as its target.
+    /// Every origin on every node shares that one lane per resource, so the
+    /// hosting node decides a resource's stanzas in commit order. A lane
+    /// addressed to another node is moved only once it is drained. A retry
+    /// with the same key finds the stored request and its entry and writes
+    /// nothing. After the commit the hosting node is hinted.
+    pub async fn commit_bound_request(
+        &self,
+        submission: BoundSubmission,
+    ) -> Result<DirectCommit, IngressUowError> {
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        if !self.uow.mailbox_acceptance_active(&tx) {
+            return Ok(DirectCommit::NotCarried);
+        }
+        let account = submission.recipient.to_bare();
+        let Some((_, claim_epoch)) = ClaimRepository::user_claim(&mut tx, &account).await? else {
+            return Ok(DirectCommit::NotCarried);
+        };
+        let identity = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::Entity(Entity::new(
+                EntityType::UserActor,
+                account.to_string(),
+            )),
+            recipient: MailboxLaneRecipient::FullJid(submission.recipient.clone()),
+        };
+        let fence = MailboxLaneFence {
+            origin_epoch: claim_epoch,
+            target_epoch: claim_epoch,
+            target_owner: submission.node.clone(),
+        };
+        let operation = MailboxOperationKey::Direct(submission.key);
+        let mut lane = match MailboxRepository::lock_lane_retargeting_drained(
+            &mut tx, &identity, &fence,
+        )
+        .await
+        {
+            Ok(lane) => lane,
+            Err(IngressUowError::Mailbox(MailboxError::StaleFence(_))) => {
+                return Ok(DirectCommit::LaneRetargetPending);
+            }
+            Err(error) => return Err(error),
+        };
+        if MailboxRepository::lookup(&mut tx, operation)
+            .await?
+            .is_none()
+        {
+            let load = MailboxRepository::pending_load(&mut tx, &lane).await?;
+            if let Err(refusal) = DIRECT_REQUEST_LIMITS.admit(load) {
+                return Ok(DirectCommit::Refused(refusal));
+            }
+        }
+        DirectRequestRepository::insert(
+            &mut tx,
+            &NewDirectRequest {
+                key: submission.key,
+                recipient: Jid::from(submission.recipient),
+                sender_entity: submission.sender_entity,
+                payload: submission.payload,
+                message_key: submission.message_key,
+                target: Some(DirectTarget {
+                    node: submission.node.clone(),
+                    binding: submission.binding,
+                }),
+            },
+        )
+        .await?;
+        let appended =
+            MailboxRepository::append(&mut tx, &mut lane, operation, &DIRECT_REQUEST_LIMITS)
+                .await?;
+        let lane = appended.entry().lane;
+        tx.commit().await?;
+        if let Some(hints) = self.mailbox_hints.get() {
+            hints.hint(submission.node.clone());
+        }
+        Ok(DirectCommit::Committed(PendingDirectRequest {
+            key: submission.key,
+            operation,
+            lane,
+            origin_epoch: claim_epoch,
+            target_owner: submission.node,
         }))
     }
 
@@ -351,6 +465,56 @@ impl IngressAuthority {
             },
         )
         .await?;
+        let stored = DirectRequestRepository::lock(&mut tx, claimed.request.key)
+            .await?
+            .ok_or(DirectRequestError::RequestMissing)?;
+        let recorded = match stored.decision {
+            Some(recorded) => recorded,
+            None => {
+                DirectRequestRepository::latch_decision(&mut tx, claimed.request.key, decision)
+                    .await?
+            }
+        };
+        MailboxRepository::decide(&mut tx, &mut lane, claimed.operation, recorded.mailbox())
+            .await?;
+        tx.commit().await?;
+        Ok(recorded)
+    }
+
+    /// Decide a bound request as the node that works its lane, in one
+    /// transaction.
+    ///
+    /// The transaction locks the lane, which must name `node` as its
+    /// target, locks the request, latches the decision and moves the lane's
+    /// cursor past the entry. Only the request's target node may record a
+    /// decision of its own; any other node that finds the request at the
+    /// head of a lane it works, such as an account owner that adopted the
+    /// lane after the account's claim moved, may only refuse it as hosted
+    /// elsewhere. A request that already records a decision keeps it.
+    pub async fn decide_bound_request(
+        &self,
+        claimed: &ClaimedDirectRequest,
+        node: &NodeIdentity,
+        decision: DirectDecision,
+    ) -> Result<DirectDecision, IngressUowError> {
+        let target_node = claimed
+            .request
+            .target
+            .as_ref()
+            .map(|target| &target.node)
+            .ok_or(DirectRequestError::NotTargetNode)?;
+        if target_node != node
+            && decision != DirectDecision::Rejected(DirectRefusal::HostedElsewhere)
+        {
+            return Err(DirectRequestError::NotTargetNode.into());
+        }
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        let mut lane = MailboxRepository::claim_backlogged_lane(&mut tx, claimed.lane, node)
+            .await?
+            .ok_or(MailboxError::LaneMissing)?;
         let stored = DirectRequestRepository::lock(&mut tx, claimed.request.key)
             .await?
             .ok_or(DirectRequestError::RequestMissing)?;

@@ -1356,6 +1356,197 @@ async fn killed_owner_hands_its_account_to_the_survivor(selectors: NodeSelectors
     recv_message_once(&mut desk, "after-resume").await;
 }
 
+fn directed_presence(to: &str, id: &str) -> Element {
+    Element::builder("presence", CLIENT_NS)
+        .attr(xml_ncname!("to").to_owned(), to)
+        .attr(xml_ncname!("id").to_owned(), id)
+        .build()
+}
+
+fn is_presence(element: &Element, id: &str) -> bool {
+    element.is("presence", CLIENT_NS) && element.attr("id") == Some(id)
+}
+
+fn ping(to: &str, id: &str) -> Element {
+    Element::builder("iq", CLIENT_NS)
+        .attr(xml_ncname!("type").to_owned(), "get")
+        .attr(xml_ncname!("to").to_owned(), to)
+        .attr(xml_ncname!("id").to_owned(), id)
+        .append(Element::builder("ping", "urn:xmpp:ping").build())
+        .build()
+}
+
+fn is_iq(element: &Element, id: &str) -> bool {
+    element.is("iq", CLIENT_NS) && element.attr("id") == Some(id)
+}
+
+/// `receiver` gets the IQ `id` once and answers it; the sender gets the
+/// answer.
+async fn ping_round_trip(
+    sender: &mut WsXmppClient,
+    receiver: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) {
+    send(sender, &ping(to, id)).await;
+    let request = recv_element(receiver, id, |element| {
+        is_iq(element, id) && element.attr("type") == Some("get")
+    })
+    .await;
+    let again = try_recv_element(receiver, QUIET, |element| is_iq(element, id)).await;
+    assert!(again.is_err(), "IQ {id} arrived twice: {again:?}");
+    let from = request.attr("from").expect("the IQ names its sender");
+    let result = Element::builder("iq", CLIENT_NS)
+        .attr(xml_ncname!("type").to_owned(), "result")
+        .attr(xml_ncname!("to").to_owned(), from)
+        .attr(xml_ncname!("id").to_owned(), id)
+        .build();
+    send(receiver, &result).await;
+    recv_element(sender, "IQ result", |element| {
+        is_iq(element, id) && element.attr("type") == Some("result")
+    })
+    .await;
+}
+
+/// An account with an available resource on each node. Messages, directed
+/// presence and IQs addressed to either full JID, from a sender on either
+/// node, reach that resource once and no other; a message and a directed
+/// presence to the bare JID reach both resources once each; an IQ to the
+/// bare JID is answered for the account and reaches neither resource.
+/// With the account coordinator, delivery reads the binding the
+/// coordinator names and reaches the resource on the node that does not
+/// own the account through a request addressed to that node.
+async fn delivery_reaches_resources_on_both_nodes(selectors: NodeSelectors) {
+    let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
+    let laptop_jid = cluster.full("alice", "laptop");
+    let phone_jid = cluster.full("alice", "phone");
+    let alice = cluster.bare("alice");
+    let mut laptop = cluster.bound(&cluster.a, "alice", "laptop").await;
+    cluster
+        .go_available(&cluster.a, &mut laptop, &laptop_jid)
+        .await;
+    let mut phone = cluster.bound(cluster.b(), "alice", "phone").await;
+    cluster
+        .go_available(cluster.b(), &mut phone, &phone_jid)
+        .await;
+    assert_eq!(
+        account_owner(&cluster.db, &alice).await,
+        Some(cluster.a.node_id.clone())
+    );
+    if cluster.b().coordinates_accounts() {
+        binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
+    }
+    let mut bob = cluster.bound(&cluster.a, "bob", "desk").await;
+    let mut carol = cluster.bound(cluster.b(), "carol", "desk").await;
+
+    // Messages to each full JID, from each node.
+    send(&mut bob, &chat(&phone_jid, "a-to-phone")).await;
+    recv_message_once(&mut phone, "a-to-phone").await;
+    expect_no_message(&mut laptop, "a-to-phone").await;
+    send(&mut carol, &chat(&phone_jid, "b-to-phone")).await;
+    recv_message_once(&mut phone, "b-to-phone").await;
+    expect_no_message(&mut laptop, "b-to-phone").await;
+    send(&mut bob, &chat(&laptop_jid, "a-to-laptop")).await;
+    recv_message_once(&mut laptop, "a-to-laptop").await;
+    expect_no_message(&mut phone, "a-to-laptop").await;
+    send(&mut carol, &chat(&laptop_jid, "b-to-laptop")).await;
+    recv_message_once(&mut laptop, "b-to-laptop").await;
+    expect_no_message(&mut phone, "b-to-laptop").await;
+
+    // Messages to the bare JID reach both available resources.
+    send(&mut bob, &chat(&alice, "a-to-bare")).await;
+    recv_message_once(&mut laptop, "a-to-bare").await;
+    recv_message_once(&mut phone, "a-to-bare").await;
+    send(&mut carol, &chat(&alice, "b-to-bare")).await;
+    recv_message_once(&mut laptop, "b-to-bare").await;
+    recv_message_once(&mut phone, "b-to-bare").await;
+
+    // Directed presence to each full JID, and to the bare JID.
+    send(
+        &mut bob,
+        &directed_presence(&phone_jid, "presence-a-to-phone"),
+    )
+    .await;
+    recv_element(&mut phone, "presence to the phone", |element| {
+        is_presence(element, "presence-a-to-phone")
+    })
+    .await;
+    send(
+        &mut carol,
+        &directed_presence(&laptop_jid, "presence-b-to-laptop"),
+    )
+    .await;
+    recv_element(&mut laptop, "presence to the laptop", |element| {
+        is_presence(element, "presence-b-to-laptop")
+    })
+    .await;
+    send(&mut carol, &directed_presence(&alice, "presence-b-to-bare")).await;
+    for client in [&mut laptop, &mut phone] {
+        recv_element(client, "presence to the bare JID", |element| {
+            is_presence(element, "presence-b-to-bare")
+        })
+        .await;
+    }
+
+    // IQs to each full JID, from each node.
+    ping_round_trip(&mut bob, &mut phone, &phone_jid, "iq-a-to-phone").await;
+    ping_round_trip(&mut carol, &mut phone, &phone_jid, "iq-b-to-phone").await;
+    ping_round_trip(&mut carol, &mut laptop, &laptop_jid, "iq-b-to-laptop").await;
+    ping_round_trip(&mut bob, &mut laptop, &laptop_jid, "iq-a-to-laptop").await;
+
+    // An IQ to the bare JID is answered for the account.
+    send(&mut carol, &ping(&alice, "iq-b-to-bare")).await;
+    recv_element(&mut carol, "the account's answer", |element| {
+        is_iq(element, "iq-b-to-bare") && matches!(element.attr("type"), Some("result" | "error"))
+    })
+    .await;
+    for client in [&mut laptop, &mut phone] {
+        let arrived =
+            try_recv_element(client, QUIET, |element| is_iq(element, "iq-b-to-bare")).await;
+        assert!(
+            arrived.is_err(),
+            "an IQ to the bare JID reached a resource: {arrived:?}"
+        );
+    }
+}
+
+/// A resource bound again on the other node while a stanza selected for
+/// its previous binding may still be in flight: every message sent after
+/// the new bind reaches the new connection exactly once, and the replaced
+/// connection, closed with a conflict, receives none of them.
+async fn a_replaced_binding_receives_nothing_meant_for_its_successor(selectors: NodeSelectors) {
+    let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
+    let tablet_jid = cluster.full("alice", "tablet");
+    let mut anchor = cluster.bound(&cluster.a, "alice", "anchor").await;
+    let mut old = cluster.bound(&cluster.a, "alice", "tablet").await;
+    let before = binding_in(&cluster.db, &tablet_jid, BINDING_ACTIVE).await;
+    let mut carol = cluster.bound(cluster.b(), "carol", "desk").await;
+
+    let mut new = cluster.connect(cluster.b(), "alice").await;
+    assert_eq!(
+        bind(&mut new, "tablet").await,
+        Answer::Bound(tablet_jid.clone())
+    );
+    let after = binding_in(&cluster.db, &tablet_jid, BINDING_ACTIVE).await;
+    assert_ne!(after.binding_ref, before.binding_ref);
+    for index in 0..5 {
+        send(
+            &mut carol,
+            &chat(&tablet_jid, &format!("successor-{index}")),
+        )
+        .await;
+    }
+    for index in 0..5 {
+        recv_message_once(&mut new, &format!("successor-{index}")).await;
+    }
+    for index in 0..5 {
+        let id = format!("successor-{index}");
+        let arrived = try_recv_element(&mut old, QUIET, |element| is_message(element, &id)).await;
+        assert!(arrived.is_err(), "the replaced binding received {id}");
+        expect_no_message(&mut anchor, &id).await;
+    }
+}
+
 /// One test per scenario for a selector profile.
 macro_rules! profile {
     ($profile:ident, $selectors:expr, { $($test:ident => $scenario:ident,)* }) => {
@@ -1388,6 +1579,7 @@ profile!(durable_registry, NodeSelectors::DURABLE_REGISTRY, {
     gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
     session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
     resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
+    delivery_reaches_resources_on_both_nodes => delivery_reaches_resources_on_both_nodes,
 });
 
 profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
@@ -1410,4 +1602,6 @@ profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
     second_resource_on_the_other_node_receives_sent_carbons => second_resource_on_the_other_node_receives_sent_carbons,
     bind_replaces_a_resource_hosted_on_the_other_node => bind_replaces_a_resource_hosted_on_the_other_node,
     killed_owner_hands_its_account_to_the_survivor => killed_owner_hands_its_account_to_the_survivor,
+    delivery_reaches_resources_on_both_nodes => delivery_reaches_resources_on_both_nodes,
+    a_replaced_binding_receives_nothing_meant_for_its_successor => a_replaced_binding_receives_nothing_meant_for_its_successor,
 });

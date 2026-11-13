@@ -1174,6 +1174,7 @@ pub struct AccountViewWire {
     pub presence: Vec<PresenceWire>,
     pub roster_interested: Vec<jid::FullJid>,
     pub blocklist_interested: Vec<jid::FullJid>,
+    pub bindings: Vec<(jid::FullJid, BindingRef)>,
 }
 
 impl From<&AccountView> for AccountViewWire {
@@ -1205,6 +1206,7 @@ impl From<&AccountView> for AccountViewWire {
                 .collect(),
             roster_interested: view.roster_interested.clone(),
             blocklist_interested: view.blocklist_interested.clone(),
+            bindings: view.bindings.clone(),
         }
     }
 }
@@ -1242,6 +1244,7 @@ impl TryFrom<AccountViewWire> for AccountView {
                 .collect::<Wire<_>>()?,
             roster_interested: wire.roster_interested,
             blocklist_interested: wire.blocklist_interested,
+            bindings: wire.bindings,
         })
     }
 }

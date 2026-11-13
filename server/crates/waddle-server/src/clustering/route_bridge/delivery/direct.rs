@@ -13,12 +13,20 @@
 //! management on its own fence when it takes the frame from its endpoint,
 //! and a detached session is appended to through the stream-management
 //! session registry. The worker itself admits nothing.
+//!
+//! A bound request (`deliver_bound`) is addressed to the node that hosts
+//! the binding the account coordinator named for a full JID. That node
+//! decides it, and hands the stanza only to the connection that carries
+//! the named binding, or to the resource's detached session when no
+//! connection holds the resource.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use waddle_xmpp::ingress::mailbox::{DirectRequestKey, MailboxLaneOrigin};
-use waddle_xmpp::ownership::NodeIdentity;
+use waddle_xmpp::ownership::{BindingRef, NodeIdentity};
+use waddle_xmpp::registry::DeliveryKind;
+use waddle_xmpp::Stanza;
 
 use super::receiver::payload_target;
 use super::{
@@ -27,9 +35,14 @@ use super::{
     OrderedRelayNackReason, OrderedRelayOrigin, OrderedRelayPayload, OrderedRelayRecipient,
     RemoteDeliveryOutcome, RemoteDeliverySeed,
 };
-use crate::ingress::direct_request::{ClaimedDirectRequest, DirectCommit, DirectSubmission};
+use super::{payload_for_recipient, user_entity, RemoteStanza};
+use crate::ingress::direct_request::{
+    BoundSubmission, ClaimedDirectRequest, DirectCommit, DirectSubmission,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
 use crate::ingress::IngressAuthority;
-use crate::ingress_uow::{DirectDecision, DirectRefusal, IngressUowError};
+use crate::ingress_uow::{DirectDecision, DirectRefusal, DirectTarget, IngressUowError};
+use crate::server::routes::interpret::SmIngressAppendContext;
 
 /// How long an origin waits for the account owner's decision before it
 /// reports the delivery as uncertain. The account owner's poller scans
@@ -133,6 +146,11 @@ impl OrderedRelayDeliveryBridge {
                     seed.is_iq,
                 )));
             }
+            Ok(DirectCommit::LaneRetargetPending) => {
+                return Some(no_client_reply_outcome(definite_no_effect_outcome(
+                    seed.is_iq,
+                )));
+            }
             // The commit may have landed: nothing else may carry the stanza.
             Err(IngressUowError::AmbiguousCommit) => {
                 return Some(no_client_reply_outcome_with_commit_state(
@@ -168,9 +186,185 @@ impl OrderedRelayDeliveryBridge {
     }
 }
 
+/// One stanza for a bound resource, as [`OrderedRelayDeliveryBridge::deliver_bound`]
+/// carries it.
+pub(crate) struct BoundDelivery<'a> {
+    pub(crate) target: &'a jid::FullJid,
+    /// The binding the account coordinator named for `target`.
+    pub(crate) binding: BindingRef,
+    /// The node that hosts `binding`.
+    pub(crate) node: NodeIdentity,
+    pub(crate) stanza: &'a Stanza,
+    pub(crate) kind: DeliveryKind,
+    pub(crate) ingress_append_context: Option<&'a SmIngressAppendContext>,
+    pub(crate) received_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl OrderedRelayDeliveryBridge {
+    /// Carry a stanza for `target` to the node that hosts `binding`, the
+    /// binding the account coordinator named for it, as a bound request.
+    ///
+    /// The hosting node hands the stanza to that exact binding. The outcome
+    /// maps the decision as [`Self::deliver_seeded_direct`] does: accepted
+    /// is `Delivered`, rejected is `Unavailable` so that the caller runs its
+    /// fallback, and a committed request whose decision was not read is
+    /// `MaybeCommitted`, which suppresses the fallback. A request that was
+    /// not committed is a definite no-effect outcome. When the deployment
+    /// does not carry direct requests nothing reaches the hosting node and
+    /// the outcome is `Unavailable`.
+    pub(crate) async fn deliver_bound(
+        &self,
+        delivery: BoundDelivery<'_>,
+    ) -> FullJidDeliveryOutcome {
+        let BoundDelivery {
+            target,
+            binding,
+            node,
+            stanza,
+            kind,
+            ingress_append_context,
+            received_at,
+        } = delivery;
+        let Some(state) = self
+            .services
+            .get()
+            .and_then(|services| services.web_socket_state.upgrade())
+        else {
+            return FullJidDeliveryOutcome::Unavailable;
+        };
+        let authority = Arc::clone(&state.deps.protocol.ingress);
+        if !authority.room_requests_carried_now().await {
+            tracing::debug!(%target, "bound request not carried: the mailbox is not selected");
+            return FullJidDeliveryOutcome::Unavailable;
+        }
+        let recipient = jid::Jid::from(target.clone());
+        let Some(payload) = bound_payload(
+            &recipient,
+            stanza,
+            kind,
+            ingress_append_context,
+            received_at,
+        ) else {
+            return FullJidDeliveryOutcome::Unavailable;
+        };
+        let obligation = append_obligation(&payload).cloned();
+        let sender = obligation
+            .as_ref()
+            .map(|obligation| obligation.sender_bare.clone())
+            .or_else(|| stanza_sender(stanza))
+            .unwrap_or_else(|| target.to_bare());
+        let key = match &obligation {
+            Some(obligation) => DirectRequestKey::for_copy(
+                obligation.message_key,
+                &obligation.receipt.semantic_identity_hash,
+                &recipient,
+            ),
+            None => DirectRequestKey::mint(),
+        };
+        let is_iq = matches!(stanza, Stanza::Iq(_));
+        let committed = authority
+            .commit_bound_request(BoundSubmission {
+                key,
+                recipient: target.clone(),
+                node,
+                binding,
+                sender_entity: user_entity(&sender),
+                payload,
+                message_key: obligation.map(|obligation| obligation.message_key),
+            })
+            .await;
+        let pending = match committed {
+            Ok(DirectCommit::Committed(pending)) => pending,
+            Ok(DirectCommit::NotCarried) => return FullJidDeliveryOutcome::Unavailable,
+            Ok(DirectCommit::Refused(refusal)) => {
+                tracing::warn!(%refusal, %target, "bound request refused: mailbox is full");
+                return definite_no_effect_outcome(is_iq);
+            }
+            Ok(DirectCommit::LaneRetargetPending) => {
+                tracing::debug!(%target, "bound request deferred: the lane owes another node decisions");
+                return definite_no_effect_outcome(is_iq);
+            }
+            Err(IngressUowError::AmbiguousCommit) => {
+                return FullJidDeliveryOutcome::MaybeCommitted;
+            }
+            Err(error) => {
+                tracing::warn!(%error, %target, "bound request not committed");
+                return definite_no_effect_outcome(is_iq);
+            }
+        };
+        match authority
+            .await_direct_request(&pending, DIRECT_DECISION_BUDGET)
+            .await
+        {
+            Ok(DirectDecision::Accepted) => FullJidDeliveryOutcome::Delivered,
+            Ok(DirectDecision::Rejected(_)) => FullJidDeliveryOutcome::Unavailable,
+            Err(reason) => {
+                tracing::warn!(%reason, %target, "bound request decision not read");
+                FullJidDeliveryOutcome::MaybeCommitted
+            }
+        }
+    }
+}
+
+/// The relay payload a bound request carries: a processed copy for a frame
+/// that skips the recipient pass, the peer payload otherwise. A copy an
+/// ingress transaction owns carries its append obligation when the context
+/// permits a remote one, exactly as a relay envelope would.
+fn bound_payload(
+    recipient: &jid::Jid,
+    stanza: &Stanza,
+    kind: DeliveryKind,
+    context: Option<&SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<OrderedRelayPayload> {
+    if kind == DeliveryKind::DirectFrame {
+        return Some(OrderedRelayPayload::ProcessedDirectMessage {
+            recipient: recipient.clone(),
+            stanza: RemoteStanza(stanza.clone()),
+            ingress_append: IngressAppendObligationRef::for_remote_message(context, stanza),
+        });
+    }
+    let mut payload = payload_for_recipient(recipient.clone(), stanza)?;
+    if let OrderedRelayPayload::Message {
+        ingress_append,
+        received_at: timestamp,
+        ..
+    } = &mut payload
+    {
+        let remote = context.filter(|context| context.authority.permits_remote_obligation());
+        *ingress_append = match (stanza, remote) {
+            (Stanza::Message(message), Some(context)) => message
+                .from
+                .as_ref()
+                .map(|sender| IngressAppendObligationRef::from_context(context, sender.to_bare()))
+                .filter(|obligation| obligation.kind_is_append_eligible()),
+            _ => None,
+        };
+        *timestamp = if remote.is_some() {
+            None
+        } else {
+            received_at.or_else(|| context.and_then(|context| context.received_at))
+        };
+    }
+    Some(payload)
+}
+
+fn stanza_sender(stanza: &Stanza) -> Option<jid::BareJid> {
+    let from = match stanza {
+        Stanza::Message(message) => message.from.as_ref(),
+        Stanza::Presence(presence) => presence.from.as_ref(),
+        Stanza::Iq(iq) => iq.from(),
+    };
+    from.map(jid::Jid::to_bare)
+}
+
 /// Whether anything on this node could take a stanza for `recipient`: a
 /// registered connection or a detached stream-management session of the
 /// full JID, or any of the two for a bare JID.
+///
+/// With the account coordinator selected, a live resource is one the
+/// coordinator lists with an active binding, wherever that binding is
+/// hosted: delivery reaches it through a bound request.
 async fn recipient_present(services: &OrderedRelayDeliveryServices, recipient: &jid::Jid) -> bool {
     let account = recipient.to_bare();
     let detached = services
@@ -178,6 +372,26 @@ async fn recipient_present(services: &OrderedRelayDeliveryServices, recipient: &
         .available_detached_resources_for_user(&account)
         .await
         .unwrap_or_default();
+    if let Some(state) = services.web_socket_state.upgrade() {
+        let selection = state.deps.app_state.account_authority();
+        let live = match recipient.clone().try_into_full() {
+            Ok(resource) => selection
+                .bound_resource(&resource)
+                .await
+                .map(|read| read.is_ok_and(|binding| binding.is_some())),
+            Err(_) => selection
+                .resources(&account)
+                .await
+                .map(|read| read.is_ok_and(|resources| !resources.is_empty())),
+        };
+        if let Some(live) = live {
+            return live
+                || match recipient.clone().try_into_full() {
+                    Ok(resource) => detached.contains(&resource),
+                    Err(_) => !detached.is_empty(),
+                };
+        }
+    }
     match recipient.clone().try_into_full() {
         Ok(resource) => {
             services.connection_registry.entry(&resource).is_some() || detached.contains(&resource)
@@ -230,6 +444,9 @@ pub(in super::super) async fn decide_direct(
     target: &NodeIdentity,
 ) -> bool {
     let request = &claimed.request;
+    if let Some(bound) = &request.target {
+        return decide_bound(services, authority, claimed, bound, target).await;
+    }
     // A request that records a decision only needs its entry moved; its
     // stanza was handed over, or deliberately not, by the attempt that
     // recorded it.
@@ -321,4 +538,149 @@ pub(in super::super) async fn decide_direct(
         recorded
     };
     decided.is_some()
+}
+
+async fn record_bound(
+    authority: &IngressAuthority,
+    claimed: &ClaimedDirectRequest,
+    node: &NodeIdentity,
+    decision: DirectDecision,
+) -> Option<DirectDecision> {
+    match authority
+        .decide_bound_request(claimed, node, decision)
+        .await
+    {
+        Ok(recorded) => Some(recorded),
+        Err(error) => {
+            tracing::warn!(%error, recipient = %claimed.request.recipient, "bound request decision not committed");
+            None
+        }
+    }
+}
+
+/// Take custody of one bound request on `node` and decide it. `true` when
+/// the decision committed.
+///
+/// A node other than the request's target, which works the lane because
+/// it adopted it as the account's new owner, refuses the request as hosted
+/// elsewhere. The target hands the stanza only to the connection that
+/// carries the request's binding, or to the resource's detached session
+/// when no connection holds the resource; a connection that carries any
+/// other binding refuses it. The order of hand-over and decision follows
+/// the rule for direct requests: a copy an ingress transaction owns is
+/// handed over first, anything else is decided first and handed over once.
+async fn decide_bound(
+    services: &Arc<OrderedRelayDeliveryServices>,
+    authority: &Arc<IngressAuthority>,
+    claimed: &ClaimedDirectRequest,
+    bound: &DirectTarget,
+    node: &NodeIdentity,
+) -> bool {
+    let request = &claimed.request;
+    if let Some(recorded) = request.decision {
+        return record_bound(authority, claimed, node, recorded)
+            .await
+            .is_some();
+    }
+    if bound.node != *node {
+        return record_bound(
+            authority,
+            claimed,
+            node,
+            DirectDecision::Rejected(DirectRefusal::HostedElsewhere),
+        )
+        .await
+        .is_some();
+    }
+    let not_delivered = DirectDecision::Rejected(DirectRefusal::NotDelivered);
+    let Ok(resource) = request.recipient.clone().try_into_full() else {
+        return record_bound(authority, claimed, node, not_delivered)
+            .await
+            .is_some();
+    };
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return false;
+    };
+    let stanza = payload_stanza(&request.payload);
+    let obligation = append_obligation(&request.payload);
+    let context = super::ingress_append::authorize_ingress_append(
+        services,
+        &request.sender_entity,
+        stanza,
+        obligation,
+    );
+    if obligation.is_some() && context.is_none() {
+        return record_bound(authority, claimed, node, not_delivered)
+            .await
+            .is_some();
+    }
+    let mut deps =
+        crate::server::routes::websocket::interpret_loop::build_interpret_deps(&state, None);
+    deps.connection_registry = &services.connection_registry;
+    deps.user_registry = Some(&services.user_registry);
+    deps.sm_session_registry = Some(&services.sm_session_registry);
+    deps.ingress_append_context = context;
+    let kind = match request.payload {
+        OrderedRelayPayload::ProcessedDirectMessage { .. } => DeliveryKind::DirectFrame,
+        _ => DeliveryKind::PeerStanza,
+    };
+    let received_at = match request.payload {
+        OrderedRelayPayload::Message { received_at, .. } => received_at,
+        _ => None,
+    };
+    let live_only = matches!(stanza, Stanza::Iq(_));
+    let hand_over = || {
+        crate::server::routes::interpret::deliver_to_local_binding(
+            &deps,
+            &resource,
+            &bound.binding,
+            stanza,
+            kind,
+            received_at,
+            live_only,
+        )
+    };
+    if obligation.is_some() {
+        let decision = match hand_over().await {
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                DirectDecision::Accepted
+            }
+            FullJidDeliveryOutcome::Unavailable => not_delivered,
+            outcome
+            @ (FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted) => {
+                tracing::warn!(?outcome, recipient = %request.recipient, "bound request not handed over yet");
+                return false;
+            }
+        };
+        return record_bound(authority, claimed, node, decision)
+            .await
+            .is_some();
+    }
+    let present = services
+        .connection_registry
+        .hosts_binding(&resource, &bound.binding)
+        || (!live_only
+            && services.connection_registry.entry(&resource).is_none()
+            && services
+                .sm_session_registry
+                .available_detached_resources_for_user(&resource.to_bare())
+                .await
+                .unwrap_or_default()
+                .contains(&resource));
+    if !present {
+        return record_bound(authority, claimed, node, not_delivered)
+            .await
+            .is_some();
+    }
+    let recorded = record_bound(authority, claimed, node, DirectDecision::Accepted).await;
+    if recorded == Some(DirectDecision::Accepted) {
+        let outcome = hand_over().await;
+        if !matches!(
+            outcome,
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+        ) {
+            tracing::warn!(?outcome, recipient = %request.recipient, "accepted bound request was not handed over");
+        }
+    }
+    recorded.is_some()
 }

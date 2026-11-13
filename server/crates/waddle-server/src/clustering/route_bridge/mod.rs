@@ -94,7 +94,8 @@ pub use account_authority::ClusterAccountAuthorityPeers;
 #[cfg(test)]
 pub(crate) use delivery::MucProxyRouteAttempt;
 pub(crate) use delivery::{
-    MucProxyRouteDecision, OrderedRelayMucProxyOutcome, RegisteredRemoteWriteAcceptedDelivery,
+    BoundDelivery, MucProxyRouteDecision, OrderedRelayMucProxyOutcome,
+    RegisteredRemoteWriteAcceptedDelivery,
 };
 pub use presence::LocalResourcePresence;
 pub use reassert::LocalMediaGrantReassertion;

@@ -140,13 +140,8 @@ pub(super) async fn execute_external(
                     ..
                 }) => return EffectOutcome::Unavailable,
                 Some(_) | None => {
-                    super::super::groupchat_archive::push_inbox_update(
-                        deps.connection_registry,
-                        deps.user_registry,
-                        &owner,
-                        entry,
-                    )
-                    .await
+                    super::super::groupchat_archive::push_inbox_update_with(deps, &owner, entry)
+                        .await
                 }
             };
             EffectOutcome::InboxPush(resources)

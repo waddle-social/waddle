@@ -33,8 +33,9 @@ pub use mailbox::{
 mod direct_requests;
 #[cfg(feature = "clustering")]
 pub use direct_requests::{
-    DirectDecision, DirectRefusal, DirectRequestError, DirectRequestRepository, NewDirectRequest,
-    StoredDirectRequest, DIRECT_REQUEST_PAYLOAD_MAX_BYTES, DIRECT_REQUEST_SETTLED_RETENTION,
+    DirectDecision, DirectRefusal, DirectRequestError, DirectRequestRepository, DirectTarget,
+    NewDirectRequest, StoredDirectRequest, DIRECT_REQUEST_PAYLOAD_MAX_BYTES,
+    DIRECT_REQUEST_SETTLED_RETENTION,
 };
 mod room_requests;
 pub use room_requests::{

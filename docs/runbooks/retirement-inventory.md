@@ -56,16 +56,17 @@ which resources an account has and which receive a stanza, and every
 `/ws` connection reports its binding to it. No step above is deletable
 yet, under either selection:
 
-- **Step 1 is blocked by delivery, not by selection.** The coordinator
-  chooses the destinations; the stanza is then delivered through the
-  account's `UserActor`, which resolves the endpoint from its own copy of
-  the `ConnectionEntry`. That copy is written only by
-  `mirror_register_outcome`. The unselected readers are listed in
+- **Step 1 is blocked by the remaining readers, not by selection.** With
+  the coordinator selected, full-JID delivery, the route bridge's
+  receiver, inbox pushes and the group-DM leave resolve a binding's
+  endpoint from the coordinator's `BindingRef`, through the local
+  connection registry or a bound direct request to the hosting node,
+  without the `UserActor`. The readers that still read the `UserActor` or
+  a remote channel mirror in that mode are listed in
   [`2138-account-coordinator.md`](../planning/2138-account-coordinator.md),
   "What still writes the registry and the mirrors". Step 1 becomes
-  deletable when full-JID delivery, stream-management promotion and the
-  route bridge's receiver resolve a binding's endpoint without the
-  `UserActor`, and the coordinator selector is the default.
+  deletable when that list is empty and the coordinator selector is the
+  default.
 - **Steps 2 to 4** follow step 1 unchanged.
 
 Deletable once the coordinator selector defaults to the coordinator, with

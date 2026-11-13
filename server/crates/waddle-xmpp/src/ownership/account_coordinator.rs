@@ -328,6 +328,17 @@ impl AccountResources {
         }
     }
 
+    /// The exact binding of every resource with an active binding, ordered
+    /// by full JID: the destination delivery resolves an endpoint for.
+    pub fn active_bindings(&self) -> Vec<(FullJid, BindingRef)> {
+        self.active()
+            .filter_map(|(jid, _)| {
+                self.binding(jid)
+                    .map(|binding| (jid.clone(), binding.clone()))
+            })
+            .collect()
+    }
+
     /// Every resource with an active binding, with no presence filter.
     pub fn resources(&self) -> Vec<FullJid> {
         self.active().map(|(jid, _)| jid.clone()).collect()
