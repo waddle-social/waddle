@@ -3,8 +3,8 @@
 //! On SIGTERM the server must natively close every live session:
 //! send `<stream:error><system-shutdown/>` (RFC 6120 §4.9.3.20)
 //! followed by the RFC 7395 `<close/>` frame, detach XEP-0198
-//! sessions so their unacked queues flow through Q6 promotion, and
-//! exit within the drain timeout — no SIGKILL required.
+//! sessions so their unacked queues stay resumable across the restart,
+//! and exit within the drain timeout — no SIGKILL required.
 
 use std::time::Duration;
 
@@ -60,13 +60,15 @@ async fn sigterm_closes_live_session_with_system_shutdown_and_exits() {
     );
 }
 
-/// A live XEP-0198 session's unacked stanzas must survive SIGTERM:
-/// the session detaches on shutdown, the drain promotes its unacked
-/// queue (Q6) into durable offline delivery, and the recipient gets
-/// the message after the server restarts — instead of losing it on
-/// every deploy.
+/// A live XEP-0198 session's unacked stanzas must survive SIGTERM: the
+/// session detaches on shutdown with its unacked frames retained by the
+/// durable stream-management authority, and after the server restarts the
+/// client resumes it and gets the message replayed, instead of losing it on
+/// every deploy. The detached session stays resumable across the restart
+/// (`docs/planning/2139-durable-sm-session-model.md`); its frames reach
+/// offline delivery only if it expires unresumed.
 #[tokio::test]
-async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_delivery() {
+async fn sigterm_keeps_live_sm_session_unacked_queue_for_resume_after_restart() {
     // RAII tempdir: cleans up the sqlite files even when an assertion
     // below panics; the guard outlives both server phases.
     let scratch_dir = tempfile::tempdir().expect("create scratch dir");
@@ -79,6 +81,7 @@ async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_deliver
     // Phase 1: admin holds a live resumable SM session with one
     // unacked inbound DM when SIGTERM lands.
     let body_text = "unacked-message-must-survive-shutdown";
+    let resume_id;
     {
         let mut server = TestServer::start_persistent_with_extra_envs(
             &global_db,
@@ -98,10 +101,15 @@ async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_deliver
             .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
             .await
             .expect("send SM enable");
-        admin
+        let enabled = admin
             .recv_matching(|frame| frame.contains("<enabled"))
             .await
             .expect("SM enabled");
+        let enabled: minidom::Element = enabled.parse().expect("enabled XML");
+        resume_id = enabled
+            .attr("id")
+            .expect("a resumable session names its resume id")
+            .to_owned();
 
         let mut bob = WsXmppClient::connect_and_auth(
             &server.ws_url(),
@@ -136,30 +144,38 @@ async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_deliver
         );
     }
 
-    // Phase 2: fresh process on the same databases — the promoted
-    // stanza is delivered as offline mail on initial presence.
+    // Phase 2: fresh process on the same databases. The client resumes the
+    // detached session without having acknowledged anything, and the
+    // retained DM is replayed with the XEP-0203 stamp of its receipt.
     let server = TestServer::start_persistent_with_extra_envs(
         &global_db,
         &[("bob", "bob-shutdown-password-1")],
         &extra_envs,
     );
-    let mut admin = WsXmppClient::connect_and_auth(
-        &server.ws_url(),
-        DOMAIN,
-        "admin",
-        server.fixed_account_password(),
-        "shutdown-q6-return",
-    )
-    .await
-    .expect("reconnect admin");
-    admin.send("<presence/>").await.expect("initial presence");
+    let mut admin = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("reconnect admin");
+    admin
+        .authenticate(DOMAIN, "admin", server.fixed_account_password())
+        .await
+        .expect("authenticate admin before resume");
+    admin
+        .send(&format!(
+            r#"<resume xmlns="urn:xmpp:sm:3" previd="{resume_id}" h="0"/>"#
+        ))
+        .await
+        .expect("send SM resume");
+    admin
+        .recv_matching(|frame| frame.contains("<resumed"))
+        .await
+        .expect("the detached session resumes after restart");
     let delivered = admin
         .recv_matching(|frame| frame.contains(body_text))
         .await
-        .expect("promoted unacked DM delivered after restart");
+        .expect("unacked DM replayed after restart");
     assert!(
         delivered.contains("urn:xmpp:delay"),
-        "offline redelivery must carry an XEP-0203 delay stamp: {delivered}"
+        "replayed delivery must carry an XEP-0203 delay stamp: {delivered}"
     );
 }
 

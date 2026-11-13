@@ -12,8 +12,9 @@
 //!   original receipt time: Waddle policy (#1178), not a §5 requirement.
 //! - XEP-0198 §5 with a peer delivering throughout the resume: every replayed
 //!   frame precedes every live frame, in send order, exactly once.
-//! - A canonical-read outage at detach: the unacknowledged ingress frame is
-//!   still replayed, but without its keyed `sm_ingress_appends` proof.
+//! - Detach with an unacknowledged ingress frame: the durable session retains
+//!   it keyed by the ingress claim it was written with, and replays it; a
+//!   canonical-read outage at detach changes neither.
 //!
 //! Tests in the `seams` module need the `test-support` feature: they arm the
 //! deterministic seams in `server/routes/websocket/characterization_seams.rs`
@@ -21,16 +22,20 @@
 //! the seam's events file that the hold actually engaged. Everything else
 //! runs on default features.
 
+mod sm_resume_token_support;
+
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
 use minidom::Element;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::sm_persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
+use waddle_xmpp::ingress::IngressEffectKind;
 use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    IngressCustodyDisposition, PersistedIngressAppend, PersistedSession, SmPersistenceStorage,
+    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, SmPersistenceStorage,
 };
 use waddle_xmpp::stream_management::SM_NS;
 use waddle_xmpp::xep::xep0203::NS_DELAY;
@@ -442,7 +447,9 @@ async fn sm_resume_after_transport_loss_reports_inbound_h_and_replays_unacked_ta
     assert_eq!(server_handled(&mut bob).await, 1, "one inbound stanza (p1)");
     drop(bob);
 
-    let detached = wait_for_detached(&storage, &stream).await;
+    let session =
+        sm_resume_token_support::session_stream(&storage.database(), stream.as_str()).await;
+    let detached = wait_for_detached(&storage, &session).await;
     assert_eq!(
         (
             detached.inbound_count,
@@ -495,17 +502,20 @@ async fn sm_resume_after_transport_loss_reports_inbound_h_and_replays_unacked_ta
 // ---------------------------------------------------------------------------
 
 struct DetachedIngressFrame {
+    /// The session's retained frames (`sm_unacked`), read before resume.
+    frames: Vec<PersistedUnackedStanza>,
     /// `sm_ingress_appends` rows at the frame's replay slot, read before resume.
     appends: Vec<PersistedIngressAppend>,
     bob_jid: FullJid,
-    stream: SmSessionId,
 }
 
 /// Bob receives one ingress-routed chat (outbound sequence 1, carrying its
 /// ingress append obligation in the live SM queue), never acks it, and loses
-/// the transport. Detach authorizes the obligation against canonical ingress
-/// state (`drain_append::reserve_live_recorded`) before the snapshot is stored.
-/// Resuming with h=0 must still replay the frame.
+/// the transport. The durable authority retains each frame with the ingress
+/// claims it was admitted with (`sm_unacked.provenance`, decision record
+/// `2139-durable-sm-session-model.md`), so the detach stores the snapshot
+/// without reading canonical ingress state again. Resuming with h=0 must
+/// still replay the frame.
 async fn detach_with_unacked_ingress_frame(
     server: &TestServer,
     database_url: &str,
@@ -520,10 +530,16 @@ async fn detach_with_unacked_ingress_frame(
     send_chat(&mut alice, &bob_jid, "unacked-ingress").await;
     receive_chat(&mut bob, "unacked-ingress").await;
     drop(bob);
-    let detached = wait_for_detached(&storage, &stream).await;
+    let session =
+        sm_resume_token_support::session_stream(&storage.database(), stream.as_str()).await;
+    let detached = wait_for_detached(&storage, &session).await;
     assert_eq!((detached.outbound_count, detached.last_acked), (1, 0));
+    let frames = storage
+        .list_unacked(&session)
+        .await
+        .expect("read retained frames");
     let appends = storage
-        .get_ingress_appends_for_sequence(&stream, 1)
+        .get_ingress_appends_for_sequence(&session, 1)
         .await
         .expect("read ingress appends");
 
@@ -546,31 +562,73 @@ async fn detach_with_unacked_ingress_frame(
     resumed.close().await.expect("resumed stream closes");
     alice.close().await.expect("alice closes");
     DetachedIngressFrame {
+        frames,
         appends,
         bob_jid,
-        stream,
     }
 }
 
-/// With canonical state readable, detach proves the obligation: the detached
-/// snapshot is stored together with one pending keyed append for the frame.
+/// The detached session retains the unacknowledged frame at sequence 1 with
+/// exactly one ingress claim: bob's resource, the direct-route effect, and a
+/// message key that names a canonical ingress row. The durable authority
+/// keeps that claim on the frame, so it writes no `sm_ingress_appends` proof
+/// for its own sessions.
+async fn assert_frame_keyed_by_its_ingress_claim(
+    detached: &DetachedIngressFrame,
+    database_url: &str,
+) {
+    let [frame] = detached.frames.as_slice() else {
+        panic!("expected one retained frame, got {:#?}", detached.frames);
+    };
+    assert_eq!(frame.sequence, 1);
+    let payload: Element = frame.stanza.wire().parse().expect("retained frame XML");
+    assert_eq!(payload.attr("id"), Some("unacked-ingress"));
+    let Some([claim]) = frame.provenance.claims() else {
+        panic!("expected one ingress claim, got {:#?}", frame.provenance);
+    };
+    assert_eq!(claim.resource, detached.bob_jid);
+    assert_eq!(
+        claim.kind.to_storage(),
+        IngressEffectKind::RouteDirect.storage_tag()
+    );
+    let db = Database::from_config(
+        "characterization inspection",
+        &DatabaseConfig::new(DatabaseDriver::Sqlite, database_url.to_owned()),
+    )
+    .await
+    .expect("inspection database");
+    let guard = db.guard().await.expect("inspection connection");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM ingress_messages WHERE message_key = ?",
+            waddle_server::db_params![claim.message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("canonical row by message key");
+    let canonical: i64 = rows
+        .next()
+        .await
+        .expect("canonical count row")
+        .expect("one row")
+        .get(0)
+        .expect("canonical count");
+    assert_eq!(canonical, 1, "the claim names the canonical ingress row");
+    assert_eq!(
+        detached.appends,
+        Vec::new(),
+        "the durable authority keeps the claim on the frame, not in sm_ingress_appends"
+    );
+}
+
+/// With canonical state readable, the detached snapshot retains the frame
+/// keyed by the ingress claim it was written with.
 #[tokio::test]
 async fn sm_detach_keys_unacked_ingress_frame_when_canonical_read_succeeds() {
     let directory = tempfile::tempdir().expect("database directory");
     let database_url = persistent_database_url(&directory);
     let server = TestServer::start_persistent_with_extra_accounts(&database_url, ACCOUNTS);
     let detached = detach_with_unacked_ingress_frame(&server, &database_url).await;
-    let [append] = detached.appends.as_slice() else {
-        panic!("expected one keyed append, got {:#?}", detached.appends);
-    };
-    assert_eq!(append.accepting_stream, detached.stream);
-    assert_eq!(append.sequence, 1);
-    assert_eq!(append.key.resource, detached.bob_jid);
-    assert_eq!(append.disposition, IngressCustodyDisposition::Pending);
-    assert_eq!(
-        append.payload.to_element().attr("id"),
-        Some("unacked-ingress")
-    );
+    assert_frame_keyed_by_its_ingress_claim(&detached, &database_url).await;
 }
 
 #[cfg(feature = "test-support")]
@@ -798,7 +856,9 @@ mod seams {
             receive_chat(&mut bob, &id).await;
         }
         drop(bob);
-        wait_for_detached(&storage, &stream).await;
+        let session =
+            sm_resume_token_support::session_stream(&storage.database(), stream.as_str()).await;
+        wait_for_detached(&storage, &session).await;
 
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let peer_target = bob_jid.clone();
@@ -846,25 +906,15 @@ mod seams {
         alice.close().await.expect("alice closes");
     }
 
-    /// Characterizes current behaviour; changes with C7 (#2046), and with
-    /// ACT-LANES / C6c for mailbox-carried obligations (C2h form ii);
-    /// unchanged under Option B.
-    ///
-    /// The frame is a local DM written live, so its obligation is the
-    /// relay-carried `SmRelayedAppendObligation` that detach authorizes in
-    /// `reserve_live_recorded` → `DrainAuthority::authorize`. Every canonical
-    /// read there fails (`CanonicalReadFailed`, as a database error), and
-    /// `DrainAuthority` degrades the obligation to an unkeyed entry (decision
-    /// on #1789: refusing it would turn the outage into loss): the frame is
-    /// still persisted and replayed, but no `sm_ingress_appends` proof is
-    /// stored for it, so the dedupe key is lost and only the delivery receipt
-    /// guards against re-execution. C2h keeps this relay-carried path until
-    /// its lane flips: once ACT-LANES moves DMs onto the C6c mailbox lane the
-    /// obligation is mailbox-carried and gets a keyed-but-unverified detach
-    /// append without a canonical read, and C7 deletes the unkeyed
-    /// degradation; either way this test then expects the keyed row.
+    /// A canonical-read outage at detach does not unkey the frame. The frame
+    /// is a local DM written live, and the durable authority stored its
+    /// ingress claim when it admitted the frame to the session window, so
+    /// the detach reads no canonical state for it: the outage seam in
+    /// `DrainAuthority::authorize` only reaches frames still queued on the
+    /// endpoint when it closes. The frame is replayed and keyed exactly as
+    /// with canonical state readable.
     #[tokio::test]
-    async fn sm_detach_canonical_read_outage_replays_unacked_ingress_frame_unkeyed() {
+    async fn sm_detach_canonical_read_outage_keeps_unacked_ingress_frame_keyed() {
         let directory = tempfile::tempdir().expect("database directory");
         let database_url = persistent_database_url(&directory);
         let server = TestServer::start_persistent_with_extra_envs(
@@ -873,10 +923,6 @@ mod seams {
             &[(DETACH_CANONICAL_READ_ENV, "unavailable")],
         );
         let detached = detach_with_unacked_ingress_frame(&server, &database_url).await;
-        assert_eq!(
-            detached.appends,
-            Vec::new(),
-            "no keyed append survives a canonical-read outage at detach"
-        );
+        assert_frame_keyed_by_its_ingress_claim(&detached, &database_url).await;
     }
 }

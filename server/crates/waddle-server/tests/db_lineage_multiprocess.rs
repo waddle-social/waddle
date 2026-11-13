@@ -8,9 +8,13 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_ws_test_support::TestServer;
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The room-observation index whose presence shows that observer startup ran.
+const OBSERVER_INDEX: &str = "extension_room_publications_pending";
 
 /// These tests create durable tables and run several real server processes.
 /// Serializing them keeps the optional shared PostgreSQL fixture responsive.
@@ -143,6 +147,32 @@ fn lineage_envs(
         ));
     }
     envs
+}
+
+/// Build the database at `url` from the schema baseline and remove
+/// [`OBSERVER_INDEX`] from it.
+///
+/// The baseline holds every room-observation table and index, so a server
+/// that initializes room observations on a database it built itself leaves
+/// nothing behind to observe. `initialize_room_observations` creates
+/// [`OBSERVER_INDEX`] when it is missing, and a server that finds the
+/// baseline already recorded runs no migration, so after startup the index
+/// is present exactly when observer initialization ran.
+async fn baseline_without_observer_index(driver: DatabaseDriver, url: &str) {
+    let db = Database::from_config(
+        "lineage observer witness",
+        &DatabaseConfig::new(driver, url.to_string()),
+    )
+    .await
+    .expect("open the database to build");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("build the schema from the baseline");
+    let conn = db.guard().await.expect("database guard");
+    conn.execute(&format!("DROP INDEX {OBSERVER_INDEX}"), ())
+        .await
+        .expect("remove the observer index");
 }
 
 async fn spawn_server(envs: Vec<(String, String)>) -> TestServer {
@@ -335,6 +365,7 @@ async fn sqlite_unenrolled_database_stays_unready() {
         "sqlite://{}?mode=rwc",
         directory.path().join("unenrolled.db").display()
     );
+    baseline_without_observer_index(DatabaseDriver::Sqlite, &database_url).await;
     let mut server = spawn_server(vec![
         ("WADDLE_DB_DRIVER".into(), "sqlite".into()),
         ("WADDLE_DATABASE_URL".into(), database_url.clone()),
@@ -351,14 +382,12 @@ async fn sqlite_unenrolled_database_stays_unready() {
     let database = sqlx::SqlitePool::connect(&database_url)
         .await
         .expect("open unattested SQLite database for inspection");
-    // V1023 owns the observer tables, so the startup-only index is the
-    // evidence that `initialize_room_observations` never ran.
-    let observer_tables: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'extension_room_publications_pending'",
-    )
-    .fetch_one(&database)
-    .await
-    .expect("inspect observer schema");
+    let observer_tables: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?")
+            .bind(OBSERVER_INDEX)
+            .fetch_one(&database)
+            .await
+            .expect("inspect observer schema");
     assert_eq!(
         observer_tables, 0,
         "unattested startup must not initialize observers"
@@ -374,6 +403,7 @@ async fn unenrolled_database_stays_unready() {
     };
     let _serial = serial_lock().lock().await;
     let fixture = SchemaFixture::new("unenrolled", postgres_url).await;
+    baseline_without_observer_index(DatabaseDriver::Postgres, &fixture.boundary_url()).await;
     let deployment_uuid = uuid::Uuid::new_v4().to_string();
     let mut server = spawn_server(lineage_envs(
         &fixture.boundary_url(),
@@ -386,11 +416,10 @@ async fn unenrolled_database_stays_unready() {
     wait_for_lineage_failure(&server, "global", "missing_lineage").await;
     assert!(!server.wait_for_exit(Duration::from_secs(1)).await);
     assert_liveness(&server).await;
-    // V1023 owns the observer tables, so the startup-only index is the
-    // evidence that `initialize_room_observations` never ran.
     let observer_tables: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'extension_room_publications_pending'",
+        "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
     )
+    .bind(OBSERVER_INDEX)
     .fetch_one(&fixture.primary_admin)
     .await
     .expect("inspect observer schema");

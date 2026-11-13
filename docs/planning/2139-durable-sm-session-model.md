@@ -170,6 +170,13 @@ Recovery of each intermediate condition:
   fence without effect.
 - **Terminal with retained frames**: the rows stay in `sm_unacked` as custody
   until the consumer that transfers them to offline delivery releases them.
+- **Graceful shutdown**: the drain detaches each owned session as a
+  transport loss does. The session stays `Detached` across the restart with
+  its retained frames, each keyed by the ingress claims it was admitted
+  with, so the client resumes it on the restarted node and gets them
+  replayed; they reach offline delivery only if the session expires
+  unresumed. Nothing is moved to offline delivery at shutdown
+  (`graceful_shutdown_ws::sigterm_keeps_live_sm_session_unacked_queue_for_resume_after_restart`).
 
 ## Resume
 
