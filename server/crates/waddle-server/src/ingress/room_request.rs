@@ -26,7 +26,7 @@ use waddle_xmpp::ingress::mailbox::{
 };
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
 use waddle_xmpp::Stanza;
-use waddle_xmpp_core::{Affiliation, OccupancySessionGeneration, Role};
+use waddle_xmpp_core::{Affiliation, OccupancySeatId, OccupancySessionGeneration, Role};
 use xmpp_parsers::presence::Presence;
 
 use super::origin_gate::{RoomAcceptanceUnresolved, RoomAcceptanceWatch};
@@ -571,6 +571,8 @@ pub enum RoomSeatChange {
         role: Role,
         affiliation: Affiliation,
         generation: OccupancySessionGeneration,
+        /// Identity of the occupancy, as the actor holds it.
+        seat: Option<OccupancySeatId>,
     },
     Unseat {
         occupant: FullJid,
@@ -615,6 +617,7 @@ impl IngressAuthority {
                     role,
                     affiliation,
                     generation,
+                    seat,
                 } => {
                     RoomOccupantRepository::record_seat(
                         &mut tx,
@@ -625,6 +628,7 @@ impl IngressAuthority {
                             role,
                             affiliation,
                             generation,
+                            seat,
                             join_request: None,
                             presence: None,
                             room_epoch: epoch,
@@ -673,6 +677,7 @@ impl waddle_xmpp::muc::durable::RoomOccupancyLedger for IngressOccupancyLedger {
                         role: seat.role,
                         affiliation: seat.affiliation,
                         generation: seat.session,
+                        seat: seat.seat,
                     },
                     Change::Unseat { occupant } => RoomSeatChange::Unseat { occupant },
                 })
@@ -708,6 +713,9 @@ async fn apply_occupancy(
         role,
         affiliation,
         generation: request.generation,
+        // The decision completes or rewrites the row the actor seated and
+        // leaves that row's seat identity as the actor recorded it.
+        seat: None,
         join_request,
         presence,
         room_epoch,

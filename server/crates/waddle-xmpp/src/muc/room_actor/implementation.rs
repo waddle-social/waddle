@@ -2520,12 +2520,15 @@ impl kameo::message::Message<Join> for RoomActor {
                 return Err(RoomActorError::NickAlreadyInUse(msg.nick));
             };
             let session = msg.session;
+            // The nick is free, so this join starts a new occupancy.
+            let seat = waddle_xmpp_core::OccupancySeatId::mint();
             self.record_seat_before_join(
                 &msg.real_jid,
                 &msg.nick,
                 msg.affiliation,
                 msg.role,
                 session,
+                Some(seat),
             )
             .await?;
             let gate = self
@@ -2551,6 +2554,7 @@ impl kameo::message::Message<Join> for RoomActor {
                     .room
                     .set_session_watermark(msg.real_jid.clone(), joined_at);
                 actor.room.set_session_generation(&msg.real_jid, session);
+                actor.room.set_session_seat(&msg.real_jid, Some(seat));
                 actor.note_session_joined(&msg.real_jid);
                 actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
             })

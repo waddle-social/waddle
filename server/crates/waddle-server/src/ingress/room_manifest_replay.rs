@@ -27,7 +27,7 @@ use crate::ingress_uow::{
 };
 use crate::server::routes::interpret::SmIngressAppendContext;
 
-use super::{EffectReceiptKey, FrozenRoomManifest};
+use super::{EffectReceiptKey, FrozenRoomManifest, SealedSeat};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -93,7 +93,7 @@ async fn current_actor(
 /// only in that owner's memory, so they cannot be checked anywhere else. The
 /// room's durable occupancy can: the owner records every seat it grants or
 /// removes in `ingress_room_occupants`, with the generation of the
-/// connection that holds it.
+/// connection that holds it and the identity of the occupancy.
 fn durable_occupancy_applies(uow: &IngressUnitOfWork, manifest: &FrozenRoomManifest) -> bool {
     manifest.claim_fence.is_some() && !matches!(uow.fencing(), IngressFencing::SingleNode)
 }
@@ -120,30 +120,37 @@ async fn durable_seat(
 /// Whether the room's durable occupancy still seats the occupant a child was
 /// frozen for.
 ///
-/// `sealed` is the generation of the connection that held the target's seat
-/// when the manifest was sealed. The frozen occupant is still seated while
-/// the recorded seat is held by that generation. A seat held by another
-/// generation belongs to a connection that joined later, and a child that
-/// records no generation names no occupant these rows could be compared
-/// with: neither is the frozen occupant, so neither receives the copy.
+/// `sealed` is the seat the target held when the manifest was sealed. The
+/// frozen occupant is still seated while the recorded seat has the same
+/// connection generation and the same occupancy identity. A seat held by
+/// another generation belongs to a connection that joined later. A seat of
+/// the same generation with another identity belongs to a later join of the
+/// same connection: the room mints an identity for every join that starts
+/// an occupancy, so a leave followed by a join never leaves the earlier
+/// identity behind. A child that records no seat names no occupant these
+/// rows could be compared with. None of these is the frozen occupant, so
+/// none receives the copy.
 ///
-/// A leave followed by a join of the same connection leaves the same row
-/// behind, because `ingress_room_occupants` identifies a seat by its
-/// connection only. The sealing actor tells the two apart by the child's
-/// occupancy watermark; a node without that actor cannot.
+/// A sealed seat without an identity (a child stored before identities were
+/// recorded, or a seat the sealing actor held without one) stands only at a
+/// row without one. Such a row was written before rows carried identities
+/// and has not been joined again since, because every join writes one. A
+/// leave and rejoin of one connection that both happened before rows
+/// carried identities cannot be told apart here.
 fn frozen_seat_stands(
-    sealed: Option<OccupancySessionGeneration>,
+    sealed: Option<SealedSeat>,
     seat: &crate::ingress_uow::RoomOccupantRecord,
 ) -> bool {
-    sealed == Some(seat.generation)
+    sealed
+        .is_some_and(|sealed| sealed.generation == seat.generation && sealed.identity == seat.seat)
 }
 
 /// Hand a frozen child to the connection `endpoint` on this node when the
 /// room's durable occupancy still seats the occupant the child was frozen
 /// for, and that occupant is this connection.
 ///
-/// The recorded seat must be held by the generation the child was sealed
-/// with (`sealed`) and by the connection the copy is written to. Any other
+/// The recorded seat must be the occupancy the child was sealed for
+/// (`sealed`) and be held by the connection the copy is written to. Any other
 /// seat, or none, means the frozen occupant has left or is not this
 /// connection, and the copy is reported as not connected. The seat is read
 /// and the socket written without the room actor, so a leave that commits
@@ -152,7 +159,7 @@ fn frozen_seat_stands(
 async fn enqueue_at_durable_seat(
     uow: &IngressUnitOfWork,
     manifest: &FrozenRoomManifest,
-    sealed: Option<OccupancySessionGeneration>,
+    sealed: Option<SealedSeat>,
     target: &FullJid,
     endpoint: Option<OccupancySessionGeneration>,
     action: impl FnOnce() -> BroadcastOutcome + Send + 'static,
@@ -182,9 +189,9 @@ async fn enqueue_at_durable_seat(
 /// the room's claim: that owner's actor holds the roster and decides. Once
 /// the claim has moved, the successor's roster is the recorded occupancy, so
 /// the frozen occupant has left when the target has no row, when its row is
-/// held by another generation than the child was sealed with, and when the
-/// child records no generation to compare the row with. A row of the sealed
-/// generation stays owed; a row whose connection is gone is removed by the
+/// another occupancy than the child was sealed for (another connection
+/// generation or another seat identity), and when the child records no seat
+/// to compare the row with. A row of the sealed occupancy stays owed; a row whose connection is gone is removed by the
 /// owner's ghost sweep or by the next owner's seating.
 #[cfg(feature = "clustering")]
 async fn retire_departed_durable_seat(
@@ -192,7 +199,7 @@ async fn retire_departed_durable_seat(
     manifest: &FrozenRoomManifest,
     key: waddle_xmpp::ingress::MessageKey,
     progress: &super::recorded::RouteProgress,
-    sealed_seat: Option<OccupancySessionGeneration>,
+    sealed_seat: Option<SealedSeat>,
     target: &FullJid,
 ) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
     use crate::ingress_uow::RoomOccupantLookup;
@@ -247,7 +254,7 @@ async fn retire_departed_durable_seat(
     _manifest: &FrozenRoomManifest,
     _key: waddle_xmpp::ingress::MessageKey,
     _progress: &super::recorded::RouteProgress,
-    _sealed_seat: Option<OccupancySessionGeneration>,
+    _sealed_seat: Option<SealedSeat>,
     _target: &FullJid,
 ) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
     Ok(None)
@@ -770,8 +777,8 @@ fn detached_append_key(
 /// A detached session has no connection to compare with the recorded seat.
 /// The session belongs to the connection that last bound the full JID, so
 /// the copy is appended while the room's durable occupancy seats the target
-/// under the generation the child was sealed with (`sealed`) and the
-/// occupancy authority holds that generation as current for the full JID.
+/// in the occupancy the child was sealed for (`sealed`) and the occupancy
+/// authority holds that seat's generation as current for the full JID.
 /// The append is keyed by the child, so a repeat allocates nothing.
 async fn queue_detached_at_durable_seat(
     manifest: &FrozenRoomManifest,
@@ -780,7 +787,7 @@ async fn queue_detached_at_durable_seat(
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-    sealed: Option<OccupancySessionGeneration>,
+    sealed: Option<SealedSeat>,
 ) -> Result<FullJidDeliveryOutcome, IngressUowError> {
     use crate::ingress_uow::RoomOccupantLookup;
     let RoomOccupantLookup::Seated(seat) = durable_seat(uow, manifest, target).await? else {

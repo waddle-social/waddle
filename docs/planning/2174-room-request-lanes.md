@@ -176,6 +176,7 @@ indexes on `message_key` and on `request_key`.
 | `nick TEXT` | Unique per room together with the bare JID rule the room actor applies. |
 | `role SMALLINT`, `affiliation SMALLINT` | As the actor's `Occupant` holds them. |
 | `occupancy_generation TEXT` | The generation that joined. A request carrying another generation for the same full JID is stale. |
+| `occupancy_seat UUID NULL` | Identity of the occupancy, minted by the room actor for every join that starts one (migration V1035). It distinguishes two occupancies of one connection. NULL in a row written before V1035. See `2046-relay-lane-responsibilities.md`, "Seat identity". |
 | `join_request UUID REFERENCES ingress_room_requests ON DELETE SET NULL` | The join occurrence that created the row. |
 | `presence BYTEA NULL` | The occupant's last available presence as the room broadcasts it, at most 16 KiB; larger presence is stored without its extension payloads. |
 | `room_epoch BIGINT` | The room claim epoch under which the row was last written. |

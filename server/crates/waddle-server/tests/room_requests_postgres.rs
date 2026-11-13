@@ -28,7 +28,7 @@ use waddle_xmpp::ingress::mailbox::{
 };
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
 use waddle_xmpp::Stanza;
-use waddle_xmpp_core::{Affiliation, OccupancySessionGeneration, Role};
+use waddle_xmpp_core::{Affiliation, OccupancySeatId, OccupancySessionGeneration, Role};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -228,6 +228,7 @@ fn record(
         role: Role::Participant,
         affiliation: Affiliation::Member,
         generation,
+        seat: None,
         join_request,
         presence: Some(presence_to("juliet", "here")),
         room_epoch: ClaimEpoch(5),
@@ -685,6 +686,43 @@ async fn occupancy_is_written_by_generation_and_recovered_by_a_successor() {
             .await
             .expect("confirm rejoin")
     );
+    // A join of the same connection after it left is another occupancy: its
+    // seat has another identity, and the earlier occupancy's presence and
+    // join request do not survive it. Recording the same occupancy again
+    // (a role change) keeps both.
+    let seat_of = |identity| RoomOccupantRecord {
+        seat: Some(identity),
+        ..record(second, None)
+    };
+    let (earlier, later) = (OccupancySeatId::mint(), OccupancySeatId::mint());
+    RoomOccupantRepository::record_seat(&mut tx, &seat_of(earlier))
+        .await
+        .expect("seat with an identity");
+    assert!(
+        RoomOccupantRepository::confirm_join(&mut tx, &record(second, None))
+            .await
+            .expect("confirm the identified seat")
+    );
+    RoomOccupantRepository::record_seat(&mut tx, &seat_of(earlier))
+        .await
+        .expect("same occupancy recorded again");
+    assert!(matches!(
+        RoomOccupantRepository::lookup(&mut tx, &room(), &occupant()).await.expect("lookup"),
+        RoomOccupantLookup::Seated(row) if row.presence.is_some() && row.seat == Some(earlier)
+    ));
+    RoomOccupantRepository::record_seat(&mut tx, &seat_of(later))
+        .await
+        .expect("same connection joins again");
+    assert!(matches!(
+        RoomOccupantRepository::lookup(&mut tx, &room(), &occupant()).await.expect("lookup"),
+        RoomOccupantLookup::Seated(row)
+            if row.presence.is_none() && row.generation == second && row.seat == Some(later)
+    ));
+    assert!(
+        RoomOccupantRepository::confirm_join(&mut tx, &record(second, None))
+            .await
+            .expect("confirm the later occupancy")
+    );
     tx.commit().await.expect("owner commits");
 
     // A second resource whose row cannot be parsed is counted, not seated.
@@ -710,6 +748,11 @@ async fn occupancy_is_written_by_generation_and_recovered_by_a_successor() {
     assert_eq!(seated.role, Role::Participant);
     assert_eq!(seated.affiliation, Affiliation::Member);
     assert_eq!(seated.generation, second);
+    assert_eq!(
+        seated.seat,
+        Some(later),
+        "a successor recovers the occupancy's identity"
+    );
     assert!(seated.presence.is_some());
     let romeo: FullJid = "romeo@example.com/orchard".parse().expect("romeo");
     assert!(matches!(

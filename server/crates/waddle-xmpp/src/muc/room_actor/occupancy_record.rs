@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use jid::FullJid;
-use waddle_xmpp_core::OccupancySessionGeneration;
+use waddle_xmpp_core::{OccupancySeatId, OccupancySessionGeneration};
 
 use super::{RoomActor, RoomActorError};
 use crate::muc::durable::{RoomOccupancyChange, RoomOccupancyRecord, RoomOccupancySeat};
@@ -33,6 +33,7 @@ impl RoomActor {
                 seats.insert(
                     session.clone(),
                     RoomOccupancySeat {
+                        seat: self.room.session_seat(&session),
                         occupant: session,
                         nick: occupant.nick.clone(),
                         role: occupant.role,
@@ -69,7 +70,8 @@ impl RoomActor {
 
     /// Record the seat a join is about to take, before the join's
     /// projection commits. A join whose seat cannot be recorded is refused,
-    /// so the actor never holds an occupant the record lacks.
+    /// so the actor never holds an occupant the record lacks. `seat` is the
+    /// identity the occupancy will hold once the projection applies.
     pub(in crate::muc::room_actor) async fn record_seat_before_join(
         &mut self,
         occupant: &FullJid,
@@ -77,6 +79,7 @@ impl RoomActor {
         affiliation: Affiliation,
         role: Role,
         session: OccupancySessionGeneration,
+        seat: Option<OccupancySeatId>,
     ) -> Result<(), RoomActorError> {
         let seat = RoomOccupancySeat {
             occupant: occupant.clone(),
@@ -84,6 +87,7 @@ impl RoomActor {
             role,
             affiliation,
             session,
+            seat,
         };
         match self
             .write_occupancy_record(vec![RoomOccupancyChange::Seat(seat.clone())])

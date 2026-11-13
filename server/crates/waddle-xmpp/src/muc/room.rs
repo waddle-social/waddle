@@ -211,6 +211,11 @@ pub struct MucRoom {
     /// rejoin overwrites the previous generation so stale cleanup can prove
     /// it belongs to the displaced connection.
     pub(super) session_generations: HashMap<FullJid, waddle_xmpp_core::OccupancySessionGeneration>,
+    /// Identity of each live occupant session's occupancy. A join that
+    /// starts a new occupancy installs a new identity, also when the same
+    /// connection held the seat before; a session seated from a durable row
+    /// that records none has no entry.
+    pub(super) session_seats: HashMap<FullJid, waddle_xmpp_core::OccupancySeatId>,
     /// Persistent affiliation list (synced with Zanzibar)
     pub(super) affiliation_list: AffiliationList,
     /// Per-nickname occupancy generation, bumped each time a nickname
@@ -307,6 +312,7 @@ impl MucRoom {
             session_watermarks: HashMap::new(),
             session_orders: HashMap::new(),
             session_generations: HashMap::new(),
+            session_seats: HashMap::new(),
             affiliation_list: AffiliationList::new(),
             nickname_generation: HashMap::new(),
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
@@ -526,6 +532,10 @@ impl MucRoom {
             occupant.real_jid.clone(),
             waddle_xmpp_core::OccupancySessionGeneration::mint(),
         );
+        self.session_seats.insert(
+            occupant.real_jid.clone(),
+            waddle_xmpp_core::OccupancySeatId::mint(),
+        );
         if !self.occupants.contains_key(&occupant.nick) {
             let floor = self.generation_floor;
             let gen = self
@@ -552,6 +562,7 @@ impl MucRoom {
                 self.session_watermarks.remove(&session);
                 self.session_orders.remove(&session);
                 self.session_generations.remove(&session);
+                self.session_seats.remove(&session);
             }
         }
         self.muji_state.remove(nick);
@@ -645,6 +656,7 @@ impl MucRoom {
         self.session_watermarks.remove(jid);
         self.session_orders.remove(jid);
         self.session_generations.remove(jid);
+        self.session_seats.remove(jid);
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
@@ -698,6 +710,24 @@ impl MucRoom {
         generation: waddle_xmpp_core::OccupancySessionGeneration,
     ) {
         self.session_generations.insert(jid.clone(), generation);
+    }
+
+    /// Identity of the occupancy `jid` holds, when the room knows one.
+    pub fn session_seat(&self, jid: &FullJid) -> Option<waddle_xmpp_core::OccupancySeatId> {
+        self.session_seats.get(jid).copied()
+    }
+
+    /// Install the identity of the occupancy `jid` holds. `None` is the
+    /// seat of a session recovered from a durable row that records none.
+    pub fn set_session_seat(
+        &mut self,
+        jid: &FullJid,
+        seat: Option<waddle_xmpp_core::OccupancySeatId>,
+    ) {
+        match seat {
+            Some(seat) => self.session_seats.insert(jid.clone(), seat),
+            None => self.session_seats.remove(jid),
+        };
     }
 
     /// Get the number of occupants.

@@ -49,6 +49,9 @@ pub struct RoomOccupancySeat {
     pub affiliation: Affiliation,
     /// Generation of the connection that holds the seat.
     pub session: waddle_xmpp_core::OccupancySessionGeneration,
+    /// Identity of this occupancy. `None` only for a seat the record already
+    /// held without one.
+    pub seat: Option<waddle_xmpp_core::OccupancySeatId>,
 }
 
 /// A change the room actor makes to the room's durable occupancy record.

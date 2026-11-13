@@ -390,6 +390,10 @@ const OCCUPANTS: &str = "SELECT count(*) FROM ingress_room_occupants \
      WHERE room_jid = ? AND occupant_jid NOT LIKE 'admin@%'";
 const WITNESS_OCCUPANTS: &str = "SELECT count(*) FROM ingress_room_occupants \
      WHERE room_jid = ? AND occupant_jid LIKE 'admin@%'";
+/// A digest of the identity of the occupancy held under the nick `seated`.
+/// The query yields no value for a seat without an identity.
+const SEAT_IDENTITY: &str = "SELECT hashtextextended(occupancy_seat::text, 0) \
+     FROM ingress_room_occupants WHERE room_jid = ? AND nick = 'seated'";
 const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 
 fn occupant_presence(room: &jid::BareJid, nick: &str, kind: Option<&str>, status: &str) -> Element {
@@ -702,6 +706,7 @@ async fn owner_transfer_recovers_occupancy_and_refuses_unrecorded_senders() {
     let mut seated = scenario.origin_client("seated").await;
     join_fanout_room(&mut seated, &scenario.room, "seated").await;
     assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
+    let seat_identity = scalar(&scenario.db, &scenario.room, SEAT_IDENTITY).await;
     scenario.replace_owner().await;
 
     seated
@@ -724,6 +729,11 @@ async fn owner_transfer_recovers_occupancy_and_refuses_unrecorded_senders() {
             .iter()
             .any(|frame| frame.attr("id") == Some("after-transfer") && is_error(frame)),
         "a recovered occupant is not asked to rejoin: {reflected:?}"
+    );
+    assert_eq!(
+        scalar(&scenario.db, &scenario.room, SEAT_IDENTITY).await,
+        seat_identity,
+        "a change of owner is not a new occupancy: the seat keeps its identity"
     );
 
     let mut stranger = scenario.origin_client("stranger").await;
