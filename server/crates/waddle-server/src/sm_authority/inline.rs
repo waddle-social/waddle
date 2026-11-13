@@ -141,6 +141,20 @@ impl InlineResumeFailed {
         ))
     }
 
+    /// The session ended before its claim could be held, so the resume
+    /// transaction was not run.
+    pub fn session_gone() -> Self {
+        Self::from_rejection(&ResumeRejection::new(ResumeRejectionReason::UnknownSession))
+    }
+
+    /// The resuming account is not the one the session is bound to, so its
+    /// claim was not moved and the resume transaction was not run.
+    pub fn account_mismatch() -> Self {
+        Self::from_rejection(&ResumeRejection::new(ResumeRejectionReason::Denied(
+            ResumeDenial::PrincipalMismatch,
+        )))
+    }
+
     pub fn failed(&self) -> &SmInlineFailed {
         &self.failed
     }

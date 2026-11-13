@@ -576,6 +576,15 @@ What holds between the durable authority and the rest of the server:
   detached under the reclaimed claim, and the claim is released. A resume
   on any node then takes the free claim. The expiry sweep takes the free
   claim of a due session on a clustered store before it expires it.
+- **Resume on a node without the claim.** A detach keeps the session
+  claim on its node, so a resume elsewhere moves the claim first: from a
+  holder whose lease is committed as expired, from a holder of a
+  `Detached` session, or after the holder detached the owning connection
+  on request. A live holder that does not answer inside the
+  resume-handshake bound keeps the session and the resume is refused. The
+  rules are in
+  [`2139-durable-sm-session-model.md`](2139-durable-sm-session-model.md),
+  "Resume on a node that does not hold the claim".
 - **Janitors.** The pending-delivery claim janitor counts every
   non-terminal durable session as live, so the rows a detached durable
   session claimed are not released as orphaned.
