@@ -57,13 +57,77 @@ pub async fn open_control_db(url: &str) -> Database {
     // control-plane pool `swarm::spawn`'s `run_heartbeat` renews through
     // (ADR-0017 element 4/12, Phase 3 Slice 0) — otherwise every renewal
     // would error and self-fence this node almost immediately.
-    Database::from_config(
+    let db = Database::from_config(
         "clustering-e2e-harness",
         &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string())
             .with_control_plane_pool(waddle_server::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
     )
     .await
-    .expect("open harness postgres")
+    .expect("open harness postgres");
+    migrate_shared_postgres(&db).await;
+    db
+}
+
+/// Build the shared database's schema from the deployment catalog before any
+/// store constructor or spawned server touches it.
+///
+/// The schema baseline builds every table from an empty schema, and every
+/// spawned server applies it at startup. Tests that share this database also
+/// open stores whose constructors create some of those tables themselves, so
+/// a test that ran first may have left them without the baseline's ledger
+/// row. Such a schema is dropped and recreated: the shared test database may
+/// be reset freely, and its tests run one at a time in nextest's `postgres`
+/// group. A schema already on the baseline is migrated in place.
+pub async fn migrate_shared_postgres(db: &Database) {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT pg_catalog.quote_ident(pg_catalog.current_schema()::text), \
+                    pg_catalog.to_regclass('_migrations') IS NOT NULL, \
+                    EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                            WHERE n.nspname = pg_catalog.current_schema() \
+                              AND c.relname NOT IN ('_lineage', '_migrations'))",
+            (),
+        )
+        .await
+        .expect("inspect the shared schema");
+    let row = rows
+        .next()
+        .await
+        .expect("read the shared schema")
+        .expect("current schema");
+    let schema: String = row.get(0).expect("schema name");
+    let has_ledger: bool = row.get(1).expect("ledger presence");
+    let has_relations: bool = row.get(2).expect("relation presence");
+    drop(rows);
+    let on_baseline = has_ledger && {
+        let mut rows = conn
+            .query(
+                "SELECT EXISTS (SELECT 1 FROM _migrations WHERE version = ?)",
+                waddle_server::db_params![waddle_server::db::BASELINE_VERSION],
+            )
+            .await
+            .expect("read the ledger");
+        rows.next()
+            .await
+            .expect("read the ledger row")
+            .expect("ledger row")
+            .get::<bool>(0)
+            .expect("baseline presence")
+    };
+    if has_relations && !on_baseline {
+        conn.execute_batch(&format!(
+            "DROP SCHEMA {schema} CASCADE; CREATE SCHEMA {schema}"
+        ))
+        .await
+        .expect("reset the shared schema");
+    }
+    drop(conn);
+    waddle_server::db::MigrationRunner::single()
+        .run(db)
+        .await
+        .expect("migrate the shared database");
 }
 
 /// Reset the clustering control-plane tables and enroll every pool PeerId.

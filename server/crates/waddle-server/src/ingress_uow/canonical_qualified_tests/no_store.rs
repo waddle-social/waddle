@@ -437,11 +437,6 @@ async fn run(fixture: &Fixture, url: &str) {
     );
     execute(
         &fixture.admin,
-        &format!("CREATE TABLE {target}.pending_delivery (row_id text PRIMARY KEY)"),
-    )
-    .await;
-    execute(
-        &fixture.admin,
         &format!(
             "GRANT SELECT ON {target}.pending_delivery TO {}",
             fixture.runtime
@@ -450,7 +445,7 @@ async fn run(fixture: &Fixture, url: &str) {
     .await;
     execute(
         &fixture.admin,
-        &format!("INSERT INTO {target}.pending_delivery VALUES ('trusted-pending')"),
+        &format!("INSERT INTO {target}.pending_delivery (row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id) VALUES ('trusted-pending', 'bob@example.test', 1, 'archived', 'bob@example.test', 'trusted-pending')"),
     )
     .await;
     sqlx::query(&format!("INSERT INTO {target}.ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) SELECT 'bob@example.test', 1, message_key, kind, semantic_identity_hash, '', 'trusted-pending' FROM {target}.ingress_effect_intents WHERE message_key = $1"))

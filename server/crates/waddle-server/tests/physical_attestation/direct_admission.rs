@@ -166,11 +166,6 @@ async fn installed_v1009(fixture: &Fixture) {
 #[tokio::test]
 async fn sqlite_direct_admission_is_exact_bounded_and_recoverable() {
     let (db, retention) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
     seed_sqlite_direct(&db, &pin, envelope, intent).await;
     let mut admission = request(pin);
@@ -544,11 +539,6 @@ async fn sqlite_real_claim_reclaims_only_never_started_and_rolls_back_insert_fai
 #[tokio::test]
 async fn sqlite_missing_main_parent_stays_unresolved_despite_temp_shadow() {
     let (db, retention) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE main.pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
     seed_sqlite_direct(&db, &pin, envelope, intent).await;
     let mut a = request(pin);

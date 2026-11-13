@@ -141,10 +141,10 @@ async fn postgres_clustered_dark_manifest_remains_authoritative_without_test_opt
     };
     *planned_fence = RoomFenceRequirement::Guarded(fence);
     snapshot.coordinates = Some(coordinates);
-    fixture.execute("CREATE TABLE IF NOT EXISTS clustering_muc_rooms (room_jid TEXT PRIMARY KEY, lifecycle_id TEXT, revision BIGINT)", ()).await;
+    fixture.execute("CREATE TABLE IF NOT EXISTS clustering_muc_rooms (room_jid TEXT PRIMARY KEY, waddle_id TEXT NOT NULL, channel_id TEXT NOT NULL, config_json TEXT NOT NULL, lifecycle_id TEXT, revision BIGINT)", ()).await;
     fixture
         .execute(
-            "INSERT INTO clustering_muc_rooms (room_jid, lifecycle_id, revision) VALUES (?, ?, ?)",
+            "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, 'waddle', 'channel', '{}', ?, ?)",
             crate::db_params![room.to_string(), coordinates.lifecycle.to_string(), 1_i64],
         )
         .await;
@@ -501,10 +501,10 @@ async fn admission_rejects_stale_durable_revision_but_replay_preserves_accepted_
         panic!("snapshot");
     };
     snapshot.coordinates = Some(coordinates);
-    fixture.execute("CREATE TABLE IF NOT EXISTS clustering_muc_rooms (room_jid TEXT PRIMARY KEY, lifecycle_id TEXT, revision BIGINT)", ()).await;
+    fixture.execute("CREATE TABLE IF NOT EXISTS clustering_muc_rooms (room_jid TEXT PRIMARY KEY, waddle_id TEXT NOT NULL, channel_id TEXT NOT NULL, config_json TEXT NOT NULL, lifecycle_id TEXT, revision BIGINT)", ()).await;
     fixture
         .execute(
-            "INSERT INTO clustering_muc_rooms (room_jid, lifecycle_id, revision) VALUES (?, ?, ?)",
+            "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, 'waddle', 'channel', '{}', ?, ?)",
             crate::db_params![
                 "room@muc.example.com",
                 coordinates.lifecycle.to_string(),

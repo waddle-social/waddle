@@ -102,6 +102,11 @@ async fn sqlite_shared_pool_fails_closed_and_adopts_full_tail() {
     let (db, lab) = sqlite_fixture().await;
     let key = uuid::Uuid::new_v4().to_string();
     seed_sqlite(&db, &key, None).await;
+    sqlite_exec(
+        &db,
+        "ALTER TABLE pending_delivery RENAME TO hidden_pending_delivery",
+    )
+    .await;
     assert!(
         matches!(
             lab.collect(now(), 1).await,
@@ -111,7 +116,7 @@ async fn sqlite_shared_pool_fails_closed_and_adopts_full_tail() {
     );
     sqlite_exec(
         &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
+        "ALTER TABLE hidden_pending_delivery RENAME TO pending_delivery",
     )
     .await;
     assert!(matches!(
@@ -173,11 +178,6 @@ async fn sqlite_shared_pool_fails_closed_and_adopts_full_tail() {
 #[tokio::test]
 async fn sqlite_custody_and_atomic_rollback() {
     let (db, lab) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let key = uuid::Uuid::new_v4().to_string();
     seed_sqlite(&db, &key, Some(now() - ALIAS_RETENTION)).await;
     let guard = db.guard().await.expect("guard");
@@ -250,11 +250,6 @@ async fn sqlite_custody_and_atomic_rollback() {
 #[tokio::test]
 async fn sqlite_epoch_and_one_slot_immediate_are_bounded() {
     let (db, lab) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let holder = db.begin_immediate().await.expect("hold writer slot");
     let bounded = RetentionLab::sqlite(
         &db,
@@ -285,11 +280,6 @@ async fn sqlite_epoch_and_one_slot_immediate_are_bounded() {
 #[tokio::test]
 async fn sqlite_temp_epoch_cannot_mask_future_or_missing_main_epoch() {
     let (db, lab) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let key = uuid::Uuid::new_v4().to_string();
     seed_sqlite(&db, &key, Some(now() - ALIAS_RETENTION)).await;
     let guard = db.guard().await.expect("one-slot runtime guard");
@@ -403,13 +393,6 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         );
     }
     drop(owner);
-    sqlx::query(&format!(
-        "CREATE TABLE {}.pending_delivery (row_id TEXT PRIMARY KEY)",
-        fixture.target
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("pending relation");
     for table in [
         "ingress_messages",
         "ingress_origin_aliases",
@@ -923,7 +906,7 @@ async fn postgres_each_live_obligation_blocks_without_starving_ready_rows() {
     sqlx::query(&format!("INSERT INTO {schema}.ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key) VALUES ($1, 1, $2, 'child')"))
         .bind(descendant).bind([4_u8; 32].as_slice()).execute(&mut *seed).await.expect("unsettled descendant");
     sqlx::query(&format!(
-        "INSERT INTO {schema}.pending_delivery (row_id) VALUES ('queued')"
+        "INSERT INTO {schema}.pending_delivery (row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id) VALUES ('queued', 'user@example.test', 1, 'archived', 'user@example.test', 'queued')"
     ))
     .execute(&mut *seed)
     .await
@@ -1057,11 +1040,6 @@ async fn sqlite_pin_validates_recorded_route_and_survives_reopen() {
         AdmissionPinLab, AdmissionPinLabError, PinOutcome,
     };
     let (db, retention) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
     seed_sqlite_direct(&db, &pin, envelope, intent).await;
     let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("shared pin lab");
@@ -1226,11 +1204,6 @@ async fn assert_sqlite_pin_rejects_replace(replacement: SqliteReplacement) {
     use waddle_server::db::physical_attestation::{AdmissionPinLab, PinOutcome};
 
     let (db, retention) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
     seed_sqlite_direct(&db, &pin, envelope, intent).await;
     let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("shared pin lab");
@@ -1334,11 +1307,6 @@ async fn sqlite_pin_rejects_replace_by_rowid() {
 async fn sqlite_collector_first_refuses_new_pin_and_temp_shadows() {
     use waddle_server::db::physical_attestation::{AdmissionPinLab, AdmissionPinLabError};
     let (db, retention) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
     seed_sqlite_direct(&db, &pin, envelope, intent).await;
     let guard = db.guard().await.expect("guard");

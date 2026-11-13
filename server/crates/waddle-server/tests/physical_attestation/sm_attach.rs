@@ -872,7 +872,7 @@ async fn portable_sm_attach_checks_restricted_snapshot_and_schema_drift() {
 async fn portable_sm_attach_accepts_owner_upgrade_and_migration_profiles() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new(url.clone()).await;
     let (owner, pool, _) = setup(&fixture).await;
     let runtime = pool.global().clone();
     bootstrap_portable_sm_owner_schema(&owner)
@@ -896,8 +896,19 @@ async fn portable_sm_attach_accepts_owner_upgrade_and_migration_profiles() {
         .await
         .expect("real owner upgrade");
     attach(&runtime).await.expect("upgraded owner profile");
-    // Run the real migration catalog through current V1029. Its cutover
-    // recreates the SM tables and must have the same attachable profile.
+    drop(runtime);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+    drop(owner);
+    fixture.cleanup().await;
+
+    // The deployment catalog builds the SM tables from the schema baseline,
+    // which starts from an empty schema, so its profile is checked on a
+    // fixture the owner bootstrap has not touched.
+    let fixture = Fixture::new(url).await;
+    let (owner, pool, _) = setup(&fixture).await;
+    let runtime = pool.global().clone();
     MigrationRunner::single()
         .run(&owner)
         .await

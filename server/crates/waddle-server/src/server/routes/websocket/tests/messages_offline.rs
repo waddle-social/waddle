@@ -121,6 +121,12 @@ async fn database_state(
     pool: Arc<crate::db::DatabasePool>,
     ingress: Option<Arc<crate::ingress::IngressAuthority>>,
 ) -> Arc<WebSocketState> {
+    // The schema baseline builds every table from an empty schema, so it runs
+    // before the pending store's constructor.
+    crate::db::MigrationRunner::single()
+        .run(pool.global())
+        .await
+        .expect("migrations");
     let pending = crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
         pool.global().clone(),
         waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,

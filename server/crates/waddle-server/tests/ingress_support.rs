@@ -176,9 +176,6 @@ impl IngressFixture {
             "sqlite://{}?mode=rwc",
             directory.path().join("ingress.db").display()
         );
-        waddle_xmpp::mam::SqlxMamStorage::open(&database_url)
-            .await
-            .expect("SQLite MAM schema");
         let config = DatabaseConfig::new(DatabaseDriver::Sqlite, database_url);
         let db = Database::from_config("ingress-test", &config)
             .await
@@ -199,23 +196,26 @@ impl IngressFixture {
         let db = Database::from_config("ingress-test", &config)
             .await
             .expect("Postgres database");
-        waddle_xmpp::mam::SqlxMamStorage::open(database.url())
-            .await
-            .expect("Postgres MAM schema");
         Some(Self::initialize(db, Some(database)).await)
     }
 
+    /// Build the schema from the baseline, then open the stores whose
+    /// constructors check their own tables. The baseline expects an empty
+    /// schema, so it runs first.
     async fn initialize(db: Database, postgres: Option<IsolatedPostgresDatabase>) -> Self {
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("ingress migrations");
+        waddle_xmpp::mam::SqlxMamStorage::open(db.database_url())
+            .await
+            .expect("MAM schema");
         waddle_server::inbox::DatabaseInboxStorage::open(Some(db.database_url()))
             .await
             .expect("inbox schema");
         waddle_server::notification_activity::NotificationActivityStore::try_new(db.clone())
             .await
             .expect("activity schema");
-        MigrationRunner::single()
-            .run(&db)
-            .await
-            .expect("ingress migrations");
         let lineage = LineageConfig {
             deployment_uuid: Some(lineage::DeploymentUuid(Uuid::new_v4())),
             action: None,

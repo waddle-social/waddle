@@ -443,13 +443,6 @@ mod tests {
             )
             .await
             .expect("install admission pin retention fixture");
-        connection
-            .execute(
-                "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-                (),
-            )
-            .await
-            .expect("install pending delivery retention fixture");
         drop(connection);
 
         let source = MessageKey::new();

@@ -160,7 +160,7 @@ async fn enrollment_checkpoint_and_retirement_round_trip(authority: &IngressAuth
     );
     #[cfg(feature = "clustering")]
     if authority.database.driver() == DatabaseDriver::Postgres {
-        authority.database.execute("INSERT INTO clustering_claims (entity, entity_type) VALUES ('sm_session:enrolled-stream', 'sm_session')").await.expect("retain promotion claim");
+        authority.database.execute("INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch) VALUES ('sm_session:enrolled-stream', 'sm_session', 'lifecycle', 'test')").await.expect("retain promotion claim");
         assert_eq!(
             authority
                 .forget_stream(&stream)
@@ -432,7 +432,6 @@ async fn postgres_retirement_test(batches: bool) {
     let mut authority = IngressAuthority::for_test(db.clone()).await;
     #[cfg(feature = "clustering")]
     {
-        db.execute("CREATE TABLE IF NOT EXISTS clustering_claims (entity TEXT NOT NULL, entity_type TEXT NOT NULL, PRIMARY KEY (entity, entity_type))").await.expect("claims schema");
         authority.uow = IngressUnitOfWork::open_with_node_identity(
             db,
             lineage,

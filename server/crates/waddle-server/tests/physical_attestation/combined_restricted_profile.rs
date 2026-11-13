@@ -300,13 +300,38 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         },
     )
     .await?;
-    // Model a pre-existing observation schema upgraded by registered
-    // migrations, as in the established owner fixture.
-    waddle_server::test_support::initialize_room_observations_for_test(&owner_db).await?;
+    // The schema baseline builds every table from an empty schema; the
+    // observation and store bootstraps then find their tables in place.
     MigrationRunner::single().run(&owner_db).await?;
+    waddle_server::test_support::initialize_room_observations_for_test(&owner_db).await?;
     bootstrap_pending_delivery_owner_schema(&owner_db).await?;
     bootstrap_inbox_owner_schema(&owner_db).await?;
     bootstrap_portable_sm_owner_schema(&owner_db).await?;
+    // The baseline also creates the PubSub owner's definer helper. This
+    // qualification observes the strict profile before PubSub owner
+    // preparation, which creates the helper again below, so it starts
+    // without it.
+    sqlx::query("DROP FUNCTION guarded.pubsub_runtime_attach_lock()")
+        .execute(&admin)
+        .await?;
+    // The baseline builds every store's tables. The families this profile
+    // omits (the coverage gap gate refuses them) are removed, so the
+    // fixture holds only what the combined profile prepares.
+    for table in [
+        "spaces_metadata",
+        "channel_space_links",
+        "_waddle_space_store_owner",
+        "push_registrations",
+        "push_nodes",
+        "push_service_vapid_keys",
+        "notification_activity",
+        "notification_outbox",
+        "call_teardown_outbox",
+    ] {
+        sqlx::query(&format!("DROP TABLE IF EXISTS guarded.{table} CASCADE"))
+            .execute(&admin)
+            .await?;
+    }
     let identity = lineage
         .postgres_identity
         .clone()
@@ -792,7 +817,9 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     mam_connection.close().await?;
     #[cfg(feature = "clustering")]
     {
-        PostgresMucRoomStore::initialize_owner(&owner_db, &identity).await?;
+        // The baseline built the room tables; the owner phase's preparation
+        // adopts them, as `initialize_owner` (fresh schemas only) cannot.
+        PostgresMucRoomStore::prepare_owner(&owner_db, &identity).await?;
         MucDestroyCompletionOutboxStore::try_new(owner_db.clone()).await?;
     }
     RoomEffectOutboxStore::initialize_owner(&owner_db, &identity).await?;

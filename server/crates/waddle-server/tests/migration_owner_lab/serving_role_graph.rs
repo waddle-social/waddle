@@ -13,6 +13,8 @@ const LOOKUP: &str =
     include_str!("../../src/db/migrations/owner/p21_receipt_journal_lookup_candidate.sql");
 const GUARDED_RECEIPT: &str =
     include_str!("../../src/db/migrations/owner/p21_guarded_receipt_candidate.sql");
+/// Store tables the role graph hands to the schema owner. The schema
+/// baseline creates most of them; owner-prepared markers are created here.
 const HELPER_TABLES: &[&str] = &[
     "dnd_projection",
     "dnd_projection_source_version",
@@ -64,25 +66,56 @@ impl Lab {
             format!("ALTER ROLE {} NOLOGIN NOINHERIT", f.owner),
             format!("ALTER ROLE {} NOINHERIT", f.runtime),
             format!("ALTER ROLE {} NOINHERIT", f.migrator),
-            format!("GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE", f.owner, f.migrator),
-            format!("GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE", lab.attestor, lab.installer),
+            format!(
+                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
+                f.owner, f.migrator
+            ),
+            format!(
+                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
+                lab.attestor, lab.installer
+            ),
             format!("REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC", f.database),
-            format!("CREATE SCHEMA {} AUTHORIZATION {}", lab.trusted_schema, lab.attestor),
-            format!("GRANT USAGE ON SCHEMA {} TO {}", lab.trusted_schema, f.runtime),
-            format!("CREATE TABLE {}.pending_delivery (id UUID)", f.schema),
-            format!("ALTER TABLE {}.pending_delivery OWNER TO {}", f.schema, f.owner),
-            format!("GRANT SELECT, INSERT, UPDATE, DELETE ON {}.ingress_messages TO {}", f.schema, f.runtime),
-            format!("GRANT SELECT, UPDATE (id) ON {}.ingress_protocol_epoch TO {}", f.schema, f.runtime),
-            format!("CREATE FUNCTION {}.pubsub_runtime_attach_lock() RETURNS VOID LANGUAGE sql SECURITY DEFINER AS 'SELECT NULL::void'", f.schema),
-            format!("ALTER FUNCTION {}.pubsub_runtime_attach_lock() OWNER TO {}", f.schema, f.owner),
-            format!("REVOKE ALL ON FUNCTION {}.pubsub_runtime_attach_lock() FROM PUBLIC", f.schema),
-            format!("GRANT EXECUTE ON FUNCTION {}.pubsub_runtime_attach_lock() TO {}", f.schema, f.runtime),
+            format!(
+                "CREATE SCHEMA {} AUTHORIZATION {}",
+                lab.trusted_schema, lab.attestor
+            ),
+            format!(
+                "GRANT USAGE ON SCHEMA {} TO {}",
+                lab.trusted_schema, f.runtime
+            ),
+            format!(
+                "ALTER TABLE {}.pending_delivery OWNER TO {}",
+                f.schema, f.owner
+            ),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.ingress_messages TO {}",
+                f.schema, f.runtime
+            ),
+            format!(
+                "GRANT SELECT, UPDATE (id) ON {}.ingress_protocol_epoch TO {}",
+                f.schema, f.runtime
+            ),
+            format!(
+                "ALTER FUNCTION {}.pubsub_runtime_attach_lock() OWNER TO {}",
+                f.schema, f.owner
+            ),
+            format!(
+                "REVOKE ALL ON FUNCTION {}.pubsub_runtime_attach_lock() FROM PUBLIC",
+                f.schema
+            ),
+            format!(
+                "GRANT EXECUTE ON FUNCTION {}.pubsub_runtime_attach_lock() TO {}",
+                f.schema, f.runtime
+            ),
         ] {
             lab.admin(&sql).await;
         }
         for table in HELPER_TABLES {
-            lab.admin(&format!("CREATE TABLE {}.{table} (id INTEGER)", f.schema))
-                .await;
+            lab.admin(&format!(
+                "CREATE TABLE IF NOT EXISTS {}.{table} (id INTEGER)",
+                f.schema
+            ))
+            .await;
             lab.admin(&format!(
                 "ALTER TABLE {}.{table} OWNER TO {}",
                 f.schema, f.owner

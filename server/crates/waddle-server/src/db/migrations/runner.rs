@@ -119,7 +119,13 @@ impl MigrationRunner {
                 rollback_migration_attempt(tx).await?;
                 return Err(error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // A dropped SQLite transaction rolls back only when its
+                // connection is returned, so a caller could otherwise read
+                // the schema while the refused attempt still holds it.
+                tx.rollback().await?;
+                return Err(error);
+            }
         };
 
         tx.commit().await?;

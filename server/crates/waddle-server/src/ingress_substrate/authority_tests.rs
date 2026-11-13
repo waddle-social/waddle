@@ -1358,12 +1358,6 @@ async fn sqlite_pending_archive_custody_protects_rejection_pair() {
         let mut tx = EnteredTransaction::from_fixture_transaction(
             fixture.db.begin_immediate().await.expect("seed"),
         );
-        tx.execute(
-            "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-            (),
-        )
-        .await
-        .expect("pending delivery fixture");
         let (source, child) = seed_rejection_pair(&mut tx, expired).await;
         let protected = if protect_child { child } else { source };
         insert_intent(&mut tx, protected, [5; 32]).await;
@@ -1397,7 +1391,7 @@ async fn sqlite_pending_archive_custody_protects_rejection_pair() {
 
         let mut tx = fixture.db.begin_immediate().await.expect("add custody");
         tx.execute(
-            "INSERT INTO pending_delivery (row_id) VALUES ('queued')",
+            "INSERT INTO pending_delivery (row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id) VALUES ('queued', 'user@example.test', 1, 'archived', 'user@example.test', 'queued')",
             (),
         )
         .await

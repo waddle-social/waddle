@@ -675,6 +675,24 @@ taken every time.
    and the owner phase that stamps it creates that, as on the history. The
    alternative, an owner Job of the pre-cut image before the cut image's,
    adds a second image to the outage window.
+10. **The baseline runs before any store constructor, in tests as in
+    startup.** The baseline is plain `CREATE` over an empty schema, and a
+    store constructor's `CREATE ... IF NOT EXISTS` would otherwise leave a
+    table the baseline then fails on (`relation ... already exists`).
+    Startup already migrates first (`bootstrap_global_owner`, then the
+    stores). Test fixtures follow the same order: they run
+    `MigrationRunner::single()` before opening MAM, inbox, pending, outbox
+    or clustering stores. Fixtures that model an older or partial schema
+    (a legacy pending store, a MAM schema its owner bootstrap has not built,
+    a profile before PubSub owner preparation) remove the baseline's object
+    first instead of creating a stub beside it. The shared PostgreSQL test
+    database (`WADDLE_TEST_POSTGRES_URL`) is built by
+    `test_support::migrate_shared_test_postgres` (and the cluster harness's
+    `migrate_shared_postgres`): a schema holding tables but no baseline row,
+    left by a test that opened stores without migrating, is dropped and
+    rebuilt before the catalog runs. The alternative, making the baseline
+    tolerate pre-existing tables, would let a drifted table pass as the
+    baseline's.
 
 Not decided here, because it needs information this work does not have:
 whether any deployed database was created by a release whose store

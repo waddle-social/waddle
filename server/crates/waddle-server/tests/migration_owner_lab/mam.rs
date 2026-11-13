@@ -12,6 +12,16 @@ const MAM_LOCK: i64 = 0x7761_6464_6d61_6d31;
 const LINEAGE_LOCK: i64 = 6_841_445_497_037_937_993;
 const LEDGER_LOCK: i64 = 6_841_445_497_037_937_992;
 
+/// The schema baseline builds the MAM archive. Cases that characterise the
+/// owner bootstrap's own DDL start from a schema without it, as a MAM schema
+/// the bootstrap has not yet prepared.
+async fn drop_mam_archive(fixture: &Fixture) {
+    sqlx::query(&format!("DROP TABLE {}.mam_messages", fixture.schema))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop the baseline MAM archive");
+}
+
 #[tokio::test]
 async fn owner_bootstrap_refuses_missing_migration_ledger() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
@@ -48,6 +58,7 @@ async fn owner_bootstrap_requires_identity_and_roles_before_ddl() {
         return;
     };
     let fixture = Fixture::new(&url, true).await;
+    drop_mam_archive(&fixture).await;
     let outcome = std::panic::AssertUnwindSafe(async {
         fixture.enable_owner_handoff().await;
         let migrator = fixture.migrator_role();
@@ -260,6 +271,7 @@ async fn cancelling_mam_lock_wait_releases_session_locks() {
         return;
     };
     let fixture = Fixture::new(&url, true).await;
+    drop_mam_archive(&fixture).await;
     let outcome = std::panic::AssertUnwindSafe(async {
         fixture.enable_owner_handoff().await;
         let mut holder = PgConnection::connect_with(&fixture.admin_options)
@@ -404,6 +416,7 @@ async fn cancelling_dispatched_ddl_requires_fence_then_reconciliation() {
         return;
     };
     let fixture = Fixture::new(&url, true).await;
+    drop_mam_archive(&fixture).await;
     let outcome = std::panic::AssertUnwindSafe(async {
         fixture.enable_owner_handoff().await;
         const TEST_LOCK: i64 = 5_874_099_219_333_001_447;

@@ -1492,13 +1492,19 @@ mod clustered {
         let deployment = Uuid::new_v4().to_string();
         let app_url = login_url(&url, &database, &roles.old_runtime, "app-password");
 
-        // The deployment pipeline enrolls the allowlist before the first
-        // clustered node starts.
+        // The first clustered start on an empty database builds the schema
+        // from the baseline and stops with an empty allowlist; the deployment
+        // pipeline then enrolls the allowlist before the node serves. The
+        // migration here stands for that first start.
         let mut app_config = DatabaseConfig::new(DatabaseDriver::Postgres, app_url.clone());
         app_config.pool_size = 1;
         let app = Database::from_config("production application login", &app_config)
             .await
             .expect("application login connects");
+        waddle_server::db::MigrationRunner::single()
+            .run(&app)
+            .await
+            .expect("build the schema as the first start does");
         PostgresAllowlistStore::new(app.clone())
             .ensure_schema()
             .await

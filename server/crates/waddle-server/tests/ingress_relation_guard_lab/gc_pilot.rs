@@ -54,11 +54,6 @@ async fn gc_tx(connection: &mut PgConnection, key: &str) -> String {
 }
 
 async fn seed(owner: &mut PgConnection) {
-    sql(
-        owner,
-        "CREATE TABLE guarded.pending_delivery (row_id text PRIMARY KEY)",
-    )
-    .await;
     begin(owner).await;
     writer_lock(owner).await;
     proof(owner, 0).await;
@@ -126,7 +121,8 @@ async fn seed(owner: &mut PgConnection) {
       INSERT INTO guarded.sm_ingress_appends (message_key,receipt_kind,semantic_identity_hash,resource,accepting_stream_id,sequence,appended_at_ms,custody_payload,original_receipt_at_ms,disposition)
       SELECT message_key::text,1,decode(repeat('04',32),'hex'),'settled','stream',1,1,'payload',1,1
       FROM guarded.ingress_messages WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000031');
-      INSERT INTO guarded.pending_delivery VALUES ('pending');
+      INSERT INTO guarded.pending_delivery (row_id,recipient_jid,original_receipt_at,payload_kind,archive_stanza_by,archive_stanza_id)
+      VALUES ('pending','archive@example.test',1,'archived','archive@example.test','pending');
       INSERT INTO guarded.muc_invite_claims SELECT message_key,'room','invitee','inviter',1 FROM guarded.ingress_messages
       WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002');
       INSERT INTO guarded.sm_ingress_appends (message_key,receipt_kind,semantic_identity_hash,resource,accepting_stream_id,sequence,appended_at_ms,custody_payload,original_receipt_at_ms,disposition)

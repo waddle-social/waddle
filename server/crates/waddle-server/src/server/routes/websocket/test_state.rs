@@ -139,6 +139,11 @@ where
         ),
     };
 
+    // The schema baseline builds every table from an empty schema, so it
+    // runs before any store constructor creates its own tables.
+    let runner = MigrationRunner::single();
+    runner.run(db_pool.global()).await.expect("migrations");
+
     let global = db_pool.global();
     let mam_storage: Arc<dyn MamStorage> = Arc::new(match global.sqlite_pool() {
         Some(pool) => waddle_xmpp::mam::SqlxMamStorage::from_sqlite_pool(pool.clone())
@@ -154,8 +159,6 @@ where
             .expect("shared inbox schema"),
     );
 
-    let runner = MigrationRunner::single();
-    runner.run(db_pool.global()).await.expect("migrations");
     MucDestroyCompletionOutboxStore::try_new(db_pool.global().clone())
         .await
         .expect("MUC destroy completion outbox");

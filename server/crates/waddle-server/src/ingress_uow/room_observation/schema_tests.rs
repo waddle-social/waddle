@@ -184,9 +184,12 @@ impl Fixture {
             .expect("PostgreSQL lineage identity");
         let designated_migrator = PgRoleName::new(self.migrator.clone())?;
         let attestation_definer = PgRoleName::new(self.definer.clone())?;
+        // The schema baseline builds every table from an empty schema, so it
+        // runs before the room-observation bootstrap, which then finds its
+        // tables in place.
+        MigrationRunner::single().run(&owner_database).await?;
         self.initialize_room_observations_with_catalog_blocker(&owner_database)
             .await?;
-        MigrationRunner::single().run(&owner_database).await?;
         owner_database
             .execute(&format!(
                 "GRANT USAGE ON SCHEMA {} TO {}, {}",
@@ -1650,6 +1653,17 @@ impl Fixture {
         Ok(())
     }
 
+    async fn target_relation_count(&self) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1",
+        )
+        .bind(&self.target)
+        .fetch_one(&self.admin)
+        .await?)
+    }
+
     async fn initialize_room_observations_with_catalog_blocker(
         &self,
         owner_database: &Database,
@@ -1661,6 +1675,7 @@ impl Fixture {
             .execute(&mut catalog_blocker)
             .await?;
 
+        let relations_before = self.target_relation_count().await?;
         let initialization_database = owner_database.clone();
         let started_at = activity_checkpoint(&self.admin).await?;
         let initialization = tokio::spawn(async move {
@@ -1673,12 +1688,8 @@ impl Fixture {
                 .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
                 .fetch_one(&self.admin)
                 .await?;
-        let schema_exists: bool = sqlx::query_scalar(
-            "SELECT pg_catalog.to_regclass(format('%I.extension_room_observers', $1)) IS NOT NULL",
-        )
-        .bind(&self.target)
-        .fetch_one(&self.admin)
-        .await?;
+        // No relation may be created before the catalog fence is held.
+        let schema_changed = self.target_relation_count().await? != relations_before;
         let owner_gate_available: bool =
             sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
                 .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
@@ -1692,7 +1703,7 @@ impl Fixture {
 
         if !initialization_pending
             || catalog_x_available
-            || schema_exists
+            || schema_changed
             || !owner_gate_available
             || !schema_gate_available
         {

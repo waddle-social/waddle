@@ -96,12 +96,15 @@ async fn sqlite_table_count(db: &Database) -> i64 {
 /// lineage and ledger tables before it migrates, so they come first.
 async fn sqlite_retired_history_database(name: &str) -> Database {
     let db = Database::in_memory(name).await.expect("open sqlite");
-    db.guard()
-        .await
-        .expect("database guard")
-        .execute_batch(SQLITE_BOOTSTRAP)
+    // The generated file's header comment holds a `;`, so it is run as one
+    // script, as the baseline itself is, not split into statements.
+    let mut tx = db.begin_immediate().await.expect("begin");
+    tx.execute_batch(SQLITE_BOOTSTRAP)
         .await
         .expect("create the lineage and ledger tables");
+    tx.commit()
+        .await
+        .expect("commit the lineage and ledger tables");
     MigrationRunner::deployment(BaselineAction::Apply)
         .run(&db)
         .await
@@ -290,7 +293,21 @@ async fn an_unrecorded_schema_is_refused_before_the_baseline_runs() {
         DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger { ref table })
             if table == "users"
     ));
-    assert!(ledger(&db).await.is_empty());
+    // The refusal rolls back the transaction that created the ledger, so
+    // the table the test created is the only one left.
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            (),
+        )
+        .await
+        .expect("list tables");
+    let mut tables = Vec::new();
+    while let Some(row) = rows.next().await.expect("table row") {
+        tables.push(row.get::<String>(0).expect("table name"));
+    }
+    assert_eq!(tables, vec!["users".to_string()]);
 }
 
 #[tokio::test]
