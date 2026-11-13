@@ -329,6 +329,13 @@ and present only when it returns `true`.
   holds `AccountAuthoritySelection::Unselected`, which serves no account:
   every read answers `AccountCoordinatorError::Unselected` and a
   connection records no binding.
+  A suite that drives ingress effects without a socket binds its
+  resources with `test_support::bind_live_resource`: it records the
+  binding at the fixture's coordinator, confirms it active and registers
+  the connection entry for that exact binding, so live delivery finds the
+  resource as it finds a WebSocket bind. Registering a connection only in
+  the connection registry or the `UserActor` makes it invisible to every
+  account read.
 
 These reads come from the coordinator, and from nothing else: the recipient
 inventory; bare-JID target selection; the carbon planner's and the carbon

@@ -30,3 +30,13 @@ Keep Actions disabled until the code and local review are complete. Then:
 
 The pause is reversible through Git history. Do not infer that `cuenv sync -A`
 alone restores the seven files in steps 2 and 3.
+
+## Local contract suites during the pause
+
+`server/scripts/test_default_publish_graph.py` exports the generated
+`.github/workflows/waddle-server-default.yml`. While the workflows are
+removed, its `setUpClass` fails with a missing-file error, so
+`server/scripts/check-ci-helper-contracts.sh` reports it as failed. That
+failure is expected until restoration step 1. To check the graph contract
+during the pause, run `cuenv sync ci -A` in a disposable detached worktree
+and run the suite there; do not commit the generated files to `main`.

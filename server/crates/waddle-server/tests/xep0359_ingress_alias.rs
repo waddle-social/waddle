@@ -346,24 +346,6 @@ async fn plan_alias_room(
 }
 
 #[cfg(feature = "test-support")]
-async fn alias_connection(
-    registry: &waddle_xmpp::registry::ConnectionRegistry,
-    users: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
-    resource: &jid::FullJid,
-) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
-    registry.register(resource.clone(), tx);
-    users
-        .ask(waddle_xmpp::registry::RegisterUserResource {
-            jid: resource.clone(),
-            entry: registry.entry(resource).expect("registered connection"),
-        })
-        .await
-        .expect("registered user resource");
-    rx
-}
-
-#[cfg(feature = "test-support")]
 async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
     use std::sync::Arc;
     use std::time::Duration;
@@ -385,7 +367,6 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
     );
     let authority = Arc::new(fixture.authority().await);
     let state = websocket_state_with_ingress(pool, authority.clone()).await;
-    let registry = state.deps.protocol.connection_registry.clone();
     let users = state.deps.protocol.user_registry.clone();
     let rooms = state.deps.protocol.room_registry.clone();
     let actor = rooms
@@ -406,8 +387,9 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
     deps.mam_storage = Some(&mam);
     let mut original = archive_plan(&fixture, true, "before-rejoin");
     let peer: jid::FullJid = "juliet@example.com/phone".parse().expect("peer");
-    let mut old_rx = alias_connection(&registry, &users, &original.sender).await;
-    let mut peer_rx = alias_connection(&registry, &users, &peer).await;
+    let mut old_rx =
+        waddle_server::test_support::bind_live_resource(&state, &original.sender, 16).await;
+    let mut peer_rx = waddle_server::test_support::bind_live_resource(&state, &peer, 16).await;
     for (resource, nick) in [(&original.sender, "reused-nick"), (&peer, "juliet")] {
         actor
             .ask(Join {
@@ -451,7 +433,8 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
         .expect("reconnected sender");
     retry.plan.sanitized_message.from = Some(retry.sender.clone().into());
     refresh_digest(&mut retry);
-    let mut retry_rx = alias_connection(&registry, &users, &retry.sender).await;
+    let mut retry_rx =
+        waddle_server::test_support::bind_live_resource(&state, &retry.sender, 16).await;
     actor
         .ask(Join {
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
@@ -541,7 +524,8 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
     reused.sender = "mercutio@example.com/phone".parse().expect("new occupant");
     reused.plan.sanitized_message.from = Some(reused.sender.clone().into());
     refresh_digest(&mut reused);
-    let mut reused_rx = alias_connection(&registry, &users, &reused.sender).await;
+    let mut reused_rx =
+        waddle_server::test_support::bind_live_resource(&state, &reused.sender, 16).await;
     actor
         .ask(Join {
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
