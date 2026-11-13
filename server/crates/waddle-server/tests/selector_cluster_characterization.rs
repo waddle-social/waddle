@@ -942,19 +942,22 @@ async fn groupchat_reaches_occupants_on_both_nodes(selectors: NodeSelectors) {
     }
 }
 
-/// The refusal of a resume whose session claim another node holds.
-fn held_elsewhere() -> Answer {
-    Answer::Failed("resource-constraint".to_owned())
+/// Whether a resume on `node` of a session another node holds is pinned
+/// as a gap: the resumed binding is published through the account's
+/// coordinator, and a node starts a coordinator only for an account whose
+/// claim it holds (the cause `second_resource_on_the_other_node` pins), so
+/// a coordinator node that does not own the account cannot answer the
+/// resume with a usable session.
+fn cross_node_resume_is_a_gap(node: &Node) -> bool {
+    node.coordinates_accounts()
 }
 
-/// A session detached on the node that owns it, resumed on the other node.
+/// A session detached on the node that owns it, resumed on the other node:
+/// the other node takes the session's claim, answers `<resumed/>` and
+/// replays the stanza the client did not handle, once.
 ///
-/// Intended: the other node takes the session, answers `<resumed/>` and
-/// replays the stanza the client did not handle.
-///
-/// Pinned gap: a node does not take over a session claim another node
-/// holds. The resume is refused and the session stays detached on its
-/// node.
+/// Pinned gap on a coordinator node (see [`cross_node_resume_is_a_gap`]):
+/// the resume is not answered `<resumed/>`.
 async fn detached_session_resumes_on_the_other_node(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
@@ -966,44 +969,73 @@ async fn detached_session_resumes_on_the_other_node(selectors: NodeSelectors) {
     let detached = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
 
     let mut alice = cluster.connect(cluster.b(), "alice").await;
+    let answer = resume(&mut alice, &token, handled - 1).await;
+    if cross_node_resume_is_a_gap(cluster.b()) {
+        assert!(!matches!(answer, Answer::Resumed(_)), "{answer:?}");
+        return;
+    }
+    assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
+    recv_message_once(&mut alice, "held").await;
+    let live = session_in(&cluster.db, &alice_jid, SESSION_LIVE).await;
+    assert_eq!(live.session_id, detached.session_id);
+    assert_eq!(live.generation, 2);
     assert_eq!(
-        resume(&mut alice, &token, handled - 1).await,
-        held_elsewhere()
+        live.owner_node_id.as_deref(),
+        Some(cluster.b().node_id.as_str())
     );
-    let after = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
-    assert_eq!(after.session_id, detached.session_id);
-    assert_eq!(after.generation, 1);
     assert_eq!(
-        after.owner_node_id.as_deref(),
-        Some(cluster.a.node_id.as_str())
+        session_claim_owner(&cluster.db, &live.session_id).await,
+        Some(cluster.b().node_id.clone())
     );
+
+    send(&mut bob, &chat(&alice_jid, "after-resume")).await;
+    recv_message_once(&mut alice, "after-resume").await;
 }
 
 /// A session that is live on the node that owns it, resumed on the other
-/// node.
+/// node: the other node takes the session and answers `<resumed/>`, and the
+/// connection that held it is closed with a conflict.
 ///
-/// Intended: the other node takes the session and answers `<resumed/>`,
-/// and the connection that held it is closed with a conflict.
-///
-/// Pinned gap: the resume is refused like the resume of a detached
-/// session, and the session stays live on its node.
+/// Pinned gap on a coordinator node (see [`cross_node_resume_is_a_gap`]):
+/// the resume is not answered `<resumed/>`.
 async fn live_session_resumes_on_the_other_node(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
     let (mut old, token) = cluster.resumable(&cluster.a, "alice", "phone").await;
-    session_in(&cluster.db, &alice_jid, SESSION_LIVE).await;
+    let before = session_in(&cluster.db, &alice_jid, SESSION_LIVE).await;
 
     let mut alice = cluster.connect(cluster.b(), "alice").await;
-    assert_eq!(resume(&mut alice, &token, 0).await, held_elsewhere());
-    let live = session_in(&cluster.db, &alice_jid, SESSION_LIVE).await;
-    assert_eq!(live.generation, 1);
+    let answer = resume(&mut alice, &token, 0).await;
+    if cross_node_resume_is_a_gap(cluster.b()) {
+        assert!(!matches!(answer, Answer::Resumed(_)), "{answer:?}");
+        return;
+    }
+    assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
+    let closed = old
+        .recv_matching_within(DELIVERY_BUDGET, |frame| {
+            frame.contains("conflict") || frame.contains("<close")
+        })
+        .await;
+    assert!(
+        closed.is_ok(),
+        "the connection that held the session is closed: {closed:?}"
+    );
+    let live = eventually("the session is live on the other node", || async {
+        sessions(&cluster.db, &alice_jid)
+            .await
+            .into_iter()
+            .find(|row| row.state == SESSION_LIVE && row.generation == 2)
+    })
+    .await;
+    assert_eq!(live.session_id, before.session_id);
     assert_eq!(
         live.owner_node_id.as_deref(),
-        Some(cluster.a.node_id.as_str())
+        Some(cluster.b().node_id.as_str())
     );
+
     let mut bob = cluster.bound(&cluster.a, "bob", "desk").await;
-    send(&mut bob, &chat(&alice_jid, "still-live")).await;
-    recv_message_once(&mut old, "still-live").await;
+    send(&mut bob, &chat(&alice_jid, "after-resume")).await;
+    recv_message_once(&mut alice, "after-resume").await;
 }
 
 /// A chat message for the full JID of a detached session, sent by a
@@ -1210,8 +1242,8 @@ profile!(durable_registry, NodeSelectors::DURABLE_REGISTRY, {
     carbons_reach_a_sibling_on_the_owning_node => carbons_reach_a_sibling_on_the_owning_node,
     second_resource_on_the_other_node => second_resource_on_the_other_node,
     groupchat_reaches_occupants_on_both_nodes => groupchat_reaches_occupants_on_both_nodes,
-    gap_detached_session_resumes_on_the_other_node => detached_session_resumes_on_the_other_node,
-    gap_live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
+    detached_session_resumes_on_the_other_node => detached_session_resumes_on_the_other_node,
+    live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
     gap_stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
     gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
     gap_session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
