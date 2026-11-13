@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use jid::FullJid;
+use jid::{BareJid, FullJid};
 use kameo::message::{Context, Message};
 use kameo::Actor;
 use tokio::time::Instant;
@@ -22,14 +22,17 @@ use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
 use waddle_xmpp::telemetry::account_coordinator::{record_operation, record_slots_in_use};
 use waddle_xmpp::telemetry::attributes::{AccountMutationKind, AccountOperationOutcome};
 
-use super::claims::{BindingLiveness, ConnectionLiveness};
+use super::claims::{
+    AccountClaimError, AccountClaimSource, BindingLiveness, ClaimNeed, ClaimRelease,
+    ConnectionLiveness,
+};
 use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
     AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
-    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession, Repair,
-    RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status, Unregister,
-    UnregisterOutcome, UnregisterRequest,
+    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseClaimIfUnbound,
+    ReleaseSession, Repair, RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status,
+    Unregister, UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::{
     AccountBindingStore, AccountBindingStoreError, PresentationMark, StoredResource,
@@ -59,10 +62,20 @@ struct PendingReplacement {
 /// second. When the store's commit outcome is unknown the in-memory slots
 /// are dropped and reloaded from the store before the next request, so
 /// selection never reflects a mutation that did not commit.
+///
+/// The actor holds the account's claim from its creation until the
+/// account's last binding is retired, when it releases the claim, or until
+/// the store reports that the claim is no longer held. Without a claim it
+/// keeps no slots. The next request that acts for a binding takes the
+/// claim again and loads the rows under the new identity; a read is
+/// answered only if this node holds a claim by then.
 #[derive(Actor)]
 pub(super) struct AccountCoordinatorActor {
-    claim_identity: UserClaimIdentity,
+    account: BareJid,
+    /// `None` after the claim was released or lost.
+    claim_identity: Option<UserClaimIdentity>,
     store: Arc<dyn AccountBindingStore>,
+    claims: Arc<dyn AccountClaimSource>,
     liveness: Arc<dyn ConnectionLiveness>,
     config: AccountCoordinatorConfig,
     /// `None` until the account's rows are loaded, and again after a store
@@ -78,12 +91,15 @@ impl AccountCoordinatorActor {
     pub(super) fn new(
         claim_identity: UserClaimIdentity,
         store: Arc<dyn AccountBindingStore>,
+        claims: Arc<dyn AccountClaimSource>,
         liveness: Arc<dyn ConnectionLiveness>,
         config: AccountCoordinatorConfig,
     ) -> Self {
         Self {
-            claim_identity,
+            account: claim_identity.bare_jid().clone(),
+            claim_identity: Some(claim_identity),
             store,
+            claims,
             liveness,
             config,
             resources: None,
@@ -100,10 +116,115 @@ impl AccountCoordinatorActor {
             .ok_or(AccountCoordinatorError::Diverged)
     }
 
+    /// The claim this coordinator holds. Callers establish it first, with
+    /// [`Self::ensure_claim`] or [`Self::ensure_loaded`].
+    fn claim(&self) -> Reply<&UserClaimIdentity> {
+        self.claim_identity
+            .as_ref()
+            .ok_or(AccountCoordinatorError::Claim(AccountClaimError::Unclaimed))
+    }
+
+    /// Hold a claim on the account again after this coordinator released
+    /// or lost its own. Nothing in memory describes the account under the
+    /// new identity, so the slots are loaded afresh.
+    async fn ensure_claim(&mut self, need: ClaimNeed) -> Reply<()> {
+        if self.claim_identity.is_some() {
+            return Ok(());
+        }
+        let claim = match need {
+            ClaimNeed::Existing => self.claims.current_claim(&self.account).await?,
+            ClaimNeed::Taken => self.claims.acquire_claim(&self.account).await?,
+        };
+        self.claim_identity = Some(claim);
+        self.forget_account_state();
+        Ok(())
+    }
+
+    fn forget_account_state(&mut self) {
+        self.resources = None;
+        self.adoption = AdoptionReport::default();
+        self.retirements.clear();
+        self.replacements.clear();
+    }
+
+    /// Stop acting under a claim the store reports as no longer held: it
+    /// was released, or another node took the account over.
+    fn note_claim_loss<T>(&mut self, reply: &Reply<T>) {
+        if matches!(
+            reply,
+            Err(AccountCoordinatorError::Store(
+                AccountBindingStoreError::ClaimNotHeld
+            ))
+        ) {
+            self.claim_identity = None;
+            self.forget_account_state();
+        }
+    }
+
+    /// Release the account's claim when the account holds no binding and
+    /// nothing is pending for it, so another node can host the account's
+    /// next binding. The free rows are deleted first, because only the
+    /// claim's holder may delete them. Returns whether the claim was
+    /// released.
+    ///
+    /// A claim the source keeps, because the `UserActor` mirror still
+    /// holds it, is released when the mirror gives its hold up and asks
+    /// again.
+    async fn release_claim_if_unbound(&mut self) -> bool {
+        self.try_release_claim().await == Some(ClaimRelease::Released)
+    }
+
+    /// [`Self::release_claim_if_unbound`], telling a claim that stays
+    /// (`Retained`) from a release that failed (`None`).
+    async fn try_release_claim(&mut self) -> Option<ClaimRelease> {
+        if !self.claims.releases_claims() {
+            return Some(ClaimRelease::Retained);
+        }
+        self.expire_replacements();
+        let Some(claim) = self.claim_identity.clone() else {
+            return Some(ClaimRelease::Retained);
+        };
+        let Some(resources) = self.resources.as_ref() else {
+            return Some(ClaimRelease::Retained);
+        };
+        if resources.slots().any(|slot| slot.binding_ref().is_some())
+            || !self.retirements.is_empty()
+            || !self.replacements.is_empty()
+        {
+            return Some(ClaimRelease::Retained);
+        }
+        for slot in resources.slots() {
+            if let Err(error) = self
+                .store
+                .forget(&claim, slot.full_jid(), slot.revision())
+                .await
+            {
+                warn!(%error, "account coordinator could not delete a free resource row");
+            }
+        }
+        // The rows of the free slots are gone, so the slots are read again
+        // if the claim stays.
+        self.resources = None;
+        match self.claims.release_claim(&claim).await {
+            Ok(ClaimRelease::Released) => {
+                self.claim_identity = None;
+                self.forget_account_state();
+                Some(ClaimRelease::Released)
+            }
+            Ok(ClaimRelease::Retained) => Some(ClaimRelease::Retained),
+            Err(error) => {
+                warn!(%error, "account coordinator could not release its account claim");
+                None
+            }
+        }
+    }
+
     async fn ensure_loaded(&mut self) -> Reply<()> {
+        self.ensure_claim(ClaimNeed::Taken).await?;
         if self.resources.is_none() {
-            let loaded = self.load().await?;
-            self.resources = Some(loaded);
+            let loaded = self.load().await;
+            self.note_claim_loss(&loaded);
+            self.resources = Some(loaded?);
         }
         Ok(())
     }
@@ -115,26 +236,22 @@ impl AccountCoordinatorActor {
     /// a deadline counted from now.
     async fn load(&mut self) -> Reply<AccountResources> {
         let store = Arc::clone(&self.store);
-        let rows = store.load_account(self.claim_identity.bare_jid()).await?;
-        let mut resources =
-            AccountResources::new(self.claim_identity.clone(), self.config.max_resources);
+        let claim = self.claim()?.clone();
+        let rows = store.load_account(&self.account).await?;
+        let mut resources = AccountResources::new(claim.clone(), self.config.max_resources);
         let mut report = AdoptionReport::default();
         let mut retirements = Vec::new();
         for row in rows {
             if row.image.binding.is_none() {
                 store
-                    .forget(
-                        &self.claim_identity,
-                        &row.image.full_jid,
-                        row.image.revision,
-                    )
+                    .forget(&claim, &row.image.full_jid, row.image.revision)
                     .await?;
                 continue;
             }
-            let stored = if row.image.claim_identity == self.claim_identity {
+            let stored = if row.image.claim_identity == claim {
                 Some(row)
             } else {
-                self.take_over(row, &mut report).await?
+                self.take_over(&claim, row, &mut report).await?
             };
             if let Some(stored) = stored {
                 if let Some(binding) = stored
@@ -163,6 +280,7 @@ impl AccountCoordinatorActor {
     /// out of selection.
     async fn take_over(
         &self,
+        claim: &UserClaimIdentity,
         row: StoredResource,
         report: &mut AdoptionReport,
     ) -> Reply<Option<StoredResource>> {
@@ -174,11 +292,11 @@ impl AccountCoordinatorActor {
             claim_identity: row.image.claim_identity.clone(),
             expected_revision: row.image.revision,
             binding_ref: binding.binding_ref.clone(),
-            replacement_claim_identity: self.claim_identity.clone(),
+            replacement_claim_identity: claim.clone(),
         });
         let revision = match self
             .store
-            .execute(&self.claim_identity, &full_jid, &replace)
+            .execute(claim, &full_jid, &replace)
             .await?
             .execution
         {
@@ -225,20 +343,20 @@ impl AccountCoordinatorActor {
             return Ok(self.store.load(&full_jid).await?);
         }
         let adopt = fresh_operation(AccountResourceMutation::AdoptBinding {
-            claim_identity: self.claim_identity.clone(),
+            claim_identity: claim.clone(),
             expected_revision: revision,
             binding_ref: binding.binding_ref.clone(),
             expected_binding_claim_identity: binding.binding_claim_identity.clone(),
             actor_registration: binding.registered.then(|| {
                 ActorRegistrationReceipt::observed(
-                    self.claim_identity.clone(),
+                    claim.clone(),
                     BindingEvidence::for_binding(&binding.binding_ref),
                 )
             }),
         });
         match self
             .store
-            .execute(&self.claim_identity, &full_jid, &adopt)
+            .execute(claim, &full_jid, &adopt)
             .await?
             .execution
         {
@@ -282,6 +400,7 @@ impl AccountCoordinatorActor {
     /// take another resource.
     async fn make_room(&mut self) -> Reply<()> {
         let store = Arc::clone(&self.store);
+        let claim = self.claim()?.clone();
         let limit = self.config.max_resources.get();
         if self.resources()?.slot_count() < limit {
             return Ok(());
@@ -291,9 +410,7 @@ impl AccountCoordinatorActor {
                 AccountResourceRevision::INITIAL,
                 AccountResourceSlot::revision,
             );
-            if store
-                .forget(&self.claim_identity, &full_jid, revision)
-                .await?
+            if store.forget(&claim, &full_jid, revision).await?
                 || store.load(&full_jid).await?.is_none()
             {
                 self.resources()?.forget_free_slot(&full_jid);
@@ -319,7 +436,8 @@ impl AccountCoordinatorActor {
         operation: AccountResourceOperation,
     ) -> Reply<BindingReply> {
         self.ensure_loaded().await?;
-        if &full_jid.to_bare() != self.claim_identity.bare_jid() {
+        let claim = self.claim()?.clone();
+        if full_jid.to_bare() != self.account {
             return Err(AccountCoordinatorError::Resources(
                 AccountResourcesError::AccountMismatch,
             ));
@@ -371,7 +489,7 @@ impl AccountCoordinatorActor {
                 if !known {
                     // A new slot is created under this coordinator's claim,
                     // so a bind under any other claim cannot create one.
-                    if claim_identity != &self.claim_identity {
+                    if claim_identity != &claim {
                         return Ok(BindingReply::Executed(AccountResourceExecution::Applied(
                             AccountResourceOperationOutcome::Rejected(
                                 AccountResourceTransitionError::ClaimMismatch,
@@ -395,10 +513,7 @@ impl AccountCoordinatorActor {
         }
 
         let store = Arc::clone(&self.store);
-        let stored = match store
-            .execute(&self.claim_identity, &full_jid, &operation)
-            .await
-        {
+        let stored = match store.execute(&claim, &full_jid, &operation).await {
             Ok(stored) => stored,
             Err(AccountBindingStoreError::OperationIdConflict) => {
                 return Err(AccountCoordinatorError::OperationIdConflict);
@@ -487,6 +602,7 @@ impl AccountCoordinatorActor {
     }
 
     async fn mark_presented(&mut self, message: MarkPresented) -> Reply<bool> {
+        self.ensure_claim(ClaimNeed::Existing).await?;
         self.ensure_loaded().await?;
         let MarkPresented {
             full_jid,
@@ -501,8 +617,9 @@ impl AccountCoordinatorActor {
             return Ok(false);
         }
         let store = Arc::clone(&self.store);
+        let claim = self.claim()?.clone();
         let mark = store
-            .mark_presented(&self.claim_identity, &full_jid, &binding_ref, presentation)
+            .mark_presented(&claim, &full_jid, &binding_ref, presentation)
             .await?;
         match mark {
             PresentationMark::First | PresentationMark::AlreadyPresented => {
@@ -805,7 +922,11 @@ impl Message<Execute> for AccountCoordinatorActor {
         self.last_activity = Instant::now();
         let kind = mutation_kind(&message.operation.mutation);
         let reply = self.execute(message.full_jid, message.operation).await;
+        self.note_claim_loss(&reply);
         record_operation(kind, binding_outcome(&reply));
+        if kind == AccountMutationKind::CompleteRetirement && reply.is_ok() {
+            self.release_claim_if_unbound().await;
+        }
         reply
     }
 }
@@ -820,7 +941,7 @@ impl Message<Status> for AccountCoordinatorActor {
     ) -> Self::Reply {
         self.last_activity = Instant::now();
         self.ensure_loaded().await?;
-        let claim_identity = self.claim_identity.clone();
+        let claim_identity = self.claim()?.clone();
         Ok(match self.resources()?.slot(&message.full_jid) {
             Some(slot) => SlotStatus {
                 claim_identity: slot.claim_identity().clone(),
@@ -847,8 +968,9 @@ impl Message<BindSuccess> for AccountCoordinatorActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.last_activity = Instant::now();
+        self.ensure_claim(ClaimNeed::Existing).await?;
         self.ensure_loaded().await?;
-        let claim_identity = self.claim_identity.clone();
+        let claim_identity = self.claim()?.clone();
         Ok(self.resources()?.slot(&message.full_jid).and_then(|slot| {
             slot.current_bind_success_receipt(&claim_identity, &message.binding_ref)
         }))
@@ -865,6 +987,7 @@ impl Message<MarkPresented> for AccountCoordinatorActor {
     ) -> Self::Reply {
         self.last_activity = Instant::now();
         let reply = self.mark_presented(message).await;
+        self.note_claim_loss(&reply);
         record_operation(
             AccountMutationKind::MarkPresented,
             match &reply {
@@ -888,6 +1011,10 @@ impl Message<Unregister> for AccountCoordinatorActor {
     ) -> Self::Reply {
         self.last_activity = Instant::now();
         let reply = self.unregister(message).await;
+        self.note_claim_loss(&reply);
+        if reply.is_ok() {
+            self.release_claim_if_unbound().await;
+        }
         record_operation(
             AccountMutationKind::BeginRetirement,
             match &reply {
@@ -912,6 +1039,10 @@ impl Message<Repair> for AccountCoordinatorActor {
     ) -> Self::Reply {
         self.last_activity = Instant::now();
         let reply = self.repair(message).await;
+        self.note_claim_loss(&reply);
+        if reply.is_ok() {
+            self.release_claim_if_unbound().await;
+        }
         record_operation(
             AccountMutationKind::Repair,
             match &reply {
@@ -934,6 +1065,10 @@ impl Message<ReleaseSession> for AccountCoordinatorActor {
     ) -> Self::Reply {
         self.last_activity = Instant::now();
         let reply = self.release_session(message).await;
+        self.note_claim_loss(&reply);
+        if reply.is_ok() {
+            self.release_claim_if_unbound().await;
+        }
         record_operation(
             AccountMutationKind::CompleteRetirement,
             match &reply {
@@ -956,6 +1091,7 @@ impl Message<ExpiredBindings> for AccountCoordinatorActor {
         _message: ExpiredBindings,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.ensure_claim(ClaimNeed::Existing).await?;
         self.ensure_loaded().await?;
         let candidates: Vec<_> = self
             .resources()?
@@ -991,6 +1127,7 @@ impl Message<ReadView> for AccountCoordinatorActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.last_activity = Instant::now();
+        self.ensure_claim(ClaimNeed::Existing).await?;
         self.ensure_loaded().await?;
         self.view()
     }
@@ -1004,6 +1141,7 @@ impl Message<OverdueRetirements> for AccountCoordinatorActor {
         _message: OverdueRetirements,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.ensure_claim(ClaimNeed::Existing).await?;
         self.ensure_loaded().await?;
         let now = Instant::now();
         Ok(self
@@ -1024,6 +1162,7 @@ impl Message<Adopt> for AccountCoordinatorActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.last_activity = Instant::now();
+        self.ensure_claim(ClaimNeed::Existing).await?;
         self.ensure_loaded().await?;
         Ok(self.adoption.clone())
     }
@@ -1040,13 +1179,31 @@ impl Message<ReclaimIfIdle> for AccountCoordinatorActor {
         if !self.is_idle() {
             return Ok(false);
         }
-        // Free rows carry nothing a later coordinator needs. A failure here
-        // leaves them for the next load, which deletes them.
-        if let Some(resources) = self.resources.as_ref() {
+        if self.claims.releases_claims() {
+            // The claim goes with the coordinator, and only for an account
+            // whose rows show no binding. Slots that were dropped after an
+            // unknown commit outcome are read again to know that.
+            if self.claim_identity.is_some() {
+                // A coordinator that cannot read its rows or release its
+                // claim stays, so the next sweep tries again: stopping
+                // would leave the claim held with nobody to release it.
+                if let Err(error) = self.ensure_loaded().await {
+                    warn!(%error, "account coordinator could not read its rows to release its claim");
+                    return Ok(false);
+                }
+                if !self.is_idle() || self.try_release_claim().await.is_none() {
+                    return Ok(false);
+                }
+            }
+        } else if let (Some(claim), Some(resources)) =
+            (self.claim_identity.as_ref(), self.resources.as_ref())
+        {
+            // Free rows carry nothing a later coordinator needs. A failure
+            // here leaves them for the next load, which deletes them.
             for slot in resources.slots() {
                 if let Err(error) = self
                     .store
-                    .forget(&self.claim_identity, slot.full_jid(), slot.revision())
+                    .forget(claim, slot.full_jid(), slot.revision())
                     .await
                 {
                     warn!(%error, "account coordinator could not delete a free resource row");
@@ -1055,5 +1212,19 @@ impl Message<ReclaimIfIdle> for AccountCoordinatorActor {
         }
         ctx.stop();
         Ok(true)
+    }
+}
+
+impl Message<ReleaseClaimIfUnbound> for AccountCoordinatorActor {
+    type Reply = Reply<bool>;
+
+    async fn handle(
+        &mut self,
+        _message: ReleaseClaimIfUnbound,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ensure_claim(ClaimNeed::Existing).await?;
+        self.ensure_loaded().await?;
+        Ok(self.release_claim_if_unbound().await)
     }
 }

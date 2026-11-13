@@ -23,14 +23,16 @@ mod config;
 mod directory;
 mod error;
 mod messages;
+mod mirror_claims;
 mod publisher;
 mod reads;
 mod selection;
 
 pub use authority::AccountBindingAuthority;
 pub use claims::{
-    AccountClaimError, AccountClaimSource, BindingLiveness, ClaimStoreClaimSource,
-    ClusterLeaseLiveness, ConnectionLiveness, LocalNodeLiveness, ProcessClaimSource,
+    AccountClaimError, AccountClaimSource, BindingLiveness, ClaimRelease, ClaimStoreClaimSource,
+    ClusterLeaseLiveness, ConnectionLiveness, LocalNodeLiveness, MirrorClaimHolds,
+    ProcessClaimSource,
 };
 pub use config::AccountCoordinatorConfig;
 pub use directory::AccountCoordinators;
@@ -39,6 +41,7 @@ pub use messages::{
     AccountView, AdoptionReport, BindingReply, ReleaseSessionRequest, RepairEvidence,
     RepairOutcome, SessionRelease, SlotStatus, UnregisterOutcome, UnregisterRequest,
 };
+pub use mirror_claims::{CoordinatorLookup, MirrorClaimStore};
 pub use publisher::{
     ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome, PublishedBinding, RetireEvidence,
     RetireOutcome,
