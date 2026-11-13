@@ -127,10 +127,14 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
             .await
             .expect("existing pin");
     }
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let mut deps = Deps::registry_only(&registry);
     deps.room_registry = Some(&rooms);
     deps.user_registry = Some(&users);
     deps.mam_storage = Some(&mam);
+    deps.web_socket_state = Some(&state);
     let mut submission = fixture.submission(Some("pin-seam"), "pin request");
     submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());
     submission.plan.sanitized_message.to = Some(room.clone().into());

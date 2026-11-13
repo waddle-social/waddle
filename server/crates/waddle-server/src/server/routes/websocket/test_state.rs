@@ -563,50 +563,10 @@ pub async fn register_test_connection(
         registered,
         "test dual-registration should confirm the resource in the actor tree for {jid}"
     );
-    activate_test_binding(state, jid).await;
+    // Routing reads the resource from the account coordinator, where a
+    // bound connection publishes it.
+    super::test_bindings::sync_test_binding(state, jid).await;
     owner
-}
-
-/// Record the registry entry of `jid` as the resource's active binding at
-/// the account coordinator, as a bound connection's publish and confirm do.
-/// Account reads (recipient inventory, bare-JID selection, carbons) answer
-/// from the coordinator only, so a test connection the coordinator does not
-/// hold receives nothing routed to its account.
-async fn activate_test_binding(state: &WebSocketState, jid: &jid::FullJid) {
-    use crate::account_coordinator::{
-        AccountBindingAuthority, ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome,
-    };
-    let Some(authority) = super::account_binding::selected_authority(state) else {
-        return;
-    };
-    let binding_ref = state
-        .deps
-        .protocol
-        .connection_registry
-        .entry(jid)
-        .and_then(|entry| entry.binding_ref().cloned())
-        .expect("a registered test connection carries its binding");
-    let publisher = CoordinatorBindingPublisher::new(authority as Arc<dyn AccountBindingAuthority>);
-    let published = match publisher
-        .publish(
-            jid,
-            &binding_ref,
-            waddle_xmpp::ownership::joint_identity::ResourceLifetime::fresh(),
-        )
-        .await
-        .expect("the account coordinator answers the test bind")
-    {
-        PublishOutcome::Published(published) => published,
-        outcome => panic!("the account coordinator refused the test binding of {jid}: {outcome:?}"),
-    };
-    match publisher
-        .confirm(jid, &published)
-        .await
-        .expect("the account coordinator answers the test activation")
-    {
-        ConfirmOutcome::Confirmed(_) => {}
-        outcome => panic!("the account coordinator did not activate {jid}: {outcome:?}"),
-    }
 }
 
 /// Drive the active frame entry with an explicitly authenticated and bound test

@@ -1,7 +1,8 @@
 use super::{
-    chat_msg, detached_dm_session, drain_inbound, interpret, jid, pipelined_dispatcher,
-    register_into_both_tiers, Arc, BlockingStorage, CarbonKind, ConnectionRegistry, Deps,
-    InMemorySmSessionRegistry, IngressEffectIntent, OutboundEvent, Stanza,
+    chat_msg, coordinator_for, detached_dm_session, drain_inbound, interpret, jid,
+    pipelined_dispatcher, register_into_both_tiers, Arc, BlockingStorage, CarbonKind,
+    ConnectionRegistry, Deps, InMemorySmSessionRegistry, IngressEffectIntent, OutboundEvent,
+    Stanza,
 };
 use crate::ingress::IngressEffectCapture;
 use kameo::actor::Spawn;
@@ -41,6 +42,9 @@ async fn headless_carbon_audience(existing_carbon: bool) {
     register_into_both_tiers(&registry, &users, &existing, sender).await;
     registry.set_carbons_enabled(&existing, existing_carbon);
     registry.update_presence(&existing, true, -1);
+    let coordinator = coordinator_for(&registry).await;
+    // An offline-path recipient is a local account.
+    crate::server::routes::websocket::test_state::seed_local_account(&coordinator, "bob").await;
     let gate = Arc::new(RecipientCarbonPlanGate {
         entered: tokio::sync::Notify::new(),
         resume: tokio::sync::Notify::new(),
@@ -55,6 +59,7 @@ async fn headless_carbon_audience(existing_carbon: bool) {
     deps.blocking_storage = Some(&blocking);
     deps.effects = &sink;
     deps.ingress_effect_capture = Some(capture.clone());
+    deps.web_socket_state = Some(&coordinator);
     let plan = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: jid("bob@example.com"),
@@ -72,6 +77,11 @@ async fn headless_carbon_audience(existing_carbon: bool) {
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         register_into_both_tiers(&registry, &users, &late, sender).await;
         registry.set_carbons_enabled(&late, true);
+        crate::server::routes::websocket::test_bindings::sync_registry_bindings(
+            &coordinator,
+            &registry,
+        )
+        .await;
         gate.resume.notify_one();
         receiver
     };
@@ -146,6 +156,7 @@ async fn xep_0280_send_carbons_fans_out_to_other_carbon_enabled_resources() {
     registry.register_with_carbons(alice_web.clone(), _web_tx, true);
     let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
     registry.register_with_carbons(alice_phone.clone(), phone_tx, true);
+    let coordinator = coordinator_for(&registry).await;
 
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
     let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
@@ -155,7 +166,14 @@ async fn xep_0280_send_carbons_fans_out_to_other_carbon_enabled_resources() {
         kind: CarbonKind::Sent,
         exclude: vec![alice_web],
     }];
-    let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+    let _outcome = interpret(
+        events,
+        &Deps {
+            web_socket_state: Some(&coordinator),
+            ..Deps::registry_only(&registry)
+        },
+    )
+    .await;
 
     // Verify the XEP-0280 <sent xmlns='urn:xmpp:carbons:2'> wrapper and
     // its nested XEP-0297 <forwarded xmlns='urn:xmpp:forward:0'> payload.
@@ -273,6 +291,7 @@ async fn xep_0280_send_carbons_received_kind_emits_received_envelope() {
     registry.register_with_carbons(bob_desk.clone(), _desk_tx, true);
     let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
     registry.register_with_carbons(bob_phone.clone(), phone_tx, true);
+    let coordinator = coordinator_for(&registry).await;
 
     let owner: jid::BareJid = "bob@example.com".parse().expect("bare");
     let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
@@ -282,7 +301,14 @@ async fn xep_0280_send_carbons_received_kind_emits_received_envelope() {
         kind: CarbonKind::Received,
         exclude: vec![bob_desk],
     }];
-    let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+    let _outcome = interpret(
+        events,
+        &Deps {
+            web_socket_state: Some(&coordinator),
+            ..Deps::registry_only(&registry)
+        },
+    )
+    .await;
 
     let received = drain_inbound(&mut phone_rx);
     assert_eq!(received.len(), 1);
@@ -561,6 +587,7 @@ async fn xep_0280_closed_middle_resource_preserves_other_carbon_deliveries() {
     registry.register_with_carbons(middle, middle_tx, true);
     registry.register_with_carbons(last.clone(), last_tx, true);
     drop(middle_rx);
+    let coordinator = coordinator_for(&registry).await;
     let message = chat_msg(source.clone().into(), jid("bob@example.com"), "hi");
     let incomplete = send_carbons_to_registry_with_capture(
         &registry,
@@ -568,7 +595,7 @@ async fn xep_0280_closed_middle_resource_preserves_other_carbon_deliveries() {
             ingress_delivery: None,
             ingress_effect_capture: None,
             sm_session_registry: None,
-            web_socket_state: None,
+            web_socket_state: Some(&coordinator),
         },
         owner,
         Box::new(message),

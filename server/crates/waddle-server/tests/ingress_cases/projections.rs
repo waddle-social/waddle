@@ -1,7 +1,8 @@
+#[cfg(feature = "test-support")]
+use super::IngressDecisionClass;
 use super::{
     archive_plan, commit_submission, CanonicalMessageRepository, DurableDirectEffect,
-    DurableEffect, Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture,
-    IngressSubmission, PlannedEffect,
+    DurableEffect, Effect, IngressEffectIntent, IngressFixture, IngressSubmission, PlannedEffect,
 };
 
 fn inbox_push_plan(
@@ -58,6 +59,7 @@ fn inbox_push_plan(
     submission
 }
 
+#[cfg(feature = "test-support")]
 async fn committed_inbox_projection(fixture: IngressFixture) {
     use waddle_server::ingress::effects::direct::ExternalDirectEffect;
     use waddle_server::ingress::effects::ProjectionRef;
@@ -172,11 +174,13 @@ async fn committed_inbox_projection(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn ingress_committed_inbox_projection_sqlite() {
     committed_inbox_projection(IngressFixture::sqlite().await).await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn ingress_committed_inbox_projection_postgres() {
     if let Some(fixture) = IngressFixture::postgres("committed_inbox_projection").await {
@@ -184,6 +188,9 @@ async fn ingress_committed_inbox_projection_postgres() {
     }
 }
 
+/// Delivery reads the resource's binding from the account coordinator, so
+/// the registry is published to a test-support coordinator.
+#[cfg(feature = "test-support")]
 pub(super) async fn assert_pushed_entry(
     fixture: &IngressFixture,
     decision: &waddle_server::ingress::IngressDecision,
@@ -211,8 +218,11 @@ pub(super) async fn assert_pushed_entry(
         })
         .await
         .expect("actor registration");
+    let routing = waddle_server::test_support::websocket_state().await;
+    waddle_server::test_support::sync_registry_bindings(&routing, &registry).await;
     let mut deps = Deps::new(&registry, "example.com");
     deps.user_registry = Some(&users);
+    deps.web_socket_state = Some(&routing);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,

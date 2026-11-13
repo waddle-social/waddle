@@ -8,12 +8,16 @@ use crate::ingress::{IngressEffectCapture, IngressSubmission};
 use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
 use crate::server::routes::interpret::interpret;
 use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
+use crate::server::routes::websocket::tests::create_test_websocket_state;
+use crate::server::routes::websocket::WebSocketState;
 use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
 use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
 
 async fn plan_carbons(
+    state: &WebSocketState,
     submission: &mut IngressSubmission,
     registry: &ConnectionRegistry,
     users: &ActorRef<UserRegistryActor>,
@@ -22,8 +26,10 @@ async fn plan_carbons(
     let sink = PlanSink::new();
     sink.observe_sender(&submission.sender);
     let capture = IngressEffectCapture::new();
+    sync_registry_bindings(state, registry).await;
     let mut deps = Deps::new(registry, "example.com");
     deps.user_registry = Some(users);
+    deps.web_socket_state = Some(state);
     deps.effects = &sink;
     deps.ingress_effect_capture = Some(capture.clone());
     let mut exclude = vec![submission.sender.clone()];
@@ -58,6 +64,7 @@ async fn local_carbons_receipts(
     foreign_first: bool,
     recovery: bool,
 ) {
+    let state = create_test_websocket_state().await;
     let registry = ConnectionRegistry::new();
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
     let mut submission = fixture.submission(Some("local-carbons-receipts"), "ordinary DM");
@@ -88,7 +95,7 @@ async fn local_carbons_receipts(
             .expect("register actor resource");
         receivers.push(Some(receiver));
     }
-    plan_carbons(&mut submission, &registry, &users, foreign_first).await;
+    plan_carbons(&state, &mut submission, &registry, &users, foreign_first).await;
     assert_eq!(submission.plan.intents.len(), audience_size);
     assert!(submission.plan.intents.iter().all(|intent| matches!(intent,
         IngressEffectIntent::Carbons {carbon_recipients, ..} if carbon_recipients.len() == 1)));
@@ -108,8 +115,10 @@ async fn local_carbons_receipts(
     if partial {
         drop(receivers[1].take());
     }
+    sync_registry_bindings(&state, &registry).await;
     let mut deps = Deps::new(&registry, "example.com");
     deps.user_registry = Some(&users);
+    deps.web_socket_state = Some(&state);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -174,6 +183,7 @@ async fn local_carbons_receipts(
             })
             .await
             .expect("register late actor resource");
+        sync_registry_bindings(&state, &registry).await;
         if recovery {
             let result = crate::ingress::recovery_executor::recover_row(
                 &fixture.db,
@@ -190,7 +200,7 @@ async fn local_carbons_receipts(
             } if unrecoverable.is_empty())
             );
         } else {
-            plan_carbons(&mut submission, &registry, &users, foreign_first).await;
+            plan_carbons(&state, &mut submission, &registry, &users, foreign_first).await;
             let retry = commit_submission(&fixture.uow, &submission, 1)
                 .await
                 .expect("recommit same origin");
@@ -292,6 +302,7 @@ async fn postgres_partial_carbons_recovery_delivers_only_missing_frozen_resource
 }
 
 async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
+    let state = create_test_websocket_state().await;
     let registry = ConnectionRegistry::new();
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
     let mut submission = fixture.submission(Some("carbon-opt-out"), "frozen carbon");
@@ -311,7 +322,7 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
         })
         .await
         .expect("register carbon recipient with user actor");
-    plan_carbons(&mut submission, &registry, &users, false).await;
+    plan_carbons(&state, &mut submission, &registry, &users, false).await;
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit carbon submission");
@@ -332,8 +343,10 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
     } else {
         assert!(registry.set_carbons_enabled(&target, false));
     }
+    sync_registry_bindings(&state, &registry).await;
     let mut deps = Deps::new(&registry, "example.com");
     deps.user_registry = Some(&users);
+    deps.web_socket_state = Some(&state);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,

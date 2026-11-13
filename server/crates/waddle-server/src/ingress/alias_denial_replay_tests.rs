@@ -144,6 +144,7 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
         .protocol
         .connection_registry
         .set_carbons_enabled(&sibling, true));
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
     if lookup_failure {
         crate::server::routes::websocket::tests::seed_local_account(&state, "ghost").await;
         state

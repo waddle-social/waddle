@@ -1,10 +1,13 @@
 use super::{
-    archive_plan, commit_submission, ArchiveExpectation, DurableDirectEffect, DurableEffect,
-    Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture, IngressSubmission,
-    PlannedEffect, StanzaId,
+    archive_plan, commit_submission, Effect, IngressDecisionClass, IngressEffectIntent,
+    IngressFixture, PlannedEffect,
 };
+#[cfg(feature = "test-support")]
+use super::{ArchiveExpectation, DurableDirectEffect, DurableEffect, IngressSubmission, StanzaId};
 use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+#[cfg(feature = "test-support")]
 use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+#[cfg(feature = "test-support")]
 use waddle_server::ingress::effects::ProjectionRef;
 use waddle_server::ingress::execute::execute_effects;
 use waddle_server::ingress::{Deps, ExternalEffect, ImmediateSink, IngressStreamIdentity};
@@ -199,6 +202,7 @@ async fn ingress_archive_free_invitation_retry_postgres() {
     }
 }
 
+#[cfg(feature = "test-support")]
 fn room_projection(
     fixture: &IngressFixture,
     origin: &str,
@@ -298,6 +302,7 @@ fn room_projection(
     submission
 }
 
+#[cfg(feature = "test-support")]
 async fn displayed_marker_replay(fixture: IngressFixture) {
     use waddle_xmpp::ingress::InboxProjectionMutation;
     for thread in [
@@ -397,10 +402,12 @@ async fn displayed_marker_replay(fixture: IngressFixture) {
     }
     fixture.close().await;
 }
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn ingress_displayed_marker_replay_sqlite() {
     displayed_marker_replay(IngressFixture::sqlite().await).await;
 }
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn ingress_displayed_marker_replay_postgres() {
     if let Some(fixture) = IngressFixture::postgres("displayed_marker_replay").await {

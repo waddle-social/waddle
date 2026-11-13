@@ -128,6 +128,7 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
 
     // No replacement: the broadcast goes out and the sibling sees the
     // unavailable from the dropped resource.
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
         .await;
     let received = tokio::time::timeout(std::time::Duration::from_millis(500), sib_rx.recv())
@@ -148,6 +149,7 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
         .protocol
         .connection_registry
         .register(dropped.clone(), repl_tx);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
         .await;
     let received = tokio::time::timeout(std::time::Duration::from_millis(500), sib_rx.recv())
@@ -167,6 +169,7 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
         .protocol
         .connection_registry
         .update_presence(&dropped, true, 0);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, true)
         .await;
     assert!(
@@ -178,6 +181,7 @@ async fn terminated_session_unavailable_is_suppressed_when_a_replacement_is_live
 
     // And a session that never sent available broadcasts nothing.
     state.deps.protocol.connection_registry.unregister(&dropped);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     super::super::cleanup::broadcast_unavailable_if_no_replacement(state.as_ref(), &dropped, false)
         .await;
     assert!(
@@ -256,6 +260,7 @@ async fn detached_invalidation_broadcasts_unavailable_past_a_silent_replacement_
     // must still receive the unavailable — the silent replacement has
     // superseded nothing presence-wise.
     let detached = make_detached_session(&dropped, true);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     super::super::cleanup::cleanup_invalidated_detached_session(
         state.as_ref(),
         detached.clone(),
@@ -279,6 +284,7 @@ async fn detached_invalidation_broadcasts_unavailable_past_a_silent_replacement_
         .protocol
         .connection_registry
         .update_presence(&dropped, true, 0);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     super::super::cleanup::cleanup_invalidated_detached_session(
         state.as_ref(),
         detached,

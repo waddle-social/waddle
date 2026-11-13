@@ -62,6 +62,7 @@ mod xep0045_partial_fanout;
 
 #[path = "failure_matrix/mod.rs"]
 mod failure_matrix;
+mod sm_resume_token_support;
 
 use base64::Engine;
 use cluster_support::{
@@ -596,7 +597,10 @@ async fn cluster_exit_criteria_end_to_end() {
         .expect("origin receives SM enabled");
     let origin_stream_id = extract_attr_after(&origin_enabled, "<enabled", "id")
         .expect("origin enabled carries stream id");
-    let origin_sm_entity = Entity::new(EntityType::SmSession, origin_stream_id.as_str());
+    // The claim names the durable session's storage key; the `<enabled/>`
+    // id is its resume token.
+    let origin_session = sm_resume_token_support::session_stream(&db, &origin_stream_id).await;
+    let origin_sm_entity = Entity::new(EntityType::SmSession, origin_session.as_str());
     {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1890,8 +1894,14 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
         .recv_matching(|frame| frame.contains("<enabled"))
         .await
         .expect("client A's SM enabled ack");
-    let stream_a = extract_attr_after(&enabled_a, "<enabled", "id")
+    let token_a = extract_attr_after(&enabled_a, "<enabled", "id")
         .unwrap_or_else(|| panic!("enabled missing id: {enabled_a}"));
+    // The claim names the durable session's storage key; the `<enabled/>`
+    // id is its resume token.
+    let stream_a = sm_resume_token_support::session_stream(&db, &token_a)
+        .await
+        .as_str()
+        .to_owned();
 
     // Client B enables resumable SM on node B — the CONTROL: this claim
     // must survive the whole test completely untouched (same owner, same
@@ -1915,8 +1925,12 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
         .recv_matching(|frame| frame.contains("<enabled"))
         .await
         .expect("client B's SM enabled ack");
-    let stream_b = extract_attr_after(&enabled_b, "<enabled", "id")
+    let token_b = extract_attr_after(&enabled_b, "<enabled", "id")
         .unwrap_or_else(|| panic!("enabled missing id: {enabled_b}"));
+    let stream_b = sm_resume_token_support::session_stream(&db, &token_b)
+        .await
+        .as_str()
+        .to_owned();
 
     // Precondition sanity: both claims exist, owned exactly as expected,
     // before anything is killed.

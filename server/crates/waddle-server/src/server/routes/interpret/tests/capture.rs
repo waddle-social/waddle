@@ -232,6 +232,7 @@ async fn displayed_marker_boundary_records_read_timestamp_and_push_route() {
     let owner_phone: jid::FullJid = "alice@example.com/phone".parse().expect("resource");
     let (owner_phone_tx, _owner_phone_rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(registry, user_registry, &owner_phone, owner_phone_tx).await;
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
 
     inbox
         .upsert(

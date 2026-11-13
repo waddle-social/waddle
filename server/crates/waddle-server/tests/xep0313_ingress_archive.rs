@@ -644,6 +644,7 @@ backend_tests!(
 );
 
 /// XEP-0313 §3.2 archive order: replaying A after B cannot rewind the inbox's archive reference.
+#[cfg(feature = "test-support")]
 async fn monotonic_inbox(fixture: IngressFixture) {
     use waddle_server::ingress::effects::direct::ExternalDirectEffect;
     use waddle_server::ingress::effects::ProjectionRef;
@@ -740,6 +741,7 @@ async fn monotonic_inbox(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+#[cfg(feature = "test-support")]
 async fn assert_inbox_wire(
     fixture: &IngressFixture,
     decision: &waddle_server::ingress::IngressDecision,
@@ -800,6 +802,8 @@ async fn assert_inbox_wire(
     assert!(receiver.try_recv().is_err());
     assert!(authority.drain_and_join(Duration::from_secs(5)).await);
 }
+// The inbox wire check binds through the public in-process fixture.
+#[cfg(feature = "test-support")]
 backend_tests!(
     monotonic_inbox_sqlite,
     monotonic_inbox_postgres,

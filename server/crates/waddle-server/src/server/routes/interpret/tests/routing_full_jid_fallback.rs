@@ -1,8 +1,8 @@
 use super::{
-    chat_msg, detached_dm_session, drain_inbound, interpret, jid, offline_pass_deps,
-    offline_pass_deps_with_user_registry, pipelined_dispatcher, register_into_both_tiers, Arc,
-    BlockingStorage, ConnectionRegistry, Deps, Element, InMemorySmSessionRegistry, InboxStorage,
-    MamStorage, OutboundEvent, Stanza,
+    chat_msg, coordinator_for, detached_dm_session, drain_inbound, interpret, jid,
+    offline_pass_deps, offline_pass_deps_with_user_registry, pipelined_dispatcher,
+    register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps, Element,
+    InMemorySmSessionRegistry, InboxStorage, MamStorage, OutboundEvent, Stanza,
 };
 use kameo::actor::Spawn;
 
@@ -28,19 +28,23 @@ async fn route_full_jid_dm_offline_resource_falls_back_to_other_live_resource() 
     let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
     registry.update_presence(&bob_desk, true, 0);
+    let coordinator = coordinator_for(&registry).await;
 
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let deps = offline_pass_deps_with_user_registry(
-        &registry,
-        &user_registry,
-        &mam,
-        &inbox,
-        &blocking,
-        &dispatcher,
-    );
+    let deps = Deps {
+        web_socket_state: Some(&coordinator),
+        ..offline_pass_deps_with_user_registry(
+            &registry,
+            &user_registry,
+            &mam,
+            &inbox,
+            &blocking,
+            &dispatcher,
+        )
+    };
 
     let msg = chat_msg(
         jid("alice@example.com/web"),

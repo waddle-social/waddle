@@ -4196,9 +4196,16 @@ mod user_reaper_tests {
         run_user_actor_reaper_sweep(&state).await;
 
         let exported = spans.exported();
+        // Other janitors of the application (the account coordinator's
+        // reaper) export their own `janitor.sweep` roots.
         let root = exported
             .iter()
-            .find(|span| span.name == "janitor.sweep")
+            .find(|span| {
+                span.name == "janitor.sweep"
+                    && span.attributes.iter().any(|kv| {
+                        kv.key.as_str() == "janitor" && kv.value.as_str() == "user_actor_reaper"
+                    })
+            })
             .expect("the sweep root must export once the sweep completes");
         assert!(
             exported

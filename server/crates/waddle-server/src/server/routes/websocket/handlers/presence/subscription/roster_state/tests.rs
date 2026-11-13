@@ -382,11 +382,22 @@ async fn resumed_roster_resource_receives_immediate_fallback_before_later_resour
     let user = resumed_jid.to_bare();
     let item = RosterItem::new("bob@example.com".parse().expect("contact JID"));
     let version: RosterVersion = "version-during-resume".parse().expect("version");
-    let mut fanout = Box::pin(send_roster_push_to_resources(
-        &state, &user, &item, &version, None,
-    ));
-    // Both detached/claimed resources were discovered, and fanout now waits
-    // for A's operation. Complete its real resume before releasing that guard.
+    let captured = Arc::new(Notify::new());
+    let mut fanout = Box::pin(
+        crate::server::routes::websocket::handlers::roster_fanout::TARGETS_CAPTURED.scope(
+            Arc::clone(&captured),
+            send_roster_push_to_resources(&state, &user, &item, &version, None),
+        ),
+    );
+    // The fanout reads the account coordinator before it lists detached
+    // resources, so drive it until both detached/claimed resources are
+    // captured; it then waits for A's operation. Complete A's real resume
+    // before releasing that guard.
+    tokio::select! {
+        biased;
+        () = &mut fanout => panic!("fanout must wait for the resuming resource"),
+        () = captured.notified() => {}
+    }
     assert!(matches!(futures::poll!(fanout.as_mut()), Poll::Pending));
     let authority = shared_identity
         .guard_if_current(&owner)

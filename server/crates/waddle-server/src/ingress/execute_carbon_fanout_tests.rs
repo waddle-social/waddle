@@ -177,6 +177,7 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
         .await
         .expect("first commit");
     let key = first.message_key.expect("message");
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let registry = ConnectionRegistry::new();
     let targets = ["a-first", "b-middle", "c-last"]
         .map(|resource| owner.with_resource_str(resource).expect("target"));
@@ -188,13 +189,15 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
         receivers.push(Some(receiver));
     }
     drop(receivers[1].take());
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let outcome = send_carbons_to_registry_with_capture(
         &registry,
         CarbonRegistryDeps {
             ingress_delivery: None,
             ingress_effect_capture: None,
             sm_session_registry: None,
-            web_socket_state: None,
+            web_socket_state: Some(&state),
         },
         owner.clone(),
         Box::new(submission.plan.sanitized_message.clone()),
@@ -262,13 +265,15 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
     registry.register_entry(targets[1].clone(), ConnectionEntry::new(sender));
     assert!(registry.set_carbons_enabled(&targets[1], true));
     receivers[1] = Some(receiver);
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let outcome = send_carbons_to_registry_with_capture(
         &registry,
         CarbonRegistryDeps {
             ingress_delivery: None,
             ingress_effect_capture: None,
             sm_session_registry: None,
-            web_socket_state: None,
+            web_socket_state: Some(&state),
         },
         owner.clone(),
         message,
@@ -386,6 +391,7 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit");
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let registry = ConnectionRegistry::new();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     let sm = Arc::new(
@@ -427,6 +433,8 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
         registry.register(target.clone(), sender);
         assert!(registry.set_carbons_enabled(&target, true));
     }
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let mut delivery = Deps::new(&registry, "example.com");
     delivery.ingress_delivery_uow = Some(fixture.uow.clone());
     delivery.sm_session_registry = Some(&sm);
@@ -445,7 +453,7 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
                 ingress_delivery: Some(&delivery),
                 ingress_effect_capture: None,
                 sm_session_registry: Some(&sm),
-                web_socket_state: None,
+                web_socket_state: Some(&state),
             },
             owner.clone(),
             Box::new(submission.plan.sanitized_message.clone()),
@@ -480,6 +488,10 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
         }
         if attempt == 0 && disappear {
             registry.unregister(&target);
+            crate::server::routes::websocket::test_bindings::sync_registry_bindings(
+                &state, &registry,
+            )
+            .await;
             if ambiguous {
                 fixture
                     .execute("UPDATE ingress_send_attempts SET state = 1", ())
@@ -521,7 +533,7 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
                 ingress_delivery: Some(&delivery),
                 ingress_effect_capture: None,
                 sm_session_registry: Some(&sm),
-                web_socket_state: None,
+                web_socket_state: Some(&state),
             },
             owner.clone(),
             Box::new(submission.plan.sanitized_message.clone()),

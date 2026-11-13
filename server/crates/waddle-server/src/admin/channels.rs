@@ -6984,6 +6984,12 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("open the account coordinator on the fixture database"),
         );
+        // The leave presence goes to the caller's binding at the coordinator.
+        crate::server::routes::websocket::test_bindings::sync_application_bindings(
+            &state,
+            &connections,
+        )
+        .await;
 
         let result = run_group_dm_leave(
             &state,

@@ -88,6 +88,8 @@ mod state;
 mod stream_management;
 pub mod supervised_io;
 #[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_bindings;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_state;
 mod timers;
 mod transport_xml;

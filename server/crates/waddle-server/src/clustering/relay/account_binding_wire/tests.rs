@@ -58,13 +58,13 @@ fn sm_binding(generation: u64) -> SmBinding {
     }
 }
 
+/// A presence payload as a connection holds it: parsed from the client's
+/// stanza, so it carries its namespace declaration the way the relay's
+/// serialized form does when it is parsed back.
 fn payload() -> Element {
-    Element::builder("c", "http://jabber.org/protocol/caps")
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            "https://waddle.social",
-        )
-        .build()
+    "<c xmlns='http://jabber.org/protocol/caps' node='https://waddle.social'/>"
+        .parse()
+        .expect("caps payload")
 }
 
 /// Every message on the relay is MessagePack with named fields.
@@ -274,12 +274,15 @@ fn reads_retirements_and_presentations_reach_the_owner_unchanged() {
 
 fn bind_success_receipt(binding: &BindingRef) -> AccountResourceBindSuccessReceipt {
     let evidence = BindingEvidence::for_binding(binding);
+    // A claim identity names its actor incarnation, so the receipt and its
+    // registration part are attested under one identity.
+    let claim = claim_identity();
     AccountResourceBindSuccessReceipt::attested(
-        claim_identity(),
+        claim.clone(),
         evidence.clone(),
         AccountResourceRevision::new(3),
         EndpointPublicationReceipt::observed(evidence.clone()),
-        ActorRegistrationReceipt::observed(claim_identity(), evidence),
+        ActorRegistrationReceipt::observed(claim, evidence),
     )
     .expect("consistent receipt parts")
 }

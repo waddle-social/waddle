@@ -1,5 +1,5 @@
 use super::{
-    chat_msg, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
+    chat_msg, coordinator_for, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
     pipelined_dispatcher, register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps,
     InboxStorage, IngressEffectIntent, MamStorage, OutboundEvent, Stanza,
 };
@@ -19,12 +19,14 @@ async fn route_to_connection_full_jid_prepares_once_then_queues_direct_frame() {
     let bob: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
+    let coordinator = coordinator_for(&registry).await;
     let sink = PlanSink::new();
     let dispatcher = pipelined_dispatcher();
     let deps = Deps {
         effects: &sink,
         message_dispatcher: Some(&dispatcher),
         local_domain: "example.com",
+        web_socket_state: Some(&coordinator),
         ..Deps::registry_with_user_registry(&registry, &user_registry)
     };
     let message = chat_msg(jid("alice@example.com/web"), bob.clone().into(), "hi");
@@ -128,6 +130,7 @@ async fn route_to_connection_bare_jid_selects_highest_priority_available_resourc
     registry.update_presence(&bob_desk, true, 5);
     registry.update_presence(&bob_phone, true, 5);
     registry.update_presence(&bob_tablet, true, 1);
+    let coordinator = coordinator_for(&registry).await;
 
     let msg = chat_msg(
         jid("alice@example.com/web"),
@@ -141,7 +144,10 @@ async fn route_to_connection_bare_jid_selects_highest_priority_available_resourc
     }];
     let _outcome = interpret(
         events,
-        &Deps::registry_with_user_registry(&registry, &user_registry),
+        &Deps {
+            web_socket_state: Some(&coordinator),
+            ..Deps::registry_with_user_registry(&registry, &user_registry)
+        },
     )
     .await;
 
@@ -187,7 +193,8 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
     register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
     // Registered but presence NOT made available — legacy
     // routing still delivers to this resource (tier-2 `GetResources`
-    // fallback, read from the same authoritative actor).
+    // fallback, read from the account coordinator).
+    let coordinator = coordinator_for(&registry).await;
 
     let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::RouteToConnection {
@@ -197,7 +204,10 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
     }];
     let _outcome = interpret(
         events,
-        &Deps::registry_with_user_registry(&registry, &user_registry),
+        &Deps {
+            web_socket_state: Some(&coordinator),
+            ..Deps::registry_with_user_registry(&registry, &user_registry)
+        },
     )
     .await;
 
@@ -310,20 +320,15 @@ async fn route_to_connection_bare_jid_ignores_resource_absent_from_actor() {
     );
 }
 
-/// ADR-0017 Phase 3 Slice 9 — the fifth unit test the DashMap-selection
-/// retirement was deferred behind (this replaces the Slice-1 "filter drops the
-/// stale extra" guard). With the transitional DashMap-liveness intersection
-/// filter retired, a *sole stale extra* — a resource still present in the actor
-/// whose underlying channel has already closed at teardown — is no longer
-/// filtered out of selection. It SELF-HEALS instead: the bare-JID delivery
-/// selects it, the actor's `TrySend*` hits `DroppedClosed`, `try_deliver`
-/// evicts it from the actor, and the message is NOT lost — the shared fan-out
-/// recipient pass persists it to the recipient's MAM independently of the
-/// live-send outcome, and the recipient catches up via MAM. This is exactly
-/// the "self-healing via `TrySendPeer` → `DroppedClosed` eviction" the Phase 1
-/// completion note deferred to this slice.
+/// A sole bound resource whose channel has closed (its connection is tearing
+/// down and has not retired its binding yet) is still the coordinator's
+/// destination for a bare-JID message. The live send fails, and the message
+/// is not lost: the recipient pass archives it to the recipient's MAM
+/// independently of the live-send outcome. Delivery does not retire the
+/// binding; the connection's teardown does (`2138-account-coordinator.md`,
+/// "Delivery").
 #[tokio::test]
-async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_closed() {
+async fn route_to_connection_bare_jid_sole_closed_binding_is_archived_without_loss() {
     use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
     use waddle_xmpp::mam::storage::InMemoryMamStorage;
     use waddle_xmpp::registry::UserRegistryActor;
@@ -335,26 +340,26 @@ async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_cl
     let (desk_tx, desk_rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
     registry.update_presence(&bob_desk, true, 5);
-    // Real teardown closes the resource's channel (the connection task's
-    // receiver drops). The actor still holds the entry in the brief
-    // lagging-unregister window — this is the exact "stale extra" the retired
-    // filter used to pre-empt; now it self-heals at delivery time. Presence
-    // stays "available" in the actor (teardown does not flip the atomic), so
-    // selection still picks it.
+    let coordinator = coordinator_for(&registry).await;
+    // Teardown closes the resource's channel before the connection retires
+    // its binding.
     drop(desk_rx);
 
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let deps = offline_pass_deps_with_user_registry(
-        &registry,
-        &user_registry,
-        &mam,
-        &inbox,
-        &blocking,
-        &dispatcher,
-    );
+    let deps = Deps {
+        web_socket_state: Some(&coordinator),
+        ..offline_pass_deps_with_user_registry(
+            &registry,
+            &user_registry,
+            &mam,
+            &inbox,
+            &blocking,
+            &dispatcher,
+        )
+    };
 
     let msg = chat_msg(
         jid("alice@example.com/web"),
@@ -368,8 +373,6 @@ async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_cl
     }];
     let _ = interpret(events, &deps).await;
 
-    // No message loss: the recipient pass persisted the DM under bob's MAM even
-    // though the sole live target's channel was dead.
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
     let archive = mam
         .query_messages(
@@ -386,30 +389,27 @@ async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_cl
          sole selected resource having a dead channel"
     );
     assert_eq!(archive.messages[0].body.as_deref(), Some("no-loss"));
-
-    // Self-heal: the dead resource was evicted from the actor on the failed
-    // send (DroppedClosed), so a subsequent selection sees no stale extra.
-    let remaining = waddle_xmpp::registry::get_resources_for_user(&user_registry, &bob_bare).await;
-    assert!(
-        remaining.is_empty(),
-        "the stale extra must be evicted from the actor by the DroppedClosed \
-         eviction, not linger (self-healing replaces the retired filter)"
+    assert_eq!(
+        coordinator
+            .deps
+            .app_state
+            .account_authority()
+            .resources(&bob_bare)
+            .await
+            .expect("coordinator resource read"),
+        vec![bob_desk],
+        "a failed send does not retire the binding; its connection's teardown does"
     );
 }
 
-/// ADR-0017 Phase 3 Slice 9: with the Slice-1 liveness filter retired, a stale
-/// extra holding a UNIQUE top priority whose channel has closed is still
-/// SELECTED (the actor ranks it top — there is no DashMap intersection to drop
-/// it before the max-priority collapse), but its dead channel self-heals: the
-/// `DroppedClosed` send evicts it, and the message is persisted (no loss) via
-/// the recipient pass. Because selection collapsed to the ghost's priority tie
-/// set, the live lower-priority resources are NOT live-delivered on that first
-/// attempt (they catch up via MAM) — this is the intended, accepted behaviour
-/// change from retiring the exact-parity filter, NOT a regression. On the NEXT
-/// bare-JID delivery — after the ghost has been evicted — routing correctly
-/// reaches the true live top-priority resource, proving convergence.
+/// A closed binding at the unique top priority is still selected for a
+/// bare-JID message until its connection retires it, so the live
+/// lower-priority resources are not live-delivered on that attempt (they
+/// catch up through MAM, which receives the message). Once the binding is
+/// retired, the next bare-JID delivery reaches the live top-priority
+/// resource.
 #[tokio::test]
-async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_live_lower() {
+async fn route_to_connection_bare_jid_closed_top_priority_binding_routes_until_retired() {
     use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
     use waddle_xmpp::mam::storage::InMemoryMamStorage;
     use waddle_xmpp::registry::UserRegistryActor;
@@ -429,27 +429,27 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
     registry.update_presence(&bob_mid, true, 3);
     registry.update_presence(&bob_low, true, 1);
     registry.update_presence(&bob_stale, true, 5);
-    // Real teardown of the top-priority resource: its channel closes, but the
-    // actor still holds the entry (presence atomic not flipped) in the
-    // lagging-unregister window.
+    let coordinator = coordinator_for(&registry).await;
+    // Teardown of the top-priority resource closes its channel before its
+    // connection retires the binding.
     drop(stale_rx);
 
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let deps = offline_pass_deps_with_user_registry(
-        &registry,
-        &user_registry,
-        &mam,
-        &inbox,
-        &blocking,
-        &dispatcher,
-    );
+    let deps = Deps {
+        web_socket_state: Some(&coordinator),
+        ..offline_pass_deps_with_user_registry(
+            &registry,
+            &user_registry,
+            &mam,
+            &inbox,
+            &blocking,
+            &dispatcher,
+        )
+    };
 
-    // First delivery: the ghost (pri 5) dominates selection; its dead channel
-    // self-heals (DroppedClosed → evicted) and the message is persisted, but
-    // the live pri-3/pri-1 resources are NOT live-delivered this round.
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(chat_msg(
@@ -463,8 +463,8 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
 
     assert!(
         drain_inbound(&mut mid_rx).is_empty(),
-        "while the top-priority ghost dominates selection, the live pri-3 \
-         resource is not live-delivered on the first attempt (catches up via MAM)"
+        "while the closed top-priority binding is active, the live pri-3 \
+         resource is not live-delivered (catches up via MAM)"
     );
     assert!(drain_inbound(&mut low_rx).is_empty());
     let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
@@ -481,20 +481,26 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
         1,
         "no message loss: the first DM is persisted to the recipient's MAM"
     );
-    // The ghost was evicted by the DroppedClosed send, leaving the two live
-    // resources.
-    let mut remaining =
-        waddle_xmpp::registry::get_resources_for_user(&user_registry, &bob_bare).await;
-    remaining.sort_by_key(|j| j.to_string());
     assert_eq!(
-        remaining,
-        vec![bob_low.clone(), bob_mid.clone()],
-        "the stale top-priority extra must be evicted (self-heal), leaving the \
-         two live resources"
+        coordinator
+            .deps
+            .app_state
+            .account_authority()
+            .resources(&bob_bare)
+            .await
+            .expect("coordinator resource read"),
+        vec![bob_low.clone(), bob_mid.clone(), bob_stale.clone()],
+        "a failed send does not retire the binding; its connection's teardown does"
     );
 
-    // Second delivery: with the ghost gone, selection now reaches the true live
-    // top-priority resource (pri 3) — convergence, no filter required.
+    // The connection's teardown retires its binding.
+    registry.unregister(&bob_stale);
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(
+        &coordinator,
+        &registry,
+    )
+    .await;
+
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(chat_msg(
@@ -509,8 +515,8 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
     assert_eq!(
         drain_inbound(&mut mid_rx).len(),
         1,
-        "after the ghost is evicted, the true live top-priority resource (pri 3) \
-         receives the next bare-JID delivery live"
+        "after the closed binding is retired, the live top-priority resource \
+         (pri 3) receives the next bare-JID delivery live"
     );
     assert!(
         drain_inbound(&mut low_rx).is_empty(),

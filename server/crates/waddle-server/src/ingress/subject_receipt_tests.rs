@@ -299,9 +299,13 @@ async fn subject_broadcast_after_actor_commit(
     let capture = IngressEffectCapture::new();
     let sink = PlanSink::new();
     sink.observe_sender(&sender);
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let mut deps = Deps::registry_only(&registry);
     deps.room_registry = Some(&rooms);
     deps.user_registry = Some(&users);
+    deps.web_socket_state = Some(&state);
     deps.ingress_effect_capture = Some(capture.clone());
     deps.effects = &sink;
     assert!(interpret(events, &deps).await.frames.is_empty());

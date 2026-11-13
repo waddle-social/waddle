@@ -1,7 +1,7 @@
 use super::{
-    chat_msg, interpret, jid, offline_pass_deps_with_user_registry, pipelined_dispatcher,
-    register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps, InboxStorage,
-    MamStorage, OutboundEvent, Stanza,
+    chat_msg, coordinator_for, interpret, jid, offline_pass_deps_with_user_registry,
+    pipelined_dispatcher, register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps,
+    InboxStorage, MamStorage, OutboundEvent, Stanza,
 };
 use kameo::actor::Spawn;
 
@@ -96,6 +96,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
     // bob into both tiers. bob sends no presence, so tier-2 `GetResources`
     // (the bound-without-presence fallback) resolves him as the live target.
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
+    let coordinator = coordinator_for(&registry).await;
 
     let blocking: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
         Arc::new(FailingBlockingStorage);
@@ -112,7 +113,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         inbox_storage: None,
         extension_manager: None,
         room_registry: None,
-        web_socket_state: None,
+        web_socket_state: Some(&coordinator),
         authenticated_principal: None,
         local_domain: "example.com",
         blocking_storage: Some(&blocking),
@@ -174,6 +175,7 @@ async fn fanout_pass_preserves_live_archive_id_parity_for_origin_retries() {
     // ADR-0017 Slice 1: bare-JID selection reads the actor tree; bob is live
     // (bound without presence), resolved via tier-2 `GetResources`.
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
+    let coordinator = coordinator_for(&registry).await;
 
     let mam: Arc<dyn MamStorage> =
         Arc::new(waddle_xmpp::mam::storage::InMemoryMamStorage::default());
@@ -182,14 +184,17 @@ async fn fanout_pass_preserves_live_archive_id_parity_for_origin_retries() {
     let blocking: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
         Arc::new(waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let deps = offline_pass_deps_with_user_registry(
-        &registry,
-        &user_registry,
-        &mam,
-        &inbox,
-        &blocking,
-        &dispatcher,
-    );
+    let deps = Deps {
+        web_socket_state: Some(&coordinator),
+        ..offline_pass_deps_with_user_registry(
+            &registry,
+            &user_registry,
+            &mam,
+            &inbox,
+            &blocking,
+            &dispatcher,
+        )
+    };
 
     let dm = || {
         let mut m = chat_msg(
