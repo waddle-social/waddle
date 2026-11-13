@@ -124,8 +124,9 @@ impl Fixture {
             .await
             .expect("migration version");
         assert_eq!(
-            last, 1037,
-            "laboratory must use the actual catalog through V1037"
+            last,
+            waddle_server::db::BASELINE_VERSION,
+            "laboratory must use the actual catalog through the schema baseline"
         );
         sqlx::raw_sql(CANDIDATE)
             .execute(&mut owner_connection)

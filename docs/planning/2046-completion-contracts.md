@@ -628,6 +628,17 @@ Open before the durable selector can be chosen in production:
 After M6, the migration history is replaced by one baseline schema per
 database, so later changes iterate from a single deployment schema.
 
+Status: cut. The baseline (migration 2000) is the deployment schema on both
+engines, generated from commit `dc19a937616a6db42fc87ccaedb0bdb18745402a`
+(the history through V1037); new migrations are numbered from 2001. A
+fresh database is built from it, and a database at V1037 is stamped where
+migrations run (the restricted cutover's owner Job in production); any
+other database holding retired versions is refused. The harness proves
+both against the history built by that commit. What remains (nine
+owner-prepared marker and keypool tables, the stores' idempotent DDL
+chains, legacy keypair-slot retirement) is in
+[the baseline design, section 8](2046-schema-baseline.md#8-the-cut).
+
 Scope:
 
 - The ledgered catalog: global V1–V15 (`MIG/global.rs:765-855`) and waddle

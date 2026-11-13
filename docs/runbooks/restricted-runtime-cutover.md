@@ -104,6 +104,23 @@ that roles the operator created stay until dropped.
    attribute; the three logins `rolcanlogin = t`, the three others `f`. The
    provisioning procedure refuses anything else.
 
+6. Confirm the database is at the final version of the retired migration
+   history. The image that serves is built on the schema baseline
+   ([design](../planning/2046-schema-baseline.md)); its owner Job records
+   the baseline in place of the retired ledger (the stamp) only when the
+   ledger is that history in full, and refuses any other ledger before it
+   writes anything.
+
+   ```sh
+   psql_primary -Atc "SELECT max(version), count(*) FROM _migrations"
+   ```
+
+   Expected: `1037|52`. A smaller result means production runs an older
+   release: deploy the final release that carries the migration history
+   (built from commit `dc19a937616a6db42fc87ccaedb0bdb18745402a` or a later
+   one before the baseline cut) as usual, let its server start once, and
+   check again. Do not continue until the result is `1037|52`.
+
 From here until the serving switch is merged, merge nothing that changes
 the server: the owner Job must run the migrations of the image that will
 serve.
@@ -128,11 +145,14 @@ serve.
    ```
 
 3. Take the rollback backup and wait until it has completed. This is the
-   only way back after step 6.
+   only way back after step 6. Also keep the migration ledger with the change
+   record: it is what the stamp in step 7 replaces.
 
    ```sh
    kubectl cnpg backup postgresql -n waddle
    kubectl -n waddle get backup
+   psql_primary -Atc "SELECT max(version), count(*) FROM _migrations"   # 1037|52
+   psql_primary -c "\copy (SELECT version, description, checksum FROM _migrations ORDER BY version) TO STDOUT WITH CSV" > migrations-before-stamp.csv
    ```
 
 4. Disable the old login and end its backends (D1 steps 2 and 3).
@@ -191,7 +211,27 @@ serve.
    ```
 
    The pod runs `owner-phase`, `install-attestor`, `emit-handoff` and then
-   publishes the handoff. What to expect:
+   publishes the handoff.
+
+   The first thing `owner-phase` does is the stamp: it checks that the
+   ledger is the complete retired history, that the schema has the
+   structure that history builds (the one-login structure the old server
+   left is accepted; the owner preparations that follow complete it), and
+   that no other session uses the database; then it replaces the 52 retired
+   ledger rows with the baseline row (version 2000) in the migration
+   transaction. No DDL runs and no application row is written. The log
+   prints `Recorded the schema baseline in place of the retired migration
+   ledger` once; a rerun of the Job finds the baseline and changes nothing.
+   A refusal exits 4 and names the cause:
+
+   | Log | Cause | Action |
+   |---|---|---|
+   | `retired migration(s) [...] were never applied ... ends at v1037` | An older release migrated the database last | Phase A step 6 was skipped; restore (see Rollback) |
+   | `... object(s) differ from the schema the migration history builds (...)` | The schema was changed by hand or by a release outside this history | Compare with the design's tooling (`schema_catalog.py fingerprint`), fix, rerun the Job |
+   | `... cannot be stamped while N other session(s) ...` | A session is still connected | As for `DatabaseNotExclusive` below |
+   | `... does not carry the retired history's description and checksum` | The ledger was edited | Restore the ledger from `migrations-before-stamp.csv` or the backup |
+
+   What to expect overall:
 
    | Exit code | Meaning | Job behaviour |
    |---|---|---|
@@ -204,6 +244,7 @@ serve.
 
    ```sh
    kubectl -n waddle wait --for=condition=complete job/"$JOB" --timeout=15m
+   psql_primary -Atc "SELECT version, description FROM _migrations"   # 2000|schema baseline
    ```
 
    If it fails with `DatabaseNotExclusive`, a session is still connected:
@@ -314,8 +355,9 @@ accepted after step 9.
   once the rollback window has closed.
 - `restricted-runtime/prepare` and `serve` stay enabled. The owner CronJob
   stays suspended.
-- A later release whose migrations or owner preparation changed needs the
-  owner Job again, with the server at zero replicas, before its pods can
+- Migrations from here on are numbered from 2001 and apply on top of the
+  baseline. A release whose migrations or owner preparation changed needs
+  the owner Job again, with the server at zero replicas, before its pods can
   attach: suspend, scale to zero, create a Job from the CronJob of the new
   release, resume. This is manual; nothing in the chart sequences it.
 - A release that changes nothing in the database needs no Job: the chart

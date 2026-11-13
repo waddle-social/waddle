@@ -106,13 +106,12 @@ fn write_peer_ids(path: &Path, keys: &[GeneratedKey]) -> std::io::Result<()> {
     writer.flush()
 }
 
+/// Enrollment rows for the peer allowlist. The table belongs to the schema
+/// baseline, so the SQL is applied once the database has been migrated (by
+/// the owner phase, or by the first start of a server that owns its schema).
 fn write_sql(path: &Path, keys: &[GeneratedKey]) -> std::io::Result<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-    writeln!(
-        writer,
-        "CREATE TABLE IF NOT EXISTS clustering_peer_allowlist (peer_id TEXT PRIMARY KEY, enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now());"
-    )?;
     for key in keys {
         writeln!(
             writer,

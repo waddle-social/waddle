@@ -9,9 +9,7 @@ use super::{
 };
 use crate::config::LineageConfig;
 use crate::db::lineage;
-use crate::db::migrations::waddle::{
-    V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES, V1028_INGRESS_SOURCE_BINDING_POSTGRES,
-};
+use crate::db::migrations::postgres_function_body;
 use crate::db::physical_attestation::PgRoleName;
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
 use crate::ingress_substrate::{
@@ -259,11 +257,7 @@ pub(super) async fn verify_v1009_epoch_owner_stage(
     check_runtime_role(tx, config, schema).await?;
     check_epoch_shape(tx, config, schema).await?;
     let epoch = function_source(tx, config, schema, "waddle_ingress_protocol_epoch_guard").await?;
-    if Some(epoch.source.as_str())
-        != source_body(
-            V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES,
-            "waddle_ingress_protocol_epoch_guard",
-        )
+    if Some(epoch.source.as_str()) != postgres_function_body("waddle_ingress_protocol_epoch_guard")
     {
         return Err(DarkMigrationOwnerError::EpochCatalogDrift);
     }
@@ -347,21 +341,26 @@ async fn inspect_catalog_with_epoch_policy(
         "waddle_ingress_epoch_guard_manifest_append_only",
     )
     .await?;
-    let v1009 = V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES;
-    if Some(truncate.source.as_str()) != source_body(v1009, "waddle_ingress_truncate_guard")
+    if Some(truncate.source.as_str()) != postgres_function_body("waddle_ingress_truncate_guard")
         || Some(manifest.source.as_str())
-            != source_body(v1009, "waddle_ingress_epoch_guard_manifest_append_only")
+            != postgres_function_body("waddle_ingress_epoch_guard_manifest_append_only")
     {
         return Err(DarkMigrationOwnerError::EpochCatalogDrift);
     }
-    let matches = |source: &str| {
-        Some(dml.source.as_str()) == source_body(source, "waddle_ingress_epoch_guard")
-            && Some(epoch.source.as_str())
-                == source_body(source, "waddle_ingress_protocol_epoch_guard")
-    };
-    let stage = if matches(v1009) {
+    let baseline = Some(dml.source.as_str())
+        == postgres_function_body("waddle_ingress_epoch_guard")
+        && Some(epoch.source.as_str())
+            == postgres_function_body("waddle_ingress_protocol_epoch_guard");
+    let candidate = Some(dml.source.as_str())
+        == source_body(RELATION_GUARD_CANDIDATE, "waddle_ingress_epoch_guard")
+        && Some(epoch.source.as_str())
+            == source_body(
+                RELATION_GUARD_CANDIDATE,
+                "waddle_ingress_protocol_epoch_guard",
+            );
+    let stage = if baseline {
         DarkEpochAclStage::V1009EpochZero
-    } else if matches(RELATION_GUARD_CANDIDATE) {
+    } else if candidate {
         DarkEpochAclStage::RelationGuardEpochZero
     } else {
         return Err(DarkMigrationOwnerError::EpochCatalogDrift);
@@ -555,16 +554,16 @@ pub(super) async fn correlate_runtime(
 }
 
 /// Whether `source` is the body of an epoch guard trigger function this
-/// source tree installs: the V1009 `waddle_ingress_truncate_guard`, or
-/// `waddle_ingress_epoch_guard` as V1009 or the relation-guard candidate
-/// defines it. A store attachment uses this to pin the function behind the
-/// guard triggers of its own relations.
+/// source tree installs: `waddle_ingress_truncate_guard` as the schema
+/// baseline defines it, or `waddle_ingress_epoch_guard` as the baseline or
+/// the relation-guard candidate defines it. A store attachment uses this to
+/// pin the function behind the guard triggers of its own relations.
 pub(crate) fn is_installed_epoch_guard_body(name: &str, source: &str) -> bool {
-    let v1009 = source_body(V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES, name);
+    let baseline = postgres_function_body(name);
     match name {
-        "waddle_ingress_truncate_guard" => v1009 == Some(source),
+        "waddle_ingress_truncate_guard" => baseline == Some(source),
         "waddle_ingress_epoch_guard" => {
-            v1009 == Some(source) || source_body(RELATION_GUARD_CANDIDATE, name) == Some(source)
+            baseline == Some(source) || source_body(RELATION_GUARD_CANDIDATE, name) == Some(source)
         }
         _ => false,
     }
@@ -830,9 +829,7 @@ async fn check_trigger_pair(
 
     for trigger in additional {
         let function = function_source(tx, config, schema, trigger.function).await?;
-        if Some(function.source.as_str())
-            != source_body(V1028_INGRESS_SOURCE_BINDING_POSTGRES, trigger.function)
-        {
+        if Some(function.source.as_str()) != postgres_function_body(trigger.function) {
             return Err(DarkMigrationOwnerError::EpochCatalogDrift);
         }
         require(

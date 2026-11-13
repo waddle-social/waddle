@@ -1,4 +1,7 @@
--- PG17 structural contract; exclude physical OIDs and planner statistics only.
+-- PG17 structural contract; exclude physical OIDs, planner statistics and the
+-- stored default of a column added to a populated table (atthasmissing,
+-- attmissingval), which a database built from the retired migration history
+-- holds and one built from the schema baseline does not.
 -- All deparsers run with search_path=pg_catalog,pg_temp in both producer and verifier.
 SELECT COALESCE(pg_catalog.jsonb_agg(definition ORDER BY definition->>'name'),'[]'::jsonb)
 FROM (
@@ -10,7 +13,7 @@ FROM (
     -- relhassubclass is a sticky planner hint; pin live edges in either direction.
     'inheritance_edges',(SELECT count(*) FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid),
     'columns',COALESCE((SELECT pg_catalog.jsonb_agg(
-      pg_catalog.jsonb_build_object('properties',pg_catalog.to_jsonb(a)-ARRAY['attrelid','attstattarget','attcacheoff','attacl'],
+      pg_catalog.jsonb_build_object('properties',pg_catalog.to_jsonb(a)-ARRAY['attrelid','attstattarget','attcacheoff','attacl','atthasmissing','attmissingval'],
         'default',pg_catalog.pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
       FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
       WHERE a.attrelid=c.oid AND a.attnum>0),'[]'::jsonb),

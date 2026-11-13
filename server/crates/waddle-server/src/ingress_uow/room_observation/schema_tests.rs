@@ -265,13 +265,13 @@ impl Fixture {
         assert!(!marker_exists(&self.admin, &self.target).await?);
 
         let ledger: (String, Option<String>) = sqlx::query_as(&format!(
-            "SELECT description, checksum FROM {}._migrations WHERE version = 1023",
+            "SELECT description, checksum FROM {}._migrations WHERE version = 2000",
             self.target
         ))
         .fetch_one(&self.admin)
         .await?;
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 1023",
+            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 2000",
             self.target
         ))
         .execute(&self.admin)
@@ -289,7 +289,7 @@ impl Fixture {
         ));
         assert!(!marker_exists(&self.admin, &self.target).await?);
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET description = $1, checksum = $2 WHERE version = 1023",
+            "UPDATE {}._migrations SET description = $1, checksum = $2 WHERE version = 2000",
             self.target
         ))
         .bind(&ledger.0)
@@ -349,13 +349,13 @@ impl Fixture {
         .await?;
 
         let stored_ledger: (String, Option<String>) = sqlx::query_as(&format!(
-            "SELECT description, checksum FROM {}._migrations WHERE version = 1023",
+            "SELECT description, checksum FROM {}._migrations WHERE version = 2000",
             self.target
         ))
         .fetch_one(&self.admin)
         .await?;
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET description = 'wrong' WHERE version = 1023",
+            "UPDATE {}._migrations SET description = 'wrong' WHERE version = 2000",
             self.target
         ))
         .execute(&self.admin)
@@ -370,14 +370,14 @@ impl Fixture {
             Err(RoomObservationSchemaError::Database)
         ));
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET description = $1 WHERE version = 1023",
+            "UPDATE {}._migrations SET description = $1 WHERE version = 2000",
             self.target
         ))
         .bind(&stored_ledger.0)
         .execute(&self.admin)
         .await?;
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 1023",
+            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 2000",
             self.target
         ))
         .execute(&self.admin)
@@ -392,14 +392,14 @@ impl Fixture {
             Err(RoomObservationSchemaError::Database)
         ));
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET checksum = $1 WHERE version = 1023",
+            "UPDATE {}._migrations SET checksum = $1 WHERE version = 2000",
             self.target
         ))
         .bind(&stored_ledger.1)
         .execute(&self.admin)
         .await?;
         sqlx::query(&format!(
-            "DELETE FROM {}._migrations WHERE version = 1023",
+            "DELETE FROM {}._migrations WHERE version = 2000",
             self.target
         ))
         .execute(&self.admin)
@@ -414,7 +414,7 @@ impl Fixture {
             Err(RoomObservationSchemaError::Database)
         ));
         sqlx::query(&format!(
-            "INSERT INTO {}._migrations (version, description, checksum) VALUES (1023, $1, $2)",
+            "INSERT INTO {}._migrations (version, description, checksum) VALUES (2000, $1, $2)",
             self.target
         ))
         .bind(&stored_ledger.0)

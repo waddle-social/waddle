@@ -13,8 +13,9 @@ use super::{
 };
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, LINEAGE_ADVISORY_LOCK_KEY};
+use crate::db::migrations::postgres_function_body;
 use crate::db::migrations::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
-use crate::db::migrations::{migration_checksum, waddle};
+use crate::db::migrations::{migration_checksum, MigrationRunner, BASELINE_VERSION};
 use crate::db::physical_attestation::{quote_identifier, validate_identifier, PgRoleName};
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
@@ -35,7 +36,7 @@ pub enum OwnerRejectionGrantError {
     Postgres(#[from] sqlx::Error),
     #[error("owner-rejection grant requires a simple attested schema identifier")]
     SchemaIdentifier,
-    #[error("owner-rejection relation, owner, or V1028 ledger entry does not match")]
+    #[error("owner-rejection relation, owner, or baseline ledger entry does not match")]
     RelationMismatch,
     #[error("runtime role has unsafe attributes, membership, or effective privileges")]
     UnsafeRuntime,
@@ -264,7 +265,7 @@ async fn run_on_connection(
         return Err(DarkMigrationOwnerError::Identity.into());
     }
     correlate_runtime(&mut tx, config, pid, nonce).await?;
-    verify_v1028_ledger(&mut tx, &quoted).await?;
+    verify_baseline_ledger(&mut tx, &quoted).await?;
     // Lock the exact qualified relation before inspecting or modifying its
     // ACL. Errors after the GRANT drop this uncommitted transaction.
     tx.execute(
@@ -297,7 +298,7 @@ async fn run_on_connection(
     if grant {
         // Commit only the exact scoped direct-grant profile. This deliberately
         // is not the incompatible DML-denied restricted definer profile.
-        verify_v1028_ledger(&mut tx, &quoted).await?;
+        verify_baseline_ledger(&mut tx, &quoted).await?;
         verify_relation_manifest(&mut tx, config, schema).await?;
         if inspect_locked(&mut tx, config, schema).await? != OwnerRejectionGrantState::Granted
             || verify_physical_epoch(&mut tx, config, schema).await? != epoch_oid
@@ -362,13 +363,16 @@ async fn verify_physical_epoch(
     row.get(4).map_err(OwnerRejectionGrantError::from)
 }
 
-async fn verify_v1028_ledger(
+/// The owner rejection relation is part of the schema baseline, so the
+/// ledger must record the baseline as this binary defines it.
+async fn verify_baseline_ledger(
     tx: &mut Transaction<'_>,
     quoted: &str,
 ) -> Result<(), OwnerRejectionGrantError> {
-    let migration = waddle::all()
+    let migration = MigrationRunner::single()
+        .migrations
         .into_iter()
-        .find(|migration| migration.version == 1028)
+        .find(|migration| migration.version == BASELINE_VERSION)
         .ok_or(OwnerRejectionGrantError::RelationMismatch)?;
     let checksum = migration_checksum(&migration, DatabaseDriver::Postgres);
     let mut rows = tx
@@ -440,7 +444,6 @@ async fn verify_relation_triggers(
     config: &DarkMigrationOwnerConfig,
     schema: &str,
 ) -> Result<(), OwnerRejectionGrantError> {
-    let migration = waddle::V1028_INGRESS_SOURCE_BINDING_POSTGRES;
     for (name, trigger, trigger_type) in [
         (
             "waddle_ingress_owner_rejection_immutable",
@@ -459,14 +462,13 @@ async fn verify_relation_triggers(
         ),
     ] {
         let function = function_source(tx, config, schema, name).await?;
-        if Some(function.source.as_str()) != source_body(migration, name) {
+        if Some(function.source.as_str()) != postgres_function_body(name) {
             return Err(OwnerRejectionGrantError::RelationMismatch);
         }
         verify_trigger(tx, schema, trigger, function.oid, trigger_type, "O").await?;
     }
     let guard = function_source(tx, config, schema, "waddle_ingress_epoch_guard").await?;
-    let v1009 = waddle::V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES;
-    if Some(guard.source.as_str()) != source_body(v1009, "waddle_ingress_epoch_guard")
+    if Some(guard.source.as_str()) != postgres_function_body("waddle_ingress_epoch_guard")
         && Some(guard.source.as_str())
             != source_body(RELATION_GUARD_CANDIDATE, "waddle_ingress_epoch_guard")
     {
@@ -482,7 +484,7 @@ async fn verify_relation_triggers(
     )
     .await?;
     let truncate = function_source(tx, config, schema, "waddle_ingress_truncate_guard").await?;
-    if Some(truncate.source.as_str()) != source_body(v1009, "waddle_ingress_truncate_guard") {
+    if Some(truncate.source.as_str()) != postgres_function_body("waddle_ingress_truncate_guard") {
         return Err(OwnerRejectionGrantError::RelationMismatch);
     }
     verify_trigger(

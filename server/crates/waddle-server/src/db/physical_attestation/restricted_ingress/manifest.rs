@@ -1,6 +1,7 @@
 //! Versioned PG17 function and non-internal trigger catalog contract.
-//! Bodies are byte slices of the checksum-pinned, unregistered source assets;
-//! no live function is invoked to decide whether its body can be trusted.
+//! Bodies are byte slices of the checksum-pinned sources: the PostgreSQL
+//! schema baseline and the unregistered owner candidates. No live function
+//! is invoked to decide whether its body can be trusted.
 
 use std::collections::BTreeMap;
 
@@ -15,12 +16,9 @@ use crate::db::physical_attestation::quote_identifier;
 const CANDIDATE: &str = include_str!("../../migrations/owner/ingress_definer_api_candidate.sql");
 const RELATION: &str =
     include_str!("../../migrations/owner/ingress_epoch_relation_guard_candidate.sql");
-const GLOBAL: &str = include_str!("../../migrations/global.rs");
-const WADDLE: &str = include_str!("../../migrations/waddle.rs");
-const PENDING_SCHEMA: &str = include_str!("../../../pending_delivery/database/schema.rs");
-const PENDING_RECOVERY: &str = include_str!("../../../pending_delivery/database/recovery_order.rs");
+const BASELINE: &str = include_str!("../../../../sql/baseline/postgres.sql");
 const STRUCTURE_SQL: &str = include_str!("structure.sql");
-const MANIFEST: &str = include_str!("../restricted_ingress_manifest_v2.json");
+const MANIFEST: &str = include_str!("../restricted_ingress_manifest_v3.json");
 
 #[derive(Deserialize)]
 pub(super) struct Manifest {
@@ -68,10 +66,7 @@ fn source(key: &str) -> Result<&'static str> {
     match key {
         "candidate" => Ok(CANDIDATE),
         "relation" => Ok(RELATION),
-        "waddle" => Ok(WADDLE),
-        "global" => Ok(GLOBAL),
-        "pending_schema" => Ok(PENDING_SCHEMA),
-        "pending_recovery" => Ok(PENDING_RECOVERY),
+        "baseline" => Ok(BASELINE),
         "structure_query" => Ok(STRUCTURE_SQL),
         _ => Err(RestrictedIngressProfileError::Mismatch("manifest source")),
     }
@@ -89,7 +84,7 @@ pub(super) fn load() -> Result<Manifest> {
         .map_err(|_| RestrictedIngressProfileError::Mismatch("manifest encoding"))?;
     if manifest.version != super::MANIFEST_VERSION
         || manifest.postgres_major != 17
-        || manifest.source_sha256.len() != 7
+        || manifest.source_sha256.len() != 4
     {
         return Err(RestrictedIngressProfileError::Mismatch("manifest version"));
     }

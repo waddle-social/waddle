@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use super::namespace::MigrationNamespace;
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MigrationLedgerError {
     #[error("migration startup cannot identify a safe PostgreSQL target schema")]
@@ -51,9 +49,10 @@ pub enum MigrationLedgerError {
     MissingChecksum { version: i64 },
 
     #[error(
-        "the schema baseline is selected, but the migration ledger still holds {versions} \
-         retired version(s); run the owner step once with WADDLE_DB_BASELINE_ACTION=stamp to \
-         record the baseline on this database"
+        "the migration ledger still holds {versions} version(s) of the retired migration \
+         history, and WADDLE_DB_BASELINE_ACTION=apply never stamps; run the owner step once \
+         without it (or with WADDLE_DB_BASELINE_ACTION=stamp) to record the schema baseline \
+         on this database"
     )]
     RetiredLedger { versions: usize },
 
@@ -65,9 +64,10 @@ pub enum MigrationLedgerError {
 
     #[error(
         "the schema baseline cannot be stamped: retired migration(s) {missing:?} were never \
-         applied; run the last release that carries the migration history first"
+         applied, so an older release migrated this database last; run the final release that \
+         carries the retired migration history (its ledger ends at v{last}) on it first"
     )]
-    RetiredLedgerIncomplete { missing: Vec<i64> },
+    RetiredLedgerIncomplete { missing: Vec<i64>, last: i64 },
 
     #[error(
         "the schema baseline cannot be stamped: ledger version v{version} is not part of the \
@@ -110,88 +110,78 @@ pub enum MigrationLedgerError {
 
     #[error(
         "migration startup is refusing to continue rather than repairing the ledger: the \
-         {namespace} schema exists (found table {table}), but the migration ledger has no \
-         record of that namespace; startup refuses to re-run destructive initial migrations; \
-         restore the _migrations table (or intentionally start from an empty database)"
+         schema exists (found table {table}), but the migration ledger is empty; startup \
+         refuses to build the schema baseline over it; restore the _migrations table (or \
+         intentionally start from an empty database)"
     )]
-    SchemaWithoutLedger {
-        namespace: MigrationNamespace,
-        table: String,
-    },
+    SchemaWithoutLedger { table: String },
 
     #[error(
-        "migration startup is refusing to continue rather than repairing the ledger: {namespace} \
-         migration v{missing} is missing, but found later applied migration v{applied_after}; \
-         expected all prior namespace migrations to be recorded"
+        "migration startup is refusing to continue rather than repairing the ledger: migration \
+         v{missing} is missing, but found later applied migration v{applied_after}; expected \
+         all prior migrations to be recorded"
     )]
-    VersionGap {
-        namespace: MigrationNamespace,
-        missing: i64,
-        applied_after: i64,
-    },
+    VersionGap { missing: i64, applied_after: i64 },
 }
 
 #[cfg(test)]
 mod tests {
     use super::MigrationLedgerError;
-    use crate::db::migrations::MigrationNamespace;
 
     #[test]
     fn error_messages_describe_startup_refusal() {
         assert_eq!(
             MigrationLedgerError::UnknownVersion {
-                version: 1007,
+                version: 2007,
                 description: "future migration".to_string(),
             }
             .to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: found unknown migration v1007 (future migration), but this binary expects every owned ledger version to exist in its migration catalog; this usually means an older binary is starting against a newer ledger"
+            "migration startup is refusing to continue rather than repairing the ledger: found unknown migration v2007 (future migration), but this binary expects every owned ledger version to exist in its migration catalog; this usually means an older binary is starting against a newer ledger"
         );
         assert_eq!(
             MigrationLedgerError::DescriptionMismatch {
-                version: 7,
+                version: 2000,
                 expected: "expected".to_string(),
                 found: "found".to_string(),
             }
             .to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: migration v7 description expected expected, found found"
+            "migration startup is refusing to continue rather than repairing the ledger: migration v2000 description expected expected, found found"
         );
         assert_eq!(
             MigrationLedgerError::ChecksumMismatch {
-                version: 1007,
+                version: 2000,
                 expected: "expected".to_string(),
                 found: "found".to_string(),
             }
             .to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: migration v1007 checksum expected expected, found found"
+            "migration startup is refusing to continue rather than repairing the ledger: migration v2000 checksum expected expected, found found"
         );
         assert_eq!(
-            MigrationLedgerError::MissingChecksum { version: 11 }.to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: migration v11 checksum found NULL, expected a stored checksum because adoption is one-time"
-        );
-        assert_eq!(
-            MigrationLedgerError::SchemaWithoutLedger {
-                namespace: MigrationNamespace::Waddle,
-                table: "channels".to_string(),
-            }
-            .to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: the waddle schema exists (found table channels), but the migration ledger has no record of that namespace; startup refuses to re-run destructive initial migrations; restore the _migrations table (or intentionally start from an empty database)"
+            MigrationLedgerError::MissingChecksum { version: 2000 }.to_string(),
+            "migration startup is refusing to continue rather than repairing the ledger: migration v2000 checksum found NULL, expected a stored checksum because adoption is one-time"
         );
         assert_eq!(
             MigrationLedgerError::SchemaWithoutLedger {
-                namespace: MigrationNamespace::Global,
                 table: "users".to_string(),
             }
             .to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: the global schema exists (found table users), but the migration ledger has no record of that namespace; startup refuses to re-run destructive initial migrations; restore the _migrations table (or intentionally start from an empty database)"
+            "migration startup is refusing to continue rather than repairing the ledger: the schema exists (found table users), but the migration ledger is empty; startup refuses to build the schema baseline over it; restore the _migrations table (or intentionally start from an empty database)"
         );
         assert_eq!(
             MigrationLedgerError::VersionGap {
-                namespace: MigrationNamespace::Global,
-                missing: 6,
-                applied_after: 7,
+                missing: 2001,
+                applied_after: 2002,
             }
             .to_string(),
-            "migration startup is refusing to continue rather than repairing the ledger: global migration v6 is missing, but found later applied migration v7; expected all prior namespace migrations to be recorded"
+            "migration startup is refusing to continue rather than repairing the ledger: migration v2001 is missing, but found later applied migration v2002; expected all prior migrations to be recorded"
+        );
+        assert_eq!(
+            MigrationLedgerError::RetiredLedgerIncomplete {
+                missing: vec![1036, 1037],
+                last: 1037,
+            }
+            .to_string(),
+            "the schema baseline cannot be stamped: retired migration(s) [1036, 1037] were never applied, so an older release migrated this database last; run the final release that carries the retired migration history (its ledger ends at v1037) on it first"
         );
     }
 }

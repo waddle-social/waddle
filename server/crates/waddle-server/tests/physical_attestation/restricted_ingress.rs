@@ -110,7 +110,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         .inspect_restricted_ingress_profile(&api_role, epoch_oid)
         .await
         .expect("exact restricted profile");
-    assert_eq!(observed.manifest_version, 2);
+    assert_eq!(observed.manifest_version, 3);
     assert_eq!(observed.epoch_relation_oid, epoch_oid);
     let mut mutation = fixture
         .admin

@@ -1,26 +1,30 @@
 # #2046 M7: schema baseline design and cut procedure
 
-Status: built and unused. The baseline SQL, the migration-runner entry that
-applies it and the stamp that records it on an existing database are in the
-tree. A process uses them only when `WADDLE_DB_BASELINE_ACTION` is set; with
-it unset the migration catalogs, the ledger validation, the owner phase and
-every store's schema bootstrap behave as before. The cut, which makes the
-baseline the default and deletes the history, is section 8. Scope and hazards
-are in
+Status: cut. The baseline (migration 2000) is the deployment schema: the
+migration catalog is the baseline followed by the migrations numbered from
+2001 (`MIG/after_baseline.rs`, empty at the cut), and the migration history
+it replaces (`MIG/global.rs`, `MIG/waddle.rs` and their SQL files) is
+deleted. A fresh database is built from the baseline; a database the
+history built to its final version is stamped where migrations run; any
+other database that holds retired versions is refused. Section 8 records
+the cut and what remains. Scope and hazards are in
 [the completion contracts, section "M7: schema baseline"](2046-completion-contracts.md).
 
 Paths: `S/` is `server/crates/waddle-server/src/`, `X/` is
 `server/crates/waddle-xmpp/src/`, `MIG/` is `S/db/migrations/`, `B/` is
 `server/crates/waddle-server/sql/baseline/`.
 
-## 1. Where the schema comes from today
+## 1. Where the schema came from before the cut
+
+This section describes the retired history, which is what the stamp
+recognises.
 
 One database holds the whole schema: a PostgreSQL database, or a SQLite file.
 It is built from five sources.
 
 | Source | What it creates | Recorded in `_migrations` |
 | --- | --- | --- |
-| Migration catalog: `MIG/global.rs` (V1–V15) and `MIG/waddle.rs` (V1001–V1030), run as one ordered stream by `MigrationRunner::single()` | 55 tables, the ingress epoch guards, their static rows | yes, one row per version |
+| Migration catalog: `MIG/global.rs` (V1–V15) and `MIG/waddle.rs` (V1001–V1037), run as one ordered stream by `MigrationRunner::single()` | the application tables, the ingress epoch guards, their static rows | yes, one row per version (52 at the final version) |
 | Store bootstraps, each with its own `CREATE ... IF NOT EXISTS` and `ALTER` chain | 57 more tables on PostgreSQL, 38 on SQLite (section 4), and columns and indexes on catalog tables | no |
 | `sql/restricted_runtime_provisioning.sql`, run by a superuser | the seven roles, database and schema ownership, database and schema ACL, EXECUTE on `pg_catalog.pg_control_system()`, the attestor schema | no |
 | `waddle-server owner-phase` (`S/server/runtime_owner.rs`) | runs the catalog and every store's owner preparation, then grants the runtime role from an exhaustive matrix | no |
@@ -99,26 +103,28 @@ migrations numbered from 2001. Version 2000 is above every existing and
 in-flight version, so "below 2000" means "retired history" on the version
 alone.
 
-The baseline is the catalog of a process that selected it
-(`MIG/baseline.rs`, `select_from_env`): `MigrationRunner::single()` then
-returns the one baseline entry instead of the history. The selection is
-process-wide and made once, before a database is opened, because every ledger
-reader in the process builds its runner with `single()`: the runner that
-applies, the owner preparations that verify a retired version was applied
-(the baseline stands for any of them), and the runtime preflight that pins
-the ledger.
+`MigrationRunner::single()` returns the deployment catalog: the baseline
+followed by `MIG/after_baseline.rs`. Every ledger reader in a process builds
+its runner with it: the runner that applies, the owner preparations that
+verify a retired version was applied (the baseline stands for any of them),
+and the runtime preflight that pins the ledger.
 
-`WADDLE_DB_BASELINE_ACTION`:
+What the runner does is decided by the ledger, where migrations run
+(`owner-phase` on PostgreSQL, server startup on SQLite and on a PostgreSQL
+server that owns its schema):
 
-| Value | Effect |
-| --- | --- |
-| unset | The migration history is the catalog. Nothing of the baseline runs. |
-| `apply` | The baseline is the catalog. An empty database is built from it; a database on it validates; a database that still holds retired versions is refused (`RetiredLedger`). |
-| `stamp` | As `apply`, and a database that holds the complete retired history is stamped (section 5). |
+| Ledger | Default (`WADDLE_DB_BASELINE_ACTION` unset or `stamp`) | `WADDLE_DB_BASELINE_ACTION=apply` |
+| --- | --- | --- |
+| empty, and no `users` table | the baseline is applied, then every later migration | the same |
+| the baseline and later versions | validated; pending later migrations are applied | the same |
+| exactly the retired manifest, structure as the history builds it | stamped (section 5), then later migrations are applied | refused (`RetiredLedger`) |
+| retired versions, anything else | refused, naming the cause (section 5) | refused (`RetiredLedger`) |
+| empty, but a `users` table exists | refused (`SchemaWithoutLedger`) | the same |
 
-Until the cut, every process that touches a baseline database is given
-`apply`: `owner-phase`, `install-attestor`, `emit-handoff` and the server. A
-process without it meets version 2000 in the ledger and refuses.
+The action is read once per process, before a database is opened
+(`MIG/baseline.rs`, `select_from_env`); any other value of the variable is a
+usage error. `apply` exists for an operator who wants a run that can never
+rewrite a ledger.
 
 The baseline SQL uses plain `CREATE`, not `CREATE ... IF NOT EXISTS`. It runs
 once per database, inside the migration transaction, when the ledger does not
@@ -162,14 +168,21 @@ baseline in `tenant_a` gives the same catalog as the history in `tenant_a`.
 The baseline carries the rows of tables whose content is the same in every
 deployment and that nothing writes after the migrations:
 
-| Table | Engine | Rows | Written today by |
+| Table | Engine | Rows | Written by the retired history in |
 | --- | --- | --- | --- |
 | `ingress_protocol_epoch` | both | 1 | `MIG/waddle.rs` |
-| `ingress_epoch_guard_manifest` | PostgreSQL | 13 | `MIG/waddle.rs` |
+| `ingress_epoch_guard_manifest` | PostgreSQL | 19 | `MIG/waddle.rs` |
 | `pending_notification_recovery_counter` | SQLite | 1 | `S/pending_delivery/database/recovery_order.rs`, with the table; the store refuses the table without the row |
 
 They are inserted before the triggers are created, because the epoch guards
 refuse writes. The list is `STATIC_TABLES` in `scripts/schema_baseline.py`.
+
+The PostgreSQL owner phase activates the ingress protocol epoch after the
+migrations, recording the time and the lineage in the epoch row. The
+baseline carries the row as the migrations inserted it (epoch 0, neither
+recorded), and the owner phase activates it on the baseline as it did on the
+history (`STATIC_COLUMNS_AS_MIGRATED` in `scripts/schema_baseline.py`). The
+harness records those two columns only as set or not set.
 
 Every other table that holds rows on a fresh database gets them after the
 baseline, from code that keeps running:
@@ -230,7 +243,7 @@ name no deployment role, because later preparations verify them: `SELECT` for
 
 ## 3. Fresh database
 
-PostgreSQL, restricted, each step with `WADDLE_DB_BASELINE_ACTION=apply`:
+PostgreSQL, restricted:
 
 1. `sql/restricted_runtime_provisioning.sql` as a superuser.
 2. `owner-phase`: lineage is enrolled, the runner creates `_migrations`,
@@ -241,16 +254,15 @@ PostgreSQL, restricted, each step with `WADDLE_DB_BASELINE_ACTION=apply`:
 3. `install-attestor`, `emit-handoff`.
 4. The server starts with the handoff. Its pinned preflight accepts row 2000.
 
-SQLite: the server starts with `apply`, the runner applies the baseline under
+SQLite: the server starts, the runner applies the baseline under
 `BEGIN IMMEDIATE`, and each store attaches. SQLite keeps single-role startup.
 
-A PostgreSQL server that owns its schema (no attestation) does not take the
-baseline and refuses to start when it is selected. Its stores create
-`clustering_keypair_slots` and `clustering_peer_allowlist` in a shape or at a
-time that differs from the restricted path: the operator creates the
-allowlist before the first start, and a plain `CREATE` then fails. The
-PostgreSQL baseline is the restricted schema, reached through the owner
-phase.
+A PostgreSQL server that owns its schema (no attestation) applies the
+baseline at its first start, and its stores then create the owner-prepared
+tables in their one-login shape, as they did on the history.
+`waddle-cluster-keypool --sql-output` writes only the allowlist rows: the
+table belongs to the baseline, so the enrollment SQL is applied after the
+first start (which stops with an empty allowlist) and before the next.
 
 ## 4. Per-store decisions
 
@@ -295,8 +307,8 @@ applied without running its DDL: the retired ledger rows are replaced by row
 
 ### Where it runs
 
-Where migrations run, when the process was started with
-`WADDLE_DB_BASELINE_ACTION=stamp`:
+Where migrations run, by default (`WADDLE_DB_BASELINE_ACTION` unset or
+`stamp`):
 
 - PostgreSQL: the first step of `waddle-server owner-phase`
   (`bootstrap_global_owner`), inside the migration transaction, under the
@@ -317,9 +329,15 @@ Where migrations run, when the process was started with
    `RetiredLedgerMixed` (retired rows together with row 2000 or later).
 2. **The schema's structure is the one the history builds.** The server
    computes a fingerprint, one SHA-256 per structural object, and compares it
-   with `B/postgres.fingerprint.json` or `B/sqlite.fingerprint.json`. Refusal:
-   `BaselineCatalogMismatch`, with the number of differing objects and the
-   first twelve by name (`missing`, `changed`, `unexpected`).
+   with `B/postgres.fingerprint.json` or `B/sqlite.fingerprint.json`. On
+   PostgreSQL `B/postgres.one-login.fingerprint.json` is accepted too: the
+   structure a server that owned its schema left (the harness's `legacy`
+   path), a strict subset of the restricted one that lacks only what the
+   owner phase creates. The owner phase that stamps it then creates the
+   rest, exactly as it did on the history. Refusal:
+   `BaselineCatalogMismatch`, with the number of objects that differ from
+   the restricted structure and the first twelve by name (`missing`,
+   `changed`, `unexpected`).
    - PostgreSQL: the query is `B/postgres.fingerprint.sql`, generated from the
      same catalog sections as the dump, and run by the server and by the
      tooling unchanged. Each digest is of the object's dump row without owner
@@ -348,11 +366,13 @@ The operator can check precondition 2 beforehand, with the tooling:
 and compare owners and privileges with `schema_catalog.py dump` and `diff`
 against a dump of the harness's `restricted` path, using `--role-alias`.
 
-Which databases qualify: one that last ran the final pre-cut release's owner
-phase (PostgreSQL, restricted or cut over from one login: their fingerprints
-are equal) or was last started by it (SQLite). A PostgreSQL database that one
-login still owns is not stamped: the server refuses the baseline there, and
-its structure lacks what only the owner phase creates.
+Which databases qualify: one whose ledger ends at the final retired version
+(v1037, 52 rows), migrated by the final pre-cut release: on PostgreSQL by
+its owner phase (restricted) or by its server that owned the schema
+(one-login), on SQLite by its server. A database an older release migrated
+last is refused with `RetiredLedgerIncomplete`, which names the missing
+versions and the final one; it is first started (one-login, SQLite) or
+owner-phased (restricted) once with the final pre-cut release.
 
 ### The write
 
@@ -374,9 +394,8 @@ as on every run.
   transaction back; on PostgreSQL the runner reports it only after the
   rollback is acknowledged. The ledger and the schema are as they were.
 - A lost commit response is resolved by running again.
-- A process without the selection refuses a stamped database: the history
-  catalog does not know version 2000. Returning to the history therefore
-  needs the old rows back. Before the stamp the operator saves them
+- A pre-cut release refuses a stamped database: the history catalog does not
+  know version 2000. Returning to it therefore needs the old rows back. Before the stamp the operator saves them
   (`COPY (SELECT * FROM _migrations) TO ...`, or the SQLite equivalent);
   rollback is `DELETE FROM _migrations WHERE version = 2000` plus
   re-inserting the saved rows, in one transaction, with every server
@@ -386,25 +405,33 @@ as on every run.
 
 ### With the coordinated cutover and the owner phase
 
-The cutover is not rolling (decision D1). For one PostgreSQL database: stop
-every server; save the ledger; run `owner-phase` with
-`WADDLE_DB_BASELINE_ACTION=stamp`; `emit-handoff --verify` with `apply`; start
-the servers with `apply`.
+The cutover is not rolling (decision D1). The production database is still
+owned by one login when the window opens, so the stamp happens in the
+restricted cutover's owner Job
+([runbook](../runbooks/restricted-runtime-cutover.md), Phase B): every server
+is stopped, the ledger is saved, provisioning runs, and the cut image's
+`owner-phase` stamps the one-login structure and completes it with the
+owner preparations (and `--legacy-keypair-slots retire`), before
+`install-attestor` and `emit-handoff`. The harness's `upgraded` path is
+this sequence.
 
-- The stamp recreates nothing, so the attestor, the handoff's database pins
-  and the lineage row stay valid. `install-attestor` is not rerun.
-- The runtime's read-only preflight (`MIG/owner/ledger_preflight.rs`) verifies
-  the ledger against `MigrationRunner::single()`. A server without the
-  selection refuses a stamped database and a server with it refuses an
-  unstamped one, each at preflight, before it serves.
+A database already in the restricted shape is stamped by the next owner
+phase the same way; the stamp recreates nothing, so the attestor, the
+handoff's database pins and the lineage row stay valid.
+
+The runtime's read-only preflight (`MIG/owner/ledger_preflight.rs`) verifies
+the ledger against `MigrationRunner::single()`, so a cut server refuses an
+unstamped database and a pre-cut server refuses a stamped one, each at
+preflight, before it serves.
 
 ## 6. Acceptance criterion
 
 **The schema the baseline builds is catalog-identical to the schema the full
 history and every store's bootstrap build, on both engines, and a stamped
 database is unchanged apart from its ledger.** `scripts/schema_history.py`
-runs both sides with one binary and prints one line per check; it exits 1
-when a check fails.
+builds the history with the final pre-cut release (`--history-server-bin`,
+`--history-keypool-bin`) and every other path with the cut binary, and
+prints one line per check; it exits 1 when a check fails.
 
 | Check | Compares | Allowed differences |
 | --- | --- | --- |
@@ -417,8 +444,9 @@ when a check fails.
 | `stamp.*.ledger-equals-baseline` | the stamped ledger and a baseline-built database's ledger | none |
 | `stamp.*.second-is-a-no-op` | the stamped database before and after a second stamp | none |
 | `stamp.*.server-starts` | the server on the stamped database reaches `/ready` | |
-| `stamp.postgres.history-catalog-refuses-stamped-database` | `owner-phase` without the selection exits 4 | |
-| `apply.refuses-a-retired-ledger`, `stamp.refuses-a-changed-schema`, `stamp.refusal-*`, `baseline.refused-by-one-login-postgres` | each refuses, and the database and its ledger are as before | |
+| `stamp.postgres.default-is-a-no-op` | the stamped ledger before and after an `owner-phase` without the variable | none |
+| `restricted-vs-upgraded`, `stamp.postgres.one-login-ledger-equals-baseline` | the one-login database carried through provisioning and the cut binary's owner phase (which stamps it), against the restricted history database, and its ledger against the baseline's | the attestor comment; row counts |
+| `apply.refuses-a-retired-ledger`, `stamp.refuses-a-changed-schema`, `stamp.refusal-*` | each refuses, and the database and its ledger are as before | |
 
 The attestor comment (`read_physical_identity()`) carries the installation's
 operation ID and differs between any two installations.
@@ -459,7 +487,9 @@ All under `server/scripts/`; each has `--help`.
 - `schema_catalog.py dump|diff|fingerprint`: the canonical catalog document,
   its comparison, and the structural fingerprint the stamp checks.
 - `schema_history.py`: builds the history, baseline and stamp paths and
-  compares them.
+  compares them. The history paths need the final pre-cut release
+  (`--history-server-bin`, `--history-keypool-bin`); every other path runs
+  the binary under test.
 - `schema_baseline.py generate|round-trip|lockstep`: the baseline files, their
   check, and the cross-engine name comparison.
 - `schema-engine-differences.txt`: tables one engine alone has.
@@ -472,27 +502,37 @@ pass `--psql` or set `WADDLE_PSQL`. The harness and the round trip need a
 superuser on a disposable cluster and create only `waddle_baseline_*`
 databases and roles.
 
-Regenerating the baseline and proving it, from `server/`:
+The baseline is frozen: a release carries it, so a changed checksum would
+fail every database that recorded it. A schema change is a migration in
+`MIG/after_baseline.rs`. The generator and the harness remain for two jobs:
+proving that the binary under test still builds and stamps what the history
+built, and regenerating the artefacts that do not enter the checksum (the
+fingerprints, when a catalog section of `scripts/schema_catalog.py` changes).
+
+Proving the baseline, from `server/`, with the final pre-cut release built
+from `OLD` (section 8) into `/tmp/old`:
 
     export WADDLE_BASELINE_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres
     export WADDLE_PSQL=/path/to/psql
-    BUILD="cargo build -p waddle-server --features clustering --locked \
-        --bin waddle-server --bin waddle-cluster-keypool"
-    BINS="--server-bin target/debug/waddle-server \
-        --keypool-bin target/debug/waddle-cluster-keypool"
-    B=crates/waddle-server/sql/baseline
+    cargo build -p waddle-server --features clustering --locked \
+        --bin waddle-server --bin waddle-cluster-keypool
+    python3 scripts/schema_history.py --out /tmp/b \
+        --server-bin target/debug/waddle-server \
+        --keypool-bin target/debug/waddle-cluster-keypool \
+        --history-server-bin /tmp/old/waddle-server \
+        --history-keypool-bin /tmp/old/waddle-cluster-keypool
 
-    # 1. The history, with any binary of this commit.
-    $BUILD
-    python3 scripts/schema_history.py --paths history --out /tmp/a $BINS
+The files under `B/` were generated at `OLD` with:
 
-    # 2. The baseline files.
+    python3 scripts/schema_history.py --paths history --out /tmp/a \
+        --server-bin /tmp/old/waddle-server --keypool-bin /tmp/old/waddle-cluster-keypool
     python3 scripts/schema_baseline.py generate /tmp/a/postgres-restricted.json \
-        --out $B --commit "$(git rev-parse HEAD)" \
+        --out $B --commit OLD \
         --fingerprint /tmp/a/postgres-restricted.fingerprint.json \
+        --one-login-fingerprint /tmp/a/postgres-legacy.fingerprint.json \
         --retired-ledger /tmp/a/postgres-restricted.ledger.json
     python3 scripts/schema_baseline.py generate /tmp/a/sqlite-history.json \
-        --out $B --commit "$(git rev-parse HEAD)" \
+        --out $B --commit OLD \
         --fingerprint /tmp/a/sqlite-history.fingerprint.json \
         --retired-ledger /tmp/a/sqlite-history.ledger.json
     python3 scripts/schema_baseline.py round-trip /tmp/a/postgres-restricted.json --directory $B
@@ -502,13 +542,10 @@ Regenerating the baseline and proving it, from `server/`:
     python3 scripts/schema_baseline.py lockstep \
         /tmp/a/postgres-restricted.json /tmp/a/sqlite-history.json
 
-    # 3. The binary that embeds them, and every path.
-    $BUILD
-    python3 scripts/schema_history.py --out /tmp/b $BINS
-
-`git diff --stat $B` after step 2 shows what changed since the files were
-last generated. The files are embedded in the server with `include_str!`, so
-step 3 rebuilds.
+The generator writes each range test of a CHECK constraint back as
+`BETWEEN`: PostgreSQL prints a `BETWEEN` as a nested `AND`, which parses back
+into a flatter expression, so a database built from the printed text would
+hold a different constraint (`reparseable_check`).
 
 ### Keeping the engines in lockstep after the cut
 
@@ -520,140 +557,76 @@ created index exists on one engine only and is not listed in
 compares names, not types or constraint bodies: the engines spell those
 differently and no rule maps one to the other.
 
-## 8. Cut checklist
+## 8. The cut
 
-The baseline, the runner entry and the stamp exist. The cut regenerates the
-files, makes the baseline the default and deletes what it replaces. Perform
-in order.
+`OLD` is `dc19a937616a6db42fc87ccaedb0bdb18745402a`, the last commit that
+carries the migration history; its ledger ends at v1037 (52 rows on each
+engine). The files under `B/` were generated from it and their headers name
+it.
 
-### What must be regenerated at the cut commit, and why
+### Done in the cut
 
-Other work adds migrations and owner-prepared tables after the files under
-`B/` were generated (their headers name the commit). All of these are stale
-as soon as that happens, and the stamp refuses every database until they are
-regenerated:
+- **Regenerated** from `OLD` on PostgreSQL 17.11: the full history (V1–V15,
+  V1001–V1037) plus every store's bootstrap and every owner preparation
+  that accepts its tables from the baseline. Both round trips and the
+  `tenant_a` round trip are identical; `lockstep` reports no difference
+  after the six clustered ingress relations (V1031–V1037) were listed as
+  PostgreSQL-only in `scripts/schema-engine-differences.txt`.
+- **Default switched.** `MigrationRunner::single()` is the baseline plus
+  `MIG/after_baseline.rs`; the stamp is the default action (section 2).
+  `main.rs` no longer refuses the baseline for a PostgreSQL server that owns
+  its schema.
+- **History deleted.** `MIG/global.rs`, `MIG/waddle.rs`, `MIG/namespace.rs`,
+  the migration SQL files they included, the namespace and sentinel logic
+  and the V1029 special case in `MIG/runner.rs`. Ledger errors no longer
+  name a namespace. Code that pinned a function body to a migration's SQL
+  (`MIG/owner/epoch_acl.rs`, `MIG/owner/owner_rejection_grants.rs`,
+  `S/db/physical_attestation/restricted_ingress/receipt_catalog.rs`) reads
+  it from the baseline (`postgres_function_body`). Callers that name a
+  retired version (`_v1023`, `_v1030`) are mapped to the baseline by the
+  runner.
+- **Kept for the stamp**: `B/*.retired-ledger.json`, `B/*.fingerprint.json`
+  and `B/postgres.one-login.fingerprint.json`.
+- **Pins.** The restricted ingress manifest is version 3
+  (`S/db/physical_attestation/restricted_ingress_manifest_v3.json`), sourced
+  from `B/postgres.sql` and the owner candidates. Its functions and triggers
+  equal version 2's apart from `source_file` and offsets. Its column
+  properties leave out `atthasmissing` and `attmissingval`: a column added
+  to a table by `ALTER TABLE ... ADD COLUMN ... DEFAULT` carries them on a
+  history-built database and not on a baseline-built one, and the stamped
+  production database and a fresh one must both match.
+- **Tests.** `MIG/tests.rs` replays no history: it covers a fresh apply, a
+  repeated run, the stamp, each refusal and validation above 2000. Fixtures
+  that built a ledger row by row name the baseline. Tests that rolled a
+  database back to a retired version to watch a migration run again are
+  removed: no catalog entry can run again.
+- **Operators.** `waddle-cluster-keypool --sql-output` writes only the
+  allowlist rows. The cutover runbook stamps in the owner Job.
 
-| File | Stale when |
-| --- | --- |
-| `B/postgres.sql`, `B/sqlite.sql` | a migration is added or a store creates or alters anything |
-| `B/postgres.fingerprint.json`, `B/sqlite.fingerprint.json` | the same |
-| `B/postgres.retired-ledger.json`, `B/sqlite.retired-ledger.json` | a migration is added, or an existing migration's SQL or description changes |
-| `B/postgres.fingerprint.sql` | a catalog section in `scripts/schema_catalog.py` changes |
-| `B/postgres.bootstrap.sql`, `B/sqlite.bootstrap.sql`, `B/postgres.privileges.sql` | the ledger or lineage table, a role, or a grant changes (round trip only) |
+### Proof
 
-By hand, when the harness or the generator says so:
+`schema_history.py` with `OLD`'s binaries for the history paths and the cut
+binaries for the rest: all 23 checks pass, including the stamp of the
+restricted and the one-login PostgreSQL databases and of the SQLite file,
+each followed by a server start, and the refusals.
 
-- `scripts/schema-engine-differences.txt`: a new table on one engine only
-  (`lockstep` names it).
-- `STATIC_TABLES` in `scripts/schema_baseline.py`: a new migration inserts
-  rows that nothing else writes (the baseline database lacks them and
-  `history-vs-baseline.*` fails on the row count).
-- `OWNER_PREPARED_TABLES` and `OWNER_PREPARED_FUNCTIONS`: a new owner
-  preparation that refuses its table without its marker row (the `baseline`
-  path's `owner-phase` exits 4 and names the preparation).
-- `ROW_TABLES` in `scripts/schema_history.py`: a new table whose rows are the
-  same in every deployment.
-- The generator refuses an object kind it does not generate (a partitioned
-  table, a policy, a domain and so on) and names it; support is added in
-  `scripts/schema_baseline.py` with a case in `test_schema_baseline.py`.
+### What remains
 
-### Steps
-
-1. **Freeze.** No migration and no store DDL change merges until the cut
-   lands. Call the commit before the cut `OLD`.
-2. **Make `webhook_deliveries` eager** on a server that owns its schema
-   (`S/server/routes/webhook_delivery.rs`: call `initialize_owner_schema` at
-   startup). It is in the PostgreSQL baseline and absent from the SQLite one
-   because a fresh SQLite database does not hold it. Add it to neither list
-   by hand: after this change the history builds it on both engines. Remove
-   its line from `scripts/schema-engine-differences.txt`.
-3. **Regenerate and prove**, with the commands of section 7. Required: both
-   round trips and the `tenant_a` round trip exit 0, `lockstep` exits 0, and
-   `schema_history.py` prints `all N check(s) passed`. Commit `B/`.
-4. **Release this as the final pre-cut release.** Every deployment runs its
-   owner phase (PostgreSQL) or starts (SQLite) on it. A PostgreSQL deployment
-   that one login still owns is cut over to the restricted shape on it.
-5. **Convert the owner-prepared stores**, one at a time, each proven by the
-   harness: make the preparation accept its table from the baseline without
-   its marker row, remove the table from `OWNER_PREPARED_TABLES`, regenerate,
-   run the harness.
-   - `S/clustering/lease.rs` (`prepare_keypool_owner`): the three keypair
-     tables and the four guards.
-   - `S/ingress_uow/room_observation/schema.rs` (`prepare_incomplete_marker`).
-   - `S/notification_activity/owner.rs`, `S/notification_outbox/schema.rs`.
-   - `S/pubsub/owner.rs`, `S/push_service/owner.rs`,
-     `S/server/push_notification_owner.rs`.
-   A store that is not converted stays owner-prepared; the cut does not wait
-   for it.
-6. **Switch the default.**
-   - `MIG/runner.rs`, `single()`: return the baseline catalog always.
-     `MIG/baseline.rs`: `selected()` defaults to `Apply`;
-     `WADDLE_DB_BASELINE_ACTION` keeps only `stamp`.
-   - `S/main.rs`: remove the refusal for a PostgreSQL server that owns its
-     schema if that startup still exists and has been made to accept the
-     baseline; otherwise leave it and delete that startup with M6.
-7. **Delete the history.**
-   - `MIG/global.rs`, `MIG/waddle.rs`, `MIG/namespace.rs` and the
-     `owned_namespaces` and per-namespace sentinel logic in `MIG/runner.rs`
-     (one sentinel table, `users`); the V1029 branch and
-     `apply_sm_frame_provenance`.
-   - `MIG/owner.rs` (`verify_applied_through_in_transaction(..., 1023)`),
-     `MIG/owner/ledger_preflight.rs` (`_v1023`, `_v1030_*`): name the baseline
-     version; the runner's mapping of retired versions to 2000 goes.
-   - `MIG/owner/`: unregistered candidates and `transition_lab.rs`.
-   - Each folded store's `CREATE` and `ALTER` chain, in the files section 4
-     names, leaving attachment, verification and the rows it still writes.
-   - `S/clustering/lease.rs`: legacy-slot retirement; `S/owner_cli/args.rs`
-     and `S/owner_cli/owner_phase.rs`: `--legacy-keypair-slots`,
-     `--legacy-ttl`. `S/bin/cluster_keypool.rs`: stop emitting `CREATE TABLE`.
-   - The retired ledgers and fingerprints stay: the stamp needs them for as
-     long as an unstamped database may exist.
-8. **Pins.**
-   - `S/db/physical_attestation/restricted_ingress/manifest.rs`: the
-     `include_str!` sources `global.rs`, `waddle.rs`,
-     `pending_delivery/database/schema.rs` and `recovery_order.rs` become
-     `B/postgres.sql`; `source_sha256` has one entry per remaining source.
-   - `server/scripts/generate-restricted-ingress-manifest.py` (`FILES`,
-     `render`) and `server/scripts/test-restricted-ingress-manifest.py`: read
-     the baseline. Regenerate
-     `S/db/physical_attestation/restricted_ingress_manifest_v2.json` as a new
-     version; its `functions`, `triggers` and `structure` must equal the old
-     file's apart from `source_file` and byte offsets, because no function
-     body changed.
-   - `S/db/physical_attestation/pinned_entry.rs`, `pinned_receipt.rs`,
-     `pinned_selected_entry.rs`, `coverage_gap_gate.rs`,
-     `restricted_ingress/receipt_catalog.rs`, `receipt_authority.rs`: the
-     V1030 references.
-   - `S/server/runtime_owner.rs`: the grant matrices must classify exactly
-     the relations and sequences of the baseline database; the harness's full
-     comparison includes every ACL.
-9. **Tests.**
-   - `MIG/tests.rs`: the tests that replay history are replaced by tests of
-     a fresh apply, a repeated run, each stamp refusal, and the ordinary
-     validation errors for versions above 2000.
-   - `MIG/owner/ledger_preflight_tests.rs`, `tests/migration_owner_lab.rs`,
-     `tests/migration_owner_lab/`, `tests/postgres_migration_ledger_catalog.rs`,
-     `tests/physical_attestation/{pinned_entry,pinned_catalog,pinned_receipt_caller,runtime_startup,restricted_receipt_journal,combined_restricted_profile}.rs`,
-     `tests/ingress_relation_guard_lab.rs`, `S/test_support/relation_guard_lab.rs`,
-     `S/ingress_uow/room_observation/tests*`, `tests/xep0198_promotion_inventory.rs`:
-     version literals and fixtures that build a ledger row by row.
-   - `tests/restricted_runtime_startup/`, `tests/restricted_clustered_startup.rs`,
-     `tests/owner_bootstrap.rs`: remove legacy-slot retirement cases.
-   - `scripts/schema_history.py`: the history paths need the `OLD` binary
-     from here on. Keep `OLD`'s output directory; run the baseline and stamp
-     paths with the cut binary against copies of `OLD`'s databases
-     (`--keep`), and compare with `schema_catalog.py diff`.
-10. **Prove the cut.** The workspace suite (`cargo nextest run --workspace
-    --all-targets --locked --profile ci`) with the PostgreSQL group; both
-    contract tests against PostgreSQL; a stamp of a kept `OLD` restricted
-    database and of an `OLD` SQLite file, each followed by a server start and
-    a dump compared with `OLD`'s.
-11. **Operator documentation** in `server/docs/operations/`: saving the
-    ledger, the fingerprint check, `WADDLE_DB_BASELINE_ACTION=stamp`, the
-    refusals and the rollback SQL; the stamp's place in
-    `server/docs/operations/db-lineage.md`'s cutover order.
-12. **Record** in `2046-completion-contracts.md` that M7 is cut, with `OLD`,
-    the cut commit and the harness output.
+- **Owner-prepared tables.** The nine tables and four functions of
+  "What the baseline does not hold yet" stay with their preparations. Each
+  is converted by making its preparation accept the table from the baseline
+  without its marker row; that is a migration from 2001 on, since the
+  baseline is frozen.
+- **Store DDL chains.** Each folded store still runs its `CREATE ... IF NOT
+  EXISTS` and `ALTER` chain, which finds everything in place. Removing them
+  is a refactor of each store and changes no schema.
+- **Legacy keypair slots.** `--legacy-keypair-slots retire` and the
+  retirement in `S/clustering/lease.rs` stay until no one-login database
+  remains to be cut over.
+- **The dark migration-owner laboratory** (`MIG/owner.rs`,
+  `MIG/owner/transition_lab.rs` and `tests/migration_owner_lab*`) verifies
+  the baseline row; its scenarios that applied a pending retired migration
+  were removed with the history.
 
 ## 9. Decisions
 
@@ -692,6 +665,16 @@ taken every time.
    dump comparison in the server would duplicate the tooling; shipping only
    a name inventory would accept a column of the wrong type. The fingerprint
    query is one generated file both sides run.
+
+8. **The stamp is the default.** Every database in service holds the retired
+   history, and only the stamp moves it; a selector the operator has to
+   remember for one run would fail closed on every other. `apply` remains
+   for a run that must never rewrite a ledger.
+9. **A one-login PostgreSQL database is stamped.** Its structure is a strict
+   subset of the restricted one, missing only what the owner phase creates,
+   and the owner phase that stamps it creates that, as on the history. The
+   alternative, an owner Job of the pre-cut image before the cut image's,
+   adds a second image to the outage window.
 
 Not decided here, because it needs information this work does not have:
 whether any deployed database was created by a release whose store

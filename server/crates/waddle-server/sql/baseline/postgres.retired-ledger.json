@@ -223,5 +223,40 @@
   1030,
   "Create inert receipt-operation result journal",
   "6f3fd1741a584f6225b1acd8b9f9f9e53351d11a7d637ed554260d034c36d42e"
+ ],
+ [
+  1031,
+  "Create durable ordered mailbox lanes and entries",
+  "715f0ac8e0dd518e3a366797799ca1549c9df16c54cf2cdf66d92da3855b3336"
+ ],
+ [
+  1032,
+  "Create room requests, durable occupancy and frozen responses",
+  "b1d0c419ce140c507f86ed88a113bf3b2f0433e0af9c261ff438e37dbeb40809"
+ ],
+ [
+  1033,
+  "Create direct requests for the mailbox",
+  "978741d26aed1fb86a6fd7aaa314d49823b54665e1195453787e9836fac91a8b"
+ ],
+ [
+  1034,
+  "Guard the durable session and account binding relations",
+  "7e87434dbd48b149f3c03f7498c4eccf362c68f0cefeaac718eb107a81b423e6"
+ ],
+ [
+  1035,
+  "Record the occupancy identity of each room seat",
+  "4bca2feaea7a94aa2dd848fd722815d5e9e0a9407e59f394b0a2e873d5502602"
+ ],
+ [
+  1036,
+  "Record the occupancy generation of each durable session",
+  "d7cb8d00d1ff2e280689e2bf2e8db1ee25e91ea2bdc29e4e9f96395ed5d7d392"
+ ],
+ [
+  1037,
+  "Address a direct request to the node that hosts its binding",
+  "e0d81e29ad4de3f826cd54e4d562ba3171e58d9faa46a73fffe7f0671fb59ffc"
  ]
 ]

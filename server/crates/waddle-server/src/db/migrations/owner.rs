@@ -3,7 +3,8 @@
 //! This is not an online migration protocol. Operators must independently
 //! drain old writers, fence the primary, provision the owner/runtime roles and
 //! preserve the expected lineage. No value passed here proves those facts.
-//! It deliberately refuses pre-V1008 databases and does not change the epoch.
+//! It deliberately refuses a database without the ingress epoch relation or
+//! the recorded schema baseline, and does not change the epoch.
 
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use thiserror::Error;
 use waddle_xmpp::ingress::ProtocolEpoch;
 
 use super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
-use super::MigrationRunner;
+use super::{MigrationRunner, BASELINE_VERSION};
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, LINEAGE_ADVISORY_LOCK_KEY};
 use crate::db::physical_attestation::{quote_identifier, PgRoleName};
@@ -152,7 +153,7 @@ pub enum DarkMigrationOwnerError {
     Identity,
     #[error("migration owner backend has a TEMP namespace or unsafe replication mode")]
     ContaminatedSession,
-    #[error("migration owner requires a committed V1008 ledger and epoch relation")]
+    #[error("migration owner requires a committed schema baseline and epoch relation")]
     MissingEpochBaseline,
     #[error("migration owner does not support the live ingress protocol epoch")]
     UnsupportedEpoch,
@@ -296,8 +297,8 @@ async fn run_on_fresh_session(
         return Err(DarkMigrationOwnerError::Identity);
     }
 
-    // Fail closed before any bootstrap DDL when this is an empty/pre-V1008
-    // target. Consult catalogs, not an unqualified potentially shadowed name.
+    // Fail closed before any bootstrap DDL when this target has no ingress
+    // epoch relation or no ledger. Consult catalogs, not an unqualified potentially shadowed name.
     let mut rows = tx.query(
         "SELECT pg_catalog.to_regclass(pg_catalog.format('%I.ingress_protocol_epoch', ?)) IS NOT NULL, \
          pg_catalog.to_regclass(pg_catalog.format('%I._migrations', ?)) IS NOT NULL",
@@ -348,8 +349,8 @@ async fn run_on_fresh_session(
     ).await?;
     let mut rows = tx
         .query(
-            &format!("SELECT count(*) FROM {quoted}._migrations WHERE version = 1008"),
-            (),
+            &format!("SELECT count(*) FROM {quoted}._migrations WHERE version = ?"),
+            crate::db_params![BASELINE_VERSION],
         )
         .await?;
     let row = rows

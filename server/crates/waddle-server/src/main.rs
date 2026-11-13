@@ -64,9 +64,9 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
     let xmpp_config = server::XmppConfig::from_env()
         .map_err(|error| anyhow::anyhow!("Failed to load XMPP configuration: {error}"))?;
 
-    // The schema baseline, when selected, replaces the migration catalog for
-    // every ledger reader in the process, so it is chosen before the
-    // database is opened. Unset leaves the migration history in place.
+    // What migrations do with a database the retired migration history
+    // built (stamp it, or refuse it) is chosen once, before the database is
+    // opened, so every ledger reader in the process agrees.
     db::select_schema_baseline_from_env().map_err(|error| anyhow::anyhow!(error))?;
 
     // Initialize database (driver + DSN contract)
@@ -165,17 +165,6 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                         db_config.with_control_plane_pool(db_runtime.control_plane_pool_size);
                 }
                 let (pool, matched, outbox) = if db_runtime.driver == db::DatabaseDriver::Postgres {
-                    // The PostgreSQL baseline is the schema the restricted
-                    // owner phase completes. A server that owns its schema
-                    // creates some of the same tables in another shape, so
-                    // it keeps the migration history.
-                    if db::schema_baseline_selected() {
-                        anyhow::bail!(
-                            "{} applies to PostgreSQL only through `waddle-server owner-phase` \
-                             and a server started with WADDLE_DB_RUNTIME_ATTESTATION",
-                            db::BASELINE_ACTION_ENV
-                        );
-                    }
                     xmpp_config.validate_shared_owner_locations()?;
                     db::bootstrap::bootstrap_shared_owner_postgres(
                         db_config,

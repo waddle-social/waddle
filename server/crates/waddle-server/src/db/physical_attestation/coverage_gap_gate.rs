@@ -116,23 +116,22 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
     ]),
     gap!(GlobalMigrations, "The global ACL verifier covers lineage and ledger only, not a classified inventory of every migrated object.", ["_lineage", "_migrations"], [
         "server/crates/waddle-server/src/db/runtime_store_acl.rs",
-        "server/crates/waddle-server/src/db/migrations/global.rs",
-        "server/crates/waddle-server/src/db/migrations/waddle.rs",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
     ]),
     gap!(IdentityAndSessions, "Global identity, authentication and session object ACLs are not mapped into the joint profile.", ["users", "auth_identities", "sessions", "native_users"], [
-        "server/crates/waddle-server/src/db/migrations/global.rs",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
         "server/crates/waddle-server/src/auth/identity.rs",
         "server/crates/waddle-server/src/auth/native.rs",
     ]),
     gap!(RosterBlockingProfileUploads, "Global roster, blocking, profile and upload object ACLs are not mapped into the joint profile.", ["roster_items", "roster_versions", "blocking_list", "vcard_storage", "upload_slots"], [
-        "server/crates/waddle-server/src/db/migrations/global.rs",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
         "server/crates/waddle-server/src/db/blocking.rs",
         "server/crates/waddle-server/src/db/roster.rs",
     ]),
     gap!(PermissionBackend, "The production permission backend is SpiceDB, while the fixture may use a local test backend; migrated permission objects still need classification.", ["permission_tuples"], [
         "server/crates/waddle-server/src/permissions/actor.rs",
         "server/crates/waddle-server/src/server/lifecycle.rs",
-        "server/crates/waddle-server/src/db/migrations/global.rs",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
     ]),
     gap!(Inbox, "The existing inbox attachment and fixture are not joined to a complete object/role/ACL contract.", ["inbox_entries", "groupchat_notification_recovery"], [
         "server/crates/waddle-server/src/inbox/runtime_attach.rs",
@@ -148,13 +147,12 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
     ]),
     gap!(IngressEpoch, "The pinned diagnostic covers only a named subset; functions, triggers, indexes and other dependencies are not a complete profile. The durable session and account binding relations are migrated under the same epoch guard and checked by the epoch ACL diagnostic and their stores' attachments, which pin their guard triggers; the pinned and definer profiles do not cover them.", ["ingress_messages", "ingress_protocol_epoch", "ingress_epoch_guard_manifest", "sm_durable_sessions", "sm_durable_operations", "account_resource_bindings", "account_resource_operations"], [
         "server/crates/waddle-server/src/db/physical_attestation/pinned_partial_profile.rs",
-        "server/crates/waddle-server/src/db/migrations/waddle.rs",
-        "server/crates/waddle-server/src/db/migrations/authority_guards_postgres.sql",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
         "server/crates/waddle-server/src/db/migrations/owner/epoch_acl.rs",
         "server/crates/waddle-server/src/db/runtime_store_acl.rs",
     ]),
-    gap!(ReceiptJournal, "The V1030 journal and callable receipt functions have not been joined to a complete all-family graph.", ["p21_receipt_operation_results", "waddle_p21_record_effect_receipt"], [
-        "server/crates/waddle-server/src/db/migrations/owner/p21_receipt_journal_postgres.sql",
+    gap!(ReceiptJournal, "The receipt journal and callable receipt functions have not been joined to a complete all-family graph.", ["p21_receipt_operation_results", "waddle_p21_record_effect_receipt"], [
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
         "server/crates/waddle-server/src/db/physical_attestation/pinned_receipt.rs",
     ]),
     gap!(PubSubProjections, "The named partial PubSub heap ACLs do not classify the complete helper, function and object graph.", ["pubsub_nodes", "pubsub_items", "dnd_projection", "notification_settings_projection"], [
@@ -175,7 +173,7 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/tests/physical_attestation/combined_restricted_profile.rs",
     ]),
     gap!(RoomCatalog, "The non-clustered room and channel callers use migrated objects whose joint ACLs are not classified.", ["channels", "muc_pending_invites", "muc_invite_claims", "group_dm_archive_boundaries"], [
-        "server/crates/waddle-server/src/db/migrations/waddle.rs",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
         "server/crates/waddle-server/src/server/routes/websocket/muc_invites.rs",
         "server/crates/waddle-server/src/admin/channels.rs",
     ]),
@@ -220,7 +218,7 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/src/call_teardown_outbox/runtime_attach.rs",
     ]),
     gap!(ExtensionData, "Disabling configured extension modules does not remove migrated grants and observation objects from the schema.", ["extension_grants", "extension_room_observers", "extension_room_observation_work"], [
-        "server/crates/waddle-server/src/db/migrations/waddle.rs",
+        "server/crates/waddle-server/sql/baseline/postgres.sql",
         "server/crates/waddle-server/src/server/extension_commands/mod.rs",
     ]),
 ];

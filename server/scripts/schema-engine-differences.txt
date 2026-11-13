@@ -19,6 +19,15 @@ postgres-only clustering_orphan_reaper_cursors
 postgres-only clustering_peer_allowlist
 postgres-only clustering_steal_intents
 
+# The cluster's ingress mailbox and the relations that carry room and direct
+# requests between nodes; clustering runs on PostgreSQL only.
+postgres-only ingress_direct_requests
+postgres-only ingress_mailbox_entries
+postgres-only ingress_mailbox_lanes
+postgres-only ingress_room_occupants
+postgres-only ingress_room_requests
+postgres-only ingress_room_responses
+
 # Records of the restricted-runtime owner phase, which SQLite does not have:
 # it starts under one role that owns the schema.
 postgres-only _waddle_space_store_owner

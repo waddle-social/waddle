@@ -42,9 +42,8 @@ pub use migrations::{
     grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
     inspect_dark_postgres_epoch_acl, migration_checksum, run_dark_postgres_owner,
     DarkEpochAclStage, DarkLedgerPreflightError, DarkMamOwnerError, DarkMigrationLedgerPins,
-    DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError, MigrationNamespace,
-    MigrationRunner, OwnerRejectionGrantError, OwnerRejectionGrantState, SharedMigrationLedger,
-    WADDLE_NAMESPACE_START,
+    DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError, MigrationRunner,
+    OwnerRejectionGrantError, OwnerRejectionGrantState, SharedMigrationLedger,
 };
 #[cfg(feature = "test-support")]
 pub use migrations::{
@@ -54,8 +53,8 @@ pub use migrations::{
     DisposableEpochTransitionObservation,
 };
 pub use migrations::{
-    schema_baseline_selected, select_schema_baseline_from_env, BaselineAction, BaselineActionError,
-    BASELINE_ACTION_ENV, BASELINE_VERSION,
+    select_schema_baseline_from_env, BaselineAction, BaselineActionError, BASELINE_ACTION_ENV,
+    BASELINE_VERSION,
 };
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};
