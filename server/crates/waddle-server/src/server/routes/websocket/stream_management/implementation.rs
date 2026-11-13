@@ -398,6 +398,7 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
                     durable_sm: ctx.durable_sm,
                     binding: ctx.binding_ref.as_ref(),
                     session: ctx.authenticated_session.as_ref(),
+                    occupancy_session: *ctx.occupancy_session,
                 },
             )
             .await
@@ -783,6 +784,9 @@ pub(in crate::server::routes::websocket::stream_management) struct SmEnableOwner
     pub(in crate::server::routes::websocket::stream_management) binding:
         Option<&'a waddle_xmpp::ownership::BindingRef>,
     pub(in crate::server::routes::websocket::stream_management) session: Option<&'a Session>,
+    /// The occupancy generation the connection's resource is bound under.
+    pub(in crate::server::routes::websocket::stream_management) occupancy_session:
+        waddle_xmpp_core::OccupancySessionGeneration,
 }
 
 pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_enable(
@@ -832,6 +836,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
                     session: owner.session,
                     full_jid: phase.bound_jid(),
                     max_resume_secs: max,
+                    occupancy_session: owner.occupancy_session,
                     pending_commit,
                 },
             )

@@ -220,6 +220,7 @@ mod ingress_checkpoint_tests {
                 durable_sm: &mut DurableSmLink::default(),
                 binding: None,
                 session: None,
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             },
         )
         .await;

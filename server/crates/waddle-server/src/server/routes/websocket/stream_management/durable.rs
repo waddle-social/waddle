@@ -176,6 +176,8 @@ pub(in crate::server::routes::websocket) struct UnresolvedEnable {
     claim_guard: SmEnableClaimGuard,
     stream_id: SmSessionId,
     max_resume_secs: u32,
+    /// The occupancy generation the resource is bound under.
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     /// Whether the client asked for a resumable session.
     resumable: bool,
     retry: SettlementRetry,
@@ -992,6 +994,7 @@ pub(super) struct DurableEnable<'a> {
     pub(super) session: Option<&'a Session>,
     pub(super) full_jid: Option<&'a FullJid>,
     pub(super) max_resume_secs: u32,
+    pub(super) occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub(super) pending_commit: &'a mut Option<SmEnableCommit>,
 }
 
@@ -1022,6 +1025,7 @@ pub(super) async fn enable(
         session,
         full_jid,
         max_resume_secs,
+        occupancy_session,
         pending_commit,
     } = request;
     let store = store.clone();
@@ -1029,7 +1033,18 @@ pub(super) async fn enable(
         record_sm_enable(SmEnableOutcome::Refused);
         return failed("unexpected-request");
     };
-    let unresolved = match prepare_enable(state, binding, session, max_resume_secs, true).await {
+    let prepared = prepare_enable(
+        state,
+        binding,
+        session,
+        EnableTerms {
+            max_resume_secs,
+            occupancy_session,
+            resumable: true,
+        },
+    )
+    .await;
+    let unresolved = match prepared {
         Ok(unresolved) => unresolved,
         Err(condition) => return failed(condition),
     };
@@ -1070,6 +1085,14 @@ pub(super) async fn enable(
     }
 }
 
+/// What the client and its binding bring to an enable.
+struct EnableTerms {
+    max_resume_secs: u32,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+    /// Whether the client asked for a resumable session.
+    resumable: bool,
+}
+
 /// Mint an enable operation and acquire what its commit asserts: the
 /// session claim for the minted session key, and the ingress stream enrolled
 /// under it. On refusal returns the `<failed/>` condition; nothing is held.
@@ -1077,9 +1100,13 @@ async fn prepare_enable(
     state: &WebSocketState,
     binding: &BindingRef,
     session: &Session,
-    max_resume_secs: u32,
-    resumable: bool,
+    terms: EnableTerms,
 ) -> Result<UnresolvedEnable, &'static str> {
+    let EnableTerms {
+        max_resume_secs,
+        occupancy_session,
+        resumable,
+    } = terms;
     let principal = match session.authenticated_principal_ref() {
         Ok(principal) => principal,
         Err(error) => {
@@ -1117,6 +1144,7 @@ async fn prepare_enable(
         claim_guard,
         stream_id,
         max_resume_secs,
+        occupancy_session,
         resumable,
         retry: SettlementRetry::first(),
     })
@@ -1130,6 +1158,7 @@ impl UnresolvedEnable {
             principal: &self.principal,
             full_jid,
             max_resume: Duration::from_secs(u64::from(self.max_resume_secs)),
+            occupancy_session: self.occupancy_session,
             claim: self.claim.as_ref(),
             now: chrono::Utc::now(),
         }
@@ -1179,11 +1208,21 @@ pub(in crate::server::routes::websocket) async fn inline_enable(
         Duration::from_secs(u64::from(max_resume_secs_from_env())),
     );
     let max_resume_secs = u32::try_from(granted.as_secs()).unwrap_or(u32::MAX);
-    let unresolved =
-        match prepare_enable(state, &binding, session, max_resume_secs, enable.resume).await {
-            Ok(unresolved) => unresolved,
-            Err(_) => return refused(DefinedCondition::ResourceConstraint),
-        };
+    let prepared = prepare_enable(
+        state,
+        &binding,
+        session,
+        EnableTerms {
+            max_resume_secs,
+            occupancy_session: conn.occupancy_session,
+            resumable: enable.resume,
+        },
+    )
+    .await;
+    let unresolved = match prepared {
+        Ok(unresolved) => unresolved,
+        Err(_) => return refused(DefinedCondition::ResourceConstraint),
+    };
     let outcome = store
         .inline_enable(&unresolved.operation, unresolved.request(&full_jid))
         .await;
@@ -1482,6 +1521,13 @@ fn adopt_committed_resume(
         // The snapshot does not record the once-per-session subscription
         // flush. A resource that was available has consumed it.
         *targets.pending_subscribes_flushed = resource.presence_available;
+    } else if let Some(generation) = commit.occupancy_session() {
+        // The owner was lost before it detached, so no resource state was
+        // stored. The resource is published under the generation it was
+        // bound with, which its room seats are held under. Presence,
+        // carbons and roster and blocklist interest start as on a freshly
+        // bound resource: the client states them again.
+        *targets.occupancy_session = generation;
     }
     *targets.sm_ingress_fence = claim.clone();
     *targets.pending_resume_stream_id = Some(stream_id.to_string());

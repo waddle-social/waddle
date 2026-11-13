@@ -555,3 +555,73 @@ async fn binding_the_resource_again_replaces_its_detached_session() {
         "resume of a replaced session: {failed:?}"
     );
 }
+
+/// The server process is killed while Alice's session is live, so its owner
+/// never detached it and no resource snapshot exists. After a restart on the
+/// same database the session is resumable: the resume succeeds, the stanza
+/// the client had not handled is replayed once, ahead of live output.
+#[tokio::test]
+async fn a_session_live_when_the_process_died_resumes_after_a_restart() {
+    let dir = tempfile::tempdir().expect("test directory");
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("database.sqlite").display()
+    );
+    let server = TestServer::start_persistent_with_extra_envs(&db_url, ACCOUNTS, &[DURABLE]);
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("observe SQLite");
+
+    let mut alice = authenticate(&server, 0).await;
+    let enabled = bind_and_enable(&mut alice, "phone").await;
+    let token = enabled.attr("id").expect("resume token").to_owned();
+    let mut bob_on_first = bob(&server).await;
+    for id in ["m1", "m2"] {
+        send_element(&mut bob_on_first, chat("alice@localhost/phone", id, "held")).await;
+    }
+    let written = recv_chats(&mut alice, &["m1", "m2"]).await;
+    let live = wait_for_session(&pool, "alice@localhost/phone", |row| {
+        row.state == STATE_LIVE && row.outbound_appended >= i64::from(written)
+    })
+    .await;
+
+    // The process dies with the session live; the transport goes with it.
+    drop(server);
+    drop(alice);
+    drop(bob_on_first);
+    let server = TestServer::start_persistent_with_extra_envs(&db_url, ACCOUNTS, &[DURABLE]);
+
+    let mut alice = authenticate(&server, 0).await;
+    send_element(&mut alice, resume(&token, written - 1)).await;
+    let resumed = recv_sm(&mut alice, "resumed").await;
+    assert_eq!(resumed.attr("previd"), Some(token.as_str()));
+
+    let mut bob = bob(&server).await;
+    send_element(&mut bob, chat("alice@localhost/phone", "m3", "live")).await;
+    let mut seen = Vec::new();
+    while !seen.iter().any(|id| id == "m3") {
+        let frame = alice
+            .recv_timeout(Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|error| panic!("no frame after {seen:?}: {error}"));
+        let Ok(element) = frame.parse::<Element>() else {
+            continue;
+        };
+        if element.is("message", "jabber:client") && element.attr("type") == Some("chat") {
+            seen.push(element.attr("id").expect("chat id").to_owned());
+        }
+    }
+    assert_eq!(
+        seen,
+        ["m2", "m3"],
+        "the unhandled stanza is replayed once, ahead of live output"
+    );
+    let after = wait_for_session(&pool, "alice@localhost/phone", |row| {
+        row.state == STATE_LIVE && row.generation == live.generation + 1
+    })
+    .await;
+    assert_eq!(
+        after.session_id, live.session_id,
+        "the same session resumed"
+    );
+}

@@ -768,15 +768,13 @@ async fn resume_until_claimed_by(
 ///
 /// While A's node lease has not lapsed, a resume on node B is refused and
 /// nothing moves. Once it has lapsed, a resume on node B takes the claim
-/// itself and records A's owner as lost, so the session is detached under a
-/// live node and keeps the frames the client had not handled.
+/// itself, records A's owner as lost and resumes the session there.
 ///
-/// A killed owner stored no resource snapshot, and the snapshot is what
-/// carries the resource's occupancy generation to the resuming connection.
-/// Without it the connection cannot publish the resource, so the resume is
-/// answered `<failed/>` and the client binds afresh on the same stream; the
-/// retained frames stay in the authority's custody until the session
-/// expires and they are transferred to offline delivery.
+/// A killed owner stored no resource snapshot. The occupancy generation the
+/// resource was bound under is stored with the session from enable onward,
+/// so the resuming connection publishes the resource under it: the resume
+/// succeeds, the stanza the client had not handled is replayed once, ahead
+/// of live output, and the session is live under the surviving node.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper() {
     let _serial = cluster_e2e_serial_lock().lock().await;
@@ -835,31 +833,29 @@ async fn a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper(
         &request,
     )
     .await;
-    assert!(reply.is("failed", SM_NS), "{reply:?}");
-    assert!(
-        reply.get_child("item-not-found", STANZAS_NS).is_some(),
-        "a session without a resource snapshot is not published: {reply:?}"
-    );
-    let taken = wait_for_session(&db, &jid, |row| row.state == STATE_DETACHED).await;
-    assert_eq!(taken.session_id, before.session_id);
+    assert!(reply.is("resumed", SM_NS), "resume on node B: {reply:?}");
+    assert_eq!(reply.attr("previd"), Some(token.as_str()));
+    let after = wait_for_session(&db, &jid, |row| {
+        row.state == STATE_LIVE && row.generation == before.generation + 1
+    })
+    .await;
     assert_eq!(
-        taken.owner_node_id.as_deref(),
+        after.session_id, before.session_id,
+        "the same session resumed"
+    );
+    assert_eq!(
+        after.owner_node_id.as_deref(),
         Some(node_b_id.as_str()),
-        "the session is detached under the surviving node"
-    );
-    assert_eq!(
-        retained_frames(&db, &taken.session_id).await,
-        1,
-        "the frame the client had not handled stays in custody"
+        "the session is live under the surviving node"
     );
 
-    // The refused client binds the resource afresh on the same stream.
-    assert_eq!(on_b.bind(&resource).await.expect("fresh bind"), jid);
+    // Live output follows the replay: a message sent now arrives after it.
     let mut sender = sender(&node_b).await;
     send_element(&mut sender, chat(&jid, "m3")).await;
     assert_eq!(
         chat_ids_within(&mut on_b, Duration::from_secs(5)).await,
-        ["m3"]
+        ["m2", "m3"],
+        "the unhandled stanza is replayed once, ahead of live output"
     );
 }
 

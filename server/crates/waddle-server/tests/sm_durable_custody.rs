@@ -77,6 +77,7 @@ async fn enabled(store: &DurableSmStore, owner: &BindingRef) -> EnabledCommit {
                 principal: &alice(),
                 full_jid: &alice_phone(),
                 max_resume: Duration::from_secs(300),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 claim: None,
                 now: at(0),
             },

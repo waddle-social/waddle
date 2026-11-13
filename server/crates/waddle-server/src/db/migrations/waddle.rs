@@ -1791,6 +1791,22 @@ pub const V1035_ROOM_OCCUPANT_SEATS_POSTGRES: &str = r#"
 ALTER TABLE ingress_room_occupants ADD COLUMN IF NOT EXISTS occupancy_seat UUID NULL;
 "#;
 
+/// The occupancy generation each durable stream-management session's
+/// resource was bound under. A resuming connection publishes its endpoint
+/// under that generation; until now only the resource snapshot written at
+/// detach carried it, so a session whose owner was lost before it detached
+/// could not be resumed. A row written before this column existed keeps
+/// NULL and gains the value at its next detach. The guarded relation is
+/// created by a migration only on PostgreSQL; a SQLite store adds the
+/// column when it opens, so SQLite records the version alone. The statement
+/// is repeatable.
+pub const V1036_SESSION_OCCUPANCY_GENERATION: &str = r#"
+SELECT 1;
+"#;
+pub const V1036_SESSION_OCCUPANCY_GENERATION_POSTGRES: &str = r#"
+ALTER TABLE sm_durable_sessions ADD COLUMN IF NOT EXISTS occupancy_session TEXT NULL;
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -2007,6 +2023,12 @@ pub fn all() -> Vec<Migration> {
             description: "Record the occupancy identity of each room seat".to_string(),
             sql_sqlite: V1035_ROOM_OCCUPANT_SEATS,
             sql_postgres: V1035_ROOM_OCCUPANT_SEATS_POSTGRES,
+        },
+        Migration {
+            version: 1036,
+            description: "Record the occupancy generation of each durable session".to_string(),
+            sql_sqlite: V1036_SESSION_OCCUPANCY_GENERATION,
+            sql_postgres: V1036_SESSION_OCCUPANCY_GENERATION_POSTGRES,
         },
     ]
 }

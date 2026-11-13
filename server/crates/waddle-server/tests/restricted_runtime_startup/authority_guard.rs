@@ -292,6 +292,7 @@ async fn authority_relations_accept_only_matrix_writes_that_prove_the_live_epoch
         principal: &principal,
         full_jid: &phone,
         max_resume: Duration::from_secs(300),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         claim: None,
         now: Utc::now(),
     };
@@ -407,7 +408,7 @@ async fn owner_phase_guards_authority_relations_created_before_the_guard_migrati
         &prepared.admin,
         // The ledger refuses an applied version above a missing one, so the
         // later migration is undone with it; its statement is repeatable.
-        &format!("DELETE FROM {SCHEMA}._migrations WHERE version IN (1034, 1035)"),
+        &format!("DELETE FROM {SCHEMA}._migrations WHERE version IN (1034, 1035, 1036)"),
     )
     .await;
     // A row the unguarded binary committed.

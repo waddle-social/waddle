@@ -354,10 +354,14 @@ pub(super) async fn settle_terminal_session(
         stream_id: stream_id.to_string(),
         user_id: record.full_jid.to_bare().to_string(),
         jid: record.full_jid.clone(),
-        occupancy_session: resource.as_ref().map_or_else(
-            waddle_xmpp_core::OccupancySessionGeneration::mint,
-            |resource| resource.occupancy_session,
-        ),
+        // A session whose owner was lost before it detached has no resource
+        // snapshot; the generation stored with the session names the same
+        // resource publication.
+        occupancy_session: resource
+            .as_ref()
+            .map(|resource| resource.occupancy_session)
+            .or(record.occupancy_session)
+            .unwrap_or_else(waddle_xmpp_core::OccupancySessionGeneration::mint),
         inbound_count: record.inbound_handled as u32,
         outbound_count: record.window.appended().wire(),
         last_acked: record.window.acked().wire(),

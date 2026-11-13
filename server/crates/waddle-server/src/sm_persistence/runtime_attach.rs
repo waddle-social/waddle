@@ -229,6 +229,7 @@ const DURABLE_SESSIONS: &[Column] = &[
     column("enable_operation", "text", true, None),
     column("last_operation", "text", true, None),
     column("updated_at_ms", "bigint", true, None),
+    column("occupancy_session", "text", false, None),
 ];
 const DURABLE_OPERATIONS: &[Column] = &[
     column("operation_id", "text", true, None),
