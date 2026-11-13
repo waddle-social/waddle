@@ -610,10 +610,12 @@ Open before the durable selector can be chosen in production:
   release the claim on request, and no relay message asks for that. A
   resume that arrives before the reaper reclaimed a lost node's claim is
   refused the same way.
-- A Bind 2 or fresh-bind replacement on a clustered store. The store
-  refuses `replace_resource_sessions`: the binder holds the account's
-  claim, the sessions' claims may be held by other nodes, and no single
-  transaction proves both. The sessions are left to expire.
+- A fresh-bind replacement on a clustered store whose session holder does
+  not release the session within the bind's replacement budget. The
+  binder takes each session's claim and ends it under that claim (see
+  "Replacement on a clustered store" in
+  `2139-durable-sm-session-model.md`); a session it cannot claim is left
+  to expire, and its frames reach offline delivery then.
 - The inline offer is not advertised in the SASL2 stream feature.
 
 ## M7: schema baseline

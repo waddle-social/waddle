@@ -47,6 +47,9 @@ const USERS: [&str; 5] = ["alice", "bob", "carol", "probe-a", "probe-b"];
 /// `sm_durable_sessions.state` values.
 const SESSION_LIVE: i64 = 1;
 const SESSION_DETACHED: i64 = 2;
+const SESSION_TERMINAL: i64 = 4;
+/// `sm_durable_sessions.terminal_reason` of a session ended by a bind.
+const TERMINAL_REPLACED: i64 = 3;
 
 /// `account_resource_bindings.state` values.
 const BINDING_ACTIVE: i64 = 3;
@@ -664,8 +667,10 @@ async fn same_node_bind_replaces_a_live_binding(selectors: NodeSelectors) {
 
 /// Binding a resource again while its durable session is detached.
 ///
-/// Intended: the bind succeeds, the detached session becomes terminal with
-/// the reason "replaced", and its resume token names no session.
+/// The bind succeeds, the detached session becomes terminal with the
+/// reason "replaced", and its resume token names no session. On a registry
+/// cluster the binder takes the session's claim and replaces it under that
+/// claim.
 async fn bind_over_a_detached_session(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let node = &cluster.a;
@@ -684,21 +689,23 @@ async fn bind_over_a_detached_session(selectors: NodeSelectors) {
         assert_eq!(answer, internal_server_error());
         return;
     }
-    // Pinned gap: a clustered durable store refuses to end a resource's
-    // sessions for a bind. The bind succeeds and the detached session
-    // stays detached. A resume with its token is refused, because the
-    // resource is bound, and the session is still not terminal.
     assert_eq!(answer, Answer::Bound(alice_jid.clone()));
-    let unreplaced = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
-    assert_eq!(unreplaced.session_id, detached.session_id);
-    assert_eq!(unreplaced.terminal_reason, None);
+    let replaced = eventually("the detached session is replaced", || async {
+        sessions(&cluster.db, &alice_jid)
+            .await
+            .into_iter()
+            .find(|row| {
+                row.session_id == detached.session_id
+                    && row.terminal_reason == Some(TERMINAL_REPLACED)
+            })
+    })
+    .await;
+    assert_eq!(replaced.state, SESSION_TERMINAL);
     let mut late = cluster.connect(node, "alice").await;
     assert_eq!(
         resume(&mut late, &token, 0).await,
         Answer::Failed("item-not-found".to_owned())
     );
-    let after = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
-    assert_eq!(after.session_id, detached.session_id);
     let mut bob = cluster.bound(node, "bob", "desk").await;
     send(&mut bob, &chat(&alice_jid, "after-rebind")).await;
     recv_message_once(&mut again, "after-rebind").await;
@@ -1241,7 +1248,7 @@ macro_rules! profile {
 profile!(durable_registry, NodeSelectors::DURABLE_REGISTRY, {
     same_node_bind_detach_and_resume => same_node_bind_detach_and_resume,
     same_node_bind_replaces_a_live_binding => same_node_bind_replaces_a_live_binding,
-    gap_bind_over_a_detached_session => bind_over_a_detached_session,
+    bind_over_a_detached_session => bind_over_a_detached_session,
     messages_through_the_mailbox => messages_through_the_mailbox,
     messages_over_the_relay => messages_over_the_relay,
     message_to_an_account_without_a_connection => message_to_an_account_without_a_connection,

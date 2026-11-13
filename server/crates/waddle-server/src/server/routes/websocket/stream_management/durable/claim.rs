@@ -29,6 +29,12 @@
 //! is then refused and the client binds afresh: nothing was written, and the
 //! session stays resumable where it is.
 //!
+//! A bind of a resource that has durable sessions on a clustered store takes
+//! each session's claim the same way, with the binder's authenticated
+//! account as the identity proof, and ends the session under it
+//! ([`claim_for_replacement`]). Its wait for a holder is bounded more
+//! tightly, because it runs inside the bind's retirement budget.
+//!
 //! The claim swap is bound to the claim epoch observed before the holder was
 //! asked, and is issued once. A detach or a resume on the holder leaves that
 //! epoch unchanged, so a session resumed on the holder between this node's
@@ -72,7 +78,7 @@ pub(super) struct ResumeClaim {
 /// Why a resume has no claim to commit under. Nothing was committed to the
 /// session in any of these cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ClaimRefusal {
+pub(in crate::server::routes::websocket) enum ClaimRefusal {
     /// Another node holds the claim and did not release the session inside
     /// the bound, or another resume moved the claim first.
     HeldElsewhere,
@@ -95,6 +101,49 @@ pub(super) struct ResumeClaimRequest<'a> {
     pub(super) requester: &'a BareJid,
     /// The account the session is bound to.
     pub(super) session_account: &'a BareJid,
+    /// Longest wait for a holder to release the session. `None` waits the
+    /// resume-handshake bound; a shorter value is used as given.
+    pub(super) wait_budget: Option<Duration>,
+}
+
+/// A session claim held on this node so that a bind can end the session.
+pub(in crate::server::routes::websocket) struct ReplacementClaim {
+    /// Keeps this node's identity from rotating until the write is issued.
+    _publication: CurrentNodeIdentityGuard,
+    /// The fence the replacement asserts. Absent only where the claim
+    /// bookkeeping holds none; a clustered store then refuses the write.
+    pub(in crate::server::routes::websocket) fence: Option<SmClaimFence>,
+}
+
+/// Hold the claim of `record`'s session on this node so that the bind of
+/// its resource by `binder` can end it. The holder of a live session is
+/// asked to detach it first, which closes that connection with a conflict;
+/// a holder that does not release the session within `wait_budget` keeps
+/// it.
+pub(in crate::server::routes::websocket) async fn claim_for_replacement(
+    state: &WebSocketState,
+    store: &DurableSmStore,
+    record: &DurableSessionRecord,
+    binder: &BareJid,
+    wait_budget: Duration,
+) -> Result<ReplacementClaim, ClaimRefusal> {
+    let stream_id = SmSessionId::new(record.session.as_uuid().to_string());
+    let held = claim_for_resume(
+        state,
+        ResumeClaimRequest {
+            store,
+            session: record.session,
+            stream_id: &stream_id,
+            requester: binder,
+            session_account: &record.full_jid.to_bare(),
+            wait_budget: Some(wait_budget),
+        },
+    )
+    .await?;
+    Ok(ReplacementClaim {
+        _publication: held._publication,
+        fence: held.fence,
+    })
 }
 
 /// What the wait for a foreign claim ended with.
@@ -178,12 +227,15 @@ async fn await_transferable(
 ) -> Result<Transfer, ClaimRefusal> {
     let registry = &state.deps.protocol.sm_session_registry;
     let stream_id = request.stream_id.as_str();
-    let budget = state
+    let handshake = state
         .deps
         .app_state
         .clustering_claims
         .resume_handshake_timeout()
         .unwrap_or(Duration::ZERO);
+    let budget = request
+        .wait_budget
+        .map_or(handshake, |wait| wait.min(handshake));
     let deadline = tokio::time::Instant::now() + budget;
     let mut delay = FIRST_RETRY_DELAY;
     // The epoch a takeover binds is the first one observed. A claim that

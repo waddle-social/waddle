@@ -17,7 +17,9 @@ use waddle_xmpp::stream_management::{
 };
 
 use super::super::replay::load_terminal_recovery_blocklist;
-use super::super::stream_management::{selected_store, DurableSmOwner, OwnerRelease};
+use super::super::stream_management::{
+    claim_for_replacement, selected_store, DurableSmOwner, OwnerRelease,
+};
 use super::{
     cleanup_invalidated_detached_session, debug, drain_outbound_into_replay, finish_detached_route,
     mpsc, redrive_terminal_pending_rows_to_live_resource, retire_binding, retire_ingress_stream,
@@ -564,20 +566,31 @@ pub(crate) async fn run_durable_sm_sweep(state: &WebSocketState) {
     }
 }
 
+/// Longest wait, per bind, for nodes holding the claims of the resource's
+/// durable sessions to release them. It leaves the rest of the bind's
+/// retirement budget to the remote incumbent's retirement.
+const REPLACEMENT_CLAIM_BUDGET: Duration = Duration::from_secs(5);
+
 /// End every durable session of `resource` because the resource is being
 /// bound again, and transfer what those sessions retained so the new binding
 /// receives it from offline delivery.
 ///
-/// A clustered store refuses the replacement: the binder holds the account's
-/// claim, not each session's. The sessions are then left as they are, which
-/// is the behaviour without a durable authority for a session this node does
-/// not hold: the occupancy authority retires their generation at this bind,
-/// a later resume of one is refused for that reason, and each expires through
-/// its own resume window.
+/// On a clustered store every write asserts the session's own claim, so each
+/// session is ended under its claim: this node takes it with the binder's
+/// authenticated account as the identity proof, asking a holder whose
+/// connection owns the session to detach it (that connection is closed with
+/// a conflict). A session whose holder does not release it within the budget
+/// is left as it is: the occupancy authority retires its generation at this
+/// bind, a later resume of it is refused for that reason, and it expires
+/// through its own resume window, transferring its frames then.
 pub(crate) async fn replace_durable_resource_sessions(state: &WebSocketState, resource: &FullJid) {
     let Some(store) = selected_store(state) else {
         return;
     };
+    if store.is_clustered() {
+        replace_claimed_resource_sessions(state, store, resource).await;
+        return;
+    }
     match store
         .replace_resource_sessions(resource, chrono::Utc::now())
         .await
@@ -587,17 +600,62 @@ pub(crate) async fn replace_durable_resource_sessions(state: &WebSocketState, re
                 settle_terminal_session(state, store, terminal.session).await;
             }
         }
-        Err(LifecycleError::Rejected(LifecycleRejection::Store(DurableSmError::Unsupported {
-            operation,
-        }))) => {
-            debug!(
-                jid = %resource,
-                operation,
-                "durable SM sessions of a rebound resource are left to expire"
-            );
-        }
         Err(error) => {
             warn!(jid = %resource, %error, "durable SM sessions of a rebound resource were not replaced");
+        }
+    }
+}
+
+/// Replace the resource's sessions one at a time, each under its own claim.
+async fn replace_claimed_resource_sessions(
+    state: &WebSocketState,
+    store: &DurableSmStore,
+    resource: &FullJid,
+) {
+    let sessions = match store.resource_sessions(resource).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            warn!(jid = %resource, %error, "durable SM sessions of a rebound resource could not be read");
+            return;
+        }
+    };
+    let binder = resource.to_bare();
+    let deadline = tokio::time::Instant::now() + REPLACEMENT_CLAIM_BUDGET;
+    for record in sessions {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let claim = match claim_for_replacement(state, store, &record, &binder, remaining).await {
+            Ok(claim) => claim,
+            Err(refusal) => {
+                debug!(
+                    jid = %resource,
+                    session = ?record.session,
+                    ?refusal,
+                    "durable SM session of a rebound resource is left to its claim holder"
+                );
+                continue;
+            }
+        };
+        let replaced = store
+            .replace_session(record.session, claim.fence.as_ref(), chrono::Utc::now())
+            .await;
+        drop(claim);
+        match replaced {
+            Ok(terminal) => {
+                settle_terminal_session(state, store, terminal.session).await;
+            }
+            // Ended meanwhile, by its own expiry or another bind; whoever
+            // ended it settles it.
+            Err(LifecycleError::Rejected(
+                LifecycleRejection::Transition(_) | LifecycleRejection::UnknownSession,
+            )) => {}
+            Err(error) => {
+                warn!(
+                    jid = %resource,
+                    session = ?record.session,
+                    %error,
+                    "durable SM session of a rebound resource was not replaced"
+                );
+            }
         }
     }
 }
