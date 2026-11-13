@@ -329,6 +329,12 @@ impl DurableSmLink {
         let Self::Hydrating(hydrating) = self else {
             return Err(HydrationFailure::NotHydrating);
         };
+        #[cfg(feature = "test-support")]
+        if super::super::characterization_seams::fail_durable_completion(
+            &hydrating.commit.fence().session.as_uuid().to_string(),
+        ) {
+            return Err(HydrationFailure::Unavailable);
+        }
         let mut attempts = 0;
         let tail = loop {
             attempts += 1;
@@ -1744,6 +1750,11 @@ pub(super) async fn resume(
         }
     };
     let stream_id = SmSessionId::new(candidate.session.as_uuid().to_string());
+    #[cfg(feature = "test-support")]
+    super::super::characterization_seams::observe_durable_resume_target(
+        &resume.previd,
+        stream_id.as_str(),
+    );
     if candidate.full_jid.to_bare() != bare_jid {
         return DurableResumeStep::Failed(SmResumeTerminal::identity_mismatch(
             stream_id,

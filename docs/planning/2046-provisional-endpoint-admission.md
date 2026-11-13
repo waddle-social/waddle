@@ -45,8 +45,13 @@ failure cases, so the same authenticated WebSocket needs to remain usable for a
 fresh bind.
 
 The dark regression in `tests/xep0198_attached_resume_ws.rs` pauses after
-publication and before claim completion, injects a replay gap into the claimed
-session, then tries a fresh bind on the same socket and same full JID. It also
+publication and before the durable resume completes, fails that completion
+(the session returns to detached and the resume is answered `<failed/>` with
+`internal-server-error`), then tries a fresh bind on the same socket and same
+full JID. The durable authority commits a resume before its endpoint is
+published, so a failed completion is the post-publication failure; the seam
+is armed with the resume token the client holds and matches the durable
+session key the connection carries. It also
 releases a delayed cleanup carrying the failed binding token and checks that a
 new binding still owns the slot. The test remains ignored because the current
 production behavior is expected to fail it. Its resource is deliberately

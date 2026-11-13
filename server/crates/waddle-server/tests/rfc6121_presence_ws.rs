@@ -106,6 +106,24 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
     bob.send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("bob is available for presence broadcasts");
+    await_frames_handled(bob, "bob-available-handled").await;
+}
+
+/// Wait until the server has handled every frame `client` sent before this
+/// call. A connection reads its next frame only after the previous one's
+/// presence change has reached the account coordinator, which routing reads,
+/// so the ping's result proves the earlier presence is routable.
+async fn await_frames_handled(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send ping");
+    let _ = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("ping result");
 }
 
 #[tokio::test]

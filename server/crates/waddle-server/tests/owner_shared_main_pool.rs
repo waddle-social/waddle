@@ -136,12 +136,6 @@ async fn malformed_existing_outbox_blocks_owner_lane_seal() {
         .execute(&admin)
         .await
         .expect("isolated schema");
-    sqlx::query(&format!(
-        "CREATE VIEW {schema}.notification_candidates AS SELECT 1 AS malformed"
-    ))
-    .execute(&admin)
-    .await
-    .expect("malformed candidate relation");
     let mut url = url::Url::parse(&database_url).expect("PostgreSQL URL");
     let retained: Vec<(String, String)> = url
         .query_pairs()
@@ -152,6 +146,32 @@ async fn malformed_existing_outbox_blocks_owner_lane_seal() {
         .clear()
         .extend_pairs(retained)
         .append_pair("options", &format!("-c search_path={schema}"));
+    // The schema baseline creates the outbox relations, so the malformed
+    // relation replaces the candidate table of a prepared database.
+    let (pool, _, outbox) = bootstrap_shared_owner_postgres(
+        DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string()),
+        &LineageConfig::default(),
+        false,
+        b"test-key",
+        1,
+        1,
+    )
+    .await
+    .expect("prepare the database");
+    drop(outbox);
+    drop(pool);
+    sqlx::query(&format!(
+        "DROP TABLE {schema}.notification_candidates CASCADE"
+    ))
+    .execute(&admin)
+    .await
+    .expect("drop the prepared candidate table");
+    sqlx::query(&format!(
+        "CREATE VIEW {schema}.notification_candidates AS SELECT 1 AS malformed"
+    ))
+    .execute(&admin)
+    .await
+    .expect("malformed candidate relation");
     let result = bootstrap_shared_owner_postgres(
         DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string()),
         &LineageConfig::default(),
