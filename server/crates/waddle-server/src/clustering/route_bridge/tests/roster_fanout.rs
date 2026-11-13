@@ -1,31 +1,36 @@
-//! Subscription roster pushes must bypass a full owner mirror through the
-//! registered remote-resource route without appending to a stale local stream.
+//! Subscription roster pushes reach a resource another node hosts through a
+//! bound request for the coordinator's binding. They bypass the full owner
+//! mirror and never append to a stale local stream.
 
 use super::{
     connection_entry_for_current_node, origin_identity, receiver_identity, services_with_claims,
     test_peer_id, Arc, CancellationToken, ClusteringMessagingConfig, ConnectionEntry, DeliveryKind,
-    NodeId, OrderedRelayDeliveryBridge, OutboundStanza, RelayDeliverRemoteResourceFrame,
-    RelayRemoteResourceFrameStatus, RelayTraceContext, RemoteOwnerRegistration,
-    RemoteResourceOutboundFrame, RemoteResourceSocketGeneration, Stanza, WebSocketState,
+    OrderedRelayDeliveryBridge, OutboundStanza, Stanza, WebSocketState,
 };
-use crate::clustering::route_bridge::{
-    TestRemoteFrameTransport, TEST_CANCELLED_REMOTE_FRAMES, TEST_REMOTE_FRAME_TRANSPORT,
-};
+use crate::clustering::route_bridge::{TestBoundOffer, TestBoundTransport, TEST_BOUND_TRANSPORT};
 use crate::clustering::ClusteringHandles;
 use crate::db::roster::DatabaseRosterStorage;
-use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+use crate::server::routes::interpret::{
+    FullJidDeliveryOutcome, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind,
+};
+use crate::server::routes::websocket::handlers::account_reads::roster_interested;
 use crate::server::routes::websocket::handlers::presence::handle_ordered_relay_presence_request;
 use crate::server::routes::websocket::handlers::roster_fanout::send_roster_push_to_resources;
+use crate::server::routes::websocket::test_bindings::{
+    bind_remote_test_resource, sync_test_binding,
+};
 use crate::server::routes::websocket::test_state::{
     create_test_websocket_state_with_extension_manager, empty_extension_manager, TestStateOverrides,
 };
 use jid::FullJid;
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
+use waddle_xmpp::ownership::account_resource_transition::AccountResourceSnapshot;
+use waddle_xmpp::ownership::{BindingRef, ConnectionRef, Entity, EntityType, NodeLeaseIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::registry::{BroadcastOutcome, ConnectionRegistry};
 use waddle_xmpp::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage};
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, PromotionCaptureCustody, SmSessionRegistry,
@@ -35,9 +40,17 @@ use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::presence::{Presence, Type};
 
+/// The owner node (`receiver-node`) of an account whose resource
+/// `alice@example.com/phone` has its socket on `origin-node`. The account
+/// coordinator names the socket's binding, so the owner reaches it by a
+/// bound request; the test stands in for committing that request and for
+/// the hosting node's decision ([`TEST_BOUND_TRANSPORT`]).
 struct RemoteRosterFixture {
     state: Arc<WebSocketState>,
-    socket_bridge: Arc<OrderedRelayDeliveryBridge>,
+    /// The connection registry of the node that hosts the socket.
+    socket_registry: Arc<ConnectionRegistry>,
+    /// The binding the account coordinator names for `target`.
+    binding: BindingRef,
     socket_receiver: mpsc::Receiver<OutboundStanza>,
     mirror_receiver: mpsc::Receiver<OutboundStanza>,
     persistence: Arc<InMemorySmPersistence>,
@@ -48,6 +61,13 @@ struct RemoteRosterFixture {
 
 impl RemoteRosterFixture {
     async fn new(roster_interested: bool) -> Self {
+        Self::with_interest(roster_interested, roster_interested).await
+    }
+
+    /// `live_interest` is the remote resource's roster interest, as its
+    /// owner mirror and the coordinator's snapshot record it;
+    /// `detached_interest` is that of the stale local detached stream.
+    async fn with_interest(live_interest: bool, detached_interest: bool) -> Self {
         let stopped = CancellationToken::new();
         stopped.cancel();
         let owner_bridge =
@@ -81,20 +101,19 @@ impl RemoteRosterFixture {
         owner_bridge.wire(Arc::new(owner_services));
 
         let target: FullJid = "alice@example.com/phone".parse().expect("remote target");
+        // The owner's remote-hosted entry for the resource, with a full queue:
+        // nothing may be handed to it.
         let (mirror_sender, mirror_receiver) = mpsc::channel(1);
         mirror_sender
             .try_send(OutboundStanza::new(Stanza::Presence(Presence::new(
                 Type::None,
             ))))
             .expect("fill owner mirror before fanout");
-        let mirror_entry = ConnectionEntry::remote_hosted(mirror_sender);
-        let mirror_owner = mirror_entry.binding_id();
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .register_entry(target.clone(), mirror_entry);
-        if roster_interested {
+        state.deps.protocol.connection_registry.register_entry(
+            target.clone(),
+            ConnectionEntry::remote_hosted(mirror_sender),
+        );
+        if live_interest {
             state
                 .deps
                 .protocol
@@ -102,50 +121,31 @@ impl RemoteRosterFixture {
                 .mark_roster_interested(&target);
         }
 
-        let socket_services = Arc::new(
-            services_with_claims(
-                receiver_identity(),
-                origin_identity(),
-                origin_identity(),
-                test_peer_id(),
-            )
-            .await,
-        );
-        let socket_bridge = OrderedRelayDeliveryBridge::new(
-            CancellationToken::new(),
-            &ClusteringMessagingConfig::default(),
-        );
-        socket_bridge.wire(socket_services.clone());
+        let socket_services = services_with_claims(
+            receiver_identity(),
+            origin_identity(),
+            origin_identity(),
+            test_peer_id(),
+        )
+        .await;
         let (socket_sender, socket_receiver) = mpsc::channel(4);
         let socket_entry = connection_entry_for_current_node(socket_sender, &socket_services);
-        let socket_owner = socket_entry.binding_id();
-        socket_services
-            .connection_registry
-            .register_entry(target.clone(), socket_entry);
-        let registration_id = socket_bridge
-            .test_insert_remote_socket_registration(
-                target.clone(),
-                socket_owner,
-                NodeId::new(receiver_identity().node_id),
-            )
-            .await;
-        owner_bridge.remote_owner_resources.lock().await.insert(
-            target.clone(),
-            RemoteOwnerRegistration {
-                occupancy_session: OccupancySessionGeneration::mint(),
-                socket_identity: origin_identity(),
-                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
-                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
-                        &NodeIdentity::new(origin_identity().node_id, "fixture-epoch"),
-                    ),
-                ),
-                unregister_pending: false,
-                registration_id,
-                socket_generation: RemoteResourceSocketGeneration::next(None),
-                socket_node: NodeId::new(origin_identity().node_id),
-                owner: mirror_owner,
+        let binding = socket_entry
+            .binding_ref()
+            .cloned()
+            .expect("the socket's entry carries its binding");
+        let socket_registry = socket_services.connection_registry.clone();
+        socket_registry.register_entry(target.clone(), socket_entry);
+        bind_remote_test_resource(
+            &state,
+            &target,
+            &binding,
+            AccountResourceSnapshot {
+                roster_interested: live_interest,
+                ..AccountResourceSnapshot::default()
             },
-        );
+        )
+        .await;
 
         let stream = SmSessionId::new("stale-owner-roster-stream");
         registry
@@ -163,7 +163,7 @@ impl RemoteRosterFixture {
                 max_resume_time: Some(300),
                 detached_at: Instant::now(),
                 carbons_enabled: false,
-                roster_interested,
+                roster_interested: detached_interest,
                 blocklist_interested: false,
                 presence_available: false,
                 presence_show: None,
@@ -182,7 +182,8 @@ impl RemoteRosterFixture {
             .expect("remove canonical detached source");
         Self {
             state,
-            socket_bridge,
+            socket_registry,
+            binding,
             socket_receiver,
             mirror_receiver,
             persistence,
@@ -192,7 +193,7 @@ impl RemoteRosterFixture {
         }
     }
 
-    async fn subscription_push(&self) -> Vec<RemoteResourceOutboundFrame> {
+    async fn subscription_push(&self) {
         let from = self.target.to_bare();
         let contact = "bob@example.com".parse::<jid::BareJid>().expect("contact");
         let mut presence = Presence::new(Type::Subscribed);
@@ -205,14 +206,46 @@ impl RemoteRosterFixture {
             inbound_sequence: 0,
             handoff: None,
         };
-        TEST_CANCELLED_REMOTE_FRAMES
-            .scope(RefCell::new(Vec::new()), async {
-                handle_ordered_relay_presence_request(&self.state, &contact, presence, origin)
-                    .await
-                    .expect("subscription mutation");
-                TEST_CANCELLED_REMOTE_FRAMES.with(|frames| frames.take())
-            })
+        handle_ordered_relay_presence_request(&self.state, &contact, presence, origin)
             .await
+            .expect("subscription mutation");
+    }
+
+    /// The hosting node's half of a bound request: the stanza goes only to
+    /// the socket connection that carries the named binding.
+    fn hand_to_binding(registry: &ConnectionRegistry, offer: &TestBoundOffer) -> BroadcastOutcome {
+        registry
+            .try_send_outbound_to_binding(
+                &offer.target,
+                &offer.binding,
+                OutboundStanza::new(offer.stanza.clone()),
+            )
+            .expect("the socket node hosts the named binding")
+    }
+
+    /// A transport that records every bound request and answers `outcome`.
+    fn recording(
+        outcome: FullJidDeliveryOutcome,
+    ) -> (TestBoundTransport, Arc<Mutex<Vec<TestBoundOffer>>>) {
+        let offers = Arc::new(Mutex::new(Vec::new()));
+        let recorded = offers.clone();
+        let transport: TestBoundTransport = Arc::new(move |offer| {
+            recorded.lock().expect("bound offers").push(offer);
+            Box::pin(async move { outcome })
+        });
+        (transport, offers)
+    }
+
+    fn assert_addressed_to_socket(&self, offer: &TestBoundOffer) {
+        assert_eq!(offer.target, self.target);
+        assert_eq!(offer.binding, self.binding);
+        assert_eq!(
+            offer.node,
+            origin_identity(),
+            "addressed to the hosting node"
+        );
+        assert_eq!(offer.kind, DeliveryKind::DirectFrame);
+        assert!(offer.ingress_append.is_none());
     }
 
     async fn assert_source_untouched(&self) {
@@ -249,21 +282,20 @@ impl RemoteRosterFixture {
 #[tokio::test]
 async fn subscription_roster_push_bypasses_full_owner_mirror_to_real_remote_socket() {
     let mut fixture = RemoteRosterFixture::new(true).await;
-    let offered = fixture.subscription_push().await;
-    // The stopped real ask returns MaybeCommitted: a second offer would be
-    // unsafe. Capture at the actual DTO boundary rather than returning success.
-    let [frame] = <[_; 1]>::try_from(offered).expect("exactly one remote roster frame offered");
-    assert_eq!(frame.jid, fixture.target);
-    assert_eq!(frame.kind, DeliveryKind::DirectFrame);
-    assert!(frame.ingress_append.is_none());
-    let reply = fixture
-        .socket_bridge
-        .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
-            frame,
-            trace: RelayTraceContext::default(),
-        })
+    // The hosting node's decision is not read: the origin reports the
+    // request as possibly committed, so a second offer would be unsafe.
+    let (transport, offers) =
+        RemoteRosterFixture::recording(FullJidDeliveryOutcome::MaybeCommitted);
+    TEST_BOUND_TRANSPORT
+        .scope(transport, fixture.subscription_push())
         .await;
-    assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
+    let offered = std::mem::take(&mut *offers.lock().expect("bound offers"));
+    let [offer] = <[_; 1]>::try_from(offered).expect("exactly one bound roster request");
+    fixture.assert_addressed_to_socket(&offer);
+    assert_eq!(
+        RemoteRosterFixture::hand_to_binding(&fixture.socket_registry, &offer),
+        BroadcastOutcome::Delivered
+    );
     let delivered = fixture
         .socket_receiver
         .try_recv()
@@ -313,9 +345,13 @@ async fn subscription_roster_push_bypasses_full_owner_mirror_to_real_remote_sock
 #[tokio::test]
 async fn subscription_roster_push_does_not_offer_uninterested_registered_remote_resource() {
     let mut fixture = RemoteRosterFixture::new(false).await;
+    let (transport, offers) = RemoteRosterFixture::recording(FullJidDeliveryOutcome::Delivered);
+    TEST_BOUND_TRANSPORT
+        .scope(transport, fixture.subscription_push())
+        .await;
     assert!(
-        fixture.subscription_push().await.is_empty(),
-        "registration alone cannot opt a resource into roster pushes"
+        offers.lock().expect("bound offers").is_empty(),
+        "a binding alone cannot opt a resource into roster pushes"
     );
     assert!(fixture.socket_receiver.try_recv().is_err());
     fixture.assert_source_untouched().await;
@@ -324,17 +360,13 @@ async fn subscription_roster_push_does_not_offer_uninterested_registered_remote_
 #[tokio::test]
 async fn subscription_roster_remote_backpressure_does_not_append_or_retry() {
     let mut fixture = RemoteRosterFixture::new(true).await;
-    let socket_registry = &fixture
-        .socket_bridge
-        .services
-        .get()
-        .expect("wired socket services")
-        .connection_registry;
-    let socket_entry = socket_registry
+    let socket_entry = fixture
+        .socket_registry
         .entry(&fixture.target)
         .expect("registered socket entry");
     for _ in 0..4 {
-        assert!(socket_registry
+        assert!(fixture
+            .socket_registry
             .try_send_outbound_if_owner(
                 &fixture.target,
                 &socket_entry.binding_id(),
@@ -342,27 +374,14 @@ async fn subscription_roster_remote_backpressure_does_not_append_or_retry() {
             )
             .is_delivered());
     }
-    let offers = Arc::new(AtomicUsize::new(0));
-    let offer_count = offers.clone();
-    let socket_bridge = fixture.socket_bridge.clone();
-    let transport: TestRemoteFrameTransport = Arc::new(move |message| {
-        let offers = offers.clone();
-        let socket_bridge = socket_bridge.clone();
-        Box::pin(async move {
-            offers.fetch_add(1, Ordering::SeqCst);
-            let reply = socket_bridge
-                .deliver_remote_resource_frame_on_socket(message)
-                .await;
-            assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Backpressure);
-            reply
-        })
-    });
-    assert!(TEST_REMOTE_FRAME_TRANSPORT
+    // The lane is at its pending cap: the request is refused before it is
+    // committed, a definite no-effect outcome (`Dropped`).
+    let (transport, offers) = RemoteRosterFixture::recording(FullJidDeliveryOutcome::Dropped);
+    TEST_BOUND_TRANSPORT
         .scope(transport, fixture.subscription_push())
-        .await
-        .is_empty());
+        .await;
     assert_eq!(
-        offer_count.load(Ordering::SeqCst),
+        offers.lock().expect("bound offers").len(),
         1,
         "Some(Dropped) concludes this attempt without another offer"
     );
@@ -391,50 +410,33 @@ async fn subscription_roster_remote_backpressure_does_not_append_or_retry() {
 
 #[tokio::test]
 async fn subscription_roster_unavailable_remote_does_not_enqueue_to_uninterested_replacement() {
-    // The live mirror requested a roster; the independent stale detached stream
-    // did not. After replacement neither current resource is interested.
-    let fixture = RemoteRosterFixture::new(false).await;
-    fixture
-        .state
-        .deps
-        .protocol
-        .connection_registry
-        .mark_roster_interested(&fixture.target);
-    fixture
-        .socket_bridge
-        .remote_socket_resources
-        .lock()
-        .await
-        .remove(&fixture.target);
+    // The live resource requested a roster; the independent stale detached
+    // stream did not. After replacement neither current resource is interested.
+    let fixture = RemoteRosterFixture::with_interest(true, false).await;
     let (replacement_sender, mut replacement_receiver) = mpsc::channel(4);
     let registry = fixture.state.deps.protocol.connection_registry.clone();
     let target = fixture.target.clone();
-    let socket_bridge = fixture.socket_bridge.clone();
     let offers = Arc::new(AtomicUsize::new(0));
     let offer_count = offers.clone();
-    let transport: TestRemoteFrameTransport = Arc::new(move |message| {
+    let transport: TestBoundTransport = Arc::new(move |_offer| {
         let registry = registry.clone();
         let target = target.clone();
-        let socket_bridge = socket_bridge.clone();
         let replacement_sender = replacement_sender.clone();
         let offers = offers.clone();
         Box::pin(async move {
             offers.fetch_add(1, Ordering::SeqCst);
-            let reply = socket_bridge
-                .deliver_remote_resource_frame_on_socket(message)
-                .await;
-            assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Unavailable);
-            // Bind a fresh stream before stale-registration cleanup returns.
-            // Its default roster interest is false; the old mirror's interest
-            // must not authorize a local enqueue to this replacement.
+            // Bind a fresh stream before the refusal returns. Its default
+            // roster interest is false; the old resource's interest must not
+            // authorize a local enqueue to this replacement.
             registry.register_entry(target, ConnectionEntry::new(replacement_sender));
-            reply
+            // The hosting node refused the request: the binding no longer
+            // holds the resource there.
+            FullJidDeliveryOutcome::Unavailable
         })
     });
-    assert!(TEST_REMOTE_FRAME_TRANSPORT
+    TEST_BOUND_TRANSPORT
         .scope(transport, fixture.subscription_push())
-        .await
-        .is_empty());
+        .await;
     assert_eq!(offer_count.load(Ordering::SeqCst), 1);
     assert!(
         fixture
@@ -444,7 +446,7 @@ async fn subscription_roster_unavailable_remote_does_not_enqueue_to_uninterested
             .connection_registry
             .entry(&fixture.target)
             .is_some(),
-        "cleanup must retain the newer registry owner"
+        "the newer registry owner is retained"
     );
     assert!(!fixture
         .state
@@ -459,98 +461,57 @@ async fn subscription_roster_unavailable_remote_does_not_enqueue_to_uninterested
     fixture.assert_source_untouched().await;
 }
 
-#[tokio::test]
-async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_stalls() {
-    let mut fixture = RemoteRosterFixture::new(false).await;
-    let registry = &fixture.state.deps.protocol.connection_registry;
-    let other: FullJid = "alice@example.com/other".parse().expect("second live JID");
-    let (placeholder_sender, _placeholder_receiver) = mpsc::channel(2);
-    registry.register_entry(other.clone(), ConnectionEntry::new(placeholder_sender));
-    registry.mark_roster_interested(&fixture.target);
-    registry.mark_roster_interested(&other);
-    let user = fixture.target.to_bare();
-    let order = registry.roster_interested_resources_for_user(&user);
-    let [remote, local] = <[_; 2]>::try_from(order.clone()).expect("two live resources");
-    let (mirror_sender, mut mirror_receiver) = mpsc::channel(2);
-    let mirror_entry = ConnectionEntry::remote_hosted(mirror_sender);
-    let mirror_owner = mirror_entry.binding_id();
-    registry.register_entry(remote.clone(), mirror_entry);
-    let (local_sender, mut local_receiver) = mpsc::channel(2);
-    registry.register_entry(local.clone(), ConnectionEntry::new(local_sender));
-    registry.mark_roster_interested(&remote);
-    registry.mark_roster_interested(&local);
-    // Occupied-entry replacement preserves hash keys and their iteration order;
-    // the blocked remote must precede the ready local in the real live loop.
-    assert_eq!(registry.roster_interested_resources_for_user(&user), order);
-
-    let socket_registry = &fixture
-        .socket_bridge
-        .services
-        .get()
-        .expect("wired socket services")
-        .connection_registry;
-    let socket_entry = socket_registry
-        .entry(&fixture.target)
-        .expect("actual B socket");
-    let socket_owner = socket_entry.binding_id();
-    socket_registry.register_entry(remote.clone(), socket_entry);
-    let registration_id = fixture
-        .socket_bridge
-        .test_insert_remote_socket_registration(
-            remote.clone(),
-            socket_owner,
-            NodeId::new(receiver_identity().node_id),
-        )
-        .await;
-    let owner_bridge = fixture
-        .state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-        .expect("owner bridge");
-    {
-        let mut registrations = owner_bridge.remote_owner_resources.lock().await;
-        assert!(registrations.remove(&fixture.target).is_some());
-        registrations.insert(
-            remote.clone(),
-            RemoteOwnerRegistration {
-                occupancy_session: OccupancySessionGeneration::mint(),
-                socket_identity: origin_identity(),
-                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
-                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
-                        &NodeIdentity::new(origin_identity().node_id, "fixture-epoch"),
-                    ),
-                ),
-                unregister_pending: false,
-                registration_id,
-                socket_generation: RemoteResourceSocketGeneration::next(None),
-                socket_node: NodeId::new(origin_identity().node_id),
-                owner: mirror_owner,
-            },
-        );
-    }
-    let reply_stalled = Arc::new(Notify::new());
-    let reply_stalled_by_transport = reply_stalled.clone();
-    let socket_bridge = fixture.socket_bridge.clone();
-    let transport: TestRemoteFrameTransport = Arc::new(move |message| {
-        let socket_bridge = socket_bridge.clone();
-        let reply_stalled = reply_stalled_by_transport.clone();
+/// A transport whose hosting node accepts the request on the real socket and
+/// whose decision never returns.
+fn stalled_after_delivery(
+    fixture: &RemoteRosterFixture,
+    stalled: Arc<Notify>,
+) -> TestBoundTransport {
+    let socket_registry = fixture.socket_registry.clone();
+    Arc::new(move |offer| {
+        let socket_registry = socket_registry.clone();
+        let stalled = stalled.clone();
         Box::pin(async move {
-            let reply = socket_bridge
-                .deliver_remote_resource_frame_on_socket(message)
-                .await;
-            assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
-            // Model a peer whose actual socket accepted the IQ but whose reply
-            // never returns. The source must not wait before queuing locals.
-            reply_stalled.notify_one();
+            assert_eq!(
+                RemoteRosterFixture::hand_to_binding(&socket_registry, &offer),
+                BroadcastOutcome::Delivered
+            );
+            // The source must not wait for this decision before queuing
+            // other resources.
+            stalled.notify_one();
             std::future::pending().await
         })
-    });
+    })
+}
+
+#[tokio::test]
+async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_stalls() {
+    let mut fixture = RemoteRosterFixture::new(true).await;
+    let registry = &fixture.state.deps.protocol.connection_registry;
+    let local: FullJid = "alice@example.com/web".parse().expect("second live JID");
+    let (local_sender, mut local_receiver) = mpsc::channel(2);
+    registry.register_entry(
+        local.clone(),
+        ConnectionEntry::new_for_connection(
+            local_sender,
+            ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(&receiver_identity())),
+        ),
+    );
+    registry.mark_roster_interested(&local);
+    sync_test_binding(&fixture.state, &local).await;
+    let user = fixture.target.to_bare();
+    // The blocked remote precedes the ready local in the coordinator's
+    // order, which is the order of the live loop.
+    assert_eq!(
+        roster_interested(&fixture.state, &user).await,
+        vec![fixture.target.clone(), local.clone()]
+    );
+
+    let reply_stalled = Arc::new(Notify::new());
+    let transport = stalled_after_delivery(&fixture, reply_stalled.clone());
     let item = RosterItem::new("bob@example.com".parse().expect("roster contact"));
     let version: RosterVersion = "version-before-remote-timeout".parse().expect("version");
-    let queued = TEST_REMOTE_FRAME_TRANSPORT
+    let queued = TEST_BOUND_TRANSPORT
         .scope(transport, async {
             let mut fanout = Box::pin(send_roster_push_to_resources(
                 &fixture.state,
@@ -589,8 +550,16 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
     assert!(payload.is("query", ROSTER_NS));
     assert_eq!(payload.attr("ver"), Some("version-before-remote-timeout"));
     assert!(local_receiver.try_recv().is_err(), "one ready-local IQ");
+    assert!(matches!(
+        fixture
+            .mirror_receiver
+            .try_recv()
+            .expect("original full mirror entry")
+            .stanza,
+        Stanza::Presence(_)
+    ));
     assert!(
-        mirror_receiver.try_recv().is_err(),
+        fixture.mirror_receiver.try_recv().is_err(),
         "local-only pass must skip remote-hosted mirrors"
     );
     let Stanza::Iq(remote_push) = fixture
@@ -601,7 +570,7 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
     else {
         panic!("remote roster IQ")
     };
-    assert_eq!(remote_push.to(), Some(&remote.into()));
+    assert_eq!(remote_push.to(), Some(&fixture.target.clone().into()));
     assert!(
         fixture.socket_receiver.try_recv().is_err(),
         "one actual remote IQ"
@@ -610,13 +579,7 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
 
 #[tokio::test]
 async fn ready_detached_roster_resource_is_persisted_while_a_remote_reply_stalls() {
-    let mut fixture = RemoteRosterFixture::new(false).await;
-    fixture
-        .state
-        .deps
-        .protocol
-        .connection_registry
-        .mark_roster_interested(&fixture.target);
+    let mut fixture = RemoteRosterFixture::with_interest(true, false).await;
     let detached_jid: FullJid = "alice@example.com/detached"
         .parse()
         .expect("independent detached JID");
@@ -646,21 +609,8 @@ async fn ready_detached_roster_resource_is_persisted_while_a_remote_reply_stalls
         .await
         .expect("store independent detached resource");
     let reply_stalled = Arc::new(Notify::new());
-    let reply_stalled_by_transport = reply_stalled.clone();
-    let socket_bridge = fixture.socket_bridge.clone();
-    let transport: TestRemoteFrameTransport = Arc::new(move |message| {
-        let socket_bridge = socket_bridge.clone();
-        let reply_stalled = reply_stalled_by_transport.clone();
-        Box::pin(async move {
-            let reply = socket_bridge
-                .deliver_remote_resource_frame_on_socket(message)
-                .await;
-            assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
-            reply_stalled.notify_one();
-            std::future::pending().await
-        })
-    });
-    let entry = TEST_REMOTE_FRAME_TRANSPORT
+    let transport = stalled_after_delivery(&fixture, reply_stalled.clone());
+    let entry = TEST_BOUND_TRANSPORT
         .scope(transport, async {
             let mut fanout = Box::pin(fixture.subscription_push());
             let persisted_while_remote_pending = async {
@@ -683,7 +633,7 @@ async fn ready_detached_roster_resource_is_persisted_while_a_remote_reply_stalls
             let entry = tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::select! {
                     entry = persisted_while_remote_pending => entry,
-                    _ = &mut fanout => panic!("remote reply must remain pending"),
+                    () = &mut fanout => panic!("remote reply must remain pending"),
                 }
             })
             .await

@@ -3,20 +3,23 @@ use super::{
     connection_entry_for_current_node, envelope_for_services, mpsc, origin_identity,
     payload_for_recipient, receiver_identity, sender_full, services_with_claims, sign_envelope,
     target_bare, target_entity, target_full, user_entity, Arc, CancellationToken,
-    ClusteringMessagingConfig, Entity, EntityType, Keypair, Message, NodeId, NodeIdentity,
-    OrderedRelayClaim, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
-    OrderedRelayNackReason, OrderedRelayPayload, RelayDeliverRemoteResourceFrame,
-    RelayRemoteResourceFrameStatus, RelayRouteRemoteResourceStanza,
+    ClusteringMessagingConfig, DeliveryKind, Entity, EntityType, Keypair, Message, NodeId,
+    NodeIdentity, OrderedRelayClaim, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    OrderedRelayNackReason, OrderedRelayPayload, RelayRouteRemoteResourceStanza,
     RelayRouteRemoteResourceStanzaReply, RelayTraceContext, RemoteDeliverySeed,
-    RemoteOwnerRegistration, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
-    RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
-    RemoteStanza, Stanza, TEST_CANCELLED_ENVELOPES,
+    RemoteOwnerRegistration, RemoteResourceRegistrationId, RemoteResourceRouteOutcome,
+    RemoteResourceRouteTarget, RemoteResourceSocketGeneration, RemoteStanza, Stanza,
+    TEST_CANCELLED_ENVELOPES,
 };
+use crate::clustering::route_bridge::{TestBoundOffer, TestBoundTransport, TEST_BOUND_TRANSPORT};
 use crate::ingress::append_authority::canonical_reads;
 use crate::ingress::commit::commit_submission;
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::FullJidDeliveryOutcome;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::ownership::account_resource_transition::AccountResourceSnapshot;
+use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
@@ -877,6 +880,27 @@ struct RegisteredRemoteOwner {
     source_registration: (RemoteResourceRegistrationId, RemoteResourceSocketGeneration),
     obligation: IngressAppendObligationRef,
     message: Message,
+    /// The binding the account coordinator names for the recipient.
+    recipient_binding: BindingRef,
+}
+
+fn recipient_socket_node() -> NodeIdentity {
+    NodeIdentity::new("recipient-socket-node", "fixture-epoch")
+}
+
+/// A transport that records every bound request and never reads the hosting
+/// node's decision: the origin reports each one as possibly committed.
+fn undecided_bound_requests() -> (
+    TestBoundTransport,
+    Arc<std::sync::Mutex<Vec<TestBoundOffer>>>,
+) {
+    let offers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = offers.clone();
+    let transport: TestBoundTransport = Arc::new(move |offer| {
+        recorded.lock().expect("bound offers").push(offer);
+        Box::pin(async { FullJidDeliveryOutcome::MaybeCommitted })
+    });
+    (transport, offers)
 }
 
 impl RegisteredRemoteOwner {
@@ -972,12 +996,19 @@ impl RegisteredRemoteOwner {
                 owner,
             },
         );
-        bridge
-            .test_insert_remote_owner_registration(
-                recipient,
-                NodeId::new("recipient-socket-node".to_owned()),
-            )
-            .await;
+        let recipient_binding = BindingRef::fresh(ConnectionRef::fresh(
+            NodeLeaseIdentity::from_node_identity(&recipient_socket_node()),
+        ));
+        crate::server::routes::websocket::test_bindings::bind_remote_test_resource(
+            &state,
+            &recipient,
+            &recipient_binding,
+            AccountResourceSnapshot {
+                presence_available: true,
+                ..AccountResourceSnapshot::default()
+            },
+        )
+        .await;
         Self {
             fixture,
             _state: state,
@@ -992,6 +1023,7 @@ impl RegisteredRemoteOwner {
             source_registration,
             obligation,
             message,
+            recipient_binding,
         }
     }
 
@@ -1007,7 +1039,7 @@ impl RegisteredRemoteOwner {
         obligation: IngressAppendObligationRef,
     ) -> (
         Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason>,
-        Vec<RemoteResourceOutboundFrame>,
+        Vec<TestBoundOffer>,
     ) {
         let recipient = target_full();
         let stanza = RemoteStanza(Stanza::Message(self.message.clone()));
@@ -1030,27 +1062,25 @@ impl RegisteredRemoteOwner {
             }
         };
         let envelope = sign_envelope(envelope, &self.keypair);
-        crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
-            .scope(std::cell::RefCell::new(Vec::new()), async {
-                let result = self.bridge.deliver_reserved(&envelope, &mut None).await;
-                let frames = crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
-                    .with(|frames| frames.take());
-                (result, frames)
-            })
-            .await
+        let (transport, offers) = undecided_bound_requests();
+        let result = TEST_BOUND_TRANSPORT
+            .scope(
+                transport,
+                self.bridge.deliver_reserved(&envelope, &mut None),
+            )
+            .await;
+        let offers = std::mem::take(&mut *offers.lock().expect("bound offers"));
+        (result, offers)
     }
 
     async fn owner_route(
         &self,
         obligation: IngressAppendObligationRef,
-    ) -> (
-        RelayRouteRemoteResourceStanzaReply,
-        Vec<RemoteResourceOutboundFrame>,
-    ) {
-        crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
-            .scope(std::cell::RefCell::new(Vec::new()), async {
-                let reply = self
-                    .bridge
+    ) -> (RelayRouteRemoteResourceStanzaReply, Vec<TestBoundOffer>) {
+        let (transport, offers) = undecided_bound_requests();
+        let reply = TEST_BOUND_TRANSPORT
+            .scope(transport, async {
+                self.bridge
                     .route_remote_resource_stanza_on_owner(
                         RelayRouteRemoteResourceStanza {
                             source_jid: self.source.clone(),
@@ -1066,105 +1096,100 @@ impl RegisteredRemoteOwner {
                         },
                         &mut None,
                     )
-                    .await;
-                let frames = crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
-                    .with(|frames| frames.take());
-                (reply, frames)
+                    .await
             })
-            .await
+            .await;
+        let offers = std::mem::take(&mut *offers.lock().expect("bound offers"));
+        (reply, offers)
     }
 
-    /// Replay the captured frame on the socket node's receiver.
-    async fn socket_hop(
-        &self,
-        frame: RemoteResourceOutboundFrame,
-    ) -> RelayRemoteResourceFrameStatus {
-        self.bridge
-            .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
-                frame,
-                trace: RelayTraceContext::default(),
-            })
-            .await
-            .status
+    /// `offer` is addressed to the node that hosts the recipient's binding and
+    /// carries the relayed obligation.
+    fn assert_bound_request(&self, offer: &TestBoundOffer) {
+        assert_eq!(offer.target, target_full());
+        assert_eq!(offer.binding, self.recipient_binding);
+        assert_eq!(offer.node, recipient_socket_node());
+        assert_eq!(offer.ingress_append.as_ref(), Some(&self.obligation));
     }
 
-    async fn recipient_still_registered(&self) -> bool {
-        self.bridge
-            .remote_owner_resources
-            .lock()
+    /// Whether the account coordinator still names the recipient's binding.
+    async fn recipient_still_bound(&self) -> bool {
+        self._state
+            .deps
+            .app_state
+            .account_authority()
+            .bound_resource(&target_full())
             .await
-            .contains_key(&target_full())
+            .expect("coordinator read")
+            .as_ref()
+            == Some(&self.recipient_binding)
     }
 }
 
 const AUTHORIZATION_FAILED: &str = "waddle.clustering.ingress_append.authorization_failed";
 
-/// Ordered relay to a recipient whose socket is registered on another node. The
-/// owner verifies before durable status (R1-1) and the socket node fences again,
-/// so the hop pays one read on each node; a rejection never leaves the owner.
+/// Ordered relay to a recipient whose binding another node hosts. The owner
+/// verifies the relayed claim before durable status (R1-1) and hands the copy
+/// to a bound request that carries the obligation to the hosting node, whose
+/// own hand-over fences it again. A rejected claim never leaves the owner.
 async fn ordered_relay_to_registered_remote_socket(fixture: IngressFixture, processed: bool) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let owner = RegisteredRemoteOwner::new(fixture).await;
 
-    let (result, frames) = owner.ordered(processed, owner.obligation.clone()).await;
+    let (result, offers) = owner.ordered(processed, owner.obligation.clone()).await;
     assert!(
         matches!(result, Err(OrderedRelayNackReason::MaybeCommitted)),
-        "a stopped ask is uncertain, never a rejection: {result:?}"
+        "an undecided bound request is uncertain, never a rejection: {result:?}"
     );
     assert_eq!(canonical_reads::count(), 1, "one read on the owner");
-    let [frame] = <[_; 1]>::try_from(frames).expect("exactly one frame offered");
-    assert_eq!(frame.jid, target_full());
-    assert_eq!(frame.ingress_append.as_ref(), Some(&owner.obligation));
-    assert_ne!(
-        owner.socket_hop(frame).await,
-        RelayRemoteResourceFrameStatus::Backpressure
+    let [offer] = <[_; 1]>::try_from(offers).expect("exactly one bound request");
+    owner.assert_bound_request(&offer);
+    assert_eq!(
+        offer.kind,
+        if processed {
+            DeliveryKind::DirectFrame
+        } else {
+            DeliveryKind::PeerStanza
+        }
     );
-    assert_eq!(canonical_reads::count(), 2, "and one on the socket node");
 
-    let (result, frames) = owner.ordered(processed, owner.absent_obligation()).await;
+    let (result, offers) = owner.ordered(processed, owner.absent_obligation()).await;
     assert!(
         matches!(result, Err(OrderedRelayNackReason::TargetUnavailable)),
         "{result:?}"
     );
-    assert_eq!(canonical_reads::count(), 3, "a rejection is read once");
-    assert!(frames.is_empty(), "a rejected claim never leaves the owner");
-    assert!(owner.recipient_still_registered().await);
+    assert_eq!(canonical_reads::count(), 2, "a rejection is read once");
+    assert!(offers.is_empty(), "a rejected claim never leaves the owner");
+    assert!(owner.recipient_still_bound().await);
     assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(1));
     owner.fixture.close().await;
 }
 
-/// Second hop of a remote-socket sender to a registered remote recipient: the
-/// owner resolves the deferred claim before forwarding, so a rejection is a
-/// definitive `Unavailable`, recorded once, and keeps the registration.
+/// Second hop of a remote-socket sender to a recipient whose binding another
+/// node hosts: the owner resolves the deferred claim before it commits a bound
+/// request, so a rejection is a definitive `Unavailable`, recorded once, and
+/// leaves the recipient's binding alone.
 async fn owner_route_to_registered_remote_socket(fixture: IngressFixture) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let owner = RegisteredRemoteOwner::new(fixture).await;
 
-    let (reply, frames) = owner.owner_route(owner.absent_obligation()).await;
+    let (reply, offers) = owner.owner_route(owner.absent_obligation()).await;
     assert_eq!(reply.outcome, RemoteResourceRouteOutcome::Unavailable);
-    assert!(frames.is_empty(), "a rejected claim never leaves the owner");
-    assert!(owner.recipient_still_registered().await);
+    assert!(offers.is_empty(), "a rejected claim never leaves the owner");
+    assert!(owner.recipient_still_bound().await);
     assert_eq!(canonical_reads::count(), 1);
     assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(1));
 
-    let (_, frames) = owner.owner_route(owner.obligation.clone()).await;
+    let (reply, offers) = owner.owner_route(owner.obligation.clone()).await;
+    assert_eq!(reply.outcome, RemoteResourceRouteOutcome::MaybeCommitted);
     assert_eq!(
         canonical_reads::count(),
         2,
-        "one owner read before forwarding"
+        "one owner read before the bound request"
     );
-    let [frame] = <[_; 1]>::try_from(frames).expect("exactly one frame offered");
-    assert_eq!(frame.ingress_append.as_ref(), Some(&owner.obligation));
-
-    // The socket node's own fence records its rejection too, and stays retryable.
-    let mut forged = frame;
-    forged.ingress_append = Some(owner.absent_obligation());
-    assert_eq!(
-        owner.socket_hop(forged).await,
-        RelayRemoteResourceFrameStatus::Backpressure
-    );
-    assert_eq!(canonical_reads::count(), 3);
-    assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(2));
+    let [offer] = <[_; 1]>::try_from(offers).expect("exactly one bound request");
+    owner.assert_bound_request(&offer);
+    assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(1));
     owner.fixture.close().await;
 }
 

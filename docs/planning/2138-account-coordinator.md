@@ -492,9 +492,21 @@ whose snapshot names its stream-management session.
 
 Tests that observe a resource hosted on another node through a remote
 channel mirror (`remote_owner_resources`) no longer see delivery on a node
-with route state, which reaches such a resource by a bound request. They
-need a coordinator whose liveness reads the other node's lease and a seam
-on the bound request.
+with route state, which reaches such a resource by a bound request. Such a
+test binds the resource at the fixture's coordinator under a binding whose
+connection the other node hosts (`test_bindings::bind_remote_test_resource`)
+and observes the bound request at one of two seams: the route bridge's
+`TEST_BOUND_TRANSPORT`, which receives the request `deliver_bound` built
+(target, binding, hosting node, stanza, kind and append obligation) in
+place of its commit and the hosting node's decision, and answers the
+outcome; or the interpreter's `CONTROLLED_REGISTERED_REMOTE_DELIVERY`,
+which `deliver_to_bound_resource` consults before it hands a remote binding
+to the bridge. The bridge seam stands in for a deployment that carries
+bound requests, so it also covers SQLite fixtures, whose store never opens
+the mailbox gate. The fixture's single-node coordinator reads such a
+binding's liveness as unknown, which neither serves nor settles it
+differently from a live one on these paths; a test of takeover or
+settlement needs a coordinator whose liveness reads the other node's lease.
 
 ## The binding publisher
 

@@ -235,6 +235,12 @@ V1037, now in `server/crates/waddle-server/sql/baseline/postgres.sql`).
   connection that carries another binding refuses it as not delivered. A
   copy an ingress transaction owns is handed over first and decided
   afterwards; anything else is decided first and handed over once.
+- **A relayed append claim** is resolved by the origin before it commits a
+  bound request (`try_deliver_registered_remote_resource_at`), as before it
+  hands a frame to a remote channel mirror (#1790): a rejected claim is a
+  definitive `Unavailable` there, recorded once, and never reaches the
+  hosting node. The hosting node fences the claim again when it hands the
+  copy over.
 - **Hosted elsewhere.** Any other node that works the lane, which happens
   when a new account owner adopts it after the account's claim moved, may
   only refuse the request with the "hosted elsewhere" refusal. The origin

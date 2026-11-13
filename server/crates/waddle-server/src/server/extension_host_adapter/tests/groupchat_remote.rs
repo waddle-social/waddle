@@ -34,7 +34,10 @@ use waddle_extensions::host_tools::{
 use waddle_extensions::{DisplayText, PluginId, StanzaId};
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::muc::room_actor::{ChangeAffiliation, GetSnapshot, Join};
-use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::ownership::account_resource_transition::AccountResourceSnapshot;
+use waddle_xmpp::ownership::{
+    BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity, SharedNodeIdentity,
+};
 use waddle_xmpp::{Affiliation, Role, Stanza};
 use waddle_xmpp_core::xep0359::OriginId;
 
@@ -44,6 +47,27 @@ fn origin_node() -> NodeIdentity {
 
 fn owner_node() -> NodeIdentity {
     NodeIdentity::new("owner", "epoch")
+}
+
+/// Host `occupant` on another node: its binding at the account coordinator
+/// names a connection that a third node holds, so the room reaches it by a
+/// bound request, as it reaches an occupant whose socket another node holds.
+async fn host_on_remote_node(fixture: &mut GroupchatFixture, occupant: &jid::FullJid) {
+    let state = Arc::get_mut(&mut fixture.adapter.state).expect("unique websocket state");
+    let app = Arc::get_mut(&mut state.deps.app_state).expect("unique app state");
+    app.clustering_claims.node_identity = Some(SharedNodeIdentity::new(origin_node()));
+    crate::server::routes::websocket::test_bindings::bind_remote_test_resource(
+        &fixture.adapter.state,
+        occupant,
+        &BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            &NodeIdentity::new("occupant-socket", "epoch"),
+        ))),
+        AccountResourceSnapshot {
+            presence_available: true,
+            ..AccountResourceSnapshot::default()
+        },
+    )
+    .await;
 }
 
 #[derive(Clone, Copy)]
@@ -821,6 +845,7 @@ async fn signed_on_owner(f: IngressFixture) {
 async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let remote: jid::FullJid = "mercutio@example.com/remote".parse().expect("remote");
+    host_on_remote_node(&mut fixture, &remote).await;
     fixture
         .actor
         .ask(Join {
@@ -992,8 +1017,9 @@ async fn slow_remote_occupant_is_detached(f: IngressFixture) {
 /// A revoked join waits for a still-running cross-node join presence, so the
 /// remote occupant sees available before unavailable, not a ghost bot.
 async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
-    let fixture = GroupchatFixture::new(&f).await;
+    let mut fixture = GroupchatFixture::new(&f).await;
     let remote: jid::FullJid = "mercutio@example.com/remote".parse().expect("remote");
+    host_on_remote_node(&mut fixture, &remote).await;
     fixture
         .actor
         .ask(Join {

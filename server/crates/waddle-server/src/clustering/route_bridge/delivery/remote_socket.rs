@@ -135,6 +135,14 @@ impl OrderedRelayDeliveryBridge {
     ) -> Option<FullJidDeliveryOutcome> {
         if let Some(remote) = self.coordinator_remote_binding(target).await {
             let (binding, node) = remote?;
+            // Resolve a relayed claim before it leaves this node (#1790): a
+            // rejected claim is a definitive `Unavailable` here and never
+            // becomes a bound request.
+            if let Some(context) = ingress_append_context {
+                if context.ensure_verified(stanza).await.is_err() {
+                    return Some(FullJidDeliveryOutcome::Unavailable);
+                }
+            }
             return Some(
                 self.deliver_bound(super::BoundDelivery {
                     target,

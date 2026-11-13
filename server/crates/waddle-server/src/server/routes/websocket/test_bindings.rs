@@ -205,6 +205,15 @@ async fn sync_binding(
         blocklist_interested: registry.is_blocklist_interested(jid),
         ..snapshot
     };
+    update_snapshot(authority, jid, binding, snapshot).await;
+}
+
+async fn update_snapshot(
+    authority: &Arc<RoutedAccountAuthority>,
+    jid: &FullJid,
+    binding: BindingRef,
+    snapshot: AccountResourceSnapshot,
+) {
     let status = authority
         .slot_status(jid)
         .await
@@ -243,6 +252,35 @@ async fn publish(
     jid: &FullJid,
     binding: &BindingRef,
 ) {
+    publish_and_confirm(app, authority, jid, binding).await;
+    record(app, binding, jid);
+}
+
+/// Bind `jid` at the account coordinator of `state` under `binding`, a
+/// binding whose connection another node hosts, with `snapshot` as the
+/// resource's state. Routing on this node then reaches the resource through
+/// a bound request addressed to that node, as it reaches a resource that a
+/// connection on another node bound. Registry syncs leave the binding
+/// alone: no local entry carries it.
+#[cfg(test)]
+pub async fn bind_remote_test_resource(
+    state: &WebSocketState,
+    jid: &FullJid,
+    binding: &BindingRef,
+    snapshot: AccountResourceSnapshot,
+) {
+    let app = &state.deps.app_state;
+    let authority = authority(app).expect("the fixture selects an account coordinator");
+    publish_and_confirm(app, &authority, jid, binding).await;
+    update_snapshot(&authority, jid, binding.clone(), snapshot).await;
+}
+
+async fn publish_and_confirm(
+    app: &AppState,
+    authority: &Arc<RoutedAccountAuthority>,
+    jid: &FullJid,
+    binding: &BindingRef,
+) {
     let publisher =
         CoordinatorBindingPublisher::new(Arc::clone(authority) as Arc<dyn AccountBindingAuthority>);
     let published = match publisher
@@ -273,7 +311,7 @@ async fn publish(
         .await
         .expect("account coordinator answers a confirmation")
     {
-        ConfirmOutcome::Confirmed(_) => record(app, binding, jid),
+        ConfirmOutcome::Confirmed(_) => {}
         other => panic!("the coordinator confirms the test binding of {jid}: {other:?}"),
     }
 }
