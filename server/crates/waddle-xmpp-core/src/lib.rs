@@ -56,7 +56,7 @@ pub use mam::{
     parse_mam_query, ArchivedMessage, MamQuery, MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS,
     RSM_NS, STANZA_ID_NS,
 };
-pub use occupancy_session::OccupancySessionGeneration;
+pub use occupancy_session::{OccupancySeatId, OccupancySessionGeneration};
 pub use parser_utils::{ensure_thread_element, extract_thread_parent, reattach_thread_parent};
 pub use presence::{
     build_available_presence, build_subscription_presence, build_unavailable_presence,

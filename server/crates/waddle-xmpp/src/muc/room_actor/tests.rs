@@ -6822,6 +6822,82 @@ async fn occupant_session_generation_tracks_the_current_seated_session() {
     );
 }
 
+/// The identity of the occupancy `jid` holds, as a room snapshot reports it.
+async fn occupancy_seat(
+    actor: &ActorRef<RoomActor>,
+    jid: &FullJid,
+) -> Option<waddle_xmpp_core::OccupancySeatId> {
+    actor
+        .ask(super::GetRoomSnapshot {
+            sender_jid: jid.clone(),
+        })
+        .await
+        .expect("room snapshot")
+        .occupants
+        .into_iter()
+        .find(|occupant| &occupant.full_jid == jid)
+        .and_then(|occupant| occupant.seat)
+}
+
+/// A connection keeps its generation when it leaves a room and joins it
+/// again, so the generation does not tell the two occupancies apart. Each
+/// join that starts an occupancy takes a new seat identity; a resumed
+/// session refreshing the seat it holds keeps the one it has.
+#[tokio::test]
+async fn every_new_occupancy_takes_a_new_seat_identity_also_on_one_connection() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-seat-identity");
+    let connection = test_session_generation();
+
+    assert_eq!(occupancy_seat(&actor, &alice).await, None);
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", connection)
+        .await
+        .expect("first join");
+    let first = occupancy_seat(&actor, &alice)
+        .await
+        .expect("a seated session has a seat identity");
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", connection)
+        .await
+        .expect("refreshing join of the seated session");
+    assert_eq!(
+        occupancy_seat(&actor, &alice).await,
+        Some(first),
+        "refreshing a held seat is the same occupancy"
+    );
+
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(connection),
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+    assert_eq!(occupancy_seat(&actor, &alice).await, None);
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", connection)
+        .await
+        .expect("rejoin on the same connection");
+    let second = occupancy_seat(&actor, &alice)
+        .await
+        .expect("the rejoined session has a seat identity");
+    assert_ne!(
+        second, first,
+        "a rejoin on the same connection is another occupancy"
+    );
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", test_session_generation())
+        .await
+        .expect("replacement by another connection");
+    let third = occupancy_seat(&actor, &alice)
+        .await
+        .expect("the replacement has a seat identity");
+    assert!(third != second && third != first);
+}
+
 #[tokio::test]
 async fn same_full_jid_rejoin_overwrites_the_stored_generation_and_stale_leave_is_superseded() {
     let _guard = crate::telemetry::test_support::acquire().await;

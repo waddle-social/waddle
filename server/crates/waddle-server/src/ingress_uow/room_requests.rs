@@ -28,7 +28,7 @@ use waddle_xmpp::ingress::{IngressOrdinal, SmIngressId};
 use waddle_xmpp::ownership::ClaimEpoch;
 
 use waddle_xmpp::Stanza;
-use waddle_xmpp_core::{Affiliation, OccupancySessionGeneration, Role};
+use waddle_xmpp_core::{Affiliation, OccupancySeatId, OccupancySessionGeneration, Role};
 use xmpp_parsers::presence::Presence;
 
 use super::{IngressUowError, IngressUowTransaction};
@@ -716,6 +716,11 @@ pub struct RoomOccupantRecord {
     pub affiliation: Affiliation,
     /// Generation of the connection that joined.
     pub generation: OccupancySessionGeneration,
+    /// Identity of the occupancy that holds the seat. `None` in a row
+    /// written before seats had identities; every seat the room actor
+    /// grants carries one. Only [`RoomOccupantRepository::record_seat`]
+    /// writes it.
+    pub seat: Option<OccupancySeatId>,
     /// The join that created the row; `None` once that request is collected.
     pub join_request: Option<RoomRequestKey>,
     /// The occupant's last available presence as the room broadcasts it.
@@ -742,7 +747,7 @@ pub struct RoomOccupancyLoad {
 }
 
 const OCCUPANT_COLUMNS: &str = "room_jid, occupant_jid, nick, role::int, affiliation::int, \
-    occupancy_generation, join_request::text, presence, room_epoch";
+    occupancy_generation, join_request::text, presence, room_epoch, occupancy_seat::text";
 
 /// Decode an occupancy row; `None` when any field is not a valid value of
 /// its type.
@@ -756,6 +761,7 @@ fn decode_occupant(row: &crate::db::Row) -> Result<Option<RoomOccupantRecord>, I
     let join_request: Option<String> = row.get(6)?;
     let presence: Option<Vec<u8>> = row.get(7)?;
     let room_epoch: i64 = row.get(8)?;
+    let seat: Option<String> = row.get(9)?;
     let parsed = (|| {
         let presence = match presence {
             None => None,
@@ -768,7 +774,12 @@ fn decode_occupant(row: &crate::db::Row) -> Result<Option<RoomOccupantRecord>, I
             None => None,
             Some(key) => Some(RoomRequestKey::from_storage(key.parse().ok()?)),
         };
+        let seat = match seat {
+            None => None,
+            Some(seat) => Some(seat.parse().ok()?),
+        };
         Some(RoomOccupantRecord {
+            seat,
             room: room.parse().ok()?,
             occupant: occupant.parse().ok()?,
             nick: (!nick.is_empty()).then_some(nick)?,
@@ -792,9 +803,10 @@ pub struct RoomOccupantRepository;
 
 impl RoomOccupantRepository {
     /// Record a seat the room actor granted, replacing whatever row the full
-    /// JID had. A row of the same connection generation keeps its presence
-    /// and its join request; a row of another generation loses both, because
-    /// they belong to the connection it replaces.
+    /// JID had. A row of the same occupancy (the same connection generation
+    /// and the same seat identity) keeps its presence and its join request;
+    /// any other row loses both, because they belong to the occupancy this
+    /// seat replaces.
     pub async fn record_seat(
         transaction: &mut IngressUowTransaction<'_>,
         occupant: &RoomOccupantRecord,
@@ -804,15 +816,18 @@ impl RoomOccupantRepository {
         tx.execute(
             &format!(
                 "INSERT INTO {occupants} AS seat (room_jid, occupant_jid, nick, role, \
-                 affiliation, occupancy_generation, room_epoch) \
-                 VALUES (?, ?, ?, ?::smallint, ?::smallint, ?, ?) \
+                 affiliation, occupancy_generation, occupancy_seat, room_epoch) \
+                 VALUES (?, ?, ?, ?::smallint, ?::smallint, ?, ?::uuid, ?) \
                  ON CONFLICT (room_jid, occupant_jid) DO UPDATE SET nick = EXCLUDED.nick, \
                  role = EXCLUDED.role, affiliation = EXCLUDED.affiliation, \
                  join_request = CASE WHEN seat.occupancy_generation = \
-                   EXCLUDED.occupancy_generation THEN seat.join_request END, \
+                   EXCLUDED.occupancy_generation AND seat.occupancy_seat IS NOT DISTINCT \
+                   FROM EXCLUDED.occupancy_seat THEN seat.join_request END, \
                  presence = CASE WHEN seat.occupancy_generation = \
-                   EXCLUDED.occupancy_generation THEN seat.presence END, \
+                   EXCLUDED.occupancy_generation AND seat.occupancy_seat IS NOT DISTINCT \
+                   FROM EXCLUDED.occupancy_seat THEN seat.presence END, \
                  occupancy_generation = EXCLUDED.occupancy_generation, \
+                 occupancy_seat = EXCLUDED.occupancy_seat, \
                  room_epoch = EXCLUDED.room_epoch",
                 occupants = relations.occupants
             ),
@@ -823,6 +838,7 @@ impl RoomOccupantRepository {
                 role_to_storage(occupant.role),
                 affiliation_to_storage(occupant.affiliation),
                 occupant.generation.to_string(),
+                occupant.seat.map(|seat| seat.to_string()),
                 occupant.room_epoch.0,
             ],
         )

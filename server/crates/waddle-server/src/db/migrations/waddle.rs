@@ -1775,6 +1775,22 @@ SELECT 1;
 pub const V1034_AUTHORITY_EPOCH_GUARDS_POSTGRES: &str =
     include_str!("authority_guards_postgres.sql");
 
+/// The identity of the occupancy that holds each seat in a room's durable
+/// occupancy. The connection generation alone does not name an occupancy: a
+/// connection that leaves a room and joins it again holds both seats under
+/// one generation. A row written before this column existed keeps NULL,
+/// which reads as a seat without an identity; the room actor writes an
+/// identity with every seat it grants. The relation exists only on
+/// PostgreSQL, so SQLite records the version alone. The statement is
+/// repeatable, so a ledger that re-applies it over an existing column
+/// changes nothing.
+pub const V1035_ROOM_OCCUPANT_SEATS: &str = r#"
+SELECT 1;
+"#;
+pub const V1035_ROOM_OCCUPANT_SEATS_POSTGRES: &str = r#"
+ALTER TABLE ingress_room_occupants ADD COLUMN IF NOT EXISTS occupancy_seat UUID NULL;
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1985,6 +2001,12 @@ pub fn all() -> Vec<Migration> {
             description: "Guard the durable session and account binding relations".to_string(),
             sql_sqlite: V1034_AUTHORITY_EPOCH_GUARDS,
             sql_postgres: V1034_AUTHORITY_EPOCH_GUARDS_POSTGRES,
+        },
+        Migration {
+            version: 1035,
+            description: "Record the occupancy identity of each room seat".to_string(),
+            sql_sqlite: V1035_ROOM_OCCUPANT_SEATS,
+            sql_postgres: V1035_ROOM_OCCUPANT_SEATS_POSTGRES,
         },
     ]
 }

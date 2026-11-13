@@ -565,6 +565,7 @@ async fn seat_room_occupancy_in(
                 role: record.role,
                 affiliation: record.affiliation,
                 session: record.generation,
+                seat: record.seat,
             })
             .collect();
         match actor

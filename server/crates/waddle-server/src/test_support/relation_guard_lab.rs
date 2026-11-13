@@ -375,7 +375,7 @@ impl Lab {
         let mut owner_connection = PgConnection::connect_with(&owner_options).await?;
         let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM guarded._migrations")
             .fetch_one(&mut owner_connection).await?;
-        ensure!(latest == 1034, "expected catalog through V1034, got {latest}");
+        ensure!(latest == 1035, "expected catalog through V1035, got {latest}");
         if candidate_guard {
             sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
             sqlx::query("CREATE TABLE guarded.waddle_epoch_transition_lab_marker (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, attempt_id UUID NOT NULL)")

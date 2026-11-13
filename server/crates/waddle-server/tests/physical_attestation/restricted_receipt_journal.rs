@@ -99,8 +99,8 @@ pub(super) async fn exercise(
         MigrationRunner::single()
             .run(&owner)
             .await
-            .expect("registered V1030 through V1034"),
-        vec![1030, 1031, 1032, 1033, 1034]
+            .expect("registered V1030 through V1035"),
+        vec![1030, 1031, 1032, 1033, 1034, 1035]
     );
     drop(owner);
     super::execute(

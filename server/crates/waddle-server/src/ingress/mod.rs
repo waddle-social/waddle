@@ -65,6 +65,7 @@ pub(crate) mod room_manifest;
 pub use recorded::{ProgressObligation, RouteProgress};
 pub use room_manifest::{
     FrozenRoomManifest, RoomManifestChild, RoomManifestChildDisposition, RoomManifestSnapshot,
+    SealedSeat,
 };
 mod rejection;
 pub mod restamp;

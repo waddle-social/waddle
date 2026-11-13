@@ -256,6 +256,17 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             // the join it targets — not be `Superseded` by an order assigned
             // when the projection finally applied (#1647, codex round 27).
             let join_order = next_occupancy_order();
+            // A resumed session refreshing the seat it holds keeps that
+            // occupancy and its identity. Every other join starts a new
+            // occupancy, also when this connection held the seat before it
+            // left, and takes an identity no earlier occupancy had.
+            let refreshes_seat = self.room.session_generation(&msg.sender_jid) == Some(msg.session)
+                && self.room.find_nick_by_real_jid(&msg.sender_jid) == Some(msg.nick.as_str());
+            let seat = if refreshes_seat {
+                self.room.session_seat(&msg.sender_jid)
+            } else {
+                Some(waddle_xmpp_core::OccupancySeatId::mint())
+            };
             // The role is corrected by the report that follows the projection;
             // what must precede the commit is the seat itself.
             self.record_seat_before_join(
@@ -264,6 +275,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 joining_affiliation,
                 self.room.derive_role_from_affiliation(joining_affiliation),
                 msg.session,
+                seat,
             )
             .await?;
             let gate = self
@@ -312,6 +324,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 }
                 actor.room.set_session_order(&joined_jid, join_order);
                 actor.room.set_session_generation(&joined_jid, msg.session);
+                actor.room.set_session_seat(&joined_jid, seat);
                 actor.note_session_joined(&joined_jid);
                 let occupant_count = actor.room.occupant_count();
                 crate::metrics::record_muc_presence("join");
@@ -1306,6 +1319,10 @@ pub struct RecoveredOccupant {
     pub affiliation: Affiliation,
     /// Generation of the connection that joined.
     pub session: OccupancySessionGeneration,
+    /// Identity of the occupancy the row records, which the seated session
+    /// keeps: a change of the room's owner is not a new occupancy. `None`
+    /// for a row that records none.
+    pub seat: Option<waddle_xmpp_core::OccupancySeatId>,
 }
 
 /// What seating a room's recovered occupants did.
@@ -1332,6 +1349,7 @@ pub struct RecoveredSeating {
 /// occupant is added with its affiliation from the room's restored
 /// affiliation list, the remote-occupant flags a join derives from
 /// `local_domain`, a new occupancy watermark and a new occupancy order.
+/// The occupancy keeps the identity its row records.
 /// The recorded role is kept when the recorded affiliation is still the
 /// occupant's affiliation; otherwise the role follows the affiliation.
 /// Nothing is broadcast.
@@ -1371,6 +1389,7 @@ impl kameo::message::Message<SeedRecoveredOccupants> for RoomActor {
                 role: recovered.role,
                 affiliation: recovered.affiliation,
                 session: recovered.session,
+                seat: recovered.seat,
             }
         }));
         let mut seating = RecoveredSeating::default();
@@ -1449,6 +1468,9 @@ impl kameo::message::Message<SeedRecoveredOccupants> for RoomActor {
                 actor
                     .room
                     .set_session_generation(&recovered.real_jid, recovered.session);
+                actor
+                    .room
+                    .set_session_seat(&recovered.real_jid, recovered.seat);
                 actor.note_session_joined(&recovered.real_jid);
                 actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
                 crate::metrics::adjust_muc_occupant_total(
