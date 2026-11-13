@@ -346,14 +346,14 @@ accordingly if a deployment already has old pending rows.
 
 ## Remote room acceptance
 
-`clustering.remoteRoomAcceptance` (`mailbox` by default, or `relay`) is
-rendered as `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE` when clustering is
-enabled. With `mailbox`, a groupchat message for a room owned by another node
-is acknowledged to its sender only after the room owner's decision is
+On a clustered deployment, a groupchat message for a room owned by another
+node is acknowledged to its sender only after the room owner's decision is
 recorded in the durable mailbox. This takes effect once the ingress protocol
 epoch is 2, which the restricted-runtime owner phase activates during a
-stopped-pod cutover; below that epoch the server behaves as with `relay`.
-Set the same value on every node. See
+stopped-pod cutover; below that epoch the origin hands the message to the
+owner through the ordered relay. There is no chart value for it:
+`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE` is ignored with a startup warning.
+See
 [`docs/operations/ingress-epoch-guards.md`](../../docs/operations/ingress-epoch-guards.md).
 
 ## Env overrides

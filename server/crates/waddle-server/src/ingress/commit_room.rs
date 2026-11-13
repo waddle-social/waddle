@@ -12,7 +12,7 @@ use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 /// that carries remote room acceptance through the durable mailbox: the
 /// owner then seals in the transaction that records its decision, so the
 /// manifest is what was accepted. A clustered transaction below the mailbox
-/// epoch, or under the relay selector, records no manifest and its copies
+/// epoch records no manifest and its copies
 /// settle through the keyed relay.
 pub(super) fn new_manifests_enabled(
     uow: &IngressUnitOfWork,

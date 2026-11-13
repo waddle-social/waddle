@@ -327,10 +327,3 @@ role settings; refuse to render a Job or a Deployment that could only fail.
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- /*
-  Remote room acceptance has two carriers. An unknown value would be refused
-  by the server at startup; fail the render instead.
-*/ -}}
-{{- if not (has (toString .Values.clustering.remoteRoomAcceptance) (list "mailbox" "relay")) -}}
-{{- fail "clustering.remoteRoomAcceptance must be \"mailbox\" or \"relay\"" -}}
-{{- end -}}

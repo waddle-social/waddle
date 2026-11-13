@@ -100,7 +100,6 @@ impl IngressFixture {
             IngressConfig {
                 pool_size: 4,
                 retry_attempts: 5,
-                remote_room_acceptance: Default::default(),
             },
             db.clone(),
             lineage,

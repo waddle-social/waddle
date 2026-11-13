@@ -4,8 +4,7 @@ Status: **active from protocol epoch 2**.
 Migration V1031 creates the lane and entry tables and `MailboxRepository` is
 the only code that writes them. On a clustered PostgreSQL deployment the
 ingress commit appends and decides entries in every transaction whose
-protocol epoch is 2 or later, unless
-`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=relay` is set. The sections from
+protocol epoch is 2 or later. The sections from
 "Ownership and boundaries" onward are the design review that preceded the
 implementation and are kept for their failure analysis. Where they describe a
 question as open, the "Implemented contract" section below is the answer in
@@ -72,14 +71,12 @@ consumed and deletes consumed entries explicitly.
 
 ### Remote room acceptance
 
-`RemoteRoomAcceptance` (`ingress_uow`) selects how a groupchat message for a
-room owned by another node reaches the owner's acceptance. `DurableMailbox`
-is the default and is set from `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`
-(`mailbox` or `relay`). It can take effect only with clustered fencing on
-PostgreSQL (`mailbox_acceptance_enabled`), and it does take effect in a
+A groupchat message for a room owned by another node reaches the owner's
+acceptance through the mailbox wherever the mailbox can exist: with
+clustered fencing on PostgreSQL (`mailbox_acceptance_enabled`), in a
 transaction whose protocol epoch is at least `mailbox_acceptance_epoch()`,
-which is 2 (`mailbox_acceptance_active`). `OrderedRelay` leaves the relay
-path as it is at every epoch.
+which is 2 (`mailbox_acceptance_active`). There is no selector:
+`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE` is ignored with a startup warning.
 
 In a transaction that uses the mailbox (`ingress/commit_mailbox.rs`):
 
@@ -254,12 +251,7 @@ epoch, and it is coordinated, not rolling (D1 in
   epoch could ever finish it. It does not repair either state.
 - **Deployments without the owner phase.** A PostgreSQL deployment that does
   not run the restricted-runtime owner phase stays at epoch 0. It keeps the
-  relay's behaviour whatever the selector says, and nothing fences an older
-  binary there.
-- **Selector.** `ingress.remoteRoomAcceptance` in the Helm chart sets
-  `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`. `relay` keeps relay acceptance at
-  every epoch and must be set on every node or none; it exists for the
-  lanes that still depend on the ordered relay and is removed with them.
+  relay's behaviour, and nothing fences an older binary there.
 
 ### Owner transfer and unread decisions
 

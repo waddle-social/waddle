@@ -1,112 +1,10 @@
 use super::{
-    debug, instrument, ActorProvisionalConnectionEntry, ConnectionBindGuard, ConnectionEntry,
-    ConnectionRegistry, FullJid, LocalBindingPermit, LocalConnectionBindingId, Ordering,
-    SocketOutboundEndpoint,
+    debug, instrument, ConnectionEntry, ConnectionRegistry, FullJid, LocalBindingPermit,
+    LocalConnectionBindingId, Ordering, SocketOutboundEndpoint,
 };
 use crate::pending_delivery::SmSessionId;
-#[cfg(any(test, feature = "test-utils"))]
-use crate::registry::user_actor::ConfirmedProvisionalMirror;
 
 impl ConnectionRegistry {
-    /// Publish an actor candidate while it still refuses all outbound work.
-    /// The caller holds the per-JID bind gate and must revalidate its current
-    /// node admission before this call and before mirroring to UserActor.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn publish_provisional_if_expected(
-        &self,
-        guard: &ConnectionBindGuard,
-        jid: FullJid,
-        candidate: &ActorProvisionalConnectionEntry,
-        expected: Option<LocalConnectionBindingId>,
-    ) -> bool {
-        if !guard.is_for(&jid) || candidate.jid() != &jid || candidate.binding_ref().is_none() {
-            return false;
-        }
-        let retired = match self.connections.entry(jid.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
-                if Some(occupied.get().binding_id()) != expected || !candidate.is_provisional() {
-                    return false;
-                }
-                let next = candidate.entry_for_publication();
-                let retire = !occupied.get().same_exact_local_binding(&next);
-                if retire {
-                    occupied.get().binding_permit.revoke_deferred();
-                    occupied.get().seal_actor_binding_if_any();
-                }
-                Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
-                let old = occupied.insert(next);
-                retire.then_some(old)
-            }
-            dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                if expected.is_some() || !candidate.is_provisional() {
-                    return false;
-                }
-                vacant.insert(candidate.entry_for_publication());
-                crate::metrics::adjust_connections_active(1);
-                None
-            }
-        };
-        if let Some(old) = retired {
-            old.binding_permit.notify_revoked();
-        }
-        true
-    }
-
-    /// The UserActor minted `confirmed` during an exact mirror check. A later
-    /// replacement on either side seals the shared endpoint, so this CAS can
-    /// only activate the still-current tuple while the bind gate is held.
-    /// The caller must hold current node admission across this synchronous call.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn activate_provisional_if_confirmed(
-        &self,
-        guard: &ConnectionBindGuard,
-        jid: &FullJid,
-        candidate: &ActorProvisionalConnectionEntry,
-        confirmed: &ConfirmedProvisionalMirror,
-    ) -> bool {
-        if !guard.is_for(jid) || candidate.jid() != jid || !confirmed.matches(candidate) {
-            return false;
-        }
-        let Some(entry) = self.connections.get_mut(jid) else {
-            return false;
-        };
-        if !candidate.matches_entry(&entry) {
-            return false;
-        }
-        let Some(binding_ref) = candidate.binding_ref() else {
-            return false;
-        };
-        entry.activate_binding(candidate.binding_id(), binding_ref)
-    }
-
-    /// Compensation removes only this exact still-published candidate. A
-    /// same-JID successor is never removed by an old startup ticket.
-    pub fn retire_provisional_if_exact(
-        &self,
-        guard: &ConnectionBindGuard,
-        jid: &FullJid,
-        candidate: &ActorProvisionalConnectionEntry,
-    ) -> bool {
-        if !guard.is_for(jid) || candidate.jid() != jid {
-            return false;
-        }
-        let removed = self.connections.remove_if(jid, |_, entry| {
-            if !candidate.matches_entry(entry) {
-                return false;
-            }
-            entry.binding_permit.revoke_deferred();
-            entry.seal_actor_binding_if_any();
-            Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
-            Self::remove_retired_presence(&self.presence_states, jid);
-            true
-        });
-        if let Some((_, entry)) = &removed {
-            entry.binding_permit.notify_revoked();
-            crate::metrics::adjust_connections_active(-1);
-        }
-        removed.is_some()
-    }
-
     /// Register a connection with its opaque outbound socket endpoint.
     ///
     /// Returns the local identity of the published binding.
@@ -175,7 +73,6 @@ impl ConnectionRegistry {
                 let retire = !occupied.get().same_exact_local_binding(&entry);
                 if retire {
                     occupied.get().binding_permit.revoke_deferred();
-                    occupied.get().seal_actor_binding_if_any();
                 }
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
@@ -216,14 +113,7 @@ impl ConnectionRegistry {
                 // A start takes old permit -> physical socket gate. Take those
                 // locks in the same order even when both entries share a socket.
                 // Failed publication leaves the incumbent permit unchanged.
-                let publish = || {
-                    interruption.publish_binding(&binding, || {
-                        if !same_binding {
-                            occupied.get().seal_actor_binding_if_any();
-                        }
-                        occupied.insert(entry)
-                    })
-                };
+                let publish = || interruption.publish_binding(&binding, || occupied.insert(entry));
                 let old = if same_binding {
                     publish()?
                 } else {
@@ -271,7 +161,6 @@ impl ConnectionRegistry {
                 let retire = !occupied.get().same_exact_local_binding(&entry);
                 if retire {
                     occupied.get().binding_permit.revoke_deferred();
-                    occupied.get().seal_actor_binding_if_any();
                 }
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
@@ -300,7 +189,6 @@ impl ConnectionRegistry {
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
             entry.binding_permit.revoke_deferred();
-            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
@@ -338,7 +226,6 @@ impl ConnectionRegistry {
                 return false;
             }
             entry.binding_permit.revoke_deferred();
-            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
@@ -374,7 +261,6 @@ impl ConnectionRegistry {
                 return false;
             }
             entry.binding_permit.revoke_deferred();
-            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true

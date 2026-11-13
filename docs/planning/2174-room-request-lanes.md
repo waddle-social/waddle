@@ -11,10 +11,10 @@ lists as missing. `S/` is `server/crates/waddle-server/src/`, `X/` is
 Status: **built, not yet verified by a test run**. Migration V1032, the
 three repositories, the owner's decision transaction, the origin's commit
 and hand-over, occupancy seating at claim takeover and the Muji path are in
-the tree; `deliver_ordered` is at `v16`. At protocol epoch 2 or later under
-the `mailbox` selector, client-sent joins, presence updates, leaves and Muji
+the tree; `deliver_ordered` is at `v16`. At protocol epoch 2 or later,
+client-sent joins, presence updates, leaves and Muji
 signalling for a room owned by another node are room requests; the relay
-serves them below that epoch and under the `relay` selector. The PostgreSQL
+serves them below that epoch. The PostgreSQL
 suite `room_requests_postgres` and the two-node suite
 `xep0045_room_request_lanes` compile and have not been run.
 

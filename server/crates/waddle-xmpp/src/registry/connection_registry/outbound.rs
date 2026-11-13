@@ -479,31 +479,6 @@ impl ConnectionEntry {
         }
     }
 
-    /// Actor-owned publication requires an opaque channel and binds the full
-    /// JID before either registry map can see the candidate.
-    pub fn new_actor_provisional_for_binding(
-        endpoint: super::ActorSocketOutboundEndpoint,
-        binding_ref: BindingRef,
-        jid: jid::FullJid,
-    ) -> Option<ActorProvisionalConnectionEntry> {
-        let raw = endpoint.into_inner();
-        if raw
-            .actor_custody()
-            .is_none_or(|custody| custody.connection() != binding_ref.connection_ref())
-        {
-            return None;
-        }
-        Some(ActorProvisionalConnectionEntry {
-            jid,
-            entry: Self::new_entry(
-                raw,
-                binding_ref.connection_ref().clone(),
-                Some(binding_ref),
-                super::BindingAdmissionState::Provisional,
-            ),
-        })
-    }
-
     fn new_entry(
         endpoint: SocketOutboundEndpoint,
         connection_ref: ConnectionRef,
@@ -633,29 +608,12 @@ impl ConnectionEntry {
         true
     }
 
-    /// Legacy replacements are unchanged. Every path that removes an actor
-    /// candidate must close its captured admission handles first.
-    pub(in crate::registry) fn seal_actor_binding_if_any(&self) {
-        if let Some(binding_ref) = self.binding_ref.as_ref() {
-            self.endpoint.seal_if_actor(self.binding_id, binding_ref);
-        }
-    }
-
     pub(in crate::registry) fn same_exact_local_binding(&self, other: &Self) -> bool {
         self.binding_id == other.binding_id
             && self.connection_ref == other.connection_ref
             && self.binding_ref == other.binding_ref
             && Arc::ptr_eq(&self.binding_permit, &other.binding_permit)
             && self.endpoint.same_binding(&other.endpoint)
-    }
-
-    pub(in crate::registry) fn actor_custody(&self) -> Option<Arc<super::ActorOutboundCustody>> {
-        self.endpoint.actor_custody()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(in crate::registry) fn is_provisional(&self) -> bool {
-        self.endpoint.is_provisional()
     }
 
     /// Recover this local socket's original outbound queue after its exact
@@ -1024,54 +982,6 @@ impl ConnectionEntry {
 #[derive(Debug, Clone)]
 pub struct ProvisionalConnectionEntry {
     entry: ConnectionEntry,
-}
-
-#[derive(Debug, Clone)]
-pub struct ActorProvisionalConnectionEntry {
-    jid: jid::FullJid,
-    entry: ConnectionEntry,
-}
-
-impl ActorProvisionalConnectionEntry {
-    pub fn jid(&self) -> &jid::FullJid {
-        &self.jid
-    }
-
-    pub fn seal_binding(&self) -> bool {
-        self.entry
-            .binding_ref()
-            .is_some_and(|binding| self.entry.seal_binding(self.entry.binding_id(), binding))
-    }
-
-    pub fn connection_ref(&self) -> &ConnectionRef {
-        self.entry.connection_ref()
-    }
-
-    pub fn binding_ref(&self) -> Option<&BindingRef> {
-        self.entry.binding_ref()
-    }
-
-    pub fn binding_id(&self) -> LocalConnectionBindingId {
-        self.entry.binding_id()
-    }
-
-    pub fn actor_custody(&self) -> Option<Arc<super::ActorOutboundCustody>> {
-        self.entry.actor_custody()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(in crate::registry) fn entry_for_publication(&self) -> ConnectionEntry {
-        self.entry.clone()
-    }
-
-    pub(in crate::registry) fn matches_entry(&self, entry: &ConnectionEntry) -> bool {
-        self.entry.same_exact_local_binding(entry)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(in crate::registry) fn is_provisional(&self) -> bool {
-        self.entry.is_provisional()
-    }
 }
 
 impl ProvisionalConnectionEntry {

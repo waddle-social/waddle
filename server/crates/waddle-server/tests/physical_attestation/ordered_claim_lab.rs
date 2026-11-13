@@ -855,7 +855,6 @@ async fn duplicate_stanza_id_after_claim_can_change_later_lookup() {
         &IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
-            remote_room_acceptance: Default::default(),
         },
         LineageConfig::default(),
         #[cfg(feature = "clustering")]

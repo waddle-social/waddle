@@ -532,7 +532,6 @@ async fn owner_grant_and_attested_ingress_lab() {
             IngressConfig {
                 pool_size: 1,
                 retry_attempts: 1,
-                remote_room_acceptance: Default::default(),
             },
             database_pool.global().clone(),
             lineage.clone(),
@@ -546,7 +545,6 @@ async fn owner_grant_and_attested_ingress_lab() {
         IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
-            remote_room_acceptance: Default::default(),
         },
         ingress.clone(),
         lineage.clone(),

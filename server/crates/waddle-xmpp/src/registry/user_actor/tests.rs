@@ -6,22 +6,20 @@ use super::test_support::{
     TakeResourceMutationObservations,
 };
 use super::{
-    health_check_or_wedge_kill, BareJid, ClearPresenceState, ConfirmProvisionalConnection,
-    ConflictCloseAllResources, Context, DrainPendingSubscriptions, FullJid, GetAvailableResources,
-    GetOtherResources, GetPresenceState, GetResources, HealthCheck, IsCarbonsEnabled, IsConnected,
-    PresenceState, QueuePendingSubscription, RegisterConnection, RegisterConnectionIfOwnerOrAbsent,
-    RegisterProvisionalConnectionIfExpected, ResourceCount, SetCarbonsEnabled, Stanza,
-    UnregisterConnection, UnregisterConnectionAndReportEmpty, UnregisterConnectionOutcome,
-    UpdatePresence, UpdatePresenceState, UserActor,
+    health_check_or_wedge_kill, BareJid, ClearPresenceState, ConflictCloseAllResources, Context,
+    DrainPendingSubscriptions, FullJid, GetAvailableResources, GetOtherResources, GetPresenceState,
+    GetResources, HealthCheck, IsCarbonsEnabled, IsConnected, PresenceState,
+    QueuePendingSubscription, RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
+    SetCarbonsEnabled, Stanza, UnregisterConnection, UnregisterConnectionAndReportEmpty,
+    UnregisterConnectionOutcome, UpdatePresence, UpdatePresenceState, UserActor,
 };
 use crate::pending_delivery::PendingRowId;
 use crate::registry::connection_registry::{
-    ActorSocketOutboundEndpoint, ArchiveDispatchRefusalReason, BroadcastOutcome, ConnectionEntry,
-    DeliveryKind, OutboundStanza, OutboundWriteAcceptance, SocketOutboundEndpoint,
+    ArchiveDispatchRefusalReason, BroadcastOutcome, ConnectionEntry, DeliveryKind, OutboundStanza,
+    OutboundWriteAcceptance, SocketOutboundEndpoint,
 };
 use crate::registry::{
-    ConnectionRegistry, LocalRetryDispatchOutcome, LocalRetryRefusal, TrySendDirectWithCustody,
-    TrySendPeerWithCustody,
+    LocalRetryDispatchOutcome, LocalRetryRefusal, TrySendDirectWithCustody, TrySendPeerWithCustody,
 };
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
@@ -46,104 +44,6 @@ fn entry() -> (ConnectionEntry, mpsc::Receiver<OutboundStanza>) {
     entry_with_capacity(16)
 }
 
-#[tokio::test]
-async fn provisional_registry_and_actor_mirror_activate_only_exact_current_binding() {
-    let registry = ConnectionRegistry::new();
-    let actor = spawn_actor("alice").await;
-    let jid = full("alice", "phone");
-    let connection = crate::ownership::ConnectionRef::fresh(
-        crate::ownership::NodeLeaseIdentity::local_process(),
-    );
-    let binding = crate::ownership::BindingRef::fresh(connection.clone());
-    let (socket, mut receiver, _custody) =
-        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("actor channel");
-    let candidate =
-        ConnectionEntry::new_actor_provisional_for_binding(socket, binding, jid.clone())
-            .expect("physical binding matches");
-    let other_jid = full("alice", "tablet");
-    let other_guard = registry.lock_bind(&other_jid).await;
-    assert!(!registry.publish_provisional_if_expected(
-        &other_guard,
-        other_jid.clone(),
-        &candidate,
-        None,
-    ));
-    drop(other_guard);
-    assert!(!actor
-        .ask(RegisterProvisionalConnectionIfExpected {
-            jid: other_jid,
-            candidate: candidate.clone(),
-            expected: None,
-        })
-        .await
-        .expect("cross-JID mirror refusal"));
-    let guard = registry.lock_bind(&jid).await;
-    assert!(registry.publish_provisional_if_expected(&guard, jid.clone(), &candidate, None));
-    drop(guard);
-    let registry_entry = registry.entry(&jid).expect("published provisional entry");
-    assert!(candidate.matches_entry(&registry_entry));
-    assert!(actor
-        .ask(RegisterProvisionalConnectionIfExpected {
-            jid: jid.clone(),
-            candidate: candidate.clone(),
-            expected: None,
-        })
-        .await
-        .expect("mirror publication"));
-    let actor_entry = actor
-        .ask(GetConnectionEntry { jid: jid.clone() })
-        .await
-        .expect("mirror read")
-        .expect("published actor entry");
-    assert!(registry_entry.same_exact_local_binding(&actor_entry));
-    assert!(receiver.try_recv().is_err());
-    let confirmed = actor
-        .ask(ConfirmProvisionalConnection {
-            jid: jid.clone(),
-            candidate: candidate.clone(),
-        })
-        .await
-        .expect("confirm ask")
-        .expect("exact mirror confirmed");
-    let guard = registry.lock_bind(&jid).await;
-    assert!(registry.activate_provisional_if_confirmed(&guard, &jid, &candidate, &confirmed));
-
-    let next_binding = crate::ownership::BindingRef::fresh(candidate.connection_ref().clone());
-    let (next_socket, _next_receiver, _next_custody) =
-        ActorSocketOutboundEndpoint::channel(candidate.connection_ref().clone(), 2, 4096)
-            .expect("fresh channel");
-    let next =
-        ConnectionEntry::new_actor_provisional_for_binding(next_socket, next_binding, jid.clone())
-            .expect("same physical connection");
-    assert!(registry.publish_provisional_if_expected(
-        &guard,
-        jid.clone(),
-        &next,
-        Some(candidate.binding_id()),
-    ));
-    drop(guard);
-    assert!(actor
-        .ask(RegisterProvisionalConnectionIfExpected {
-            jid: jid.clone(),
-            candidate: next.clone(),
-            expected: Some(candidate.binding_id()),
-        })
-        .await
-        .expect("successor mirror"));
-    let guard = registry.lock_bind(&jid).await;
-    assert!(!registry.activate_provisional_if_confirmed(&guard, &jid, &candidate, &confirmed));
-    assert!(!registry.retire_provisional_if_exact(&guard, &jid, &candidate));
-    assert_eq!(
-        registry
-            .entry(&jid)
-            .expect("successor remains")
-            .binding_id(),
-        next.binding_id()
-    );
-}
-
-/// A throwaway presence stanza — delivery-surface behavior is independent of
-/// stanza content, so any stanza works to exercise the routing path.
 fn any_stanza() -> Stanza {
     Stanza::Presence(xmpp_parsers::presence::Presence::new(
         xmpp_parsers::presence::Type::None,
@@ -339,12 +239,8 @@ async fn resource_mutation_observer_bounds_its_journal() {
         ),
     );
     let binding = crate::ownership::BindingRef::fresh(connection.clone());
-    let (endpoint, _receiver, _custody) =
-        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
-    let oversized_entry =
-        ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
-            .expect("binding matches connection")
-            .entry_for_publication();
+    let (endpoint, _receiver) = SocketOutboundEndpoint::channel(2);
+    let oversized_entry = ConnectionEntry::new_for_binding(endpoint, binding);
     actor
         .ask(RegisterConnection {
             jid,
@@ -385,11 +281,8 @@ async fn resource_mutation_observer_bounds_binding_identity_and_skips_snapshots_
         ),
     );
     let binding = crate::ownership::BindingRef::fresh(connection.clone());
-    let (endpoint, _receiver, _custody) =
-        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
-    let entry = ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
-        .expect("binding matches connection")
-        .entry_for_publication();
+    let (endpoint, _receiver) = SocketOutboundEndpoint::channel(2);
+    let entry = ConnectionEntry::new_for_binding(endpoint, binding);
     actor
         .ask(RegisterConnection { jid, entry })
         .await
@@ -456,49 +349,6 @@ async fn resource_mutation_observer_reports_remote_entries_as_unmodeled() {
         ResourceMutationObservation::Register {
             candidate_binding: None,
             disposition: ResourceMutationDisposition::Inserted,
-            ..
-        }
-    ));
-    assert_eq!(
-        batch.model_comparison,
-        ModelComparison::InconclusiveMissingExternalReceipts
-    );
-}
-
-#[tokio::test]
-async fn resource_mutation_observer_records_provisional_mirror_refusal() {
-    let actor = spawn_actor("alice").await;
-    let jid = full("alice", "phone");
-    let wrong_jid = full("alice", "tablet");
-    let connection = crate::ownership::ConnectionRef::fresh(
-        crate::ownership::NodeLeaseIdentity::local_process(),
-    );
-    let binding = crate::ownership::BindingRef::fresh(connection.clone());
-    let (endpoint, _receiver, _custody) =
-        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
-    let candidate = ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid)
-        .expect("candidate matches connection");
-
-    let accepted = actor
-        .ask(RegisterProvisionalConnectionIfExpected {
-            jid: wrong_jid,
-            candidate,
-            expected: None,
-        })
-        .await
-        .expect("provisional mirror refusal");
-    assert!(!accepted);
-
-    let batch = actor
-        .ask(TakeResourceMutationObservations)
-        .await
-        .expect("observation batch");
-    assert!(matches!(
-        &batch.observations[0],
-        ResourceMutationObservation::ProvisionalMirror {
-            previous: None,
-            candidate_binding: Some(_),
-            disposition: ResourceMutationDisposition::Rejected,
             ..
         }
     ));

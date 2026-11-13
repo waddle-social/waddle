@@ -38,7 +38,6 @@ const CLIENT_NS: &str = "jabber:client";
 const BIND_NS: &str = "urn:ietf:params:xml:ns:xmpp-bind";
 const CARBONS_NS: &str = "urn:xmpp:carbons:2";
 const STREAM_NS: &str = "http://etherx.jabber.org/streams";
-const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
 const OWNER_LOCALPARTS_ENV: &str = "WADDLE_SERVER_OWNER_LOCALPARTS";
 
 /// The accounts every scenario seeds, by the name a scenario calls them.
@@ -111,10 +110,7 @@ impl Cluster {
             .collect();
         // Room creation is limited to server owners.
         let owners = format!("admin,{}", localparts.join(","));
-        let mut envs = vec![(OWNER_LOCALPARTS_ENV, owners.as_str())];
-        if delivery == Delivery::Mailbox {
-            envs.push((ACCEPTANCE_ENV, "mailbox"));
-        }
+        let envs = vec![(OWNER_LOCALPARTS_ENV, owners.as_str())];
 
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();

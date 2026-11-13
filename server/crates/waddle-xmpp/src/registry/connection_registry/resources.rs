@@ -149,28 +149,6 @@ impl ConnectionRegistry {
             .collect()
     }
 
-    /// Get all connected resources for a bare JID, excluding a specific full JID.
-    ///
-    /// Returns all full JIDs that match the bare JID except the excluded one.
-    /// This does NOT filter by carbons status — callers that are routing
-    /// XEP-0280 carbon copies should use [`Self::other_carbon_resources_for_user`]
-    /// instead so that non-opted-in resources are not sent carbon-wrapped stanzas.
-    pub fn other_resources_for_user(
-        &self,
-        bare_jid: &BareJid,
-        exclude_jid: &FullJid,
-    ) -> Vec<FullJid> {
-        self.connections
-            .iter()
-            .filter(|entry| {
-                let jid = entry.key();
-                // Match bare JID but exclude the specific full JID
-                jid.to_bare() == *bare_jid && jid != exclude_jid
-            })
-            .map(|entry| entry.key().clone())
-            .collect()
-    }
-
     /// Get all resources for a bare JID that have XEP-0280 Message Carbons
     /// enabled, excluding every full JID in `exclude_jids`.
     ///

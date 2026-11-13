@@ -1,6 +1,6 @@
 use super::{
-    ActorSocketOutboundEndpoint, ConnectionEntry, ConnectionRegistry, ForceDetachOfferError,
-    ForceDetachOrigin, ForceDetachRequest, LocalConnectionBindingId,
+    ConnectionEntry, ConnectionRegistry, ForceDetachOfferError, ForceDetachOrigin,
+    ForceDetachRequest, LocalConnectionBindingId,
 };
 use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use crate::pending_delivery::SmSessionId;
@@ -280,79 +280,6 @@ fn exact_seal_revokes_and_wrong_identity_cannot_seal() {
     assert!(registry
         .local_binding_permit_if_owner(&jid(), &owner)
         .is_none());
-}
-
-#[tokio::test]
-async fn provisional_publication_and_exact_retirement_fail_closed() {
-    let registry = ConnectionRegistry::new();
-    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
-    let binding = BindingRef::fresh(connection.clone());
-    let (socket, _receiver, _custody) =
-        ActorSocketOutboundEndpoint::channel(connection.clone(), 2, 4096).expect("socket");
-    let candidate =
-        ConnectionEntry::new_actor_provisional_for_binding(socket, binding.clone(), jid())
-            .expect("candidate");
-    let guard = registry.lock_bind(&jid()).await;
-    assert!(registry.publish_provisional_if_expected(&guard, jid(), &candidate, None));
-    assert!(
-        registry.publish_provisional_if_expected(
-            &guard,
-            jid(),
-            &candidate,
-            Some(candidate.binding_id()),
-        ),
-        "provisional same-entry publication stays provisional"
-    );
-    assert!(
-        registry
-            .local_binding_permit_if_owner(&jid(), &candidate.binding_id())
-            .is_none(),
-        "provisional binding cannot mint a permit"
-    );
-    let current = registry.entry(&jid()).expect("published candidate");
-    assert!(current.activate_binding(candidate.binding_id(), &binding));
-    let old_permit = registry
-        .local_binding_permit_if_owner(&jid(), &candidate.binding_id())
-        .expect("active permit");
-    registry.register_entry(jid(), current.clone());
-    assert!(registry.register_entry_if_owner_or_absent(
-        jid(),
-        current.clone(),
-        &candidate.binding_id()
-    ));
-    assert!(registry.register_socket_entry(jid(), current).is_some());
-    assert!(old_permit.is_active());
-    assert!(
-        registry
-            .local_binding_permit_if_owner(&jid(), &candidate.binding_id())
-            .is_some(),
-        "same-entry publication must not seal actor admission"
-    );
-
-    let next_binding = BindingRef::fresh(connection.clone());
-    let (socket, _receiver, _custody) =
-        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("successor socket");
-    let next =
-        ConnectionEntry::new_actor_provisional_for_binding(socket, next_binding.clone(), jid())
-            .expect("successor");
-    assert!(registry.publish_provisional_if_expected(
-        &guard,
-        jid(),
-        &next,
-        Some(candidate.binding_id())
-    ));
-    assert!(!old_permit.is_active());
-    assert!(registry
-        .local_binding_permit_if_owner(&jid(), &next.binding_id())
-        .is_none());
-    assert!(!registry.retire_provisional_if_exact(&guard, &jid(), &candidate));
-    let current = registry.entry(&jid()).expect("published successor");
-    assert!(current.activate_binding(next.binding_id(), &next_binding));
-    let next_permit = registry
-        .local_binding_permit_if_owner(&jid(), &next.binding_id())
-        .expect("successor permit");
-    assert!(registry.retire_provisional_if_exact(&guard, &jid(), &next));
-    assert!(!next_permit.is_active());
 }
 
 #[test]
