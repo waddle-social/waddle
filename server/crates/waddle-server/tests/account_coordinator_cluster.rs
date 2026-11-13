@@ -45,7 +45,8 @@ const STATE_DETACHED: i64 = 4;
 /// Two nodes that select the coordinator, and the database they share.
 struct Scenario {
     db: Database,
-    server_a: TestServer,
+    /// `None` once the scenario has killed node A.
+    server_a: Option<TestServer>,
     node_a: String,
     server_b: TestServer,
     node_b: String,
@@ -85,7 +86,7 @@ impl Scenario {
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
         Self {
             db,
-            server_a,
+            server_a: Some(server_a),
             node_a,
             server_b,
             node_b,
@@ -123,6 +124,43 @@ impl Scenario {
         client
     }
 
+    fn server_a(&self) -> &TestServer {
+        self.server_a.as_ref().expect("node A")
+    }
+
+    /// Kill node A without letting it run any teardown, and wait until
+    /// the cluster has recorded its node lease as expired. Until then a
+    /// claim it holds counts as held by a live node.
+    async fn kill_node_a(&mut self) {
+        drop(self.server_a.take().expect("node A"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let conn = self.db.guard().await.expect("database guard");
+            let mut rows = conn
+                .query(
+                    "SELECT count(*) FROM clustering_nodes WHERE node_id = ? AND NOT expired",
+                    waddle_server::db_params![self.node_a.clone()],
+                )
+                .await
+                .expect("node lease query");
+            let unexpired = rows
+                .next()
+                .await
+                .expect("node lease row")
+                .expect("one row")
+                .get::<i64>(0)
+                .expect("unexpired count");
+            if unexpired == 0 {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "node A's lease was not recorded as expired"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn peer_on(&self, server: &TestServer, resource: &str) -> WsXmppClient {
         WsXmppClient::connect_and_auth(
             &server.ws_url(),
@@ -148,7 +186,7 @@ async fn forget_bindings(db: &Database) {
         .query(
             "SELECT count(*) FROM information_schema.tables WHERE table_name IN \
              ('account_resource_operations', 'account_resource_bindings', \
-             'ingress_protocol_epoch')",
+             'ingress_protocol_epoch', 'pending_delivery')",
             (),
         )
         .await
@@ -161,9 +199,18 @@ async fn forget_bindings(db: &Database) {
         .get::<i64>(0)
         .expect("relation count");
     drop(rows);
-    if relations < 3 {
+    if relations < 4 {
         return;
     }
+    // A stored stanza an earlier scenario delivered just before its nodes
+    // were killed stays claimed by that delivery, which holds back the
+    // account's later stored stanzas.
+    conn.execute(
+        "DELETE FROM pending_delivery WHERE recipient_jid = ?",
+        waddle_server::db_params![account_jid()],
+    )
+    .await
+    .expect("delete stored stanzas");
     conn.execute(
         "DO $$ BEGIN \
          PERFORM pg_catalog.set_config('waddle.protocol_epoch', \
@@ -241,6 +288,53 @@ async fn binding_state(db: &Database, resource: &str) -> Option<i64> {
         .map(|row| row.get::<i64>(0).expect("binding state"))
 }
 
+/// The reference of the binding a resource row holds.
+async fn binding_ref(db: &Database, resource: &str) -> Option<String> {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT binding_ref FROM account_resource_bindings WHERE full_jid = ?",
+            waddle_server::db_params![full_jid(resource)],
+        )
+        .await
+        .expect("binding query");
+    rows.next()
+        .await
+        .expect("binding row")
+        .and_then(|row| row.get::<Option<String>>(0).expect("binding reference"))
+}
+
+/// Wait until the resource's row names a stream-management session.
+async fn wait_for_session_reference(db: &Database, resource: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let conn = db.guard().await.expect("database guard");
+        let mut rows = conn
+            .query(
+                "SELECT count(*) FROM account_resource_bindings \
+                 WHERE full_jid = ? AND sm_session_id IS NOT NULL",
+                waddle_server::db_params![full_jid(resource)],
+            )
+            .await
+            .expect("session reference query");
+        let referenced = rows
+            .next()
+            .await
+            .expect("session reference row")
+            .expect("one row")
+            .get::<i64>(0)
+            .expect("session reference count");
+        if referenced == 1 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{resource} did not record its stream-management session"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn wait_for_binding(db: &Database, resource: &str, expected: Option<i64>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -311,14 +405,14 @@ async fn the_first_bind_takes_the_account_claim_and_the_last_unbind_releases_it(
     let scenario = Scenario::start().await;
     assert_eq!(account_claim(&scenario.db).await, None);
 
-    let desk = scenario.account_on(&scenario.server_a, "desk").await;
+    let desk = scenario.account_on(scenario.server_a(), "desk").await;
     wait_for_binding(&scenario.db, "desk", Some(STATE_ACTIVE)).await;
     let taken = wait_for_claim(&scenario.db, "held by node A", |claim| {
         claim.is_some_and(|(node, _)| node == &scenario.node_a)
     })
     .await;
 
-    let phone = scenario.account_on(&scenario.server_a, "phone").await;
+    let phone = scenario.account_on(scenario.server_a(), "phone").await;
     wait_for_binding(&scenario.db, "phone", Some(STATE_ACTIVE)).await;
 
     desk.close().await.expect("close the first resource");
@@ -347,7 +441,7 @@ async fn the_first_bind_takes_the_account_claim_and_the_last_unbind_releases_it(
 #[tokio::test]
 async fn a_message_to_an_account_without_a_claim_is_stored_for_its_next_resource() {
     let scenario = Scenario::start().await;
-    let mut sender = scenario.peer_on(&scenario.server_a, "sender").await;
+    let mut sender = scenario.peer_on(scenario.server_a(), "sender").await;
     assert_eq!(account_claim(&scenario.db).await, None);
 
     send_element(
@@ -372,7 +466,7 @@ async fn a_message_to_an_account_without_a_claim_is_stored_for_its_next_resource
         "reading an account without a claim takes none"
     );
 
-    let mut desk = scenario.account_on(&scenario.server_a, "desk").await;
+    let mut desk = scenario.account_on(scenario.server_a(), "desk").await;
     send_element(&mut desk, available()).await;
     let delivered = recv_element(&mut desk, "the stored message", |element| {
         element.is("message", CLIENT_NS) && element.attr("id") == Some("unclaimed-1")
@@ -394,7 +488,7 @@ async fn a_message_to_an_account_without_a_claim_is_stored_for_its_next_resource
 #[tokio::test]
 async fn a_detached_binding_keeps_the_account_claim_until_it_is_retired() {
     let scenario = Scenario::start().await;
-    let mut desk = scenario.account_on(&scenario.server_a, "desk").await;
+    let mut desk = scenario.account_on(scenario.server_a(), "desk").await;
     send_element(
         &mut desk,
         Element::builder("enable", SM_NS)
@@ -422,7 +516,7 @@ async fn a_detached_binding_keeps_the_account_claim_until_it_is_retired() {
         "a detached binding keeps the account's claim"
     );
 
-    let mut resumed = scenario.authenticated_on(&scenario.server_a).await;
+    let mut resumed = scenario.authenticated_on(scenario.server_a()).await;
     send_element(
         &mut resumed,
         Element::builder("resume", SM_NS)
@@ -445,4 +539,88 @@ async fn a_detached_binding_keeps_the_account_claim_until_it_is_retired() {
     resumed.close().await.expect("close the resumed stream");
     wait_for_binding(&scenario.db, "desk", None).await;
     wait_for_claim(&scenario.db, "released", |claim| claim.is_none()).await;
+}
+
+/// Enable stream management with resumption and announce availability.
+async fn enable_resumable(client: &mut WsXmppClient) {
+    send_element(
+        client,
+        Element::builder("enable", SM_NS)
+            .attr(xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    )
+    .await;
+    recv_element(client, "enabled", |element| element.is("enabled", SM_NS)).await;
+    send_element(client, available()).await;
+}
+
+/// The owner node dies with the account's bindings on it. The survivor
+/// takes the account over on the next bind: the binding of the same full
+/// JID is retired and replaced promptly, a binding without a session is
+/// retired, and a binding whose session can resume is kept as detached.
+#[tokio::test]
+async fn a_dead_owners_bindings_are_settled_by_the_node_that_takes_the_account_over() {
+    let mut scenario = Scenario::start().await;
+    let _desk = scenario.account_on(scenario.server_a(), "desk").await;
+    let _phone = scenario.account_on(scenario.server_a(), "phone").await;
+    let mut tablet = scenario.account_on(scenario.server_a(), "tablet").await;
+    enable_resumable(&mut tablet).await;
+    for resource in ["desk", "phone", "tablet"] {
+        wait_for_binding(&scenario.db, resource, Some(STATE_ACTIVE)).await;
+    }
+    let before = binding_ref(&scenario.db, "desk").await;
+    wait_for_session_reference(&scenario.db, "tablet").await;
+
+    scenario.kill_node_a().await;
+
+    let started = tokio::time::Instant::now();
+    let _desk_again = scenario.account_on(&scenario.server_b, "desk").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the rebind does not wait out the replacement budget: {:?}",
+        started.elapsed()
+    );
+    wait_for_binding(&scenario.db, "desk", Some(STATE_ACTIVE)).await;
+    assert_ne!(binding_ref(&scenario.db, "desk").await, before);
+    wait_for_claim(&scenario.db, "held by node B", |claim| {
+        claim.is_some_and(|(node, _)| node == &scenario.node_b)
+    })
+    .await;
+    wait_for_binding(&scenario.db, "phone", None).await;
+    wait_for_binding(&scenario.db, "tablet", Some(STATE_DETACHED)).await;
+}
+
+/// A stanza for an account whose owner node died is not an error: the
+/// node that reads the account takes it over, retires the dead node's
+/// bindings and stores the stanza. Nothing is left to hold the claim for,
+/// so it is released, and the account's next resource gets the stanza.
+#[tokio::test]
+async fn a_message_to_an_account_whose_owner_died_is_stored_for_its_next_resource() {
+    let mut scenario = Scenario::start().await;
+    let _desk = scenario.account_on(scenario.server_a(), "desk").await;
+    wait_for_binding(&scenario.db, "desk", Some(STATE_ACTIVE)).await;
+    let mut sender = scenario.peer_on(&scenario.server_b, "sender").await;
+
+    scenario.kill_node_a().await;
+
+    send_element(&mut sender, chat(&account_jid(), "orphaned-1", "for later")).await;
+    send_element(&mut sender, ping("after-orphaned-1")).await;
+    let reply = recv_element(&mut sender, "the ping result or an error", |element| {
+        element.attr("id") == Some("after-orphaned-1") || element.attr("id") == Some("orphaned-1")
+    })
+    .await;
+    assert_eq!(
+        (reply.name(), reply.attr("id"), reply.attr("type")),
+        ("iq", Some("after-orphaned-1"), Some("result")),
+        "the message is not answered with an error: {reply:?}"
+    );
+    wait_for_binding(&scenario.db, "desk", None).await;
+    wait_for_claim(&scenario.db, "released", |claim| claim.is_none()).await;
+
+    let mut desk = scenario.account_on(&scenario.server_b, "desk").await;
+    send_element(&mut desk, available()).await;
+    recv_element(&mut desk, "the stored message", |element| {
+        element.is("message", CLIENT_NS) && element.attr("id") == Some("orphaned-1")
+    })
+    .await;
 }

@@ -21,7 +21,24 @@ impl OrderedRelayDeliveryBridge {
             return Ok(None);
         };
         if !claim.owner_lease_fresh {
-            return Err(());
+            // The account's owner lost its node lease. With the account
+            // coordinator selected the local read takes the account over
+            // and answers from its settled rows. The connection registry
+            // knows nothing about an account another node owned, so there
+            // the read fails.
+            let coordinator_selected = services.web_socket_state.upgrade().is_some_and(|state| {
+                state
+                    .deps
+                    .app_state
+                    .account_authority()
+                    .coordinators()
+                    .is_some()
+            });
+            return if coordinator_selected {
+                Ok(None)
+            } else {
+                Err(())
+            };
         }
         if claim.owner == services.node_identity.current() {
             return Ok(None);

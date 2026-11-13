@@ -691,3 +691,10 @@ waddle-server::xep0198_durable_cross_node_resume a_session_detached_on_another_n
 waddle-server::xep0198_durable_cross_node_resume a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper
 waddle-server::xep0198_durable_cross_node_resume racing_resumes_on_two_nodes_leave_exactly_one_owner
 waddle-server::xep0198_durable_cross_node_resume a_connection_that_lost_the_session_claim_retires_and_leaves_the_session
+
+# #2138 account takeover: the node that takes over an account whose owner
+# died settles the dead node's bindings by that node's lease, and a read of
+# such an account goes through the takeover. Only a multi-node PostgreSQL
+# run has a node lease to expire.
+waddle-server::account_coordinator_cluster a_dead_owners_bindings_are_settled_by_the_node_that_takes_the_account_over
+waddle-server::account_coordinator_cluster a_message_to_an_account_whose_owner_died_is_stored_for_its_next_resource
