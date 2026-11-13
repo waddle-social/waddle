@@ -277,7 +277,7 @@ impl PendingAcceptances {
             let mut lanes = self
                 .lanes
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             let waits = lanes.entry(lane).or_default();
             change(waits);
             let sample = (

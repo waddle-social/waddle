@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 #[derive(Default)]

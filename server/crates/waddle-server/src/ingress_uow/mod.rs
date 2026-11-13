@@ -337,7 +337,7 @@ impl IngressUnitOfWork {
     ) -> bool {
         self.seated_rooms
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .get(room)
             .is_some_and(|seated| *seated == epoch)
     }
@@ -350,7 +350,7 @@ impl IngressUnitOfWork {
     ) {
         self.seated_rooms
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .insert(room, epoch);
     }
 

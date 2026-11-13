@@ -364,10 +364,10 @@ struct ErrorCapture<W, E> {
 impl<W, E> ErrorCapture<W, E> {
     fn record(&self, error: E) -> Arc<E> {
         let error = Arc::new(error);
-        let mut saved = match self.error.lock() {
-            Ok(saved) => saved,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut saved = self
+            .error
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if saved.is_none() {
             *saved = Some(Arc::clone(&error));
         }
@@ -2028,10 +2028,11 @@ where
     }
 
     fn error_or_interrupted(&self, progress: WriteProgress) -> OutputError<E> {
-        let error = match self.error.lock() {
-            Ok(error) => error.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
+        let error = self
+            .error
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone();
         match error {
             Some(error) => OutputError::Transport(error),
             None => OutputError::Interrupted(progress),

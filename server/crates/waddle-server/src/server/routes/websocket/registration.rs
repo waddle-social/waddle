@@ -360,10 +360,10 @@ impl<'a> RegistryBindingPublisher<'a> {
     }
 
     fn take_endpoint(&self) -> Option<waddle_xmpp::registry::ConnectionEntry> {
-        match self.endpoint.lock() {
-            Ok(mut staged) => staged.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        }
+        self.endpoint
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .take()
     }
 
     fn register(

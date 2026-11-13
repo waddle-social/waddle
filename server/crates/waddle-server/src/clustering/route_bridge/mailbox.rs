@@ -284,7 +284,7 @@ impl LaneWorkers {
     fn is_busy(&self, lane: MailboxLaneId) -> bool {
         self.busy
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .contains(&lane)
     }
 
@@ -302,7 +302,7 @@ impl LaneWorkers {
         };
         self.busy
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .insert(lane);
         let busy = Arc::clone(&self.busy);
         let services = Arc::clone(services);
@@ -328,7 +328,7 @@ impl Drop for LaneRelease {
     fn drop(&mut self) {
         self.busy
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .remove(&self.lane);
     }
 }

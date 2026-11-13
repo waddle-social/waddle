@@ -18,6 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::super::{RemoteResourceRegistrationId, RemoteResourceSocketGeneration};
 
@@ -53,7 +54,8 @@ pub(in super::super) enum RemoteResourceUpdateOrderFull {
     /// updates.
     RegistrationQueue,
     /// A panic during a map edit poisoned the order lock. All later
-    /// admissions fail closed instead of relying on state of unknown shape.
+    /// admissions fail closed instead of relying on state of unknown shape;
+    /// the poisoned map is never read again.
     Poisoned,
 }
 
@@ -81,9 +83,15 @@ type Slots = Arc<Mutex<HashMap<RemoteResourceUpdateKey, VecDeque<QueuedTurn>>>>;
 /// Bounded per-registration FIFO of update handlers. Each queue contains
 /// every live admitted turn, including its active head. An idle registration
 /// is removed immediately so its capacity can be reused.
+///
+/// A poisoned order lock closes the order for good. The queued readiness
+/// senders live inside the poisoned map, which is not known to be consistent
+/// and is therefore left untouched; `closed` is the signal outside the lock
+/// that fails every turn still waiting for a grant.
 #[derive(Default)]
 pub(in super::super) struct RemoteResourceUpdateOrder {
     slots: Slots,
+    closed: CancellationToken,
 }
 
 impl RemoteResourceUpdateOrder {
@@ -93,14 +101,11 @@ impl RemoteResourceUpdateOrder {
         &self,
         key: RemoteResourceUpdateKey,
     ) -> Result<RemoteResourceUpdateTurn, RemoteResourceUpdateOrderFull> {
-        let mut slots = match self.slots.lock() {
-            Ok(slots) => slots,
-            Err(poisoned) => {
-                // Drop all ungranted senders without granting successors.
-                // The already-granted head of each queue may finish.
-                poisoned.into_inner().clear();
-                return Err(RemoteResourceUpdateOrderFull::Poisoned);
-            }
+        let Ok(mut slots) = self.slots.lock() else {
+            // Fail every ungranted turn without granting successors. The
+            // already-granted head of each queue may finish.
+            self.closed.cancel();
+            return Err(RemoteResourceUpdateOrderFull::Poisoned);
         };
         let (sender, receiver) = oneshot::channel();
         let identity = Arc::new(());
@@ -127,6 +132,7 @@ impl RemoteResourceUpdateOrder {
         drop(slots);
         Ok(RemoteResourceUpdateTurn {
             slots: Arc::clone(&self.slots),
+            closed: self.closed.clone(),
             key,
             identity,
             readiness: TurnReadiness::Waiting(receiver),
@@ -161,6 +167,7 @@ enum TurnReadiness {
 /// removes that turn from the queue.
 pub(in super::super) struct RemoteResourceUpdateTurn {
     slots: Slots,
+    closed: CancellationToken,
     key: RemoteResourceUpdateKey,
     identity: Arc<()>,
     readiness: TurnReadiness,
@@ -169,14 +176,19 @@ pub(in super::super) struct RemoteResourceUpdateTurn {
 impl RemoteResourceUpdateTurn {
     /// Wait for an explicit grant from the queue. The receiver stays in the
     /// turn while this borrowed future is pending, so cancelling that future
-    /// cannot bypass the queue on a later retry. A closed sender is failure,
-    /// never permission to run.
+    /// cannot bypass the queue on a later retry. A grant that was already
+    /// sent wins over a closed order; otherwise a closed order or a closed
+    /// sender is failure, never permission to run.
     pub(in super::super) async fn wait_for_predecessors(
         &mut self,
     ) -> Result<(), RemoteResourceUpdateOrderClosed> {
         let result = match &mut self.readiness {
             TurnReadiness::Waiting(receiver) => {
-                receiver.await.map_err(|_| RemoteResourceUpdateOrderClosed)
+                tokio::select! {
+                    biased;
+                    granted = receiver => granted.map_err(|_| RemoteResourceUpdateOrderClosed),
+                    () = self.closed.cancelled() => Err(RemoteResourceUpdateOrderClosed),
+                }
             }
             TurnReadiness::Ready => return Ok(()),
             TurnReadiness::Closed => return Err(RemoteResourceUpdateOrderClosed),
@@ -192,15 +204,12 @@ impl RemoteResourceUpdateTurn {
 
 impl Drop for RemoteResourceUpdateTurn {
     fn drop(&mut self) {
-        let mut slots = match self.slots.lock() {
-            Ok(slots) => slots,
-            Err(poisoned) => {
-                // Draining wakes ungranted waiters with an error. Poison is
-                // observed only on the next admission or turn drop, so a
-                // panic alone does not guarantee an immediate wakeup.
-                poisoned.into_inner().clear();
-                return;
-            }
+        let Ok(mut slots) = self.slots.lock() else {
+            // Closing wakes ungranted waiters with an error. Poison is
+            // observed only on the next admission or turn drop, so a
+            // panic alone does not guarantee an immediate wakeup.
+            self.closed.cancel();
+            return;
         };
         let idle = if let Some(queue) = slots.get_mut(&self.key) {
             let Some(position) = queue
@@ -539,6 +548,26 @@ mod tests {
         drop(first);
         assert_eq!(
             second.wait_for_predecessors().await,
+            Err(RemoteResourceUpdateOrderClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_sent_before_the_order_closed_still_admits_its_unpolled_head() {
+        let order = RemoteResourceUpdateOrder::default();
+        let key = registration();
+        let mut head = order.admit(key.clone()).expect("admit head");
+        let mut waiter = order.admit(key.clone()).expect("admit waiter");
+        order.poison_for_test();
+        assert_eq!(
+            order.admit(key).err(),
+            Some(RemoteResourceUpdateOrderFull::Poisoned)
+        );
+
+        assert_eq!(head.wait_for_predecessors().await, Ok(()));
+        drop(head);
+        assert_eq!(
+            waiter.wait_for_predecessors().await,
             Err(RemoteResourceUpdateOrderClosed)
         );
     }
