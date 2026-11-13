@@ -66,8 +66,8 @@ mod sm_resume_token_support;
 
 use base64::Engine;
 use cluster_support::{
-    cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
-    muc_join_presence, open_control_db, readiness_status, reset_and_enroll,
+    activate_mailbox_epoch, cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool,
+    join_fanout_room, muc_join_presence, open_control_db, readiness_status, reset_and_enroll,
     reset_node_lease_tables, spawn_cluster_server, spawn_cluster_server_with_envs,
     wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
@@ -416,6 +416,13 @@ async fn cluster_exit_criteria_end_to_end() {
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
     let (server_b, _startup_node_b, peer_b) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    // A full JID whose binding another node hosts is reached by a bound
+    // direct request, which the mailbox carries from protocol epoch 2
+    // (`docs/planning/2173-direct-lanes.md`, "Bound requests"). Below it
+    // such a resource is unavailable and the cross-node legs below could
+    // not deliver live. The first node to start builds the schema the
+    // epoch row lives in.
+    activate_mailbox_epoch(&db).await;
 
     // --- The test process joins as node C.
     let stop = CancellationToken::new();
@@ -2478,22 +2485,6 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
 #[tokio::test]
 async fn groupchat_fanout_terminalizes_at_the_mailbox_epoch() {
     groupchat_fanout_terminalizes(true).await;
-}
-
-/// Advance the shared database's ingress protocol epoch to 2. Each statement
-/// is one step of the epoch guard; a database already there is left alone.
-async fn activate_mailbox_epoch(db: &Database) {
-    let conn = db.guard().await.expect("epoch guard");
-    for _ in 0..2 {
-        conn.execute(
-            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
-             lineage_uuid = (SELECT lineage_uuid::uuid FROM _lineage WHERE id = 1) \
-             WHERE id = 1 AND epoch < 2",
-            (),
-        )
-        .await
-        .expect("activate the mailbox epoch");
-    }
 }
 
 async fn groupchat_fanout_terminalizes(mailbox_epoch: bool) {
