@@ -12,6 +12,8 @@
 //! leaves nothing to recover, so it does not create a durable session: it
 //! keeps the in-memory counters on either selector.
 
+mod claim;
+
 use std::time::Duration;
 
 use jid::FullJid;
@@ -345,20 +347,22 @@ impl DurableSmLink {
                         %error,
                         "durable SM resume could not be completed"
                     );
-                    return Err(
-                        if matches!(
-                            error,
-                            OwnerError::Rejected(
-                                OwnerRejection::Fence(_)
-                                    | OwnerRejection::NotOwned(_)
-                                    | OwnerRejection::UnknownSession
+                    let superseded = match &error {
+                        OwnerError::Rejected(rejection) => {
+                            binding_lost_session(
+                                &hydrating.store,
+                                hydrating.commit.fence(),
+                                rejection,
                             )
-                        ) {
-                            HydrationFailure::Superseded
-                        } else {
-                            HydrationFailure::Unavailable
-                        },
-                    );
+                            .await
+                        }
+                        OwnerError::Indeterminate(_) => false,
+                    };
+                    return Err(if superseded {
+                        HydrationFailure::Superseded
+                    } else {
+                        HydrationFailure::Unavailable
+                    });
                 }
             }
         };
@@ -427,11 +431,16 @@ impl DurableSmLink {
                 Ok(()) => return true,
                 // A fence refusal means another generation owns the session
                 // already; this binding owns nothing either way.
-                Err(OwnerError::Rejected(
-                    OwnerRejection::Fence(_)
-                    | OwnerRejection::NotOwned(_)
-                    | OwnerRejection::UnknownSession,
-                )) => return true,
+                Err(OwnerError::Rejected(rejection))
+                    if binding_lost_session(
+                        &hydrating.store,
+                        hydrating.commit.fence(),
+                        &rejection,
+                    )
+                    .await =>
+                {
+                    return true
+                }
                 Err(OwnerError::Indeterminate(_)) if attempts < ADMISSION_ATTEMPTS => {}
                 Err(error) => {
                     error!(
@@ -511,11 +520,9 @@ impl DurableSmLink {
                 }
                 AckVerdict::HandledInvalid
             }
-            Err(OwnerError::Rejected(
-                rejection @ (OwnerRejection::Fence(_)
-                | OwnerRejection::NotOwned(_)
-                | OwnerRejection::UnknownSession),
-            )) => {
+            Err(OwnerError::Rejected(rejection))
+                if binding_lost_session(&owner.store, &owner.fence, &rejection).await =>
+            {
                 info!(
                     session = ?owner.fence.session,
                     error = %rejection,
@@ -551,11 +558,9 @@ impl DurableSmLink {
             .await;
         match reported {
             Ok(()) => {}
-            Err(OwnerError::Rejected(
-                rejection @ (OwnerRejection::Fence(_)
-                | OwnerRejection::NotOwned(_)
-                | OwnerRejection::UnknownSession),
-            )) => {
+            Err(OwnerError::Rejected(rejection))
+                if binding_lost_session(&owner.store, &owner.fence, &rejection).await =>
+            {
                 info!(
                     session = ?owner.fence.session,
                     error = %rejection,
@@ -620,6 +625,18 @@ impl DurableSmOwner {
                 Err(AdmissionError::Indeterminate(cause)) => {
                     warn!(session = ?self.fence.session, error = %cause, "durable SM admission outcome is still unknown");
                     return Err(CustodyRefusal::Unavailable);
+                }
+                Err(AdmissionError::Rejected(AdmissionRejection::ClaimFenceMissing)) => {
+                    return Err(match claim_loss(&self.store, &self.fence).await {
+                        ClaimLoss::Superseded | ClaimLoss::Ended => {
+                            info!(
+                                session = ?self.fence.session,
+                                "durable SM session claim is held elsewhere; retiring this binding"
+                            );
+                            CustodyRefusal::Superseded
+                        }
+                        ClaimLoss::Unknown => CustodyRefusal::Unavailable,
+                    });
                 }
                 Err(AdmissionError::Rejected(rejection)) => {
                     return Err(admission_refusal(&self.fence, &rejection));
@@ -697,6 +714,58 @@ pub(in crate::server::routes::websocket) enum OwnerRelease {
     /// The transition could not be committed. The session keeps this
     /// binding as its owner until an owner-loss record or a resume moves it.
     Unavailable,
+}
+
+/// What the loss of the session claim means for the binding that named it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimLoss {
+    /// The session continues without this binding: the node that took the
+    /// claim resumes or expires it.
+    Superseded,
+    /// The session is terminal or unknown to the authority.
+    Ended,
+    /// The session could not be read, so nothing is known about it.
+    Unknown,
+}
+
+/// Classify a write refused because this node no longer holds the claim the
+/// binding named.
+///
+/// A session claim leaves a node only by being taken for a resume on
+/// another node, by the orphan reaper after this node's lease lapsed, or by
+/// the release that follows the session's end. None of them returns the
+/// claim to this binding, so the binding has lost the session for good. The
+/// session is read to tell a session that continues elsewhere from one that
+/// ended, and so that an authority that cannot be read is reported as
+/// unavailable instead.
+async fn claim_loss(store: &DurableSmStore, fence: &OwnerFence) -> ClaimLoss {
+    use waddle_xmpp::stream_management::durable::DurableSmState;
+    match store.session(fence.session).await {
+        Ok(Some(record)) if !matches!(record.state, DurableSmState::Terminal(_)) => {
+            ClaimLoss::Superseded
+        }
+        Ok(_) => ClaimLoss::Ended,
+        Err(error) => {
+            warn!(session = ?fence.session, %error, "durable SM session could not be read after its claim was lost");
+            ClaimLoss::Unknown
+        }
+    }
+}
+
+/// Whether `rejection` means the binding behind `fence` no longer owns its
+/// session: another generation owns it, it ended, or its claim moved.
+async fn binding_lost_session(
+    store: &DurableSmStore,
+    fence: &OwnerFence,
+    rejection: &OwnerRejection,
+) -> bool {
+    match rejection {
+        OwnerRejection::Fence(_) | OwnerRejection::NotOwned(_) | OwnerRejection::UnknownSession => {
+            true
+        }
+        OwnerRejection::ClaimFenceMissing => claim_loss(store, fence).await != ClaimLoss::Unknown,
+        OwnerRejection::Handled(_) | OwnerRejection::Store(_) => false,
+    }
 }
 
 fn owner_release(fence: &OwnerFence, result: Result<(), OwnerError>) -> OwnerRelease {
@@ -786,20 +855,35 @@ impl DurableSmOwner {
                 Err(OwnerError::Rejected(OwnerRejection::NotOwned(
                     waddle_xmpp::stream_management::durable::DurableSmState::Detached,
                 ))) if attempts > 1 => return OwnerRelease::Committed,
-                result => return owner_release(&self.fence, result),
+                result => return self.release_outcome(result).await,
             }
+        }
+    }
+
+    /// Classify the result of ending this owner's hold. A write refused
+    /// because the claim moved is classified from the session's row.
+    async fn release_outcome(&self, result: Result<(), OwnerError>) -> OwnerRelease {
+        match result {
+            Err(OwnerError::Rejected(OwnerRejection::ClaimFenceMissing)) => {
+                match claim_loss(&self.store, &self.fence).await {
+                    ClaimLoss::Superseded => OwnerRelease::Superseded,
+                    ClaimLoss::Ended => OwnerRelease::Ended,
+                    ClaimLoss::Unknown => OwnerRelease::Unavailable,
+                }
+            }
+            result => owner_release(&self.fence, result),
         }
     }
 
     /// End the session deliberately. Its retained frames stay in custody
     /// until they are transferred and released.
     pub(in crate::server::routes::websocket) async fn close(&self) -> OwnerRelease {
-        owner_release(
-            &self.fence,
+        self.release_outcome(
             self.store
                 .close(&self.fence, self.claim.as_ref(), chrono::Utc::now())
                 .await,
         )
+        .await
     }
 }
 
@@ -883,6 +967,7 @@ fn admission_refusal(fence: &OwnerFence, rejection: &AdmissionRejection) -> Cust
             warn!(session = ?fence.session, error = %rejection, "durable SM retained-frame bound reached");
             CustodyRefusal::WindowFull
         }
+        // A lost claim is classified by the caller, which reads the session.
         AdmissionRejection::PrincipalMismatch
         | AdmissionRejection::ClaimFenceMissing
         | AdmissionRejection::OperationReused
@@ -1652,17 +1737,35 @@ pub(super) async fn resume(
     }
 
     // The session claim this node must hold for the commit. A claim another
-    // node holds is not taken over here: the resume is refused and the
-    // client binds afresh.
-    let registry = &state.deps.protocol.sm_session_registry;
-    let Some(_claim_publication) = registry.ensure_session_claim(stream_id.as_str()).await else {
-        warn!(%stream_id, "durable SM resume refused: the session claim is held elsewhere");
-        return DurableResumeStep::Failed(SmResumeTerminal::failed_cross_node(
-            stream_id,
-            SmResumeOutcome::OwnerUnreachable,
-        ));
+    // node holds is moved here once that node has released the session;
+    // otherwise the resume is refused and the client binds afresh.
+    let held_claim = match claim::claim_for_resume(
+        state,
+        claim::ResumeClaimRequest {
+            store,
+            session: candidate.session,
+            stream_id: &stream_id,
+            requester: &bare_jid,
+            session_account: &candidate.full_jid.to_bare(),
+        },
+    )
+    .await
+    {
+        Ok(held_claim) => held_claim,
+        Err(refusal) => {
+            return DurableResumeStep::Failed(SmResumeTerminal::failed_cross_node(
+                stream_id,
+                match refusal {
+                    claim::ClaimRefusal::HeldElsewhere => SmResumeOutcome::OwnerUnreachable,
+                    claim::ClaimRefusal::NotAuthorized => SmResumeOutcome::IdentityMismatch,
+                    claim::ClaimRefusal::SessionGone => SmResumeOutcome::NotFound,
+                    claim::ClaimRefusal::Unavailable => SmResumeOutcome::Storage,
+                    claim::ClaimRefusal::ShutdownAbandoned => SmResumeOutcome::ShutdownAbandoned,
+                },
+            ));
+        }
     };
-    let claim = registry.current_sm_claim_fence(stream_id.as_str());
+    let claim = held_claim.fence.clone();
 
     let inbound_checkpoint = match state
         .deps
@@ -1928,12 +2031,31 @@ pub(in crate::server::routes::websocket) async fn inline_resume(
         }
     }
 
-    let registry = &state.deps.protocol.sm_session_registry;
-    let Some(_claim_publication) = registry.ensure_session_claim(stream_id.as_str()).await else {
-        warn!(%stream_id, "inline durable SM resume refused: the session claim is held elsewhere");
-        return InlineResumeStep::Failed(InlineResumeFailed::claim_unavailable());
+    let held_claim = match claim::claim_for_resume(
+        state,
+        claim::ResumeClaimRequest {
+            store: &store,
+            session: attempt.session(),
+            stream_id: &stream_id,
+            requester: &bare_jid,
+            session_account: &attempt.full_jid().to_bare(),
+        },
+    )
+    .await
+    {
+        Ok(held_claim) => held_claim,
+        Err(refusal) => {
+            return InlineResumeStep::Failed(match refusal {
+                claim::ClaimRefusal::HeldElsewhere => InlineResumeFailed::claim_unavailable(),
+                claim::ClaimRefusal::NotAuthorized => InlineResumeFailed::account_mismatch(),
+                claim::ClaimRefusal::SessionGone => InlineResumeFailed::session_gone(),
+                claim::ClaimRefusal::Unavailable | claim::ClaimRefusal::ShutdownAbandoned => {
+                    InlineResumeFailed::standing_unavailable()
+                }
+            });
+        }
     };
-    let claim = registry.current_sm_claim_fence(stream_id.as_str());
+    let claim = held_claim.fence.clone();
     let inbound_checkpoint = match state
         .deps
         .protocol

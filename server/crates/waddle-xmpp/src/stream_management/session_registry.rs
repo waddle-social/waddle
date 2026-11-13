@@ -9,6 +9,7 @@
 
 mod acknowledgements;
 mod append;
+mod claim_transfer;
 mod claims;
 mod core;
 mod cross_node_resume;
@@ -23,6 +24,9 @@ mod tombstones;
 mod trait_impl;
 mod traits;
 
+pub use claim_transfer::{
+    ForeignSessionClaim, ObservedSessionClaim, SessionClaimEvidence, SessionClaimTakeover,
+};
 pub use claims::{PendingPromotionRetryRetention, ShutdownSmClaimLoss, ShutdownSmDrainBatch};
 pub use core::{InMemorySmSessionRegistry, ReclaimedClaimReservation, ReclaimedHydrationOutcome};
 pub use cross_node_resume::{

@@ -32,9 +32,9 @@ any of the state below.
   and the store compares them under the row lock.
 - **Claim**: on a clustered node every write also asserts the exact
   `clustering_claims` row `(sm_session:<session>, node id, node epoch, claim
-  epoch)` under `FOR SHARE`, before the session row lock. A node that lost its
-  lease has no such row, so it loses write authority with the lease.
-  Single-node SQLite has no claim.
+  epoch)` under `FOR SHARE`, before the session row lock. A node whose claim
+  was taken, by a resume elsewhere or after its lease lapsed, has no such
+  row and loses write authority with it. Single-node SQLite has no claim.
 - **Operation**: enable, resume and each admission carry a caller-minted
   `SmOperationId`. One row per operation in `sm_durable_operations` records
   its outcome.
@@ -187,6 +187,62 @@ hydration append above the replay range without exposure. Completing the
 resume moves the session to `Live`, raises the ceiling to `appended`, and
 returns that tail; the caller writes the replay range, then the tail, then
 accepts live frames. Completion also deletes the resource snapshot.
+
+## Resume on a node that does not hold the claim
+
+The session claim stays with the node that enabled or last resumed the
+session until the session is terminal; a detach keeps it. A resume on
+another node moves the claim before its transaction, because the transaction
+asserts the claim row. The connection decides from the claim row and the
+session row together
+(`W/stream_management/durable/claim.rs`, `W` =
+`server/crates/waddle-server/src/server/routes/websocket`):
+
+| Claim holder and session row | Action |
+| --- | --- |
+| Holder's node lease is committed as expired | Take the claim by the owner-stale swap, record the owner as lost, resume |
+| Row is `Detached` | Take the claim by the identity-bound resume swap, resume. The holder is not asked: its snapshot is stored and no connection owns the session |
+| Row has an owner committed under a claim that is no longer on file | That owner is fenced. Take the claim by the resume swap, record the owner as lost, resume |
+| Row has an owner under the claim on file | Ask the holder to detach the owning connection (`resume_steal.v1`). It stores the resource snapshot and admits the frames it recorded without a transport; then the row is `Detached` |
+
+The swap is bound to the claim epoch observed first and is issued once. A
+swap that loses means another resume or the orphan reaper moved the claim;
+the resume is refused. The claim is recorded in the registry's fence
+inventory and the session is not hydrated into the in-memory registry.
+
+The holder is asked inside the resume-handshake bound
+(`WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS`). A holder that does not
+answer has its node lease committed as expired only if its heartbeat lapsed
+past the lease TTL, which is the stale-node watchdog's own transition.
+Otherwise the claim is not taken: **a live holder that does not answer, or
+that answers without the row becoming `Detached`, keeps the session, and the
+resume is refused** with `<failed/>` (`resource-constraint`). Nothing was
+written, the client binds afresh, and the session stays resumable on its
+holder until its window ends. Taking the claim there would be safe for
+committed frames, which the fence protects, but would drop the frames the
+holder's connection recorded without a transport and resume without its
+resource snapshot.
+
+A session whose owner was recorded as lost has no resource snapshot: the
+owner never detached. The resume transaction commits for it, but the
+snapshot is what carries the resource's occupancy generation to the resuming
+connection, and without it the connection cannot publish the resource. The
+resume is compensated to `Detached` and answered `<failed/>`
+(`item-not-found`); the client binds afresh and the retained frames are
+transferred to offline delivery when the session expires. This holds for
+every owner-lost session, whichever node recorded the loss, until the
+session's occupancy generation is stored outside the snapshot.
+
+A detach or a resume on the holder leaves the claim epoch unchanged, so a
+session resumed on the holder between this node's last read of the row and
+its swap is taken from a live owner. That owner is superseded like any
+other: its next write fails.
+
+A write refused because the claim row is gone (`ClaimFenceMissing`) retires
+the binding that named it. A claim never returns to a binding that lost it,
+so the binding reads the session: one that continues is left to the node
+holding its claim, as a superseded generation is; one that is terminal is
+treated as ended. Only an unreadable store keeps the binding waiting.
 
 ## Conflict close
 

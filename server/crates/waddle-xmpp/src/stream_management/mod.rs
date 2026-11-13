@@ -56,9 +56,10 @@ pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngr
 pub use resume_checkpoint::{SmResumeCheckpointHandle, SmResumeRejection};
 pub use session_registry::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
-    DetachedUnackedStanza, InMemorySmSessionRegistry, PendingPromotionRetryRetention,
-    PromotionCaptureCustody, RecentTombstoneRecord, ReclaimedClaimReservation,
-    ReclaimedHydrationOutcome, RemoteResumeAskOutcome, RemoteResumeAsker, ResumableSessionProbe,
+    DetachedUnackedStanza, ForeignSessionClaim, InMemorySmSessionRegistry, ObservedSessionClaim,
+    PendingPromotionRetryRetention, PromotionCaptureCustody, RecentTombstoneRecord,
+    ReclaimedClaimReservation, ReclaimedHydrationOutcome, RemoteResumeAskOutcome,
+    RemoteResumeAsker, ResumableSessionProbe, SessionClaimEvidence, SessionClaimTakeover,
     ShutdownSmClaimLoss, ShutdownSmDrainBatch, SmClaimCompletion, SmRegistryError,
     SmSessionRegistry, StealTicket, StoredDetachedSession, TombstoneScrubbedSmEntries,
     TombstoneScrubbedSmEntry, DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,

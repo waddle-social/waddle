@@ -681,3 +681,13 @@ waddle-server::restricted_runtime_startup authority_guard::store_attachment_refu
 waddle-server::account_coordinator_cluster the_first_bind_takes_the_account_claim_and_the_last_unbind_releases_it
 waddle-server::account_coordinator_cluster a_message_to_an_account_without_a_claim_is_stored_for_its_next_resource
 waddle-server::account_coordinator_cluster a_detached_binding_keeps_the_account_claim_until_it_is_retired
+
+# #2139 durable stream management, resume on a node that does not hold the
+# session claim. Two processes with `WADDLE_XMPP_DURABLE_SM=durable`: the
+# claim moves to the resuming node from a live, a detached and a killed
+# owner, racing resumes leave one owner, and the former owner is fenced.
+waddle-server::xep0198_durable_cross_node_resume a_session_live_on_another_node_resumes_and_replays_once_in_order
+waddle-server::xep0198_durable_cross_node_resume a_session_detached_on_another_node_resumes_and_its_former_owner_is_fenced
+waddle-server::xep0198_durable_cross_node_resume a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper
+waddle-server::xep0198_durable_cross_node_resume racing_resumes_on_two_nodes_leave_exactly_one_owner
+waddle-server::xep0198_durable_cross_node_resume a_connection_that_lost_the_session_claim_retires_and_leaves_the_session
