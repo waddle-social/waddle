@@ -255,6 +255,11 @@ pub struct InMemorySmSessionRegistry {
     /// Production wiring injects a `waddle-server`-side adapter over
     /// `RelayHandle` via [`Self::with_remote_resume_asker`].
     pub(super) remote_resume: Option<Arc<dyn super::cross_node_resume::RemoteResumeAsker>>,
+    /// The durable authority's detached sessions, consulted by the detached
+    /// readers and appenders after this registry's own maps. Set once, when
+    /// the durable selector is active.
+    pub(super) durable_detached:
+        std::sync::OnceLock<Arc<dyn super::durable_detached::DurableDetachedSessions>>,
 }
 
 impl Default for InMemorySmSessionRegistry {
@@ -894,6 +899,7 @@ impl InMemorySmSessionRegistry {
             reclaimed_claim_reservations: RwLock::new(HashMap::new()),
             next_reclaimed_claim_reservation: AtomicU64::new(1),
             remote_resume: None,
+            durable_detached: std::sync::OnceLock::new(),
         }
     }
 
@@ -924,6 +930,7 @@ impl InMemorySmSessionRegistry {
             reclaimed_claim_reservations: RwLock::new(HashMap::new()),
             next_reclaimed_claim_reservation: AtomicU64::new(1),
             remote_resume: None,
+            durable_detached: std::sync::OnceLock::new(),
         }
     }
 

@@ -2185,6 +2185,14 @@ async fn create_sm_session_registry(
         );
     }
     let sm_session_registry = Arc::new(sm_session_registry);
+    // Under the durable selector a detached session lives in the authority,
+    // not in this registry's maps; its detached readers and appenders reach
+    // those sessions through this attachment.
+    if let Some(store) = state.durable_sm().store() {
+        sm_session_registry.attach_durable_detached(Arc::new(
+            crate::sm_authority::DurableDetachedRecipients::new(store.clone()),
+        ));
+    }
     // ADR-0017 Phase 3 Slice 5 (carried debt (b)): complete the
     // `LocallyClaimedEntities` `clustering::start_if_enabled` handed to
     // `self_fence::run_node_lease` empty — see

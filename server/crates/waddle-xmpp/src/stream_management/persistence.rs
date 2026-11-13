@@ -233,6 +233,19 @@ impl SmReplayPayload {
         Self::parse_wire(wire, None)
     }
 
+    /// Serialize a typed stanza that no transport has written yet. The bytes
+    /// stored are the bytes a replay writes.
+    pub fn from_stanza(stanza: &Stanza) -> Result<Self, SmPersistenceError> {
+        let mut buffer = Vec::new();
+        stanza
+            .to_element()
+            .write_to(&mut buffer)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let wire = String::from_utf8(buffer)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Self::from_wire_matching(wire, stanza)
+    }
+
     /// Also require the captured XML to describe the supplied producer stanza.
     /// This is a structural comparison before typed parsing can discard fields.
     pub fn from_wire_matching(wire: String, expected: &Stanza) -> Result<Self, SmPersistenceError> {

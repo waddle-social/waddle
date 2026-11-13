@@ -424,6 +424,28 @@ async fn load_resource_with(
     Ok(sessions)
 }
 
+/// Every `Detached` session of one account, in session-key order, without
+/// locking the rows.
+pub(super) async fn load_detached_account(
+    tx: &mut Transaction<'_>,
+    account: &jid::BareJid,
+) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT {COLUMNS} FROM sm_durable_sessions WHERE bare_jid = ? AND state = 2 \
+                 ORDER BY session_id"
+            ),
+            crate::db_params![account.to_string()],
+        )
+        .await?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next().await? {
+        sessions.push(decode(&row)?);
+    }
+    Ok(sessions)
+}
+
 /// Move every `Live` or `TransferHydrating` session to `Detached`, keeping
 /// an existing detach time.
 pub(super) async fn detach_all_owned(

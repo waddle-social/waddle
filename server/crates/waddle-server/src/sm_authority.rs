@@ -12,6 +12,7 @@
 //! the transaction that holds the authority row lock.
 
 mod custody;
+mod detached;
 mod enable;
 mod error;
 mod inline;
@@ -27,6 +28,7 @@ pub use custody::{
     AckSettlement, AdmissionAuthority, AdmissionError, AdmissionFrame, AdmissionRejection,
     AdmissionRequest, CommittedObligation, OwnerError, OwnerRejection, RetainedFrame,
 };
+pub use detached::{DetachedDurableSession, DurableDetachedRecipients};
 pub use enable::{
     EnableError, EnableOperation, EnableRejection, EnableRequest, EnableResolution, EnabledCommit,
 };

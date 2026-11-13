@@ -1052,3 +1052,118 @@ async fn a_fresh_bind_on_another_node_replaces_a_session_live_there() {
 async fn a_fresh_bind_on_another_node_replaces_a_session_detached_there() {
     a_fresh_bind_on_node_b_replaces_a_session_held_by_node_a(false).await;
 }
+
+/// The owner's session on node A, detached with nothing unacknowledged.
+/// Returns the resume token and the detached session's row.
+async fn session_detached_on_node_a(cluster: &Cluster, resource: &str) -> (String, SessionRow) {
+    let (on_a, token) = enabled_session(&cluster.node_a, &cluster.owner_password, resource).await;
+    drop(on_a);
+    let detached = wait_for_session(&cluster.db, &owner_jid(resource), |row| {
+        row.state == STATE_DETACHED
+    })
+    .await;
+    (token, detached)
+}
+
+async fn wait_for_retained(db: &Database, session_id: &str, count: i64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while retained_frames(db, session_id).await < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the detached session did not retain {count} frames"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Messages sent from node B to a session detached on node A are retained
+/// in that session's custody, and a resume replays each once, in order,
+/// ahead of live output.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_to_a_session_detached_on_another_node_replay_once_in_order() {
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let Some(cluster) = cluster(&[]).await else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let resource = unique_resource("detached-route");
+    let jid = owner_jid(&resource);
+    let (token, detached) = session_detached_on_node_a(&cluster, &resource).await;
+
+    let mut sender = sender(&cluster.node_b).await;
+    for id in ["d1", "d2", "d3"] {
+        send_element(&mut sender, chat(&jid, id)).await;
+    }
+    wait_for_retained(&cluster.db, &detached.session_id, 3).await;
+
+    let mut on_a = owner_connection(&cluster.node_a, &cluster.owner_password).await;
+    send_element(&mut on_a, resume(&token, 0)).await;
+    let reply = recv_resume_reply(&mut on_a, Duration::from_secs(30))
+        .await
+        .expect("resume reply");
+    assert!(reply.is("resumed", SM_NS), "resume on node A: {reply:?}");
+    send_element(&mut sender, chat(&jid, "live")).await;
+    assert_eq!(
+        chat_ids_within(&mut on_a, Duration::from_secs(5)).await,
+        ["d1", "d2", "d3", "live"],
+        "the retained messages are replayed once, in order, ahead of live output"
+    );
+}
+
+/// A message sent from node B to a session detached on node A reaches
+/// offline delivery exactly once when the session's window elapses.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_retained_by_a_session_detached_on_another_node_is_delivered_offline_once_on_expiry(
+) {
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let Some(cluster) = cluster(&[]).await else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let resource = unique_resource("detached-expiry");
+    let jid = owner_jid(&resource);
+    let (_token, detached) = session_detached_on_node_a(&cluster, &resource).await;
+
+    let mut sender = sender(&cluster.node_b).await;
+    send_element(&mut sender, chat(&jid, "x1")).await;
+    wait_for_retained(&cluster.db, &detached.session_id, 1).await;
+
+    // The window is moved into the past; the next janitor sweep of the node
+    // holding the claim expires the session and transfers what it retained.
+    {
+        let conn = cluster.db.guard().await.expect("guard");
+        conn.execute(
+            "UPDATE sm_durable_sessions \
+             SET detached_at_ms = detached_at_ms - (max_resume_secs + 1) * 1000 \
+             WHERE session_id = ?",
+            waddle_server::db_params![detached.session_id.clone()],
+        )
+        .await
+        .expect("elapse the resume window");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    loop {
+        let row = session_row(&cluster.db, &jid).await;
+        let released = row.as_ref().is_some_and(|row| row.state == STATE_TERMINAL)
+            && retained_frames(&cluster.db, &detached.session_id).await == 0;
+        if released {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the detached session did not expire and release its custody: {row:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let mut on_b = owner_connection(&cluster.node_b, &cluster.owner_password).await;
+    on_b.bind(&unique_resource("after-expiry"))
+        .await
+        .expect("bind on node B");
+    send_element(&mut on_b, initial_presence()).await;
+    assert_eq!(
+        chat_ids_within(&mut on_b, Duration::from_secs(5)).await,
+        ["x1"],
+        "the retained message is delivered offline once"
+    );
+}
