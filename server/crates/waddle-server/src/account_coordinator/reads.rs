@@ -2,14 +2,16 @@
 //!
 //! Each read returns `None` when the connection registry is the selected
 //! authority, and the caller then reads the registry as it always has. When
-//! the coordinator is selected the read is the coordinator's answer or its
-//! error; a caller must not replace an error with a registry read, because
-//! the registry is not written in that mode.
+//! the coordinator is selected the read is the answer of the coordinator on
+//! the node that owns the account, or its error; a caller must not replace
+//! an error with a registry read, because the registry is not written in
+//! that mode.
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ownership::account_coordinator::AccountResourcePresence;
 use waddle_xmpp::registry::user_actor::ResourceRoutingState;
 
+use super::authority::AccountBindingAuthority;
 use super::error::AccountCoordinatorError;
 use super::messages::AccountView;
 use super::selection::AccountAuthoritySelection;
@@ -19,8 +21,8 @@ impl AccountAuthoritySelection {
         &self,
         account: &BareJid,
     ) -> Option<Result<AccountView, AccountCoordinatorError>> {
-        match self.coordinators() {
-            Some(coordinators) => Some(coordinators.view(account).await),
+        match self.authority() {
+            Some(authority) => Some(authority.view(account).await),
             None => None,
         }
     }

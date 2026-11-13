@@ -2,6 +2,9 @@
 
 use super::metrics;
 
+use super::AccountBindingReplyWire;
+use super::AccountBindingRequestWire;
+
 use super::remote_resource_compat;
 use super::AdminListAnswer;
 use super::Arc;
@@ -102,6 +105,7 @@ pub(in crate::clustering::relay) enum RelayDispatchKind {
     ReassertMediaGrants,
     ResourcePresence,
     RecipientInventory,
+    AccountBinding,
     ExtensionRoomSend,
     MucAdminQuery,
 }
@@ -124,6 +128,7 @@ impl RelayDispatchKind {
             Self::ReassertMediaGrants => "reassert_media_grants",
             Self::ResourcePresence => "resource_presence",
             Self::RecipientInventory => "recipient_inventory",
+            Self::AccountBinding => "account_binding",
             Self::ExtensionRoomSend => "extension_room_send",
             Self::MucAdminQuery => "muc_admin_query",
         }
@@ -1182,6 +1187,35 @@ impl Message<super::RelayRecipientInventory> for RelayActor {
                 Ok(inventory) => RelayRecipientInventoryReply::Inventory(inventory),
                 Err(()) => RelayRecipientInventoryReply::Unavailable,
             }
+        })
+    }
+}
+
+/// A request for an account's authority, sent to the node that holds the
+/// account's claim, or a fresh-bind displacement, sent to the node whose
+/// connection holds the displaced binding. The payload is the versioned
+/// wire form of `account_binding_wire`; a peer that predates this id
+/// answers `UnknownMessage` before any handler runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RelayAccountBinding {
+    pub request: AccountBindingRequestWire,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.account_binding.v1")]
+impl Message<RelayAccountBinding> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<AccountBindingReplyWire>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayAccountBinding,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::AccountBinding, &msg.trace);
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.account_binding_local(msg.request).await
         })
     }
 }
@@ -2592,6 +2626,48 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
             .map_err(send_error)
+    }
+
+    /// Ask the node for an account authority decision or a displacement.
+    /// A cached relay ref that proves unusable before the message reached
+    /// a handler is looked up and asked once more; any other failure is
+    /// returned with its effect classification, and the caller decides
+    /// whether the request may be repeated.
+    pub(crate) async fn account_binding(
+        &mut self,
+        request: AccountBindingRequestWire,
+    ) -> Result<AccountBindingReplyWire, RelayAskError> {
+        let message = RelayAccountBinding {
+            request,
+            trace: RelayTraceContext::capture(),
+        };
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote_ref = self.resolve().await?;
+                match remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                {
+                    Ok(reply) => Ok(reply),
+                    Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                        self.cached = None;
+                        let remote_ref = self.resolve().await?;
+                        remote_ref
+                            .ask(&message)
+                            .mailbox_timeout(self.mailbox_timeout)
+                            .reply_timeout(self.reply_timeout)
+                            .await
+                            .map_err(send_error)
+                    }
+                    Err(error) => Err(send_error(error)),
+                }
+            } => result,
+        }
     }
 
     /// Forward a muc#admin list GET to the room owner (#1298). Read-only,

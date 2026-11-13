@@ -1,7 +1,7 @@
 //! The contract a connection actor drives its binding through.
 
 use async_trait::async_trait;
-use jid::FullJid;
+use jid::{BareJid, FullJid};
 use waddle_xmpp::ownership::account_coordinator::Presentation;
 use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceBindSuccessReceipt, AccountResourceOperation,
@@ -9,7 +9,10 @@ use waddle_xmpp::ownership::account_resource_transition::{
 use waddle_xmpp::ownership::BindingRef;
 
 use super::error::AccountCoordinatorError;
-use super::messages::{BindingReply, SlotStatus, UnregisterOutcome, UnregisterRequest};
+use super::messages::{
+    AccountView, BindingReply, ReleaseSessionRequest, RepairEvidence, RepairOutcome,
+    SessionRelease, SlotStatus, UnregisterOutcome, UnregisterRequest,
+};
 
 /// The account authority as a connection sees it.
 ///
@@ -33,6 +36,11 @@ use super::messages::{BindingReply, SlotStatus, UnregisterOutcome, UnregisterReq
 /// An `Err` is never a decision about the binding. After a store failure
 /// the commit outcome is unknown; the connection repeats the same operation
 /// identity and proceeds on the recorded outcome.
+///
+/// The authority of an account is the coordinator on the node that holds
+/// the account's claim. [`super::AccountCoordinators`] is the coordinators
+/// of this node only; [`super::RoutedAccountAuthority`] sends each request
+/// to the node that owns the account.
 #[async_trait]
 pub trait AccountBindingAuthority: Send + Sync + 'static {
     /// The claim identity, revision and current binding of a resource.
@@ -69,4 +77,29 @@ pub trait AccountBindingAuthority: Send + Sync + 'static {
         full_jid: &FullJid,
         request: UnregisterRequest,
     ) -> Result<UnregisterOutcome, AccountCoordinatorError>;
+
+    /// Complete a retirement whose endpoint evidence is overdue.
+    async fn repair(
+        &self,
+        full_jid: &FullJid,
+        binding_ref: &BindingRef,
+        evidence: RepairEvidence,
+    ) -> Result<RepairOutcome, AccountCoordinatorError>;
+
+    /// Release a resource's reference to a terminal stream-management
+    /// session by retiring the detached binding that holds it.
+    async fn release_session(
+        &self,
+        full_jid: &FullJid,
+        request: ReleaseSessionRequest,
+    ) -> Result<SessionRelease, AccountCoordinatorError>;
+
+    /// The account's bindings whose connection is gone.
+    async fn expired_bindings(
+        &self,
+        account: &BareJid,
+    ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError>;
+
+    /// One coherent read of the account's resources.
+    async fn view(&self, account: &BareJid) -> Result<AccountView, AccountCoordinatorError>;
 }

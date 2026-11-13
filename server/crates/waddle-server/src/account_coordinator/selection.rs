@@ -15,6 +15,7 @@ use super::claims::{
 };
 use super::config::AccountCoordinatorConfig;
 use super::directory::AccountCoordinators;
+use super::routed::{AccountAuthorityPeers, RoutedAccountAuthority};
 use crate::account_bindings::{AccountBindingStoreError, DatabaseAccountBindingStore};
 use crate::clustering::ClusteringHandles;
 use crate::db::Database;
@@ -73,7 +74,7 @@ pub enum AccountAuthoritySelectionError {
     #[error("the account coordinator requires the durable stream-management authority")]
     RequiresDurableStreamManagement,
     #[error(
-        "a clustered account coordinator requires the claim store, the node identity and the node leases"
+        "a clustered account coordinator requires the claim store, the node identity, the node leases and the cluster relay"
     )]
     ClusterIdentityMissing,
 }
@@ -81,11 +82,19 @@ pub enum AccountAuthoritySelectionError {
 /// The authority account reads consult. `Registry` carries no
 /// coordinators, so a caller cannot reach them unless the mode selected
 /// them.
+///
+/// `Coordinator` carries this node's own coordinators and the routed
+/// authority over them. Connections and routing go through the routed
+/// authority, which reaches the coordinator of the node that owns each
+/// account; the coordinators themselves serve only what this node owns.
 #[derive(Clone, Default)]
 pub enum AccountAuthoritySelection {
     #[default]
     Registry,
-    Coordinator(Arc<AccountCoordinators>),
+    Coordinator {
+        coordinators: Arc<AccountCoordinators>,
+        authority: Arc<RoutedAccountAuthority>,
+    },
 }
 
 impl AccountAuthoritySelection {
@@ -109,6 +118,7 @@ impl AccountAuthoritySelection {
         }
         let store = DatabaseAccountBindingStore::open(db.clone(), clustered).await?;
         let mirror_holds = Arc::new(MirrorClaimHolds::default());
+        let mut peers = None;
         let (claims, liveness): (Arc<dyn AccountClaimSource>, Arc<dyn ConnectionLiveness>) =
             if clustered {
                 let (Some(claim_store), Some(node_identity)) = (
@@ -120,6 +130,10 @@ impl AccountAuthoritySelection {
                 let Some(node_leases) = cluster_node_leases(clustering) else {
                     return Err(AccountAuthoritySelectionError::ClusterIdentityMissing);
                 };
+                let Some(cluster_peers) = cluster_peers(clustering) else {
+                    return Err(AccountAuthoritySelectionError::ClusterIdentityMissing);
+                };
+                peers = Some(cluster_peers);
                 let lease = NodeLeaseIdentity::from_node_identity(&node_identity.current());
                 (
                     Arc::new(ClaimStoreClaimSource::with_mirror(
@@ -144,16 +158,47 @@ impl AccountAuthoritySelection {
             Arc::downgrade(&coordinators),
             config,
         ));
-        Ok(Self::Coordinator(coordinators))
+        let authority = match peers {
+            Some(peers) => RoutedAccountAuthority::new(Arc::clone(&coordinators), peers),
+            None => RoutedAccountAuthority::local_only(Arc::clone(&coordinators)),
+        };
+        Ok(Self::Coordinator {
+            coordinators,
+            authority: Arc::new(authority),
+        })
     }
 
-    /// The coordinators, when the coordinator is the selected authority.
+    /// This node's own coordinators, when the coordinator is the selected
+    /// authority. They serve only the accounts this node owns; a request
+    /// on behalf of a connection goes through [`Self::authority`].
     pub fn coordinators(&self) -> Option<&Arc<AccountCoordinators>> {
         match self {
             Self::Registry => None,
-            Self::Coordinator(coordinators) => Some(coordinators),
+            Self::Coordinator { coordinators, .. } => Some(coordinators),
         }
     }
+
+    /// The authority that decides each account's requests on the node that
+    /// owns it, when the coordinator is the selected authority.
+    pub fn authority(&self) -> Option<&Arc<RoutedAccountAuthority>> {
+        match self {
+            Self::Registry => None,
+            Self::Coordinator { authority, .. } => Some(authority),
+        }
+    }
+}
+
+/// The cluster as the routed account authority reaches it.
+#[cfg(feature = "clustering")]
+fn cluster_peers(clustering: &ClusteringHandles) -> Option<Arc<dyn AccountAuthorityPeers>> {
+    crate::clustering::route_bridge::ClusterAccountAuthorityPeers::new(clustering)
+        .map(|peers| Arc::new(peers) as Arc<dyn AccountAuthorityPeers>)
+}
+
+/// A build without clustering has no other node to reach.
+#[cfg(not(feature = "clustering"))]
+fn cluster_peers(_clustering: &ClusteringHandles) -> Option<Arc<dyn AccountAuthorityPeers>> {
+    None
 }
 
 /// The cluster's node leases as the coordinators read them.

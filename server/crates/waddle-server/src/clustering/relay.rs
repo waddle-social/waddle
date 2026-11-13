@@ -24,10 +24,15 @@ use crate::ingress::execute::RelayFrameReceiptCompletion;
 use crate::server::routes::interpret::carbons::CarbonFanoutFailure;
 use crate::server::routes::interpret::RecipientInventory;
 use crate::server::routes::websocket::AdminListAnswer;
+mod account_binding_wire;
 pub(crate) mod frame_receipts;
 mod muc_cleanup;
 mod remote_resource_compat;
 mod resource_identity_wire;
+pub use account_binding_wire::{
+    AccountBindingReplyWire, AccountBindingRequestWire, AccountBindingWireError,
+    ACCOUNT_BINDING_V1_ID,
+};
 use frame_receipts::PendingReplyReceipts;
 pub use frame_receipts::RelayReplyReceiptToken;
 pub use muc_cleanup::{RelayMucCleanup, RelayMucCleanupOutcome};

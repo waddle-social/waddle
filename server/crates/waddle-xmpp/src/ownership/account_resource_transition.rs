@@ -519,6 +519,33 @@ pub struct AccountResourceBindSuccessReceipt {
 }
 
 impl AccountResourceBindSuccessReceipt {
+    /// The receipt another node's slot issued, rebuilt from its parts after
+    /// they crossed the cluster relay. The parts must agree with each other
+    /// as the slot's own receipt does: the publication and the registration
+    /// name the receipt's binding, and the registration names its claim
+    /// identity. Parts that disagree are no receipt.
+    pub fn attested(
+        claim_identity: UserClaimIdentity,
+        source: BindingEvidence,
+        revision: AccountResourceRevision,
+        publication: EndpointPublicationReceipt,
+        registration: ActorRegistrationReceipt,
+    ) -> Option<Self> {
+        if publication.source() != &source
+            || registration.source() != &source
+            || registration.claim_identity() != &claim_identity
+        {
+            return None;
+        }
+        Some(Self {
+            claim_identity,
+            source,
+            revision,
+            publication,
+            registration,
+        })
+    }
+
     pub fn claim_identity(&self) -> &UserClaimIdentity {
         &self.claim_identity
     }
@@ -603,6 +630,11 @@ impl SuccessfulResumeReceipt {
 
     pub fn resumed_sm(&self) -> SmBinding {
         self.resumed_sm
+    }
+
+    /// The logical resource lifetime the resume keeps.
+    pub fn lifetime(&self) -> ResourceLifetime {
+        self.lifetime
     }
 
     pub fn custody_disposition(&self) -> BindingRetirementDisposition {

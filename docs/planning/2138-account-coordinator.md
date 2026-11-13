@@ -51,7 +51,8 @@ claim follows the account's bindings:
   takes the claim for its node
   when the account has none, and takes it over when the holder's node
   lease is lost. A claim another node holds under a fresh lease is left
-  alone and the request fails with the claim error.
+  alone: that node's coordinator decides the request (see "Requests for an
+  account another node owns").
 - **The last binding releases it.** When a retirement leaves the account
   without a binding, a pending replacement or a retirement awaiting
   evidence, the coordinator deletes the account's free rows and releases
@@ -189,6 +190,58 @@ Sockets do not move: a
 connection hosted on another node stays there and is reached through the
 addressing boundary. Adoption does not mint a stream-management session or
 change a binding's `BindingRef`.
+
+## Requests for an account another node owns
+
+A node runs coordinators only for the accounts whose claim it holds. Every
+connection request and every account read goes through the routed
+authority (`RoutedAccountAuthority`), which reads the account's
+`UserActor` claim for each request:
+
+- **This node holds it, nobody does, or its holder lost its node lease**:
+  this node's coordinators serve the request, taking the claim or taking
+  the account over as on a single node.
+- **Another node holds it under a fresh lease**: the request is sent to
+  that node as `waddle.clustering.relay.account_binding.v1`, and that
+  node's own coordinators serve it. The receiver never routes a request on:
+  a receiver that does not hold the claim answers the claim error, changes
+  nothing, and the sender reads the owner again.
+
+Requests and answers cross the relay as dedicated wire DTOs
+(`clustering/relay/account_binding_wire.rs`) with explicit conversions in
+both directions; the in-process evidence types are not serialized. Each
+evidence value is rebuilt through its own constructor, and a bind-success
+receipt is rebuilt through `AccountResourceBindSuccessReceipt::attested`,
+which refuses parts that disagree. Only the mutations a connection sends
+have a wire form (`Bind`, `PublishEndpoint`, `RegisterActor`,
+`UpdateSnapshot`, `Detach`, `SuccessfulResume`); unregister, repair,
+session release, slot reads, presentations, expired-binding reads and the
+account view complete the set.
+
+**Exactly once.** A request is repeated, within an eight-second budget,
+when it did not reach the owner, when the claim moved, and when its answer
+was lost. Each mutation carries its operation identity and the binding
+store records the outcome of each identity once
+(`account_resource_operations`), so a repeat returns the recorded outcome
+whichever node serves it, including the survivor that took the account
+over from an owner that died after committing. A one-time presentation
+carries no identity: after a lost answer it is not repeated, the caller
+does not present, and the stored offline messages or subscription
+requests stay for the next presentation. A request that stays undecided
+is `OwnerUndecided`, an unknown outcome like a store failure.
+
+**Replacement on another node.** A bind that displaces a binding whose
+connection another node hosts asks that node, with the same message id,
+to close the connection as a fresh-bind replacement. The connection then
+retires its binding through its own teardown, and the replacing bind waits
+on the slot as it does on one node. A displaced binding that no connection
+holds any more is retired once the owner reports it expired.
+
+**Mixed fleets.** A peer that predates the message answers
+`UnknownMessage`, and a peer that runs the connection registry answers
+that it does not serve the coordinator; both leave the request undecided
+and the bind fails. The production cutover is the coordinated `Recreate`
+in `docs/operations/relay-cutovers.md`.
 
 ## Directed presence teardown
 
@@ -340,11 +393,11 @@ Decisions this wiring makes:
   routing index states that it accepted nothing.
 - **The bind-success receipt** is read when the binding is confirmed, not
   again when the reply is written.
-- **A node that does not own the account** cannot record the binding
-  while another node holds the account's claim under a fresh lease: the
-  coordinator refuses with the claim error and the bind fails. An account
-  without a claim is taken by the node of its first bind, so all resources
-  of one account must be hosted by the node that holds its claim.
+- **A node that does not own the account** records the binding through
+  the coordinator of the node that holds the account's claim (see
+  "Requests for an account another node owns"). An account without a
+  claim is taken by the node of its first bind; resources of one account
+  can be hosted on any node.
 
 ### What still writes the registry and the mirrors
 

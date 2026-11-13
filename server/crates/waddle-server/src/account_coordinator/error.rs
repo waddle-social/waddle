@@ -38,4 +38,10 @@ pub enum AccountCoordinatorError {
     Diverged,
     #[error("the coordinator mailbox refused the request: {0:?}")]
     Mailbox(MailboxRejection),
+    /// The node that owns the account did not decide the request: it could
+    /// not be reached in time, it failed, or it does not serve the account
+    /// coordinator. After a mutation the commit outcome is unknown, as
+    /// after [`Self::Store`].
+    #[error("the node that owns the account did not decide the request")]
+    OwnerUndecided,
 }

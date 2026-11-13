@@ -861,12 +861,11 @@ async fn carbons_reach_a_sibling_on_the_owning_node(selectors: NodeSelectors) {
 }
 
 /// A second resource of an account, bound on the node that does not own
-/// the account.
-///
-/// Intended: the bind succeeds, the account stays with the node that owns
-/// it, and the resource takes part in the account like one on the owning
-/// node: with carbons enabled it receives a copy of a message a
-/// correspondent sends to its sibling on the other node.
+/// the account: the bind succeeds, the account stays with the node that
+/// owns it, and the resource takes part in the account like one on the
+/// owning node: with carbons enabled it receives a copy of a message a
+/// correspondent sends to its sibling on the other node. A coordinator
+/// node records the binding through the owning node's coordinator.
 async fn second_resource_on_the_other_node(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let laptop_jid = cluster.full("alice", "laptop");
@@ -883,14 +882,10 @@ async fn second_resource_on_the_other_node(selectors: NodeSelectors) {
         Some(cluster.a.node_id.clone()),
         "the account stays with the node that bound it first"
     );
-    if cluster.b().coordinates_accounts() {
-        // Pinned gap: a node starts a coordinator only for an account
-        // whose claim it holds, so it cannot record the binding.
-        assert_eq!(answer, internal_server_error());
-        assert!(binding(&cluster.db, &phone_jid).await.is_none());
-        return;
-    }
     assert_eq!(answer, Answer::Bound(phone_jid.clone()));
+    if cluster.b().coordinates_accounts() {
+        binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
+    }
     cluster
         .go_available(cluster.b(), &mut phone, &phone_jid)
         .await;
@@ -949,22 +944,10 @@ async fn groupchat_reaches_occupants_on_both_nodes(selectors: NodeSelectors) {
     }
 }
 
-/// Whether a resume on `node` of a session another node holds is pinned
-/// as a gap: the resumed binding is published through the account's
-/// coordinator, and a node starts a coordinator only for an account whose
-/// claim it holds (the cause `second_resource_on_the_other_node` pins), so
-/// a coordinator node that does not own the account cannot answer the
-/// resume with a usable session.
-fn cross_node_resume_is_a_gap(node: &Node) -> bool {
-    node.coordinates_accounts()
-}
-
 /// A session detached on the node that owns it, resumed on the other node:
 /// the other node takes the session's claim, answers `<resumed/>` and
-/// replays the stanza the client did not handle, once.
-///
-/// Pinned gap on a coordinator node (see [`cross_node_resume_is_a_gap`]):
-/// the resume is not answered `<resumed/>`.
+/// replays the stanza the client did not handle, once. A coordinator node
+/// moves the resource's binding through the owning node's coordinator.
 async fn detached_session_resumes_on_the_other_node(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
@@ -977,10 +960,6 @@ async fn detached_session_resumes_on_the_other_node(selectors: NodeSelectors) {
 
     let mut alice = cluster.connect(cluster.b(), "alice").await;
     let answer = resume(&mut alice, &token, handled - 1).await;
-    if cross_node_resume_is_a_gap(cluster.b()) {
-        assert!(!matches!(answer, Answer::Resumed(_)), "{answer:?}");
-        return;
-    }
     assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
     recv_message_once(&mut alice, "held").await;
     let live = session_in(&cluster.db, &alice_jid, SESSION_LIVE).await;
@@ -1002,9 +981,6 @@ async fn detached_session_resumes_on_the_other_node(selectors: NodeSelectors) {
 /// A session that is live on the node that owns it, resumed on the other
 /// node: the other node takes the session and answers `<resumed/>`, and the
 /// connection that held it is closed with a conflict.
-///
-/// Pinned gap on a coordinator node (see [`cross_node_resume_is_a_gap`]):
-/// the resume is not answered `<resumed/>`.
 async fn live_session_resumes_on_the_other_node(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
@@ -1013,10 +989,6 @@ async fn live_session_resumes_on_the_other_node(selectors: NodeSelectors) {
 
     let mut alice = cluster.connect(cluster.b(), "alice").await;
     let answer = resume(&mut alice, &token, 0).await;
-    if cross_node_resume_is_a_gap(cluster.b()) {
-        assert!(!matches!(answer, Answer::Resumed(_)), "{answer:?}");
-        return;
-    }
     assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
     let closed = old
         .recv_matching_within(DELIVERY_BUDGET, |frame| {
@@ -1236,6 +1208,153 @@ async fn resource_of_a_killed_node_binds_on_the_survivor(selectors: NodeSelector
     expect_no_message(&mut bob, "to-bare").await;
 }
 
+/// A coordinator node binds a resource of an account the other node owns.
+/// The binding is recorded and activated by the owning node's coordinator:
+/// the account stays with its owner, the row holds the binding active, and
+/// the resource receives messages for its full JID and its bare JID from a
+/// correspondent on either node.
+async fn bind_on_the_other_node_records_the_binding_at_the_owner(selectors: NodeSelectors) {
+    let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
+    let desk_jid = cluster.full("alice", "desk");
+    let phone_jid = cluster.full("alice", "phone");
+    let mut desk = cluster.bound(&cluster.a, "alice", "desk").await;
+    cluster.go_available(&cluster.a, &mut desk, &desk_jid).await;
+
+    let mut phone = cluster.bound(cluster.b(), "alice", "phone").await;
+    assert_eq!(
+        account_owner(&cluster.db, &cluster.bare("alice")).await,
+        Some(cluster.a.node_id.clone()),
+        "the account stays with the node that bound it first"
+    );
+    let row = binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
+    assert!(row.binding_ref.is_some());
+    cluster
+        .go_available(cluster.b(), &mut phone, &phone_jid)
+        .await;
+
+    let mut bob_a = cluster.bound(&cluster.a, "bob", "desk").await;
+    send(&mut bob_a, &chat(&phone_jid, "from-the-owner-node")).await;
+    recv_message_once(&mut phone, "from-the-owner-node").await;
+    let mut carol_b = cluster.bound(cluster.b(), "carol", "desk").await;
+    send(&mut carol_b, &chat(&phone_jid, "from-the-same-node")).await;
+    recv_message_once(&mut phone, "from-the-same-node").await;
+    send(&mut bob_a, &chat(&desk_jid, "to-the-sibling")).await;
+    recv_message_once(&mut desk, "to-the-sibling").await;
+    expect_no_message(&mut phone, "to-the-sibling").await;
+}
+
+/// A resource bound on the node that does not own its account, with
+/// carbons enabled, receives a sent carbon of the message its sibling on
+/// the owning node sends.
+async fn second_resource_on_the_other_node_receives_sent_carbons(selectors: NodeSelectors) {
+    let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
+    let laptop_jid = cluster.full("alice", "laptop");
+    let phone_jid = cluster.full("alice", "phone");
+    let bob_jid = cluster.full("bob", "desk");
+    let mut laptop = cluster.bound(&cluster.a, "alice", "laptop").await;
+    cluster
+        .go_available(&cluster.a, &mut laptop, &laptop_jid)
+        .await;
+    let mut phone = cluster.bound(cluster.b(), "alice", "phone").await;
+    cluster
+        .go_available(cluster.b(), &mut phone, &phone_jid)
+        .await;
+    enable_carbons(&cluster, cluster.b(), &mut phone, &phone_jid).await;
+    let mut bob = cluster.bound(cluster.b(), "bob", "desk").await;
+    cluster.go_available(cluster.b(), &mut bob, &bob_jid).await;
+
+    send(&mut laptop, &chat(&bob_jid, "outbound")).await;
+    recv_message_once(&mut bob, "outbound").await;
+    recv_element(&mut phone, "sent carbon", |element| {
+        is_carbon(element, "sent", "outbound")
+    })
+    .await;
+}
+
+/// Binding a full JID whose live connection is on the other node closes
+/// that connection with a conflict and gives the resource to the new one;
+/// the owning node's coordinator holds the new binding.
+async fn bind_replaces_a_resource_hosted_on_the_other_node(selectors: NodeSelectors) {
+    let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
+    let alice_jid = cluster.full("alice", "laptop");
+    let mut owner_side = cluster.bound(&cluster.a, "alice", "anchor").await;
+    let mut old = cluster.bound(cluster.b(), "alice", "laptop").await;
+    let before = binding_in(&cluster.db, &alice_jid, BINDING_ACTIVE).await;
+
+    let mut new = cluster.connect(&cluster.a, "alice").await;
+    let answer = bind(&mut new, "laptop").await;
+    let conflict = recv_element(&mut old, "conflict", |element| {
+        element.is("error", STREAM_NS)
+    })
+    .await;
+    assert_eq!(first_child_name(&conflict), "conflict");
+    assert_eq!(answer, Answer::Bound(alice_jid.clone()));
+    let after = binding_in(&cluster.db, &alice_jid, BINDING_ACTIVE).await;
+    assert_ne!(after.binding_ref, before.binding_ref);
+    assert_eq!(
+        account_owner(&cluster.db, &cluster.bare("alice")).await,
+        Some(cluster.a.node_id.clone())
+    );
+
+    let mut bob = cluster.bound(cluster.b(), "bob", "desk").await;
+    send(&mut bob, &chat(&alice_jid, "after-replace")).await;
+    recv_message_once(&mut new, "after-replace").await;
+    expect_no_message(&mut owner_side, "after-replace").await;
+}
+
+/// The node that owns an account is killed while the survivor hosts a
+/// resource of the account and the dead node hosted a resumable one. Once
+/// the dead node's lease expired, the survivor takes the account over: its
+/// own resource keeps receiving messages, a new resource binds, and the
+/// dead node's session resumes on the survivor with its unhandled stanza.
+async fn killed_owner_hands_its_account_to_the_survivor(selectors: NodeSelectors) {
+    let mut cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
+    let desk_jid = cluster.full("alice", "desk");
+    let phone_jid = cluster.full("alice", "phone");
+    let (mut desk, token) = cluster.resumable(cluster.b(), "alice", "desk").await;
+    let mut phone = cluster.bound(&cluster.a, "alice", "phone").await;
+    assert_eq!(
+        account_owner(&cluster.db, &cluster.bare("alice")).await,
+        Some(cluster.b().node_id.clone())
+    );
+    let mut bob_b = cluster.bound(cluster.b(), "bob", "desk").await;
+    send(&mut bob_b, &chat(&desk_jid, "held")).await;
+    let handled = recv_counting(&mut desk, "held").await;
+    let session = session_in(&cluster.db, &desk_jid, SESSION_LIVE).await;
+
+    kill_node_b(&mut cluster).await;
+    drop(desk);
+    drop(bob_b);
+    eventually("the dead node's session claim is released", || async {
+        session_claim_owner(&cluster.db, &session.session_id)
+            .await
+            .is_none()
+            .then_some(())
+    })
+    .await;
+
+    let mut tablet = cluster.connect(&cluster.a, "alice").await;
+    assert_eq!(
+        bind(&mut tablet, "tablet").await,
+        Answer::Bound(cluster.full("alice", "tablet"))
+    );
+    assert_eq!(
+        account_owner(&cluster.db, &cluster.bare("alice")).await,
+        Some(cluster.a.node_id.clone()),
+        "the survivor owns the account"
+    );
+    let mut desk = cluster.connect(&cluster.a, "alice").await;
+    let answer = resume(&mut desk, &token, handled - 1).await;
+    assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
+    recv_message_once(&mut desk, "held").await;
+
+    let mut bob = cluster.bound(&cluster.a, "bob", "desk").await;
+    send(&mut bob, &chat(&phone_jid, "to-the-phone")).await;
+    recv_message_once(&mut phone, "to-the-phone").await;
+    send(&mut bob, &chat(&desk_jid, "after-resume")).await;
+    recv_message_once(&mut desk, "after-resume").await;
+}
+
 /// One test per scenario for a selector profile.
 macro_rules! profile {
     ($profile:ident, $selectors:expr, { $($test:ident => $scenario:ident,)* }) => {
@@ -1278,12 +1397,16 @@ profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
     messages_over_the_relay => messages_over_the_relay,
     message_to_an_account_without_a_connection => message_to_an_account_without_a_connection,
     carbons_reach_a_sibling_on_the_owning_node => carbons_reach_a_sibling_on_the_owning_node,
-    gap_second_resource_on_the_other_node => second_resource_on_the_other_node,
+    second_resource_on_the_other_node => second_resource_on_the_other_node,
     groupchat_reaches_occupants_on_both_nodes => groupchat_reaches_occupants_on_both_nodes,
-    gap_detached_session_resumes_on_the_other_node => detached_session_resumes_on_the_other_node,
-    gap_live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
+    detached_session_resumes_on_the_other_node => detached_session_resumes_on_the_other_node,
+    live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
     gap_stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
     gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
     session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
     resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
+    bind_on_the_other_node_records_the_binding_at_the_owner => bind_on_the_other_node_records_the_binding_at_the_owner,
+    second_resource_on_the_other_node_receives_sent_carbons => second_resource_on_the_other_node_receives_sent_carbons,
+    bind_replaces_a_resource_hosted_on_the_other_node => bind_replaces_a_resource_hosted_on_the_other_node,
+    killed_owner_hands_its_account_to_the_survivor => killed_owner_hands_its_account_to_the_survivor,
 });

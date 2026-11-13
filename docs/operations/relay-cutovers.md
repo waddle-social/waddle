@@ -314,3 +314,30 @@ The SQLite migration targets released databases without the new ownership
 columns. An unreleased PR database that already has those columns but lacks
 V1022 fails closed and requires deliberate development-database repair; the
 migration does not silently discard its ownership evidence.
+
+## Routed account coordinator (#2046)
+
+With `WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` on a cluster, a node sends
+every binding request and account read for an account another node owns to
+that node as the new message
+`waddle.clustering.relay.account_binding.v1`. The same id carries the
+request that closes a connection replaced by a fresh bind on another node.
+There is no earlier version of this message and no compatible receiver on
+an older binary: an older peer answers `UnknownMessage`, which leaves the
+request undecided, and the bind or resume fails. A node that runs the
+connection registry answers that it does not serve the coordinator, with
+the same result.
+
+The coordinated `Recreate` cutover that switches the fleet to the account
+coordinator applies to this message: stop every old replica before new
+replicas start, so no new node routes to a peer without the receiver.
+Selecting the coordinator on some replicas and the registry on others is
+not a supported fleet state. Restore `RollingUpdate` only in a separate
+change after fleet verification, under the guard above.
+
+Verify after the rollout, on two replicas: a second resource of one
+account bound on the replica that does not own the account, carbons
+between the two resources, a bind that replaces a resource hosted on the
+other replica, and a bind and a resume on the survivor after the owning
+replica is stopped. These instructions do not authorize or assert a
+deployment.

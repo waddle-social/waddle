@@ -45,7 +45,9 @@ fn entry(binding: &BindingRef) -> ConnectionEntry {
 #[tokio::test]
 async fn coordinator_publishes_confirms_and_retires_a_binding() {
     let coordinators = coordinators();
-    let publisher = CoordinatorBindingPublisher::new(Arc::clone(&coordinators));
+    let publisher = CoordinatorBindingPublisher::new(
+        Arc::clone(&coordinators) as Arc<dyn AccountBindingAuthority>
+    );
     let jid = full_jid("laptop");
     let binding = binding();
 

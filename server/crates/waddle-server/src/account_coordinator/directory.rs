@@ -435,4 +435,32 @@ impl AccountBindingAuthority for AccountCoordinators {
             }
         )
     }
+
+    async fn repair(
+        &self,
+        full_jid: &FullJid,
+        binding_ref: &BindingRef,
+        evidence: RepairEvidence,
+    ) -> Result<RepairOutcome, AccountCoordinatorError> {
+        AccountCoordinators::repair(self, full_jid, binding_ref, evidence).await
+    }
+
+    async fn release_session(
+        &self,
+        full_jid: &FullJid,
+        request: ReleaseSessionRequest,
+    ) -> Result<SessionRelease, AccountCoordinatorError> {
+        AccountCoordinators::release_session(self, full_jid, request).await
+    }
+
+    async fn expired_bindings(
+        &self,
+        account: &BareJid,
+    ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
+        AccountCoordinators::expired_bindings(self, account).await
+    }
+
+    async fn view(&self, account: &BareJid) -> Result<AccountView, AccountCoordinatorError> {
+        AccountCoordinators::view(self, account).await
+    }
 }

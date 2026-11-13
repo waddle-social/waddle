@@ -536,6 +536,11 @@ pub async fn wait_for_node_lease_lapse(db: &Database, node_id: &str) {
 /// `first` holds, which it does through `first`'s relay: the two nodes are
 /// then connected. A node reports ready before the mesh has formed, and
 /// until it has, neither node knows the resources the other hosts.
+///
+/// With the account coordinator selected the probe's binding is recorded
+/// by `first`, the account's owner. A probe that fails before the mesh has
+/// formed can leave its binding there, held for a connection of a live
+/// node, so every attempt binds a resource of its own.
 pub async fn wait_for_cross_node_registration(first: &TestServer, second: &TestServer) {
     let holder = WsXmppClient::connect_and_auth(
         &first.ws_url(),
@@ -546,9 +551,9 @@ pub async fn wait_for_cross_node_registration(first: &TestServer, second: &TestS
     )
     .await
     .expect("mesh probe binds on the first node");
-    let resource = format!("mesh-probe-{}", uuid::Uuid::new_v4());
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        let resource = format!("mesh-probe-{}", uuid::Uuid::new_v4());
         match WsXmppClient::connect_and_auth(
             &second.ws_url(),
             "localhost",
