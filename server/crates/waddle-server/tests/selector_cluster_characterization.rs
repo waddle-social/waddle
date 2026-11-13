@@ -1124,15 +1124,15 @@ async fn session_claim_owner(db: &Database, session_id: &str) -> Option<String> 
 /// The node that hosts a live resumable session is killed, and the client
 /// resumes on the surviving node.
 ///
-/// Intended: once the dead node's lease has lapsed the survivor takes the
-/// session, answers `<resumed/>` and replays the unhandled stanza.
+/// Once the survivor has released the dead node's claim on the session, it
+/// takes the session, answers `<resumed/>`, replays the unhandled stanza
+/// once and delivers live output after it. The session's occupancy
+/// generation is stored with the session, so no resource snapshot is
+/// needed.
 ///
-/// Pinned gap: once the survivor has released the dead node's claim on
-/// the session, the resume commits the session's next generation on the
-/// survivor, is answered `<failed/>` with item-not-found and leaves the
-/// session detached. A registry node then binds the resource afresh; a
-/// coordinator node refuses the bind, because the account's claim still
-/// names the dead node.
+/// Pinned gap on a coordinator node (see [`cross_node_resume_is_a_gap`]):
+/// the account's claim still names the dead node, so the resume is not
+/// answered `<resumed/>`.
 async fn session_of_a_killed_node_resumes_on_the_survivor(selectors: NodeSelectors) {
     let mut cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
@@ -1153,23 +1153,29 @@ async fn session_of_a_killed_node_resumes_on_the_survivor(selectors: NodeSelecto
     .await;
 
     let mut alice = cluster.connect(&cluster.a, "alice").await;
+    let answer = resume(&mut alice, &token, handled - 1).await;
+    if cross_node_resume_is_a_gap(&cluster.a) {
+        assert!(!matches!(answer, Answer::Resumed(_)), "{answer:?}");
+        return;
+    }
+    assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
+    recv_message_once(&mut alice, "held").await;
+    let live = eventually("the session is live on the survivor", || async {
+        sessions(&cluster.db, &alice_jid)
+            .await
+            .into_iter()
+            .find(|row| row.state == SESSION_LIVE && row.generation == 2)
+    })
+    .await;
+    assert_eq!(live.session_id, session.session_id);
     assert_eq!(
-        resume(&mut alice, &token, handled - 1).await,
-        Answer::Failed("item-not-found".to_owned())
-    );
-    let after = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
-    assert_eq!(after.session_id, session.session_id);
-    assert_eq!(after.generation, 2);
-    assert_eq!(
-        after.owner_node_id.as_deref(),
+        live.owner_node_id.as_deref(),
         Some(cluster.a.node_id.as_str())
     );
-    let fresh = bind(&mut alice, "phone").await;
-    if cluster.a.coordinates_accounts() {
-        assert_eq!(fresh, internal_server_error());
-    } else {
-        assert_eq!(fresh, Answer::Bound(alice_jid));
-    }
+
+    let mut bob = cluster.bound(&cluster.a, "bob", "desk").await;
+    send(&mut bob, &chat(&alice_jid, "after-resume")).await;
+    recv_message_once(&mut alice, "after-resume").await;
 }
 
 /// The node that owns an account and hosts its resource is killed, and
@@ -1246,7 +1252,7 @@ profile!(durable_registry, NodeSelectors::DURABLE_REGISTRY, {
     live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
     gap_stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
     gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
-    gap_session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
+    session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
     resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
 });
 
