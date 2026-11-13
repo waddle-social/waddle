@@ -1,6 +1,5 @@
 //! Which stream-management authority a serving process uses.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -11,52 +10,44 @@ use super::error::DurableSmError;
 use super::store::DurableSmStore;
 use crate::db::Database;
 
-/// Environment variable naming the [`DurableSmMode`].
+/// Environment variable naming the stream-management authority. The durable
+/// session authority is the only one, so the variable may be unset or
+/// `durable`.
 pub const DURABLE_SM_MODE_ENV: &str = "WADDLE_XMPP_DURABLE_SM";
 
 /// Retained payload bytes one session may hold under the default bounds.
 const DEFAULT_MAX_OUTSTANDING_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The environment names a stream-management authority this binary does not
+/// have. Startup refuses it rather than serve with another authority than
+/// the one the operator named.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{DURABLE_SM_MODE_ENV} must be `legacy` or `durable`, not `{0}`")]
+#[error(
+    "{DURABLE_SM_MODE_ENV} must be unset or `durable`, not `{0}`: the durable session \
+     authority is the only stream-management authority"
+)]
 pub struct InvalidDurableSmMode(String);
 
-/// The configured stream-management authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DurableSmMode {
-    /// The in-memory session registry with detach-time persistence.
-    #[default]
-    Legacy,
-    /// The durable session authority in [`crate::sm_authority`].
-    Durable,
-}
-
-impl FromStr for DurableSmMode {
-    type Err = InvalidDurableSmMode;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim() {
-            "legacy" => Ok(Self::Legacy),
-            "durable" => Ok(Self::Durable),
-            other => Err(InvalidDurableSmMode(other.to_owned())),
-        }
+/// Check [`DURABLE_SM_MODE_ENV`]: unset and `durable` are accepted, any
+/// other value, `legacy` included, is refused.
+pub fn check_durable_sm_mode_env() -> Result<(), InvalidDurableSmMode> {
+    match std::env::var(DURABLE_SM_MODE_ENV) {
+        Ok(value) => check_durable_sm_mode(&value),
+        Err(_) => Ok(()),
     }
 }
 
-impl DurableSmMode {
-    /// Read the mode from the environment. An unset variable is `Legacy`; a
-    /// value that is neither mode is an error, so a typo cannot silently
-    /// select the other authority.
-    pub fn from_env() -> Result<Self, InvalidDurableSmMode> {
-        match std::env::var(DURABLE_SM_MODE_ENV) {
-            Ok(value) => value.parse(),
-            Err(_) => Ok(Self::Legacy),
-        }
+/// Check one value of [`DURABLE_SM_MODE_ENV`].
+pub fn check_durable_sm_mode(value: &str) -> Result<(), InvalidDurableSmMode> {
+    match value.trim() {
+        "durable" => Ok(()),
+        other => Err(InvalidDurableSmMode(other.to_owned())),
     }
 }
 
-/// The authority a serving path consults. `Legacy` carries no store, so a
-/// caller cannot reach durable operations unless the mode selected them.
+/// The authority a serving path consults. Startup always publishes
+/// `Durable`; `Legacy` is the state of an application state that never ran
+/// startup's selection, and carries no store.
 #[derive(Clone, Default)]
 pub enum DurableSmSelection {
     #[default]
@@ -65,29 +56,36 @@ pub enum DurableSmSelection {
 }
 
 impl DurableSmSelection {
-    /// Build the selection for `mode` over the ingress database. On the
-    /// attested runtime pool the store attaches to owner-prepared relations;
-    /// otherwise it creates them.
-    pub async fn open(
-        mode: DurableSmMode,
-        db: &Database,
-        clustered: bool,
-    ) -> Result<Self, DurableSmError> {
-        match mode {
-            DurableSmMode::Legacy => Ok(Self::Legacy),
-            DurableSmMode::Durable => {
-                let bounds = default_bounds()?;
-                let store = if db.uses_attested_postgres_pool() {
-                    DurableSmStore::attach_runtime(db.clone(), bounds, clustered).await?
-                } else {
-                    DurableSmStore::open(db.clone(), bounds, clustered).await?
-                };
-                Ok(Self::Durable(Arc::new(store)))
+    /// Open the durable store over the ingress database. On the attested
+    /// runtime pool the store attaches to owner-prepared relations, whose
+    /// sessions without an authority record the owner phase has drained.
+    /// Otherwise the store creates its relations and drains those sessions
+    /// itself.
+    pub async fn open(db: &Database, clustered: bool) -> Result<Self, DurableSmError> {
+        let bounds = default_bounds()?;
+        let store = if db.uses_attested_postgres_pool() {
+            DurableSmStore::attach_runtime(db.clone(), bounds, clustered).await?
+        } else {
+            let store = DurableSmStore::open(db.clone(), bounds, clustered).await?;
+            let drained = super::legacy_drain::drain_legacy_sm_sessions(db)
+                .await
+                .map_err(Box::new)?;
+            if drained.sessions > 0 {
+                tracing::info!(
+                    sessions = drained.sessions,
+                    stored = drained.stored,
+                    released = drained.released,
+                    acknowledged = drained.acknowledged,
+                    dropped = drained.dropped,
+                    "moved stream-management sessions without a durable record to offline storage"
+                );
             }
-        }
+            store
+        };
+        Ok(Self::Durable(Arc::new(store)))
     }
 
-    /// The durable store, when the durable authority is selected.
+    /// The durable store, when startup published it.
     pub fn store(&self) -> Option<&DurableSmStore> {
         match self {
             Self::Legacy => None,

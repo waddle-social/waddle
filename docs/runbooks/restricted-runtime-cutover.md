@@ -209,6 +209,40 @@ serve.
    If it fails with `DatabaseNotExclusive`, a session is still connected:
    the log lists it. Do not use `--exclusive-database not-checked`.
 
+   `owner-phase` also drains every XEP-0198 session the old server left in
+   `sm_sessions` and `sm_unacked` without a row in `sm_durable_sessions`.
+   The new server resumes only sessions of the durable session authority,
+   so each such session is moved once to offline storage
+   (`pending_delivery`) and its rows are deleted, in one transaction per
+   session. When it moved any, the log prints `moved stream-management
+   sessions without a durable record to offline storage` with the counts.
+   What clients see:
+
+   - A client whose session was detached or live when the server stopped
+     cannot resume it. Its `<resume/>` is answered with `<failed/>` and it
+     binds afresh; this costs one resume per client at the cutover.
+   - Every message the old session retained unacknowledged is delivered to
+     the account through offline delivery on its next bind, once. A message
+     that was already an offline row the session had claimed is released
+     back to offline delivery and is not stored a second time; an offline
+     row the client had acknowledged is deleted.
+   - Retained `<iq/>` and `<presence/>` frames, and messages offline storage
+     does not keep (for example chat states only, or from a sender the
+     account blocks), are not delivered, as when an unresumed session
+     expires with no other resource online.
+
+   The drain is safe to repeat: a rerun of the Job finds no such session
+   and changes nothing. To see what is left before or after it:
+
+   ```sh
+   psql_primary -Atc "SELECT count(*) FROM (SELECT stream_id FROM sm_sessions
+                        UNION SELECT stream_id FROM sm_unacked) l
+                       WHERE NOT EXISTS (SELECT 1 FROM sm_durable_sessions d
+                                          WHERE d.session_id = l.stream_id)"
+   ```
+
+   Expected after the Job: `0`.
+
 8. Confirm the handoff was published and keep a copy with the change
    record.
 

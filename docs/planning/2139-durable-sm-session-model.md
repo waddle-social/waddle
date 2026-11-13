@@ -339,6 +339,54 @@ transport. Whether or not the close arrives, the superseded owner cannot
 admit, acknowledge, detach, complete or compensate: each of those names its
 old generation and binding and fails the fence.
 
+## Sessions without a durable record
+
+The durable authority is the only stream-management authority.
+`WADDLE_XMPP_DURABLE_SM` may be unset or `durable`; any other value,
+`legacy` included, stops startup, so a deployment that names another
+authority does not serve with this one by surprise.
+
+A session the in-memory registry enabled before that has rows in
+`sm_sessions` or `sm_unacked` and none in `sm_durable_sessions`. Nothing
+serving resumes, expires or releases it, and it is not converted into a
+durable session: its stored counters and resource snapshot are not a
+durable window, and its `previd` is its storage key, which a durable
+session never is. It is drained once instead
+(`S/sm_authority/legacy_drain.rs`):
+
+- **Where.** The owner phase drains before a restricted runtime attaches
+  (`prepare_restricted_runtime_owner`, after the durable relations are
+  prepared). A startup that runs its own DDL (SQLite, or PostgreSQL without
+  a restricted runtime role) drains when `DurableSmSelection::open` opens
+  the store, before the in-memory registry restores anything.
+- **One transaction per session**, opened through
+  `begin_guarded_store_writer`. It settles the session's recorded
+  acknowledgement windows (the offline rows the client acknowledged are
+  deleted), releases every offline row the session still claims, and
+  stores each retained message in `pending_delivery` that is neither the
+  replay copy of a claimed row (same outbound sequence) nor already
+  transferred (a `pending_delivery_sm_promotions` receipt). The message is
+  classified as an offline-storage candidate with no resource online and
+  the recipient's blocklist; it is inserted without the per-recipient quota,
+  because the session had already accepted it. The ingress custody of each
+  processed frame is marked promoted, and the session's `sm_sessions`,
+  `sm_unacked`, `sm_acknowledged_windows` and promotion receipt rows are
+  deleted.
+- **Exactly once.** The transaction commits all of it or none of it, and a
+  drained session leaves no row to find, so a rerun changes nothing. Custody
+  of a frame the session no longer retained stays pending for the
+  runtime's custody recovery, which promotes it once.
+- **What is lost.** One resume per client at the cutover: the client gets
+  `<failed/>` and binds afresh, and the retained messages arrive through
+  offline delivery. Retained `<iq/>` and `<presence/>` frames, and messages
+  offline storage does not keep, are dropped, as at the expiry of an
+  unresumed session with no other resource online. A retraction the old
+  process recorded only in memory does not scrub a retained message.
+
+The drain reads `sm_sessions`, `sm_unacked`, `sm_acknowledged_windows`,
+`pending_delivery_sm_promotions` and `sm_ingress_appends`; the durable
+authority keeps using `sm_sessions` and `sm_unacked` for its own sessions.
+
 ## Schema and the epoch guard
 
 On PostgreSQL, migration V1034 creates `sm_durable_sessions` and

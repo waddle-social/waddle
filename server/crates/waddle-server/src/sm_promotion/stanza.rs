@@ -9,7 +9,7 @@ use super::PromotedOutcome;
 /// stanza kinds the SM unacked queue can hold (Copilot review on
 /// PR #346: previous code only parsed `<message/>` and silently
 /// dropped IQ/presence as Unparseable).
-pub(super) fn parse_stanza(xml: &str) -> Option<Stanza> {
+pub(crate) fn parse_stanza(xml: &str) -> Option<Stanza> {
     let element: xmpp_parsers::minidom::Element = xml.parse().ok()?;
     match element.name() {
         "message" => xmpp_parsers::message::Message::try_from(element)

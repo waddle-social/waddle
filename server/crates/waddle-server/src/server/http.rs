@@ -2090,13 +2090,11 @@ async fn create_sm_session_registry(
     .await?;
     state.register_lineage_alias(DurableStore::Sm, DurableStore::Global);
     // The durable session authority shares the ingress database with the
-    // portable relations it writes. The legacy mode opens no store.
-    let durable_sm = crate::sm_authority::DurableSmSelection::open(
-        crate::sm_authority::DurableSmMode::from_env()?,
-        global_db,
-        server_config.clustering.enabled,
-    )
-    .await?;
+    // portable relations it writes.
+    crate::sm_authority::check_durable_sm_mode_env()?;
+    let durable_sm =
+        crate::sm_authority::DurableSmSelection::open(global_db, server_config.clustering.enabled)
+            .await?;
     if let Some(store) = durable_sm.store().filter(|store| !store.is_clustered()) {
         // No binding of a previous process of this single node exists any
         // more, so the sessions it left owned are detached and resumable. A

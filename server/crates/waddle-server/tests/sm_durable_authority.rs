@@ -6,7 +6,7 @@
 
 use waddle_server::db::Database;
 use waddle_server::sm_authority::{
-    DurableSmError, DurableSmMode, DurableSmSelection, DurableSmStore,
+    check_durable_sm_mode, DurableSmError, DurableSmSelection, DurableSmStore,
 };
 use waddle_xmpp::ownership::SmSessionKey;
 use waddle_xmpp::stream_management::durable::ExposureBounds;
@@ -47,21 +47,20 @@ async fn a_clustered_store_refuses_sqlite() {
     ));
 }
 
+/// The durable authority is the only one: the selector variable accepts
+/// `durable` and refuses every other value, `legacy` included, and the
+/// selection always carries a store.
 #[tokio::test]
-async fn the_selector_defaults_to_legacy_and_opens_a_store_only_when_durable() {
-    assert_eq!(DurableSmMode::default(), DurableSmMode::Legacy);
-    assert_eq!("legacy".parse(), Ok(DurableSmMode::Legacy));
-    assert_eq!("durable".parse(), Ok(DurableSmMode::Durable));
-    assert!("on".parse::<DurableSmMode>().is_err());
+async fn the_selection_is_always_durable() {
+    assert_eq!(check_durable_sm_mode("durable"), Ok(()));
+    assert_eq!(check_durable_sm_mode(" durable "), Ok(()));
+    assert!(check_durable_sm_mode("legacy").is_err());
+    assert!(check_durable_sm_mode("on").is_err());
 
     let db = Database::in_memory("sm-durable-selector")
         .await
         .expect("in-memory database");
-    let legacy = DurableSmSelection::open(DurableSmMode::Legacy, &db, false)
-        .await
-        .expect("legacy selection");
-    assert!(legacy.store().is_none());
-    let durable = DurableSmSelection::open(DurableSmMode::Durable, &db, false)
+    let durable = DurableSmSelection::open(&db, false)
         .await
         .expect("durable selection");
     assert!(durable.store().is_some());

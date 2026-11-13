@@ -202,6 +202,8 @@ pub enum RestrictedRuntimeOwnerError {
     StreamManagement(#[source] SmPersistenceError),
     #[error("durable stream management owner preparation failed")]
     DurableStreamManagement(#[source] DatabaseError),
+    #[error("stream-management sessions without a durable record could not be drained")]
+    LegacyStreamManagementDrain(#[source] crate::sm_authority::LegacyDrainError),
     #[error("account binding owner preparation failed")]
     AccountBindings(#[source] DatabaseError),
     #[error("PubSub owner preparation failed")]
@@ -708,6 +710,22 @@ pub async fn prepare_restricted_runtime_owner(
     bootstrap_durable_sm_owner_schema(owner)
         .await
         .map_err(RestrictedRuntimeOwnerError::DurableStreamManagement)?;
+    // The runtime serves only sessions with a durable authority record. Any
+    // other session left in the stream-management relations is moved to
+    // offline storage here, once, before a runtime attaches.
+    let drained = crate::sm_authority::drain_legacy_sm_sessions(owner)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::LegacyStreamManagementDrain)?;
+    if drained.sessions > 0 {
+        tracing::info!(
+            sessions = drained.sessions,
+            stored = drained.stored,
+            released = drained.released,
+            acknowledged = drained.acknowledged,
+            dropped = drained.dropped,
+            "moved stream-management sessions without a durable record to offline storage"
+        );
+    }
     bootstrap_account_binding_owner_schema(owner)
         .await
         .map_err(RestrictedRuntimeOwnerError::AccountBindings)?;

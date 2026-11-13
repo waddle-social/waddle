@@ -16,6 +16,7 @@ mod detached;
 mod enable;
 mod error;
 mod inline;
+mod legacy_drain;
 mod lifecycle;
 mod operations;
 mod record;
@@ -39,6 +40,7 @@ pub use inline::{
     InlineResumeAttempt, InlineResumeFailed, InlineResumeOutcome, InlineResumeRequest,
     InlineSession,
 };
+pub use legacy_drain::{drain_legacy_sm_sessions, LegacyDrainError, LegacyDrainReport};
 pub use lifecycle::{DetachSnapshot, LifecycleError, LifecycleRejection, TerminalSession};
 pub use record::{DurableSessionRecord, RecordedClaim};
 pub use resume::{
@@ -46,5 +48,8 @@ pub use resume::{
     ResumeRejectionReason, ResumeRequest, ResumeResolution, ResumedCommit,
 };
 pub use schema::bootstrap_schema_owner as bootstrap_durable_sm_owner_schema;
-pub use selection::{DurableSmMode, DurableSmSelection, InvalidDurableSmMode, DURABLE_SM_MODE_ENV};
+pub use selection::{
+    check_durable_sm_mode, check_durable_sm_mode_env, DurableSmSelection, InvalidDurableSmMode,
+    DURABLE_SM_MODE_ENV,
+};
 pub use store::DurableSmStore;

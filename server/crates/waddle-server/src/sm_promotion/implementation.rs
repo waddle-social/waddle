@@ -1431,9 +1431,7 @@ pub(in crate::sm_promotion) async fn promote_one(
 /// entry + optional MAM result + metadata; groupchat_archive::push_inbox_update_to
 /// sends headline push(entry, metadata). Query-scoped MAM alone is handled
 /// separately above (#460). Extra body/thread/payloads remain ordinary intake.
-pub(in crate::sm_promotion) fn is_senderless_inbox_projection(
-    message: &xmpp_parsers::message::Message,
-) -> bool {
+pub(crate) fn is_senderless_inbox_projection(message: &xmpp_parsers::message::Message) -> bool {
     use waddle_xmpp::xep::xep0430::{NS_INBOX, NS_MAM, NS_WADDLE_INBOX};
     use xmpp_parsers::message::MessageType;
     if message.from.is_some()
