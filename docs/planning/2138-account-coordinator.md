@@ -472,17 +472,22 @@ releases first, the session row is deleted last.**
   node a connection of a previous process is expired.
   - A **detached** binding is adopted as detached, whatever became of the
     node that hosted its connection: it has no connection, and its session
-    keeps its resume right under the new claim. The session's authority
-    ends it when it can no longer resume, which retires the binding.
+    keeps its resume right under the new claim. Once its session has ended
+    (the `sm_durable_sessions` row is terminal or gone) it is retired when
+    the account is loaded; otherwise the session's authority ends it when
+    it can no longer resume, which retires the binding.
   - A prepared, published or active binding on a **live** connection is
     adopted.
   - An active binding on an **expired** connection that names a
-    stream-management session is adopted and detached before the account
-    answers anything, so a resume inherits its snapshot and presentation
-    flags. Whether the session resumes is the session authority's
-    decision.
-  - Any other binding on an expired connection is retired, with the
-    recovery paths as the owner of what it accepted.
+    stream-management session that can still resume is adopted and
+    detached before the account answers anything, so a resume inherits its
+    snapshot and presentation flags. Whether the session resumes is the
+    session authority's decision. A session read that fails counts as
+    resumable: a detached binding loses nothing and is released when the
+    session ends.
+  - Any other binding on an expired connection, including one whose
+    session has ended, is retired, with the recovery paths as the owner of
+    what it accepted.
   - A binding of **unknown** liveness is kept, is not a destination and is
     not retired on that evidence.
 

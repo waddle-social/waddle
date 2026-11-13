@@ -18,7 +18,7 @@ use waddle_xmpp::ownership::account_resource_transition::{
     BindingEvidence, BindingRetirementDisposition, DirectedPresenceTeardownReceipt,
     EndpointRetirementEvidence, PresentationFlushReceipt,
 };
-use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
+use waddle_xmpp::ownership::{BindingRef, SmSessionKey, UserClaimIdentity};
 use waddle_xmpp::telemetry::account_coordinator::{record_operation, record_slots_in_use};
 use waddle_xmpp::telemetry::attributes::{AccountMutationKind, AccountOperationOutcome};
 
@@ -289,8 +289,9 @@ impl AccountCoordinatorActor {
     /// Move a row written under a previous claim identity to this one, and
     /// adopt its binding when it is detached, when its connection is live,
     /// or when it is active on a lost connection and names a
-    /// stream-management session: that one is detached right after the
-    /// load, so its session keeps its resume right. A binding that is not
+    /// stream-management session: right after the load that one is
+    /// detached when its session can resume, so the session keeps its
+    /// resume right, and retired when it has ended. A binding that is not
     /// adopted keeps its previous binding claim, which keeps it out of
     /// selection.
     async fn take_over(
@@ -397,14 +398,15 @@ impl AccountCoordinatorActor {
         Ok(self.store.load(&full_jid).await?)
     }
 
-    /// Settle every binding whose connection is gone. An active binding
-    /// this claim holds that names a stream-management session is
-    /// detached: the session's authority decides whether it resumes or
-    /// ends, and the slot keeps the snapshot a resume inherits. Any other
-    /// is retired with the recovery paths as the owner of what it
-    /// accepted. A detached binding has no connection and is left alone; a
-    /// binding whose liveness is unknown is neither detached nor retired.
-    /// Returns how many bindings were retired.
+    /// Settle every binding that can no longer serve its resource. An
+    /// active binding on a lost connection that this claim holds and whose
+    /// stream-management session can still resume is detached, and the
+    /// slot keeps the snapshot a resume inherits. A detached binding whose
+    /// session has ended has nothing left to resume. Each of those that is
+    /// not detached is retired with the recovery paths as the owner of what
+    /// it accepted. A detached binding whose session can resume is left to
+    /// that session; a binding whose liveness is unknown is neither
+    /// detached nor retired. Returns how many bindings were retired.
     async fn settle_expired(&mut self) -> Reply<usize> {
         let claim = self.claim()?.clone();
         let candidates: Vec<_> = self
@@ -412,25 +414,37 @@ impl AccountCoordinatorActor {
             .slots()
             .filter_map(|slot| {
                 let binding = slot.binding_receipt()?;
-                (binding.state() != AccountResourceBindingState::Detached).then(|| {
-                    (
-                        slot.full_jid().clone(),
-                        binding.binding_ref().clone(),
-                        binding
-                            .snapshot()
-                            .stream_management_ref
-                            .map(|reference| reference.session),
-                    )
-                })
+                Some((
+                    slot.full_jid().clone(),
+                    binding.binding_ref().clone(),
+                    binding.state(),
+                    binding
+                        .snapshot()
+                        .stream_management_ref
+                        .map(|reference| reference.session),
+                ))
             })
             .collect();
         let mut retired = 0;
-        for (full_jid, binding_ref, session) in candidates {
-            if self.liveness.liveness(&binding_ref, session).await != BindingLiveness::Expired {
-                continue;
-            }
-            if self.detach_expired(&claim, &full_jid, &binding_ref).await? {
-                continue;
+        for (full_jid, binding_ref, state, session) in candidates {
+            if state == AccountResourceBindingState::Detached {
+                let Some(session) = session else {
+                    continue;
+                };
+                if self.session_resumable(session).await {
+                    continue;
+                }
+            } else {
+                if self.liveness.liveness(&binding_ref, session).await != BindingLiveness::Expired {
+                    continue;
+                }
+                let resumable = match session {
+                    Some(session) => self.session_resumable(session).await,
+                    None => false,
+                };
+                if resumable && self.detach_expired(&claim, &full_jid, &binding_ref).await? {
+                    continue;
+                }
             }
             let evidence = RetireEvidence::recovery_owned();
             let started = self
@@ -462,6 +476,20 @@ impl AccountCoordinatorActor {
             }
         }
         Ok(retired)
+    }
+
+    /// Whether the stream-management session a binding names can still
+    /// resume. A read that fails counts as resumable: a detached binding
+    /// loses nothing, and the session's authority releases it once the
+    /// session ends.
+    async fn session_resumable(&self, session: SmSessionKey) -> bool {
+        match self.store.session_resumable(session).await {
+            Ok(resumable) => resumable,
+            Err(error) => {
+                tracing::debug!(%error, "a binding's session was not read; it is kept resumable");
+                true
+            }
+        }
     }
 
     /// Detach an active binding on a lost connection when it names a

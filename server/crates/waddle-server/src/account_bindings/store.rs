@@ -97,6 +97,13 @@ pub trait AccountBindingStore: Send + Sync + 'static {
         session: SmSessionKey,
     ) -> Result<Vec<FullJid>, AccountBindingStoreError>;
 
+    /// Whether the durable stream-management session `session` can still
+    /// resume: its row exists and is not terminal.
+    async fn session_resumable(
+        &self,
+        session: SmSessionKey,
+    ) -> Result<bool, AccountBindingStoreError>;
+
     /// Up to `limit` accounts that have a resource holding a binding, in
     /// bare-JID order, starting after `after`.
     async fn bound_accounts(

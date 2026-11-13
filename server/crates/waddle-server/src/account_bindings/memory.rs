@@ -195,6 +195,16 @@ impl AccountBindingStore for InMemoryAccountBindingStore {
             .collect())
     }
 
+    /// This store keeps no session relation, so every session a binding
+    /// names is taken as resumable and its session authority decides.
+    async fn session_resumable(
+        &self,
+        _session: SmSessionKey,
+    ) -> Result<bool, AccountBindingStoreError> {
+        drop(self.state()?);
+        Ok(true)
+    }
+
     async fn bound_accounts(
         &self,
         after: Option<&BareJid>,

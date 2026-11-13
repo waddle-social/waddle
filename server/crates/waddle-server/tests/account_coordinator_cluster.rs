@@ -557,7 +557,8 @@ async fn enable_resumable(client: &mut WsXmppClient) {
 /// The owner node dies with the account's bindings on it. The survivor
 /// takes the account over on the next bind: the binding of the same full
 /// JID is retired and replaced promptly, a binding without a session is
-/// retired, and a binding whose session can resume is kept as detached.
+/// retired, and a binding whose session can resume is kept as detached
+/// until a bind of its resource replaces it, also promptly.
 #[tokio::test]
 async fn a_dead_owners_bindings_are_settled_by_the_node_that_takes_the_account_over() {
     let mut scenario = Scenario::start().await;
@@ -588,6 +589,19 @@ async fn a_dead_owners_bindings_are_settled_by_the_node_that_takes_the_account_o
     .await;
     wait_for_binding(&scenario.db, "phone", None).await;
     wait_for_binding(&scenario.db, "tablet", Some(STATE_DETACHED)).await;
+
+    // A bind of the detached resource replaces it without waiting: its
+    // connection is gone with the dead node.
+    let detached = binding_ref(&scenario.db, "tablet").await;
+    let started = tokio::time::Instant::now();
+    let _tablet_again = scenario.account_on(&scenario.server_b, "tablet").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the rebind of a detached resource does not wait out the replacement budget: {:?}",
+        started.elapsed()
+    );
+    wait_for_binding(&scenario.db, "tablet", Some(STATE_ACTIVE)).await;
+    assert_ne!(binding_ref(&scenario.db, "tablet").await, detached);
 }
 
 /// A stanza for an account whose owner node died is not an error: the

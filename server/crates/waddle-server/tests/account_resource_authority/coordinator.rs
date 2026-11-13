@@ -1236,6 +1236,112 @@ async fn a_takeover_adopts_live_remote_bindings_and_retires_expired_ones() {
     );
 }
 
+/// End the stored session row, as its expiry does.
+async fn end_session(db: &Database, session: waddle_xmpp::ownership::SmSessionKey) {
+    let connection = db.guard().await.expect("database connection");
+    connection
+        .execute(
+            &format!(
+                "UPDATE sm_durable_sessions SET state = 4, terminal_reason = 2 \
+                 WHERE session_id = '{}'",
+                session.as_uuid()
+            ),
+            (),
+        )
+        .await
+        .expect("end the session");
+}
+
+#[tokio::test]
+async fn a_takeover_keeps_a_lost_binding_detached_only_while_its_session_can_resume() {
+    let harness = harness("account-coordinator-lost-sessions", config()).await;
+    let current = harness.claim();
+    let lost = || {
+        BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            &NodeIdentity::new("node-lost", "epoch"),
+        )))
+    };
+    let resumable_jid = resource("lost-resumable");
+    let ended_jid = resource("lost-ended");
+    let detached_jid = resource("detached-ended");
+    let mut bindings = Vec::new();
+    for jid in [&resumable_jid, &ended_jid, &detached_jid] {
+        let binding = lost();
+        let revision = activate_binding(&harness.coordinators, jid, &binding).await;
+        let session = insert_session(&harness.db).await;
+        let snapshot = AccountResourceSnapshot {
+            stream_management_ref: Some(sm_binding(session, 1)),
+            ..presence(true, 0, false)
+        };
+        let revision = drive(
+            &harness.coordinators,
+            jid,
+            update(&current, revision, &binding, snapshot),
+        )
+        .await;
+        if jid == &detached_jid {
+            drive(
+                &harness.coordinators,
+                jid,
+                detach(&current, revision, &binding),
+            )
+            .await;
+        }
+        bindings.push((binding, session));
+    }
+    end_session(&harness.db, bindings[1].1).await;
+    end_session(&harness.db, bindings[2].1).await;
+
+    harness.claims.move_to(claim(2));
+    let successor = AccountCoordinators::new(
+        Arc::clone(&harness.store) as Arc<dyn AccountBindingStore>,
+        Arc::clone(&harness.claims) as Arc<dyn AccountClaimSource>,
+        Arc::new(StatedLiveness(
+            bindings
+                .iter()
+                .map(|(binding, _)| (binding.clone(), BindingLiveness::Expired))
+                .collect(),
+        )),
+        config(),
+    );
+    successor
+        .adopt_account(&resumable_jid.to_bare())
+        .await
+        .expect("adopt the account");
+
+    assert_eq!(
+        successor
+            .slot_status(&resumable_jid)
+            .await
+            .expect("slot status")
+            .binding,
+        Some((bindings[0].0.clone(), AccountResourceBindingState::Detached)),
+        "a lost binding whose session can resume is kept as detached"
+    );
+    for jid in [&ended_jid, &detached_jid] {
+        assert_eq!(
+            successor
+                .slot_status(jid)
+                .await
+                .expect("slot status")
+                .binding,
+            None,
+            "a lost binding whose session has ended is retired: {jid}"
+        );
+    }
+    for (_, session) in &bindings[1..] {
+        assert!(
+            harness
+                .store
+                .resources_for_session(*session)
+                .await
+                .expect("resources for the session")
+                .is_empty(),
+            "no row names an ended session"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_binding_publisher_maps_publish_confirm_and_retire_onto_the_coordinator() {
     use waddle_server::account_coordinator::{
