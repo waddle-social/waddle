@@ -333,9 +333,11 @@ and present only when it returns `true`.
   resources with `test_support::bind_live_resource`: it records the
   binding at the fixture's coordinator, confirms it active and registers
   the connection entry for that exact binding, so live delivery finds the
-  resource as it finds a WebSocket bind. Registering a connection only in
-  the connection registry or the `UserActor` makes it invisible to every
-  account read.
+  resource as it finds a WebSocket bind. The in-crate
+  `register_test_connection` does the same for the entry it registers: it
+  publishes and confirms that entry's binding at the coordinator.
+  Registering a connection only in the connection registry or the
+  `UserActor` makes it invisible to every account read.
 
 These reads come from the coordinator, and from nothing else: the recipient
 inventory; bare-JID target selection; the carbon planner's and the carbon

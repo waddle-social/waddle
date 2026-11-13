@@ -7,11 +7,6 @@
 //! scenario observes are its own. The first bind of an account takes the
 //! account's `UserActor` claim, so the node a scenario binds an account on
 //! first owns that account.
-//!
-//! A test whose name starts with `gap_` pins behaviour the authorities do not
-//! support on a cluster: it asserts what the servers answer and its comment
-//! states the behaviour the scenario is meant to have. Closing the gap
-//! replaces the pinned answer with the intended one.
 
 #![cfg(feature = "clustering")]
 
@@ -46,6 +41,9 @@ const USERS: [&str; 5] = ["alice", "bob", "carol", "probe-a", "probe-b"];
 /// `sm_durable_sessions.state` values.
 const SESSION_LIVE: i64 = 1;
 const SESSION_DETACHED: i64 = 2;
+const SESSION_TERMINAL: i64 = 4;
+/// `sm_durable_sessions.terminal_reason` values.
+const REASON_REPLACED: i64 = 3;
 
 /// `account_resource_bindings.state` values.
 const BINDING_ACTIVE: i64 = 3;
@@ -389,6 +387,62 @@ async fn recv_message_once(client: &mut WsXmppClient, id: &str) -> Element {
     message
 }
 
+/// Each message in `ids` arrives exactly once, in any order. Frames are
+/// read one at a time, so a message that arrives while another is awaited
+/// is counted rather than discarded.
+async fn recv_messages_once(client: &mut WsXmppClient, ids: &[String]) {
+    let mut seen = vec![0_u32; ids.len()];
+    let deadline = tokio::time::Instant::now() + DELIVERY_BUDGET;
+    while seen.contains(&0) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let frame = client
+            .recv_timeout(remaining)
+            .await
+            .unwrap_or_else(|error| {
+                let missing: Vec<&String> = ids
+                    .iter()
+                    .zip(&seen)
+                    .filter(|(_, count)| **count == 0)
+                    .map(|(id, _)| id)
+                    .collect();
+                panic!("messages {missing:?} did not arrive: {error}")
+            });
+        count_messages(&frame, ids, &mut seen);
+    }
+    expect_none_of(client, ids, &mut seen).await;
+}
+
+/// Record a frame that is one of the messages `ids` in `seen`.
+fn count_messages(frame: &str, ids: &[String], seen: &mut [u32]) {
+    let Ok(element) = frame.parse::<Element>() else {
+        return;
+    };
+    if let Some(index) = ids.iter().position(|id| is_message(&element, id)) {
+        seen[index] += 1;
+    }
+}
+
+/// Watch `client` for [`QUIET`] and fail if any message in `ids` arrives
+/// more often than `seen` already records.
+async fn expect_none_of(client: &mut WsXmppClient, ids: &[String], seen: &mut [u32]) {
+    let before = seen.to_vec();
+    let deadline = tokio::time::Instant::now() + QUIET;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) => count_messages(&frame, ids, seen),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        seen, before,
+        "unexpected copies of {ids:?}: counts {seen:?}, expected {before:?}"
+    );
+}
+
 async fn expect_no_message(client: &mut WsXmppClient, id: &str) {
     let arrived = try_recv_element(client, QUIET, |element| is_message(element, id)).await;
     assert!(
@@ -420,6 +474,7 @@ where
 struct SessionRow {
     session_id: String,
     state: i64,
+    terminal_reason: Option<i64>,
     generation: i64,
     owner_node_id: Option<String>,
     outbound_appended: i64,
@@ -430,7 +485,7 @@ async fn sessions(db: &Database, full_jid: &str) -> Vec<SessionRow> {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
         .query(
-            "SELECT session_id, state::bigint, generation, \
+            "SELECT session_id, state::bigint, terminal_reason::bigint, generation, \
              owner_node_id, outbound_appended FROM sm_durable_sessions \
              WHERE full_jid = ? ORDER BY updated_at_ms",
             waddle_server::db_params![full_jid.to_owned()],
@@ -442,9 +497,10 @@ async fn sessions(db: &Database, full_jid: &str) -> Vec<SessionRow> {
         sessions.push(SessionRow {
             session_id: row.get(0).expect("session_id"),
             state: row.get(1).expect("state"),
-            generation: row.get(2).expect("generation"),
-            owner_node_id: row.get(3).expect("owner_node_id"),
-            outbound_appended: row.get(4).expect("outbound_appended"),
+            terminal_reason: row.get(2).expect("terminal_reason"),
+            generation: row.get(3).expect("generation"),
+            owner_node_id: row.get(4).expect("owner_node_id"),
+            outbound_appended: row.get(5).expect("outbound_appended"),
         });
     }
     sessions
@@ -538,11 +594,6 @@ async fn recv_counting(client: &mut WsXmppClient, id: &str) -> u32 {
     }
 }
 
-/// The stream error a node answers when session initialization fails.
-fn internal_server_error() -> Answer {
-    Answer::StreamError("internal-server-error".to_owned())
-}
-
 /// A resource bound on the node that owns its account detaches when its
 /// transport is lost and resumes on that node with the unhandled stanza
 /// replayed.
@@ -601,27 +652,38 @@ async fn same_node_bind_replaces_a_live_binding(selectors: NodeSelectors) {
     recv_message_once(&mut new, "after-replace").await;
 }
 
-/// Binding a resource again while its durable session is detached.
-///
-/// Intended: the bind succeeds, the detached session becomes terminal with
-/// the reason "replaced", its resume token names no session, and a message
-/// to the full JID reaches the new connection.
-///
-/// Pinned gap: the detached binding holds the resource's slot at the
-/// coordinator. The bind waits for that binding to retire, which nothing
-/// does while its session stays detached, and ends in a stream error when
-/// the wait runs out.
+/// Binding a resource again while its durable session is detached: the
+/// bind succeeds, the detached session becomes terminal with the reason
+/// "replaced", its resume token names no session, and a message to the
+/// full JID reaches the new connection
+/// (`docs/planning/2139-durable-sm-session-model.md`, "Replacement on a
+/// clustered store").
 async fn bind_over_a_detached_session(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let node = &cluster.a;
     let alice_jid = cluster.full("alice", "phone");
-    let (alice, _token) = cluster.resumable(node, "alice", "phone").await;
+    let (alice, token) = cluster.resumable(node, "alice", "phone").await;
     drop(alice);
-    session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
+    let detached = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
 
     let mut again = cluster.connect(node, "alice").await;
-    let answer = bind(&mut again, "phone").await;
-    assert_eq!(answer, internal_server_error());
+    assert_eq!(
+        bind(&mut again, "phone").await,
+        Answer::Bound(alice_jid.clone())
+    );
+    let replaced = session_in(&cluster.db, &alice_jid, SESSION_TERMINAL).await;
+    assert_eq!(replaced.session_id, detached.session_id);
+    assert_eq!(replaced.terminal_reason, Some(REASON_REPLACED));
+
+    let mut late = cluster.connect(node, "alice").await;
+    assert_eq!(
+        resume(&mut late, &token, 0).await,
+        Answer::Failed("item-not-found".to_owned())
+    );
+
+    let mut bob = cluster.bound(node, "bob", "desk").await;
+    send(&mut bob, &chat(&alice_jid, "after-replace")).await;
+    recv_message_once(&mut again, "after-replace").await;
 }
 
 /// Chat messages between accounts whose resources are on different nodes
@@ -917,10 +979,11 @@ async fn live_session_resumes_on_the_other_node(selectors: NodeSelectors) {
 }
 
 /// A chat message for the full JID of a detached session, sent by a
-/// correspondent on the session's node or on the other node.
-///
-/// Intended: the stanza enters the detached session's custody and the
-/// resume replays it once.
+/// correspondent on the session's node or on the other node: the stanza
+/// enters the detached session's custody, the resume replays it once, and
+/// it is not also stored for offline delivery
+/// (`docs/planning/2139-durable-sm-session-model.md`, "Delivery to a
+/// detached session").
 async fn stanza_to_a_detached_session(selectors: NodeSelectors, sender_on_session_node: bool) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
@@ -946,23 +1009,18 @@ async fn stanza_to_a_detached_session(selectors: NodeSelectors, sender_on_sessio
 
     let mut alice = cluster.connect(&cluster.a, "alice").await;
     let answer = resume(&mut alice, &token, 0).await;
-    // Pinned gap: the stanza does not enter the detached session's
-    // custody. It is stored for offline delivery, the resume replays
-    // nothing, and the account's next resource to become available
-    // receives it as a delayed message.
     assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
-    expect_no_message(&mut alice, "while-detached").await;
+    recv_message_once(&mut alice, "while-detached").await;
     let resumed = session_in(&cluster.db, &alice_jid, SESSION_LIVE).await;
     assert_eq!(resumed.session_id, detached.session_id);
-    assert_eq!(resumed.outbound_appended, 0);
+    assert_eq!(resumed.outbound_appended, 1);
     let mut tablet = cluster.bound(&cluster.a, "alice", "tablet").await;
     send(
         &mut tablet,
         &Element::builder("presence", CLIENT_NS).build(),
     )
     .await;
-    let stored = recv_message_once(&mut tablet, "while-detached").await;
-    assert!(is_offline_copy(&stored, "while-detached"), "{stored:?}");
+    expect_no_message(&mut tablet, "while-detached").await;
 }
 
 async fn stanza_from_the_same_node_to_a_detached_session(selectors: NodeSelectors) {
@@ -1413,22 +1471,13 @@ async fn a_replaced_binding_receives_nothing_meant_for_its_successor(selectors: 
     );
     let after = binding_in(&cluster.db, &tablet_jid, BINDING_ACTIVE).await;
     assert_ne!(after.binding_ref, before.binding_ref);
-    for index in 0..5 {
-        send(
-            &mut carol,
-            &chat(&tablet_jid, &format!("successor-{index}")),
-        )
-        .await;
+    let ids: Vec<String> = (0..5).map(|index| format!("successor-{index}")).collect();
+    for id in &ids {
+        send(&mut carol, &chat(&tablet_jid, id)).await;
     }
-    for index in 0..5 {
-        recv_message_once(&mut new, &format!("successor-{index}")).await;
-    }
-    for index in 0..5 {
-        let id = format!("successor-{index}");
-        let arrived = try_recv_element(&mut old, QUIET, |element| is_message(element, &id)).await;
-        assert!(arrived.is_err(), "the replaced binding received {id}");
-        expect_no_message(&mut anchor, &id).await;
-    }
+    recv_messages_once(&mut new, &ids).await;
+    expect_none_of(&mut old, &ids, &mut vec![0; ids.len()]).await;
+    expect_none_of(&mut anchor, &ids, &mut vec![0; ids.len()]).await;
 }
 
 /// One test per scenario for a selector profile.
@@ -1450,7 +1499,7 @@ macro_rules! profile {
 profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
     same_node_bind_detach_and_resume => same_node_bind_detach_and_resume,
     same_node_bind_replaces_a_live_binding => same_node_bind_replaces_a_live_binding,
-    gap_bind_over_a_detached_session => bind_over_a_detached_session,
+    bind_over_a_detached_session => bind_over_a_detached_session,
     messages_through_the_mailbox => messages_through_the_mailbox,
     messages_over_the_relay => messages_over_the_relay,
     message_to_an_account_without_a_connection => message_to_an_account_without_a_connection,
@@ -1459,8 +1508,8 @@ profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
     groupchat_reaches_occupants_on_both_nodes => groupchat_reaches_occupants_on_both_nodes,
     detached_session_resumes_on_the_other_node => detached_session_resumes_on_the_other_node,
     live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
-    gap_stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
-    gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
+    stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
+    stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
     session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
     resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
     bind_on_the_other_node_records_the_binding_at_the_owner => bind_on_the_other_node_records_the_binding_at_the_owner,
