@@ -357,6 +357,7 @@ async fn accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_che
         .protocol
         .connection_registry
         .set_carbons_enabled(&sibling, true));
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
     create_test_session(&state, "bob").await;
     let (initial_sender, mut initial_receiver) = tokio::sync::mpsc::channel(8);
     register_test_connection(

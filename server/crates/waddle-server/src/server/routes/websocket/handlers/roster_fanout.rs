@@ -224,6 +224,14 @@ async fn attempt_resource(
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Notified once a fanout has captured its live and detached targets and
+    /// before any target's attempt runs, so a test can hold a target's stream
+    /// operation across exactly that point.
+    pub(crate) static TARGETS_CAPTURED: std::sync::Arc<tokio::sync::Notify>;
+}
+
 pub(crate) async fn send_roster_push_to_resources(
     state: &WebSocketState,
     user: &BareJid,
@@ -287,6 +295,10 @@ pub(crate) async fn send_roster_push_to_resources(
             initially_live,
             &append_gate,
         ));
+    }
+    #[cfg(test)]
+    if let Ok(captured) = TARGETS_CAPTURED.try_with(std::sync::Arc::clone) {
+        captured.notify_one();
     }
     let mut rejected = BTreeSet::new();
     while let Some(attempt) = attempts.next().await {

@@ -39,6 +39,7 @@ async fn direct_receipt(fixture: IngressFixture, partial: bool) {
     let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry)
         .with_ingress_effect_capture(Some(capture.clone()));
     deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.web_socket_state = Some(&state);
     deps.message_dispatcher = Some(&state.deps.protocol.dispatcher);
     deps.mam_storage = Some(&state.deps.protocol.mam_storage);
     deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);

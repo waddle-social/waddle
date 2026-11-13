@@ -4887,6 +4887,7 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
         assert!(registered, "test dual-registration should confirm {jid}");
     }
 
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let responses = handle_message_for_test(
         state.as_ref(),
         &sender_jid,
@@ -4969,6 +4970,7 @@ async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resour
         );
     }
 
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let responses = handle_message_through_ingress(
         state.as_ref(),
         &sender_jid,
@@ -5022,6 +5024,7 @@ async fn handle_message_direct_chat_sends_received_carbon_to_opted_in_sibling_re
         .carbons_enabled
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let frame = format!(
         "<message xmlns='jabber:client' to='{recipient_jid}' type='chat' id='recv-carbon-1'>\
                 <body>received carbon over websocket</body>\

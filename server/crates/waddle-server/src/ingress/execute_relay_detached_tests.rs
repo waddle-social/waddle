@@ -409,18 +409,46 @@ async fn relay_scope<T>(
     }
 }
 
+/// Run a cross-node exchange on a stack of the size the server gives its
+/// workers (`main.rs`). The receiving node's delivery runs inside the
+/// origin's execution here, which is deeper than either node goes on its own
+/// and deeper than a test thread's default stack.
 #[cfg(feature = "clustering")]
-#[tokio::test]
-async fn sqlite_cross_node_keyed_append_receipt_failure_recovery_1778() {
-    relay_fallback_receipt_failure(IngressFixture::sqlite().await, true).await;
+fn on_server_worker_stack<F, Exchange>(exchange: F)
+where
+    F: FnOnce() -> Exchange + Send + 'static,
+    Exchange: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(exchange());
+        })
+        .expect("exchange thread")
+        .join()
+        .expect("exchange");
 }
 
 #[cfg(feature = "clustering")]
-#[tokio::test]
-async fn postgres_cross_node_keyed_append_receipt_failure_recovery_1778() {
-    if let Some(fixture) = IngressFixture::postgres("cross_node_keyed_append_1778").await {
-        relay_fallback_receipt_failure(fixture, true).await;
-    }
+#[test]
+fn sqlite_cross_node_keyed_append_receipt_failure_recovery_1778() {
+    on_server_worker_stack(|| async {
+        relay_fallback_receipt_failure(IngressFixture::sqlite().await, true).await;
+    });
+}
+
+#[cfg(feature = "clustering")]
+#[test]
+fn postgres_cross_node_keyed_append_receipt_failure_recovery_1778() {
+    on_server_worker_stack(|| async {
+        if let Some(fixture) = IngressFixture::postgres("cross_node_keyed_append_1778").await {
+            relay_fallback_receipt_failure(fixture, true).await;
+        }
+    });
 }
 
 #[cfg(feature = "clustering")]
@@ -763,26 +791,12 @@ async fn sealed_copy_for_a_session_detached_on_another_node(lose_first_record: b
     fixture.close().await;
 }
 
-/// Run the exchange on a stack of the size the server gives its workers
-/// (`main.rs`). The receiving node's delivery runs inside the owner's
-/// execution here, which is deeper than either node goes on its own and
-/// deeper than a test thread's default stack.
+/// The exchange runs on the server's worker stack ([`on_server_worker_stack`]).
 #[cfg(feature = "clustering")]
 fn run_sealed_copy_for_a_session_detached_on_another_node(lose_first_record: bool) {
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(sealed_copy_for_a_session_detached_on_another_node(
-                    lose_first_record,
-                ));
-        })
-        .expect("exchange thread")
-        .join()
-        .expect("exchange");
+    on_server_worker_stack(move || {
+        sealed_copy_for_a_session_detached_on_another_node(lose_first_record)
+    });
 }
 
 #[cfg(feature = "clustering")]

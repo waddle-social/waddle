@@ -25,8 +25,10 @@ async fn recipient_block_error_is_retained_as_the_plans_error_reply() {
     let sender = "alice@example.com/web".parse().expect("sender");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &sender, tx).await;
+    let coordinator = crate::server::routes::interpret::tests::coordinator_for(&registry).await;
     let deps = Deps {
         user_registry: Some(&user_registry),
+        web_socket_state: Some(&coordinator),
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
     let plan = plan_message_dispatch(

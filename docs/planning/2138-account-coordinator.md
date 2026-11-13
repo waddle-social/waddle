@@ -475,6 +475,27 @@ Until this list is empty the registry publisher stays in the bind path
 after the coordinator (see "The binding publisher"), and the deletion
 steps of the retirement inventory stay blocked.
 
+### Fixtures that stand in for a connection
+
+A test that registers a channel in a connection registry has no binding at
+the coordinator, so routing reads no resource for it. Such fixtures do the
+connection's half themselves (`S/server/routes/websocket/test_bindings.rs`;
+`test_support::sync_registry_bindings` for integration suites): every
+locally hosted registry entry is published and confirmed under the
+`BindingRef` it carries, its presence, carbons and push interest are sent
+as the slot's snapshot, and a binding the fixture published whose entry is
+gone or replaced is retired. A fixture syncs again after it changes the
+registry. A failed send does not retire a binding; a fixture models a
+connection's teardown by removing the entry and syncing. Bindings a real
+connection published through registration are left to that connection,
+whose snapshot names its stream-management session.
+
+Tests that observe a resource hosted on another node through a remote
+channel mirror (`remote_owner_resources`) no longer see delivery on a node
+with route state, which reaches such a resource by a bound request. They
+need a coordinator whose liveness reads the other node's lease and a seam
+on the bound request.
+
 ## The binding publisher
 
 A connection publishes its bindings through one trait, `BindingPublisher`

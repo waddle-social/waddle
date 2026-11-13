@@ -735,6 +735,7 @@ async fn transient_live_carbons_or_offline(fixture: IngressFixture, initial: Ini
             blocking.set_blocklist(target.to_bare(), vec![submission.sender.to_bare()]);
         }
     }
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
     let mut offered = submission.plan.sanitized_message.clone();
     add_hint(&mut offered, Hint::NoStore);
     let mut dispatcher = StanzaDispatcher::new();

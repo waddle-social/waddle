@@ -1,5 +1,5 @@
 use super::{
-    chat_msg, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
+    chat_msg, coordinator_for, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
     pipelined_dispatcher, register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps,
     InboxStorage, MamStorage, OutboundEvent, Stanza,
 };
@@ -25,6 +25,7 @@ async fn route_to_connection_bare_jid_skips_negative_priority_resources() {
     // phone is connected but has not sent presence (tier-2 fallback
     // territory).
     registry.update_presence(&bob_desk, true, -1);
+    let coordinator = coordinator_for(&registry).await;
 
     let msg = chat_msg(
         jid("alice@example.com/web"),
@@ -37,7 +38,10 @@ async fn route_to_connection_bare_jid_skips_negative_priority_resources() {
             stanza: Box::new(Stanza::Message(msg)),
             call_setup: None,
         }],
-        &Deps::registry_with_user_registry(&registry, &user_registry),
+        &Deps {
+            web_socket_state: Some(&coordinator),
+            ..Deps::registry_with_user_registry(&registry, &user_registry)
+        },
     )
     .await;
 

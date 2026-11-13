@@ -71,6 +71,7 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
                 .set_carbons_enabled(resource, true));
         }
     }
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
     let mut conn = connection(&state, true).await;
     let mut message = xmpp_parsers::message::Message::new(Some(if bare {
         full.to_bare().into()
@@ -223,6 +224,7 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
     })
     .await
     .expect("disconnect resource");
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
     while rx.try_recv().is_ok() {}
     let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
     assert!(frames

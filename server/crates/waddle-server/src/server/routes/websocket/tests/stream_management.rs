@@ -9451,6 +9451,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     // registers out-of-band, so carry the owner token like real
     // registration does.
     alice.registry_owner = Some(alice_owner);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
             r#"<iq xmlns="jabber:client" type="get" id="alice-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
             "example.com",
@@ -9458,6 +9459,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
             &mut alice,
         )
         .await;
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client"/>"#,
         "example.com",
@@ -9470,6 +9472,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
     bob.registry_owner = Some(bob_owner);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -9482,6 +9485,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
         .expect("alice receives initial subscribe")
         .expect("subscribe stanza");
 
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
         "example.com",
@@ -9491,6 +9495,7 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     .await;
     while bob_rx.try_recv().is_ok() {}
 
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -9679,6 +9684,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -9722,6 +9728,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
 
     let mut alice_phone = WsConnState::new();
     alice_phone.phase = ConnectionPhase::ready(alice_phone_jid, false);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
         "example.com",
@@ -10060,6 +10067,7 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid, false);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -10069,6 +10077,7 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
     .await;
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
         "example.com",
@@ -10079,6 +10088,7 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
     while bob_rx.try_recv().is_ok() {}
     while alice_sibling_rx.try_recv().is_ok() {}
 
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     handlers::presence::broadcast_unavailable_for_terminated_session(state.as_ref(), &alice_jid)
         .await;
 
@@ -10815,6 +10825,7 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
         .protocol
         .connection_registry
         .update_presence(&jid, true, 0);
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
     conn.registry_owner = Some(owner);

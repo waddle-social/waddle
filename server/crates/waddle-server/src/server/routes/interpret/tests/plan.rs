@@ -128,12 +128,14 @@ async fn live_full_dm_plans_recipient_effects_and_processed_copy_without_sending
         waddle_xmpp::registry::UserRegistryActor::new(),
     );
     register_into_both_tiers(&registry, &user_registry, &target, tx).await;
+    let coordinator = crate::server::routes::interpret::tests::coordinator_for(&registry).await;
     let mam: Arc<dyn MamStorage> = Arc::new(poison::PoisonMam(InMemoryMamStorage::new()));
     let inbox: Arc<dyn InboxStorage> = Arc::new(poison::PoisonInbox(InMemoryInboxStorage::new()));
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
     let deps = Deps {
         user_registry: Some(&user_registry),
+        web_socket_state: Some(&coordinator),
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
     let plan = plan_message_dispatch(
@@ -195,12 +197,14 @@ async fn stored_full_headline_plans_recipient_archive_before_processed_delivery(
         waddle_xmpp::registry::UserRegistryActor::new(),
     );
     register_into_both_tiers(&registry, &users, &target, tx).await;
+    let coordinator = crate::server::routes::interpret::tests::coordinator_for(&registry).await;
     let mam: Arc<dyn MamStorage> = Arc::new(poison::PoisonMam(InMemoryMamStorage::new()));
     let inbox: Arc<dyn InboxStorage> = Arc::new(poison::PoisonInbox(InMemoryInboxStorage::new()));
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
     let deps = Deps {
         user_registry: Some(&users),
+        web_socket_state: Some(&coordinator),
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
     let mut message = outgoing(target.clone().into());

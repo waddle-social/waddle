@@ -104,6 +104,18 @@ async fn register_into_both_tiers(
     );
 }
 
+/// A WebSocket route state whose account coordinator holds `registry`'s
+/// entries. Routing reads a resource's binding, presence and carbons from
+/// the coordinator, so `Deps` that deliver through a test registry name this
+/// state as well; call it again after the registry changes.
+pub(crate) async fn coordinator_for(
+    registry: &ConnectionRegistry,
+) -> Arc<crate::server::routes::websocket::WebSocketState> {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, registry).await;
+    state
+}
+
 fn result_iq(id: &str) -> Iq {
     Iq::Result {
         from: None,

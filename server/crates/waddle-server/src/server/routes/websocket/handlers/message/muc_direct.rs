@@ -1217,6 +1217,7 @@ mod tests {
             .protocol
             .connection_registry
             .set_carbons_enabled(&sibling, true));
+        crate::server::routes::websocket::test_bindings::sync_test_bindings(state.as_ref()).await;
         let sink = PlanSink::new();
         let base = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),

@@ -1,3 +1,7 @@
+//! Delivery reads each resource's binding from the account coordinator, so
+//! these cases publish their registry to a test-support coordinator.
+#![cfg(feature = "test-support")]
+
 use super::{
     archive_plan, commit_submission, DurableDirectEffect, DurableEffect, Effect,
     IngressEffectIntent, IngressFixture, PlannedEffect,
@@ -92,8 +96,11 @@ async fn two_resource_inbox_push(fixture: IngressFixture) {
         decision.arm_owned_receipts.is_empty(),
         "multi-resource inbox pushes retain generic receipt ownership"
     );
+    let routing = waddle_server::test_support::websocket_state().await;
+    waddle_server::test_support::sync_registry_bindings(&routing, &registry).await;
     let mut deps = Deps::new(&registry, "example.com");
     deps.user_registry = Some(&users);
+    deps.web_socket_state = Some(&routing);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,

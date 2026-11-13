@@ -1595,6 +1595,7 @@ impl FencedFanoutFixture {
             sender_tx,
         )
         .await;
+        crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
         Self {
             state,
             room_jid,

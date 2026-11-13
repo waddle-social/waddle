@@ -52,11 +52,13 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
     let resource = owner.with_resource_str("phone").expect("resource");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &resource, tx).await;
+    let coordinator = super::coordinator_for(&registry).await;
     let sink = PlanSink::new();
     let inbox: Arc<dyn InboxStorage> = Arc::new(storage.clone());
     let deps = Deps {
         inbox_storage: Some(&inbox),
         user_registry: Some(&user_registry),
+        web_socket_state: Some(&coordinator),
         effects: &sink,
         ..Deps::registry_only(&registry)
     };

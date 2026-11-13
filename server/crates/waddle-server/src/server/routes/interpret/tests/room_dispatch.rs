@@ -126,6 +126,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         bob_tx,
     )
     .await;
+    crate::server::routes::websocket::test_bindings::sync_test_bindings(&state).await;
 
     let capture = IngressEffectCapture::new();
     let deps = Deps {
@@ -345,6 +346,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &alice, alice_tx).await;
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
+    let coordinator = super::coordinator_for(&registry).await;
 
     let occupants = vec![
         OccupantSnapshot {
@@ -389,7 +391,10 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         b"test-occupant-id-secret-32-bytes-long".to_vec(),
     )
     .expect("test secret meets length floor");
-    let deps = Deps::registry_with_user_registry(&registry, &user_registry);
+    let deps = Deps {
+        web_socket_state: Some(&coordinator),
+        ..Deps::registry_with_user_registry(&registry, &user_registry)
+    };
     let (offered, digest_input) = prepare_extension_room_message(&deps, &room_jid, &bot, response)
         .expect("offered bot message");
     let planned = plan_bot_groupchat_message(
