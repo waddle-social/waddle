@@ -253,6 +253,35 @@ so the binding reads the session: one that continues is left to the node
 holding its claim, as a superseded generation is; one that is terminal is
 treated as ended. Only an unreadable store keeps the binding waiting.
 
+## Replacement on a clustered store
+
+Binding a resource again ends its durable sessions with `Replaced`
+(`W/cleanup/durable_sm.rs`, `replace_durable_resource_sessions`). On a
+clustered store each session is ended under its own claim:
+
+1. The binder reads the resource's non-terminal sessions.
+2. For each, it takes the session claim with the resume's claim rules
+   (`claim_for_replacement` in `W/stream_management/durable/claim.rs`). The
+   binder's authenticated bare JID is the identity proof, and it must equal
+   the session's account. A holder whose connection owns the session is
+   asked to detach it (`resume_steal.v1`); that connection is closed with a
+   conflict and stores its resource snapshot and the frames it recorded
+   without a transport. A lost owner is recorded as lost.
+3. It commits `Replace` under that claim (`DurableSmStore::replace_session`),
+   which asserts the claim row in the same transaction.
+4. It settles the terminal session: its retained frames go to offline
+   delivery once each, and custody and the claim are released.
+
+The wait for holders is bounded per bind (five seconds, and never more than
+the resume-handshake bound) so the bind keeps the rest of its retirement
+budget. A session whose holder does not release it in time, or whose claim
+another taker moved first, is left as it is: the occupancy authority retires
+its generation at this bind, a later resume of it is refused, and it expires
+through its own window, transferring its frames then.
+
+Bind 2 binds a server-generated resource, so it never replaces an existing
+session's resource.
+
 ## Conflict close
 
 The witness names the superseded binding. The caller may close that
@@ -286,6 +315,7 @@ refuses either table unless it carries exactly its guard pair.
 - Transfer of a terminal session's frames to offline delivery. The store
   retains them and exposes release; the pending-delivery promotion writer is
   not converted here.
-- Replacing a resource's sessions when the resource is bound again on a
-  clustered store. The binder holds the account claim, not each session's
-  claim, and no fence joins the two; the store refuses the operation there.
+- A single transaction that replaces every session of a resource on a
+  clustered store. `replace_resource_sessions` refuses there, because each
+  session's write asserts that session's own claim; the binder replaces the
+  sessions one at a time instead (see "Replacement on a clustered store").

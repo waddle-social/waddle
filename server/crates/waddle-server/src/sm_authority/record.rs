@@ -392,6 +392,22 @@ pub(super) async fn load_resource_for_update(
     resource: &FullJid,
 ) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
     let lock = for_update(tx.driver());
+    load_resource_with(tx, resource, lock).await
+}
+
+/// Every session of `resource`, without locking the rows.
+pub(super) async fn load_resource(
+    tx: &mut Transaction<'_>,
+    resource: &FullJid,
+) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
+    load_resource_with(tx, resource, "").await
+}
+
+async fn load_resource_with(
+    tx: &mut Transaction<'_>,
+    resource: &FullJid,
+    lock: &str,
+) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
     let mut rows = tx
         .query(
             &format!(

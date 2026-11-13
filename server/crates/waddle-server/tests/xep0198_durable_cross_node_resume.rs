@@ -5,8 +5,9 @@
 //! meshed over the swarm. A session is enabled on node A and its resume
 //! token is presented on node B: while its connection on A is live, after
 //! A detached it, and after A was killed with no orphan reaper to reclaim
-//! its claims. The tests observe the wire, the authority's session row and
-//! the session's claim row.
+//! its claims. The same resource is also bound afresh on node B while A
+//! holds its session, live or detached. The tests observe the wire, the
+//! authority's session row and the session's claim row.
 //!
 //! Requires `WADDLE_TEST_POSTGRES_URL`; skipped otherwise.
 
@@ -940,4 +941,114 @@ async fn racing_resumes_on_two_nodes_leave_exactly_one_owner() {
         Some("m1"),
         "the replay precedes live output: {winner:?}"
     );
+}
+
+const STATE_TERMINAL: i64 = 4;
+const TERMINAL_REPLACED: i64 = 3;
+
+/// The state and terminal reason of the session, once it is terminal.
+async fn wait_for_terminal(db: &Database, session_id: &str) -> (i64, Option<i64>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT CAST(state AS BIGINT), CAST(terminal_reason AS BIGINT) \
+                 FROM sm_durable_sessions WHERE session_id = ?",
+                waddle_server::db_params![session_id.to_owned()],
+            )
+            .await
+            .expect("read durable session");
+        let row = rows.next().await.expect("durable session row");
+        let observed: Option<(i64, Option<i64>)> =
+            row.map(|row| (row.get(0).expect("state"), row.get(1).expect("reason")));
+        drop(rows);
+        drop(conn);
+        if let Some(observed) = observed.filter(|(state, _)| *state == STATE_TERMINAL) {
+            return observed;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "durable session {session_id} did not end: {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn initial_presence() -> Element {
+    Element::builder("presence", "jabber:client").build()
+}
+
+/// The owner's resource is bound afresh on node B while its durable session
+/// is held by node A, live or detached. Node B takes the session's claim
+/// and ends the session as replaced; a live connection on node A is closed
+/// with a conflict. The frames the session retained reach the new binding
+/// through offline delivery, each exactly once, and the old resume token
+/// names no session.
+async fn a_fresh_bind_on_node_b_replaces_a_session_held_by_node_a(live: bool) {
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let Some(cluster) = cluster(&[]).await else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let resource = unique_resource(if live {
+        "replace-live"
+    } else {
+        "replace-detached"
+    });
+    let jid = owner_jid(&resource);
+    let (on_a, token, _written) = live_session_holding(&cluster, &resource, &["m1", "m2"]).await;
+    let before = wait_for_session(&cluster.db, &jid, |row| row.state == STATE_LIVE).await;
+    let on_a = if live {
+        Some(on_a)
+    } else {
+        drop(on_a);
+        wait_for_session(&cluster.db, &jid, |row| row.state == STATE_DETACHED).await;
+        None
+    };
+
+    let mut on_b = owner_connection(&cluster.node_b, &cluster.owner_password).await;
+    assert_eq!(on_b.bind(&resource).await.expect("bind on node B"), jid);
+    if let Some(mut on_a) = on_a {
+        let closed = on_a
+            .recv_matching_within(Duration::from_secs(15), |frame| frame.contains("conflict"))
+            .await;
+        assert!(
+            closed.is_ok(),
+            "node A's connection is closed with a conflict: {closed:?}"
+        );
+    }
+    assert_eq!(
+        wait_for_terminal(&cluster.db, &before.session_id).await,
+        (STATE_TERMINAL, Some(TERMINAL_REPLACED)),
+        "the session is ended as replaced"
+    );
+
+    send_element(&mut on_b, initial_presence()).await;
+    assert_eq!(
+        chat_ids_within(&mut on_b, Duration::from_secs(5)).await,
+        ["m1", "m2"],
+        "the replaced session's frames arrive once each, in order"
+    );
+
+    let mut late = owner_connection(&cluster.node_a, &cluster.owner_password).await;
+    send_element(&mut late, resume(&token, 0)).await;
+    let reply = recv_resume_reply(&mut late, Duration::from_secs(30))
+        .await
+        .expect("resume reply");
+    assert!(reply.is("failed", SM_NS), "{reply:?}");
+    assert!(
+        reply.get_child("item-not-found", STANZAS_NS).is_some(),
+        "a replaced session cannot be resumed: {reply:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_bind_on_another_node_replaces_a_session_live_there() {
+    a_fresh_bind_on_node_b_replaces_a_session_held_by_node_a(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_bind_on_another_node_replaces_a_session_detached_there() {
+    a_fresh_bind_on_node_b_replaces_a_session_held_by_node_a(false).await;
 }

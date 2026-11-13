@@ -13,6 +13,7 @@
 //! keeps the in-memory counters on either selector.
 
 mod claim;
+pub(in crate::server::routes::websocket) use claim::claim_for_replacement;
 
 use std::time::Duration;
 
@@ -1793,6 +1794,7 @@ pub(super) async fn resume(
             stream_id: &stream_id,
             requester: &bare_jid,
             session_account: &candidate.full_jid.to_bare(),
+            wait_budget: None,
         },
     )
     .await
@@ -2085,6 +2087,7 @@ pub(in crate::server::routes::websocket) async fn inline_resume(
             stream_id: &stream_id,
             requester: &bare_jid,
             session_account: &attempt.full_jid().to_bare(),
+            wait_budget: None,
         },
     )
     .await

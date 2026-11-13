@@ -247,9 +247,10 @@ impl DurableSmStore {
     }
 
     /// End every session of `resource` that is not already terminal, because
-    /// the resource was bound again. A clustered store refuses: the binder
-    /// holds the account's claim, not each session's, and no fence joins the
-    /// two yet.
+    /// the resource was bound again. A clustered store refuses: every write
+    /// there asserts the session's own claim, which the binder does not hold.
+    /// On a clustered store the binder takes each session's claim and ends it
+    /// with [`Self::replace_session`].
     pub async fn replace_resource_sessions(
         &self,
         resource: &FullJid,
@@ -280,6 +281,39 @@ impl DurableSmStore {
             .await
             .map_err(|error| LifecycleError::Indeterminate(error.into()))?;
         Ok(replaced)
+    }
+
+    /// The sessions of `resource` that are not terminal, as read now. A
+    /// listed session may change before it is locked; each write reloads it.
+    pub async fn resource_sessions(
+        &self,
+        resource: &FullJid,
+    ) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
+        let mut tx = self.db.begin().await?;
+        let sessions = record::load_resource(&mut tx, resource).await?;
+        tx.rollback().await?;
+        Ok(sessions
+            .into_iter()
+            .filter(|stored| !stored.state.is_terminal())
+            .collect())
+    }
+
+    /// End one session because its resource was bound again, under the
+    /// session claim `claim` that this node holds. The claim is asserted in
+    /// the same transaction, so a session whose claim moved meanwhile is
+    /// left to its new holder.
+    pub async fn replace_session(
+        &self,
+        session: SmSessionKey,
+        claim: Option<&SmClaimFence>,
+        now: DateTime<Utc>,
+    ) -> Result<TerminalSession, LifecycleError> {
+        let (tx, mut stored) = self.lock_unowned(session, claim).await?;
+        stored.state =
+            transition(stored.state, DurableSmEvent::Replace).map_err(LifecycleRejection::from)?;
+        let terminal = terminal_session(&stored);
+        finish(tx, &stored, now).await?;
+        Ok(terminal)
     }
 
     /// The frames a terminal session still holds in custody, in ordinal
