@@ -362,9 +362,10 @@ fn stanza_sender(stanza: &Stanza) -> Option<jid::BareJid> {
 /// registered connection or a detached stream-management session of the
 /// full JID, or any of the two for a bare JID.
 ///
-/// With the account coordinator selected, a live resource is one the
-/// coordinator lists with an active binding, wherever that binding is
-/// hosted: delivery reaches it through a bound request.
+/// A live resource is one the account coordinator lists with an active
+/// binding, wherever that binding is hosted: delivery reaches it through a
+/// bound request. Without the route state no coordinator is reachable and
+/// only detached sessions count.
 async fn recipient_present(services: &OrderedRelayDeliveryServices, recipient: &jid::Jid) -> bool {
     let account = recipient.to_bare();
     let detached = services
@@ -372,40 +373,26 @@ async fn recipient_present(services: &OrderedRelayDeliveryServices, recipient: &
         .available_detached_resources_for_user(&account)
         .await
         .unwrap_or_default();
-    if let Some(state) = services.web_socket_state.upgrade() {
-        let selection = state.deps.app_state.account_authority();
-        let live = match recipient.clone().try_into_full() {
-            Ok(resource) => selection
-                .bound_resource(&resource)
-                .await
-                .map(|read| read.is_ok_and(|binding| binding.is_some())),
-            Err(_) => selection
-                .resources(&account)
-                .await
-                .map(|read| read.is_ok_and(|resources| !resources.is_empty())),
-        };
-        if let Some(live) = live {
-            return live
-                || match recipient.clone().try_into_full() {
-                    Ok(resource) => detached.contains(&resource),
-                    Err(_) => !detached.is_empty(),
-                };
-        }
-    }
-    match recipient.clone().try_into_full() {
-        Ok(resource) => {
-            services.connection_registry.entry(&resource).is_some() || detached.contains(&resource)
-        }
-        Err(_) => {
-            !detached.is_empty()
-                || !waddle_xmpp::registry::available_resources_for_user(
-                    &services.user_registry,
-                    &account,
-                )
-                .await
-                .is_empty()
-        }
-    }
+    let full = recipient.clone().try_into_full().ok();
+    let detached_present = match &full {
+        Some(resource) => detached.contains(resource),
+        None => !detached.is_empty(),
+    };
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return detached_present;
+    };
+    let selection = state.deps.app_state.account_authority();
+    let live = match &full {
+        Some(resource) => selection
+            .bound_resource(resource)
+            .await
+            .is_ok_and(|binding| binding.is_some()),
+        None => selection
+            .resources(&account)
+            .await
+            .is_ok_and(|resources| !resources.is_empty()),
+    };
+    live || detached_present
 }
 
 async fn record(

@@ -87,7 +87,8 @@ impl OrderedRelayDeliveryBridge {
     /// The coordinator's binding of `target` when the account coordinator
     /// is selected: `Some(Some(..))` names the binding and the other node
     /// that hosts it, `Some(None)` means no other node hosts an active
-    /// binding of the resource. `None` when the registry is selected.
+    /// binding of the resource. `None` when this node has no route state to
+    /// reach the coordinator from.
     async fn coordinator_remote_binding(
         &self,
         target: &jid::FullJid,
@@ -104,7 +105,7 @@ impl OrderedRelayDeliveryBridge {
             .app_state
             .account_authority()
             .bound_resource(target)
-            .await?;
+            .await;
         let Ok(Some(binding)) = read else {
             return Some(None);
         };
@@ -118,12 +119,12 @@ impl OrderedRelayDeliveryBridge {
         )
     }
 
-    /// Deliver to a resource another node hosts. With the registry selected
-    /// that is a resource registered here through a remote channel mirror.
-    /// With the account coordinator selected it is a resource whose active
-    /// binding another node hosts, reached by a bound request; the mirror
-    /// is not read. `None` means no other node hosts the resource and the
-    /// caller keeps its local path.
+    /// Deliver to a resource another node hosts: a resource whose active
+    /// binding at the account coordinator another node hosts, reached by a
+    /// bound request. Only a node without route state, which reaches no
+    /// coordinator, falls back to a remote channel mirror registered here.
+    /// `None` means no other node hosts the resource and the caller keeps
+    /// its local path.
     pub(crate) async fn try_deliver_registered_remote_resource_at(
         &self,
         target: &jid::FullJid,
@@ -444,8 +445,7 @@ impl OrderedRelayDeliveryBridge {
     }
 
     /// Deliver a frame to a resource another node hosts and report whether
-    /// it was accepted. With the account coordinator selected the frame is
-    /// a bound request to the node that hosts the resource's binding, and
+    /// it was accepted. The frame is a bound request to the node that hosts the resource's binding, and
     /// its acceptance is that node's decision.
     pub(crate) async fn try_deliver_registered_remote_resource_write_accepted(
         self: &Arc<Self>,

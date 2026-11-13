@@ -307,12 +307,12 @@ impl AppState {
         self.durable_sm.set(selection).is_ok()
     }
 
-    /// The selected account-resource authority. Before startup publishes a
-    /// selection this is the connection registry, which is also the
-    /// default.
+    /// The account-resource authority startup selected. Before startup
+    /// publishes it this is [`AccountAuthoritySelection::Unselected`], which
+    /// serves no account.
     pub fn account_authority(&self) -> &AccountAuthoritySelection {
-        static REGISTRY: AccountAuthoritySelection = AccountAuthoritySelection::Registry;
-        self.account_authority.get().unwrap_or(&REGISTRY)
+        static UNSELECTED: AccountAuthoritySelection = AccountAuthoritySelection::Unselected;
+        self.account_authority.get().unwrap_or(&UNSELECTED)
     }
 
     /// Publish the startup selection. Returns false if one was already

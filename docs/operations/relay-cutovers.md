@@ -317,25 +317,40 @@ migration does not silently discard its ownership evidence.
 
 ## Routed account coordinator (#2046)
 
-With `WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` on a cluster, a node sends
-every binding request and account read for an account another node owns to
-that node as the new message
-`waddle.clustering.relay.account_binding.v1`. The same id carries the
-request that closes a connection replaced by a fresh bind on another node.
-An account view answered through it carries the exact binding of each
-active resource, which delivery reads to reach a resource on another node.
-There is no earlier version of this message and no compatible receiver on
-an older binary: an older peer answers `UnknownMessage`, which leaves the
-request undecided, and the bind or resume fails. A node that runs the
-connection registry answers that it does not serve the coordinator, with
-the same result.
+The account coordinator is the only account-resource authority; startup
+selects it on every node. `WADDLE_XMPP_ACCOUNT_AUTHORITY` is removed:
+startup ignores it and logs a warning when it is set, so remove it from the
+deployment's environment. On a cluster a node sends every binding request
+and account read for an account another node owns to that node as the
+message `waddle.clustering.relay.account_binding.v1`. The same id carries
+the request that closes a connection replaced by a fresh bind on another
+node. An account view answered through it carries the exact binding of
+each active resource, which delivery reads to reach a resource on another
+node. There is no earlier version of this message and no compatible
+receiver on an older binary: an older peer answers `UnknownMessage`, which
+leaves the request undecided, and the bind or resume fails. An older node
+that runs the connection registry answers that it does not serve the
+coordinator, with the same result.
 
-The coordinated `Recreate` cutover that switches the fleet to the account
-coordinator applies to this message: stop every old replica before new
-replicas start, so no new node routes to a peer without the receiver.
-Selecting the coordinator on some replicas and the registry on others is
-not a supported fleet state. Restore `RollingUpdate` only in a separate
-change after fleet verification, under the guard above.
+The coordinated `Recreate` cutover applies to this release: stop every old
+replica before new replicas start, so no new node routes to a peer without
+the receiver. A release that defaults to the registry and this one in the
+same fleet is not a supported state. Restore `RollingUpdate` only in a
+separate change after fleet verification, under the guard above.
+
+**Rollback** is a restart on the previous release, with the same
+`Recreate` sequencing: stop every replica of this release, then start the
+previous one. Leave `WADDLE_XMPP_ACCOUNT_AUTHORITY` unset (or set it to
+`registry`) so the previous release reads the connection registry. Every
+connection reconnects across the restart. The previous release does not
+read `account_resource_bindings`; the rows this release left stay in place.
+On a later roll forward their connections are gone (their process ended or
+their node lost its lease): the coordinator's reaper settles them, and a
+bind that finds one in its slot retires it once the coordinator reports it
+expired. Durable stream-management sessions are
+read by both releases, so a detached session stays resumable across the
+rollback within its resume window. No migration separates the two
+releases, so the restart needs no database change.
 
 Verify after the rollout, on two replicas: a second resource of one
 account bound on the replica that does not own the account, carbons

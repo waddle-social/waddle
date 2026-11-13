@@ -432,10 +432,9 @@ them, because the connection drives its ledger and its publisher from its
 own turn, and a message cannot retire an installed binding, which still
 retires with its connection. Publication reaches the routing state through
 one trait, `BindingPublisher`. `binding_publisher` in `W/registration.rs`
-returns the publisher the selected account authority requires: the
-connection registry with its mirrors, and, when
-`WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator`, the account coordinator ahead
-of them ([`2138-account-coordinator.md`](2138-account-coordinator.md)).
+returns the publisher every binding goes through: the account coordinator,
+ahead of the connection registry with its mirrors, which remaining readers
+still need ([`2138-account-coordinator.md`](2138-account-coordinator.md)).
 
 The pump queues are bounded in bytes: one frame of the largest WebSocket
 message inbound (64 MiB, which the upgrade states explicitly), and that plus

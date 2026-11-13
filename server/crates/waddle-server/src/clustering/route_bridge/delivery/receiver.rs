@@ -331,23 +331,16 @@ pub(in super::super) async fn deliver_reserved_bare_presence_direct(
                 .available_resources(target)
                 .await
         }
-        None => None,
+        None => Err(crate::account_coordinator::AccountCoordinatorError::Unselected),
     };
-    let live_targets = match coordinator {
-        Some(Ok(available)) => available,
-        Some(Err(error)) => {
-            tracing::warn!(
-                bare_jid = %target,
-                %error,
-                "ordered relay: account coordinator did not list available resources for bare-JID presence"
-            );
-            Vec::new()
-        }
-        None => {
-            waddle_xmpp::registry::available_resources_for_user(&services.user_registry, target)
-                .await
-        }
-    };
+    let live_targets = coordinator.unwrap_or_else(|error| {
+        tracing::warn!(
+            bare_jid = %target,
+            %error,
+            "ordered relay: account coordinator did not list available resources for bare-JID presence"
+        );
+        Vec::new()
+    });
     let live_set: HashSet<jid::FullJid> = live_targets.iter().map(|(jid, _)| jid.clone()).collect();
     let mut landed = false;
     for resource in live_targets.into_iter().map(|(jid, _)| jid) {

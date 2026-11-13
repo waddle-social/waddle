@@ -14,9 +14,9 @@
 //! A connection reaches its account's coordinator through
 //! [`RoutedAccountAuthority`], which serves a request here when this node
 //! owns the account and sends it to the owning node otherwise; routing
-//! reads accounts the same way, and only when [`AccountAuthoritySelection`]
-//! selects the coordinator. The default selection is the connection
-//! registry, which no coordinator feeds.
+//! reads accounts the same way. Startup always selects the coordinator
+//! ([`AccountAuthoritySelection`]); it is the only account-resource
+//! authority.
 
 mod actor;
 mod authority;
@@ -54,6 +54,6 @@ pub use routed::{
     AccountRoutingPolicy, ForwardFailure, RoutedAccountAuthority,
 };
 pub use selection::{
-    AccountAuthorityMode, AccountAuthoritySelection, AccountAuthoritySelectionError,
-    InvalidAccountAuthorityMode, ACCOUNT_AUTHORITY_MODE_ENV,
+    warn_if_removed_selector_set, AccountAuthoritySelection, AccountAuthoritySelectionError,
+    REMOVED_ACCOUNT_AUTHORITY_ENV,
 };

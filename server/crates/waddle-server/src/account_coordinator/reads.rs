@@ -1,11 +1,10 @@
-//! Account reads that routing takes from the selected authority.
+//! Account reads that routing takes from the account coordinator.
 //!
-//! Each read returns `None` when the connection registry is the selected
-//! authority, and the caller then reads the registry as it always has. When
-//! the coordinator is selected the read is the answer of the coordinator on
-//! the node that owns the account, or its error; a caller must not replace
-//! an error with a registry read, because the registry is not written in
-//! that mode.
+//! Each read is the answer of the coordinator on the node that owns the
+//! account, or its error. An application that never selected the
+//! coordinator answers [`AccountCoordinatorError::Unselected`]. The
+//! connection registry and the `UserActor` are not account authorities and
+//! a caller must not read them in place of an error.
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ownership::account_coordinator::AccountResourcePresence;
@@ -21,10 +20,10 @@ impl AccountAuthoritySelection {
     async fn coordinator_view(
         &self,
         account: &BareJid,
-    ) -> Option<Result<AccountView, AccountCoordinatorError>> {
+    ) -> Result<AccountView, AccountCoordinatorError> {
         match self.authority() {
-            Some(authority) => Some(authority.view(account).await),
-            None => None,
+            Some(authority) => authority.view(account).await,
+            None => Err(AccountCoordinatorError::Unselected),
         }
     }
 
@@ -33,8 +32,8 @@ impl AccountAuthoritySelection {
     pub(crate) async fn routing_resources(
         &self,
         account: &BareJid,
-    ) -> Option<Result<Vec<ResourceRoutingState>, AccountCoordinatorError>> {
-        Some(self.coordinator_view(account).await?.map(|view| {
+    ) -> Result<Vec<ResourceRoutingState>, AccountCoordinatorError> {
+        self.coordinator_view(account).await.map(|view| {
             view.routing
                 .into_iter()
                 .map(|resource| ResourceRoutingState {
@@ -44,7 +43,7 @@ impl AccountAuthoritySelection {
                     carbons_enabled: resource.carbons_enabled,
                 })
                 .collect()
-        }))
+        })
     }
 
     /// The live destinations of a stanza addressed to the bare JID: the
@@ -54,8 +53,8 @@ impl AccountAuthoritySelection {
     pub(crate) async fn bare_jid_targets(
         &self,
         account: &BareJid,
-    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
-        Some(self.coordinator_view(account).await?.map(|view| {
+    ) -> Result<Vec<FullJid>, AccountCoordinatorError> {
+        self.coordinator_view(account).await.map(|view| {
             if !view.routable.is_empty() {
                 return view.routable;
             }
@@ -64,7 +63,7 @@ impl AccountAuthoritySelection {
                 .filter(|resource| !(resource.available && resource.priority < 0))
                 .map(|resource| resource.jid)
                 .collect()
-        }))
+        })
     }
 
     /// The active binding of one resource: the only binding delivery may
@@ -73,36 +72,30 @@ impl AccountAuthoritySelection {
     pub(crate) async fn bound_resource(
         &self,
         resource: &FullJid,
-    ) -> Option<Result<Option<BindingRef>, AccountCoordinatorError>> {
-        Some(
-            self.coordinator_view(&resource.to_bare())
-                .await?
-                .map(|view| view.binding(resource).cloned()),
-        )
+    ) -> Result<Option<BindingRef>, AccountCoordinatorError> {
+        self.coordinator_view(&resource.to_bare())
+            .await
+            .map(|view| view.binding(resource).cloned())
     }
 
     /// Every active resource, with no presence filter.
     pub(crate) async fn resources(
         &self,
         account: &BareJid,
-    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
-        Some(
-            self.coordinator_view(account)
-                .await?
-                .map(|view| view.resources),
-        )
+    ) -> Result<Vec<FullJid>, AccountCoordinatorError> {
+        self.coordinator_view(account)
+            .await
+            .map(|view| view.resources)
     }
 
     /// Every presence-available resource with its priority.
     pub(crate) async fn available_resources(
         &self,
         account: &BareJid,
-    ) -> Option<Result<Vec<(FullJid, i8)>, AccountCoordinatorError>> {
-        Some(
-            self.coordinator_view(account)
-                .await?
-                .map(|view| view.available),
-        )
+    ) -> Result<Vec<(FullJid, i8)>, AccountCoordinatorError> {
+        self.coordinator_view(account)
+            .await
+            .map(|view| view.available)
     }
 
     /// The presence an available resource last announced. `Ok(None)` means
@@ -110,16 +103,14 @@ impl AccountAuthoritySelection {
     pub(crate) async fn presence(
         &self,
         resource: &FullJid,
-    ) -> Option<Result<Option<AccountResourcePresence>, AccountCoordinatorError>> {
-        Some(
-            self.coordinator_view(&resource.to_bare())
-                .await?
-                .map(|view| {
-                    view.presence
-                        .into_iter()
-                        .find(|presence| &presence.jid == resource)
-                }),
-        )
+    ) -> Result<Option<AccountResourcePresence>, AccountCoordinatorError> {
+        self.coordinator_view(&resource.to_bare())
+            .await
+            .map(|view| {
+                view.presence
+                    .into_iter()
+                    .find(|presence| &presence.jid == resource)
+            })
     }
 
     /// The active resources with carbons enabled, other than `exclude`.
@@ -127,37 +118,78 @@ impl AccountAuthoritySelection {
         &self,
         account: &BareJid,
         exclude: &[FullJid],
-    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
-        Some(self.coordinator_view(account).await?.map(|view| {
+    ) -> Result<Vec<FullJid>, AccountCoordinatorError> {
+        self.coordinator_view(account).await.map(|view| {
             view.routing
                 .into_iter()
                 .filter(|resource| resource.carbons_enabled && !exclude.contains(&resource.jid))
                 .map(|resource| resource.jid)
                 .collect()
-        }))
+        })
     }
 
     /// The active resources that want roster pushes.
     pub(crate) async fn roster_interested(
         &self,
         account: &BareJid,
-    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
-        Some(
-            self.coordinator_view(account)
-                .await?
-                .map(|view| view.roster_interested),
-        )
+    ) -> Result<Vec<FullJid>, AccountCoordinatorError> {
+        self.coordinator_view(account)
+            .await
+            .map(|view| view.roster_interested)
     }
 
     /// The active resources that want block-list pushes.
     pub(crate) async fn blocklist_interested(
         &self,
         account: &BareJid,
-    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
-        Some(
-            self.coordinator_view(account)
-                .await?
-                .map(|view| view.blocklist_interested),
-        )
+    ) -> Result<Vec<FullJid>, AccountCoordinatorError> {
+        self.coordinator_view(account)
+            .await
+            .map(|view| view.blocklist_interested)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An application that never ran startup's selection has no account
+    /// authority: every read fails instead of answering from another
+    /// source.
+    #[tokio::test]
+    async fn unselected_authority_answers_no_read() {
+        let selection = AccountAuthoritySelection::Unselected;
+        let account: BareJid = "alice@example.com".parse().expect("bare jid");
+        let resource: FullJid = "alice@example.com/phone".parse().expect("full jid");
+        assert!(matches!(
+            selection.resources(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.routing_resources(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.bare_jid_targets(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.bound_resource(&resource).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.presence(&resource).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.carbon_resources(&account, &[]).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.blocklist_interested(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(selection.coordinators().is_none());
+        assert!(selection.authority().is_none());
     }
 }

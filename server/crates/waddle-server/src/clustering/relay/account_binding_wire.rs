@@ -1443,7 +1443,8 @@ impl From<&AccountCoordinatorError> for AuthorityErrorWire {
             AccountCoordinatorError::Store(_)
             | AccountCoordinatorError::Restore(_)
             | AccountCoordinatorError::Mailbox(_)
-            | AccountCoordinatorError::OwnerUndecided => Self::Undecided,
+            | AccountCoordinatorError::OwnerUndecided
+            | AccountCoordinatorError::Unselected => Self::Undecided,
         }
     }
 }

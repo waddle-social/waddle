@@ -1,7 +1,6 @@
 //! WebSocket sessions with the account coordinator and the durable
 //! stream-management authority selected
-//! (`WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator`,
-//! `WADDLE_XMPP_DURABLE_SM=durable`) on single-node SQLite.
+//! (`WADDLE_XMPP_DURABLE_SM=durable`) on single-node SQLite.
 //!
 //! Every connection reports its binding to the coordinator, and routing
 //! reads the coordinator's slots. These tests observe the wire and the
@@ -16,10 +15,7 @@ use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::stream_management::SM_NS;
 
 const ACCOUNTS: &[(&str, &str)] = &[("alice", "coordinator-alice"), ("bob", "coordinator-bob")];
-const SELECTORS: &[(&str, &str)] = &[
-    ("WADDLE_XMPP_ACCOUNT_AUTHORITY", "coordinator"),
-    ("WADDLE_XMPP_DURABLE_SM", "durable"),
-];
+const SELECTORS: &[(&str, &str)] = &[("WADDLE_XMPP_DURABLE_SM", "durable")];
 const CLIENT_NS: &str = "jabber:client";
 
 /// `account_resource_bindings.state` values.
@@ -207,6 +203,38 @@ async fn bind_records_the_binding_and_a_bare_jid_message_follows_the_coordinator
     let mut bob = bound(&fixture.server, 1, "desk").await;
     send_element(&mut bob, chat("alice@localhost", "bare-1", "hello")).await;
     let delivered = recv_message(&mut alice, "bare-1").await;
+    assert_eq!(delivered.attr("from"), Some("bob@localhost/desk"));
+}
+
+/// The removed selector variable selects nothing: a server started with
+/// `WADDLE_XMPP_ACCOUNT_AUTHORITY=registry` still records every binding at
+/// the account coordinator and routes from it.
+#[tokio::test]
+async fn the_removed_registry_selector_is_ignored() {
+    let dir = tempfile::tempdir().expect("test directory");
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("database.sqlite").display()
+    );
+    let envs = [
+        ("WADDLE_XMPP_ACCOUNT_AUTHORITY", "registry"),
+        ("WADDLE_XMPP_DURABLE_SM", "durable"),
+    ];
+    let server = TestServer::start_persistent_with_extra_envs(&db_url, ACCOUNTS, &envs);
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("observe SQLite");
+    let mut alice = bound(&server, 0, "laptop").await;
+    wait_for_binding(&pool, "alice@localhost/laptop", |row| {
+        holds_binding(row, STATE_ACTIVE)
+    })
+    .await
+    .expect("binding row");
+    go_available(&mut alice, &pool, "alice@localhost/laptop", 0).await;
+
+    let mut bob = bound(&server, 1, "desk").await;
+    send_element(&mut bob, chat("alice@localhost", "ignored-1", "hello")).await;
+    let delivered = recv_message(&mut alice, "ignored-1").await;
     assert_eq!(delivered.attr("from"), Some("bob@localhost/desk"));
 }
 

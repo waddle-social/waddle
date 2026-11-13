@@ -269,26 +269,21 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
     // resource that disabled carbons after the message
     // entered the pipeline still gets skipped.
     let owner_str = owner.to_string();
-    let selected = match deps.web_socket_state {
-        Some(state) => {
-            state
-                .deps
-                .app_state
-                .account_authority()
-                .carbon_resources(&owner, &exclude)
-                .await
-        }
-        None => None,
-    };
-    let mut live_targets = match selected {
-        // The coordinator is the selected authority. When it does not
-        // answer, no live resource receives a copy; the registry is not
-        // written in that mode and is not read instead.
-        Some(resources) => resources.unwrap_or_else(|error| {
-            warn!(%error, "account coordinator did not answer the carbon-policy read");
-            Vec::new()
-        }),
-        None => registry.other_carbon_resources_for_user(&owner, &exclude),
+    // The account coordinator decides the per-target carbon policy. When it
+    // does not answer, no live resource receives a copy; the connection
+    // registry is not an account authority and is not read instead.
+    let mut live_targets = match deps.web_socket_state {
+        Some(state) => state
+            .deps
+            .app_state
+            .account_authority()
+            .carbon_resources(&owner, &exclude)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(%error, "account coordinator did not answer the carbon-policy read");
+                Vec::new()
+            }),
+        None => Vec::new(),
     };
     live_targets.sort();
     // Detached-but-resumable resources (XEP-0198 stream

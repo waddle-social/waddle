@@ -44,4 +44,8 @@ pub enum AccountCoordinatorError {
     /// after [`Self::Store`].
     #[error("the node that owns the account did not decide the request")]
     OwnerUndecided,
+    /// The application never selected the account coordinator, which
+    /// startup always does; only a fixture that skipped startup reads it.
+    #[error("no account coordinator was selected")]
+    Unselected,
 }

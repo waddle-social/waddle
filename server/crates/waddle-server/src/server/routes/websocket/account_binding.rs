@@ -1,12 +1,12 @@
 //! A connection's binding at the account coordinator.
 //!
-//! When the account coordinator is the selected account authority
-//! (`AppState::account_authority`), a connection drives the coordinator's
-//! slot for its resource through the binding publisher and
+//! A connection drives the account coordinator's slot for its resource
+//! (`AppState::account_authority`) through the binding publisher and
 //! [`AccountBindingAuthority`]. [`AccountBindingLink`] is what the
 //! connection keeps of that: the published binding and the snapshot the
-//! coordinator last committed for it. With the connection registry as the
-//! selected authority no link exists and every function here does nothing.
+//! coordinator last committed for it. An application that never selected
+//! the coordinator (a fixture that skipped startup) holds no link and every
+//! function here does nothing.
 //!
 //! The connection states what happened to its own binding and the
 //! coordinator decides:
@@ -76,8 +76,8 @@ impl AccountBindingLink {
     }
 }
 
-/// The routed account authority, when the account coordinator is the
-/// selected account authority. It reaches the coordinator of the node that
+/// The routed account authority, once startup selected the account
+/// coordinator. It reaches the coordinator of the node that
 /// owns each account, wherever the connection is.
 pub(super) fn selected_authority(state: &WebSocketState) -> Option<Arc<RoutedAccountAuthority>> {
     state

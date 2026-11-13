@@ -363,7 +363,6 @@ pub async fn register(
     app_state: Arc<AppState>,
     websocket_state: Arc<WebSocketState>,
     connection_registry: Arc<ConnectionRegistry>,
-    user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) {
@@ -476,25 +475,16 @@ pub async fn register(
         let state = Arc::clone(&app_state);
         let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
-        let user_registry = user_registry.clone();
         let sm_sessions = Arc::clone(&sm_session_registry);
         registry
             .register(NODE_GROUP_DM_LEAVE, "Leave group DM", move |ctx| {
                 let state = Arc::clone(&state);
                 let websocket_state = Arc::clone(&websocket_state);
                 let connections = Arc::clone(&connections);
-                let user_registry = user_registry.clone();
                 let sm_sessions = Arc::clone(&sm_sessions);
                 async move {
-                    handle_group_dm_leave(
-                        ctx,
-                        state,
-                        websocket_state,
-                        connections,
-                        user_registry,
-                        sm_sessions,
-                    )
-                    .await
+                    handle_group_dm_leave(ctx, state, websocket_state, connections, sm_sessions)
+                        .await
                 }
             })
             .await;
@@ -645,7 +635,6 @@ async fn handle_group_dm_leave(
     state: Arc<AppState>,
     websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
-    user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: Arc<InMemorySmSessionRegistry>,
 ) -> CommandResult {
     let caller_bare = ctx.from.to_bare();
@@ -668,7 +657,6 @@ async fn handle_group_dm_leave(
         &state,
         &websocket_state.deps.protocol.pending_local_muc_departures,
         &connections,
-        &user_registry,
         &sm_sessions,
         &caller_full,
         &args,
@@ -2193,7 +2181,6 @@ async fn run_group_dm_leave(
     state: &AppState,
     pending_local_muc_departures: &Arc<PendingLocalMucDepartures>,
     connections: &ConnectionRegistry,
-    user_registry: &ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: &InMemorySmSessionRegistry,
     caller_full_jid: &FullJid,
     args: &GroupDmLeaveArgs,
@@ -2245,17 +2232,17 @@ async fn run_group_dm_leave(
         });
     }
 
-    // With the account coordinator selected its active resources are the
-    // caller's live resources; the registry's `UserActor` is not read.
-    let live_resources = match state.account_authority().resources(&caller_bare).await {
-        Some(Ok(resources)) => resources,
-        Some(Err(error)) => {
-            return Err(internal_err(format!(
+    // The account coordinator's active resources are the caller's live
+    // resources.
+    let live_resources = state
+        .account_authority()
+        .resources(&caller_bare)
+        .await
+        .map_err(|error| {
+            internal_err(format!(
                 "failed to list live group-DM leave resources: {error}"
-            )));
-        }
-        None => waddle_xmpp::registry::get_resources_for_user(user_registry, &caller_bare).await,
-    };
+            ))
+        })?;
     let live_resource_set = live_resources.iter().cloned().collect::<BTreeSet<_>>();
     let mut resources = live_resources;
     match sm_sessions.detached_resources_for_user(&caller_bare).await {
@@ -6987,12 +6974,21 @@ mod group_dm_durable_reconciliation_tests {
         let sm_sessions = InMemorySmSessionRegistry::new();
         let pending_local_muc_departures =
             Arc::new(crate::server::routes::websocket::PendingLocalMucDepartures::default());
+        state.publish_account_authority(
+            crate::account_coordinator::AccountAuthoritySelection::open(
+                state.db_pool.global(),
+                &crate::clustering::ClusteringHandles::default(),
+                false,
+                true,
+            )
+            .await
+            .expect("open the account coordinator on the fixture database"),
+        );
 
         let result = run_group_dm_leave(
             &state,
             &pending_local_muc_departures,
             &connections,
-            &user_registry,
             &sm_sessions,
             &caller_full,
             &GroupDmLeaveArgs {
@@ -7159,7 +7155,6 @@ mod group_dm_durable_reconciliation_tests {
             state,
             &websocket_state.deps.protocol.pending_local_muc_departures,
             websocket_state.deps.protocol.connection_registry.as_ref(),
-            &websocket_state.deps.protocol.user_registry,
             websocket_state.deps.protocol.sm_session_registry.as_ref(),
             &alice_web,
             &GroupDmLeaveArgs {
@@ -7272,7 +7267,6 @@ mod group_dm_durable_reconciliation_tests {
             state,
             &websocket_state.deps.protocol.pending_local_muc_departures,
             websocket_state.deps.protocol.connection_registry.as_ref(),
-            &websocket_state.deps.protocol.user_registry,
             websocket_state.deps.protocol.sm_session_registry.as_ref(),
             &alice_web,
             &GroupDmLeaveArgs { room_jid },

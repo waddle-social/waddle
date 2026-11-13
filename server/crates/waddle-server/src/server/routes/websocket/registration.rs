@@ -422,16 +422,17 @@ pub(super) enum PublisherRefusal {
     Account(AccountResourceTransitionError),
 }
 
-/// The publisher the selected account authority requires.
+/// The publisher every binding goes through.
 ///
-/// The connection registry is written under both selections: it holds the
-/// outbound endpoint of every binding, and full-JID delivery, the cluster
-/// route bridge, pending-delivery flush and stream-management promotion
-/// read it and the `UserActor` mirror regardless of the selection. With
-/// the account coordinator selected, each binding is also recorded there
-/// first, and the coordinator's decision gates the registry's: a binding
-/// the coordinator does not publish is not registered, and one it does not
-/// confirm is not acknowledged.
+/// The connection registry is still written: it holds the outbound
+/// endpoint of every binding, and full-JID delivery, the cluster route
+/// bridge, pending-delivery flush and stream-management promotion read it
+/// and the `UserActor` mirror. Each binding is recorded at the account
+/// coordinator first, and the coordinator's decision gates the registry's:
+/// a binding the coordinator does not publish is not registered, and one
+/// it does not confirm is not acknowledged. An application that never
+/// selected the coordinator (a fixture that skipped startup) writes the
+/// registry alone.
 pub(super) struct SelectedBindingPublisher<'a> {
     registry: RegistryBindingPublisher<'a>,
     coordinator: Option<CoordinatorBindingPublisher>,
@@ -490,8 +491,7 @@ fn unpublished_retirement() -> RetireEvidence {
 
 impl SelectedBindingPublisher<'_> {
     /// The coordinator's half of a publication: record the binding in the
-    /// resource's slot. `None` when the connection registry is the selected
-    /// account authority.
+    /// resource's slot. `None` when no coordinator was selected.
     async fn record_account(
         &self,
         jid: &FullJid,
@@ -609,8 +609,8 @@ impl BindingPublisher for SelectedBindingPublisher<'_> {
         self.publish_both(jid, binding, lifetime, None, false).await
     }
 
-    /// With the coordinator selected a resume needs its evidence; without
-    /// it nothing is published.
+    /// With a coordinator a resume needs its evidence; without it nothing
+    /// is published.
     async fn publish_resumed(
         &self,
         jid: &FullJid,

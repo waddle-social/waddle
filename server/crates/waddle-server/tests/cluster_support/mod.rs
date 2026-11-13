@@ -181,64 +181,27 @@ impl StreamManagementAuthority {
     }
 }
 
-/// The account-resource authority a node selects
-/// (`WADDLE_XMPP_ACCOUNT_AUTHORITY`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AccountAuthority {
-    /// The connection registry and `UserActor`.
-    #[default]
-    Registry,
-    /// The account coordinator.
-    Coordinator,
-}
-
-impl AccountAuthority {
-    /// The value the server parses from its environment.
-    pub fn env_value(self) -> &'static str {
-        match self {
-            Self::Registry => "registry",
-            Self::Coordinator => "coordinator",
-        }
-    }
-}
-
-/// The authorities one node selects at startup. The default is what a
-/// server selects when neither variable is set.
+/// The authorities one node selects at startup. The account coordinator is
+/// the only account-resource authority and takes no selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NodeSelectors {
     pub stream_management: StreamManagementAuthority,
-    pub account_authority: AccountAuthority,
 }
 
 impl NodeSelectors {
-    /// Durable stream management with the account coordinator. The
-    /// coordinator refuses to start without durable stream management, so
-    /// this is the only combination that selects it.
+    /// Durable stream management, which the account coordinator requires.
     pub const DURABLE_COORDINATOR: Self = Self {
         stream_management: StreamManagementAuthority::Durable,
-        account_authority: AccountAuthority::Coordinator,
     };
 
-    /// Durable stream management with the connection registry.
-    pub const DURABLE_REGISTRY: Self = Self {
-        stream_management: StreamManagementAuthority::Durable,
-        account_authority: AccountAuthority::Registry,
-    };
-
-    /// The selector variables of a node's environment. Both are always
+    /// The selector variables of a node's environment. Each is always
     /// stated, so a node started through [`spawn_cluster_node`] never
     /// depends on the server's defaults.
-    pub fn envs(self) -> [(&'static str, &'static str); 2] {
-        [
-            (
-                waddle_server::sm_authority::DURABLE_SM_MODE_ENV,
-                self.stream_management.env_value(),
-            ),
-            (
-                waddle_server::account_coordinator::ACCOUNT_AUTHORITY_MODE_ENV,
-                self.account_authority.env_value(),
-            ),
-        ]
+    pub fn envs(self) -> [(&'static str, &'static str); 1] {
+        [(
+            waddle_server::sm_authority::DURABLE_SM_MODE_ENV,
+            self.stream_management.env_value(),
+        )]
     }
 }
 
