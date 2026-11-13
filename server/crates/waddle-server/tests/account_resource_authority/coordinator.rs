@@ -1165,7 +1165,7 @@ impl ConnectionLiveness for StatedLiveness {
 }
 
 #[tokio::test]
-async fn a_takeover_adopts_live_remote_bindings_and_reports_expired_ones() {
+async fn a_takeover_adopts_live_remote_bindings_and_retires_expired_ones() {
     let harness = harness("account-coordinator-remote-liveness", config()).await;
     let remote = |node: &str| {
         BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
@@ -1210,26 +1210,21 @@ async fn a_takeover_adopts_live_remote_bindings_and_reports_expired_ones() {
     );
     assert_eq!(
         successor
+            .slot_status(&expired_jid)
+            .await
+            .expect("slot status")
+            .binding,
+        None,
+        "a binding on a lost connection is retired when the account is loaded"
+    );
+    assert!(
+        successor
             .expired_bindings(&account)
             .await
-            .expect("expired bindings"),
-        vec![(expired_jid.clone(), expired.clone())],
+            .expect("expired bindings")
+            .is_empty(),
         "unknown liveness is not reported as expired"
     );
-    assert!(matches!(
-        successor
-            .unregister(&expired_jid, unregister_request(&expired))
-            .await
-            .expect("unregister"),
-        UnregisterOutcome::Retiring { .. }
-    ));
-    assert!(matches!(
-        successor
-            .repair(&expired_jid, &expired, repair_evidence())
-            .await
-            .expect("repair"),
-        RepairOutcome::Completed { .. }
-    ));
     assert_eq!(
         successor
             .slot_status(&unknown_jid)

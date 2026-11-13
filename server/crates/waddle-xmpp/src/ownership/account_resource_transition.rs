@@ -1963,6 +1963,15 @@ impl AccountResourceSlot {
                 {
                     AccountResourceBindingState::Active
                 }
+                // A detached binding has no connection to prove live. It is
+                // adopted as detached, so the session it names can still
+                // resume under the adopting claim.
+                (AccountResourceBindingState::Detached, Some(registration))
+                    if registration.claim_identity == *claim_identity
+                        && registration.source == binding.source =>
+                {
+                    AccountResourceBindingState::Detached
+                }
                 (AccountResourceBindingState::Retired, _) => {
                     return Err(AccountResourceTransitionError::LifecycleConflict);
                 }
@@ -3570,6 +3579,98 @@ mod tests {
         publish_endpoint(&mut slot, &claim_identity, &resumed_binding);
         register_actor(&mut slot, &claim_identity, &resumed_binding);
         assert_eq!(slot.snapshot(), Some(&resumed_snapshot));
+    }
+
+    #[test]
+    fn a_detached_binding_is_adopted_as_detached_and_resumes_under_the_adopting_claim() {
+        let mut slot = slot();
+        let predecessor = slot.claim_identity().clone();
+        let old_binding = binding(local_connection());
+        bind_active(&mut slot, &predecessor, &old_binding);
+        commit(
+            AccountResourceMutation::UpdateSnapshot {
+                claim_identity: predecessor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                snapshot: sample_snapshot(),
+            },
+            &mut slot,
+        );
+        let detached_snapshot = slot.snapshot().expect("snapshot").clone();
+        let lifetime = slot.binding_receipt().expect("binding").lifetime();
+        detach_active(&mut slot, &predecessor, &old_binding);
+
+        let successor = claim("node-b", "epoch-b", 2);
+        commit(
+            AccountResourceMutation::ReplaceClaim {
+                claim_identity: predecessor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                replacement_claim_identity: successor.clone(),
+            },
+            &mut slot,
+        );
+        let resumed_binding = binding(local_connection());
+        let resume = |slot: &AccountResourceSlot| AccountResourceMutation::SuccessfulResume {
+            claim_identity: successor.clone(),
+            expected_revision: slot.revision(),
+            previous_binding_ref: old_binding.clone(),
+            binding_ref: resumed_binding.clone(),
+            receipt: SuccessfulResumeReceipt::observed(
+                BindingEvidence::for_binding(&old_binding),
+                BindingEvidence::for_binding(&resumed_binding),
+                sm_binding(1, 1),
+                sm_binding(1, 2),
+                lifetime,
+                BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+            ),
+        };
+        let unadopted = resume(&slot);
+        reject(
+            unadopted,
+            &mut slot,
+            AccountResourceTransitionError::BindingOwnerMismatch,
+        );
+
+        // Adoption needs the registration the detached binding had.
+        reject(
+            AccountResourceMutation::AdoptBinding {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                expected_binding_claim_identity: predecessor.clone(),
+                actor_registration: None,
+            },
+            &mut slot,
+            AccountResourceTransitionError::ActorRegistrationMismatch,
+        );
+        commit(
+            AccountResourceMutation::AdoptBinding {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                expected_binding_claim_identity: predecessor,
+                actor_registration: Some(ActorRegistrationReceipt::observed(
+                    successor.clone(),
+                    BindingEvidence::for_binding(&old_binding),
+                )),
+            },
+            &mut slot,
+        );
+        let adopted = slot.binding_receipt().expect("adopted binding");
+        assert_eq!(adopted.state(), AccountResourceBindingState::Detached);
+        assert_eq!(adopted.binding_claim_identity(), &successor);
+        assert!(adopted.detachment().is_some());
+        assert_eq!(slot.snapshot(), Some(&detached_snapshot));
+
+        let adopted_resume = resume(&slot);
+        commit(adopted_resume, &mut slot);
+        assert_eq!(
+            slot.binding_receipt()
+                .expect("resumed binding")
+                .binding_ref(),
+            &resumed_binding
+        );
     }
 
     #[test]

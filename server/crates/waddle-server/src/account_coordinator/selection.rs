@@ -11,7 +11,7 @@ use waddle_xmpp::telemetry::reliability::record_janitor_sweep;
 
 use super::claims::{
     AccountClaimSource, ClaimStoreClaimSource, ClusterLeaseLiveness, ConnectionLiveness,
-    LocalNodeLiveness, MirrorClaimHolds, ProcessClaimSource,
+    LocalNodeLiveness, MirrorClaimHolds, NodeLeaseRead, ProcessClaimSource,
 };
 use super::config::AccountCoordinatorConfig;
 use super::directory::AccountCoordinators;
@@ -72,7 +72,9 @@ pub enum AccountAuthoritySelectionError {
     /// not commit.
     #[error("the account coordinator requires the durable stream-management authority")]
     RequiresDurableStreamManagement,
-    #[error("a clustered account coordinator requires the claim store and the node identity")]
+    #[error(
+        "a clustered account coordinator requires the claim store, the node identity and the node leases"
+    )]
     ClusterIdentityMissing,
 }
 
@@ -115,6 +117,9 @@ impl AccountAuthoritySelection {
                 ) else {
                     return Err(AccountAuthoritySelectionError::ClusterIdentityMissing);
                 };
+                let Some(node_leases) = cluster_node_leases(clustering) else {
+                    return Err(AccountAuthoritySelectionError::ClusterIdentityMissing);
+                };
                 let lease = NodeLeaseIdentity::from_node_identity(&node_identity.current());
                 (
                     Arc::new(ClaimStoreClaimSource::with_mirror(
@@ -122,7 +127,7 @@ impl AccountAuthoritySelection {
                         node_identity,
                         Arc::clone(&mirror_holds),
                     )),
-                    Arc::new(ClusterLeaseLiveness::new(lease, Arc::clone(&claim_store))),
+                    Arc::new(ClusterLeaseLiveness::new(lease, node_leases)),
                 )
             } else {
                 (
@@ -151,15 +156,43 @@ impl AccountAuthoritySelection {
     }
 }
 
+/// The cluster's node leases as the coordinators read them.
+#[cfg(feature = "clustering")]
+struct ClusterNodeLeases(Arc<dyn crate::clustering::claims::NodeLeaseStore>);
+
+#[cfg(feature = "clustering")]
+#[async_trait::async_trait]
+impl NodeLeaseRead for ClusterNodeLeases {
+    async fn unexpired(&self, node: &waddle_xmpp::ownership::NodeIdentity) -> Option<bool> {
+        self.0.is_unexpired(node).await.ok()
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn cluster_node_leases(clustering: &ClusteringHandles) -> Option<Arc<dyn NodeLeaseRead>> {
+    let store = clustering.node_lease.clone()?;
+    Some(Arc::new(ClusterNodeLeases(store)))
+}
+
+/// A build without clustering has no node leases to read.
+#[cfg(not(feature = "clustering"))]
+fn cluster_node_leases(_clustering: &ClusteringHandles) -> Option<Arc<dyn NodeLeaseRead>> {
+    None
+}
+
 /// How many accounts one sweep examines for bindings without a connection.
 const EXPIRED_BINDING_SWEEP_ACCOUNTS: u32 = 256;
 
-/// Retire the bindings whose connection is gone: its node lost its lease,
+/// Settle the bindings whose connection is gone: its node lost its lease,
 /// or its process ended. Such a binding has no connection to retire it, so
-/// its resource would stay reserved and a session it references could
-/// never be deleted. Each is retired by `unregister` and then `repair`,
-/// stating that the recovery paths own the work it accepted. A binding
-/// whose liveness is unknown is not reported as expired and is left alone.
+/// its resource would stay reserved and its account's claim held. Each
+/// account's coordinator detaches the ones whose session can still resume
+/// and retires the rest, stating that the recovery paths own the work they
+/// accepted. A binding whose liveness is unknown is left alone.
+///
+/// The sweep takes over an account whose claim nobody holds or whose
+/// holder's node lease is lost, because nobody else acts for the rows such
+/// an account still has. An account another node holds is skipped.
 ///
 /// One sweep examines a bounded page of the accounts that hold a binding
 /// and resumes after it on the next; `cursor` restarts at the beginning
@@ -180,32 +213,12 @@ async fn retire_expired_bindings(
         }
     };
     *cursor = accounts.last().cloned();
-    let publisher = super::publisher::CoordinatorBindingPublisher::new(Arc::clone(coordinators));
     let mut retired = 0;
     for account in accounts {
-        let expired = match coordinators.expired_bindings(&account).await {
-            Ok(expired) => expired,
+        match coordinators.settle_expired(&account).await {
+            Ok(settled) => retired += settled,
             Err(error) => {
-                tracing::debug!(%error, "account coordinator reaper: expired bindings not read");
-                continue;
-            }
-        };
-        for (full_jid, binding_ref) in expired {
-            match publisher
-                .retire_binding(
-                    &full_jid,
-                    &binding_ref,
-                    super::publisher::RetireEvidence::recovery_owned(),
-                )
-                .await
-            {
-                Ok(super::publisher::RetireOutcome::Retired { .. }) => retired += 1,
-                Ok(outcome) => {
-                    tracing::debug!(?outcome, "account coordinator reaper: expired binding kept");
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "account coordinator reaper: retirement outcome unknown");
-                }
+                tracing::debug!(%error, "account coordinator reaper: account not settled");
             }
         }
     }

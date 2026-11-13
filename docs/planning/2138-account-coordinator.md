@@ -43,8 +43,9 @@ claim follows the account's bindings:
 
 - **No claim, no bindings.** An account nobody holds a claim on has no
   binding that could be a destination. Its view is empty, not a failed
-  read, so a stanza for it takes the offline path. A read never takes a
-  claim.
+  read, so a stanza for it takes the offline path. Reading it takes no
+  claim. (A read does take over an account whose holder lost its node
+  lease; see "Reading an account whose owner is lost".)
 - **The first bind takes the claim.** A request that acts for a binding
   (`slot_status`, `execute`, `unregister`, `repair`, `release_session`)
   takes the claim for its node
@@ -181,8 +182,10 @@ never revives a retired binding.
 ## Owner migration
 
 When the account's claim moves to another node, the new owner's coordinator
-loads the resource rows under the new `UserClaimIdentity` and adopts each
-binding whose row names a live `ConnectionRef`. Sockets do not move: a
+loads the resource rows under the new `UserClaimIdentity`, adopts each
+binding whose row names a live `ConnectionRef` and each detached binding,
+and settles the bindings of connections that are gone (see "Takeover").
+Sockets do not move: a
 connection hosted on another node stays there and is reached through the
 addressing boundary. Adoption does not mint a stream-management session or
 change a binding's `BindingRef`.
@@ -459,19 +462,49 @@ releases first, the session row is deleted last.**
   outcome. An unknown outcome is refused and the binding stays
   non-routable.
 - **Takeover.** A coordinator that loads rows written under a previous
-  claim identity replaces the claim on every row and adopts a prepared,
-  published or active binding whose connection is live. Liveness has three
-  answers. A connection under this node's current lease is live. A binding
-  hosted by another node is judged through its stream-management session's
-  claim, the only node-lease read the claim store exposes: when the node
-  the connection names holds that claim, a fresh lease means live and a
-  lost lease means expired. Everything else is unknown, including a remote
-  binding without a session. On a single node a connection of a previous
-  process is expired. An expired binding is reported and can be retired
-  without its connection; an unknown one is kept, is not a destination and
-  is not retired on that evidence. A detached binding is never adopted:
-  the slot model has no adoption for one, so a session detached under a
-  previous claim cannot resume.
+  claim identity replaces the claim on every row and decides each binding
+  by its state and by the liveness of its connection. Liveness has three
+  answers. A connection under this node's current lease is live. A
+  connection another node hosts is judged by that node incarnation's
+  lease, read by node id (`NodeLeaseStore::is_unexpired`, the predicate a
+  claim's `owner_lease_fresh` uses): unexpired means live, expired or gone
+  means expired, and a read that does not answer is unknown. On a single
+  node a connection of a previous process is expired.
+  - A **detached** binding is adopted as detached, whatever became of the
+    node that hosted its connection: it has no connection, and its session
+    keeps its resume right under the new claim. The session's authority
+    ends it when it can no longer resume, which retires the binding.
+  - A prepared, published or active binding on a **live** connection is
+    adopted.
+  - An active binding on an **expired** connection that names a
+    stream-management session is adopted and detached before the account
+    answers anything, so a resume inherits its snapshot and presentation
+    flags. Whether the session resumes is the session authority's
+    decision.
+  - Any other binding on an expired connection is retired, with the
+    recovery paths as the owner of what it accepted.
+  - A binding of **unknown** liveness is kept, is not a destination and is
+    not retired on that evidence.
+
+  The same settlement runs every time a coordinator loads an account and
+  on the reaper's sweep, so a binding whose node dies later is settled
+  too. The sweep takes over an account whose claim nobody holds or whose
+  holder lost its node lease, since nobody else acts for its rows; when
+  nothing is left to hold the claim for, it is released. A bind that
+  replaces a detached binding on an expired connection retires it, as it
+  does any binding whose connection is gone.
+- **Reading an account whose owner is lost.** A view of an account whose
+  claim's holder lost its node lease is read through takeover: the reading
+  node takes the claim, settles the rows as above, answers, and releases
+  the claim if no binding remains. The rows cannot be read as they are,
+  because they still list the lost node's bindings as active, and failing
+  the read would turn every stanza for the account into an error until
+  one of its resources binds again. Taking the claim on a read is safe
+  here because the claim has no live holder to displace, the takeover is
+  the claim store's stale-owner compare-and-swap, and a node that loses
+  that race answers with the claim error. Until the cluster has recorded
+  the lost node's lease as expired the claim counts as held, and the read
+  fails as a read of any unreachable owner does.
 - **Over the slot bound.** Rows that hold a binding are always loaded,
   even beyond the account's slot bound. Such an account serves its stored
   bindings and refuses a bind of any new resource until enough retire.

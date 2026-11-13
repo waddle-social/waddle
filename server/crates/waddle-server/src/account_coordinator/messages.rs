@@ -144,15 +144,18 @@ pub enum SessionRelease {
 /// identity when it loaded the account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdoptionReport {
-    /// Bindings on live connections, now held under this claim.
+    /// Bindings now held under this claim: those on live connections,
+    /// detached ones, and active ones on a lost connection whose session
+    /// can resume, which the coordinator detaches once the account is
+    /// loaded.
     pub adopted: Vec<(FullJid, BindingRef)>,
     /// Bindings moved to this claim but not adopted: their connection's
-    /// liveness is unknown, or they are detached. They are not routable
-    /// and stay so until they are retired.
+    /// liveness is unknown. They are not routable and stay so until they
+    /// are retired.
     pub unadopted: Vec<(FullJid, BindingRef)>,
     /// Bindings moved to this claim whose connection is gone: its node
-    /// lost its lease or its process ended. They are not routable and can
-    /// be retired without their connection, by `unregister` and `repair`.
+    /// lost its lease or its process ended. They are not routable, and the
+    /// coordinator retires them once the account is loaded.
     pub expired: Vec<(FullJid, BindingRef)>,
     /// Bindings whose row could not be moved to this claim, with the
     /// slot's reason. They remain under the previous claim.
@@ -197,7 +200,14 @@ pub(super) struct ReleaseSession {
 
 pub(super) struct ExpiredBindings;
 
-pub(super) struct ReadView;
+pub(super) struct ReadView {
+    /// Take the account over when its claim's holder lost its node lease,
+    /// instead of failing the read.
+    pub(super) take_over: bool,
+}
+
+/// Detach or retire the account's bindings whose connection is gone.
+pub(super) struct SettleExpired;
 
 pub(super) struct OverdueRetirements;
 

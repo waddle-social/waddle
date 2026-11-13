@@ -15,8 +15,8 @@ use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceOperationLookup, AccountResourceOperationOutcome,
     AccountResourceRetirementEvidence, AccountResourceRevision, AccountResourceSlot,
     AccountResourceTransitionError, ActorRegistrationReceipt, ActorUnregistrationEvidence,
-    BindingEvidence, DirectedPresenceTeardownReceipt, EndpointRetirementEvidence,
-    PresentationFlushReceipt,
+    BindingEvidence, BindingRetirementDisposition, DirectedPresenceTeardownReceipt,
+    EndpointRetirementEvidence, PresentationFlushReceipt,
 };
 use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
 use waddle_xmpp::telemetry::account_coordinator::{record_operation, record_slots_in_use};
@@ -31,9 +31,10 @@ use super::error::AccountCoordinatorError;
 use super::messages::{
     AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
     MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseClaimIfUnbound,
-    ReleaseSession, Repair, RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status,
-    Unregister, UnregisterOutcome, UnregisterRequest,
+    ReleaseSession, Repair, RepairEvidence, RepairOutcome, SessionRelease, SettleExpired,
+    SlotStatus, Status, Unregister, UnregisterOutcome, UnregisterRequest,
 };
+use super::publisher::RetireEvidence;
 use crate::account_bindings::{
     AccountBindingStore, AccountBindingStoreError, PresentationMark, StoredResource,
 };
@@ -225,6 +226,17 @@ impl AccountCoordinatorActor {
             let loaded = self.load().await;
             self.note_claim_loss(&loaded);
             self.resources = Some(loaded?);
+            // The rows may name connections that are gone. They are
+            // settled before the slots answer anything, so a binding on a
+            // lost connection is never served as a destination. The call
+            // is boxed because settling runs the retirement path, which
+            // itself requires loaded slots.
+            let settled = Box::pin(self.settle_expired()).await;
+            if settled.is_err() {
+                self.resources = None;
+            }
+            self.note_claim_loss(&settled);
+            settled?;
         }
         Ok(())
     }
@@ -275,9 +287,12 @@ impl AccountCoordinatorActor {
     }
 
     /// Move a row written under a previous claim identity to this one, and
-    /// adopt its binding when the binding's connection is live. A binding
-    /// that is not adopted keeps its previous binding claim, which keeps it
-    /// out of selection.
+    /// adopt its binding when it is detached, when its connection is live,
+    /// or when it is active on a lost connection and names a
+    /// stream-management session: that one is detached right after the
+    /// load, so its session keeps its resume right. A binding that is not
+    /// adopted keeps its previous binding claim, which keeps it out of
+    /// selection.
     async fn take_over(
         &self,
         claim: &UserClaimIdentity,
@@ -316,23 +331,27 @@ impl AccountCoordinatorActor {
                 return Ok(Some(row));
             }
         };
-        let liveness = self
-            .liveness
-            .liveness(
-                &binding.binding_ref,
-                binding
-                    .snapshot
-                    .stream_management_ref
-                    .map(|reference| reference.session),
-            )
-            .await;
-        let adoptable = liveness == BindingLiveness::Live
-            && matches!(
-                binding.state,
-                AccountResourceBindingState::Prepared
-                    | AccountResourceBindingState::Published
-                    | AccountResourceBindingState::Active
-            );
+        let session = binding
+            .snapshot
+            .stream_management_ref
+            .map(|reference| reference.session);
+        // A detached binding has no connection whose liveness could matter.
+        let liveness = if binding.state == AccountResourceBindingState::Detached {
+            BindingLiveness::Unknown
+        } else {
+            self.liveness.liveness(&binding.binding_ref, session).await
+        };
+        let adoptable = match binding.state {
+            AccountResourceBindingState::Detached => true,
+            AccountResourceBindingState::Prepared | AccountResourceBindingState::Published => {
+                liveness == BindingLiveness::Live
+            }
+            AccountResourceBindingState::Active => {
+                liveness == BindingLiveness::Live
+                    || (liveness == BindingLiveness::Expired && session.is_some())
+            }
+            AccountResourceBindingState::Retiring | AccountResourceBindingState::Retired => false,
+        };
         if !adoptable {
             let entry = (full_jid.clone(), binding.binding_ref.clone());
             if liveness == BindingLiveness::Expired {
@@ -376,6 +395,118 @@ impl AccountCoordinatorActor {
                 .push((full_jid.clone(), binding.binding_ref.clone(), error)),
         }
         Ok(self.store.load(&full_jid).await?)
+    }
+
+    /// Settle every binding whose connection is gone. An active binding
+    /// this claim holds that names a stream-management session is
+    /// detached: the session's authority decides whether it resumes or
+    /// ends, and the slot keeps the snapshot a resume inherits. Any other
+    /// is retired with the recovery paths as the owner of what it
+    /// accepted. A detached binding has no connection and is left alone; a
+    /// binding whose liveness is unknown is neither detached nor retired.
+    /// Returns how many bindings were retired.
+    async fn settle_expired(&mut self) -> Reply<usize> {
+        let claim = self.claim()?.clone();
+        let candidates: Vec<_> = self
+            .resources()?
+            .slots()
+            .filter_map(|slot| {
+                let binding = slot.binding_receipt()?;
+                (binding.state() != AccountResourceBindingState::Detached).then(|| {
+                    (
+                        slot.full_jid().clone(),
+                        binding.binding_ref().clone(),
+                        binding
+                            .snapshot()
+                            .stream_management_ref
+                            .map(|reference| reference.session),
+                    )
+                })
+            })
+            .collect();
+        let mut retired = 0;
+        for (full_jid, binding_ref, session) in candidates {
+            if self.liveness.liveness(&binding_ref, session).await != BindingLiveness::Expired {
+                continue;
+            }
+            if self.detach_expired(&claim, &full_jid, &binding_ref).await? {
+                continue;
+            }
+            let evidence = RetireEvidence::recovery_owned();
+            let started = self
+                .unregister(Unregister {
+                    full_jid: full_jid.clone(),
+                    request: UnregisterRequest {
+                        operation: evidence.begin,
+                        binding_ref: binding_ref.clone(),
+                        custody_disposition: evidence.custody_disposition,
+                    },
+                })
+                .await?;
+            if !matches!(started, UnregisterOutcome::Retiring { .. }) {
+                continue;
+            }
+            let completed = self
+                .repair(Repair {
+                    full_jid,
+                    binding_ref,
+                    evidence: RepairEvidence {
+                        operation: evidence.complete,
+                        directed_presence: evidence.directed_presence,
+                        presentation_flush: evidence.presentation_flush,
+                    },
+                })
+                .await?;
+            if matches!(completed, RepairOutcome::Completed { .. }) {
+                retired += 1;
+            }
+        }
+        Ok(retired)
+    }
+
+    /// Detach an active binding on a lost connection when it names a
+    /// stream-management session and this claim holds it. Returns whether
+    /// the slot now holds it as detached.
+    async fn detach_expired(
+        &mut self,
+        claim: &UserClaimIdentity,
+        full_jid: &FullJid,
+        binding_ref: &BindingRef,
+    ) -> Reply<bool> {
+        let Some(slot) = self.resources()?.slot(full_jid) else {
+            return Ok(false);
+        };
+        let Some(binding) = slot.binding_receipt().filter(|binding| {
+            binding.binding_ref() == binding_ref
+                && binding.state() == AccountResourceBindingState::Active
+                && binding.binding_claim_identity() == claim
+                && binding.snapshot().stream_management_ref.is_some()
+        }) else {
+            return Ok(false);
+        };
+        let Some(publication) = binding.publication().cloned() else {
+            return Ok(false);
+        };
+        let detach = fresh_operation(AccountResourceMutation::Detach {
+            claim_identity: slot.claim_identity().clone(),
+            expected_revision: slot.revision(),
+            binding_ref: binding_ref.clone(),
+            endpoint: EndpointRetirementEvidence::Unpublished {
+                publication,
+                removed: BindingEvidence::for_binding(binding_ref),
+            },
+            custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+        });
+        Ok(matches!(
+            self.execute(full_jid.clone(), detach).await?,
+            BindingReply::Executed(
+                AccountResourceExecution::Applied(
+                    AccountResourceOperationOutcome::Committed { .. }
+                ) | AccountResourceExecution::Replayed(
+                    AccountResourceOperationOutcome::Committed { .. }
+                )
+            )
+        ))
     }
 
     /// Replace one in-memory slot with the stored row. When the store has
@@ -1123,11 +1254,16 @@ impl Message<ReadView> for AccountCoordinatorActor {
 
     async fn handle(
         &mut self,
-        _message: ReadView,
+        message: ReadView,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.last_activity = Instant::now();
-        self.ensure_claim(ClaimNeed::Existing).await?;
+        self.ensure_claim(if message.take_over {
+            ClaimNeed::Taken
+        } else {
+            ClaimNeed::Existing
+        })
+        .await?;
         self.ensure_loaded().await?;
         self.view()
     }
@@ -1212,6 +1348,24 @@ impl Message<ReclaimIfIdle> for AccountCoordinatorActor {
         }
         ctx.stop();
         Ok(true)
+    }
+}
+
+impl Message<SettleExpired> for AccountCoordinatorActor {
+    type Reply = Reply<usize>;
+
+    async fn handle(
+        &mut self,
+        _message: SettleExpired,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ensure_loaded().await?;
+        let settled = self.settle_expired().await;
+        self.note_claim_loss(&settled);
+        if settled.is_ok() {
+            self.release_claim_if_unbound().await;
+        }
+        settled
     }
 }
 

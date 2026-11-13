@@ -1749,6 +1749,20 @@ pub trait NodeLeaseStore: Send + Sync {
         Ok(true)
     }
 
+    /// Whether the lease of this exact node incarnation is unexpired: its
+    /// `clustering_nodes` row exists under the same epoch and its committed
+    /// `expired` flag is not set. This is the predicate a claim's
+    /// `owner_lease_fresh` reads, asked about a node instead of a claim's
+    /// owner; a late heartbeat alone does not make a lease expired.
+    ///
+    /// The default is an error, because a store without a lease table
+    /// proves nothing about another node.
+    async fn is_unexpired(&self, _node: &NodeIdentity) -> Result<bool, ClaimError> {
+        Err(ClaimError::Backend(
+            "this node lease store cannot read another node's lease".to_string(),
+        ))
+    }
+
     /// Read the PeerId currently bound to this exact `node_id`/`node_epoch`
     /// row. `None` means the node row is absent or predates the binding and
     /// must not authenticate relay delivery effects.
@@ -2406,6 +2420,23 @@ impl NodeLeaseStore for PostgresClaimStore {
             out.push(NodeIdentity::new(node_id, node_epoch));
         }
         Ok(out)
+    }
+
+    async fn is_unexpired(&self, node: &NodeIdentity) -> Result<bool, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT 1 FROM clustering_nodes
+                WHERE node_id = ?
+                  AND node_epoch = ?
+                  AND NOT expired
+                "#,
+                crate::db_params![node.node_id.clone(), node.node_epoch.clone()],
+            )
+            .await
+            .map_err(db_err)?;
+        Ok(rows.next().await.map_err(db_err)?.is_some())
     }
 
     async fn is_fresh(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError> {

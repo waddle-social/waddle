@@ -31,7 +31,7 @@ mod selection;
 pub use authority::AccountBindingAuthority;
 pub use claims::{
     AccountClaimError, AccountClaimSource, BindingLiveness, ClaimRelease, ClaimStoreClaimSource,
-    ClusterLeaseLiveness, ConnectionLiveness, LocalNodeLiveness, MirrorClaimHolds,
+    ClusterLeaseLiveness, ConnectionLiveness, LocalNodeLiveness, MirrorClaimHolds, NodeLeaseRead,
     ProcessClaimSource,
 };
 pub use config::AccountCoordinatorConfig;

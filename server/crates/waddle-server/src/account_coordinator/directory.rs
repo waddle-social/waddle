@@ -28,7 +28,7 @@ use super::messages::{
     AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
     MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseClaimIfUnbound,
     ReleaseSession, ReleaseSessionRequest, Repair, RepairEvidence, RepairOutcome, SessionRelease,
-    SlotStatus, Status, Unregister, UnregisterOutcome, UnregisterRequest,
+    SettleExpired, SlotStatus, Status, Unregister, UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::AccountBindingStore;
 
@@ -180,13 +180,45 @@ impl AccountCoordinators {
     pub async fn view(&self, account: &BareJid) -> Result<AccountView, AccountCoordinatorError> {
         // The macro returns early from its enclosing block when the
         // account has no claim, so the block scopes that to the read.
-        let view = async { ask!(self, account, ClaimNeed::Existing, ReadView) }.await;
+        let read = ReadView { take_over: false };
+        let view = async { ask!(self, account, ClaimNeed::Existing, read) }.await;
         match view {
             Err(AccountCoordinatorError::Claim(AccountClaimError::Unclaimed)) => {
                 Ok(AccountView::default())
             }
+            Err(AccountCoordinatorError::Claim(AccountClaimError::Stale)) => {
+                self.view_through_takeover(account).await
+            }
             view => view,
         }
+    }
+
+    /// Read an account whose claim's holder lost its node lease. Nobody
+    /// answers for such an account until some node takes it over, and its
+    /// rows cannot be read as they are: they still list the bindings the
+    /// lost node hosted. This node takes the account over, which settles
+    /// those bindings, and answers from the result. The claim is released
+    /// again when nothing is left to hold it for.
+    async fn view_through_takeover(
+        &self,
+        account: &BareJid,
+    ) -> Result<AccountView, AccountCoordinatorError> {
+        let read = ReadView { take_over: true };
+        let view = async { ask!(self, account, ClaimNeed::Taken, read) }.await?;
+        if let Err(error) = self.release_claim_if_unbound(account).await {
+            tracing::debug!(%error, "the claim of an account read through takeover was not released");
+        }
+        Ok(view)
+    }
+
+    /// Detach or retire the account's bindings whose connection is gone,
+    /// taking the account over when nobody live holds it. Returns how many
+    /// bindings were retired.
+    pub async fn settle_expired(
+        &self,
+        account: &BareJid,
+    ) -> Result<usize, AccountCoordinatorError> {
+        ask!(self, account, ClaimNeed::Taken, SettleExpired)
     }
 
     /// Release the claim of `account` if this node holds it and the
