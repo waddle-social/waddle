@@ -2,12 +2,11 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { AlertCircle, X } from "lucide-vue-next";
-import { toastClasses } from "@/ui/part-classes";
+import { callToastClasses } from "./call-toast-classes";
 import { $callState, $lastCallError, clearLastCallError } from "@/lib/calls/call-store";
 
-// Styled like every other toast (opaque ink); the danger border marks
-// it as a failure.
-const cls = toastClasses;
+// Ink in both themes; the danger border marks it as a failure.
+const cls = callToastClasses;
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);
@@ -31,21 +30,19 @@ const visible = computed(() => {
 <template>
   <div
     v-if="visible"
-    :class="[cls.root, 'call-toast fixed top-6 right-6 z-50 max-w-sm animate-slide-up']"
-    style="border-color: var(--destructive)"
+    :class="cls.error"
+    data-theme="night"
     role="alert"
     aria-live="assertive"
     aria-label="Call error"
   >
-    <AlertCircle class="mt-0.5 h-4 w-4 shrink-0 text-destructive-text" aria-hidden="true" />
-    <div :class="[cls.description, 'min-w-0 flex-1']">{{ lastError }}</div>
-    <button
-      :class="[cls.closeTrigger, 'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md']"
-      type="button"
-      aria-label="Dismiss"
-      @click="clearLastCallError"
-    >
-      <X class="h-3.5 w-3.5" aria-hidden="true" />
+    <AlertCircle :class="cls.errorIcon" aria-hidden="true" />
+    <div :class="cls.copy">
+      <b :class="cls.errorTitle">Call error</b>
+      <span :class="cls.status">{{ lastError }}</span>
+    </div>
+    <button :class="cls.dismiss" type="button" aria-label="Dismiss" @click="clearLastCallError">
+      <X aria-hidden="true" />
     </button>
   </div>
 </template>

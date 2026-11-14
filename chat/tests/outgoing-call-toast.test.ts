@@ -17,7 +17,7 @@ describe("OutgoingCallToast", () => {
     });
 
     const html = await render();
-    expect(html).toContain("Audio call");
+    expect(html).toContain("Voice call");
     expect(html).toContain("calling");
     expect(html).not.toContain("ringing");
   });
