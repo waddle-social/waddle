@@ -991,8 +991,9 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
 }
 
 // Raw owner pools have no checkout hook, so this observes a failed fenced
-// attempt there. Attested reader pools also issue ROLLBACK in before_acquire;
-// for them it proves only that a backend reached checkout, not catalog retry.
+// attempt there. Attested reader pools can also issue ROLLBACK inside their
+// checkout hooks; for them it proves only that a backend reached checkout,
+// not catalog retry.
 async fn wait_for_idle_rollback(f: &Fixture, application: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

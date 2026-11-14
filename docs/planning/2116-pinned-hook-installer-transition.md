@@ -69,8 +69,9 @@ original backend/primary fence survive until positive reconciliation.
    both installation and locked observation; absence alone never proves
    rollback.
 3. **Pinned connection hooks.** On the exact SQLx physical connection, refuse
-   nonzero SQLx transaction depth, roll back any raw inherited transaction,
-   cap session lock/statement waits, clear leaked session advisory locks and
+   nonzero SQLx transaction depth, roll back a raw inherited open
+   transaction (discarding a session whose inherited transaction failed, and
+   sending no ROLLBACK to an idle session), cap session lock/statement waits, clear leaked session advisory locks and
    TEMP objects, then start one READ COMMITTED read-only transaction before the first dependent
    read. Set a safe catalog-first path, acquire shared lineage, run the pinned
    function-present preflight, `LOCK TABLE ONLY` the proven heap, recheck after
