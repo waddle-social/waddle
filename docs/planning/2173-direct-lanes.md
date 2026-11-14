@@ -304,7 +304,7 @@ V1037, now in `server/crates/waddle-server/sql/baseline/postgres.sql`).
 
 ## Build state
 
-Built, not yet verified by a test run. V1033, the repository
+Built and verified by a test run (below). V1033, the repository
 (`S/ingress_uow/direct_requests.rs`), the origin commit, wait and
 consumption and the owner's decision (`S/ingress/direct_request.rs`), the
 origin seam and the worker (`delivery/direct.rs`), worker dispatch and
@@ -314,7 +314,17 @@ adoption of account lanes (`S/ingress/mailbox_worker.rs`) and retention
 Bound requests (V1037, the target node and binding, the "hosted
 elsewhere" refusal written by a node that is not the request's target)
 and the PostgreSQL repository suite (`tests/direct_requests_postgres.rs`)
-are in the tree, not yet verified by a test run.
+are in the tree.
+
+Verified on PostgreSQL 17 with `cargo nextest run --profile ci
+--all-features -p waddle-server` (cargo-nextest 0.9.151): the five
+`direct_requests_postgres` tests (V1033 and V1037 through the schema
+baseline, the guarded table, decision and "hosted elsewhere" round trip,
+lane moves, collection), the five two-node `xep0198_direct_lanes` tests,
+`mailbox_core_postgres`, `ingress_relation_guard_lab`, and the
+`db::migrations`, `ingress_uow::direct_requests`, `ingress_uow::mailbox`
+and `ingress::mailbox_worker` unit tests; 82 tests, all passing, in each
+of three runs.
 
 Not built:
 
