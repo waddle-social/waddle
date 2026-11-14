@@ -28,8 +28,8 @@ that store is emptied.** Each replica logs `Refusing the authorization store: it
 with a `reason` naming the first populated definition, and startup fails with
 `Authorization store is not usable with this server: Authorization store
 refused: authorization store holds ...`. No relationship is written in that
-case; the schema gains the empty `waddle_authz_codec` definition, which the
-previous release removes again when it starts.
+case; the schema gains the empty `waddle_authz_codec` and `waddle_authz_schema`
+definitions, which the previous release removes again when it starts.
 
 Main auto-deploys. Merge this change only inside an explicitly authorised
 `Recreate` window, or ship it as part of the planned fresh production redeploy
@@ -102,14 +102,18 @@ same access controls as the account database and delete it after the window.
    and flags to be confirmed against the deployed `zed` version). A single
    bulk delete may stop at a default limit, so repeat it until the verification
    read returns nothing. The existing schema may stay; this release rewrites it
-   and adds `waddle_authz_codec`. Verify that `zed relationship read
-   <definition>` returns nothing for each definition.
+   and adds `waddle_authz_codec` and `waddle_authz_schema`. Verify that `zed
+   relationship read <definition>` returns nothing for each definition.
 4. Start this release with `Recreate` and the deployment UUID unchanged. One
    replica logs `Marked empty authorization store for the current ID codec`;
    both must become ready. A replica refused because the store `changed while
    its codec marker was being written` only needs a restart.
 5. Verify `zed relationship read waddle_authz_codec` returns exactly the
-   marker above, that deployment owners can administer the server, and that a
+   marker above, and the schema-version checks of
+   [authz-schema-versions.md](authz-schema-versions.md) (this release also
+   installs schema version 1, which gives a channel `outcast` precedence over
+   every channel grant and over the author's own message edit and delete),
+   that deployment owners can administer the server, and that a
    fresh account receives its deployment membership. Re-apply the bans (so SpiceDB and
    SQL agree) and ownerships decided in step 1, and confirm the rooms kept closed are closed.
 6. Restore `RollingUpdate`, if wanted, only in a separate change after fleet
@@ -118,16 +122,17 @@ same access controls as the account database and delete it after the window.
 ## Rollback
 
 Prefer roll-forward. Once the store is marked, the previous release cannot
-start against it: its schema write omits `waddle_authz_codec`, and SpiceDB
-refuses to remove a definition that still holds relationships, so its startup
-fails. That failure is the fence. **Do not restore the previous binary onto a
+start against it: its schema write omits `waddle_authz_codec` and
+`waddle_authz_schema`, and SpiceDB refuses to remove a definition that still
+holds relationships, so its startup fails. That failure is the fence. **Do not restore the previous binary onto a
 marked store, and do not delete the marker by hand to get past it**: without
 the marker the previous release would start and read every `v2_` row as a
 legacy ID, ignoring grants and bans and aliasing identifiers such as
 `v2_c2t5`.
 
 A binary rollback is a second cutover in reverse: stop every replica of this
-release, empty the store again (losing every grant written since, with the same
+release, empty the store again, including the `waddle_authz_codec` and
+`waddle_authz_schema` markers (losing every grant written since, with the same
 inventory and re-ban obligations), then start the previous release on the empty
 store. Rolling forward again later repeats this whole procedure.
 
