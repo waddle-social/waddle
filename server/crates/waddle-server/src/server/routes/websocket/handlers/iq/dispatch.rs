@@ -41,7 +41,7 @@ use super::{handle_private_storage_iq, handle_vcard_iq};
 use super::{is_last_activity_query, is_search_request};
 use super::{is_push_disable, is_push_enable};
 use super::{StanzaErrorCondition, XmppError};
-use crate::destination::Destination;
+use crate::destination::{canonical_address, Destination};
 
 pub(in crate::server::routes::websocket::handlers) fn response_batch_from_inline_room_effect_frames(
     frames: crate::room_effect_outbox::drain::InlineRoomEffectDrain,
@@ -93,7 +93,7 @@ pub(in crate::server::routes::websocket::handlers) struct IqHandlerContext<'a> {
 }
 
 pub async fn handle_iq_with_conn_state(
-    iq: xmpp_parsers::iq::Iq,
+    mut iq: xmpp_parsers::iq::Iq,
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
@@ -106,6 +106,16 @@ pub async fn handle_iq_with_conn_state(
     let upload_domain = state.deps.service_domains.upload.clone();
     let extensions_domain = state.deps.service_domains.extensions.clone();
     let push_domain = state.deps.service_domains.push.clone();
+
+    // RFC 7622 §3.2: `node@domain.` and `node@domain` are one address. Every
+    // handler below compares `to` with served addresses as text and answers
+    // from it, so the stanza carries the canonical form the destination
+    // classifier uses; otherwise a trailing dot would make each specific
+    // handler miss and leave the request to a fallback answering for a
+    // different entity. Replies therefore come from the canonical address.
+    if let Some(to) = iq.to_mut() {
+        *to = canonical_address(to);
+    }
 
     let id = iq.id().to_string();
     let to = iq.to().map(|jid| jid.to_string());

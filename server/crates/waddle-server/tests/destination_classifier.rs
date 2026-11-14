@@ -471,6 +471,65 @@ async fn offer_iq_reports_an_accepted_stanza_without_a_reply() {
     assert!(matches!(offer, IqOffer::Accepted), "{offer:?}");
 }
 
+/// A route that records the stanza it is offered and refuses it.
+#[derive(Default)]
+struct RecordingRoute {
+    offered: std::sync::Mutex<Option<(RemoteDestination, Stanza)>>,
+}
+
+#[async_trait]
+impl RemoteRoute for RecordingRoute {
+    async fn route(&self, outbound: RemoteOutbound) -> RemoteRouteOutcome {
+        if let Ok(mut offered) = self.offered.lock() {
+            *offered = Some((outbound.destination().clone(), outbound.stanza().clone()));
+        }
+        RemoteRouteOutcome::Unroutable {
+            reason: UnroutableReason::FederationDisabled,
+            outbound: Box::new(outbound),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_offered_stanza_names_the_canonical_destination() {
+    for (raw, canonical) in [
+        ("bob@remote.test.", "bob@remote.test"),
+        ("bob@remote.test./phone", "bob@remote.test/phone"),
+        ("remote.test.", "remote.test"),
+    ] {
+        let route = RecordingRoute::default();
+        let request = sent_ping(raw);
+        let offer = offer_iq(
+            &route,
+            remote(raw),
+            request,
+            &domain(HOME),
+            REMOTE_ROUTE_OFFER_TIMEOUT,
+        )
+        .await;
+        let (destination, stanza) = route
+            .offered
+            .lock()
+            .expect("recorded offer")
+            .take()
+            .expect("the IQ was offered");
+        assert_eq!(destination.address(), &jid(canonical));
+        let Stanza::Iq(offered) = stanza else {
+            panic!("IQ offered");
+        };
+        assert_eq!(offered.to(), Some(&jid(canonical)), "{raw}");
+        assert_eq!(offered.to().map(Jid::as_str), Some(canonical), "{raw}");
+
+        let IqOffer::Refused {
+            reply: Some(reply), ..
+        } = offer
+        else {
+            panic!("a refused request is answered");
+        };
+        assert_eq!(reply.from().map(Jid::as_str), Some(canonical), "{raw}");
+    }
+}
+
 /// A route that blocks on its peer instead of enqueueing.
 struct StalledRoute;
 

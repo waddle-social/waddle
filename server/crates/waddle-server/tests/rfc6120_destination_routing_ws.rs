@@ -387,20 +387,27 @@ async fn a_trailing_domain_dot_routes_to_the_canonical_destination() {
     let forwarded = receive_iq(&mut peer, "dot-local").await;
     assert!(matches!(forwarded, Iq::Get { .. }), "{forwarded:?}");
     assert_eq!(forwarded.from(), Some(&origin_jid));
+    assert_eq!(
+        forwarded.to().map(Jid::as_str),
+        Some("peer@localhost/dot-peer"),
+        "the peer receives the canonical address it bound"
+    );
 
-    // A remote destination with a trailing dot is still remote.
-    for (index, target) in ["bob@remote.test.", "bob@remote.test./phone"]
-        .into_iter()
-        .enumerate()
+    // A remote destination with a trailing dot is still remote, and the
+    // refusal comes from its canonical address.
+    for (index, (target, canonical)) in [
+        ("bob@remote.test.", "bob@remote.test"),
+        ("bob@remote.test./phone", "bob@remote.test/phone"),
+    ]
+    .into_iter()
+    .enumerate()
     {
-        let iq = request(
-            NS_PING,
-            false,
-            Some(jid(target)),
-            &format!("dot-remote-{index}"),
-        );
-        let reply = round_trip(&mut origin, iq.clone()).await;
-        assert_unroutable(&reply, &iq, &origin_jid);
+        let id = format!("dot-remote-{index}");
+        let iq = request(NS_PING, false, Some(jid(target)), &id);
+        let reply = round_trip(&mut origin, iq).await;
+        let canonical_request = request(NS_PING, false, Some(jid(canonical)), &id);
+        assert_eq!(reply.from().map(Jid::as_str), Some(canonical));
+        assert_unroutable(&reply, &canonical_request, &origin_jid);
     }
 
     origin.close().await.expect("close origin");

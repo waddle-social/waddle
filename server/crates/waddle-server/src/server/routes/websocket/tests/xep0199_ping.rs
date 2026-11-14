@@ -357,7 +357,7 @@ async fn foreign_rejection_settles_sm_inbound_once_and_does_not_block_local_prog
 }
 
 #[tokio::test]
-async fn foreign_ping_before_binding_keeps_authentication_error() {
+async fn foreign_ping_before_binding_is_refused_as_not_authorized() {
     let state = create_test_websocket_state().await;
     for phase in [
         ConnectionPhase::new(),
@@ -368,12 +368,9 @@ async fn foreign_ping_before_binding_keeps_authentication_error() {
         let responses =
             dispatch(&state, &mut conn, request(Some("remote.test"), false, None)).await;
         let [Iq::Error { error, .. }] = responses.as_slice() else {
-            panic!("authentication error: {responses:?}")
+            panic!("RFC 6120 §7.1 not-authorized refusal: {responses:?}")
         };
         assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
-        assert!(
-            error.by.is_none(),
-            "remote routing gate must run after authentication"
-        );
+        assert!(error.by.is_none(), "an unbound stream has nothing routed");
     }
 }

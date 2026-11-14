@@ -218,7 +218,15 @@ pub enum InvalidDestination {
     UnqualifiedHost,
 }
 
-/// `address` without a trailing label separator on its domainpart.
+/// `address` without a trailing label separator on its domainpart: the form
+/// RFC 7622 §3.2 requires before an address is compared or used. Every other
+/// address is returned unchanged, so applying it twice is harmless.
+///
+/// [`ServedDomains::classify`] applies it before classifying. A caller that
+/// hands the classified stanza on applies it to the stanza's `to` as well, so
+/// that handlers compare and reply from the same address the classifier used:
+/// `node@domain.` and `node@domain` are one entity, and an exact text
+/// comparison against a served address must not tell them apart.
 ///
 /// The `jid` crate validates such a domainpart without the separator but keeps
 /// the original text, so `node@domain.` reports `domain.` as its domain, and in
@@ -226,7 +234,7 @@ pub enum InvalidDestination {
 /// The parts are therefore re-read from the canonical text, splitting it the
 /// way the parser does (the first `/` starts the resourcepart, and an `@`
 /// before it ends the localpart), and the address is rebuilt from typed parts.
-fn canonical_address(address: &Jid) -> Jid {
+pub fn canonical_address(address: &Jid) -> Jid {
     let raw = address.as_str();
     let (bare, resource) = match raw.split_once('/') {
         Some((bare, resource)) => (bare, Some(resource)),
@@ -362,13 +370,26 @@ pub struct RemoteOutbound {
 
 impl RemoteOutbound {
     /// Wrap `stanza` for `destination`. A stanza without `from` has no sender
-    /// a remote peer could answer and is handed back as the error.
-    pub fn new(destination: RemoteDestination, stanza: Stanza) -> Result<Self, Box<Stanza>> {
+    /// a remote peer could answer and is handed back, unchanged, as the
+    /// error.
+    ///
+    /// The stanza's `to` is set to the destination's address, which is in
+    /// canonical form, so the stanza a route delivers always names the
+    /// destination the route was given.
+    pub fn new(destination: RemoteDestination, mut stanza: Stanza) -> Result<Self, Box<Stanza>> {
         let sender = match &stanza {
             Stanza::Iq(iq) => iq.from().cloned(),
             Stanza::Message(message) => message.from.clone(),
             Stanza::Presence(presence) => presence.from.clone(),
         };
+        if sender.is_some() {
+            let to = Some(destination.address().clone());
+            match &mut stanza {
+                Stanza::Iq(iq) => *iq.to_mut() = to,
+                Stanza::Message(message) => message.to = to,
+                Stanza::Presence(presence) => presence.to = to,
+            }
+        }
         match sender {
             Some(sender) => Ok(Self {
                 sender,
@@ -496,17 +517,20 @@ pub enum IqOffer {
 /// Offer an IQ from a local entity to `route`, waiting at most `deadline`,
 /// and fail closed.
 ///
-/// The sender is the IQ's `from`. A request that is not routed always yields
-/// an error reply addressed to that sender and attributed to `home`: with the
-/// echoed payload when the route returned the IQ it was offered, and without
-/// it when the route timed out or returned anything else.
+/// The sender is the IQ's `from`, and its `to` is set to the destination's
+/// canonical address before it is offered. A request that is not routed
+/// always yields an error reply from that address, addressed to the sender
+/// and attributed to `home`: with the echoed payload when the route returned
+/// the IQ it was offered, and without it when the route timed out or returned
+/// anything else.
 pub async fn offer_iq(
     route: &dyn RemoteRoute,
     destination: RemoteDestination,
-    iq: Iq,
+    mut iq: Iq,
     home: &DomainRef,
     deadline: Duration,
 ) -> IqOffer {
+    *iq.to_mut() = Some(destination.address().clone());
     let offered = OfferedIq::capture(&iq);
     let outbound = match RemoteOutbound::new(destination, Stanza::Iq(Box::new(iq))) {
         Ok(outbound) => outbound,
