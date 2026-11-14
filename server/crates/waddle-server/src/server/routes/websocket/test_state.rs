@@ -12,6 +12,7 @@ use crate::clustering::ClusteringHandles;
 use crate::config::ServerConfig;
 use crate::db::DatabaseDriver;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+use crate::destination::FederationDisabled;
 use crate::dnd_projection::DndProjectionStore;
 use crate::dnd_reader::PepDndReader;
 use crate::inbox::DatabaseInboxStorage;
@@ -360,6 +361,7 @@ where
                 app_state: Arc::clone(&app_state),
                 auth_state,
                 service_domains,
+                remote_route: Arc::new(FederationDisabled),
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
                     user_registry: waddle_xmpp::registry::UserRegistryActor::spawn(

@@ -18,6 +18,7 @@ use crate::db::lineage::LineageReport;
 use crate::db::lineage::PgIdentity;
 use crate::db::Database;
 use crate::db::DatabaseDriver;
+use crate::destination::FederationDisabled;
 use crate::dnd_projection::DndProjectionStore;
 use crate::dnd_reader::PepDndReader;
 use crate::inbox::DatabaseInboxStorage;
@@ -1598,6 +1599,9 @@ async fn create_websocket_state(
             app_state: state.clone(),
             auth_state: auth_state.clone(),
             service_domains,
+            // Server-to-server transport is not configurable yet, so every
+            // remote destination is refused with a local stanza error.
+            remote_route: Arc::new(FederationDisabled),
             protocol: ProtocolServices {
                 connection_registry,
                 user_registry,

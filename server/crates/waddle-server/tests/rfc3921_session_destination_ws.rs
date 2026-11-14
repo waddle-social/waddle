@@ -63,12 +63,15 @@ async fn foreign_session_denials_preserve_local_noop_and_real_peer_forwarding() 
                 panic!("foreign Session cannot return local success")
             };
             assert_eq!(error.type_, ErrorType::Cancel);
-            assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+            assert_eq!(
+                error.defined_condition,
+                DefinedCondition::RemoteServerNotFound
+            );
             assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
             assert!(error
                 .texts
                 .values()
-                .any(|text| text == "Remote Session routing is not allowed by this server."));
+                .any(|text| text == "Routing to remote domains is not enabled on this server."));
             let original = match iq {
                 Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
                 _ => unreachable!(),
