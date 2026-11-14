@@ -64,8 +64,8 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
     };
     let sm = persistent_sm(&fixture).await;
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
-    store_detached(&sm, &target).await;
     let mut state = state_for(&fixture, sm.clone()).await;
+    store_detached(&sm, &target).await;
     let blocking = Arc::new(waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new());
     let protocol = &mut Arc::get_mut(&mut state)
         .expect("unique state")
@@ -538,8 +538,8 @@ async fn oversized_prepared_copy(fixture: IngressFixture) {
     };
     let sm = persistent_sm(&fixture).await;
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
-    store_detached(&sm, &target).await;
     let state = state_for(&fixture, sm.clone()).await;
+    store_detached(&sm, &target).await;
     socket_tests::create_test_session(&state, "juliet").await;
     let mut submission = fixture.submission(
         Some("oversized-prepared"),

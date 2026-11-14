@@ -24,8 +24,8 @@ async fn pin_recovery(f: IngressFixture, case: PinCase) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");
-    store_detached(&sm, &resource).await;
     let state = state_for(&f, sm.clone()).await;
+    store_detached(&sm, &resource).await;
     let mut submission =
         planned_room(&f, &state, Case::Lost, std::slice::from_ref(&resource)).await;
     store_detached(&sm, &submission.sender).await;

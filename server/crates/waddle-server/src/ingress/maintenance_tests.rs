@@ -679,7 +679,6 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
@@ -691,6 +690,10 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
     ).await;
     let mut state = Arc::try_unwrap(state).unwrap_or_else(|_| panic!("fresh state"));
     state.deps.protocol.sm_session_registry = sm.clone();
+    // Selecting the durable stream-management store while building the state
+    // moves `sm_sessions` rows without a durable record to offline storage,
+    // so the detached session is stored after it.
+    store_detached(&sm, &resource).await;
     let environment: Arc<dyn super::RecoveryEnvironment> =
         Arc::new(StateEnvironment(Arc::new(state)));
     let mut submission =

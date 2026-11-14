@@ -115,6 +115,12 @@ async fn persistent_sm(f: &IngressFixture) -> Arc<InMemorySmSessionRegistry> {
     );
     Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence))
 }
+/// Seed a registry-held detached session on the fixture database.
+///
+/// Call it only after `state_for`: selecting the durable stream-management
+/// store moves every `sm_sessions` row without a durable record to offline
+/// storage, so a session stored earlier keeps its in-memory entry but loses
+/// the persisted row its appends and reads reconcile against.
 async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
     sm.store_session(DetachedSession {
         promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
@@ -219,10 +225,10 @@ async fn detached_recovery(f: IngressFixture, stall_original: bool) {
         "juliet@example.com/phone".parse().expect("phone"),
         "juliet@example.com/laptop".parse().expect("laptop"),
     ];
+    let state = state_for(&f, sm.clone()).await;
     for resource in &resources {
         store_detached(&sm, resource).await;
     }
-    let state = state_for(&f, sm.clone()).await;
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let submission = direct_submission(&f, "detached-recovery", &resources);
     let decision = commit_submission(&f.uow, &submission, 5)
@@ -297,8 +303,8 @@ async fn blocked_direct_recovery(f: IngressFixture, read_fails: bool) {
     }
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let mut state = state_for(&f, sm.clone()).await;
+    store_detached(&sm, &resource).await;
     let blocking = Arc::new(InMemoryBlockingStorage::new());
     Arc::get_mut(&mut state)
         .expect("unique state")
@@ -1796,8 +1802,8 @@ async fn backdate_created(f: &IngressFixture, key: MessageKey, seconds: i64) {
 async fn unsupported_backlog_is_evaluated_once_then_skipped(f: IngressFixture) {
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let state = state_for(&f, sm.clone()).await;
+    store_detached(&sm, &resource).await;
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let mut keys = Vec::new();
     for index in 0..70 {
@@ -1861,8 +1867,8 @@ async fn unsupported_backlog_is_evaluated_once_then_skipped(f: IngressFixture) {
 async fn unsupported_kind_backlog_does_not_starve_recoverable_rows(f: IngressFixture) {
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let state = state_for(&f, sm.clone()).await;
+    store_detached(&sm, &resource).await;
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let mut keys = Vec::new();
     for index in 0..70 {
@@ -1910,10 +1916,10 @@ async fn row_deadline_bounds_a_stalled_route_and_later_rows_still_run(f: Ingress
     let sm = persistent_sm(&f).await;
     let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
     let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
+    let state = state_for(&f, sm.clone()).await;
     for resource in [&first, &second] {
         store_detached(&sm, resource).await;
     }
-    let state = state_for(&f, sm.clone()).await;
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let a = commit_submission(
         &f.uow,
@@ -1970,9 +1976,9 @@ async fn forced_stop_during_bound_recovery_is_prompt(f: IngressFixture) {
     use tokio_util::sync::CancellationToken;
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let env: Arc<dyn RecoveryEnvironment> =
         Arc::new(StateEnvironment(state_for(&f, sm.clone()).await));
+    store_detached(&sm, &resource).await;
     let key = commit_submission(
         &f.uow,
         &direct_submission(&f, "forced-stop", std::slice::from_ref(&resource)),
@@ -2053,9 +2059,9 @@ async fn forced_stop_during_bound_recovery_is_prompt(f: IngressFixture) {
 async fn live_duplicate_and_recovery_serialize_detached_appends(f: IngressFixture) {
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let env: Arc<dyn RecoveryEnvironment> =
         Arc::new(StateEnvironment(state_for(&f, sm.clone()).await));
+    store_detached(&sm, &resource).await;
     let submission = direct_submission(&f, "detached-race", std::slice::from_ref(&resource));
     let original = commit_submission(&f.uow, &submission, 5)
         .await
@@ -2600,9 +2606,9 @@ async fn sqlite_present_detached_session_append_failure_never_parks() {
     let fixture = IngressFixture::sqlite().await;
     let sm = persistent_sm(&fixture).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
-    store_detached(&sm, &resource).await;
     let env: Arc<dyn RecoveryEnvironment> =
         Arc::new(StateEnvironment(state_for(&fixture, sm.clone()).await));
+    store_detached(&sm, &resource).await;
     let key = commit_submission(
         &fixture.uow,
         &direct_submission(
