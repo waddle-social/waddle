@@ -5,6 +5,8 @@
 //! - `WsXmppClient` connects via WebSocket and authenticates with SCRAM-SHA-256.
 //! - `require_test_postgres_url` is the one reader of the Postgres test-database
 //!   environment for every test crate in the workspace.
+//! - [`iq`] sends typed IQs over a connected client and [`stanza`] builds the
+//!   requests and reply checks suites share.
 //!
 //! This lives in its own crate (rather than a `tests/ws_common/mod.rs`
 //! shared module) so that every integration-test binary links the same
@@ -13,6 +15,7 @@
 //! warnings cannot fire and no lint suppressions are needed.
 
 pub mod iq;
+pub mod stanza;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;

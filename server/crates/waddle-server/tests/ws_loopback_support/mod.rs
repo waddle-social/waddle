@@ -4,7 +4,9 @@
 //!
 //! Clients authenticate with SASL SCRAM-SHA-256 against native accounts and
 //! bind a resource, as a deployed client does. Stanzas are built and parsed
-//! as typed values.
+//! as typed values with `waddle_ws_test_support::stanza`; this module holds
+//! only what needs the server's test state, so every suite that includes it
+//! uses all of it.
 
 use std::sync::Arc;
 
@@ -13,24 +15,9 @@ use waddle_server::auth::{NativeUserStore, RegisterRequest};
 use waddle_server::db::actor::DbExecute;
 use waddle_server::test_support::{router, seed_local_account, WebSocketState};
 use waddle_ws_test_support::WsXmppClient;
-use xmpp_parsers::iq::Iq;
-use xmpp_parsers::minidom::Element;
-use xmpp_parsers::stanza_error::DefinedCondition;
 
 /// The test state pins its account domain (`test_state.rs`).
 pub const DOMAIN: &str = "example.com";
-/// The test state's MUC service.
-pub const MUC: &str = "muc.example.com";
-/// The test state's Spaces service.
-pub const SPACES: &str = "spaces.example.com";
-/// The test state's extensions service.
-pub const EXTENSIONS: &str = "extensions.example.com";
-pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
-pub const NS_MUC: &str = "http://jabber.org/protocol/muc";
-pub const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
-pub const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
-pub const NS_MAM: &str = "urn:xmpp:mam:2";
-pub const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 const PASSWORD: &str = "loopback-account-password";
 
 /// A test state served over a loopback TCP listener.
@@ -116,84 +103,4 @@ impl Loopback {
             .await
             .expect("channel catalog row");
     }
-}
-
-/// The room JID of the channel `channel_id`.
-pub fn room(channel_id: &str) -> BareJid {
-    format!("{channel_id}@{MUC}").parse().expect("room JID")
-}
-
-/// Send `iq` and wait for its reply.
-pub async fn round_trip(client: &mut WsXmppClient, iq: Iq) -> Iq {
-    waddle_ws_test_support::iq::round_trip(client, iq).await
-}
-
-/// Whether an IQ reply is a result.
-pub fn is_result(reply: &Iq) -> bool {
-    matches!(reply, Iq::Result { .. })
-}
-
-/// Whether an IQ reply is an error with `condition`.
-pub fn is_error(reply: &Iq, condition: DefinedCondition) -> bool {
-    matches!(reply, Iq::Error { error, .. } if error.defined_condition == condition)
-}
-
-/// A `set` IQ to `to` carrying `payload`.
-pub fn set(id: &str, to: &str, payload: Element) -> Iq {
-    Iq::Set {
-        from: None,
-        to: Some(to.parse().expect("IQ destination")),
-        id: id.to_owned(),
-        payload,
-    }
-}
-
-/// A `get` IQ to `to` carrying `payload`.
-pub fn get(id: &str, to: &str, payload: Element) -> Iq {
-    Iq::Get {
-        from: None,
-        to: Some(to.parse().expect("IQ destination")),
-        id: id.to_owned(),
-        payload,
-    }
-}
-
-/// A XEP-0060 publish of one item to `node`.
-pub fn publish(node: &str, item_id: &str, payload: Element) -> Element {
-    Element::builder("pubsub", NS_PUBSUB)
-        .append(
-            Element::builder("publish", NS_PUBSUB)
-                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-                .append(
-                    Element::builder("item", NS_PUBSUB)
-                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
-                        .append(payload)
-                        .build(),
-                )
-                .build(),
-        )
-        .build()
-}
-
-/// A XEP-0060 subscription of `jid` to `node`.
-pub fn subscribe(node: &str, jid: &str) -> Element {
-    Element::builder("pubsub", NS_PUBSUB)
-        .append(
-            Element::builder("subscribe", NS_PUBSUB)
-                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-                .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid)
-                .build(),
-        )
-        .build()
-}
-
-/// A XEP-0060 items request for `node`.
-pub fn items(node: &str) -> Element {
-    Element::builder("pubsub", NS_PUBSUB)
-        .append(
-            Element::builder("items", NS_PUBSUB)
-                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-                .build(),
-        )
-        .build()
 }

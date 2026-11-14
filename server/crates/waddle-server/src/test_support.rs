@@ -1020,7 +1020,9 @@ pub async fn websocket_state_with_ingress(
 /// permission actor is fenced by the global database's host-grant store,
 /// the actor and the state's host-grant gate share one enrolled set, and the
 /// WebSocket routes use the app state's room registry, whose room actors
-/// take the members-only binding of managed rooms.
+/// take the members-only binding of managed rooms. The app state names the
+/// WebSocket test state's MUC and Spaces services, so the admin commands a
+/// suite registers act on the rooms and Spaces its clients see.
 ///
 /// The enrolled set is loaded in the background; a suite that enrolls a
 /// scope after building the state calls `host_grants.enrolled().refresh()`
@@ -1045,6 +1047,14 @@ pub async fn websocket_state_with_host_grant_fence(
     );
     let host_grants = HostGrantGate::with_enrolled_scopes(store, enrolled);
     let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    // The admin commands read the app state's services; they are the
+    // WebSocket test state's own.
+    app_state.muc_domain = "muc.example.com"
+        .parse()
+        .expect("test MUC domain parses as DomainPart");
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("test Spaces service parses as BareJid");
     let membership: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> = Arc::new(
         crate::server::durable_membership::PermissionDurableMembershipSource::new(
             permission_actor.clone(),
@@ -1087,6 +1097,151 @@ pub async fn websocket_state_with_host_grant_fence(
         move || std::future::ready(Some(ingress)),
     )
     .await
+}
+
+/// Broadcast a room's own message (a system message from the room's bare
+/// JID) the way the call-thread and pin surfaces do: archived, then routed
+/// to the room's seated occupants that may receive it. `Some` with the
+/// assigned stanza ID when it was archived.
+#[cfg(feature = "test-support")]
+pub async fn broadcast_room_system_message(
+    state: &WebSocketState,
+    room: jid::BareJid,
+    message: xmpp_parsers::message::Message,
+) -> Option<String> {
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    crate::server::routes::interpret::broadcast_room_system_message(&deps, room, Box::new(message))
+        .await
+}
+
+/// Whether `requester` may still read `room`, decided again after a
+/// protected read: `None` for a room no enrolled host-grant scope manages.
+#[cfg(feature = "test-support")]
+pub async fn host_grant_read_still_admitted(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    requester: Option<&jid::BareJid>,
+) -> Option<bool> {
+    crate::server::routes::websocket::handlers::presence::host_grant_read_still_admitted(
+        state, room, requester,
+    )
+    .await
+}
+
+/// Record one affiliation change of the managed room `room` as an XEP-0045
+/// administration request does, with the store's commit ending as `fault`
+/// says, and answer with the request's reply: `Ok` when the change is
+/// recorded, otherwise the stanza error's defined condition.
+///
+/// # Panics
+/// Panics if no enrolled scope manages `room` on this state.
+#[cfg(feature = "test-support")]
+pub async fn record_room_affiliation_under_commit_fault(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    initiator: &jid::BareJid,
+    target: &jid::BareJid,
+    affiliation: waddle_xmpp::Affiliation,
+    fault: crate::permissions::host_grant::HostGrantCommitFault,
+) -> Result<(), xmpp_parsers::stanza_error::DefinedCondition> {
+    use crate::permissions::host_grant::{with_host_grant_commit_fault, RoomBinding, RoomGate};
+    let RoomGate::Managed(grants) = state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room))
+        .await
+    else {
+        panic!("the room is not a managed room of this state");
+    };
+    with_host_grant_commit_fault(
+        fault,
+        crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::record_host_grant_affiliation(
+            state,
+            &grants,
+            initiator,
+            target,
+            affiliation,
+        ),
+    )
+    .await
+    .map_err(|error| error.defined_condition)
+}
+
+/// Run the topology bootstrap a WebSocket server runs at startup against
+/// this state: its catalog, Spaces and community nodes, room actors and
+/// seeds.
+#[cfg(feature = "test-support")]
+pub async fn bootstrap_fresh_topology(state: &Arc<WebSocketState>) -> Result<(), String> {
+    let account_domain =
+        waddle_xmpp::identity::CanonicalDomain::parse_exact(&state.deps.auth_state.xmpp_domain)
+            .map_err(|error| error.to_string())?;
+    crate::server::topology::bootstrap_fresh_xmpp_topology(
+        &state.deps.app_state,
+        Arc::clone(&state.deps.protocol.pubsub_storage),
+        &state.deps.service_domains,
+        &account_domain,
+        &state.deps.protocol.room_registry,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Record `member` as a member of the group DM `group_dm_id` through the
+/// group-DM member writers (the permission relation and its mirror).
+#[cfg(feature = "test-support")]
+pub async fn persist_group_dm_member(
+    state: &crate::server::AppState,
+    group_dm_id: &str,
+    member: &jid::BareJid,
+) -> Result<(), waddle_xmpp::XmppError> {
+    crate::admin::channels::persist_group_dm_member_tuple(state, group_dm_id, member).await
+}
+
+/// Plan the extension bot of `plugin` posting `body` into `room`, as the
+/// extension host does before it submits the message, and return the
+/// planner's refusal: `None` when the bot was seated and the post planned.
+#[cfg(feature = "test-support")]
+pub async fn extension_bot_groupchat_refusal(
+    state: &Arc<WebSocketState>,
+    plugin: &str,
+    room: &jid::BareJid,
+    body: &str,
+) -> Option<String> {
+    use crate::server::routes::interpret::{
+        plan_extension_bot_groupchat, BotOccupancy, ExtensionRoomMessage,
+    };
+    let plugin = waddle_extensions::PluginId::try_new(plugin).expect("plugin id");
+    let bot = state
+        .deps
+        .service_domains
+        .extension_bot_jid(&plugin)
+        .expect("extension bot JID");
+    let message = ExtensionRoomMessage {
+        plugin,
+        body: waddle_extensions::DisplayText::try_new(body).expect("message body"),
+        room: waddle_extensions::RoomJid::try_new(room.to_string()).expect("room JID"),
+        preferred_nick: None,
+        stanza_id: None,
+        thread_id: None,
+        reply_to: None,
+        markup: Vec::new(),
+        extensions: None,
+    };
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let mut occupancy = BotOccupancy::default();
+    plan_extension_bot_groupchat(
+        &deps,
+        room.clone(),
+        bot,
+        message,
+        state,
+        None,
+        &mut occupancy,
+    )
+    .await
+    .err()
+    .map(|refusal| refusal.to_string())
 }
 
 /// Build all fixture schemas before creating an authority that starts maintenance.

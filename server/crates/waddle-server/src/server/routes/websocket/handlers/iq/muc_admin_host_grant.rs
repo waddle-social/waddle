@@ -107,7 +107,7 @@ pub(super) fn host_grant_affiliation_list(
 /// actor applies it. `Ok` means the change is recorded: a reduction is
 /// effective at once, and an increase once its projection has been verified
 /// and activated by the reconciliation this starts.
-pub(super) async fn record_host_grant_affiliation(
+pub(crate) async fn record_host_grant_affiliation(
     state: &WebSocketState,
     room: &ManagedRoomGrants,
     initiator: &BareJid,

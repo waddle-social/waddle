@@ -6,29 +6,42 @@
 //! on every surface: joins, archive reads, room discovery, administration,
 //! owner configuration and destruction, mediated invitations, PubSub on the
 //! scope's Space node, the planner's durable membership and the legacy
-//! permission reads. Legacy tuples, durable room affiliations, PubSub
-//! affiliations, Space membership and the room actor's own affiliation list
-//! admit nothing there. Bootstrap and repair writers never lift a ban and
-//! never write a privileged grant for an account outside the served domain
-//! and the trusted homes they are given.
+//! permission reads, and the protected effects of `sinks`. Legacy tuples,
+//! durable room affiliations, PubSub affiliations, Space membership and the
+//! room actor's own affiliation list and roles admit nothing there.
+//! Bootstrap and repair writers never lift a ban and never write a
+//! privileged grant for an account outside the served domain and the
+//! trusted homes they are given.
 //!
 //! The WebSocket cases drive the production router over a loopback socket
-//! against a state on the fixture's PostgreSQL database; the others call
-//! the fenced writers and readers directly. They need PostgreSQL only. The
-//! fixture activates the scope in place of a verified projection, as the
-//! other SQL admission suites do, and attaches the replica without the
+//! against a state on the fixture's PostgreSQL database, wired as a
+//! PostgreSQL deployment is: its permission actor is fenced by the store and
+//! shares the enrolled set with the host-grant gate. The relationships a
+//! stale mirror or an older binary would have left are written with a
+//! separate unfenced actor. The other cases call the fenced writers and
+//! readers directly. They need PostgreSQL only; a lane that sets
+//! `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them without it. The fixture
+//! activates the scope in place of a verified projection, as the other SQL
+//! admission suites do, and attaches the replica without the
 //! runtime-privilege check, since its login owns the schema.
 #![cfg(feature = "test-support")]
 
+// The shared host-grant fixture serves several suites; this one uses a subset.
+#[allow(dead_code)]
 mod host_grant_support;
+// The shared ingress fixture serves several suites; this one uses a subset.
+#[allow(dead_code)]
 mod ingress_support;
 mod ws_loopback_support;
+
+#[path = "host_grant_fence_cases/sinks.rs"]
+mod sinks;
 
 use std::sync::Arc;
 
 use host_grant_support::{bare, issuance_policy, served, GrantFixture, OWNER, PEER, SENDER};
 use jid::BareJid;
-use kameo::actor::Spawn;
+use kameo::actor::{ActorRef, Spawn};
 use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
 use waddle_server::permissions::host_grant::{HostGrantAttachment, HostGrantGate, RoomAffiliation};
 use waddle_server::permissions::{
@@ -40,17 +53,18 @@ use waddle_server::spaces_pubsub_seed::{
     seed_owner_on_all_nodes, seed_owners_on_node, OwnerSeedOutcome, OwnerSeedPolicy,
 };
 use waddle_server::test_support::{
-    websocket_state_with_ingress, PermissionDurableMembershipSource,
+    websocket_state_with_host_grant_fence, PermissionDurableMembershipSource,
+};
+use waddle_ws_test_support::iq::round_trip;
+use waddle_ws_test_support::stanza::{
+    get, is_error, is_result, pubsub_items, pubsub_publish, pubsub_subscribe, set,
 };
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::muc::affiliation::DurableMembershipSource;
 use waddle_xmpp::muc::room_actor::ChangeAffiliation;
 use waddle_xmpp::muc::room_registry_actor::GetRoom;
 use waddle_xmpp::pubsub::{Affiliation, InMemoryPubSubStorage, PubSubStorage};
-use ws_loopback_support::{
-    get, is_error, is_result, items, publish, round_trip, set, subscribe, Loopback, NS_DISCO_INFO,
-    NS_MAM, NS_MUC, NS_MUC_ADMIN, NS_MUC_OWNER, SPACES,
-};
+use ws_loopback_support::Loopback;
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
@@ -58,18 +72,41 @@ use xmpp_parsers::stanza_error::DefinedCondition;
 const CAROL: &str = "carol@example.com";
 /// An account of a home that is not a trusted home.
 const REMOTE: &str = "eve@remote.example";
+/// The test state's MUC service.
+const MUC: &str = "muc.example.com";
+/// The test state's Spaces service.
+const SPACES: &str = "spaces.example.com";
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+const NS_MAM: &str = "urn:xmpp:mam:2";
+const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 const MUC_MEMBERSONLY: &str = "muc_membersonly";
 
-/// The fixture scope's room served over a loopback socket, with the
-/// replica attached to the store.
+/// The fixture scope's room served over a loopback socket.
 struct ManagedRoom {
     grants: GrantFixture,
     server: Loopback,
+    /// A permission actor without the host-grant fence, standing in for a
+    /// stale mirror or an older binary: it writes and reads the legacy
+    /// relationships the fenced actor refuses.
+    legacy: ActorRef<PermissionActor>,
 }
 
 impl ManagedRoom {
+    /// The fixture's room with the replica attached to the store.
     async fn start(label: &str) -> Option<Self> {
+        Self::serve(label, true).await
+    }
+
+    /// The fixture's room on a replica that has not verified its runtime
+    /// role's privileges on the store.
+    async fn start_unattached(label: &str) -> Option<Self> {
+        Self::serve(label, false).await
+    }
+
+    async fn serve(label: &str, attach: bool) -> Option<Self> {
         let grants = GrantFixture::active(label).await?;
         let pool = Arc::new(
             DatabasePool::try_new(
@@ -80,12 +117,17 @@ impl ManagedRoom {
             .expect("shared database pool"),
         );
         let authority = Arc::new(grants.ingress.authority().await);
-        let state = websocket_state_with_ingress(pool, authority).await;
-        assert!(state
-            .deps
-            .app_state
-            .host_grants
-            .attach(HostGrantAttachment::unverified_for_test(served())));
+        let state = websocket_state_with_host_grant_fence(pool, authority).await;
+        if attach {
+            assert!(state
+                .deps
+                .app_state
+                .host_grants
+                .attach(HostGrantAttachment::unverified_for_test(served())));
+        }
+        let legacy = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
+            grants.ingress.db.clone(),
+        )));
         let server = Loopback::serve(state).await;
         for account in ["owner", "romeo", "alice", "carol"] {
             server.account(account).await;
@@ -93,7 +135,11 @@ impl ManagedRoom {
         // The catalog row says the room is open; the room's binding makes it
         // members-only whatever the row says.
         server.channel(&grants.scope.channel_id, false).await;
-        Some(Self { grants, server })
+        Some(Self {
+            grants,
+            server,
+            legacy,
+        })
     }
 
     fn room(&self) -> &BareJid {
@@ -104,13 +150,26 @@ impl ManagedRoom {
         Object::new(ObjectType::Channel, self.grants.scope.channel_id.as_str())
     }
 
+    /// Reload the replica's enrolled set after the fixture enrolled
+    /// another scope.
+    async fn refresh_enrolled(&self) {
+        self.server
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .enrolled()
+            .refresh()
+            .await
+            .expect("enrolled set refresh");
+    }
+
     /// Hand `account` every legacy grant the room's legacy stores can hold:
     /// a channel owner and member relationship and a parent Space
     /// membership. None of them admits anything in a managed room.
     async fn legacy_grants(&self, account: &str) {
-        let actor = &self.server.state.deps.app_state.permission_actor;
         for relation in ["owner", "member"] {
-            actor
+            self.legacy
                 .ask(WriteTuple {
                     tuple: Tuple::new(
                         self.channel(),
@@ -121,7 +180,7 @@ impl ManagedRoom {
                 .await
                 .expect("legacy channel relationship");
         }
-        actor
+        self.legacy
             .ask(WriteTuple {
                 tuple: Tuple::new(
                     Object::new(ObjectType::Space, self.grants.scope.space_node.as_str()),
@@ -157,13 +216,9 @@ impl ManagedRoom {
     }
 
     /// The legacy channel relationships the room's channel holds for
-    /// `account`, read without the host-grant guard.
+    /// `account`, read without the host-grant fence.
     async fn legacy_relations(&self, account: &str) -> Vec<String> {
-        self.server
-            .state
-            .deps
-            .app_state
-            .permission_actor
+        self.legacy
             .ask(ListRelations {
                 subject: Subject::user(account),
                 object: self.channel(),
@@ -541,14 +596,14 @@ async fn invitations_and_space_pubsub_grant_nothing_in_an_enrolled_scope() {
 
     // The scope's Space node is not served through PubSub.
     let node = fixture.grants.scope.space_node.clone();
-    let reply = round_trip(&mut romeo, get("items", SPACES, items(&node))).await;
+    let reply = round_trip(&mut romeo, get("items", SPACES, pubsub_items(&node))).await;
     assert!(
         is_error(&reply, DefinedCondition::Forbidden),
         "items: {reply:?}"
     );
     let reply = round_trip(
         &mut romeo,
-        set("subscribe", SPACES, subscribe(&node, SENDER)),
+        set("subscribe", SPACES, pubsub_subscribe(&node, SENDER)),
     )
     .await;
     assert!(
@@ -560,7 +615,11 @@ async fn invitations_and_space_pubsub_grant_nothing_in_an_enrolled_scope() {
     );
     let reply = round_trip(
         &mut romeo,
-        set("publish", SPACES, publish(&node, room.as_str(), bookmark)),
+        set(
+            "publish",
+            SPACES,
+            pubsub_publish(&node, room.as_str(), bookmark),
+        ),
     )
     .await;
     assert!(
@@ -762,8 +821,14 @@ async fn owner_reseed_keeps_bans_skips_enrolled_spaces_and_refuses_remote_accoun
         );
 
         // The Space node of an enrolled scope is never seeded.
-        let outcomes =
-            seed_owners_on_node(&storage, &spaces, &enrolled, &[owner.clone()], policy).await;
+        let outcomes = seed_owners_on_node(
+            &storage,
+            &spaces,
+            &enrolled,
+            std::slice::from_ref(&owner),
+            policy,
+        )
+        .await;
         assert_eq!(outcomes, vec![OwnerSeedOutcome::RefusedNode]);
         assert_eq!(
             storage
@@ -783,7 +848,7 @@ async fn owner_reseed_keeps_bans_skips_enrolled_spaces_and_refuses_remote_accoun
             &storage,
             &spaces,
             "plain",
-            &[trusted.clone()],
+            std::slice::from_ref(&trusted),
             OwnerSeedPolicy {
                 issuance: &with_home,
                 host_grants: &gate,

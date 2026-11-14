@@ -98,7 +98,7 @@ pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
 mod mentions_permissions;
 mod muc_admin;
-mod muc_admin_host_grant;
+pub(crate) mod muc_admin_host_grant;
 #[cfg(feature = "clustering")]
 pub(crate) mod muc_admin_relay;
 // XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in

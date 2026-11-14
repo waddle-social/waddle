@@ -1,0 +1,933 @@
+//! Protected effects and metadata of a managed room outside the join, the
+//! archive and administration: each is decided from the canonical grants,
+//! whatever role, affiliation or relationship the room actor, the legacy
+//! stores or a deployment role still hold.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use jid::{BareJid, Jid};
+use waddle_extensions::host_tools::InvocationKind;
+use waddle_extensions::PluginId;
+use waddle_server::auth::session::Session;
+use waddle_server::channel_space_links::ChannelSpaceLink;
+use waddle_server::permissions::host_grant::RoomAffiliation;
+use waddle_server::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
+use waddle_server::server::extension_host_adapter::{
+    ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
+};
+use waddle_server::space_identity::{space_jid_for_node, SpaceNode};
+use waddle_server::test_support::{
+    broadcast_room_system_message, extension_bot_groupchat_refusal, host_grant_read_still_admitted,
+    persist_group_dm_member,
+};
+use waddle_ws_test_support::iq::round_trip;
+use waddle_ws_test_support::stanza::{get, is_error, is_result, result_payload, set, NS_PUBSUB};
+use waddle_ws_test_support::WsXmppClient;
+use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
+use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
+use waddle_xmpp::xep::xep0424::NS_MESSAGE_RETRACT;
+use waddle_xmpp::xep::xep0425::NS_MESSAGE_MODERATE;
+use waddle_xmpp::xep::xep0433::{build_search_request, parse_search_results, SearchRequest};
+use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
+use xmpp_parsers::message::{Lang, Message, MessageType};
+use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stanza_error::DefinedCondition;
+
+use super::host_grant_support::{bare, OWNER, PEER, SENDER};
+use super::{error_condition, join, ManagedRoom, CAROL, MUC, NS_DISCO_INFO, NS_MUC_ADMIN, SPACES};
+
+const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
+const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+const DOMAIN: &str = "example.com";
+const NODE_CHANNELS_LIST: &str = "urn:waddle:admin:channels:list:0";
+const NODE_CHANNELS_DELETE: &str = "urn:waddle:admin:channels:delete:0";
+const NODE_SPACES_LIST: &str = "urn:waddle:admin:spaces:list:0";
+const NODE_SPACES_DELETE: &str = "urn:waddle:admin:spaces:delete:0";
+/// A Space node no scope enrolls.
+const PLAIN_SPACE: &str = "plain-space";
+/// The extension the bot and host-adapter cases act for.
+const PLUGIN: &str = "board";
+
+fn attribute(name: &str) -> minidom::rxml::NcName {
+    minidom::rxml::NcName::try_from(name).expect("valid XML attribute name")
+}
+
+fn moderate(target: &str) -> Element {
+    Element::builder("moderate", NS_MESSAGE_MODERATE)
+        .attr(attribute("id"), target)
+        .append(Element::builder("retract", NS_MESSAGE_RETRACT).build())
+        .build()
+}
+
+fn role_item(nick: &str, role: &str) -> Element {
+    Element::builder("query", NS_MUC_ADMIN)
+        .append(
+            Element::builder("item", NS_MUC_ADMIN)
+                .attr(attribute("nick"), nick)
+                .attr(attribute("role"), role)
+                .build(),
+        )
+        .build()
+}
+
+fn pin_query() -> Element {
+    Element::builder("query", NS_WADDLE_PIN_V0).build()
+}
+
+fn node_disco_info(node: &str) -> Element {
+    Element::builder("query", NS_DISCO_INFO)
+        .attr(attribute("node"), node)
+        .build()
+}
+
+fn disco_items() -> Element {
+    Element::builder("query", NS_DISCO_ITEMS).build()
+}
+
+fn pubsub_retract(node: &str, item_id: &str) -> Element {
+    Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            Element::builder("retract", NS_PUBSUB)
+                .attr(attribute("node"), node)
+                .append(
+                    Element::builder("item", NS_PUBSUB)
+                        .attr(attribute("id"), item_id)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// An XEP-0050 execution of the admin command `node` with `fields`.
+fn admin_command(node: &str, fields: &[(&str, &str)]) -> Element {
+    let mut command = Element::builder("command", NS_COMMANDS)
+        .attr(attribute("node"), node)
+        .attr(attribute("action"), "execute");
+    if !fields.is_empty() {
+        let form = fields.iter().fold(
+            DataForm::new(FormType::Submit).add_field(Field::form_type(node)),
+            |form, (var, value)| form.add_field(Field::text_single(*var, *value)),
+        );
+        command = command.append(form.to_element());
+    }
+    command.build()
+}
+
+/// The `jid` attributes of a disco#items result's items.
+fn item_jids(reply: &xmpp_parsers::iq::Iq) -> Vec<String> {
+    result_payload(reply)
+        .map(|query| {
+            query
+                .children()
+                .filter_map(|item| item.attr("jid").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `node` attributes of a disco#items result's items.
+fn item_nodes(reply: &xmpp_parsers::iq::Iq) -> Vec<String> {
+    result_payload(reply)
+        .map(|query| {
+            query
+                .children()
+                .filter_map(|item| item.attr("node").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `text` is the text of `element` or of any element below it.
+fn mentions(element: &Element, text: &str) -> bool {
+    element.text().trim() == text || element.children().any(|child| mentions(child, text))
+}
+
+/// Whether `client` receives a groupchat message from `room` whose body is
+/// `body` within `wait`.
+async fn receives_room_message(
+    client: &mut WsXmppClient,
+    room: &BareJid,
+    body: &str,
+    wait: Duration,
+) -> bool {
+    client
+        .recv_matching_within(wait, |frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                element.name() == "message"
+                    && element.attr("from") == Some(room.as_str())
+                    && element
+                        .children()
+                        .any(|child| child.name() == "body" && child.text() == body)
+            })
+        })
+        .await
+        .is_ok()
+}
+
+/// Make `account` a community owner: an Owner affiliation on a Spaces node
+/// no scope enrolls.
+async fn community_owner(fixture: &ManagedRoom, account: &str) {
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    let storage = &fixture.server.state.deps.app_state.pubsub_storage;
+    storage
+        .get_or_create_node(&spaces, PLAIN_SPACE)
+        .await
+        .expect("plain Space node");
+    storage
+        .update_node_config(&spaces, PLAIN_SPACE, &NodeConfig::spaces_public())
+        .await
+        .expect("plain Space configuration");
+    storage
+        .set_affiliation(&spaces, PLAIN_SPACE, &bare(account), Affiliation::Owner)
+        .await
+        .expect("community owner");
+}
+
+/// Register the admin channel and Space commands on the fixture's state, as
+/// a deployment's startup does.
+async fn register_admin_commands(fixture: &ManagedRoom) {
+    let state = &fixture.server.state;
+    waddle_server::admin::spaces::register(
+        &state.deps.protocol.command_registry,
+        Arc::clone(&state.deps.app_state),
+    )
+    .await;
+    waddle_server::admin::channels::register(
+        &state.deps.protocol.command_registry,
+        Arc::clone(&state.deps.app_state),
+        Arc::clone(state),
+        Arc::clone(&state.deps.protocol.connection_registry),
+        Arc::clone(&state.deps.protocol.sm_session_registry),
+        None,
+    )
+    .await;
+}
+
+fn invocation(account: &str) -> ExtensionInvocation {
+    let localpart = account.split('@').next().expect("account localpart");
+    ExtensionInvocation {
+        session: Some(Session::new(account, localpart, localpart)),
+        actor_jid: format!("{account}/extension")
+            .parse()
+            .expect("invoking resource"),
+        plugin_id: PluginId::try_new(PLUGIN).expect("plugin id"),
+        source_room: None,
+        kind: InvocationKind::Command,
+        provider_room_grants: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn message_moderation_needs_the_canonical_moderate_action() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_moderate").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut owner = fixture.server.client("owner", "phone").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "the owner's join: {joined:?}"
+    );
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+
+    // The owner seats the member as a moderator, and the room actor's list
+    // names the member an owner: neither is a canonical grant.
+    let reply = round_trip(
+        &mut owner,
+        set("voice", room.as_str(), role_item("romeo", "moderator")),
+    )
+    .await;
+    assert!(is_result(&reply), "the moderator role: {reply:?}");
+    fixture
+        .mirror_affiliation(SENDER, waddle_xmpp::Affiliation::Owner)
+        .await;
+
+    let reply = round_trip(
+        &mut romeo,
+        set("moderate", room.as_str(), moderate("absent-message")),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::Forbidden),
+        "a member moderated through the actor's role and list: {reply:?}"
+    );
+    // The canonical owner passes authorization; the message it names does
+    // not exist.
+    let reply = round_trip(
+        &mut owner,
+        set("moderate", room.as_str(), moderate("absent-message")),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::ItemNotFound),
+        "the owner's moderation: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn the_pin_list_is_refused_to_a_seated_occupant_whose_grant_was_revoked() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_pins").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut alice = fixture.server.client("alice", "phone").await;
+    let joined = join(&mut alice, &room, "alice").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+    let reply = round_trip(&mut alice, get("pins", room.as_str(), pin_query())).await;
+    assert!(is_result(&reply), "a member's pin list: {reply:?}");
+
+    // A ban recorded in the store leaves the occupant seated until the
+    // revocation fence ejects it; the pin list is a protected read.
+    fixture
+        .grants
+        .set(OWNER, PEER, RoomAffiliation::Outcast)
+        .await
+        .expect("ban");
+    let reply = round_trip(&mut alice, get("pins-again", room.as_str(), pin_query())).await;
+    assert!(
+        is_error(&reply, DefinedCondition::Forbidden),
+        "a banned occupant read the pin list: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_rooms_own_message_reaches_only_occupants_that_may_read_it() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_system").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+    let mut alice = fixture.server.client("alice", "phone").await;
+    let joined = join(&mut alice, &room, "alice").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+    fixture
+        .grants
+        .set(OWNER, PEER, RoomAffiliation::Outcast)
+        .await
+        .expect("ban");
+
+    let mut message = Message::new(Some(Jid::from(room.clone())));
+    message.from = Some(Jid::from(room.clone()));
+    message.type_ = MessageType::Groupchat;
+    message
+        .bodies
+        .insert(Lang(String::new()), "the room speaks".to_owned());
+    let archived =
+        broadcast_room_system_message(&fixture.server.state, room.clone(), message).await;
+    assert!(archived.is_some(), "the room's message was not archived");
+    assert!(
+        receives_room_message(&mut romeo, &room, "the room speaks", Duration::from_secs(5)).await,
+        "a member did not receive the room's message"
+    );
+    assert!(
+        !receives_room_message(&mut alice, &room, "the room speaks", Duration::from_secs(1)).await,
+        "a banned occupant received the room's message"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn channel_search_finds_a_managed_room_only_for_an_account_that_may_view_it() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_search").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let search = |id: &str| {
+        build_search_request(
+            Jid::from(MUC.parse::<BareJid>().expect("MUC service")),
+            &SearchRequest {
+                query: fixture.grants.scope.channel_id.clone(),
+                max: None,
+                rsm: None,
+            },
+            id,
+        )
+    };
+    let found = |reply: &xmpp_parsers::iq::Iq| {
+        parse_search_results(reply)
+            .iter()
+            .any(|result| result.address == room.as_str())
+    };
+
+    // The catalog row describes the room, but not to an account whose
+    // grants do not allow viewing it, whatever legacy relationship it holds.
+    fixture.legacy_grants(CAROL).await;
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let reply = round_trip(&mut carol, search("carol-search")).await;
+    assert!(is_result(&reply), "search refused: {reply:?}");
+    assert!(!found(&reply), "an ungranted account found the room");
+
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let reply = round_trip(&mut romeo, search("romeo-search")).await;
+    assert!(found(&reply), "a member did not find the room: {reply:?}");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn the_enrolled_space_and_the_managed_room_are_not_described_by_the_services() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_disco").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let node = fixture.grants.scope.space_node.clone();
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    let storage = &fixture.server.state.deps.protocol.pubsub_storage;
+    for listed in [node.as_str(), PLAIN_SPACE] {
+        storage
+            .get_or_create_node(&spaces, listed)
+            .await
+            .expect("Space node");
+        storage
+            .update_node_config(&spaces, listed, &NodeConfig::spaces_public())
+            .await
+            .expect("Space configuration");
+    }
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+
+    // A member is told the scope's Space node does not exist.
+    let reply = round_trip(
+        &mut romeo,
+        get("space-info", SPACES, node_disco_info(&node)),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::ItemNotFound),
+        "the enrolled Space node was described: {reply:?}"
+    );
+
+    // Neither service lists them, though the room's catalog row is public.
+    let reply = round_trip(&mut romeo, get("rooms", MUC, disco_items())).await;
+    assert!(is_result(&reply), "MUC disco#items: {reply:?}");
+    assert!(
+        !item_jids(&reply).contains(&room.to_string()),
+        "the managed room was listed: {reply:?}"
+    );
+    let reply = round_trip(&mut romeo, get("spaces", SPACES, disco_items())).await;
+    assert!(is_result(&reply), "Spaces disco#items: {reply:?}");
+    let nodes = item_nodes(&reply);
+    assert!(
+        !nodes.contains(&node),
+        "the enrolled Space node was listed: {reply:?}"
+    );
+    assert!(
+        nodes.contains(&PLAIN_SPACE.to_owned()),
+        "an unenrolled public Space was not listed: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_spaces_retract_does_not_move_a_managed_room() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_retract").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    community_owner(&fixture, CAROL).await;
+    fixture
+        .server
+        .state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Space, PLAIN_SPACE),
+                Relation::new("owner"),
+                Subject::user(CAROL),
+            ),
+        })
+        .await
+        .expect("Space owner");
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let reply = round_trip(
+        &mut carol,
+        set(
+            "retract",
+            SPACES,
+            pubsub_retract(PLAIN_SPACE, room.as_str()),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::Forbidden),
+        "a Spaces retract moved a managed room: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_managed_room_without_a_channel_row_is_not_joined() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_rowless").await else {
+        return;
+    };
+    // A second scope's room, whose member is the fixture's sender, has no
+    // catalog row.
+    let rowless = fixture.grants.enroll_another().await;
+    fixture.refresh_enrolled().await;
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let refused = join(&mut romeo, &rowless.room, "romeo").await;
+    assert_eq!(
+        error_condition(&refused).as_deref(),
+        Some("service-unavailable"),
+        "a managed room was joined as an instant room: {refused:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_replica_without_an_attachment_admits_nobody_to_a_managed_room() {
+    let Some(fixture) = ManagedRoom::start_unattached("hg_sink_unattached").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let refused = join(&mut romeo, &room, "romeo").await;
+    assert!(
+        error_condition(&refused).is_some(),
+        "an unattached replica admitted a member: {refused:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn extension_bots_are_not_seated_in_a_managed_room() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_bot").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let refusal =
+        extension_bot_groupchat_refusal(&fixture.server.state, PLUGIN, &room, "hello").await;
+    assert_eq!(
+        refusal.as_deref(),
+        Some("extension bots hold no grant in a managed room")
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn the_extension_host_decides_a_managed_room_by_its_canonical_grants() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_host").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+    let host = ExtensionHostAdapter::new(Arc::clone(&fixture.server.state));
+
+    // A member reads the room's occupants and finds the room.
+    let members = host
+        .list_muc_members(&invocation(SENDER), &room)
+        .await
+        .expect("a member's occupant list");
+    assert!(!members.is_empty());
+    let channels = host
+        .list_channels(&invocation(SENDER), 500, 0)
+        .await
+        .expect("a member's channel list");
+    assert!(channels.iter().any(|channel| channel.room == room));
+
+    // A canonical ban denies it, whatever legacy relationship remains.
+    fixture.legacy_grants(PEER).await;
+    fixture
+        .grants
+        .set(OWNER, PEER, RoomAffiliation::Outcast)
+        .await
+        .expect("ban");
+    let denied = host.list_muc_members(&invocation(PEER), &room).await;
+    assert!(
+        matches!(denied, Err(ExtensionHostAdapterError::NotAuthorized)),
+        "a banned account read the occupants: {denied:?}"
+    );
+
+    // Deployment ownership is not a grant of the room.
+    fixture
+        .server
+        .state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Server, "deployment"),
+                Relation::new("owner"),
+                Subject::user(CAROL),
+            ),
+        })
+        .await
+        .expect("deployment owner");
+    let denied = host.list_muc_members(&invocation(CAROL), &room).await;
+    assert!(
+        matches!(denied, Err(ExtensionHostAdapterError::NotAuthorized)),
+        "the deployment owner read the occupants: {denied:?}"
+    );
+    let channels = host
+        .list_channels(&invocation(CAROL), 500, 0)
+        .await
+        .expect("the deployment owner's channel list");
+    assert!(
+        !channels.iter().any(|channel| channel.room == room),
+        "the deployment owner was shown the managed room"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn admin_commands_refuse_a_managed_room_its_space_and_a_cascade_reaching_it() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_admin").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    register_admin_commands(&fixture).await;
+    community_owner(&fixture, CAROL).await;
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    let plain_space =
+        space_jid_for_node(&spaces, &SpaceNode::from(PLAIN_SPACE)).expect("plain Space JID");
+    let scope_space = space_jid_for_node(
+        &spaces,
+        &SpaceNode::from(fixture.grants.scope.space_node.as_str()),
+    )
+    .expect("scope Space JID");
+    let mut carol = fixture.server.client("carol", "phone").await;
+
+    let reply = round_trip(
+        &mut carol,
+        set(
+            "delete-room",
+            DOMAIN,
+            admin_command(
+                NODE_CHANNELS_DELETE,
+                &[("channel_jid", room.as_str()), ("confirm", "yes")],
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::NotAllowed),
+        "a managed room was deleted by an admin command: {reply:?}"
+    );
+
+    let reply = round_trip(
+        &mut carol,
+        set(
+            "delete-scope-space",
+            DOMAIN,
+            admin_command(
+                NODE_SPACES_DELETE,
+                &[("space_jid", scope_space.as_str()), ("confirm", "yes")],
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::NotAllowed),
+        "an enrolled Space was deleted by an admin command: {reply:?}"
+    );
+
+    // A Space whose deletion would destroy the managed room is refused
+    // whole: the Space node survives.
+    fixture
+        .server
+        .state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&ChannelSpaceLink {
+            channel_jid: room.clone(),
+            space_jid: plain_space.clone(),
+            space_node: SpaceNode::from(PLAIN_SPACE),
+            created_at: 0,
+        })
+        .await
+        .expect("channel-space link");
+    let reply = round_trip(
+        &mut carol,
+        set(
+            "delete-plain-space",
+            DOMAIN,
+            admin_command(
+                NODE_SPACES_DELETE,
+                &[("space_jid", plain_space.as_str()), ("confirm", "yes")],
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::NotAllowed),
+        "a Space deletion reached a managed room: {reply:?}"
+    );
+    assert!(fixture
+        .server
+        .state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_node(&spaces, PLAIN_SPACE)
+        .await
+        .expect("Space node read")
+        .is_some());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn admin_listings_omit_a_managed_room_and_its_space_without_canonical_standing() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_admin_lists").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let node = fixture.grants.scope.space_node.clone();
+    register_admin_commands(&fixture).await;
+    community_owner(&fixture, CAROL).await;
+    community_owner(&fixture, OWNER).await;
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    fixture
+        .server
+        .state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_or_create_node(&spaces, &node)
+        .await
+        .expect("scope Space node");
+
+    let listing = |reply: &xmpp_parsers::iq::Iq| {
+        result_payload(reply)
+            .cloned()
+            .unwrap_or_else(|| panic!("the listing was refused: {reply:?}"))
+    };
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let reply = round_trip(
+        &mut carol,
+        set("spaces", DOMAIN, admin_command(NODE_SPACES_LIST, &[])),
+    )
+    .await;
+    let spaces_listing = listing(&reply);
+    assert!(!mentions(&spaces_listing, &node), "{spaces_listing:?}");
+    assert!(mentions(&spaces_listing, PLAIN_SPACE), "{spaces_listing:?}");
+
+    // A community owner without a grant is not shown the managed room; its
+    // canonical owner is.
+    let reply = round_trip(
+        &mut carol,
+        set("channels", DOMAIN, admin_command(NODE_CHANNELS_LIST, &[])),
+    )
+    .await;
+    assert!(!mentions(&listing(&reply), room.as_str()));
+    let mut owner = fixture.server.client("owner", "phone").await;
+    let reply = round_trip(
+        &mut owner,
+        set("channels", DOMAIN, admin_command(NODE_CHANNELS_LIST, &[])),
+    )
+    .await;
+    assert!(mentions(&listing(&reply), room.as_str()), "{reply:?}");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn group_dm_member_writers_refuse_a_managed_rooms_channel() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_group_dm").await else {
+        return;
+    };
+    let refused = persist_group_dm_member(
+        &fixture.server.state.deps.app_state,
+        &fixture.grants.scope.channel_id,
+        &bare(CAROL),
+    )
+    .await;
+    assert!(refused.is_err(), "a group-DM writer wrote a managed room");
+    assert!(fixture.legacy_relations(CAROL).await.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_protected_read_is_decided_again_after_a_revoke() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_reread").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let state = &fixture.server.state;
+    let alice = bare(PEER);
+    assert_eq!(
+        host_grant_read_still_admitted(state, &room, Some(&alice)).await,
+        Some(true)
+    );
+    fixture
+        .grants
+        .set(OWNER, PEER, RoomAffiliation::Outcast)
+        .await
+        .expect("ban");
+    assert_eq!(
+        host_grant_read_still_admitted(state, &room, Some(&alice)).await,
+        Some(false)
+    );
+    // A room no scope manages keeps its single check.
+    let unmanaged: BareJid = format!("unmanaged-room@{MUC}").parse().expect("room JID");
+    assert_eq!(
+        host_grant_read_still_admitted(state, &unmanaged, Some(&alice)).await,
+        None
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn an_affiliation_change_whose_commit_reply_was_lost_is_read_back() {
+    use waddle_server::permissions::host_grant::HostGrantCommitFault;
+    use waddle_server::test_support::record_room_affiliation_under_commit_fault;
+    let Some(fixture) = ManagedRoom::start("hg_sink_commit").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let state = &fixture.server.state;
+
+    // The change committed and its acknowledgement was lost: the request
+    // reads the operation back and reports it recorded.
+    assert_eq!(
+        record_room_affiliation_under_commit_fault(
+            state,
+            &room,
+            &bare(OWNER),
+            &bare(CAROL),
+            waddle_xmpp::Affiliation::Member,
+            HostGrantCommitFault::ReplyLostAfterCommit,
+        )
+        .await,
+        Ok(())
+    );
+    assert_eq!(
+        fixture.grants.affiliations(CAROL).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::None))
+    );
+
+    // The change never committed: the read back finds no operation, the
+    // request fails, and nothing is recorded.
+    let dave = "dave@example.com";
+    assert_eq!(
+        record_room_affiliation_under_commit_fault(
+            state,
+            &room,
+            &bare(OWNER),
+            &bare(dave),
+            waddle_xmpp::Affiliation::Member,
+            HostGrantCommitFault::LostBeforeCommit,
+        )
+        .await,
+        Err(DefinedCondition::InternalServerError)
+    );
+    assert_eq!(fixture.grants.affiliations(dave).await, None);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn the_topology_bootstrap_leaves_an_enrolled_default_channel_and_general_space_alone() {
+    use waddle_server::permissions::host_grant::{
+        BootstrapGrant, EnrollScope, GrantOperationId, ManagedRoom as BoundRoom, MutationReceipt,
+        ScopeKey, ScopeLifecycleId,
+    };
+    use waddle_server::permissions::ListSubjects;
+    use waddle_server::test_support::bootstrap_fresh_topology;
+    let Some(fixture) = ManagedRoom::start("hg_sink_topology").await else {
+        return;
+    };
+    // A scope whose Space is the General Space and whose room is the
+    // default chat channel, which the bootstrap otherwise writes, places in
+    // that Space and opens.
+    let chat: BareJid = format!("chat@{MUC}").parse().expect("chat room");
+    let receipt = fixture
+        .grants
+        .store
+        .enroll_scope(
+            &EnrollScope {
+                operation: GrantOperationId::generate(),
+                lifecycle: ScopeLifecycleId::generate(),
+                key: ScopeKey::new(SPACES.parse().expect("Spaces service"), "general")
+                    .expect("scope key"),
+                rooms: vec![BoundRoom::new(chat.clone()).expect("bound room")],
+                bootstrap: vec![BootstrapGrant {
+                    room: chat.clone(),
+                    subject: super::host_grant_support::subject(OWNER),
+                    affiliation: RoomAffiliation::Owner,
+                }],
+            },
+            &fixture.grants.policy,
+        )
+        .await
+        .expect("enroll the default channel");
+    assert!(matches!(receipt, MutationReceipt::Recorded(_)));
+    fixture.refresh_enrolled().await;
+
+    bootstrap_fresh_topology(&fixture.server.state)
+        .await
+        .expect("topology bootstrap");
+
+    let catalog = |id: &'static str| {
+        let ingress = &fixture.grants.ingress;
+        async move {
+            ingress
+                .optional_text(&format!("SELECT id FROM channels WHERE id = '{id}'"))
+                .await
+        }
+    };
+    // The enrolled default channel gets no catalog row; another default
+    // channel does.
+    assert_eq!(catalog("chat").await, None);
+    assert_eq!(
+        catalog("announcements").await.as_deref(),
+        Some("announcements")
+    );
+    // The enrolled General Space node is not created, and the channel gets
+    // no parent relationship.
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    assert!(fixture
+        .server
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces, "general")
+        .await
+        .expect("node lookup")
+        .is_none());
+    let parents = fixture
+        .legacy
+        .ask(ListSubjects {
+            object: Object::new(ObjectType::Channel, "chat"),
+            relation: Relation::new("parent"),
+        })
+        .await
+        .expect("parent relationships");
+    assert!(
+        parents.is_empty(),
+        "the bootstrap parented chat: {parents:?}"
+    );
+    fixture.close().await;
+}

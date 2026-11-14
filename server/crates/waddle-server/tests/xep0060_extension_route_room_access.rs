@@ -27,14 +27,19 @@ use waddle_server::permissions::{
     DeleteTuple, Object, ObjectType, Relation, Subject, Tuple, WriteTuple,
 };
 use waddle_server::test_support::websocket_state_with_extension_manager;
-use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
-use ws_loopback_support::{
-    get, is_error, is_result, items, publish, room, round_trip, set, subscribe, Loopback,
-    EXTENSIONS,
+use waddle_ws_test_support::iq::round_trip;
+use waddle_ws_test_support::stanza::{
+    get, is_error, is_result, pubsub_items, pubsub_publish, pubsub_subscribe, set,
 };
+use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
+use ws_loopback_support::Loopback;
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
+/// The test state's MUC service.
+const MUC: &str = "muc.example.com";
+/// The test state's extensions service.
+const EXTENSIONS: &str = "extensions.example.com";
 const CHANNEL: &str = "board-room";
 const PAYLOAD_NS: &str = "urn:example:board";
 
@@ -48,6 +53,11 @@ fn route() -> ExtensionRouteDescriptor {
         state_node: PubSubNode::try_new("urn:example:board:{room}").expect("state node"),
         payload_namespace: PayloadNamespace::try_new(PAYLOAD_NS).expect("payload namespace"),
     }
+}
+
+/// The room JID of the channel `channel_id`.
+fn room(channel_id: &str) -> BareJid {
+    format!("{channel_id}@{MUC}").parse().expect("room JID")
 }
 
 /// The route's state node for the fixture room.
@@ -171,7 +181,7 @@ async fn a_banned_member_keeps_a_stale_affiliation_and_cannot_subscribe_through_
     let mut bob = fixture.server.client("bob", "laptop").await;
 
     // Reading the room's extension state hands bob a member affiliation.
-    let reply = round_trip(&mut bob, get("read", EXTENSIONS, items(&node()))).await;
+    let reply = round_trip(&mut bob, get("read", EXTENSIONS, pubsub_items(&node()))).await;
     assert!(is_result(&reply), "member read refused: {reply:?}");
     assert_eq!(
         fixture.node_affiliation(&fixture.bob).await,
@@ -190,7 +200,7 @@ async fn a_banned_member_keeps_a_stale_affiliation_and_cannot_subscribe_through_
         set(
             "subscribe",
             EXTENSIONS,
-            subscribe(&node(), fixture.bob.as_str()),
+            pubsub_subscribe(&node(), fixture.bob.as_str()),
         ),
     )
     .await;
@@ -198,7 +208,7 @@ async fn a_banned_member_keeps_a_stale_affiliation_and_cannot_subscribe_through_
         is_error(&reply, DefinedCondition::Forbidden),
         "a banned account subscribed: {reply:?}"
     );
-    let reply = round_trip(&mut bob, get("reread", EXTENSIONS, items(&node()))).await;
+    let reply = round_trip(&mut bob, get("reread", EXTENSIONS, pubsub_items(&node()))).await;
     assert!(
         is_error(&reply, DefinedCondition::Forbidden),
         "a banned account read the room's state: {reply:?}"
@@ -216,10 +226,10 @@ async fn a_subscription_made_before_a_ban_receives_no_event_after_it() {
         (&mut bob, "bob", "bob-read"),
         (&mut carol, "carol", "carol-read"),
     ] {
-        let reply = round_trip(client, get(id, EXTENSIONS, items(&node()))).await;
+        let reply = round_trip(client, get(id, EXTENSIONS, pubsub_items(&node()))).await;
         assert!(is_result(&reply), "{account} read refused: {reply:?}");
         let jid = format!("{account}@{}", ws_loopback_support::DOMAIN);
-        let reply = round_trip(client, set(id, EXTENSIONS, subscribe(&node(), &jid))).await;
+        let reply = round_trip(client, set(id, EXTENSIONS, pubsub_subscribe(&node(), &jid))).await;
         assert!(
             is_result(&reply),
             "{account} subscription refused: {reply:?}"
@@ -232,7 +242,7 @@ async fn a_subscription_made_before_a_ban_receives_no_event_after_it() {
         set(
             "post",
             EXTENSIONS,
-            publish(&node(), "card-1", card("hello")),
+            pubsub_publish(&node(), "card-1", card("hello")),
         ),
     )
     .await;
@@ -261,7 +271,11 @@ async fn a_banned_member_cannot_publish_through_a_publisher_affiliation() {
     let mut bob = fixture.server.client("bob", "laptop").await;
     let reply = round_trip(
         &mut bob,
-        set("post", EXTENSIONS, publish(&node(), "card-1", card("spam"))),
+        set(
+            "post",
+            EXTENSIONS,
+            pubsub_publish(&node(), "card-1", card("spam")),
+        ),
     )
     .await;
     assert!(
