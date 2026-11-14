@@ -2,58 +2,14 @@
 
 use super::observe;
 use super::websocket_stream_close_element;
-#[cfg(test)]
-use super::Arc;
-use super::DbExecute;
 use super::IngressUowError;
-use super::PrincipalResolution;
 use super::SmInboundCompletionTracker;
 use super::{apply_sm_ack_observation, observe_sm_ack, SmAckObservation};
 use super::{
-    debug, info, warn, BareJid, ConnectionPhase, Element, FromStr, Session, SmEnable, SmResume,
-    SmStanza, StreamManagementState, WebSocketState,
+    debug, info, warn, ConnectionPhase, Element, FromStr, Session, SmEnable, SmResume, SmStanza,
+    StreamManagementState, WebSocketState,
 };
 use super::{ResponseFrame, StreamErrorFrame};
-
-/// Operation-owned resume claim.  Dropping an uncommitted guard returns the
-/// frozen snapshot to the registry without creating server-local claim state.
-pub(in crate::server::routes::websocket) struct SmResumeClaimGuard {
-    pub(in crate::server::routes::websocket::stream_management) registry:
-        std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
-    pub(in crate::server::routes::websocket::stream_management) stream_id: String,
-    pub(in crate::server::routes::websocket::stream_management) armed: bool,
-}
-
-impl SmResumeClaimGuard {
-    pub(in crate::server::routes::websocket::stream_management) fn new(
-        registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
-        stream_id: String,
-    ) -> Self {
-        Self {
-            registry,
-            stream_id,
-            armed: true,
-        }
-    }
-
-    pub(in crate::server::routes::websocket) fn commit(mut self) {
-        self.armed = false;
-    }
-
-    pub(in crate::server::routes::websocket::stream_management) async fn release(mut self) {
-        if self.registry.release_claim(&self.stream_id).await.is_ok() {
-            self.armed = false;
-        }
-    }
-}
-
-impl Drop for SmResumeClaimGuard {
-    fn drop(&mut self) {
-        if self.armed && !self.registry.defer_claimed_resume_release(&self.stream_id) {
-            warn!(stream_id = %self.stream_id, "cancelled SM resume could not retain exact claim cleanup responsibility");
-        }
-    }
-}
 
 pub(in crate::server::routes::websocket::stream_management) struct SmEnableClaimGuard {
     pub(in crate::server::routes::websocket::stream_management) registry:
@@ -361,11 +317,6 @@ pub(in crate::server::routes::websocket) struct SmCtx<'a> {
     pub(in crate::server::routes::websocket) pending_subscribes_flushed: &'a mut bool,
     pub(in crate::server::routes::websocket) pending_resume_stream_id: &'a mut Option<String>,
     pub(in crate::server::routes::websocket) pending_resume_h: &'a mut Option<u32>,
-    pub(in crate::server::routes::websocket) pending_resume_claim:
-        &'a mut Option<SmResumeClaimGuard>,
-    #[cfg(test)]
-    pub(in crate::server::routes::websocket) pre_final_principal_recheck_test_hook:
-        &'a mut Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
     /// the responses it returns — those are replay stanzas already tracked
     /// in the unacked queue.
@@ -826,214 +777,42 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
         None => max_resume_secs,
     };
     if enable.resume {
-        if let Some(store) = super::durable::selected_store(state) {
-            return super::durable::enable(
-                store,
-                state,
-                super::durable::DurableEnable {
-                    link: owner.durable_sm,
-                    binding: owner.binding,
-                    session: owner.session,
-                    full_jid: phase.bound_jid(),
-                    max_resume_secs: max,
-                    occupancy_session: owner.occupancy_session,
-                    pending_commit,
-                },
-            )
-            .await;
-        }
-    }
-    let stream_id = uuid::Uuid::new_v4().to_string();
-    // ADR-0017 Phase 3 Slice 6, element 8: for a resumable enable, ensure
-    // this node's `ClaimStore` claim at `<enable/>` time — not only at detach
-    // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
-    // claim row for a still-live session, a cross-node resume attempt
-    // would have nothing to discover: it needs the `clustering_claims` row
-    // to exist to know this entity is "live, owned by this node" at all.
-    // `ensure_claimed`'s self-idempotence (see the method's own doc
-    // comment) is exactly what keeps this call from spuriously conflicting
-    // with the detach-time call for the same stream id later in this
-    // session's lifetime. No-op in practice for single-node deployments
-    // (`InProcessClaimStore`'s bookkeeping, never a foreign conflict).
-    // A non-resumable stream has no `previd`, is never detached, and cannot
-    // be discovered or resumed cross-node. Giving it a durable ownership
-    // claim would retain an entity with no terminal close path, so it does
-    // not participate in clustered SM ownership at all.
-    let claim_publication = if enable.resume {
-        let Some(publication) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .ensure_session_claim(&stream_id)
-            .await
-        else {
-            warn!(
-                stream_id = %stream_id,
-                "SM enable rejected because exact claim admission did not complete"
-            );
+        // Every resumable session belongs to the durable authority. A state
+        // that never selected it offers no resumption.
+        let Some(store) = super::durable::selected_store(state) else {
             record_sm_enable(SmEnableOutcome::Refused);
             return vec![ResponseFrame::from(
-                SmFailed::with_condition("resource-constraint").to_element(),
+                SmFailed::with_condition("feature-not-implemented").to_element(),
             )];
         };
-        Some(publication)
-    } else {
-        None
-    };
-    let fence = state
-        .deps
-        .protocol
-        .sm_session_registry
-        .current_sm_claim_fence(&stream_id);
-    let claim_guard = claim_publication.map(|publication| {
-        SmEnableClaimGuard::new(
-            state.deps.protocol.sm_session_registry.clone(),
-            waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
-            publication,
+        return super::durable::enable(
+            store,
+            state,
+            super::durable::DurableEnable {
+                link: owner.durable_sm,
+                binding: owner.binding,
+                session: owner.session,
+                full_jid: phase.bound_jid(),
+                max_resume_secs: max,
+                occupancy_session: owner.occupancy_session,
+                pending_commit,
+            },
         )
-    });
-    if enable.resume
-        && state
-            .deps
-            .protocol
-            .ingress
-            .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
-                stream_id.clone(),
-            ))
-            .await
-            .is_err()
-    {
-        record_sm_enable(SmEnableOutcome::Failed);
-        return vec![ResponseFrame::from(
-            SmFailed::with_condition("resource-constraint").to_element(),
-        )];
+        .await;
     }
-    // The pending commit retains both exact cleanup responsibility and the
-    // identity-publication guard through the `<enabled/>` transport write.
-    // Identity rotation therefore cannot demote the durable claim in the gap
-    // between admission and the state the peer has observed.
-    let enabled = if enable.resume {
-        SmEnabled::with_resume(stream_id.clone(), max)
-    } else {
-        SmEnabled::new(stream_id.clone())
-    };
+    // A non-resumable stream has no `previd`, is never detached and cannot
+    // be resumed, so it takes no session claim and enrolls no ingress
+    // stream. Its counters live only on this connection.
+    let stream_id = uuid::Uuid::new_v4().to_string();
     *pending_commit = Some(SmEnableCommit::new(
-        claim_guard,
-        fence,
-        waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
-        enable.resume,
+        None,
+        None,
+        waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
+        false,
         max,
     ));
-    if enable.resume {
-        record_sm_enable(SmEnableOutcome::Enabled);
-        vec![ResponseFrame::SmEnabled(enabled.to_element())]
-    } else {
-        record_sm_enable(SmEnableOutcome::EnabledWithoutResume);
-        vec![ResponseFrame::from(enabled.to_element())]
-    }
-}
-
-/// Outcome of racing [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::prepare_cross_node_resume`]
-/// — the cancellable, read-only half of a cross-node resume attempt — against
-/// this node's graceful-shutdown token (council-adjudicated FIX 3, corrected
-/// by FIX A/deviation 47's rewrite: only the read-only `prepare` half is ever
-/// raced; the write half,
-/// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::finish_cross_node_steal`],
-/// always runs to completion once reached — see `cross_node_resume.rs`'s
-/// module doc "Cancellation boundary" section for why racing the whole
-/// attempt was unsound). It remains a `waddle-server`-only concern, not part
-/// of `waddle-xmpp`'s registry API.
-pub(in crate::server::routes::websocket) enum CrossNodeAttemptOutcome {
-    /// The attempt reached a terminal outcome (successfully or with an
-    /// error) before shutdown fired, OR `finish_cross_node_steal` ran (it
-    /// is never raced, so it always reaches this variant once started).
-    Completed(
-        Result<
-            waddle_xmpp::stream_management::CrossNodeResumeOutcome,
-            waddle_xmpp::stream_management::SmRegistryError,
-        >,
-    ),
-    /// This node's graceful-shutdown token fired before `prepare_cross_node_resume`
-    /// produced even a [`waddle_xmpp::stream_management::CrossNodeResumeStage::ReadyToSteal`]
-    /// ticket — abandoned cleanly, never retried, and (unlike the pre-FIX-A
-    /// design) provably no write was ever issued: `prepare_cross_node_resume`
-    /// performs none.
-    ShutdownAbandoned,
-}
-
-/// Outcome of racing only `prepare_cross_node_resume` (FIX A). Distinct from
-/// [`CrossNodeAttemptOutcome`] because a `ReadyToSteal` ticket is not itself
-/// a terminal state — it still needs `finish_cross_node_steal`, called
-/// un-raced, immediately after.
-pub(in crate::server::routes::websocket::stream_management) enum PrepareRaceOutcome {
-    ShutdownAbandoned,
-    Terminal(
-        Result<
-            waddle_xmpp::stream_management::CrossNodeResumeOutcome,
-            waddle_xmpp::stream_management::SmRegistryError,
-        >,
-    ),
-    ReadyToSteal(waddle_xmpp::stream_management::StealTicket),
-}
-
-/// Attempt cross-node XEP-0198 resume for `stream_id`, verifying `bare_jid`
-/// (the caller's already-established identity) against whatever cross-node
-/// claim/persisted snapshot is found. Races only the cancellable
-/// `prepare_cross_node_resume` half against this node's graceful-shutdown
-/// token (FIX A/deviation 47's rewrite) — `finish_cross_node_steal` always
-/// runs to completion once reached; see `cross_node_resume.rs`'s module doc,
-/// "Cancellation boundary" section, for why racing the whole attempt is
-/// unsound.
-///
-/// This is the single XEP-0198 resume path and the only place its
-/// cancellation-safe cross-node machinery races against shutdown.
-pub(in crate::server::routes::websocket) async fn attempt_cross_node_resume_raced(
-    state: &WebSocketState,
-    stream_id: &str,
-    bare_jid: &BareJid,
-) -> super::CrossNodeAttemptOutcome {
-    let handshake_budget = state
-        .deps
-        .app_state
-        .clustering_claims
-        .resume_handshake_timeout()
-        // Unreachable in practice: a `None` budget only occurs when
-        // clustering is disabled/not compiled in, in which case
-        // `prepare_cross_node_resume` itself short-circuits to `NotFound`
-        // before ever consulting this budget.
-        .unwrap_or(std::time::Duration::ZERO);
-    let shutdown_token = state.deps.shutdown.stop_token();
-    let prepared = tokio::select! {
-        biased;
-        _ = shutdown_token.cancelled() => PrepareRaceOutcome::ShutdownAbandoned,
-        result = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .prepare_cross_node_resume(stream_id, bare_jid, handshake_budget) => {
-            match result {
-                Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::Terminal(outcome)) => {
-                    PrepareRaceOutcome::Terminal(Ok(outcome))
-                }
-                Ok(waddle_xmpp::stream_management::CrossNodeResumeStage::ReadyToSteal(ticket)) => {
-                    PrepareRaceOutcome::ReadyToSteal(ticket)
-                }
-                Err(error) => PrepareRaceOutcome::Terminal(Err(error)),
-            }
-        }
-    };
-    match prepared {
-        PrepareRaceOutcome::ShutdownAbandoned => CrossNodeAttemptOutcome::ShutdownAbandoned,
-        PrepareRaceOutcome::Terminal(result) => CrossNodeAttemptOutcome::Completed(result),
-        PrepareRaceOutcome::ReadyToSteal(ticket) => CrossNodeAttemptOutcome::Completed(
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .finish_cross_node_steal(ticket)
-                .await,
-        ),
-    }
+    record_sm_enable(SmEnableOutcome::EnabledWithoutResume);
+    vec![ResponseFrame::from(SmEnabled::new(stream_id).to_element())]
 }
 
 pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_resume(
@@ -1042,8 +821,8 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     ctx: SmCtx<'_>,
     finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
-    // Under the durable selector every resumable session belongs to the
-    // durable authority, so every `<resume/>` is its decision.
+    // Every resumable session belongs to the durable authority, so every
+    // `<resume/>` is its decision.
     if let Some(store) = super::durable::selected_store(state) {
         return match super::durable::resume(store, resume, state, ctx).await {
             // The reply is decided when the endpoint is published, or when
@@ -1064,591 +843,15 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
             }
         };
     }
-    let terminal = handle_sm_resume_terminal(resume, state, ctx).await;
-    observe::observe_sm_resume(&terminal);
-    // Terminal results are recorded only once the frame carrying them is
-    // written (the main loop consumes this slot after the batch write).
-    // Two exceptions record immediately here:
-    // - `ShutdownAbandoned` deliberately produces no frames — the attempt
-    //   is terminal server-side with nothing to write-gate on;
-    // - a preliminary `Resumed` stays un-staged: claim finalization decides
-    //   the real terminal and stages it (`registration.rs`).
-    match terminal.outcome() {
-        observe::SmResumeOutcome::Resumed => {}
-        observe::SmResumeOutcome::ShutdownAbandoned => {
-            observe::observe_sm_resume_finalized(observe::SmResumeOutcome::ShutdownAbandoned, None);
-        }
-        outcome => *finalized_resume_outcome = Some(outcome),
-    }
-    terminal.into_frames()
-}
-
-pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_resume_terminal(
-    resume: SmResume,
-    state: &WebSocketState,
-    ctx: SmCtx<'_>,
-) -> observe::SmResumeTerminal {
-    use observe::{SmResumeOutcome, SmResumeTerminal};
-    use waddle_xmpp::stream_management::CrossNodeResumeOutcome;
-
-    let SmCtx {
-        binding_ref,
-        bindings,
-        #[cfg(test)]
-        resume_binding_attempts,
-        phase,
-        resume_endpoint_handoff_blocked,
-        sm_state,
-        sm_ingress_fence,
-        authenticated_session,
-        occupancy_session,
-        carbons_enabled,
-        presence_available,
-        presence_show,
-        presence_status,
-        presence_priority,
-        presence_payloads,
-        pending_subscribes_flushed,
-        pending_resume_stream_id,
-        pending_resume_h,
-        pending_resume_claim,
-        #[cfg(test)]
-        pre_final_principal_recheck_test_hook,
-        suppress_sm_record_next_batch,
-        roster_interested,
-        blocklist_interested,
-        pending_sm_enable_commit: _,
-        sm_inbound_completion: _,
-        durable_sm: _,
-    } = ctx;
-
-    // Stream resumption is only legal before this transport has established a
-    // fresh SASL/bind lifecycle of its own, and never on a handoff-blocked
-    // socket, which cannot publish the resumed route. Refuse before detaching
-    // or claiming the session the request names.
-    if !phase.allows_stream_management_resume() || resume_endpoint_handoff_blocked {
-        return SmResumeTerminal::failed(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            SmResumeOutcome::UnexpectedRequest,
-        );
-    }
-
-    // Capture one identity for this attempt before any asynchronous work.
-    // An early failed attempt drops it; a successful one carries it to the
-    // registration path. Neither case reuses the token on a later attempt.
-    *binding_ref = None;
-    let attempt_binding = match bindings.prepare_next() {
-        Ok(prepared) => prepared.attempt.binding_ref,
-        Err(refusal) => {
-            tracing::error!(%refusal, "resume attempt could not mint a binding identity");
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Internal,
-            );
-        }
-    };
-    #[cfg(test)]
-    resume_binding_attempts.push(attempt_binding.clone());
-
-    // Capture and retire the old transport before claiming its snapshot. The
-    // connection-owned handshake retains counters, replay and occupancy and
-    // acknowledges only after cleanup. Never re-resolve/retry the live owner:
-    // another resume can publish the same SM ID on a replacement meanwhile.
-    if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
-        use crate::clustering::resume_bridge::{
-            request_validated_local_resume, LocalForcedDetachOutcome, LocalResumeRejected,
-        };
-        use waddle_xmpp::stream_management::SmResumeRejection;
-        let shutdown = state.deps.shutdown.stop_token();
-        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(&resume.previd);
-        let outcome = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                return SmResumeTerminal::failed(
-                    waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                    SmResumeOutcome::ShutdownAbandoned,
-                );
-            }
-            outcome = request_validated_local_resume(
-                &state.deps.protocol.connection_registry,
-                &stream_id,
-                bare_jid,
-                resume.h,
-            ) => outcome,
-        };
-        match outcome {
-            Ok(LocalForcedDetachOutcome::IdentityMismatch) => {
-                return SmResumeTerminal::failed(stream_id, SmResumeOutcome::IdentityMismatch);
-            }
-            Err(LocalResumeRejected {
-                reason: SmResumeRejection::NotResumable,
-                ..
-            }) => {
-                return SmResumeTerminal::failed(stream_id, SmResumeOutcome::NotFound);
-            }
-            Err(LocalResumeRejected {
-                jid,
-                reason:
-                    SmResumeRejection::ReplayGap {
-                        inbound_count,
-                        replay_gap_through,
-                    },
-            }) => {
-                return SmResumeTerminal::replay_gap(
-                    stream_id,
-                    inbound_count,
-                    jid,
-                    resume.h,
-                    replay_gap_through,
-                );
-            }
-            Err(LocalResumeRejected {
-                reason: SmResumeRejection::HandledTooHigh { outbound_count },
-                ..
-            }) => {
-                *phase = ConnectionPhase::closing(None);
-                return SmResumeTerminal::handled_too_high(stream_id, resume.h, outbound_count);
-            }
-            Ok(LocalForcedDetachOutcome::Detached | LocalForcedDetachOutcome::NotLiveLocally) => {}
-        }
-        // NotLiveLocally is not proof of cleanup. A snapshot must still be
-        // claimable below; prepare_socket_bind separately waits for the exact
-        // incumbent to stop before <resumed/>, replay or route publication.
-    }
-
-    let mut detached = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .claim_session(&resume.previd)
-        .await
-    {
-        Ok(Some(session)) => session,
-        // ADR-0017 Phase 3 Slice 6, element 8: this node has no local
-        // record of the session at all — before falling back to today's
-        // plain item-not-found, try the cross-node claim-steal resume path.
-        // Single-node/non-clustering behavior is byte-identical: with no
-        // cluster claim store wired (or no foreign claim on this entity),
-        // `attempt_cross_node_resume` itself returns `NotFound` and this
-        // collapses to exactly the pre-Slice-6 outcome. Only attempted when
-        // this connection already has a SASL-authenticated bare JID to
-        // check identity against — a resume attempt with no established
-        // identity has nothing for `verify_resume_identity` to compare, so
-        // it falls straight through to `item-not-found` exactly as before.
-        Ok(None) => {
-            // Council-adjudicated FIX 3, corrected by FIX A (deviation 47's
-            // rewrite): race ONLY the cancellable, read-only
-            // `prepare_cross_node_resume` half (including its whole
-            // held-response retry loop) against this node's
-            // graceful-shutdown token, so a `<resume/>` held for up to the
-            // resume-handshake budget (FIX 1: now itself bounded) can never
-            // delay this connection's own graceful-shutdown handling — the
-            // outer connection loop's `shutdown_token.cancelled()` arm is
-            // otherwise starved for as long as this `.await` runs (see
-            // `connection.rs`'s select loop: once an arm's body starts
-            // executing, the loop cannot observe any other arm, including
-            // shutdown, until that body's own awaits resolve).
-            //
-            // The write half, `finish_cross_node_steal`, is deliberately
-            // called OUTSIDE this `tokio::select!` once `prepare_cross_node_resume`
-            // hands back a `ReadyToSteal` ticket — never raced, never
-            // wrapped in a timeout that could drop it mid-sequence. Racing
-            // the whole attempt (the original FIX 3 shape) could drop the
-            // future between `steal_for_resume` committing in Postgres and
-            // `hydrate_reclaimed`/`claim_session` completing, stranding a
-            // self-owned, un-hydrated claim under a fresh lease the orphan
-            // reaper can never steal back — see
-            // `waddle_xmpp::stream_management::session_registry`'s
-            // `cross_node_resume.rs` module doc, "Cancellation boundary".
-            let cross_node = if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
-                Some(super::attempt_cross_node_resume_raced(state, &resume.previd, bare_jid).await)
-            } else {
-                None
-            };
-            match cross_node {
-                Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::Claimed(
-                    session,
-                )))) => *session,
-                Some(CrossNodeAttemptOutcome::Completed(Ok(
-                    CrossNodeResumeOutcome::NotAuthorized,
-                ))) => {
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::IdentityMismatch,
-                    );
-                }
-                Some(CrossNodeAttemptOutcome::Completed(Ok(
-                    CrossNodeResumeOutcome::OwnerUnreachable,
-                ))) => {
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::OwnerUnreachable,
-                    );
-                }
-                Some(CrossNodeAttemptOutcome::Completed(Ok(
-                    CrossNodeResumeOutcome::StorageUnavailable,
-                ))) => {
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::Storage,
-                    );
-                }
-                Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound))) => {
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::NotFound,
-                    );
-                }
-                // `None` means the cross-node path was never entered (no
-                // authenticated bare JID to verify against) — a LOCAL miss.
-                // Marking it cross-node would miscount the clustering
-                // dashboard's cross-node rejection panel.
-                None => {
-                    return SmResumeTerminal::failed(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::NotFound,
-                    );
-                }
-                Some(CrossNodeAttemptOutcome::Completed(Err(
-                    waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_),
-                ))) => {
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::Storage,
-                    );
-                }
-                Some(CrossNodeAttemptOutcome::Completed(Err(_))) => {
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::Internal,
-                    );
-                }
-                Some(CrossNodeAttemptOutcome::ShutdownAbandoned) => {
-                    // FIX 3: cancellation won the race before the attempt
-                    // completed — abandoned cleanly (no CAS after
-                    // cancellation: `tokio::select!` drops the losing future
-                    // rather than polling it to completion, so no
-                    // `steal_for_resume` this call issued can have committed
-                    // after this point). No response is sent for this
-                    // `<resume/>` at all: the connection's own select loop
-                    // observes the same, now-cancelled `shutdown_token` on
-                    // its very next iteration and sends the conformant
-                    // `<system-shutdown/>` stream error instead — a more
-                    // accurate signal to the client than a resume-specific
-                    // failure would be. A client that instead hard
-                    // -disconnects mid-hold is observed at the next loop
-                    // iteration (the WS read arm); the hold itself is
-                    // already bounded by FIX 1's budget regardless.
-                    return SmResumeTerminal::failed_cross_node(
-                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                        SmResumeOutcome::ShutdownAbandoned,
-                    );
-                }
-            }
-        }
-        // Claim-store backend outages and timeouts are a storage incident,
-        // not a registry logic error — keep them out of `internal`.
-        Err(waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_)) => {
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Storage,
-            );
-        }
-        Err(_) => {
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Internal,
-            );
-        }
-    };
-
-    let claim_guard = SmResumeClaimGuard::new(
-        state.deps.protocol.sm_session_registry.clone(),
-        resume.previd.clone(),
-    );
-    let principal = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .session_principal(&resume.previd)
-        .await
-    {
-        Ok(Some(principal)) => principal,
-        Ok(None) => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::PrincipalUnavailable,
-            );
-        }
-        Err(_) => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Storage,
-            );
-        }
-    };
-
-    if restore_ingress_checkpoint(state, &mut detached)
-        .await
-        .is_err()
-    {
-        claim_guard.release().await;
-        return SmResumeTerminal::failed(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            SmResumeOutcome::Storage,
-        );
-    }
-
-    let early_resolution = state
-        .deps
-        .auth_state
-        .session_manager
-        .resolve_principal(&principal)
-        .await;
-    match early_resolution {
-        crate::auth::session::PrincipalResolution::Resolved(_) => {}
-        PrincipalResolution::Missing => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::PrincipalUnavailable,
-            );
-        }
-        // A durable row exists but its auth context diverged (context
-        // version, auth epoch, or JID): an identity mismatch, not an
-        // unavailable principal. Same `not-authorized` wire condition.
-        PrincipalResolution::Mismatched => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::IdentityMismatch,
-            );
-        }
-        crate::auth::session::PrincipalResolution::StorageError(_) => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Storage,
-            );
-        }
-    }
-
-    if let ConnectionPhase::Authenticated { bare_jid } = phase {
-        if detached.jid.to_bare() != *bare_jid {
-            claim_guard.release().await;
-            return SmResumeTerminal::identity_mismatch(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                detached.jid.clone(),
-            );
-        }
-    }
-
-    // Ordering matters, mirroring the live ack path:
-    // `handled_count_exceeds_outbound` is an exact mod-2^32 window
-    // from last_acked, which classifies the regressed half-space as
-    // "outside the window" too. `can_resume_from` rejects a regressed
-    // `h` first, so a stale mod-behind `h` stays a failed resume
-    // (`<failed/>`, client starts a fresh session) rather than being
-    // reclassified as a handled-count-too-high stream error; an
-    // ahead-of-window `h` passes it and hits the too-high error below.
-    if !detached.can_resume_from(resume.h) {
-        claim_guard.release().await;
-        return SmResumeTerminal::replay_gap(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            detached.inbound_count,
-            detached.jid.clone(),
-            resume.h,
-            detached.replay_gap_through,
-        );
-    }
-
-    if detached.handled_count_exceeds_outbound(resume.h) {
-        claim_guard.release().await;
-        *phase = ConnectionPhase::closing(None);
-        return SmResumeTerminal::handled_too_high(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            resume.h,
-            detached.outbound_count,
-        );
-    }
-
-    #[cfg(test)]
-    if let Some((reached, release)) = pre_final_principal_recheck_test_hook.take() {
-        reached.notify_one();
-        release.notified().await;
-    }
-
-    // This is the resume linearization point: no SM state has been installed
-    // yet, and this is the final await before Ready/publication/replay.
-    let resumed_session = match state
-        .deps
-        .auth_state
-        .session_manager
-        .resolve_principal(&principal)
-        .await
-    {
-        crate::auth::session::PrincipalResolution::Resolved(session) => session,
-        PrincipalResolution::Missing => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::PrincipalUnavailable,
-            );
-        }
-        // Mirror of the early resolution: diverged durable principal =
-        // identity mismatch (same wire condition).
-        PrincipalResolution::Mismatched => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::IdentityMismatch,
-            );
-        }
-        crate::auth::session::PrincipalResolution::StorageError(_) => {
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Storage,
-            );
-        }
-    };
-
-    // The snapshot and its principal are written in one atomic statement, so
-    // they cannot diverge today; this gate turns that invariant into an
-    // enforced precondition of the commit below rather than an assumption.
-    if detached.jid.to_bare() != *principal.bare_jid() {
-        claim_guard.release().await;
-        return SmResumeTerminal::detached_divergence(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            detached.jid.clone(),
-        );
-    }
-
-    // Retain the original window for receipt and pending-row settlement, but
-    // commit its ACK to the canonical source first. A failed final resume or
-    // cancellation must not restore replay entries whose pending rows vanished.
-    let mut staged_sm_state = StreamManagementState::new();
-    staged_sm_state.restore_from_session(&detached);
-    let restored_inbound = detached.inbound_count;
-    detached = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .acknowledge_claimed_resume(&detached, resume.h)
-        .await
-    {
-        Ok(mut acknowledged) => {
-            acknowledged.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
-                acknowledged.inbound_count,
-                restored_inbound,
-            );
-            acknowledged
-        }
-        Err(error) => {
-            warn!(%error, "SM resume ACK could not commit; retaining source and pending rows");
-            claim_guard.release().await;
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::Storage,
-            );
-        }
-    };
-    if !complete_acknowledged_ingress_custody(state, &staged_sm_state, resume.h).await
-        || !complete_acknowledged_ingress_receipts(state, &staged_sm_state, resume.h).await
-        || !settle_pending_ack_window(
-            state,
-            &staged_sm_state,
-            staged_sm_state.last_acked,
-            resume.h,
-            detached.promotion_custody.captured_fence(),
-        )
-        .await
-        .is_ok()
-        || state
-            .deps
-            .protocol
-            .sm_session_registry
-            .settle_session_acknowledgements(
-                &detached,
-                state.deps.protocol.pending_delivery_storage.as_ref(),
-            )
-            .await
-            .is_err()
-    {
-        claim_guard.release().await;
-        return SmResumeTerminal::failed(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            SmResumeOutcome::Storage,
-        );
-    }
-    *sm_ingress_fence = state
-        .deps
-        .protocol
-        .sm_session_registry
-        .current_sm_claim_fence(&detached.stream_id);
-    sm_state.restore_from_session(&detached);
-    sm_state.acknowledge(resume.h);
-    // A native-SCRAM login persisted its own resume-fence row at
-    // authentication; adopting the resumed lineage supersedes that fresh
-    // candidate row, which nothing else will ever delete. Fire-and-forget:
-    // the row is bearer-inert either way, this only reclaims storage.
-    if let Some(superseded) = authenticated_session.take() {
-        if superseded.native_resume_only && superseded.id != resumed_session.id {
-            let actor = state.deps.auth_state.session_manager.actor_ref();
-            tokio::spawn(async move {
-                if actor
-                    .ask(DbExecute {
-                        sql: format!(
-                            "DELETE FROM sessions WHERE id = ? AND token_hash LIKE '{}:%'",
-                            crate::auth::session::NATIVE_RESUME_TOKEN_SENTINEL
-                        ),
-                        params: vec![crate::db::Value::from(superseded.id.clone())],
-                    })
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        failure = "storage",
-                        "failed to delete superseded native-resume session row"
-                    );
-                }
-            });
-        }
-    }
-    *authenticated_session = Some(resumed_session);
-    *occupancy_session = detached.occupancy_session;
-    *carbons_enabled = detached.carbons_enabled;
-    *roster_interested = detached.roster_interested;
-    *blocklist_interested = detached.blocklist_interested;
-    *presence_available = detached.presence_available;
-    *presence_show = detached.presence_show.clone();
-    *presence_status = detached.presence_status.clone();
-    *presence_priority = detached.presence_priority;
-    *presence_payloads = detached.presence_payloads.clone();
-    *pending_subscribes_flushed = detached.pending_subscribes_flushed;
-    *pending_resume_stream_id = Some(resume.previd.clone());
-    *pending_resume_h = Some(resume.h);
-    *pending_resume_claim = Some(claim_guard);
-    *binding_ref = Some(attempt_binding);
-    *phase = ConnectionPhase::ready(detached.jid.clone(), true);
-    // Responses below include replayed stanzas straight from the restored
-    // unacked queue. They already carry their original sequence numbers —
-    // the main loop must NOT push them through `record_outbound` again.
-    *suppress_sm_record_next_batch = true;
-
-    let replay = super::super::resume_replay::replay_frames(
-        sm_state,
-        resume.h,
-        state.deps.auth_state.xmpp_domain.as_str(),
-    );
-    SmResumeTerminal::resumed(
+    // A state that never selected the durable authority holds no resumable
+    // session.
+    let terminal = observe::SmResumeTerminal::failed(
         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-        sm_state.inbound_count(),
-        detached.jid,
-        replay,
-    )
+        observe::SmResumeOutcome::NotFound,
+    );
+    observe::observe_sm_resume(&terminal);
+    *finalized_resume_outcome = Some(terminal.outcome());
+    terminal.into_frames()
 }
 
 /// Persist a newly exposed contiguous frontier before acknowledging it.
@@ -1683,25 +886,5 @@ pub(in crate::server::routes::websocket) async fn flush_ingress_checkpoint(
         )
         .await?;
     tracker.checkpoint_flushed(sm_state.inbound_count());
-    Ok(())
-}
-
-pub(in crate::server::routes::websocket::stream_management) async fn restore_ingress_checkpoint(
-    state: &WebSocketState,
-    detached: &mut waddle_xmpp::stream_management::DetachedSession,
-) -> Result<(), IngressUowError> {
-    let checkpoint = state
-        .deps
-        .protocol
-        .ingress
-        .load_resume_checkpoint(&waddle_xmpp::pending_delivery::SmSessionId::new(
-            detached.stream_id.clone(),
-        ))
-        .await?
-        .ok_or(IngressUowError::SmIngressStreamMissing)?;
-    detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
-        detached.inbound_count,
-        checkpoint.to_storage(),
-    );
     Ok(())
 }

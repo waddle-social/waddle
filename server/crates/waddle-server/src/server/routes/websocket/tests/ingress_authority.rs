@@ -8,10 +8,7 @@ use super::{
     ConnectionPhase, DatabaseConfig, DatabasePool, InMemorySmSessionRegistry, PoolConfig, Stanza,
     TestStateOverrides, WebSocketState,
 };
-use super::{
-    get_or_create_room_actor, mpsc, register_test_connection, seed_local_account,
-    store_resumable_detached_session, RoomConfig,
-};
+use super::{get_or_create_room_actor, register_test_connection, seed_local_account, RoomConfig};
 // Its only use sits in a clustering-gated branch, so a default-feature build
 // sees it unused. Predates this work (#1786); invisible because every other
 // check runs with `--all-features`.
@@ -952,9 +949,6 @@ mod timeout;
 #[cfg(feature = "clustering")]
 #[path = "ingress_authority_relay.rs"]
 mod relay;
-
-#[path = "ingress_authority_fence.rs"]
-mod fence;
 
 #[cfg(feature = "clustering")]
 #[tokio::test]

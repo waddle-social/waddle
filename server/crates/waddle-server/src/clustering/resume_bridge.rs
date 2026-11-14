@@ -29,27 +29,23 @@ use std::sync::{Arc, OnceLock};
 #[cfg(any(test, feature = "clustering"))]
 use std::time::Duration;
 
-use jid::{BareJid, FullJid};
+use jid::BareJid;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::registry::ConnectionRegistry;
 #[cfg(any(test, feature = "clustering"))]
 use waddle_xmpp::registry::{ForceDetachOutcome, ForceDetachRequest};
 
-#[derive(Debug)]
-pub(crate) struct LocalResumeRejected {
-    pub jid: FullJid,
-    pub reason: waddle_xmpp::stream_management::SmResumeRejection,
-}
-
 /// Capture one local owner and let that owner's task validate `h` before
 /// interrupting I/O. After enqueue, wait through its cleanup acknowledgment:
 /// a handshake timer cannot turn an accepted detach into a premature miss.
+/// An owner that refuses the detach because `h` is not valid for the session
+/// answers why, and keeps the session.
 pub(crate) async fn request_validated_local_resume(
     registry: &ConnectionRegistry,
     stream_id: &SmSessionId,
     requester_bare_jid: &BareJid,
     h: u32,
-) -> Result<LocalForcedDetachOutcome, LocalResumeRejected> {
+) -> Result<LocalForcedDetachOutcome, waddle_xmpp::stream_management::SmResumeRejection> {
     use waddle_xmpp::registry::LocalResumeReply;
     let Some(jid) = registry.sm_stream_owner(stream_id) else {
         return Ok(LocalForcedDetachOutcome::NotLiveLocally);
@@ -81,7 +77,7 @@ pub(crate) async fn request_validated_local_resume(
         LocalResumeReply::Detached => Ok(LocalForcedDetachOutcome::Detached),
         LocalResumeReply::IdentityMismatch => Ok(LocalForcedDetachOutcome::IdentityMismatch),
         LocalResumeReply::NotPersisted => Ok(LocalForcedDetachOutcome::NotLiveLocally),
-        LocalResumeReply::Rejected(reason) => Err(LocalResumeRejected { jid, reason }),
+        LocalResumeReply::Rejected(reason) => Err(reason),
     }
 }
 

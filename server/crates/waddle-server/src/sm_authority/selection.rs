@@ -45,14 +45,13 @@ pub fn check_durable_sm_mode(value: &str) -> Result<(), InvalidDurableSmMode> {
     }
 }
 
-/// The authority a serving path consults. Startup always publishes
-/// `Durable`; `Legacy` is the state of an application state that never ran
-/// startup's selection, and carries no store.
-#[derive(Clone, Default)]
-pub enum DurableSmSelection {
-    #[default]
-    Legacy,
-    Durable(Arc<DurableSmStore>),
+/// The stream-management authority startup selects: the durable session
+/// store. Startup publishes it on the application state; a state that never
+/// ran that selection has none, and every resumable stream-management
+/// operation on it is refused.
+#[derive(Clone)]
+pub struct DurableSmSelection {
+    store: Arc<DurableSmStore>,
 }
 
 impl DurableSmSelection {
@@ -82,15 +81,14 @@ impl DurableSmSelection {
             }
             store
         };
-        Ok(Self::Durable(Arc::new(store)))
+        Ok(Self {
+            store: Arc::new(store),
+        })
     }
 
-    /// The durable store, when startup published it.
-    pub fn store(&self) -> Option<&DurableSmStore> {
-        match self {
-            Self::Legacy => None,
-            Self::Durable(store) => Some(store),
-        }
+    /// The durable store.
+    pub fn store(&self) -> &Arc<DurableSmStore> {
+        &self.store
     }
 }
 

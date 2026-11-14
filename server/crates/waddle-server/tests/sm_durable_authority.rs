@@ -63,5 +63,10 @@ async fn the_selection_is_always_durable() {
     let durable = DurableSmSelection::open(&db, false)
         .await
         .expect("durable selection");
-    assert!(durable.store().is_some());
+    assert!(durable
+        .store()
+        .stream_ids()
+        .await
+        .expect("list durable sessions")
+        .is_empty());
 }

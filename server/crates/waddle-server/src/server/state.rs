@@ -15,7 +15,7 @@ use crate::db::DatabasePool;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
 use crate::server::liveness::RuntimeProgress;
-use crate::sm_authority::DurableSmSelection;
+use crate::sm_authority::{DurableSmSelection, DurableSmStore};
 #[cfg(any(test, feature = "test-support"))]
 use crate::spaces_metadata::InMemorySpacesMetadataStore;
 use crate::spaces_metadata::SpacesMetadataStore;
@@ -294,11 +294,10 @@ impl AppState {
         })
     }
 
-    /// The selected stream-management authority. Before startup publishes a
-    /// selection this is the legacy authority, which is also the default.
-    pub fn durable_sm(&self) -> &DurableSmSelection {
-        static LEGACY: DurableSmSelection = DurableSmSelection::Legacy;
-        self.durable_sm.get().unwrap_or(&LEGACY)
+    /// The durable stream-management store startup selected. `None` before
+    /// startup publishes it; resumable enables and resumes are then refused.
+    pub fn durable_sm(&self) -> Option<&Arc<DurableSmStore>> {
+        self.durable_sm.get().map(DurableSmSelection::store)
     }
 
     /// Publish the startup selection. Returns false if one was already

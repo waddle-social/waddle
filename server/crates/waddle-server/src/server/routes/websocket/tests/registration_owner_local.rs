@@ -5,16 +5,13 @@ use super::super::super::outbound::{handle_outbound_stanza, OutboundAuthority};
 use super::super::super::send::InterruptibleSink;
 use super::super::super::timers::TransportTimers;
 use super::{
-    bind_fresh_test_connection, create_test_session, create_test_websocket_state, element_to_xml,
-    finish_test_socket_cleanup, handle_xmpp_frame, mpsc, publish_stream_id_and_presence, Arc,
-    ConnectionPhase, Element, FullJid, OutboundStanza, RegistrationAfterFrame, Stanza, WsConnState,
-    SM_NS,
+    bind_fresh_test_connection, create_test_session, create_test_websocket_state,
+    finish_test_socket_cleanup, mpsc, publish_stream_id_and_presence, Arc, FullJid, OutboundStanza,
+    RegistrationAfterFrame, Stanza, WsConnState,
 };
 use crate::clustering::relay::RelayRemoteResourceRegistrationStatus;
-use crate::clustering::route_bridge::tests::connection_entry_for_socket_node;
 use crate::clustering::route_bridge::{
-    remote_registration_request, remote_registration_request_from_entry, wire_for_test,
-    OrderedRelayDeliveryBridge,
+    remote_registration_request, wire_for_test, OrderedRelayDeliveryBridge,
 };
 use crate::clustering::NodeId;
 use tokio::time::{timeout, Duration};
@@ -456,116 +453,5 @@ async fn remote_registration_refuses_untracked_owner_local_connection() {
             .connection_registry
             .is_owned_by(&jid, &owner),
         "a missing lifecycle cannot authorize overwriting a live local route"
-    );
-}
-
-#[tokio::test]
-async fn remote_same_generation_resume_preserves_owner_local_sm_snapshot() {
-    use waddle_xmpp::stream_management::SmSessionRegistry;
-
-    let state = create_test_websocket_state().await;
-    let jid: FullJid = "alice@example.com/owner-resume".parse().expect("JID");
-    let (_, mut incumbent, mut rx, _) =
-        bind_fresh_test_connection(state.clone(), jid.clone()).await;
-    let session = create_test_session(&state, "alice").await;
-    incumbent.authenticated_session = Some(session.clone());
-    let enabled = handle_xmpp_frame(
-        &element_to_xml(
-            Element::builder("enable", SM_NS)
-                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
-                .build(),
-        ),
-        "example.com",
-        &state,
-        &mut incumbent,
-    )
-    .await;
-    let enabled: Element = enabled[0].parse().expect("enabled frame");
-    let stream_id = enabled.attr("id").expect("stream id").to_owned();
-    incumbent.publish_pending_sm_enable(&state);
-    let lifecycle = incumbent
-        .socket_lifecycle
-        .as_ref()
-        .expect("lifecycle")
-        .clone();
-    let mut control = lifecycle.entry.take_force_detach_rx().expect("control");
-    let bridge = owner_bridge(&state, &jid).await;
-    // The resumed session arrives on another node's transport and carries the
-    // owner-local binding's occupancy generation with it.
-    let resume_socket = NodeId::new("resume-socket".to_owned());
-    let (resumed_tx, _resumed_rx) = mpsc::channel(1);
-    let resumed_entry = connection_entry_for_socket_node(resumed_tx, &resume_socket);
-    *resumed_entry
-        .occupancy_session
-        .lock()
-        .expect("occupancy mutex") = lifecycle.entry.occupancy_session();
-    let request =
-        remote_registration_request_from_entry(jid.clone(), resume_socket, &resumed_entry);
-    assert_eq!(
-        bridge
-            .register_remote_user_resource_on_owner(request.clone())
-            .await
-            .status,
-        RelayRemoteResourceRegistrationStatus::Busy
-    );
-    let detach = timeout(Duration::from_secs(1), control.recv())
-        .await
-        .expect("detach request")
-        .expect("request");
-    assert_eq!(detach.origin, ForceDetachOrigin::CrossNodeResume);
-    assert!(
-        !incumbent.write_interruption.is_cancelled(),
-        "same-generation resume keeps the existing socket interruption policy"
-    );
-    finish_requested_cleanup(&state, &mut incumbent, &mut rx, detach.origin).await;
-    let guard = timeout(
-        Duration::from_secs(5),
-        state.deps.protocol.connection_registry.lock_bind(&jid),
-    )
-    .await
-    .expect("background detach finishes");
-    assert!(guard.pending_retirements().is_empty());
-    drop(guard);
-    let snapshot = state
-        .deps
-        .protocol
-        .sm_session_registry
-        .peek_session(&stream_id)
-        .await
-        .expect("snapshot lookup")
-        .expect("resumable snapshot preserved");
-    assert_eq!(snapshot.occupancy_session, incumbent.occupancy_session);
-    assert_eq!(lifecycle.state(), SocketCleanupState::Detached);
-
-    // Exercise the XEP-0198 resume parser/claim path with the retained snapshot.
-    let mut resumed = WsConnState::new();
-    resumed.phase = ConnectionPhase::authenticated(&jid);
-    resumed.authenticated_session = Some(session);
-    handle_xmpp_frame(
-        &element_to_xml(
-            Element::builder("resume", SM_NS)
-                .attr(
-                    minidom::rxml::xml_ncname!("previd").to_owned(),
-                    stream_id.as_str(),
-                )
-                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-                .build(),
-        ),
-        "example.com",
-        &state,
-        &mut resumed,
-    )
-    .await;
-    assert_eq!(
-        resumed.pending_resume_stream_id.as_deref(),
-        Some(stream_id.as_str())
-    );
-    assert_eq!(resumed.occupancy_session, incumbent.occupancy_session);
-    assert_eq!(
-        bridge
-            .register_remote_user_resource_on_owner(request)
-            .await
-            .status,
-        RelayRemoteResourceRegistrationStatus::Registered
     );
 }

@@ -2,22 +2,12 @@ use jid::FullJid;
 use tracing::{error, warn};
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::registry::DeferredPendingFlushWakeups;
-use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
+use waddle_xmpp::stream_management::{SmFailed, SmResumed};
 
-use super::super::cleanup::cleanup_invalidated_detached_session;
 use super::super::registration::{retire_binding, retire_remote_binding, withdraw_binding};
 use super::super::state::WsConnState;
 use super::super::WebSocketState;
 
-/// Finish the XEP-0198 side effects that become safe only after the resumed
-/// or freshly-bound resource has been published to the connection registry.
-///
-/// `handle_sm_resume` claims the detached session before bind so the old
-/// stream cannot be resumed twice, but detached fanout can still append
-/// stanzas during the claim-to-registration handoff. This boundary completes
-/// that claim under the stream registry lock, returns the typed final
-/// XEP-0198 outcome. Fresh-bind retirement is completed before registry
-/// publication by the registration admission barrier.
 /// The finalized XEP-0198 response plus the terminal resume result to
 /// record once the caller has revalidated node authority. Emitting the
 /// result before that final check would count a `resumed` (or a flip's
@@ -29,6 +19,11 @@ pub(in crate::server::routes::websocket) struct SmFinalizationReport {
         Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 }
 
+/// Finish the XEP-0198 side effects that become safe only after the resumed
+/// or freshly-bound resource has been published to the connection registry:
+/// a resume the durable authority committed is completed and its typed final
+/// outcome returned. Fresh-bind retirement is completed before registry
+/// publication by the registration admission barrier.
 pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_registration(
     state: &WebSocketState,
     conn: &mut WsConnState,
@@ -38,12 +33,12 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
     failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
 ) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-        return complete_pending_resume_claim(
+        return complete_durable_resume(
             state,
             conn,
             jid,
             owner,
-            stream_id,
+            &stream_id,
             outbound_receiver,
             failed_resume_wakeups,
         )
@@ -63,251 +58,6 @@ pub(in crate::server::routes::websocket) enum SmRegistrationFinalization {
         replay_after_h: u32,
     },
     ReplaceWithFailed(SmFailed),
-    ReplaceWithHandledCountTooHigh {
-        acknowledged: u32,
-        send_count: u32,
-    },
-}
-
-async fn complete_pending_resume_claim(
-    state: &WebSocketState,
-    conn: &mut WsConnState,
-    jid: &FullJid,
-    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-    stream_id: String,
-    outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
-    failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
-) -> SmFinalizationReport {
-    if conn.durable_sm.is_hydrating() {
-        return complete_durable_resume(
-            state,
-            conn,
-            jid,
-            owner,
-            &stream_id,
-            outbound_receiver,
-            failed_resume_wakeups,
-        )
-        .await;
-    }
-    if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
-        .await
-        .is_err()
-    {
-        close_registered_resume_attempt(state, conn, jid, owner).await;
-        return SmFinalizationReport {
-            finalization: SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
-                "internal-server-error",
-            )),
-            resume_outcome: Some(super::observe::SmResumeOutcome::Storage),
-        };
-    }
-    let resume_h = conn.pending_resume_h.take();
-    let completion = match resume_h {
-        Some(h) => {
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .complete_claim_if_resumable(&stream_id, h)
-                .await
-        }
-        None => {
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .complete_claim(&stream_id)
-                .await
-        }
-    };
-    let completion_reached_terminal_boundary = completion.is_ok();
-    let mut resume_outcome = None;
-    let finalization = match completion {
-        Ok(Some(SmClaimCompletion::Resumed(mut detached))) => match resume_h {
-            Some(h) => {
-                detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
-                    detached.inbound_count,
-                    conn.sm_state.inbound_count(),
-                );
-                conn.sm_state.restore_from_session(&detached);
-                // The resume `h` acknowledges the mod-2^32 window
-                // (detached.last_acked, h] — purge the pending_delivery
-                // rows this SM session claimed in exactly that window
-                // (review F4). Before the ack window went wrap-aware
-                // these rows were swept up by the NEXT live ack's
-                // numeric `<= h` delete; a windowed delete anchored at
-                // the post-resume `last_acked` would skip them forever,
-                // stranding them claimed until the claim-expiry janitor
-                // re-released them as duplicates.
-                let acked_from_exclusive = detached.last_acked;
-                let expected_fence = detached.promotion_custody.captured_fence();
-                conn.sm_state.acknowledge(h);
-                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
-                match state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .delete_acked_in_window(
-                        &session_id,
-                        acked_from_exclusive,
-                        h,
-                        match expected_fence {
-                            Some(fence) => {
-                                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(
-                                    fence,
-                                )
-                            }
-                            None => {
-                                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Unavailable
-                            }
-                        },
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
-                        SmRegistrationFinalization::ReplaceWithResumed {
-                            resumed: SmResumed::new(
-                                stream_id.clone(),
-                                conn.sm_state.inbound_count(),
-                            ),
-                            replay_after_h: h,
-                        }
-                    }
-                    Err(error) => {
-                        warn!(
-                            session = %session_id,
-                            from = acked_from_exclusive,
-                            h,
-                            %error,
-                            failure = "storage",
-                            "pending_delivery ACK deletion retained on resume; claim release must settle it"
-                        );
-                        if matches!(
-                            &error,
-                            waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. }
-                        ) {
-                            close_registered_resume_attempt(state, conn, jid, owner).await;
-                            resume_outcome = Some(super::observe::SmResumeOutcome::Storage);
-                            SmRegistrationFinalization::ReplaceWithFailed(
-                                SmFailed::with_condition("internal-server-error"),
-                            )
-                        } else {
-                            resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
-                            SmRegistrationFinalization::ReplaceWithResumed {
-                                resumed: SmResumed::new(
-                                    stream_id.clone(),
-                                    conn.sm_state.inbound_count(),
-                                ),
-                                replay_after_h: h,
-                            }
-                        }
-                    }
-                }
-            }
-            None => SmRegistrationFinalization::KeepExistingResponses,
-        },
-        Ok(Some(SmClaimCompletion::ReplayWindowTruncated(detached))) => {
-            warn!(
-                stream_id = %stream_id,
-                jid = %jid,
-                client_h = ?resume_h,
-                replay_gap_through = ?detached.replay_gap_through,
-                "SM resume claim gained a replay gap before completion"
-            );
-            reset_resume_attempt(
-                state,
-                conn,
-                jid,
-                Some(owner),
-                Some(&stream_id),
-                outbound_receiver,
-                failed_resume_wakeups,
-            )
-            .await;
-            resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
-            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
-                "resource-constraint",
-                detached.inbound_count,
-            ))
-        }
-        Ok(Some(SmClaimCompletion::HandledCountTooHigh(detached))) => {
-            let acknowledged = resume_h.unwrap_or_default();
-            warn!(
-                stream_id = %stream_id,
-                jid = %jid,
-                client_h = acknowledged,
-                send_count = detached.outbound_count,
-                "SM resume claim completed with handled count too high"
-            );
-            close_registered_resume_attempt(state, conn, jid, owner).await;
-            resume_outcome = Some(super::observe::SmResumeOutcome::HandledTooHigh);
-            SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
-                acknowledged,
-                send_count: detached.outbound_count,
-            }
-        }
-        Ok(Some(SmClaimCompletion::Expired(detached))) => {
-            warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
-            if let Err(error) = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .settle_session_acknowledgements(
-                    &detached,
-                    state.deps.protocol.pending_delivery_storage.as_ref(),
-                )
-                .await
-            {
-                // Registry retry custody and the durable journal keep pending
-                // rows protected until the expiry janitor can settle them.
-                warn!(%error, "Expired resume retained pending ACK settlement");
-            }
-            // Completion has durably parked this queue in non-resumable
-            // promotion inventory under its original claim. This snapshot
-            // retires presence/occupancy only; the janitor owns promotion and
-            // releases the claim after canonical source confirmation.
-            let handled = waddle_xmpp::stream_management::sequence::max_in_window(
-                detached.inbound_count,
-                conn.sm_state.inbound_count(),
-            );
-            cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
-            close_registered_resume_attempt(state, conn, jid, owner).await;
-            resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
-            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
-                "item-not-found",
-                handled,
-            ))
-        }
-        Ok(None) => {
-            warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
-            close_registered_resume_attempt(state, conn, jid, owner).await;
-            resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
-            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
-                "item-not-found",
-            ))
-        }
-        Err(_error) => {
-            warn!(stream_id = %stream_id, jid = %jid, failure = "storage", "Failed to complete SM resume claim");
-            close_registered_resume_attempt(state, conn, jid, owner).await;
-            resume_outcome = Some(super::observe::SmResumeOutcome::Storage);
-            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
-                "internal-server-error",
-            ))
-        }
-    };
-    if let Some(guard) = conn.pending_resume_claim.take() {
-        if completion_reached_terminal_boundary {
-            guard.commit();
-        } else {
-            drop(guard);
-        }
-    }
-    SmFinalizationReport {
-        finalization,
-        resume_outcome,
-    }
 }
 
 /// Complete a resume the durable authority committed, now that its endpoint
@@ -439,9 +189,6 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     conn.durable_sm.abandon_hydration().await;
     if let Some(success) = conn.sasl2_success.as_mut() {
         success.resume_not_published();
-    }
-    if let Some(claim) = conn.pending_resume_claim.take() {
-        claim.release().await;
     }
     conn.pending_resume_stream_id = None;
     conn.pending_resume_h = None;
@@ -621,185 +368,4 @@ async fn reset_resume_attempt(
     conn.presence_payloads.clear();
     conn.pending_subscribes_flushed = false;
     conn.suppress_sm_record_next_batch = false;
-}
-
-async fn close_registered_resume_attempt(
-    state: &WebSocketState,
-    conn: &mut WsConnState,
-    jid: &FullJid,
-    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) {
-    conn.retire_binding_ref();
-    let removed = withdraw_binding(state, jid, owner).is_some();
-    if removed {
-        // ADR-0017 Phase 1: mirror the DashMap unregister into the actor
-        // tree so the resource the bind mirror-registered does not leak when
-        // a resume attempt is closed out. Owner-gated on the same token so a
-        // superseding newcomer is not clobbered.
-        retire_binding(state, jid, owner).await;
-        retire_remote_binding(state, jid, owner).await;
-    }
-    conn.registry_owner = None;
-    super::super::account_binding::retire_current(state, conn).await;
-    conn.phase = ConnectionPhase::closing(Some(jid.clone()));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_sm_registry_and_pending_storage, register_test_connection,
-    };
-    use std::sync::Arc;
-    use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
-    use waddle_xmpp::pending_delivery::SmSessionId;
-    use waddle_xmpp::stream_management::persistence::{
-        InMemorySmPersistence, SmPersistenceStorage,
-    };
-    use waddle_xmpp::stream_management::{
-        DetachedSessionSnapshot, InMemorySmSessionRegistry, PromotionCaptureCustody,
-        SmSessionRegistry, StreamManagementState,
-    };
-    use waddle_xmpp::telemetry::attributes::SmEvictionPath;
-
-    #[tokio::test]
-    async fn xep0198_expired_resume_reports_handled_count_without_requeuing_acknowledged_stanza() {
-        let source = Arc::new(InMemorySmPersistence::new());
-        let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(source.clone()));
-        let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
-            registry.clone(),
-            pending.clone(),
-        )
-        .await;
-        let jid: FullJid = "alice@example.com/expired-resume"
-            .parse()
-            .expect("recipient");
-        let stream = SmSessionId::new("websocket-expired-completion");
-        let mut sm = StreamManagementState::new();
-        sm.enable(stream.as_str().to_owned(), true, Some(1));
-        for _ in 0..3 {
-            sm.increment_inbound();
-        }
-        let mut message = xmpp_parsers::message::Message::new(Some(jid.clone().into()));
-        message.from = Some("bob@example.com/phone".parse().expect("sender"));
-        message.type_ = xmpp_parsers::message::MessageType::Chat;
-        message.bodies.insert(
-            xmpp_parsers::message::Lang::new(),
-            "unhandled message".to_owned(),
-        );
-        let _ = sm.record_outbound(
-            waddle_xmpp::parser::stanza_to_string(message).expect("typed message XML"),
-            SmEvictionPath::DirectOutbound,
-        );
-        let mut detached = sm
-            .to_detached_session(DetachedSessionSnapshot {
-                user_id: "alice".to_owned(),
-                jid: jid.clone(),
-                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-                carbons_enabled: false,
-                roster_interested: false,
-                blocklist_interested: false,
-                presence_available: false,
-                presence_show: None,
-                presence_status: None,
-                presence_priority: 0,
-                presence_payloads: Vec::new(),
-                pending_subscribes_flushed: false,
-            })
-            .expect("detached queue");
-        detached.promotion_custody = PromotionCaptureCustody::never_claimed();
-        registry.store_session(detached).await.expect("store queue");
-        registry
-            .claim_session(stream.as_str())
-            .await
-            .expect("claim")
-            .expect("live session");
-        let (sender, _receiver) = tokio::sync::mpsc::channel(8);
-        let owner = register_test_connection(&state, &jid, sender).await;
-        let mut conn = WsConnState::new();
-        conn.sm_state = sm;
-        // Resume restoration can recover a newer durable ingress frontier
-        // than the claimed detached snapshot's count of three.
-        conn.sm_state.increment_inbound();
-        conn.sm_state.increment_inbound();
-        conn.pending_resume_stream_id = Some(stream.as_str().to_owned());
-        conn.pending_resume_h = Some(1);
-        conn.pending_resume_claim = Some(super::super::SmResumeClaimGuard::new(
-            registry.clone(),
-            stream.as_str().to_owned(),
-        ));
-        conn.registry_owner = Some(owner);
-        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-
-        let report = finalize_sm_after_registry_registration(
-            &state,
-            &mut conn,
-            &jid,
-            &owner,
-            None,
-            &mut DeferredPendingFlushWakeups::default(),
-        )
-        .await;
-        let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
-            panic!("expired resume must produce failed, never resumed or replay");
-        };
-        let failed = failed.to_element();
-        assert!(failed.is("failed", waddle_xmpp::stream_management::SM_NS));
-        assert_eq!(failed.attr("h"), Some("5"));
-        assert!(failed
-            .get_child("item-not-found", xmpp_parsers::ns::XMPP_STANZAS)
-            .is_some());
-        assert_eq!(
-            report.resume_outcome,
-            Some(super::super::observe::SmResumeOutcome::NotFound)
-        );
-        assert!(conn.phase.is_closing());
-        assert!(conn.pending_resume_claim.is_none());
-        assert!(conn.registry_owner.is_none());
-        let canonical = source
-            .get_session(&stream)
-            .await
-            .expect("canonical inventory")
-            .expect("source retained");
-        assert_eq!(canonical.max_resume_time, Some(0));
-        assert_eq!(
-            source
-                .list_unacked(&stream)
-                .await
-                .expect("unacked custody")
-                .len(),
-            0
-        );
-
-        crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
-        assert!(source
-            .get_session(&stream)
-            .await
-            .expect("canonical source settled")
-            .is_none());
-        assert_eq!(
-            state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .list(&jid.to_bare())
-                .await
-                .expect("offline handoff")
-                .len(),
-            0
-        );
-        crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
-        assert_eq!(
-            state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .list(&jid.to_bare())
-                .await
-                .expect("acknowledged stanza stays retired")
-                .len(),
-            0
-        );
-    }
 }

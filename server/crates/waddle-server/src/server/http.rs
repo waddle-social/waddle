@@ -2093,7 +2093,8 @@ async fn create_sm_session_registry(
     let durable_sm =
         crate::sm_authority::DurableSmSelection::open(global_db, server_config.clustering.enabled)
             .await?;
-    if let Some(store) = durable_sm.store().filter(|store| !store.is_clustered()) {
+    if !durable_sm.store().is_clustered() {
+        let store = durable_sm.store();
         // No binding of a previous process of this single node exists any
         // more, so the sessions it left owned are detached and resumable. A
         // clustered node proves owner loss per session by its claim instead.
@@ -2116,7 +2117,7 @@ async fn create_sm_session_registry(
         global_db,
         clustering,
         server_config.clustering.enabled,
-        durable_sm.store().is_some(),
+        true,
     )
     .await?;
     if !state.publish_durable_sm(durable_sm) {
@@ -2163,7 +2164,7 @@ async fn create_sm_session_registry(
     // The durable authority keeps its sessions' snapshots and retained frames
     // in the relations this registry restores from. Its sessions are not
     // hydrated here: the authority alone resumes, expires and releases them.
-    let durable_stream_ids = match state.durable_sm().store() {
+    let durable_stream_ids = match state.durable_sm() {
         Some(store) => store
             .stream_ids()
             .await?
@@ -2186,9 +2187,11 @@ async fn create_sm_session_registry(
     // Under the durable selector a detached session lives in the authority,
     // not in this registry's maps; its detached readers and appenders reach
     // those sessions through this attachment.
-    if let Some(store) = state.durable_sm().store() {
+    if let Some(store) = state.durable_sm() {
         sm_session_registry.attach_durable_detached(Arc::new(
-            crate::sm_authority::DurableDetachedRecipients::new(store.clone()),
+            crate::sm_authority::DurableDetachedRecipients::new(
+                crate::sm_authority::DurableSmStore::clone(store),
+            ),
         ));
     }
     // ADR-0017 Phase 3 Slice 5 (carried debt (b)): complete the
@@ -2201,8 +2204,8 @@ async fn create_sm_session_registry(
     #[cfg(feature = "clustering")]
     if let Some(local_claims) = &clustering.local_claims {
         local_claims.wire(Arc::clone(&sm_session_registry));
-        if let Some(store) = state.durable_sm().store() {
-            local_claims.wire_durable_sm(store.clone());
+        if let Some(store) = state.durable_sm() {
+            local_claims.wire_durable_sm(crate::sm_authority::DurableSmStore::clone(store));
         }
     }
     Ok(sm_session_registry)

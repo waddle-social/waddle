@@ -21,8 +21,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use waddle_server::test_support::{
-    create_test_session, router, websocket_state_with_sasl2,
-    websocket_state_with_sasl2_and_durable_sm, WebSocketState,
+    create_test_session, router, websocket_state_with_sasl2_and_durable_sm,
+    websocket_state_with_sasl2_without_durable_sm, WebSocketState,
 };
 use waddle_xmpp::ownership::SmSessionKey;
 use waddle_xmpp::stream_management::durable::DurableSmState;
@@ -161,7 +161,6 @@ async fn only_session_state(state: &WebSocketState) -> DurableSmState {
         .deps
         .app_state
         .durable_sm()
-        .store()
         .expect("durable authority selected");
     let ids = store.stream_ids().await.expect("list durable sessions");
     assert_eq!(ids.len(), 1, "exactly one durable session");
@@ -299,7 +298,7 @@ async fn a_failed_inline_resume_falls_back_to_bind2() {
 
 #[tokio::test]
 async fn inline_requests_are_malformed_without_the_durable_authority() {
-    let state = websocket_state_with_sasl2().await;
+    let state = websocket_state_with_sasl2_without_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
     let (mut peer, server) = connect(state).await;
     start_stream(&mut peer).await;

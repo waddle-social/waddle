@@ -1,9 +1,9 @@
 use super::{
     connection, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_extension_manager, empty_extension_manager,
-    get_or_create_room_actor, handle_xmpp_frame, mpsc, offered_message, register_test_connection,
-    store_resumable_detached_session, Arc, ConnectionPhase, DatabaseConfig, DatabasePool,
-    PoolConfig, RoomConfig, SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState,
+    get_or_create_room_actor, handle_xmpp_frame, offered_message, register_test_connection, Arc,
+    DatabaseConfig, DatabasePool, PoolConfig, RoomConfig, SmSessionId, Stanza, TestStateOverrides,
+    WebSocketState, WsConnState,
 };
 use crate::ingress::commit::commit_hooks;
 use crate::ingress_uow::IngressUowError;
@@ -68,61 +68,6 @@ fn snapshot(conn: &mut WsConnState) -> DetachedSession {
         .expect("resumable snapshot")
 }
 
-async fn resume_snapshot(
-    state: &WebSocketState,
-    stale: DetachedSession,
-    session: &crate::auth::Session,
-    expected: u32,
-) -> (
-    WsConnState,
-    mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
-) {
-    store_resumable_detached_session(state, session, stale.clone()).await;
-    let mut resumed = WsConnState::new();
-    resumed.phase = ConnectionPhase::authenticated(&stale.jid);
-    resumed.authenticated_session = Some(session.clone());
-    let resume = minidom::Element::builder("resume", waddle_xmpp::stream_management::SM_NS)
-        .attr(
-            minidom::rxml::xml_ncname!("previd").to_owned(),
-            stale.stream_id,
-        )
-        .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-        .build();
-    let wire = super::super::super::transport_xml::element_to_xml(resume);
-    let frames = handle_xmpp_frame(&wire, "example.com", state, &mut resumed).await;
-    let reply: minidom::Element = frames
-        .first()
-        .expect("resume frame")
-        .parse()
-        .expect("resume XML");
-    assert!(
-        reply.is("resumed", waddle_xmpp::stream_management::SM_NS),
-        "{frames:?}"
-    );
-    assert_eq!(
-        reply
-            .attr("h")
-            .expect("h")
-            .parse::<u32>()
-            .expect("h integer"),
-        expected
-    );
-    let (sender, receiver) = mpsc::channel(8);
-    let mut pending = Some(sender);
-    let registered = super::super::super::registration::register_bound_connection_after_frame(
-        state,
-        "example.com",
-        &mut resumed,
-        &mut pending,
-    )
-    .await;
-    assert!(matches!(
-        registered,
-        super::super::super::registration::RegistrationAfterFrame::Registered(_)
-    ));
-    (resumed, receiver)
-}
-
 /// XEP-0198 §4–§6: exhausted serializable attempts do not acknowledge the stanza.
 #[tokio::test]
 async fn serialization_exhaustion_is_a_resumable_wire_hole() {
@@ -147,118 +92,6 @@ async fn serialization_exhaustion_is_a_resumable_wire_hole_case(state: Arc<WebSo
     assert_ack(&state, &mut conn, 0).await;
     assert_eq!(row_count(&state, "ingress_messages").await, 0);
     assert_eq!(row_count(&state, "ingress_sm_refs").await, 0);
-}
-
-/// XEP-0198 §5–§6: retry after a failed commit uses the first fresh ordinal.
-#[tokio::test]
-async fn ambiguous_uncommitted_resume_retransmission_gets_fresh_binding() {
-    recovery_after_ambiguity(create_test_websocket_state().await, false).await;
-}
-
-/// XEP-0198 §4–§5: a lost commit result resumes at the durable handled count.
-#[tokio::test]
-async fn ambiguous_committed_resume_covers_message_without_retransmission() {
-    recovery_after_ambiguity(create_test_websocket_state().await, true).await;
-}
-
-async fn recovery_after_ambiguity(state: Arc<WebSocketState>, landed: bool) {
-    let mut conn = connection(&state, true).await;
-    let stale = snapshot(&mut conn);
-    let session = conn.authenticated_session.clone().expect("session");
-    assert_ack(&state, &mut conn, 0).await;
-    let wire = offered_message();
-    let dispatch = handle_xmpp_frame(&wire, "example.com", &state, &mut conn);
-    let frames = if landed {
-        commit_hooks::AMBIGUOUS_COMMIT.scope(true, dispatch).await
-    } else {
-        commit_hooks::FAILURE
-            .scope(
-                std::cell::RefCell::new(Some(IngressUowError::AmbiguousCommit)),
-                dispatch,
-            )
-            .await
-    };
-    assert!(frames.is_empty());
-    assert_eq!(conn.sm_state.inbound_count(), 0);
-    assert_eq!(
-        row_count(&state, "ingress_messages").await,
-        i64::from(landed)
-    );
-    drop(conn);
-    let (mut resumed, _receiver) =
-        resume_snapshot(&state, stale, &session, u32::from(landed)).await;
-    if !landed {
-        let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut resumed).await;
-        assert!(
-            frames.iter().any(|frame| frame.contains("bad-request")),
-            "frames={frames:?}"
-        );
-    }
-    assert_ack(&state, &mut resumed, 1).await;
-    assert_eq!(row_count(&state, "ingress_messages").await, 1);
-    assert_eq!(row_count(&state, "ingress_sm_refs").await, 1);
-    let db = state
-        .deps
-        .app_state
-        .db_pool
-        .global()
-        .guard()
-        .await
-        .expect("database");
-    let mut rows = db
-        .query(
-            "SELECT CAST(ingress_ordinal AS BIGINT) FROM ingress_sm_refs",
-            (),
-        )
-        .await
-        .expect("ordinal");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("row")
-            .expect("binding")
-            .get::<i64>(0)
-            .expect("ordinal"),
-        1
-    );
-}
-
-/// XEP-0198 §4–§5: the checkpoint covers deferred IQ completion even without detach.
-#[tokio::test]
-async fn deferred_iq_ack_survives_crash_without_detach_and_new_positions_do_not_collide() {
-    deferred_iq_ack_survives_crash_without_detach_and_new_positions_do_not_collide_case(
-        create_test_websocket_state().await,
-    )
-    .await;
-}
-
-async fn deferred_iq_ack_survives_crash_without_detach_and_new_positions_do_not_collide_case(
-    state: Arc<WebSocketState>,
-) {
-    let mut conn = connection(&state, true).await;
-    let stale = snapshot(&mut conn);
-    let session = conn.authenticated_session.clone().expect("session");
-    let iq = conn.sm_inbound_completion.reserve(&conn.sm_state);
-    for _ in 0..2 {
-        handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
-    }
-    assert_ack(&state, &mut conn, 0).await;
-    assert_eq!(row_count(&state, "ingress_sm_refs").await, 2);
-    conn.sm_inbound_completion.complete(iq, &mut conn.sm_state);
-    assert_ack(&state, &mut conn, 3).await;
-    drop(conn);
-    let (mut resumed, _receiver) = resume_snapshot(&state, stale, &session, 3).await;
-    for h in [4, 5] {
-        let frames =
-            handle_xmpp_frame(&offered_message(), "example.com", &state, &mut resumed).await;
-        assert!(
-            frames.iter().any(|frame| frame.contains("bad-request")),
-            "frames={frames:?}"
-        );
-        assert_ack(&state, &mut resumed, h).await;
-    }
-    assert_eq!(row_count(&state, "ingress_messages").await, 4);
-    assert_eq!(row_count(&state, "ingress_sm_refs").await, 4);
 }
 
 /// XEP-0198 §4: the exposed counter and durable checkpoint wrap modulo 2^32.
@@ -487,15 +320,6 @@ async fn serialization_exhaustion_is_a_resumable_wire_hole_postgres() {
 
 /// XEP-0198 §4–§6: PostgreSQL counterpart of the connection scenario.
 #[tokio::test]
-async fn deferred_iq_ack_survives_crash_without_detach_and_new_positions_do_not_collide_postgres() {
-    postgres_case(
-        deferred_iq_ack_survives_crash_without_detach_and_new_positions_do_not_collide_case,
-    )
-    .await;
-}
-
-/// XEP-0198 §4–§6: PostgreSQL counterpart of the connection scenario.
-#[tokio::test]
 async fn wire_checkpoint_wraps_after_max_unsigned_int_postgres() {
     postgres_case(wire_checkpoint_wraps_after_max_unsigned_int_case).await;
 }
@@ -513,18 +337,6 @@ async fn accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_che
         accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_checkpoint_case,
     )
     .await;
-}
-
-/// XEP-0198 §4–§5: PostgreSQL ambiguity before a commit is retransmitted.
-#[tokio::test]
-async fn ambiguous_uncommitted_resume_retransmission_gets_fresh_binding_postgres() {
-    postgres_case(|state| recovery_after_ambiguity(state, false)).await;
-}
-
-/// XEP-0198 §4–§5: PostgreSQL committed ambiguity resumes from the checkpoint.
-#[tokio::test]
-async fn ambiguous_committed_resume_covers_message_without_retransmission_postgres() {
-    postgres_case(|state| recovery_after_ambiguity(state, true)).await;
 }
 
 pub(super) async fn postgres_case<F, Fut>(run: F)
@@ -777,53 +589,3 @@ async fn room_denials_case(state: Arc<WebSocketState>) {
 
 #[path = "ingress_authority_matrix.rs"]
 mod matrix;
-
-/// XEP-0198 §5–§6: a retained snapshot cannot resume without ingress authority.
-#[tokio::test]
-async fn resume_without_ingress_enrollment_fails_closed() {
-    resume_without_ingress_enrollment_case(create_test_websocket_state().await).await;
-}
-
-#[tokio::test]
-async fn resume_without_ingress_enrollment_fails_closed_postgres() {
-    postgres_case(resume_without_ingress_enrollment_case).await;
-}
-
-async fn resume_without_ingress_enrollment_case(state: Arc<WebSocketState>) {
-    let mut conn = connection(&state, true).await;
-    let stale = snapshot(&mut conn);
-    let session = conn.authenticated_session.clone().expect("session");
-    store_resumable_detached_session(&state, &session, stale.clone()).await;
-    drop(conn);
-    state
-        .deps
-        .app_state
-        .db_pool
-        .global()
-        .guard()
-        .await
-        .expect("database")
-        .execute("DELETE FROM ingress_sm_streams", ())
-        .await
-        .expect("remove ingress enrollment");
-    let mut resumed = WsConnState::new();
-    resumed.phase = ConnectionPhase::authenticated(&stale.jid);
-    resumed.authenticated_session = Some(session);
-    let resume = minidom::Element::builder("resume", waddle_xmpp::stream_management::SM_NS)
-        .attr(
-            minidom::rxml::xml_ncname!("previd").to_owned(),
-            stale.stream_id,
-        )
-        .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-        .build();
-    let wire = super::super::super::transport_xml::element_to_xml(resume);
-    let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut resumed).await;
-    assert_eq!(frames.len(), 1);
-    let reply: minidom::Element = frames[0].parse().expect("resume response XML");
-    assert!(reply.is("failed", waddle_xmpp::stream_management::SM_NS));
-    assert!(reply
-        .get_child("internal-server-error", xmpp_parsers::ns::XMPP_STANZAS)
-        .is_some());
-    assert!(!resumed.sm_state.enabled);
-    assert_eq!(row_count(&state, "ingress_sm_streams").await, 0);
-}

@@ -38,7 +38,7 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 
 use super::super::frame::{ResponseFrame, StreamErrorFrame};
 use super::super::transport_xml::websocket_stream_close_element;
-use waddle_xmpp::stream_management::{SmFailed, SmResumed, StreamManagementState};
+use waddle_xmpp::stream_management::{SmFailed, StreamManagementState};
 use waddle_xmpp::telemetry::attributes::SmAckOutcome;
 use waddle_xmpp::telemetry::reliability;
 
@@ -148,12 +148,6 @@ pub(super) enum SmResumeTerminal {
         handled: Option<u32>,
         send_count: Option<u32>,
     },
-    Resumed {
-        stream_id: SmSessionId,
-        handled: u32,
-        jid: FullJid,
-        replay: Vec<ResponseFrame>,
-    },
 }
 
 impl SmResumeTerminal {
@@ -231,37 +225,9 @@ impl SmResumeTerminal {
         }
     }
 
-    pub(super) fn detached_divergence(stream_id: SmSessionId, detached_jid: FullJid) -> Self {
-        Self::Failed {
-            stream_id,
-            source: SmResumeSource::Local,
-            outcome: SmResumeOutcome::DetachedDivergence,
-            jid: Some(detached_jid),
-            client_h: None,
-            replay_gap_through: None,
-            handled: None,
-            send_count: None,
-        }
-    }
-
-    pub(super) fn resumed(
-        stream_id: SmSessionId,
-        handled: u32,
-        jid: FullJid,
-        replay: Vec<ResponseFrame>,
-    ) -> Self {
-        Self::Resumed {
-            stream_id,
-            handled,
-            jid,
-            replay,
-        }
-    }
-
     pub(super) fn outcome(&self) -> SmResumeOutcome {
         match self {
             Self::Failed { outcome, .. } => *outcome,
-            Self::Resumed { .. } => SmResumeOutcome::Resumed,
         }
     }
 
@@ -308,7 +274,7 @@ impl SmResumeTerminal {
                 SmFailed::resume_failed("resource-constraint", handled).to_element(),
             )],
             // `condition()` is `None` only for `ShutdownAbandoned` (matched
-            // above), `Resumed` (the other variant), and `HandledTooHigh` —
+            // above), `Resumed` (never a failure), and `HandledTooHigh` —
             // whose dedicated arm above requires the fields its constructor
             // always sets. A field-less `HandledTooHigh` therefore cannot
             // carry a truthful frame; degrade to the generic internal error
@@ -317,19 +283,6 @@ impl SmResumeTerminal {
                 SmFailed::with_condition(self.condition().unwrap_or("internal-server-error"))
                     .to_element(),
             )],
-            Self::Resumed {
-                stream_id,
-                handled,
-                replay,
-                ..
-            } => {
-                let mut responses = Vec::with_capacity(replay.len() + 1);
-                responses.push(ResponseFrame::from(
-                    SmResumed::new(stream_id.as_str().to_owned(), handled).to_element(),
-                ));
-                responses.extend(replay);
-                responses
-            }
         }
     }
 }
@@ -423,54 +376,15 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
             }
             SmResumeOutcome::Resumed => {}
         },
-        SmResumeTerminal::Resumed {
-            stream_id,
-            jid,
-            replay,
-            ..
-        } => {
-            info!(stream_id = %stream_id, outcome = ?SmResumeOutcome::Resumed, jid = %jid, replay = replay.len(), "SM resume accepted; awaiting claim finalization");
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
-    use std::sync::{Arc, Mutex};
-
-    use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_sdk::trace::{InMemorySpanExporterBuilder, SdkTracerProvider};
-    use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
     use waddle_xmpp::telemetry::attributes::MessageKind;
     use waddle_xmpp::telemetry::messages::record_delivered_message;
     use waddle_xmpp::telemetry::test_support;
-
-    #[derive(Clone, Default)]
-    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for CaptureWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("capture buffer lock")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn sm_ack_metrics_classify_outcomes_without_touching_delivered_counter() {
@@ -539,92 +453,5 @@ mod tests {
             Some(1)
         );
         assert_eq!(sm_state.last_acked, 1);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn sm_resume_observation_keeps_origin_id_out_of_metrics_spans_and_logs() {
-        let metrics = test_support::acquire().await;
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let exporter = InMemorySpanExporterBuilder::new().build();
-        let provider = SdkTracerProvider::builder()
-            .with_simple_exporter(exporter.clone())
-            .build();
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_writer(CaptureWriter(buffer.clone())),
-            )
-            .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(provider.tracer("sm-observe-test"))
-                    .with_error_events_to_status(true)
-                    .with_error_records_to_exceptions(true),
-            );
-        let _subscriber = tracing::subscriber::set_default(subscriber);
-
-        let sentinel_origin_id = "sentinel-origin-id-sm-observe";
-        let resumed_jid: FullJid = "alice@example.com/web".parse().expect("jid");
-        let replay = vec![ResponseFrame::from(
-            minidom::Element::builder("message", "jabber:client")
-                .append(
-                    minidom::Element::builder("origin-id", "urn:xmpp:sid:0")
-                        .attr(
-                            minidom::rxml::xml_ncname!("id").to_owned(),
-                            sentinel_origin_id,
-                        )
-                        .build(),
-                )
-                .build(),
-        )];
-
-        observe_sm_resume(&SmResumeTerminal::resumed(
-            SmSessionId::new("stream-resumed"),
-            7,
-            resumed_jid,
-            replay,
-        ));
-        assert_eq!(
-            metrics.counter_sum("xmpp.sm.resume.results", &[("outcome", "resumed")]),
-            None,
-            "preliminary resumed terminal must not count before claim finalization"
-        );
-        observe_sm_resume_finalized(
-            SmResumeOutcome::Resumed,
-            Some(&SmSessionId::new("stream-resumed")),
-        );
-
-        provider
-            .force_flush()
-            .expect("in-memory tracer provider must flush");
-        assert_eq!(
-            metrics.counter_sum("xmpp.sm.resume.results", &[("outcome", "resumed")]),
-            Some(1)
-        );
-        for (_, attributes) in metrics
-            .counter_samples("xmpp.sm.resume.results")
-            .expect("resume result samples")
-        {
-            for (key, value) in attributes {
-                assert_ne!(key, sentinel_origin_id);
-                assert_ne!(value, sentinel_origin_id);
-            }
-        }
-        for span in exporter
-            .get_finished_spans()
-            .expect("in-memory exporter must yield finished spans")
-        {
-            for attribute in span.attributes {
-                assert_ne!(attribute.key.as_str(), sentinel_origin_id);
-                assert_ne!(attribute.value.to_string(), sentinel_origin_id);
-            }
-        }
-        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
-            .expect("captured logs are UTF-8");
-        assert!(logs.contains("SM resume accepted"), "{logs}");
-        assert!(
-            !logs.contains(sentinel_origin_id),
-            "origin-id must stay out of telemetry logs: {logs}"
-        );
     }
 }

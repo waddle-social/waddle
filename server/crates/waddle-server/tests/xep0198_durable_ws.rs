@@ -625,3 +625,111 @@ async fn a_session_live_when_the_process_died_resumes_after_a_restart() {
         "the same session resumed"
     );
 }
+
+/// `sm_sessions` and `sm_unacked` rows that no durable session record owns.
+/// The durable authority keeps its resource snapshots and retained frames in
+/// these relations under its own session ids; anything else was written by
+/// the stream-management session registry's own persistence.
+async fn rows_outside_the_authority(pool: &sqlx::SqlitePool) -> (i64, i64) {
+    let sessions = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sm_sessions s WHERE NOT EXISTS \
+         (SELECT 1 FROM sm_durable_sessions d WHERE d.session_id = s.stream_id)",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read sm_sessions");
+    let frames = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sm_unacked u WHERE NOT EXISTS \
+         (SELECT 1 FROM sm_durable_sessions d WHERE d.session_id = u.stream_id)",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read sm_unacked");
+    (sessions, frames)
+}
+
+/// With the durable authority selected, the session registry's persistence
+/// writes no session snapshot and no retained frame of its own: through
+/// enable, delivery, acknowledgement, detach, resume, replacement of a live
+/// session, close, a lost non-resumable stream and a restart, every
+/// `sm_sessions` and `sm_unacked` row belongs to a durable session.
+#[tokio::test]
+async fn the_session_registry_writes_no_rows_of_its_own_beside_the_authority() {
+    let dir = tempfile::tempdir().expect("test directory");
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("database.sqlite").display()
+    );
+    let server = TestServer::start_persistent_with_extra_envs(&db_url, ACCOUNTS, &[DURABLE]);
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("observe SQLite");
+    let fixture = Fixture {
+        server,
+        pool,
+        _dir: dir,
+    };
+
+    // Resumable session: delivery, acknowledgement, detach, resume.
+    let (token, written) = detached_session_holding(&fixture, &["m1", "m2"]).await;
+    assert_eq!(rows_outside_the_authority(&fixture.pool).await, (0, 0));
+    let mut alice = authenticate(&fixture.server, 0).await;
+    send_element(&mut alice, resume(&token, written - 1)).await;
+    recv_sm(&mut alice, "resumed").await;
+    recv_chats(&mut alice, &["m2"]).await;
+    send_element(
+        &mut alice,
+        sm("a").attr(nc!("h"), written.to_string()).build(),
+    )
+    .await;
+    let mut bob = bob(&fixture.server).await;
+    send_element(&mut bob, chat("alice@localhost/phone", "m3", "live")).await;
+    recv_chats(&mut alice, &["m3"]).await;
+    assert_eq!(rows_outside_the_authority(&fixture.pool).await, (0, 0));
+
+    // A second connection binding the same resource supersedes the first.
+    let mut replacement = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut replacement, "phone").await;
+    wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_TERMINAL
+    })
+    .await;
+    drop(alice);
+    drop(replacement);
+    assert_eq!(rows_outside_the_authority(&fixture.pool).await, (0, 0));
+
+    // Closing the stream ends the session.
+    let mut desk = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut desk, "desk").await;
+    send_element(
+        &mut desk,
+        Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing").build(),
+    )
+    .await;
+    wait_for_session(&fixture.pool, "alice@localhost/desk", |row| {
+        row.state == STATE_TERMINAL && row.terminal_reason == Some(REASON_CLOSED)
+    })
+    .await;
+    assert_eq!(rows_outside_the_authority(&fixture.pool).await, (0, 0));
+
+    // A non-resumable stream whose transport is lost.
+    let mut tablet = authenticate(&fixture.server, 0).await;
+    tablet.bind("tablet").await.expect("bind");
+    send_element(&mut tablet, sm("enable").build()).await;
+    recv_sm(&mut tablet, "enabled").await;
+    drop(tablet);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(rows_outside_the_authority(&fixture.pool).await, (0, 0));
+
+    // A live session survives the process; the restart writes nothing
+    // beside the authority either.
+    let mut watch = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut watch, "watch").await;
+    let Fixture { server, pool, _dir } = fixture;
+    drop(server);
+    drop(watch);
+    let server = TestServer::start_persistent_with_extra_envs(&db_url, ACCOUNTS, &[DURABLE]);
+    let mut alice = authenticate(&server, 0).await;
+    alice.bind("phone").await.expect("bind after restart");
+    assert_eq!(rows_outside_the_authority(&pool).await, (0, 0));
+}

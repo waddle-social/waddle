@@ -69,7 +69,6 @@ mod messages;
 mod misc;
 mod muc;
 mod registration;
-mod resume_checkpoint;
 mod retirement;
 mod rfc3921_session_destination;
 mod rfc6121_iq_reply;

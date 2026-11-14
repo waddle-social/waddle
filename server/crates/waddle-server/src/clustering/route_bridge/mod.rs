@@ -426,14 +426,6 @@ impl OrderedRelayDeliveryBridge {
             },
         );
     }
-
-    #[cfg(test)]
-    pub(crate) async fn test_pending_remote_socket_unregister_count(&self) -> usize {
-        self.pending_remote_socket_unregistrations
-            .lock()
-            .await
-            .len()
-    }
 }
 
 #[cfg(test)]

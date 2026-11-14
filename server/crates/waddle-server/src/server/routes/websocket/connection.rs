@@ -3,9 +3,7 @@ use super::batch_write::{
     BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
 };
 use super::cleanup::cleanup_connection_shutdown;
-use super::frame::{
-    handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame, StreamErrorFrame,
-};
+use super::frame::{handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame};
 use super::interpret_loop::build_interpret_deps;
 use super::outbound::{handle_outbound_stanza, OutboundAuthority};
 use super::registration::{
@@ -2939,18 +2937,6 @@ where
                 SmRegistrationFinalization::ReplaceWithFailed(failed) => {
                     responses = ResponseBatch::from_frames(vec![failed.to_element()]);
                 }
-                SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
-                    acknowledged,
-                    send_count,
-                } => {
-                    responses = ResponseBatch::from_frames(vec![
-                        ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
-                            acknowledged,
-                            send_count,
-                        }),
-                        ResponseFrame::from(websocket_stream_close_element()),
-                    ]);
-                }
             }
         }
         RegistrationAfterFrame::AuthorityRevoked
@@ -3140,8 +3126,7 @@ async fn cleanup_frame_authority_revocation(_state: &WebSocketState, conn: &mut 
     }
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         conn.pending_resume_h = None;
-        drop(conn.pending_resume_claim.take());
-        debug!(%stream_id, "Released SM resume claim after authority revocation");
+        debug!(%stream_id, "Dropped the pending SM resume after authority revocation");
     }
 }
 
