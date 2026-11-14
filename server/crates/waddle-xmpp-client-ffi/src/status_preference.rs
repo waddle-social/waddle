@@ -25,6 +25,8 @@ use crate::{WaddleClient, WaddleError};
 /// A status the user pinned by hand (ADR-010): an RFC 6121 §4.7.2.1
 /// `<show/>` value, or plain available.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleManualStatus {
     Available,
     /// `<show>chat</show>`, free for chat.
@@ -37,6 +39,8 @@ pub enum WaddleManualStatus {
 /// each device's auto-away govern; `Manual` pins one status on every
 /// device until the user resets it.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleStatusPreference {
     Automatic,
     Manual { status: WaddleManualStatus },

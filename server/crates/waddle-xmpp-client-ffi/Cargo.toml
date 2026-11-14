@@ -17,9 +17,12 @@ path = "src/bin/uniffi_bindgen.rs"
 required-features = ["uniffi-bindgen-bin"]
 
 [features]
+# Opt-in JSON I/O for the independent Flutter runtime; existing UniFFI clients are unchanged.
+serde = ["dep:serde"]
 uniffi-bindgen-bin = ["uniffi/cli"]
 
 [dependencies]
+serde = { workspace = true, optional = true }
 waddle-xmpp-client = { path = "../waddle-xmpp-client" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 uniffi = { version = "0.31", features = ["tokio"] }

@@ -1,0 +1,31 @@
+[package]
+name = "waddle-flutter-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Nonblocking C ABI for the independent Flutter client's shared Rust protocol runtime"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+waddle-xmpp-client-ffi = { path = "../waddle-xmpp-client-ffi", features = ["serde"] }
+waddle-flutter-timeline = { path = "../waddle-flutter-timeline" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+jid = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+minidom = { workspace = true }
+xmpp-parsers = { workspace = true }
+waddle-xmpp-client = { path = "../waddle-xmpp-client" }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+
+[lints]
+workspace = true

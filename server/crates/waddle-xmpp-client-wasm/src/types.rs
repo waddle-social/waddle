@@ -1485,6 +1485,19 @@ pub struct WaddleSendOptions {
     /// Sender-side directory for resolving typed `@label` tokens to
     /// XEP-0372 mention references (see `SendMessageOptions::mention_directory`).
     pub mention_directory: Option<WaddleMentionDirectory>,
+    /// Source pack of an XEP-0449 sticker. Missing means an ordinary file send.
+    pub sticker: Option<WaddleStickerRef>,
+}
+
+/// Typed reference to a sticker's original PEP or PubSub pack.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WaddleStickerRef {
+    /// Identifier of the advertised sticker pack.
+    pub pack_id: String,
+    /// Optional bare JID of the pack owner.
+    pub pack_jid: Option<String>,
+    /// Optional PubSub node hosting the referenced pack.
+    pub pack_node: Option<String>,
 }
 
 /// Known mention targets and permission to resolve broadcast mention tokens.

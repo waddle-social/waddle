@@ -24,6 +24,8 @@ use crate::{WaddleClient, WaddleError};
 /// `Full` sends the Waddle history-access extension. `FromJoin` omits
 /// that child and the server applies its from-join default.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleGroupDmHistoryAccess {
     /// New member may only see archive rows from their add boundary.
     FromJoin,

@@ -26,6 +26,18 @@ use crate::judgments::{SafetyScores, SafetyScoresFastening, ScoreTarget, Stamped
 /// (inclusive; ADR-0019 behaviour table).
 pub const GROUPING_WINDOW_MS: i64 = 5 * 60 * 1000;
 
+/// How an adapter proves that an occupant may change a retained message.
+/// Existing adapters retain their nickname fallback until they stamp live
+/// identity; hosts supplying immutable presence attribution can opt in.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorIdentityPolicy {
+    /// Preserve the existing adapter contract when no stable actor is supplied.
+    #[default]
+    NicknameFallback,
+    /// An identity-bearing target requires an identity-bearing, matching actor.
+    KnownTargetRequiresStableIdentity,
+}
+
 /// Longest reply quote kept on a row, in characters.
 const SNIPPET_CHARS: usize = 120;
 
@@ -300,6 +312,7 @@ struct RowIds {
 
 #[derive(Debug, Default)]
 pub struct Timeline {
+    author_identity_policy: AuthorIdentityPolicy,
     items: Vec<TimelineItem>,
     /// Ids of each row, parallel to `items`.
     ids: Vec<RowIds>,
@@ -342,6 +355,15 @@ pub struct Timeline {
 impl Timeline {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Choose stronger mutation identity checks when the platform adapter can
+    /// supply current, immutable author attribution for live messages.
+    pub fn with_author_identity_policy(policy: AuthorIdentityPolicy) -> Self {
+        Self {
+            author_identity_policy: policy,
+            ..Self::default()
+        }
     }
 
     pub fn items(&self) -> &[TimelineItem] {
@@ -400,6 +422,7 @@ impl Timeline {
         let mut older: Vec<TimelineItem> = Vec::new();
         let mut older_ids: Vec<RowIds> = Vec::new();
         let mut fastenings = Vec::new();
+        let mut enriched = BTreeSet::new();
         for message in messages {
             if is_fastening(&message) {
                 fastenings.push(message);
@@ -410,8 +433,20 @@ impl Timeline {
             let in_page = older
                 .iter()
                 .zip(&older_ids)
-                .any(|(item, held)| same_row(&ids, &author, held, &Author::of_item(item)));
-            if in_page || self.holds(&ids, &author) {
+                .position(|(item, held)| same_row(&ids, &author, held, &Author::of_item(item)));
+            if let Some(at) = in_page {
+                if ids.stanza.is_some()
+                    && ids.stanza == older_ids[at].stanza
+                    && older[at].author_id.is_none()
+                {
+                    older[at].author_id.clone_from(&message.author_id);
+                }
+                continue;
+            }
+            if self.holds(&ids, &author) {
+                if let Some(at) = self.enrich_archived_author(&message) {
+                    enriched.insert(at);
+                }
                 continue;
             }
             let Some(item) = content_item(&message) else {
@@ -422,7 +457,7 @@ impl Timeline {
         }
 
         let pushed = older.len();
-        let mut touched = BTreeSet::new();
+        let mut touched: BTreeSet<usize> = enriched.into_iter().map(|at| at + pushed).collect();
         if pushed > 0 {
             // References an older row may now take over from a newer one.
             let previous: Vec<(String, usize)> = self
@@ -670,8 +705,14 @@ impl Timeline {
             .get(&(author.clone(), id.to_string()))
             .copied()
             .or_else(|| {
-                self.referenced(id)
-                    .filter(|&at| same_author(&self.items[at], author, author_id))
+                self.referenced(id).filter(|&at| {
+                    same_author(
+                        &self.items[at],
+                        author,
+                        author_id,
+                        self.author_identity_policy,
+                    )
+                })
             })
     }
 
@@ -705,6 +746,20 @@ impl Timeline {
         }];
         diffs.extend(self.sets(touched.into_iter().filter(|&row| row != at)));
         diffs
+    }
+
+    /// The adapter has verified this full stanza ID against this conversation's
+    /// archive authority before supplying it. Only that exact match can enrich
+    /// unknown identity; a sender-chosen ID or current nickname is insufficient.
+    fn enrich_archived_author(&mut self, message: &IncomingMessage) -> Option<usize> {
+        let author = message.author_id.as_ref()?;
+        let at = *self.by_stanza.get(message.stanza_id.as_ref()?)?;
+        let item = &mut self.items[at];
+        if item.author_id.is_some() {
+            return None;
+        }
+        item.author_id = Some(author.clone());
+        Some(at)
     }
 
     fn take_reflection(
@@ -768,7 +823,14 @@ impl Timeline {
                 .remove(&key)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|edit| same_author(&self.items[at], &author, edit.author_id.as_deref()))
+                .filter(|edit| {
+                    same_author(
+                        &self.items[at],
+                        &author,
+                        edit.author_id.as_deref(),
+                        self.author_identity_policy,
+                    )
+                })
                 .max_by_key(|edit| edit.at);
             if let Some(edit) = edit {
                 if self.apply_edit_at(at, &author, &edit) {
@@ -1051,8 +1113,9 @@ impl Timeline {
     }
 
     fn apply_edit_at(&mut self, at: usize, author: &Author, edit: &Edit) -> bool {
+        let policy = self.author_identity_policy;
         let item = &mut self.items[at];
-        if item.retracted || !same_author(item, author, edit.author_id.as_deref()) {
+        if item.retracted || !same_author(item, author, edit.author_id.as_deref(), policy) {
             return false;
         }
         if item.edited_at.is_some_and(|applied| edit.at < applied) {
@@ -1074,12 +1137,13 @@ impl Timeline {
 
     /// Retract the row: by its sender (`Some`), or by the room (`None`).
     fn apply_removal_at(&mut self, at: usize, by: Option<(&Author, Option<&str>)>) -> bool {
+        let policy = self.author_identity_policy;
         let item = &mut self.items[at];
         if item.retracted {
             return false;
         }
         if let Some((author, author_id)) = by {
-            if !same_author(item, author, author_id) {
+            if !same_author(item, author, author_id, policy) {
                 return false;
             }
         }
@@ -1186,14 +1250,23 @@ impl Timeline {
 }
 
 /// Whether a fastening from `author` may change `item`: the same side
-/// (user or not) and, when both carry a stable identity (a room's real
-/// JID), the same one; otherwise the same name.
-fn same_author(item: &TimelineItem, author: &Author, author_id: Option<&str>) -> bool {
+/// (user or not), and matching identities when both are supplied. Strict hosts
+/// additionally require a stable actor whenever the target has one; genuinely
+/// anonymous targets retain the nickname-bound fallback under either policy.
+fn same_author(
+    item: &TimelineItem,
+    author: &Author,
+    author_id: Option<&str>,
+    policy: AuthorIdentityPolicy,
+) -> bool {
     if item.own != author.own {
         return false;
     }
     match (item.author_id.as_deref(), author_id) {
         (Some(held), Some(claimed)) => held == claimed,
+        (Some(_), None) if policy == AuthorIdentityPolicy::KnownTargetRequiresStableIdentity => {
+            false
+        }
         _ => item.sender == author.sender,
     }
 }

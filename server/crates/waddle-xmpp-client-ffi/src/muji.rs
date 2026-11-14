@@ -52,6 +52,7 @@ pub(crate) fn muji_mixer_target(account_jid: &str) -> Result<jid::Jid, WaddleErr
 /// (never inside it): raised hand and self-reported mute. Presence is
 /// last-writer-wins, so every update re-stamps BOTH flags.
 #[derive(uniffi::Record, Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleInCallPresenceFlags {
     pub hand_raised: bool,
     pub muted: bool,

@@ -5,6 +5,7 @@ use jid::Jid;
 /// Exposed so native clients reuse the workspace JID parser instead of
 /// hand-rolling string splits.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleJidParts {
     pub localpart: Option<String>,
     pub domain: String,

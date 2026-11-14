@@ -1,5 +1,9 @@
 //! Browser event loop coordinating commands, WebSocket frames, and runtime events.
 
+use std::cell::Cell;
+
+use crate::lifecycle::RetiredOnDrop;
+
 use super::{
     client_driver_event, emit_stream_management_callback, is_muc_join_presence, mam,
     message_delivery_stanza_id, mpsc, oneshot, parse_stanza_error, pin_mut, select,
@@ -266,7 +270,9 @@ pub(crate) async fn driver_loop(
     event_tx: mpsc::Sender<DriverEvent>,
     inner: Rc<RefCell<WaddleClientInner>>,
     command_lane: Rc<RefCell<WasmCommandLane>>,
+    retired: Rc<Cell<bool>>,
 ) {
+    let _retirement = RetiredOnDrop::new(retired);
     let mut task = match WasmDriverTask::try_new(
         config,
         ws,
@@ -1411,11 +1417,14 @@ mod tests {
 
     fn test_inner() -> Rc<RefCell<WaddleClientInner>> {
         Rc::new(RefCell::new(WaddleClientInner {
+            ownership: crate::lifecycle::BrowserOwnership::default(),
+            retirement_promise: None,
             config: StoredConfig {
                 server_url: "wss://xmpp.example.test".to_string(),
                 jid: "alice@example.test".to_string(),
                 access_token: "token".to_string(),
                 resource: "web".to_string(),
+                resumable: true,
                 resume_state: None,
             },
             command_lane: None,
@@ -1426,6 +1435,7 @@ mod tests {
             on_session_lifecycle: None,
             on_disconnected: None,
             on_error: None,
+            on_authentication_failed: None,
             on_message_delivery_acked: None,
             on_message_delivery_failed: None,
             on_message_rejected: None,
@@ -1722,6 +1732,7 @@ mod tests {
             jid: "alice@example.test".to_string(),
             access_token: "token".to_string(),
             resource: "web".to_string(),
+            resumable: true,
             resume_state: Some(
                 waddle_xmpp_client::SmResumeState::try_new(
                     waddle_xmpp_client::StreamId::new("previous-stream"),
@@ -1756,6 +1767,7 @@ mod tests {
             jid: "alice@example.test".to_string(),
             access_token: "token".to_string(),
             resource: "web".to_string(),
+            resumable: true,
             resume_state: None,
         };
         let mut runtime =

@@ -6,6 +6,8 @@ use waddle_xmpp_client::ClientError;
 /// existing Swift call sites stay untouched; only new `Result`-returning
 /// surfaces use this enum.
 #[derive(uniffi::Error, thiserror::Error, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleError {
     /// No live session — connect first.
     #[error("not connected")]

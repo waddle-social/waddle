@@ -80,6 +80,7 @@ fn make_driver_task_with_config(
         deferred_commands: VecDeque::new(),
         explicit_disconnect: false,
         last_resume_state: None,
+        _driver_lifetime: watch::channel(()).0,
     };
     (task, cmd_tx, evt_rx)
 }
@@ -249,6 +250,7 @@ async fn send_iq_resolves_via_mock_driver() {
         commands: cmd_tx,
         events: evt_tx,
         state,
+        driver_lifetime: watch::channel(()).1,
     };
 
     let iq = Element::builder("iq", crate::NS_CLIENT)
@@ -1028,7 +1030,8 @@ async fn native_handle_rejects_sends_while_retired_socket_close_is_stalled() {
     transport.close_transport_gate = Some((started_tx, release_rx));
     let (mut task, commands, _events) =
         make_driver_task_with_config(config_with_resume_state(), transport);
-    let handle = ClientHandle::from_parts(commands, task.events.clone(), task.state.clone());
+    let mut handle = ClientHandle::from_parts(commands, task.events.clone(), task.state.clone());
+    handle.driver_lifetime = task._driver_lifetime.subscribe();
     let mut events = handle.events();
     drive_task_to_resume_attempt(&mut task).await;
     task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1055,6 +1058,11 @@ async fn native_handle_rejects_sends_while_retired_socket_close_is_stalled() {
         "the transport close is still blocked"
     );
     assert_eq!(handle.state(), ClientState::Disconnected);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), handle.wait_for_driver_exit())
+            .await
+            .is_err()
+    );
     assert!(matches!(
         handle.send_stanza(message_stanza("late-send")).await,
         Err(ClientError::Disconnected)
@@ -1090,4 +1098,13 @@ async fn native_handle_rejects_sends_while_retired_socket_close_is_stalled() {
     assert!(!keep_running);
     assert_eq!(task.runtime.resume_state(), retained);
     assert_eq!(shared.sent_messages(), sent_before_release);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), handle.wait_for_driver_exit())
+            .await
+            .is_err()
+    );
+    drop(task);
+    tokio::time::timeout(Duration::from_secs(1), handle.wait_for_driver_exit())
+        .await
+        .unwrap();
 }

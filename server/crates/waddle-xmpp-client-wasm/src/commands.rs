@@ -121,6 +121,14 @@ async fn send_iq_roundtrip(
     inner: &Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Result<Element, ClientError>, JsValue> {
+    send_iq_roundtrip_with_deadline(inner, stanza, IQ_REPLY_DEADLINE_MS).await
+}
+
+async fn send_iq_roundtrip_with_deadline(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+    deadline_ms: u32,
+) -> Result<Result<Element, ClientError>, JsValue> {
     let iq_id = stanza
         .attr("id")
         .and_then(|value| waddle_xmpp_client::request::StanzaId::try_new(value).ok());
@@ -135,7 +143,7 @@ async fn send_iq_roundtrip(
         }
         iq_reply_from_oneshot(rx).await
     };
-    let (deadline, cancel_deadline) = sleep_ms(IQ_REPLY_DEADLINE_MS);
+    let (deadline, cancel_deadline) = sleep_ms(deadline_ms);
     let outcome = wait_iq_reply_with_deadline(round_trip, deadline).await;
     cancel_deadline();
     match outcome {
@@ -151,7 +159,7 @@ async fn send_iq_roundtrip(
                 });
             }
             Ok(Err(ClientError::IqTimeout {
-                timeout: std::time::Duration::from_millis(u64::from(IQ_REPLY_DEADLINE_MS)),
+                timeout: std::time::Duration::from_millis(u64::from(deadline_ms)),
             }))
         }
     }
@@ -547,6 +555,18 @@ pub(crate) async fn send_iq_command_stanza_aware(
         Ok(elem) => Ok(Ok(elem)),
         Err(ClientError::StanzaError(stanza_err)) => Ok(Err(stanza_err)),
         Err(other) => Err(js_error(other.to_string())),
+    }
+}
+
+/// XEP-0199 liveness probe: a stanza-level response, including an error, proves
+/// the stream is alive. Match the native client's bounded eight-second wait.
+pub(crate) async fn send_ping_command(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+) -> Result<(), JsValue> {
+    match send_iq_roundtrip_with_deadline(&inner, stanza, 8_000).await? {
+        Ok(_) | Err(ClientError::StanzaError(_)) => Ok(()),
+        Err(error) => Err(js_error(error.to_string())),
     }
 }
 

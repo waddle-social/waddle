@@ -30,6 +30,11 @@ pub(crate) fn build_client_config(config: &StoredConfig) -> Result<ClientConfig,
     let mut client_config = ClientConfig::try_new(ConnectionConfig::new(domain), transport, auth)
         .map_err(|err| js_error(err.to_string()))?;
     client_config.session.stream_management.resume_state = config.resume_state.clone();
+    client_config.session.stream_management.allow_resume = config.resumable;
+    if !config.resumable {
+        client_config.session.stream_management.resume_max = None;
+        client_config.session.stream_management.resume_state = None;
+    }
     Ok(client_config)
 }
 

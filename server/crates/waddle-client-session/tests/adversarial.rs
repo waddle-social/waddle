@@ -4,7 +4,8 @@
 //! review of the first version of this store.
 
 use waddle_client_session::{
-    Delivery, HistoryPage, IncomingMessage, LocalEcho, ReactionUpdate, Timeline, TimelineDiff,
+    AuthorIdentityPolicy, Delivery, HistoryPage, IncomingMessage, LocalEcho, ReactionUpdate,
+    Timeline, TimelineDiff,
 };
 
 /// A DM archive row as session.rs::archived_from builds it.
@@ -248,7 +249,11 @@ fn echo_reflection_survives_reindex() {
         None,
         HistoryPage::Complete,
     );
-    assert!(d.is_empty(), "{d:?}");
+    assert!(
+        matches!(d.as_slice(), [TimelineDiff::Set { index: 1, item }]
+        if item.author_id.as_deref() == Some("david@w.s")),
+        "{d:?}"
+    );
     assert_eq!(t.items().len(), 2);
     assert!(t.set_delivery("o1", Delivery::Failed).is_empty());
     assert_eq!(t.get("S9").map(|i| i.body.as_str()), Some("hi"));
@@ -314,4 +319,193 @@ fn dm_decoy_keeps_reaction_after_real_target_pages_in() {
         [(true, 1), (false, 0)],
         "reaction shown on both rows"
     );
+}
+
+#[test]
+fn unstamped_nickname_reuser_cannot_mutate_a_known_author_immediately_or_before_history() {
+    for buffered in [false, true] {
+        for retract in [false, true] {
+            let mut timeline = Timeline::with_author_identity_policy(
+                AuthorIdentityPolicy::KnownTargetRequiresStableIdentity,
+            );
+            let original = room(
+                "archive-original",
+                "origin-original",
+                "alex",
+                "alex@example.org",
+                "Original text",
+                10,
+            );
+            let mutation = IncomingMessage {
+                sender: "alex".into(),
+                author_id: None,
+                body: Some("Forged edit".into()),
+                timestamp_ms: 20,
+                replaces_id: (!retract).then(|| "origin-original".into()),
+                retracts_id: retract.then(|| "origin-original".into()),
+                ..IncomingMessage::default()
+            };
+            if buffered {
+                timeline.apply_live(mutation);
+                timeline.apply_history_page(
+                    vec![original],
+                    Some("archive-original".into()),
+                    HistoryPage::Complete,
+                );
+            } else {
+                timeline.apply_history_page(
+                    vec![original],
+                    Some("archive-original".into()),
+                    HistoryPage::Complete,
+                );
+                timeline.apply_live(mutation);
+            }
+            assert_eq!(
+                timeline.items()[0].body,
+                "Original text",
+                "buffered={buffered}, retract={retract}"
+            );
+            assert!(!timeline.items()[0].edited);
+            assert!(!timeline.items()[0].retracted);
+        }
+    }
+}
+
+#[test]
+fn genuinely_anonymous_nickname_bound_corrections_and_retractions_remain_supported() {
+    for policy in [
+        AuthorIdentityPolicy::NicknameFallback,
+        AuthorIdentityPolicy::KnownTargetRequiresStableIdentity,
+    ] {
+        let mut timeline = Timeline::with_author_identity_policy(policy);
+        timeline.apply_live(IncomingMessage {
+            author_id: None,
+            ..room(
+                "archive-original",
+                "origin-original",
+                "alex",
+                "",
+                "Original text",
+                10,
+            )
+        });
+        timeline.apply_live(IncomingMessage {
+            sender: "alex".into(),
+            replaces_id: Some("origin-original".into()),
+            body: Some("Anonymous correction".into()),
+            timestamp_ms: 20,
+            ..IncomingMessage::default()
+        });
+        assert_eq!(timeline.items()[0].body, "Anonymous correction");
+        timeline.apply_live(IncomingMessage {
+            sender: "alex".into(),
+            retracts_id: Some("origin-original".into()),
+            timestamp_ms: 30,
+            ..IncomingMessage::default()
+        });
+        assert!(timeline.items()[0].retracted);
+    }
+}
+
+#[test]
+fn legacy_adapters_keep_their_author_fallback_until_they_opt_in() {
+    let mut timeline = Timeline::new();
+    timeline.apply_live(room(
+        "archive-original",
+        "original",
+        "alex",
+        "alex@example.org",
+        "Old adapter",
+        10,
+    ));
+    timeline.apply_live(IncomingMessage {
+        sender: "alex".into(),
+        replaces_id: Some("original".into()),
+        body: Some("Legacy correction".into()),
+        timestamp_ms: 20,
+        ..IncomingMessage::default()
+    });
+    assert_eq!(timeline.items()[0].body, "Legacy correction");
+}
+
+#[test]
+fn exact_archive_identity_enriches_unknown_author_without_overwrite_or_downgrade() {
+    let mut timeline = Timeline::with_author_identity_policy(
+        AuthorIdentityPolicy::KnownTargetRequiresStableIdentity,
+    );
+    let original = room(
+        "archive-original",
+        "original",
+        "alex",
+        "alex@example.org",
+        "Original",
+        10,
+    );
+    timeline.apply_live(IncomingMessage {
+        author_id: None,
+        ..original.clone()
+    });
+    let diffs = timeline.apply_history_page(
+        vec![original.clone()],
+        Some("archive-original".into()),
+        HistoryPage::Complete,
+    );
+    assert_eq!(
+        timeline.items()[0].author_id.as_deref(),
+        Some("alex@example.org")
+    );
+    assert!(diffs
+        .iter()
+        .any(|diff| matches!(diff, TimelineDiff::Set { .. })));
+    timeline.apply_live(IncomingMessage {
+        sender: "alex".into(),
+        replaces_id: Some("original".into()),
+        body: Some("Unstamped edit".into()),
+        timestamp_ms: 20,
+        ..IncomingMessage::default()
+    });
+    assert_eq!(timeline.items()[0].body, "Original");
+    timeline.apply_history_page(
+        vec![IncomingMessage {
+            author_id: Some("mallory@example.org".into()),
+            ..original.clone()
+        }],
+        None,
+        HistoryPage::Complete,
+    );
+    timeline.apply_history_page(
+        vec![IncomingMessage {
+            author_id: None,
+            ..original
+        }],
+        None,
+        HistoryPage::Complete,
+    );
+    assert_eq!(
+        timeline.items()[0].author_id.as_deref(),
+        Some("alex@example.org")
+    );
+}
+
+#[test]
+fn sender_chosen_id_alone_cannot_enrich_an_unknown_author() {
+    let mut timeline = Timeline::with_author_identity_policy(
+        AuthorIdentityPolicy::KnownTargetRequiresStableIdentity,
+    );
+    let original = room(
+        "archive-original",
+        "original",
+        "alex",
+        "alex@example.org",
+        "Original",
+        10,
+    );
+    timeline.apply_live(IncomingMessage {
+        stanza_id: None,
+        author_id: None,
+        ..original.clone()
+    });
+    timeline.apply_history_page(vec![original], None, HistoryPage::Complete);
+    assert_eq!(timeline.items().len(), 1);
+    assert!(timeline.items()[0].author_id.is_none());
 }
