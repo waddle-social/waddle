@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "3752c8d318563e184e3035de3be1d11898c3cb9f",
+  "baseline_commit": "90cbb1968c76489a5770f63852956807fd5b0a61",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
-      "sha256": "4f83c58539eec409a5f3601b4b3322516d533ca23bb19f79330defef44c6145c"
+      "sha256": "302d5ebb76e05d202f21e29c77e3269f4aefdc60595cc352e0ace770061a8d10"
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/standing.rs",
@@ -603,7 +603,7 @@
     },
     "hg-gate": {
       "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
-      "line": 72,
+      "line": 75,
       "text": "pub struct HostGrantGate"
     },
     "hg-room-read": {

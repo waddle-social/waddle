@@ -4,7 +4,7 @@ Status: source inventory for #2047 F0; **production closure is not established**
 Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
-through `3752c8d318563e184e3035de3be1d11898c3cb9f` (see the last refresh
+through `90cbb1968c76489a5770f63852956807fd5b0a61` (see the last refresh
 below); the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -346,7 +346,7 @@ in this second target-main delta. This remains a selected static review: new
 vocabulary, external writers and unreviewed files can still escape it.
 
 The selected evidence was refreshed a third time for the host-grant writer
-fence, through `3752c8d318563e184e3035de3be1d11898c3cb9f`:
+fence, through `90cbb1968c76489a5770f63852956807fd5b0a61`:
 
 - The canonical host-grant store (`permissions/host_grant`) is a grant store
   and its acceptance admission an acceptance authority; both are anchored
