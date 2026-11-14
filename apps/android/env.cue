@@ -150,8 +150,10 @@ schema.#Project & {
 			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
-		// own parallel PR job so a flaky emulator never delays unit-test
-		// feedback and can be re-run independently. /dev/kvm + GMD on the
+		// own job so a flaky emulator never delays unit-test feedback and
+		// can be re-run independently. It runs after merge and on request:
+		// it gates nothing, and on pull requests it held a Namespace runner
+		// for every change to the shared Rust crates. /dev/kvm + GMD on the
 		// Namespace runner were proven by a real pull_request execution
 		// (PR #1366). Caveat: a manual dispatch on an unchanged ref
 		// reports green after "No affected tasks" — cuenv's affectedness
@@ -159,8 +161,9 @@ schema.#Project & {
 		// "skipped", not "passed".
 		deviceTests: {
 			when: {
-				pullRequest: true
-				manual:      true
+				branch: ["main"]
+				defaultBranch: true
+				manual:        true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
 			"tasks": [tasks.gmdCheck]

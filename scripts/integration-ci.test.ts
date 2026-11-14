@@ -70,12 +70,12 @@ describe("graph parity", () => {
     expect(workflow.jobs.integration.if).toBe("${{ always() }}");
     expect(workflow.jobs.integration.needs).toEqual(["plan", "example__build", "example__verify"]);
     expect(workflow.on.merge_group.types).toEqual(["checks_requested"]);
-    expect(workflow.on.pull_request).toEqual({});
+    expect(Object.keys(workflow.on).sort()).toEqual(["merge_group", "workflow_dispatch"]);
   });
   test("discovers all existing PR lanes, including experiment and native lanes", () => {
     const lanes = readLanes();
     const workflow = Bun.YAML.parse(generate(lanes)) as any;
-    for (const name of ["apple", "android", "chat", "federationgrantfence", "rusttests", "namespacerustchecks", "xmppservercompliance"]) {
+    for (const name of ["apple", "android", "chat", "federationgrantfence", "rusttests", "namespacerustchecks", "xmppcompliance"]) {
       expect(lanes.some(lane => lane.file.includes(name))).toBe(true);
     }
     expect(Object.keys(workflow.jobs).sort()).toEqual(["plan", "integration", ...lanes.flatMap(jobIds)].sort());

@@ -2,6 +2,7 @@ package cuenv
 
 import (
 	"list"
+	"strings"
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
 	xRust "github.com/cuenv/cuenv/contrib/rust"
@@ -83,6 +84,15 @@ let _gitopsWaddleServerInputs = [
 	"../infrastructure/waddle.cloud/gitops/waddle-server/**",
 	"../infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
 	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
+]
+
+// The short publish gates that the main pipeline runs in one job.
+let _mainCheckNames = [
+	"checkCiDrift",
+	"checkSwitchableAlternativeProgram",
+	"checkAlertRules",
+	"checkXmppClientFfiBindings",
+	"renderDeployment",
 ]
 let _deploymentInputs = ["deployment.cue", "observer-release.json", "scripts/observer_release.py", "scripts/test_observer_release.py"]
 
@@ -175,33 +185,36 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
-				// cuenv has no per-task runner. nixTestLocal depends on the
-				// helper but not on itself, so it alone selects the privileged
-				// 32-core builder. Publish depends on both and keeps its normal
-				// profile. The JSON round trip permits optional needs lookups;
-				// CI checks the generated graph and its default-success gates.
-				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
+				// cuenv has no per-task runner, so one expression selects it
+				// from the job's dependencies. A job that does not wait for
+				// fmt runs on the privileged 32-core builder: that is
+				// nixTestLocal, the longest gate, which therefore asks for
+				// its runner the moment the workflow starts, and fmt itself,
+				// which takes about a minute. Every other job waits for fmt
+				// and uses the normal profile. The JSON round trip permits a
+				// lookup of a dependency the job does not have; CI checks the
+				// generated graph and its default-success gates.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
 					"pull-requests": "none"
 				}
 			}
+			// Each job queues for a runner and repeats the Nix, cache and
+			// cuenv setup, so the short checks share one job (mainChecks).
+			// The compile-heavy gates stay separate so that they overlap.
 			tasks: [
-				_t.checkCiDrift,
-				_t.checkSwitchableAlternativeProgram,
-				_t.checkAlertRules,
 				_t.fmt,
-				_t.clippy,
-				_t.test,
-				_t.doctest,
-				_t.checkXmppClientFfiBindings,
-				_t.renderDeployment,
-				_t.nixBuildImageStream,
-				_t.nixBuildExtensionModules,
-				// Publish evidence: Postgres + all-features shards with the
+				_t.mainChecks,
+				_t.mainClippy,
+				_t.mainTest,
+				_t.mainDoctest,
+				_t.mainBuildImageStream,
+				_t.mainBuildExtensionModules,
+				// Publish evidence: the shard-lane helper contracts, then the
+				// Postgres + all-features shards with the
 				// required-cluster-tests.txt executed-name check (#1796).
-				_t.ciHelperContracts,
 				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
@@ -244,15 +257,17 @@ schema.#Project & {
 			]
 		}
 		// Native PostgreSQL characterization is independent of image publishing.
+		// It gates nothing, so it runs after merge and on request, on a
+		// GitHub runner: Namespace capacity is left to the lanes that gate
+		// pull requests and publishing.
 		roomChildContract: {
 			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
-			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -294,6 +309,9 @@ schema.#Project & {
 			}
 			tasks: [_t.federationGrantFenceProof]
 		}
+		// Runs after merge and on request. Its build closure repeats the
+		// pull-request image, clippy and fmt builds, and the proof gates
+		// nothing, so pull requests do not run it.
 		parentMoveNative: {
 			mode: "expanded"
 			when: {
@@ -311,29 +329,16 @@ schema.#Project & {
 			}
 			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
 		}
-		parentMoveNativePullRequest: {
-			mode: "expanded"
-			when: pullRequest: true
-			provider: github: runner: "ubuntu-24.04"
-			provider: github: permissions: {
-				"id-token":      "write"
-				contents:        "read"
-				checks:          "write"
-				packages:        "read"
-				"pull-requests": "none"
-			}
-			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
-		}
 		// Native SQL subscriber-capture characterization; no publishing task.
+		// Scheduled like roomChildContract, for the same reason.
 		spaceFanoutContract: {
 			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
-			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token": "write"
 				contents:   "read"
@@ -354,7 +359,12 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.clippy, _t.test, _t.doctest]
+			// The default-feature, no-Postgres test lane is the only Rust
+			// gate of the main pipeline that no other pull-request lane
+			// covers. Pull requests get clippy and doctests from the
+			// pullRequest pipeline's nixClippy and nixDoctest, which run the
+			// same commands over the same workspace and features.
+			tasks: [_t.test]
 		}
 		// Rust archives and shards are generated from ci/rust-tests/workflow.cue.
 		rootSync: {
@@ -397,12 +407,20 @@ schema.#Project & {
 			]
 		}
 		xmppServerCompliance: {
-			// The measured source compile is 4m13 on Namespace versus
-			// 12m47 on GitHub's standard runner. Keep this heavy lane here.
+			// The pull-request shard lane (rustTests) runs these server
+			// tests with Postgres and every feature, so this lane runs
+			// after merge and on request. The measured source compile is
+			// 4m13 on Namespace versus 12m47 on GitHub's standard runner;
+			// nothing waits for this lane, so it takes the slower runner
+			// and leaves Namespace capacity to the publishing pipeline.
 			mode: "expanded"
-			when: ci.pipelines.xmppCompliance.when
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				manual:        true
+			}
 			provider: github: {
-				runner:      "namespace-profile-linux-x86"
+				runner:      "ubuntu-24.04"
 				permissions: ci.pipelines.xmppCompliance.provider.github.permissions
 			}
 			tasks: [_t.nixXmppServerTests]
@@ -530,6 +548,19 @@ schema.#Project & {
 					  overall_status=1
 					fi
 					if ! bun scripts/integration-ci.ts --check; then
+					  overall_status=1
+					fi
+					# The integration planner runs these contracts itself, but
+					# only for merge groups and manual dispatches. Pull requests
+					# that change the planner, its adapter or the cuenv bootstrap
+					# get them here.
+					if ! bun test scripts/integration-ci.test.ts; then
+					  overall_status=1
+					fi
+					if ! python3 scripts/test_integration_ci_project.py; then
+					  overall_status=1
+					fi
+					if ! python3 scripts/test_cuenv_bootstrap.py; then
 					  overall_status=1
 					fi
 					# checkCiDrift is itself a direct publication gate. Verify the
@@ -776,7 +807,8 @@ schema.#Project & {
 
 		// Contract tests for the shard lane's helpers (required-test check,
 		// shard planning, archive transfer) and the Postgres test-environment
-		// structure check. The PR rustTests workflow runs the same script.
+		// structure check. The PR rustTests workflow runs the same script
+		// before compiling, and on main nixTestLocal runs it first.
 		ciHelperContracts: schema.#Task & {
 			// Reads ../tests and ../scripts through ../ inputs, which cuenv
 			// 0.56 rejects under the "dir" sandbox.
@@ -796,13 +828,25 @@ schema.#Project & {
 		// cuenv 0.57.3 emits no timeout-minutes for the main-pipeline job (it
 		// gates publish), so the lane bounds itself inside the PR job's 60
 		// minutes; a timeout fails the lane with diagnostics instead of
-		// holding publish for GitHub's six-hour default.
-		nixTestLocal: schema.#Task & {
+		// holding publish for GitHub's six-hour default. The PR rustTests
+		// workflow runs this command after its own helper-contract step.
+		nixTestShards: schema.#Task & {
 			command: "timeout"
 			args: ["--kill-after=2m", "55m", "bash", "scripts/run-nextest-shards.sh"]
-			dependsOn: [tasks.ciHelperContracts]
 			inputs: tasks.nixTestArchive.inputs
 			outputs: ["server/.ci/nextest-archive"]
+			hermetic: false
+		}
+
+		// The main pipeline's publish evidence: the helper contracts, then
+		// the bounded shard lane, in one job. The contracts take under two
+		// minutes; as a separate job they made the longest gate wait for a
+		// second runner before it could ask for its own.
+		nixTestLocal: schema.#Task & {
+			command: "bash"
+			args: ["-euo", "pipefail", "-c", "bash scripts/check-ci-helper-contracts.sh && exec \(strings.Join(list.Concat([[tasks.nixTestShards.command], tasks.nixTestShards.args]), " "))"]
+			inputs: list.Concat([tasks.ciHelperContracts.inputs, tasks.nixTestShards.inputs])
+			outputs:  tasks.nixTestShards.outputs
 			hermetic: false
 		}
 
@@ -877,6 +921,73 @@ schema.#Project & {
 			command:  "bash"
 			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace doctest"]
 			inputs: _namespaceRustTaskInputs
+		}
+
+		// The main pipeline's short publish gates in one job, so they take
+		// one runner and one Nix, cache and cuenv setup. Every check runs
+		// even after an earlier one fails, and the job fails if any did.
+		mainChecks: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-uo", "pipefail", "-c", #"""
+				failed=()
+				for check in \#(strings.Join(_mainCheckNames, " ")); do
+				  echo "::group::${check}"
+				  cuenv task "${check}" || failed+=("${check}")
+				  echo "::endgroup::"
+				done
+				if (( ${#failed[@]} )); then
+				  echo "Failed checks: ${failed[*]}" >&2
+				  exit 1
+				fi
+				"""#]
+			inputs: list.Concat([for name in _mainCheckNames {tasks[name].inputs}])
+			dependsOn: [tasks.fmt]
+		}
+
+		// The main pipeline's compile-heavy publish gates. They are the
+		// tasks pull requests run, plus a dependency on fmt: the runner
+		// expression of the default pipeline keys on that dependency, and
+		// declaring it on the shared tasks would add an fmt job to every
+		// pull-request pipeline that lists them.
+		mainClippy: schema.#Task & {
+			hermetic: false
+			command:  tasks.clippy.command
+			args:     tasks.clippy.args
+			inputs:   tasks.clippy.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainTest: schema.#Task & {
+			hermetic: false
+			command:  tasks.test.command
+			args:     tasks.test.args
+			inputs:   tasks.test.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainDoctest: schema.#Task & {
+			hermetic: false
+			command:  tasks.doctest.command
+			args:     tasks.doctest.args
+			inputs:   tasks.doctest.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainBuildImageStream: schema.#Task & {
+			hermetic: false
+			command:  tasks.nixBuildImageStream.command
+			args:     tasks.nixBuildImageStream.args
+			inputs:   tasks.nixBuildImageStream.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainBuildExtensionModules: schema.#Task & {
+			hermetic: false
+			command:  tasks.nixBuildExtensionModules.command
+			args:     tasks.nixBuildExtensionModules.args
+			inputs:   tasks.nixBuildExtensionModules.inputs
+			dependsOn: [tasks.fmt]
 		}
 
 		checkXmppClientFfiBindings: schema.#Task & {
@@ -1557,21 +1668,19 @@ schema.#Project & {
 			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/cutover_revisions.py", "scripts/publish_chart.py"]])
 			outputs: ["target/digests/**"]
 			dependsOn: [
-				tasks.checkCiDrift,
-				tasks.checkSwitchableAlternativeProgram,
-				tasks.checkAlertRules,
 				tasks.fmt,
-				tasks.clippy,
-				tasks.test,
-				tasks.doctest,
-				tasks.checkXmppClientFfiBindings,
-				tasks.renderDeployment,
-				tasks.nixBuildImageStream,
-				tasks.nixBuildExtensionModules,
-				// No image ships unless the Postgres + all-features lane ran
-				// every required cluster test on this exact commit. Keep both
-				// direct gates, even though the shard lane also needs helpers.
-				tasks.ciHelperContracts,
+				// checkCiDrift, checkSwitchableAlternativeProgram,
+				// checkAlertRules, checkXmppClientFfiBindings and
+				// renderDeployment.
+				tasks.mainChecks,
+				tasks.mainClippy,
+				tasks.mainTest,
+				tasks.mainDoctest,
+				tasks.mainBuildImageStream,
+				tasks.mainBuildExtensionModules,
+				// No image ships unless the helper contracts passed and the
+				// Postgres + all-features lane ran every required cluster
+				// test on this exact commit.
 				tasks.nixTestLocal,
 			]
 		}

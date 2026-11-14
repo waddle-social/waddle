@@ -522,3 +522,58 @@ support retaining FlakeHub for archive transfer: Hestia 3 and snapshots proved
 seeded availability, while Namespace's successful authenticated seed was
 followed by another empty warm volume. Detailed setup, restore, full-read and
 post-step evidence is in [ci-cache-benchmarks.md](ci-cache-benchmarks.md).
+
+## Main publication latency and runner contention
+
+[Main run 43592102868](https://github.com/waddle-social/waddle/actions/runs/43592102868)
+took 49 minutes from push to the end of its last gate. Its 13 gate jobs queued
+at 11:53; the first started at 12:09 and the rest followed at about one a
+minute. `ciHelperContracts` (1m51) started at 12:22, and `nixTestLocal` (14m23)
+could not ask for its 32-core builder until that finished. Each job spent about
+40 seconds on Nix, cache and cuenv setup. Pull requests produced about 85
+workflow runs that day against 15 pushes, on the same Namespace runners.
+
+The `default` pipeline now has eight gates instead of thirteen:
+
+| Job | Runner | Waits for | Runs |
+| --- | --- | --- | --- |
+| `fmt` | 32-core builder | nothing | `cargo fmt --check` |
+| `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
+| `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
+| `mainClippy`, `mainTest`, `mainDoctest` | profile | `fmt` | the namespace clippy, test and doctest tasks |
+| `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
+| `publishContainerImage` | profile | every job above | publication |
+
+cuenv 0.63.2 has no per-task runner, and a GitHub `runs-on` expression can
+only tell jobs apart by their dependencies. The expression gives the builder
+to a job that does not wait for `fmt`. That lets `nixTestLocal` request its
+runner when the workflow starts; the price is that `fmt` (about a minute) also
+runs on the builder and the other gates start after it. Matrix tasks would
+select a runner by name, but 0.63.2 names the job `nixTestLocal-<value>` while
+dependents still need `nixTestLocal`, which is not a valid workflow.
+
+The plain `test` gate stays on `main` beside the shards. It builds the default
+features (about 180 `not(feature = ...)` sites in the server crates compile only
+there) and passes `--all-targets`; the shards build `--all-features --lib
+--tests`. Neither selection contains the other.
+
+Pull requests no longer start these lanes:
+
+| Lane | Runner it used | Now runs | Pull-request coverage that remains |
+| --- | --- | --- | --- |
+| `waddle-integration` (a copy of every PR lane) | all of them | merge groups, dispatch | the original workflows |
+| `namespaceRustChecks` `clippy`, `doctest` | Namespace profile | `main` (`mainClippy`, `mainDoctest`) | `nixClippy`, `nixDoctest`: same workspace, features and lints |
+| `xmppServerCompliance` | Namespace profile | `main`, dispatch | `rustTests` runs the server tests with Postgres and all features |
+| `roomChildContract`, `spaceFanoutContract` | Namespace profile | `main`, dispatch | none; they gate nothing |
+| `parentMoveNativePullRequest` | GitHub | `main`, dispatch (`parentMoveNative`) | its build closure repeats `nixClippy`, `nixFmt` and `nixBuildImageStream` |
+| Android `deviceTests` | Namespace profile | `main`, dispatch | Android `pullRequest` |
+
+`namespaceRustChecks` keeps `test` on pull requests: it is the only pull-request
+lane that builds the default features, and it is a publish gate on `main`.
+On `main`, `roomChildContract`, `spaceFanoutContract` and
+`xmppServerCompliance` use GitHub runners, so they no longer take Namespace
+runners from the publishing pipeline that the same push starts.
+
+These are design expectations, not measurements. The account's Namespace
+concurrency limit is unverified (see the 64 vCPU observation above); if it is
+64 vCPU, `fmt` and `nixTestLocal` together fill it for the first minute.
