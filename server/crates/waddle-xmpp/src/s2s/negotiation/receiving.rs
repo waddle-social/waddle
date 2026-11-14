@@ -7,7 +7,7 @@ use jid::Jid;
 use minidom::rxml::Namespace;
 use minidom::Element;
 
-use crate::identity::{parse_jid, CanonicalDomain};
+use crate::identity::{canonical_jid, parse_jid, CanonicalDomain};
 use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
 use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamVersion};
@@ -254,9 +254,17 @@ impl Receiving {
             (_, TopLevel::Dialback) => self.on_dialback(steps),
             (State::Established, TopLevel::Stanza(stanza)) => match self.check_stanza(stanza) {
                 Err(condition) => self.fail(steps, condition),
-                Ok(stanza) if self.deliver => steps.push(Step::Deliver(stanza)),
+                Ok(Checked::Accepted(stanza)) if self.deliver => steps.push(Step::Deliver(stanza)),
+                Ok(Checked::Malformed(stanza)) if self.deliver => {
+                    steps.push(Step::DeliverMalformed(stanza))
+                }
+                // Without application dispatch no stanza error can be
+                // returned, so a refused spelling ends the stream.
+                Ok(Checked::Malformed(_)) => {
+                    self.fail(steps, StreamErrorCondition::ImproperAddressing)
+                }
                 // Application dispatch is not enabled on this stream.
-                Ok(_) => self.fail(steps, StreamErrorCondition::PolicyViolation),
+                Ok(Checked::Accepted(_)) => self.fail(steps, StreamErrorCondition::PolicyViolation),
             },
             (State::Established, TopLevel::Other) => {
                 self.fail(steps, StreamErrorCondition::UnsupportedStanzaType)
@@ -386,13 +394,16 @@ impl Receiving {
     /// canonical form, so its domains compare equal to the stream's pair
     /// wherever it goes next.
     ///
-    /// Any address the profile refuses closes the stream with
-    /// `improper-addressing`, including one that is a syntactically valid
-    /// JID in a spelling the profile does not accept, such as an uppercase
-    /// localpart. The handshake design records that the routing slice is
-    /// to answer such a stanza with a `jid-malformed` stanza error instead
-    /// and keep the stream.
-    fn check_stanza(&self, mut stanza: Element) -> Result<Element, StreamErrorCondition> {
+    /// An address that is absent, empty or not a valid address at all
+    /// closes the stream with `improper-addressing`. A valid address written
+    /// in a spelling the profile refuses, such as an uppercase localpart,
+    /// is read through RFC 7622 preparation instead, only to compare its
+    /// domain with the pair and to address a reply: its domain must still
+    /// be the stream's, and the stanza is returned as
+    /// [`Checked::Malformed`], with both addresses in the canonical form of
+    /// what preparation made of them, for the connection owner to answer
+    /// with a `jid-malformed` stanza error.
+    fn check_stanza(&self, mut stanza: Element) -> Result<Checked, StreamErrorCondition> {
         let Some((source, destination)) = &self.pair else {
             return Err(StreamErrorCondition::InternalServerError);
         };
@@ -402,15 +413,20 @@ impl Receiving {
         ) else {
             return Err(StreamErrorCondition::ImproperAddressing);
         };
-        if to.domain().as_str() != destination.as_str() {
+        if to.address.domain().as_str() != destination.as_str() {
             return Err(StreamErrorCondition::HostUnknown);
         }
-        if from.domain().as_str() != source.as_str() {
+        if from.address.domain().as_str() != source.as_str() {
             return Err(StreamErrorCondition::InvalidFrom);
         }
-        set_address(&mut stanza, "to", to);
-        set_address(&mut stanza, "from", from);
-        Ok(stanza)
+        let malformed = to.refused || from.refused;
+        set_address(&mut stanza, "to", to.address);
+        set_address(&mut stanza, "from", from.address);
+        Ok(if malformed {
+            Checked::Malformed(stanza)
+        } else {
+            Checked::Accepted(stanza)
+        })
     }
 
     fn next_exchange(&mut self) -> ExchangeId {
@@ -451,13 +467,42 @@ impl Receiving {
     }
 }
 
-/// A stanza `to` or `from` address in canonical form, or `None` when it is
-/// absent, empty or outside the identity profile.
-fn stanza_address(stanza: &Element, name: &str) -> Option<Jid> {
-    stanza
-        .attr(name)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| parse_jid(&lowercase_domainpart(value)).ok())
+/// The outcome of [`Receiving::check_stanza`] for a stanza whose
+/// addresses belong to the stream's pair.
+enum Checked {
+    /// Both addresses are in the identity profile.
+    Accepted(Element),
+    /// At least one address is valid but written in a spelling the profile
+    /// refuses.
+    Malformed(Element),
+}
+
+/// A stanza address read from its raw text.
+struct StanzaAddress {
+    /// The canonical form: of the address itself, or of its RFC 7622
+    /// preparation when `refused`.
+    address: Jid,
+    /// Whether the text is a spelling the identity profile refuses.
+    refused: bool,
+}
+
+/// A stanza `to` or `from` address, or `None` when it is absent, empty or
+/// not a valid address.
+fn stanza_address(stanza: &Element, name: &str) -> Option<StanzaAddress> {
+    let value = stanza.attr(name).filter(|value| !value.is_empty())?;
+    let value = lowercase_domainpart(value);
+    if let Ok(address) = parse_jid(&value) {
+        return Some(StanzaAddress {
+            address,
+            refused: false,
+        });
+    }
+    let prepared = Jid::new(&value).ok()?;
+    let address = canonical_jid(&prepared).ok()?;
+    Some(StanzaAddress {
+        address,
+        refused: true,
+    })
 }
 
 /// `address` with ASCII uppercase letters in its domainpart mapped to

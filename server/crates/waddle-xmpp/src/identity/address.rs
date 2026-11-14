@@ -119,6 +119,29 @@ pub fn canonical_jid(address: &Jid) -> Result<Jid, IdentityError> {
     ))
 }
 
+/// The text of `address` as presented to a peer: the domain in U-labels
+/// (RFC 7622 §3.2.1, [`CanonicalDomain::to_unicode`]), the localpart and
+/// resourcepart of its canonical form unchanged.
+///
+/// The result is attribute text for a stream boundary. It is not parsed
+/// back into a [`Jid`]: the `jid` parser applies Nameprep to a U-label,
+/// which folds some IDNA2008 labels into a different domain.
+pub fn presentation_text(address: &Jid) -> Result<String, IdentityError> {
+    let canonical = canonical_jid(address)?;
+    let domain = CanonicalDomain::from_domain(canonical.domain())?;
+    let mut text = String::new();
+    if let Some(localpart) = canonical.node() {
+        text.push_str(localpart.as_str());
+        text.push('@');
+    }
+    text.push_str(&domain.to_unicode());
+    if let Some(resourcepart) = canonical.resource() {
+        text.push('/');
+        text.push_str(resourcepart.as_str());
+    }
+    Ok(text)
+}
+
 /// A bare JID in canonical form: the identity of an account, a service or a
 /// grant subject.
 ///

@@ -15,7 +15,11 @@
 //! - [`Negotiation`]: the initiating and receiving negotiation state machine
 //!   (STARTTLS, SASL EXTERNAL, authenticated restart), with Server Dialback
 //!   decision points that refuse while [`DialbackMode::Disabled`];
-//! - [`S2sStream`]: a driver combining all of the above for one connection.
+//! - [`S2sStream`]: a driver combining all of the above for one connection,
+//!   which hands stanzas from an established receiving stream to its owner
+//!   and encodes stanzas for an established initiating stream;
+//! - [`into_server_content`] and [`into_client_content`]: the content
+//!   namespace mapping a stanza needs to cross a server-to-server stream.
 //!
 //! Stream header addresses are read from the raw attribute text into the
 //! identity profile's [`CanonicalDomain`](crate::identity::CanonicalDomain),
@@ -23,6 +27,7 @@
 //! headers write U-labels.
 
 mod condition;
+mod content;
 mod decoder;
 mod encoder;
 mod header;
@@ -31,6 +36,7 @@ mod negotiation;
 mod stream;
 
 pub use condition::{SaslFailureCondition, StreamErrorCondition};
+pub use content::{into_client_content, into_server_content};
 pub use decoder::{DecodeError, DiscardedInput, Inbound, StreamDecoder, TlsHandoff};
 pub use encoder::{EncodeError, StreamEncoder};
 pub use header::{HeaderAddress, StreamHeader, StreamId, StreamLanguage, StreamVersion};
@@ -40,4 +46,4 @@ pub use negotiation::{
     ExchangeId, InboundAdmission, InitiatingConfig, NegotiatedStream, Negotiation,
     NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Signal, Step, TlsPeer,
 };
-pub use stream::{Output, S2sStream};
+pub use stream::{Output, S2sStream, SendError};
