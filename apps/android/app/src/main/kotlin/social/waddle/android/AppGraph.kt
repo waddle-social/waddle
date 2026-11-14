@@ -128,13 +128,9 @@ class AppGraph(
     val loginGateway: () -> LoginAuthGateway =
         loginGatewayFactory ?: { WaddleLoginAuthGateway(authApi) }
 
-    /**
-     * GIF search over the server origin's `/api/giphy` proxy (the web
-     * contract). Same-origin as the auth REST base; a deployment
-     * without the proxy degrades to the "not configured" picker state.
-     */
+    /** GIF search uses the production chat proxy or a deployment-specific proxy. */
     val gifSearchGateway: GifSearchGateway =
-        gifSearchGateway ?: GiphyProxyGateway(serverUrl, okHttpClient)
+        gifSearchGateway ?: GiphyProxyGateway(serverUrl, okHttpClient, BuildConfig.WADDLE_GIF_PROXY_URL)
 
     private val networkSignal: NetworkSignal = networkSignal
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))

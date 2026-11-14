@@ -38,6 +38,11 @@ adb logcat --pid $(adb shell pidof -s social.waddle.android)
 cuenv equivalents (same tasks CI runs): `cuenv task build --path apps/android`,
 `checkBindingsDrift`, `test`.
 
+GIF search uses `https://waddle.chat/api/giphy` with the default production
+server. Custom `waddleServerUrl` builds use that server's `/api/giphy` route.
+Set `-PwaddleGifProxyUrl=https://gif.example` to use a separate HTTPS proxy base
+URL; the URL must not contain credentials, a query, or a fragment.
+
 ## Install-in-place artifacts
 
 Every APK — local or CI — is signed with the **checked-in**
