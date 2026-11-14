@@ -27,6 +27,7 @@
 postgres = { max-threads = 1 }
 # The ignored `live_spicedb_` tests share the one disposable SpiceDB named by
 # WADDLE_TEST_SPICEDB_ENDPOINT, and some empty it, so they run one at a time.
+# They refuse to run unless WADDLE_TEST_SPICEDB_DISPOSABLE=1 marks it wipeable.
 spicedb-live = { max-threads = 1 }
 
 # The clustering e2e binaries run an in-process + spawned-server cluster
@@ -157,7 +158,7 @@ filter = 'package(waddle-server) & binary(xmpp_e2e_cue)'
 threads-required = 'num-cpus'
 
 [[profile.default.overrides]]
-filter = 'package(waddle-server) & (binary(authz_id_codec) | binary(authz_codec_incarnation)) & test(/^live_spicedb_/)'
+filter = 'package(waddle-server) & (binary(authz_id_codec) | binary(authz_codec_incarnation) | binary(authz_schema_version) | binary(channel_outcast_precedence)) & test(/^live_spicedb_/)'
 test-group = 'spicedb-live'
 
 [profile.ci]

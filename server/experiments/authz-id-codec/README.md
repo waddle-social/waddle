@@ -122,4 +122,5 @@ establish the local codec contract; they do not establish live SpiceDB acceptanc
 store isolation, migration safety, or production authorization correctness. The
 production consumer's live SpiceDB tests are `#[ignore]`d and need a disposable
 SpiceDB named by `WADDLE_TEST_SPICEDB_ENDPOINT` and
-`WADDLE_TEST_SPICEDB_PRESHARED_KEY`.
+`WADDLE_TEST_SPICEDB_PRESHARED_KEY`, and refuse to run unless
+`WADDLE_TEST_SPICEDB_DISPOSABLE=1` declares that store safe to wipe.

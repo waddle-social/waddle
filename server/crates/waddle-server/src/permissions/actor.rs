@@ -292,6 +292,17 @@ impl PermissionActor {
         }
     }
 
+    async fn record_schema_version(&self) -> Result<(), PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => {
+                backend.record_schema_version(SPICEDB_SCHEMA).await
+            }
+            // The local backend evaluates the compiled schema directly and
+            // stores no schema to version.
+            PermissionActorBackend::Local { .. } => Ok(()),
+        }
+    }
+
     async fn ensure_codec_incarnation(&self) -> Result<(), PermissionError> {
         match &self.backend {
             PermissionActorBackend::SpiceDb(backend) => backend.ensure_codec_incarnation().await,
@@ -303,6 +314,11 @@ impl PermissionActor {
 }
 
 /// Ensure the external authorization backend has Waddle's built-in schema.
+///
+/// The schema is written only into an unversioned store or one recorded at an
+/// older schema version; a store at this version is left as it is, and a
+/// store at a newer or unrecognised version is refused without writing. See
+/// `permissions::authz_schema_version`.
 pub struct EnsureSchema;
 
 impl kameo::message::Message<EnsureSchema> for PermissionActor {
@@ -332,6 +348,24 @@ impl kameo::message::Message<EnsureAuthzCodecIncarnation> for PermissionActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.ensure_codec_incarnation().await
+    }
+}
+
+/// Record the built-in schema version in the external authorization store, or
+/// refuse a store recorded at a newer or unrecognised version. Run after
+/// [`EnsureAuthzCodecIncarnation`], so that a store the codec guard refuses is
+/// left without a version record. See `permissions::authz_schema_version`.
+pub struct RecordAuthzSchemaVersion;
+
+impl kameo::message::Message<RecordAuthzSchemaVersion> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        _msg: RecordAuthzSchemaVersion,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.record_schema_version().await
     }
 }
 

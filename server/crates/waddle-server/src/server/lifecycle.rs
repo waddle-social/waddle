@@ -198,6 +198,15 @@ pub async fn start_with_config_and_owner_outbox(
         .map_err(|error| {
             anyhow::anyhow!("Authorization store is not usable with this server: {error}")
         })?;
+    // Record the schema version only in a store the codec guard accepted, so
+    // a refused store gains no version marker; see
+    // `permissions::authz_schema_version`.
+    permission_actor
+        .ask(crate::permissions::RecordAuthzSchemaVersion)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to record the permission schema version: {error}")
+        })?;
     // Membership reconciliation (reads every user row and provisions
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must

@@ -16,11 +16,12 @@ use jid::BareJid;
 use kameo::actor::Spawn;
 use waddle_server::config::SpiceDbConfig;
 use waddle_server::permissions::{
-    decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, CheckPermission,
-    DeleteTuple, EncodedObjectId, EncodedSubjectId, EnsureSchema, ListRelations, ListSubjects,
-    LookupResources, LookupSubjects, Object, ObjectType, Permission, PermissionActor,
-    PermissionError, Relation, Subject, SubjectType, Tuple, WriteTuple,
-    AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_ID_WIRE_PREFIX, MAX_AUTHZ_ID_BYTES, MAX_AUTHZ_WIRE_BYTES,
+    decode_object, decode_subject, guarded_resource_definitions, AuthzIdError, AuthzOpaqueId,
+    AuthzUserJid, CheckPermission, DeleteTuple, EncodedObjectId, EncodedSubjectId, EnsureSchema,
+    ListRelations, ListSubjects, LookupResources, LookupSubjects, Object, ObjectType, Permission,
+    PermissionActor, PermissionError, Relation, Subject, SubjectType, Tuple, WriteTuple,
+    AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_ID_WIRE_PREFIX, AUTHZ_SCHEMA_MARKER_DEFINITION,
+    MAX_AUTHZ_ID_BYTES, MAX_AUTHZ_WIRE_BYTES,
 };
 use waddle_server::test_support::spicedb_wire;
 use waddle_server::ServerConfig;
@@ -523,26 +524,27 @@ fn production_backend_rejects_unencodable_identifiers_before_any_request() {
 /// Exercises the codec against a real SpiceDB through the production actor.
 /// Point it at a disposable instance only: it rewrites the schema.
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_keeps_legacy_colliding_identities_distinct() {
-    let endpoint =
-        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
-    // Writing the schema is refused while another codec's marker is stored,
-    // which the codec-incarnation tests sharing this SpiceDB can leave
-    // behind. On a fresh SpiceDB the marker definition does not exist and the
-    // delete fails; that is the state wanted.
+    let (endpoint, preshared_key) = disposable_spicedb_env();
+    // Writing the schema is refused while another codec's marker, a newer
+    // schema-version marker, or relationships without a codec marker are
+    // stored, which the other live tests sharing this SpiceDB leave behind.
+    // A definition the stored schema lacks, or every definition on a fresh
+    // SpiceDB, makes its delete fail; that is the state wanted.
     let raw = prescience::Client::builder(&endpoint, &preshared_key)
         .insecure(true)
         .build()
         .await
         .expect("raw SpiceDB client");
-    let _ = raw
-        .delete_relationships(prescience::RelationshipFilter::new(
-            AUTHZ_CODEC_MARKER_DEFINITION,
-        ))
-        .await;
+    for definition in guarded_resource_definitions().chain([
+        AUTHZ_CODEC_MARKER_DEFINITION,
+        AUTHZ_SCHEMA_MARKER_DEFINITION,
+    ]) {
+        let _ = raw
+            .delete_relationships(prescience::RelationshipFilter::new(definition))
+            .await;
+    }
     let mut config = ServerConfig::test_homeserver();
     config.spicedb = Some(SpiceDbConfig {
         endpoint,
@@ -661,4 +663,22 @@ async fn live_spicedb_keeps_legacy_colliding_identities_distinct() {
             .expect("check after delete")
             .allowed
     );
+}
+
+/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
+/// the operator has declared the store disposable: these tests delete every
+/// relationship of the guarded definitions and both markers.
+fn disposable_spicedb_env() -> (String, String) {
+    assert_eq!(
+        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
+        Ok("1"),
+        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
+         relationship of the guarded definitions and both markers, so they only run against a \
+         store that is safe to wipe"
+    );
+    let endpoint =
+        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
+    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
+        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    (endpoint, preshared_key)
 }

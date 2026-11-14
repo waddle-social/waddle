@@ -17,9 +17,14 @@ server reads the codec marker
 - marker for `v2`: the server starts;
 - no marker and no Waddle relationships: the server writes the marker, then
   starts. Of several replicas starting together, one writes it;
-- no marker but Waddle relationships: the server refuses to start;
+- no marker but Waddle relationships: the server refuses to start, before it
+  rewrites the schema. A Waddle definition that the stored schema does not
+  declare counts as empty;
 - any other marker content: the server refuses to start, before it rewrites the
   schema.
+
+The marker is read, and an unmarked store scanned, once before the schema is
+written and again, strictly, after it is written and before the server serves.
 
 Production runs the `spicedb` SpiceDBCluster on its PostgreSQL datastore, which
 the running release has populated, including through the startup reseed of
@@ -27,9 +32,16 @@ deployment memberships. **This build refuses to start against production until
 that store is emptied.** Each replica logs `Refusing the authorization store: it is not bound to the current ID codec`
 with a `reason` naming the first populated definition, and startup fails with
 `Authorization store is not usable with this server: Authorization store
-refused: authorization store holds ...`. No relationship is written in that
-case; the schema gains the empty `waddle_authz_codec` definition, which the
-previous release removes again when it starts.
+refused: authorization store holds ...` (`Failed to ensure permission schema:
+Authorization store refused: authorization store holds ...` when, as usual, the
+store is already populated when the replica starts). In that case neither a
+relationship nor the schema is written: replicas of the previous release that
+are still running keep evaluating their own schema, and their schema writes at
+restart do not alternate with this release's. Only a store that becomes
+populated between the two scans, because a replica of the previous release
+wrote to it while this release was starting, has this release's schema written
+before it is refused; the previous release then writes its own schema again
+when it next starts, because neither marker was written.
 
 Main auto-deploys. Merge this change only inside an explicitly authorised
 `Recreate` window, or ship it as part of the planned fresh production redeploy
@@ -102,14 +114,18 @@ same access controls as the account database and delete it after the window.
    and flags to be confirmed against the deployed `zed` version). A single
    bulk delete may stop at a default limit, so repeat it until the verification
    read returns nothing. The existing schema may stay; this release rewrites it
-   and adds `waddle_authz_codec`. Verify that `zed relationship read
-   <definition>` returns nothing for each definition.
+   and adds `waddle_authz_codec` and `waddle_authz_schema`. Verify that `zed
+   relationship read <definition>` returns nothing for each definition.
 4. Start this release with `Recreate` and the deployment UUID unchanged. One
    replica logs `Marked empty authorization store for the current ID codec`;
    both must become ready. A replica refused because the store `changed while
    its codec marker was being written` only needs a restart.
 5. Verify `zed relationship read waddle_authz_codec` returns exactly the
-   marker above, that deployment owners can administer the server, and that a
+   marker above, and the schema-version checks of
+   [authz-schema-versions.md](authz-schema-versions.md) (this release also
+   installs schema version 1, which gives a channel `outcast` precedence over
+   every channel grant and over the author's own message edit and delete),
+   that deployment owners can administer the server, and that a
    fresh account receives its deployment membership. Re-apply the bans (so SpiceDB and
    SQL agree) and ownerships decided in step 1, and confirm the rooms kept closed are closed.
 6. Restore `RollingUpdate`, if wanted, only in a separate change after fleet
@@ -118,16 +134,17 @@ same access controls as the account database and delete it after the window.
 ## Rollback
 
 Prefer roll-forward. Once the store is marked, the previous release cannot
-start against it: its schema write omits `waddle_authz_codec`, and SpiceDB
-refuses to remove a definition that still holds relationships, so its startup
-fails. That failure is the fence. **Do not restore the previous binary onto a
+start against it: its schema write omits `waddle_authz_codec` and
+`waddle_authz_schema`, and SpiceDB refuses to remove a definition that still
+holds relationships, so its startup fails. That failure is the fence. **Do not restore the previous binary onto a
 marked store, and do not delete the marker by hand to get past it**: without
 the marker the previous release would start and read every `v2_` row as a
 legacy ID, ignoring grants and bans and aliasing identifiers such as
 `v2_c2t5`.
 
 A binary rollback is a second cutover in reverse: stop every replica of this
-release, empty the store again (losing every grant written since, with the same
+release, empty the store again, including the `waddle_authz_codec` and
+`waddle_authz_schema` markers (losing every grant written since, with the same
 inventory and re-ban obligations), then start the previous release on the empty
 store. Rolling forward again later repeats this whole procedure.
 
@@ -139,9 +156,12 @@ startup. The surfaced error depends on where the refusal happens:
 
 - ``authorization store holds `<definition>` relationships but no codec
   marker``: the store was written by the previous release, or a pre-codec
-  binary wrote to it before it was marked. Startup fails with
-  `Authorization store is not usable with this server: Authorization store
-  refused: ...`. Follow the procedure above.
+  binary wrote to it before it was marked. This is checked before the schema
+  is written, so startup fails with `Failed to ensure permission schema:
+  Authorization store refused: ...` and the stored schema is left as it is; if
+  the relationships appeared while the replica was starting, the refusal comes
+  after the schema write, as `Authorization store is not usable with this
+  server: Authorization store refused: ...`. Follow the procedure above.
 - `authorization store is marked for a different or unrecognised ID codec`:
   the store belongs to another codec version, for example a later release. Run
   the release that wrote it. Do not edit or delete the marker. This is checked

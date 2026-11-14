@@ -4,7 +4,7 @@
 //! definitions the guard requires to be empty. The `live_spicedb_` tests run
 //! the production backend against a disposable SpiceDB: an empty store is
 //! marked, a store holding legacy relationships or another codec's marker is
-//! refused (another codec's marker before the schema is rewritten), a marked
+//! refused (both before the schema is rewritten), a marked
 //! store is accepted, and racing replicas that write grants as soon as they
 //! pass write one marker and all start.
 #![cfg(feature = "test-support")]
@@ -24,7 +24,7 @@ use waddle_server::permissions::{
     Object, ObjectType, PermissionActor, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID,
     AUTHZ_CODEC_MARKER_READ_LIMIT, AUTHZ_CODEC_MARKER_RELATION, AUTHZ_CODEC_VERSION,
-    AUTHZ_ID_WIRE_PREFIX, MAX_AUTHZ_ID_BYTES,
+    AUTHZ_ID_WIRE_PREFIX, AUTHZ_SCHEMA_MARKER_DEFINITION, MAX_AUTHZ_ID_BYTES,
 };
 use waddle_server::ServerConfig;
 
@@ -203,10 +203,7 @@ struct LiveSpiceDb {
 
 impl LiveSpiceDb {
     async fn connect() -> Self {
-        let endpoint =
-            std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-        let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-            .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+        let (endpoint, preshared_key) = disposable_spicedb_env();
         let client = Client::builder(&endpoint, &preshared_key)
             .insecure(true)
             .build()
@@ -219,13 +216,20 @@ impl LiveSpiceDb {
             insecure: true,
         });
         let live = Self { config, client };
-        // Drop any marker an earlier test left, so that writing the schema is
-        // not refused. On a fresh SpiceDB the definition does not exist yet
-        // and the delete fails; that is the state wanted.
-        let _ = live
-            .client
-            .delete_relationships(RelationshipFilter::new(AUTHZ_CODEC_MARKER_DEFINITION))
-            .await;
+        // Drop any codec or schema-version marker, and any relationship, an
+        // earlier test left, so that writing the schema is neither refused
+        // nor skipped. A definition the stored schema lacks, or every
+        // definition on a fresh SpiceDB, makes its delete fail; that is the
+        // state wanted.
+        for definition in guarded_resource_definitions().chain([
+            AUTHZ_CODEC_MARKER_DEFINITION,
+            AUTHZ_SCHEMA_MARKER_DEFINITION,
+        ]) {
+            let _ = live
+                .client
+                .delete_relationships(RelationshipFilter::new(definition))
+                .await;
+        }
         // Write the built-in schema through the production path, then empty
         // every definition it declares.
         live.actor()
@@ -316,7 +320,7 @@ fn incarnation_outcome<M>(
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_marks_an_empty_store() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -327,7 +331,7 @@ async fn live_spicedb_marks_an_empty_store() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_accepts_a_marked_store_with_relationships() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -350,7 +354,7 @@ async fn live_spicedb_accepts_a_marked_store_with_relationships() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_an_unmarked_store_with_legacy_rows() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -363,17 +367,19 @@ async fn live_spicedb_refuses_an_unmarked_store_with_legacy_rows() {
     )
     .await;
 
-    assert_eq!(
-        guard(&live.actor().await).await,
-        Err(AuthzIncarnationError::UnmarkedStoreNotEmpty {
-            resource_type: "channel"
-        })
-    );
+    // A restarting replica refuses before rewriting the schema, and the
+    // guard refuses on its own as well.
+    let replica = live.actor().await;
+    let refusal = AuthzIncarnationError::UnmarkedStoreNotEmpty {
+        resource_type: "channel",
+    };
+    assert_eq!(ensure_schema(&replica).await, Err(refusal));
+    assert_eq!(guard(&replica).await, Err(refusal));
     assert!(live.marker_rows().await.is_empty(), "store was marked");
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_another_codec_version() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -406,7 +412,7 @@ async fn live_spicedb_refuses_another_codec_version() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_racing_replicas_write_one_marker() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -443,4 +449,22 @@ async fn live_spicedb_racing_replicas_write_one_marker() {
     guard(&live.actor().await)
         .await
         .expect("marked store with grants");
+}
+
+/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
+/// the operator has declared the store disposable: these tests delete every
+/// relationship of the guarded definitions and both markers.
+fn disposable_spicedb_env() -> (String, String) {
+    assert_eq!(
+        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
+        Ok("1"),
+        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
+         relationship of the guarded definitions and both markers, so they only run against a \
+         store that is safe to wipe"
+    );
+    let endpoint =
+        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
+    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
+        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    (endpoint, preshared_key)
 }
