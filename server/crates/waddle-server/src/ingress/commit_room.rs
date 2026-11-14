@@ -62,6 +62,206 @@ pub(super) async fn assert_snapshot_coordinates(
     CanonicalMessageRepository::assert_room_snapshot(tx, room, coordinates).await
 }
 
+/// How the host-grant authority decided a fresh room acceptance.
+pub(super) enum HostGrantAcceptance {
+    /// No enrolled scope manages the room; its existing admission applies.
+    Unmanaged,
+    /// The sender is admitted under the scope's canonical policy state,
+    /// whose guard this transaction now holds. `submission` carries the plan
+    /// reduced to `audience`, the admitted principals it names; the
+    /// acceptance records, seals and executes that plan and nothing else.
+    Admitted {
+        submission: Box<IngressSubmission>,
+        audience: Vec<jid::BareJid>,
+    },
+    Refused(HostGrantRefusal),
+}
+
+/// Why a managed room's fresh acceptance is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostGrantRefusal {
+    Denied(crate::permissions::host_grant::AdmissionDenial),
+    /// This replica has not verified its runtime role's privileges on the
+    /// host-grant store, so it treats every enrolled scope as unavailable.
+    AuthorityUnavailable,
+    /// The acceptance is not one a managed room takes: the transaction
+    /// cannot seal a manifest for the room, the plan holds work that is
+    /// neither the room's own nor addressed to a principal, or the room's
+    /// address is not in canonical form.
+    UnsupportedAcceptance,
+}
+
+/// Admit a fresh acceptance for a room an enrolled host-grant scope manages.
+///
+/// The decision is made from PostgreSQL in this transaction, after its
+/// ownership claims and before anything it accepts is recorded: the scope's
+/// guard is taken shared and held until the transaction ends, so a revoke
+/// either committed before this read or waits for this transaction. The
+/// sender needs `send_message`, or the stanza is refused. Every other
+/// principal the plan names needs `read`: the plan is reduced to those who
+/// hold it (`host_grant_plan`), so a principal who does not is delivered,
+/// projected and notified nothing, and does not keep the stanza from the
+/// admitted audience.
+pub(super) async fn admit_host_grants(
+    tx: &mut IngressUowTransaction<'_>,
+    submission: &IngressSubmission,
+    can_seal: bool,
+) -> Result<HostGrantAcceptance, IngressUowError> {
+    use super::host_grant_plan::{named_principals, reduce_to_audience};
+    use crate::ingress_uow::HostGrantAdmissionRepository;
+    use crate::permissions::host_grant::{
+        HostGrantAction, RoomAcceptance, RoomAdmission, RoomManagement,
+    };
+    use crate::server::routes::interpret::effects::RoomExecutionPath;
+    let RoomExecutionPath::Local {
+        room,
+        manifest_snapshot,
+        ..
+    } = &submission.plan.room_execution
+    else {
+        return Ok(HostGrantAcceptance::Unmanaged);
+    };
+    let refused = |refusal| Ok(HostGrantAcceptance::Refused(refusal));
+    // An unmanaged room costs one indexed lookup and nothing else.
+    let scope = match HostGrantAdmissionRepository::managing_scope(tx, room).await? {
+        RoomManagement::Unmanaged => return Ok(HostGrantAcceptance::Unmanaged),
+        RoomManagement::NotCanonical => return refused(HostGrantRefusal::UnsupportedAcceptance),
+        RoomManagement::Managed(scope) => scope,
+    };
+    let Some(attachment) = tx.host_grant_attachment() else {
+        warn_authority_unavailable();
+        return refused(HostGrantRefusal::AuthorityUnavailable);
+    };
+    let sender = submission.principal.bare_jid();
+    // A plan that cannot be classified is refused only after the sender was
+    // decided, so a sender who is not admitted learns nothing but that.
+    let named = named_principals(&submission.plan, room, sender);
+    let admission = HostGrantAdmissionRepository::admit_room_acceptance(
+        tx,
+        &scope,
+        &RoomAcceptance {
+            room,
+            sender,
+            action: HostGrantAction::SendMessage,
+            audience: named.as_deref().unwrap_or_default(),
+            served: attachment.served(),
+        },
+    )
+    .await?;
+    let audience = match admission {
+        RoomAdmission::Denied(denial) => return refused(HostGrantRefusal::Denied(denial)),
+        RoomAdmission::Admitted { audience, .. } => audience,
+    };
+    if named.is_err() || !can_seal || manifest_snapshot.is_none() {
+        return refused(HostGrantRefusal::UnsupportedAcceptance);
+    }
+    let Ok(plan) = reduce_to_audience(&submission.plan, room, sender, &audience) else {
+        return refused(HostGrantRefusal::UnsupportedAcceptance);
+    };
+    // The manifest is sealed under the stanza identity of the room's route,
+    // which the planner records only when it routed the groupchat to a
+    // connection. An admitted acceptance without one would freeze no
+    // children and so prove no audience.
+    if manifest_stamp(&plan.intents, room).is_none() {
+        return refused(HostGrantRefusal::UnsupportedAcceptance);
+    }
+    super::commit::commit_hooks::after_host_grant_admission().await;
+    Ok(HostGrantAcceptance::Admitted {
+        submission: Box::new(IngressSubmission {
+            plan,
+            ..submission.clone()
+        }),
+        audience,
+    })
+}
+
+/// Log, at most once a minute, that a managed room's acceptance was refused
+/// because this replica holds no host-grant attachment. Only the kind of
+/// the refusal is logged; the room and the sender are not.
+fn warn_authority_unavailable() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    const INTERVAL: Duration = Duration::from_secs(60);
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    // Milliseconds after `ORIGIN` at which the next warning may be logged.
+    static NEXT_MS: AtomicU64 = AtomicU64::new(0);
+    let now =
+        u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX);
+    let due = NEXT_MS.load(Ordering::Relaxed);
+    let next = now.saturating_add(u64::try_from(INTERVAL.as_millis()).unwrap_or(u64::MAX));
+    if now >= due
+        && NEXT_MS
+            .compare_exchange(due, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::warn!(
+            kind = "authority_unavailable",
+            "A managed room's acceptance was refused: this replica has not verified its \
+             runtime role's privileges on the host-grant store"
+        );
+    }
+}
+
+/// An admitted acceptance for a managed room must freeze a manifest, and
+/// what the manifest froze must lie within the admitted audience: every
+/// child that names a recipient names an admitted one, and every recorded
+/// intent is one the reduced plan could hold. Anything else fails the
+/// transaction, so nothing is accepted for it. Admission refuses a plan
+/// that would seal nothing, and the reduction of the plan keeps the rest;
+/// the check is what keeps a later change of the commit path from accepting
+/// through an acceptance that freezes no children, or from widening a
+/// sealed audience, unnoticed.
+pub(super) fn assert_admitted_children(
+    manifest: Option<&super::FrozenRoomManifest>,
+    sender: &jid::BareJid,
+    audience: &[jid::BareJid],
+) -> Result<(), IngressUowError> {
+    let Some(manifest) = manifest else {
+        return Err(IngressUowError::HostGrantAudienceUnproven);
+    };
+    let children = manifest.children.iter().all(|child| {
+        child
+            .target
+            .as_ref()
+            .is_none_or(|target| audience.contains(&target.to_bare()))
+    });
+    let intents = super::host_grant_plan::intents_within_audience(
+        manifest.recorded_intents(),
+        &manifest.room,
+        sender,
+        audience,
+    );
+    if children && intents {
+        Ok(())
+    } else {
+        Err(IngressUowError::HostGrantAudienceUnproven)
+    }
+}
+
+/// The stanza identity a room manifest is sealed under: the one the room
+/// route of `room` among `intents` stamped. Without such a route there is
+/// nothing to seal, and `seal` freezes no manifest.
+fn manifest_stamp(
+    intents: &[waddle_xmpp::ingress::IngressEffectIntent],
+    room: &jid::BareJid,
+) -> Option<waddle_xmpp_core::xep0359::StanzaId> {
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+    intents.iter().find_map(|intent| match intent {
+        IngressEffectIntent::RouteMucGroupchat {
+            room: saved,
+            route_identity: EffectMessageIdentity::StanzaId(stamp),
+            ..
+        }
+        | IngressEffectIntent::RouteMucSystemBroadcast {
+            room: saved,
+            route_identity: EffectMessageIdentity::StanzaId(stamp),
+            ..
+        } if saved == room => Some(stamp.clone()),
+        _ => None,
+    })
+}
+
 pub(super) async fn seal(
     tx: &mut IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
@@ -70,7 +270,6 @@ pub(super) async fn seal(
     use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
     use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
     use crate::server::routes::interpret::effects::RoomExecutionPath;
-    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
     let envelope = CanonicalMessageRepository::load_envelope(tx, key)
         .await?
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
@@ -87,20 +286,7 @@ pub(super) async fn seal(
         return Ok(None);
     };
     let intents = EffectIntentRepository::load(tx, key).await?;
-    let stamp = intents.iter().find_map(|intent| match intent {
-        IngressEffectIntent::RouteMucGroupchat {
-            room: saved,
-            route_identity: EffectMessageIdentity::StanzaId(stamp),
-            ..
-        }
-        | IngressEffectIntent::RouteMucSystemBroadcast {
-            room: saved,
-            route_identity: EffectMessageIdentity::StanzaId(stamp),
-            ..
-        } if saved == room => Some(stamp.clone()),
-        _ => None,
-    });
-    let Some(stamp) = stamp else {
+    let Some(stamp) = manifest_stamp(&intents, room) else {
         return Ok(None);
     };
     // Host-owned occupant copies are an intentional no-transport projection.

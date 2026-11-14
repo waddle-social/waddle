@@ -63,6 +63,15 @@ impl MigrationRunner {
         Self::deployment(baseline::selected())
     }
 
+    /// The highest version in this runner's catalog: the version a database
+    /// that has applied every migration records last.
+    pub fn latest_version(&self) -> Option<i64> {
+        self.migrations
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+    }
+
     /// The deployment catalog under an explicit [`BaselineAction`].
     pub(super) fn deployment(action: BaselineAction) -> Self {
         let mut migrations = vec![baseline::migration()];

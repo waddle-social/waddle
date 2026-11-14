@@ -105,9 +105,29 @@ fn builtin_schema_subtracts_outcast_from_every_channel_permission() {
             .strip_prefix('(')
             .and_then(|rest| rest.strip_suffix(") - outcast"))
             .unwrap_or_else(|| panic!("{line} does not subtract outcast from all its grants"));
-        assert!(!granted.contains('('), "{line}");
-        assert!(!granted.contains('-'), "{line}");
+        // Inside the parentheses there is nothing but a union of grants: a
+        // direct channel relation, or a permission of the parent Space
+        // reached through the `parent->` arrow. No grant is subtracted,
+        // intersected or grouped apart from the others, so none escapes the
+        // one subtraction that closes the expression.
+        let grants: Vec<&str> = granted.split(" + ").collect();
+        assert!(!grants.is_empty(), "{line}");
+        for grant in grants {
+            let relation = grant.strip_prefix("parent->").unwrap_or(grant);
+            assert!(
+                !relation.is_empty()
+                    && relation
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                "{line}: {grant:?} is not a relation or a parent arrow"
+            );
+            assert_ne!(relation, "outcast", "{line}");
+        }
     }
+    // `delete` is granted through the parent Space only, and it is among the
+    // permissions checked above: an outcast who administers the Space does
+    // not delete the channel.
+    assert!(channel.contains(&"permission delete = (parent->admin) - outcast"));
 }
 
 #[test]

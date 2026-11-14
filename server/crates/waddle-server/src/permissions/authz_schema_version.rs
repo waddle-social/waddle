@@ -105,9 +105,10 @@ pub const AUTHZ_SCHEMA_MARKER_ID: &str = "installed";
 /// The version of the built-in schema this build writes and serves.
 ///
 /// Version 1 is the first versioned schema; it adds outcast precedence to
-/// every channel permission. Stores without a marker are unversioned and are
-/// upgraded.
-pub const AUTHZ_SCHEMA_VERSION: u32 = 1;
+/// every channel permission. Version 2 adds the `waddle_grant_projection`
+/// definition, which holds the host-grant projection markers and changes no
+/// permission. Stores without a marker are unversioned and are upgraded.
+pub const AUTHZ_SCHEMA_VERSION: u32 = 2;
 
 /// Prefix of the marker relation; the version follows in decimal, without
 /// leading zeros. SpiceDB relation names need at least three characters, so

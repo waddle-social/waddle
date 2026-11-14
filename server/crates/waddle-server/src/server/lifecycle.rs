@@ -181,6 +181,14 @@ pub async fn start_with_config_and_owner_outbox(
     } else {
         PermissionActor::from_server_config(&server_config).await?
     };
+    // PostgreSQL holds the canonical grants of enrolled host-grant scopes.
+    // Legacy tuple writes to their objects are refused from that store, so
+    // the refusal survives a restart; SQLite holds no such scope.
+    let permission_actor_impl =
+        match crate::permissions::host_grant::HostGrantStore::open((*global_db).clone()) {
+            Ok(store) => permission_actor_impl.with_host_grant_store(store),
+            Err(_) => permission_actor_impl,
+        };
     info!(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"

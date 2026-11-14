@@ -127,8 +127,9 @@ same access controls as the account database and delete it after the window.
 5. Verify `zed relationship read waddle_authz_codec` returns exactly the
    marker above, and the schema-version checks of
    [authz-schema-versions.md](authz-schema-versions.md) (this release also
-   installs schema version 1, which gives a channel `outcast` precedence over
-   every channel grant and over the author's own message edit and delete),
+   installs schema version 2, which gives a channel `outcast` precedence over
+   every channel grant and over the author's own message edit and delete, and
+   declares the host-grant projection marker definition),
    that deployment owners can administer the server, and that a
    fresh account receives its deployment membership. Re-apply the bans (so SpiceDB and
    SQL agree) and ownerships decided in step 1, and confirm the rooms kept closed are closed.

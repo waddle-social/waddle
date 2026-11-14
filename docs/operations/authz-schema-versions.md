@@ -9,10 +9,11 @@ recorded at an older version, and refuses to start, without writing anything,
 against a store recorded at a newer or unrecognised version or holding an
 unfinished upgrade to a newer version (`permissions::authz_schema_version`).
 
-The version is recorded in one marker relationship:
+The version is recorded in one marker relationship, here for version 2, the
+version of this release:
 
 ```
-waddle_authz_schema:installed#version_1@waddle_authz_schema:installed
+waddle_authz_schema:installed#version_2@waddle_authz_schema:installed
 ```
 
 The relation name carries the version, and the schema of version N declares
@@ -93,6 +94,28 @@ What this changes for users is narrower than the schema:
 The local test backend evaluates the same rule as SpiceDB, and deleting the
 `outcast` relation restores what the subject's other relations grant.
 
+## Version 2: host-grant projection marker
+
+Version 2 adds one definition and changes no permission:
+
+```
+definition waddle_grant_projection {
+  relation marker: waddle_grant_projection
+}
+```
+
+It holds the projection markers of the host-grant authority
+(`server/docs/planning/host-grant-authority-2047.md`): at most one
+relationship per enrolled scope lifecycle,
+`waddle_grant_projection:<lifecycle>#marker@waddle_grant_projection:<stamp>`.
+No permission refers to it. A deployment without an enrolled scope holds no
+relationship in it, and every check answers as under version 1.
+
+The codec guard treats the definition like any other: a store that holds
+projection markers and no codec marker is refused. Do not write or delete a
+projection marker by hand; the host-grant authority reads it to decide what a
+scope's projection holds.
+
 ## Startup
 
 At startup, with the codec guard of
@@ -101,8 +124,8 @@ At startup, with the codec guard of
 1. A store the codec guard refuses, because it is marked for another codec or
    holds relationships without a codec marker, is refused before anything is
    written. Otherwise the replica reads the version marker.
-   - Version 1: it reads the stored schema, refuses to start if that declares
-     a version newer than 1, and otherwise proceeds without writing the
+   - Its own version: it reads the stored schema, refuses to start if that
+     declares a newer version, and otherwise proceeds without writing the
      schema.
    - None: it writes the built-in schema.
    - An older version: the same stored-schema check, then it writes the
@@ -127,14 +150,18 @@ release that wrote it can still write its own schema again.
 
 ## Rollout within #2047
 
-Version 1 is first installed by the same start that binds the empty store to
-the `v2` ID codec. The codec cutover already requires every replica of the
-previous release to be stopped and the store to be empty, so there is no
-mixed-version period for this transition. Follow
+The release that merges #2047 carries schema version 2. Its schema is first
+installed by the same start that binds the empty store to the `v2` ID codec,
+and that start records version 2 directly; no store is recorded at version 1
+unless a build from before the host-grant authority ran against it. The codec
+cutover already requires every replica of the previous release to be stopped
+and the store to be empty, so there is no mixed-version period for this
+transition. Follow
 [authz-codec-cutover.md](authz-codec-cutover.md), and in its verification step
 also check:
 
-- `zed relationship read waddle_authz_schema` returns exactly the marker above;
+- `zed relationship read waddle_authz_schema` returns exactly
+  `waddle_authz_schema:installed#version_2@waddle_authz_schema:installed`;
 - one replica logged `Recorded the authorization schema version`;
 - bans re-applied after the cutover deny the banned account in the room, also
   when the account is a member of the parent Space.
@@ -143,7 +170,7 @@ Once the marker exists, a replica of the previous release fails at startup:
 its schema write would remove `waddle_authz_schema` (and `waddle_authz_codec`),
 and SpiceDB refuses it. Replicas of the previous release that are still running
 cannot exist at this point, because the codec cutover stopped them; if one
-does, it evaluates every check against the version 1 schema, since SpiceDB
+does, it evaluates every check against the stored schema, since SpiceDB
 evaluates permissions centrally.
 
 ## Later schema versions
@@ -170,12 +197,20 @@ Mixed-version replicas during such a rollout:
   replicas keep serving under the new schema until they are replaced.
 
 The upgrade path from an older recorded version (the `Older` branch of step 1
-and step 3) cannot run while version 1 is the only version, so it has only
-offline coverage. **Version 2 must ship with a live upgrade test** in
+and step 3) is exercised from version 1 to version 2 by the live tests in
 `server/crates/waddle-server/tests/authz_schema_version.rs`: a store recorded
-at version 1 is upgraded and recorded at version 2, racing replicas of both
-versions included, and a version 1 replica refuses the store once version 2
-has written its schema.
+at version 1 is upgraded and recorded at version 2, also by replicas racing
+each other, and a version 1 replica is refused from the moment version 2 has
+written its schema, before and after the marker is replaced. The version 1
+replica in those tests is the version 1 decision applied to the live store
+(marker classification, the stored-schema check, and SpiceDB's own refusal of
+the version 1 schema), not a version 1 binary. A later version adds the same
+tests for its own upgrade.
+
+When replicas race through an upgrade, one that read the older marker before
+another replaced it may write the upgrade schema last. The emptied older
+relation then stays declared until the next upgrade; it holds nothing and no
+permission refers to it.
 
 Old-binary retirement: the rollout is complete when no pod of an older image
 remains. A crash-looping old pod that logs `Refusing the authorization store:

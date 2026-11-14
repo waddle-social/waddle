@@ -9,9 +9,22 @@ host-grant authority and SpiceDB as its reconstructible policy projection.
 selection on conditions B1, B4, B6 and B7 of the
 [blocking ledger](#blocking-review-ledger), and its first slice evaluates
 admission in SQL inside the acceptance transaction. The selection discharges no
-ledger entry and changes no runtime behavior. The
+ledger entry. The
 [federation plan](../../../docs/planning/federation-2047.md) and distributed
 actor roadmap retain their ordering and activation gates.
+
+The first slice is implemented (`permissions/host_grant`, migration 2001).
+What it decided for its scope is recorded under
+[First-slice decisions](#first-slice-decisions); the evidence for those
+decisions is the first slice's focused set, executed as described under
+[Running the first slice's focused set](#running-the-first-slices-focused-set).
+No scope is enrolled by any release configuration, and nothing enrolls one at
+runtime, so the slice changes no behavior of an existing deployment beyond
+its migration, the built-in authorization schema's version, one indexed
+lookup on legacy channel and Space permission writes, a privilege check of
+the runtime role when a PostgreSQL replica starts, and the refusal of a room
+address that is not in canonical form (see
+[Rollout part](#rollout-part-g24)).
 
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
@@ -518,6 +531,12 @@ S2S.
 | Outcast on every action the SQL policy protects, including channel `moderate`, `manage` and `delete` and an outcast author's own message `edit` and `delete` | The SQL policy evaluates outcast for every action it protects, and outcast wins each at this slice's admission. | W5b |
 | Acknowledged revoke across two replicas with queued work at joins, protected reads, PubSub and stream-management fanout and room administration | No new protected admission under the revoked grant after the fence, on any replica. | W5d |
 | Retired account JID on a Waddle home | Never issued to a new holder through any provisioning path. | W5d |
+| Groupchat planned by the room planner for a revoked member, a member of the parent Space without a room grant, and a seated account without a grant | The acceptance is reduced to the admitted audience: none of them is routed, projected, pushed or notified anything, nothing is recorded for a later replay to deliver, and the admitted members receive the message. | W5b |
+| Plan that holds work a managed room does not account for; room address that is not canonical | The stanza is refused with a committed error of type `cancel`; a sender who is not admitted is told only that. | W5b |
+| Stored owner or admin grant of a remote account at this slice's admission and as a mutation's initiator | Contributes nothing, member-level access included, and does not count as the owner a room keeps; a member-level grant of a remote account is honored. | W5b |
+| Replica whose runtime role does not match the store's privilege profile | Holds no attachment and serves no enrolled scope; rooms no scope manages are unaffected. | W5b |
+| Enrollment and retirement with the runtime credential | Refused by PostgreSQL before anything changes. | W5b |
+| Projection read that does not answer | The permission actor keeps answering what it decides without SpiceDB; the read ends at its deadline with an unknown outcome. | W5b |
 
 The W5b focused set is every row marked W5b; the W5d focused set is every row
 marked W5d. Both run again on the integrated tree in verification step 4. No
@@ -525,6 +544,589 @@ S2S transport is needed for either; do not waive the existing harness
 restriction. Broader suites and live tests are separate evidence. Later slices
 must close join, read-response, PubSub, topology, actor-restoration and
 remote-custody gaps individually.
+
+## First-slice decisions
+
+These are the decisions the first grant-authority slice made for its scope.
+They are decisions, not evidence: the acceptance matrix above is their
+evidence and has not been run. Later slices extend each of them for the
+surfaces and writers they add, and must not rely on a bound stated here
+without restating it.
+
+### What the slice covers
+
+- A scope is a community key (service JID and Space node) with exactly one
+  lifecycle. A key is enrolled once; a retired or exhausted scope is never
+  enrolled again, so a lifecycle identity cannot be reused and has no ordinal
+  to exhaust. Recreation of a scope under a new lifecycle is not built.
+- A scope manages at most 8 rooms and holds at most 200 grant rows, counting
+  revoked subjects (`HOST_GRANT_SCOPE_MAX_ROOMS`,
+  `HOST_GRANT_SCOPE_MAX_GRANT_ROWS`). A change to a subject that already
+  holds a row is always recorded, so a full scope can still revoke and ban;
+  only a grant to a new subject is refused at the bound. The bound is what
+  keeps one projection write inside one `WriteRelationships` request; a
+  larger scope needs the chunking decision this slice does not make.
+- A managed room is members-only and its grants are the explicit room
+  affiliations `owner`, `admin`, `member`, `outcast` and `none`. Nothing is
+  inherited from the parent Space.
+- The store is PostgreSQL only. SQLite holds no host-grant relation, no scope
+  can be enrolled there, and every room keeps its existing admission.
+- Nothing calls the mutation API from an XMPP handler. Mapping an XMPP
+  request to an operation identity is undecided and belongs to the slice
+  that integrates a handler.
+- A managed room accepts groupchat messages from its members, including a
+  correction, a retraction and link-preview references of such a message.
+  It accepts nothing else that is planned for it: occupant private
+  messages, the room's own system messages, groupchat sent by an extension
+  bot, subject changes, pins and call signalling are refused (see
+  [B2](#b2-policy-for-the-action-this-slice-protects-g14-part)).
+
+### Canonical model as built
+
+Migration 2001 creates seven relations.
+
+| Relation | Holds |
+| --- | --- |
+| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. The restore slice owns how it changes. |
+| `host_grant_scope_lifecycles` | One row per enrollment: lifecycle identity and scope key, both unique. Never deleted, and updated once at most: retirement stamps `retired_at_ms`. Only the schema owner writes it. |
+| `host_grant_scopes` | The latest state of a scope: incarnation, policy version, generation, the operation that recorded it, the latest generation whose projection was verified and activated, and `closed` or `active` with the reason for `closed` (`enrolled`, `retired`, `exhausted`). Its row lock is the scope's authority guard. |
+| `host_grant_rooms` | The rooms a scope manages and each room's authorization object. A binding is immutable. |
+| `host_grants` | One row per room and subject: the recorded affiliation, the effective affiliation, the generation and operation that last changed it, and why issuance accepted it. A revoke is a row whose affiliation is `none`. |
+| `host_grant_operations` | The immutable outcome of each operation: identity, fingerprint of its input, kind, initiator, incarnation, generation and the digest of the intended projection. One operation per generation of a lifecycle. |
+| `host_grant_operation_changes` | The grant changes of each operation, in order, with the previous affiliation. |
+
+An operation carries a stable identity and its fingerprint covers every
+input, including the generation it was decided under and its initiator. An
+exact retry returns the recorded outcome; the same identity with any other
+input is a typed conflict; neither authorizes anything again.
+
+Each recorded operation advances the scope's generation by one. A generation
+is `i64`; the largest value is reserved as terminal. An operation that finds
+no working generation left does not make its change: it closes the scope at
+the terminal generation, permanently, and is recorded as the operation that
+exhausted it. Because the change is not made, the digest that operation
+records is the digest of the grant rows as they stand, not of the projection
+the command intended.
+
+Recorded and effective are separate columns. A reduction of a subject's
+access (a revoke, an outcast, a demotion) lowers the effective affiliation in
+the transaction that records it, so it takes effect at that commit. An
+increase leaves the effective affiliation as it was and takes effect only
+when the operation's projection has been written, verified and activated.
+Affiliations are ordered `outcast < none < member < admin < owner`, and the
+effective affiliation after an operation is the lower of the previous
+effective affiliation and the recorded one, so lifting a ban together with a
+new grant keeps the subject an outcast until the grant is activated.
+
+This differs from the general proposal above in one respect, as the first
+slice's text requires: a mutation does not close the scope's admission.
+Admission in this slice reads only the effective columns, under the scope's
+guard, so withholding the increase is sufficient and already effective
+grants keep admitting. The coarse generation still orders every operation of
+the scope and still invalidates any witness prepared outside a transaction.
+A scope is `closed` only before its first activation, after retirement and
+after exhaustion.
+
+### B1: store capabilities and credential separation (G11)
+
+PostgreSQL. The relations are created by the migration, as the schema owner,
+and carry no trigger, function or foreign key. The runtime role's privileges
+come from the owner phase's grant matrix
+(`server/runtime_owner.rs`):
+
+| Relation | Runtime role | Why |
+| --- | --- | --- |
+| `host_grant_authority` | `SELECT` | Only the owner changes the incarnation. |
+| `host_grant_scope_lifecycles` | `SELECT` | Only the owner enrolls a scope. |
+| `host_grant_rooms` | `SELECT` | Only the owner binds a room. |
+| `host_grant_scopes` | `SELECT`, `UPDATE` | The runtime locks the guard and advances the state; it cannot insert a scope. |
+| `host_grants` | `SELECT`, `INSERT`, `UPDATE` | Grants are upserted; a revoke is a row. |
+| `host_grant_operations`, `host_grant_operation_changes` | `SELECT`, `INSERT` | The journal is append-only. |
+
+Consequences this slice relies on: the runtime credential cannot enroll a
+scope, bind a room, bootstrap a grant or retire a scope, so no restart,
+configuration value or account name can create authority or end a scope; it
+cannot delete or truncate any host-grant row; and it cannot rewrite an
+operation's outcome.
+
+Enrollment and retirement are owner-phase operations. Each is one
+transaction that writes the lifecycle ledger: enrollment inserts the scope's
+row with its rooms and bootstrap grants (`HostGrantStore::enroll_scope`),
+which pass the same issuance rules as any grant, and retirement stamps
+`retired_at_ms` on that row before it closes the scope
+(`HostGrantStore::retire_scope`). The runtime role holds `SELECT` on the
+ledger and nothing else, so PostgreSQL refuses either on a runtime handle
+before anything is changed, and the store reports `OwnerPhaseRequired`. A
+retirement that finds no generation left has stamped the ledger and closes
+the scope as exhausted.
+
+The owner phase refuses a schema with a relation the matrix does not classify
+and a runtime role that already holds a privilege beyond it.
+`HostGrantStore::verify_runtime_privileges` reads the same profile back on a
+runtime handle: a restricted login role with exactly these privileges and no
+trigger or rule on the relations.
+
+A PostgreSQL replica runs that check when it starts, before it builds the
+state that serves connections, and keeps the result as a
+`HostGrantAttachment`. An acceptance transaction admits a room that a scope
+manages only on a replica that holds one. A replica whose runtime role does
+not match the profile, or that could not read it, therefore treats every
+enrolled scope as unavailable: a groupchat to a managed room is refused with
+a committed `service-unavailable`, rooms that no scope manages are
+unaffected, and the failure is logged at error level by its kind, without an
+identifier. The attachment also carries the account domain the replica
+serves, which is what admission honors privileged grants for (B2). Later
+privilege changes by the owner are not observed until the next start.
+
+Not established by this slice:
+
+- A holder of the runtime credential can still write any grant row with its
+  own SQL. The runtime is the authority's writer; the store's invariants are
+  those of `HostGrantStore`, not of the database. Such a holder can also
+  close a scope by writing its state row; it cannot stamp the ledger.
+- A replica whose runtime role is the schema owner fails the check, so it
+  serves no enrolled scope. Enrolled scopes need the restricted runtime.
+- The attested runtime's pinned catalog profile does not cover these
+  relations; they are verified by the store's own check only.
+- A binary built before this slice does not know the relations. It neither
+  reads nor writes them, and it admits a managed room as an unmanaged one.
+  Retiring such binaries before any scope is enrolled is part of the rollout
+  and activation runbooks (G24, G22).
+
+SpiceDB. A deployment has one preshared key and SpiceDB has no privilege
+narrower than the key, so there is no credential that could write the marker
+but not a grant. The boundary is therefore built from three properties:
+
+- In the server, the only writer of an enrolled scope's affiliation family is
+  `WriteHostGrantProjection`. The legacy tuple messages (`WriteTuple`,
+  `DeleteTuple`, `ReplaceExclusiveRelation`, `SwapExclusiveRelation`) refuse
+  a tuple whose object, or whose Space or channel subject, is the channel of a
+  managed room or the Space of an enrolled scope. The refusal is read from
+  PostgreSQL on every such write, so it holds after a restart and on every
+  replica, and a store that cannot be read refuses the write. The lookup
+  waits at most 500 ms for a lock and runs at most 1 s, so a stalled
+  database refuses the write instead of holding the permission actor. A
+  retired scope keeps its objects closed to legacy writes.
+- On the wire, every projection write is conditioned on the scope's marker
+  (B3), so a writer that holds the key and an older intent cannot apply it.
+- Admission in this slice never reads SpiceDB, so a relationship written by
+  any other holder of the key admits nothing through the fresh-manifest path.
+  Such a relationship is found when a projection is verified, and then keeps
+  the pending increase from being activated.
+
+A key holder that does not carry the guard (an older binary, an operator
+tool) can still write relationships beside the projection. This slice does
+not exclude it; the writer inventory and old-writer retirement do (W5c, G24,
+G22). The surfaces that still decide from SpiceDB are not fenced by this
+slice either.
+
+For the writer inventory (W5c): two writers reach the legacy tuple mirror
+without passing the permission actor, and so without its refusal for an
+enrolled scope. `persist_durable_group_dm_member_tuple` and
+`delete_durable_group_dm_member_tuple` (`admin/channels.rs`) insert and
+delete `permission_tuples` rows with their own SQL, keyed by a group-DM
+identifier as the channel object. Neither is reachable for a managed room
+today; both need the same treatment as the actor's tuple messages before a
+scope can share an identifier space with group DMs.
+
+### B4: lock order, atomic admission, cancellation and lost commits (G12)
+
+The scope's guard is the row lock on its `host_grant_scopes` row. A store
+transaction (mutation, retirement, activation) takes it `FOR UPDATE`; an
+acceptance transaction takes it `FOR SHARE`.
+
+The acquisition order of the fresh-manifest acceptance transaction
+(`ingress/commit/implementation.rs`), as audited:
+
+1. the ingress protocol epoch row, shared, when the transaction begins;
+2. the principal's session row, shared;
+3. for a relayed stanza, the room's ownership claim, shared;
+4. the room owner's mailbox lane row;
+5. the stream-management stream row, then the origin's mailbox lane row;
+6. the origin alias and the canonical message row;
+7. for a locally owned clustered room, the room's ownership claim, shared;
+8. the durable room row of the manifest's coordinates, shared, without waiting;
+9. **the scope guard, shared**, and under it the room binding, the authority
+   incarnation and the room's grant rows, read without row locks;
+10. every row the acceptance records: effect intents, receipts, archive rows,
+    the sealed manifest, the mailbox decision and the stream position.
+
+The guard is taken after every ownership claim of the transaction and before
+the first row that records what is accepted. The rows of steps 4 to 6 are
+ingress identity rows that the existing path locks before its later room
+checks, and the canonical message row of a new stanza is inserted there; the
+guard does not change their order, and a refusal decided at step 9 commits
+that row as a denial.
+
+The order of a store transaction: the protocol epoch row, shared (the
+guarded-store entry takes it, so an epoch this binary does not implement
+refuses the write); the scope guard, exclusive; then host-grant rows only.
+A store transaction takes no ownership claim and no ingress row, and it
+performs no RPC, actor call, queue wait or socket write.
+
+No cycle exists between the two: a transaction that holds a guard
+exclusively waits for nothing an acceptance transaction can hold except the
+guard itself and the epoch row, which both take shared. Two store
+transactions of one scope serialize on its guard, and no operation of this
+slice takes two guards. A later operation that needs several guards takes
+them in ascending lifecycle identity, and a later surface that takes the
+guard takes it after its claims; an inner transaction that takes a claim is
+never started while a guard is held.
+
+Waits are bounded. The acceptance transaction's lock wait is its existing
+bound (100 ms): a scope whose guard is held exclusively fails that acceptance
+with the `Timeout` class, nothing is accepted, and other scopes and unmanaged
+rooms are unaffected. A store transaction waits at most 3 s for a lock and
+5 s per statement and then returns `Busy` with nothing changed.
+
+Known limit: PostgreSQL does not queue share lockers behind a waiting
+exclusive locker of a row. A continuous overlap of acceptance transactions in
+one scope can therefore make a mutation of that scope time out repeatedly. It
+never acknowledges a revoke that did not commit, but it can delay one. This
+slice does not change the guard. Whether it needs a fair primitive is a
+decision of the revocation slice (W5d), which defines what a revoke's
+acknowledgement promises and by when.
+
+Atomic admission. The decision and what it admits are one transaction: the
+policy state is read under the guard, the manifest is sealed and its children
+recorded, and the guard is released by the same commit. Therefore:
+
+- a revoke that committed before the acceptance took the guard is seen, and
+  the acceptance is refused; a revoke that starts later waits until the
+  acceptance has committed or rolled back;
+- a refusal is a committed denial with a stanza error, as for any other
+  committed denial: it owns the stanza's origin identity and a retransmission
+  resolves to it, whatever has changed since. No refusal is therefore of
+  type `wait`;
+- a retransmission of an accepted stanza replays the acceptance and is not
+  decided again, so a later revoke does not erase accepted children and a
+  later grant does not add any;
+- the plan is reduced to the admitted audience before anything is recorded
+  (B2), and after sealing the manifest is checked against that audience
+  again: a child that targets anyone outside it, or a recorded intent the
+  reduced plan could not hold, fails the transaction.
+
+A managed room accepts nothing through an acceptance that seals no manifest:
+a transaction that cannot seal one (a clustered deployment below the mailbox
+epoch, or a plan without a manifest snapshot) is refused for a managed room.
+
+Cancellation and lost commits. Each store transaction runs on a task of its
+own, so a caller that stops waiting does not abandon it; it resolves and is
+found by its operation identity. A commit that is not acknowledged returns
+`CommitOutcomeUnknown`, never a rollback, and so does a task that ended
+without reporting, which may have committed before it did: the caller reads
+the operation back (`operation_outcome`), which answers `Committed` or
+`Absent` from the primary, and a failed readback leaves it unknown. Retrying
+the same command is equally safe.
+
+An enrollment has no guard to wait on before its first insert, so two
+submissions of one enrollment meet at a unique key instead. The one that
+loses reads the journal again after the other committed: an exact retry
+returns the recorded outcome, and the same identity with other input is a
+conflict, whichever submission reached the key first. The acceptance transaction keeps its existing rule: an
+unacknowledged commit returns no decision, so no external effect can execute,
+and recovery works from the canonical rows.
+
+### B3: marker protocol for this slice's projection writes (G15, part)
+
+Schema version 2 adds the definition `waddle_grant_projection`, which holds
+one marker relationship per scope lifecycle and confers no permission:
+
+```
+waddle_grant_projection:<lifecycle>#marker@waddle_grant_projection:<stamp>
+```
+
+The stamp is `<incarnation>_<generation>_<operation>_<digest>`: the authority
+incarnation, the scope generation, the operation that recorded it and the
+SHA-256 of the intended projection (the policy version, the lifecycle and
+every relationship, in canonical order). A marker has one spelling; anything
+else in the definition for that lifecycle, or more than one relationship, is
+malformed.
+
+A projection write is one `WriteRelationships` request that states the whole
+affiliation family of the scope: for every grant row, including revoked
+subjects, the relation of its affiliation is touched and the other three are
+deleted; the previous marker is deleted and the next one touched. Its
+preconditions:
+
+- replacing a marker: that exact marker exists;
+- the first write of a lifecycle: the lifecycle holds no marker, and the
+  affiliation family of every managed room holds no relationship. This is
+  the slice's evidence of a fresh namespace. A scope whose rooms already hold
+  affiliation relationships is never opened.
+
+A write is refused before any RPC if the marker it would replace is not of an
+older generation, or belongs to another lifecycle or incarnation, or if the
+intent names a room or one subject's grant in a room more than once: a
+request states each relationship in exactly one update, and SpiceDB rejects
+one that does not, which would read as an unknown outcome. A write whose
+precondition fails writes nothing, and its writer stops: there is no call
+that writes an intent against whatever marker is present. Any other failure
+leaves the outcome unknown.
+
+The projection RPCs do not run in the permission actor's mailbox turn. The
+actor hands its SpiceDB backend to a task of the caller's request, so the
+33 reads of one observation and the write do not hold up permission checks
+and tuple writes queued behind them. Each RPC has a 5 s deadline and a whole
+observation 20 s.
+
+Reconciliation (`HostGrantAuthority::reconcile`) is the only path to
+activation and is also recovery; it keeps no state between passes. A pass
+reads the scope's current intent from PostgreSQL in one snapshot, reads the
+marker, and decides:
+
+| Marker | Pass |
+| --- | --- |
+| The current operation's | The write was applied, whether or not its reply arrived. Verify and activate. |
+| The journal's marker for an older generation | Write the current intent conditioned on exactly that marker, verify, activate. |
+| None, and no projection of this lifecycle was ever activated | Write the current intent into the fresh namespace, verify, activate. |
+| None, after an activation | Contradiction: nothing is written. |
+| Malformed, another incarnation, a generation that is not older, or an older generation the journal does not record | Contradiction: nothing is written. |
+
+A pass reads PostgreSQL before SpiceDB, so another replica can record and
+project a newer operation between the two reads. A marker that is not older
+than the pass's plan is therefore compared with the canonical state again:
+it is a contradiction only if that state is still the one the pass read,
+and otherwise the pass is superseded and the next one starts over.
+
+Verification reads the marker fully consistently and the family at exactly
+the marker's revision, and compares the family with the canonical rows
+exactly; a relationship the projection never writes, or a missing one, is a
+contradiction. A successful comparison yields a `VerifiedProjection`
+witness. Activation (`HostGrantStore::activate`) is crate-private and takes
+that witness and nothing else, and only verification constructs one, so no
+caller can make a recorded increase effective without a projection that was
+read back. Test fixtures that exercise the canonical store without SpiceDB
+use `test_support::activate_host_grant_marker`. Activation compares
+lifecycle, incarnation, generation, operation and policy version under the
+guard, and changes nothing for an operation that is no longer current.
+
+A recovery pass (`HostGrantAuthority::recover_pending`) follows the pending
+scopes page by page, in lifecycle order, to the end. A scope that cannot
+progress (a contradiction, a projection that does not answer) is visited
+once per pass and never keeps a scope behind it from being reconciled.
+
+A contradiction or an unknown outcome never closes the scope and never
+changes canonical state: the recorded increase stays ineffective, effective
+grants keep admitting, and a revoke still takes effect at its commit. Nothing
+in the projection can make a revoked grant effective, because admission does
+not read it.
+
+Not decided here: repair of a contradiction and reconstruction of a
+projection (the restore slice), projections larger than one request, and any
+admission that reads the projection. A retired or exhausted scope has no
+projection plan; its relationships and marker stay as they were.
+
+### B2: policy for the action this slice protects (G14, part)
+
+The protected action is the acceptance of a fresh groupchat in a managed
+room. The policy is a table over the effective affiliation
+(`permissions/host_grant/policy.rs`), mirroring what the authorization schema
+grants the four affiliation relations, without the parent Space:
+
+| Effective affiliation | Allowed |
+| --- | --- |
+| `owner`, `admin` | every action except channel `delete` |
+| `member` | `view`, `read`, `send_message`, and the author's own correction and retraction |
+| `none`, `outcast` | nothing |
+
+- The sender needs `send_message`, or the stanza is refused. The sender is
+  the principal the acceptance is made for: the account of an authenticated
+  stream, the actor of an extension, or the room itself for a room's own
+  broadcast. An extension actor or a room holds an affiliation only if one
+  is granted, so both are refused in a managed room.
+- `outcast` wins for every action. A subject holds one affiliation per room,
+  and admission also refuses a subject whose recorded affiliation is
+  `outcast` whatever its effective column holds.
+- A correction or a retraction of one's own message is a send, so an outcast
+  author loses both, and so does any subject that cannot send.
+- No explicit affiliation confers channel `delete`.
+- Grants held by other stores (legacy tuples, durable room affiliations,
+  Space membership, the room actor's occupancy) admit nothing.
+
+The audience of a managed room is its admitted subjects and nobody else.
+The planner still plans a groupchat for whoever the room actor and the
+legacy stores name: seated occupants, accounts with a durable room
+affiliation, members of the parent Space and mentioned accounts. The
+acceptance transaction reduces that plan under the guard, before it records
+anything (`ingress/host_grant_plan.rs`):
+
+- Every principal the plan names needs `read`: the target of a route, the
+  owner of an inbox row and of its push, the owner of a notification and the
+  recipient of its recovery item, whether the planner named them as an
+  occupant, a durable member or a mentioned account.
+- A principal that does not hold `read` is dropped: its intents and the
+  effects that would carry them out are removed from the plan, so no child
+  is frozen for it, no inbox row, push, notification or recovery item is
+  written for it, and nothing is recorded that a later replay or recovery
+  could deliver to it. It does not refuse the stanza. A member whose grant
+  was revoked while the room still seats it therefore receives nothing, and
+  the other members receive the message.
+- Work of the room itself that names no principal is kept: its archive
+  entry, a retraction tombstone and its replay scrub, link-preview
+  references.
+- Classification is by allow-list, and the match over intent and effect
+  variants is exhaustive in the source. Work that is neither of the above
+  refuses the whole stanza: direct-message work, carbons, invitations,
+  offline queues, call signalling, a relay to a remote room owner, and
+  changes of room state (subject, pins, system messages), which this policy
+  does not decide. A new variant does not compile until it is classified.
+- An extension that observes a room's messages reads them. An observer
+  holds no grant, so its observation is dropped from a managed room's
+  acceptance like any other unadmitted reader.
+- The planner is not filtered. Filtering it would save planning work only;
+  the acceptance is the boundary. Applying the binding to the room actor's
+  configuration, and fencing the planner's sources, belong to the
+  writer-fencing slice (W5c).
+
+What a managed room does not accept, as a consequence: occupant private
+messages (planned without a manifest, and not a copy of a groupchat), the
+room's own system messages and groupchat sent by an extension bot (their
+sender holds no grant), subject changes, pins and call signalling. Mediated
+invitations and declines are not planned as a room acceptance and keep
+their existing checks, like every other surface this slice does not fence.
+
+Refusals: `forbidden` (type `auth`) when the sender is not admitted;
+`service-unavailable` (type `cancel`) when the scope admits nothing, when
+the replica holds no verified attachment to the grant store (B1), when no
+manifest can be sealed, when the plan holds work the allow-list does not
+admit, or when the room's address is not in canonical form. A sender who is
+not admitted is told only that. A refusal is a recorded outcome that a
+retransmission resolves to for good, so none is of type `wait`.
+
+Remote privilege at this boundary (ADR-0020 D8). Honoring a privileged or
+moderator grant of a remote principal requires its home to be trusted and
+the stream it arrived on to have `pkix` strength, and neither is visible
+here. Until the effect-boundary slice (W5e) supplies them, this boundary
+fails closed: an `owner` or `admin` grant, the only privileged or moderator
+affiliations this slice holds, whose subject is not an account of a domain
+this deployment serves is honored as no grant
+(`policy::honoured_affiliation`). At admission it yields neither `moderate`
+nor the `read` and `send_message` the table would derive from it, for the
+sender and for every named principal; as a mutation's initiator it
+authorizes nothing; and it does not count as the owner a room must keep.
+Member-level and negative grants of remote accounts are honored as stored.
+The served account domains are the replica's configured account domain:
+admission takes them from its attachment (B1) and a mutation from its
+issuance policy. A replica that serves no account domain honors no
+privileged grant. Both sets must come from one configuration value: issuance
+records an owner or admin grant as `local` because its subject's domain is
+served, and admission honors it only if it agrees. No issuance policy is
+built from configuration in this slice; when one is, it takes the account
+domains from the value the attachment takes them from. W5e replaces this rule with the trusted-home and `pkix`
+evaluation. Issuance is unchanged by it.
+
+A mutation's initiator is an account whose authority is evaluated from the
+state under the guard, in the transaction that records the change: only an
+effective owner grants or removes owner and admin standing, an effective
+owner or admin changes other standing, and a room always keeps an owner who
+can administer it: one whose standing is recorded, effective and honored. A
+standing that was revoked, demoted or not yet activated authorizes nothing,
+nor does a privileged standing of a remote account (above), and a command
+decided under an earlier generation is refused as stale first. An
+enrollment is refused unless every room starts with an owner of a served
+account domain.
+
+Issuance to remote accounts (ADR-0020 D8). `IssuancePolicy` takes the domains
+the deployment serves and the trusted-home set as inputs. An owner or admin
+affiliation for an account whose domain is neither served here nor an exact
+member of that set is refused before anything is recorded; member-level and
+negative affiliations are issued to any account; an identity of a local
+service is refused as a subject. The accepted basis (`local`, `trusted_home`,
+`unprivileged`) is recorded with the grant. A grant recorded for a trusted
+home is not honored by this slice's admission or as an initiator, as
+described above; whether it is honored on a `pkix` stream is decided by
+W5e.
+
+### B6 as it applies to grant subjects
+
+A grant subject is `GrantSubject`: a bare account JID that the authorization
+ID codec's `AuthzUserJid` accepts, that is, in the identity profile's
+canonical form and within the codec's limits. A full JID and a JID without a
+localpart are refused rather than reduced. The SQL grant key and the
+projected subject are that canonical text.
+
+### Rollout part (G24)
+
+- Migration 2001 is the first migration after the schema baseline. Under the
+  restricted runtime the owner phase applies it and grants its relations
+  from the matrix, and the runtime's ledger preflight refuses a database
+  whose ledger lacks it; a PostgreSQL server that owns its schema applies it
+  at startup. A server of the previous release refuses a ledger that holds a
+  version it does not know. The owner phase therefore runs with the new
+  image before any new server starts, and old and new servers do not share
+  the database across it. On SQLite the migration creates nothing.
+- The schema tooling that compares a history-built database with a
+  baseline-built one (`scripts/schema_history.py`) does not yet account for
+  relations added after the baseline.
+- The built-in authorization schema is version 2. Its upgrade from version 1
+  follows [the schema version runbook](../../../docs/operations/authz-schema-versions.md).
+- Every legacy tuple write now reads PostgreSQL once for each channel or
+  Space object it names, in a transaction of its own with a 500 ms lock and
+  1 s statement bound. On SQLite the permission actor carries no store and
+  nothing changes.
+- With no scope enrolled, acceptance of a room message adds one indexed
+  lookup on PostgreSQL. It changes one outcome: the lookup is made by the
+  room's canonical address, and a room address that is not in the identity
+  profile's canonical form (a rooted domain, for example) is refused with
+  `service-unavailable` instead of being accepted as a room no scope
+  manages. The identity profile already refuses such addresses where
+  stanzas are parsed.
+- A PostgreSQL replica checks its runtime role's privileges on the
+  host-grant relations when it starts. A failure does not stop the
+  replica, which serves no enrolled scope until the check passes. A
+  failure that a later attempt may pass (a failed statement, an expired
+  lock or statement bound, bounds that could not be installed) is retried
+  in the background with a backoff capped at one minute; a role that does
+  not match the profile is not retried. Each failure is logged by its kind,
+  as an error when the database holds a scope that is enrolled and not
+  retired or when that cannot be read, and otherwise as information. A
+  deployment whose runtime role owns the schema therefore logs the mismatch
+  at every start, as an error once a scope is enrolled, and must move to
+  the restricted runtime before it enrolls one. While a replica is
+  unattached, each refused acceptance for a managed room is also logged
+  as a warning by its kind, at most once a minute.
+- The owner phase is what retires a scope as well as what enrolls one. The
+  runtime role's grant matrix is unchanged by that: it reads the lifecycle
+  ledger and cannot write it.
+
+### Running the first slice's focused set
+
+From `server/`, against a disposable PostgreSQL 17 cluster and a disposable
+SpiceDB:
+
+```sh
+export WADDLE_TEST_POSTGRES_URL=postgres://USER@HOST:PORT/DATABASE
+export WADDLE_TEST_REQUIRE_POSTGRES=1
+export WADDLE_TEST_SPICEDB_ENDPOINT=http://127.0.0.1:50051
+export WADDLE_TEST_SPICEDB_PRESHARED_KEY=KEY
+export WADDLE_TEST_SPICEDB_DISPOSABLE=1
+cargo nextest run -p waddle-server --features test-support --locked \
+    --run-ignored all \
+    -E 'binary(host_grant_authority) | binary(xep0045_host_grant_admission) | binary(xep0045_host_grant_audience) | binary(host_grant_projection) | binary(authz_schema_version) | binary(channel_outcast_precedence) | binary(authz_codec_incarnation) | binary(authz_id_codec)'
+```
+
+The PostgreSQL login must be a superuser. Each case creates and drops its
+own database, and one case of `host_grant_authority` creates a role, grants
+it privileges in that database and connects as it; since PostgreSQL 16 a
+login that holds `CREATEROLE` without being a superuser cannot arrange that
+for a database it does not own. The SpiceDB is emptied by every
+`live_spicedb_` case. `host_grant_authority`,
+`xep0045_host_grant_admission` and `xep0045_host_grant_audience` need
+PostgreSQL only; `host_grant_projection` and the `live_spicedb_` cases of
+`authz_schema_version` need both stores. `xep0045_host_grant_audience`
+plans its messages with the production room planner against a real room
+actor; the other admission cases build their plans by hand.
+
+The focused set was executed on 2026-11-14 against PostgreSQL 17.11 and
+SpiceDB 1.56.1 with nextest's default parallelism: two consecutive runs
+passed 110 of 110 cases. An earlier run of the same revision failed one
+admission case with an ingress substrate timeout; the case passed alone and
+in both later runs. An expired bound under parallel load is the likely
+cause, but it has not been confirmed. That SpiceDB used the memory
+datastore, so the `live_spicedb_` and `host_grant_projection` cases are
+evidence against SpiceDB's API and consistency semantics, not against a
+PostgreSQL-backed SpiceDB datastore.
 
 ## Blocking review ledger
 
@@ -534,10 +1136,10 @@ evidence.
 
 | ID | Unresolved decision/evidence | Work blocked | Under ADR-0020 |
 | --- | --- | --- | --- |
-| B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation) and W5c (writer inventory and exclusion); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
-| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. |
-| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes, W5c extends it to the writers it fences, W5o decides the fenced schema transition and W5r bounded reconstruction. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
-| B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b and extended by W5c for each surface it fences. |
+| B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation: [recorded](#b1-store-capabilities-and-credential-separation-g11)) and W5c (writer inventory and exclusion); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
+| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part). |
+| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences, W5o decides the fenced schema transition and W5r bounded reconstruction. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
+| B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences. |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c; W5d's #2056 control is its evidence. |
 | B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |
 | B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r. |

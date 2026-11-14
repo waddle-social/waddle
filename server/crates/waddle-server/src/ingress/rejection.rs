@@ -87,10 +87,73 @@ pub(super) fn rejection_plan(
 /// full: a `resource-constraint` error of type `wait` to the sender and no
 /// other work. The caller commits it as an ordinary denial.
 pub(super) fn mailbox_full_plan(plan: &IngressPlan, sender: &jid::FullJid) -> IngressPlan {
-    let error = FrozenStanzaError::new(
-        FrozenStanzaErrorType::Wait,
-        StanzaErrorCondition::ResourceConstraint,
-    );
+    refusal_plan(
+        plan,
+        sender,
+        FrozenStanzaError::new(
+            FrozenStanzaErrorType::Wait,
+            StanzaErrorCondition::ResourceConstraint,
+        ),
+    )
+}
+
+/// The decision class a host-grant refusal commits under.
+pub(super) fn host_grant_refusal_class(
+    refusal: super::commit_room::HostGrantRefusal,
+) -> IngressDecisionClass {
+    use super::commit_room::HostGrantRefusal;
+    use crate::permissions::host_grant::AdmissionDenial;
+    match refusal {
+        HostGrantRefusal::Denied(AdmissionDenial::SenderNotAdmitted) => {
+            IngressDecisionClass::AuthorizationDenied
+        }
+        HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed)
+        | HostGrantRefusal::AuthorityUnavailable
+        | HostGrantRefusal::UnsupportedAcceptance => IngressDecisionClass::PolicyDenied,
+    }
+}
+
+/// The plan of a stanza the host-grant authority refuses for a managed room:
+/// an error to the sender and no other work. The caller commits it as an
+/// ordinary denial, so nothing the stanza asked for is accepted.
+///
+/// - The sender holds no grant that allows the send: `forbidden`, type
+///   `auth`.
+/// - The scope admits nothing, this replica has not verified its privileges
+///   on the grant store, or the acceptance is not one a managed room takes:
+///   `service-unavailable`, type `cancel`.
+///
+/// A committed denial owns the stanza's origin identity: a retransmission
+/// resolves to it and is answered with the same error whatever has changed
+/// since. No refusal is therefore of type `wait`, which would invite the
+/// retry that can never succeed.
+pub(super) fn host_grant_refused_plan(
+    plan: &IngressPlan,
+    sender: &jid::FullJid,
+    refusal: super::commit_room::HostGrantRefusal,
+) -> IngressPlan {
+    use super::commit_room::HostGrantRefusal;
+    use crate::permissions::host_grant::AdmissionDenial;
+    let (kind, condition) = match refusal {
+        HostGrantRefusal::Denied(AdmissionDenial::SenderNotAdmitted) => {
+            (FrozenStanzaErrorType::Auth, StanzaErrorCondition::Forbidden)
+        }
+        HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed)
+        | HostGrantRefusal::AuthorityUnavailable
+        | HostGrantRefusal::UnsupportedAcceptance => (
+            FrozenStanzaErrorType::Cancel,
+            StanzaErrorCondition::ServiceUnavailable,
+        ),
+    };
+    refusal_plan(plan, sender, FrozenStanzaError::new(kind, condition))
+}
+
+/// `plan` reduced to one error reply to `sender`.
+fn refusal_plan(
+    plan: &IngressPlan,
+    sender: &jid::FullJid,
+    error: FrozenStanzaError,
+) -> IngressPlan {
     let mut reply = plan.sanitized_message.clone();
     reply.to = Some(sender.clone().into());
     reply.from = plan.sanitized_message.to.clone();

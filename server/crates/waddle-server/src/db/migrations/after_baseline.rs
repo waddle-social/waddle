@@ -13,20 +13,31 @@
 
 use super::Migration;
 
+/// Version of the migration that creates the host-grant authority tables.
+pub const HOST_GRANT_AUTHORITY_VERSION: i64 = 2001;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
-    Vec::new()
+    vec![Migration {
+        version: HOST_GRANT_AUTHORITY_VERSION,
+        description: "host-grant authority".to_string(),
+        sql_sqlite: include_str!("../../../sql/migrations/2001_host_grant_authority.sqlite.sql"),
+        sql_postgres: include_str!(
+            "../../../sql/migrations/2001_host_grant_authority.postgres.sql"
+        ),
+    }]
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::BASELINE_VERSION;
-    use super::all;
+    use super::{all, HOST_GRANT_AUTHORITY_VERSION};
 
     #[test]
     fn later_migrations_follow_the_baseline_in_order() {
         let versions: Vec<i64> = all().iter().map(|migration| migration.version).collect();
         assert!(versions.iter().all(|version| *version > BASELINE_VERSION));
         assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(versions, vec![HOST_GRANT_AUTHORITY_VERSION]);
     }
 }

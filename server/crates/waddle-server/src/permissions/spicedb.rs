@@ -23,9 +23,19 @@ use super::authz_schema_version::{
     AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID, AUTHZ_SCHEMA_MARKER_READ_LIMIT,
     AUTHZ_SCHEMA_VERSION,
 };
+use super::host_grant::{
+    MarkerObservation, ProjectedRelationship, ProjectionIntent, ProjectionMarker,
+    ProjectionObservation, ProjectionRefusal, ProjectionWrite, RoomAffiliation, ScopeLifecycleId,
+    HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
+    HOST_GRANT_PROJECTION_RPC_TIMEOUT, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
 };
+
+/// SpiceDB's default bound on the updates, and on the preconditions, of one
+/// `WriteRelationships` request.
+const WRITE_REQUEST_LIMIT: usize = 1000;
 
 #[derive(Clone)]
 pub struct SpiceDbPermissionBackend {
@@ -664,6 +674,180 @@ impl SpiceDbPermissionBackend {
         Ok(subjects)
     }
 
+    /// Read the projection of one scope lifecycle: its marker, and the
+    /// affiliation family of each of `channels`.
+    ///
+    /// The marker is read fully consistently. When the lifecycle holds a
+    /// marker, the family is read at exactly the marker's revision, so the
+    /// observation describes one state of the store.
+    pub async fn observe_host_grant_projection(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        channels: &[String],
+    ) -> Result<ProjectionObservation, PermissionError> {
+        let mut stream = self
+            .client
+            .read_relationships(
+                RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION)
+                    .resource_id(lifecycle.to_storage()),
+            )
+            .consistency(Consistency::FullyConsistent)
+            .limit(4)
+            .timeout(HOST_GRANT_PROJECTION_RPC_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_spicedb_error)?;
+        let mut markers = Vec::new();
+        let mut revision = None;
+        while let Some(item) = stream.next().await {
+            let item = item.map_err(map_spicedb_error)?;
+            revision = Some(item.read_at);
+            markers.push(item.relationship);
+        }
+        let marker = match markers.as_slice() {
+            [] => MarkerObservation::Absent,
+            [relationship] => parse_grant_projection_marker(lifecycle, relationship)
+                .map_or(MarkerObservation::Malformed, MarkerObservation::Present),
+            _ => MarkerObservation::Malformed,
+        };
+        let consistency = match (&marker, revision) {
+            (MarkerObservation::Present(_), Some(revision)) => {
+                Consistency::AtExactSnapshot(revision)
+            }
+            _ => Consistency::FullyConsistent,
+        };
+        let row_limit = u32::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1).unwrap_or(u32::MAX);
+        let mut relationships = std::collections::BTreeSet::new();
+        let mut malformed_family = false;
+        for channel_id in channels {
+            let object = Object::new(ObjectType::Channel, channel_id.as_str());
+            for affiliation in RoomAffiliation::PROJECTED {
+                let Some(relation) = affiliation.relation() else {
+                    continue;
+                };
+                let mut stream = self
+                    .client
+                    .read_relationships(filter_for_object_and_relation(&object, relation)?)
+                    .consistency(consistency.clone())
+                    .limit(row_limit)
+                    .timeout(HOST_GRANT_PROJECTION_RPC_TIMEOUT)
+                    .send()
+                    .await
+                    .map_err(map_spicedb_error)?;
+                let mut rows = 0usize;
+                while let Some(item) = stream.next().await {
+                    let relationship = item.map_err(map_spicedb_error)?.relationship;
+                    rows += 1;
+                    let subject = subject_from_reference(&relationship.subject)?;
+                    if subject.subject_type != SubjectType::User
+                        || subject.relation.is_some()
+                        || relationship.optional_caveat.is_some()
+                    {
+                        malformed_family = true;
+                        continue;
+                    }
+                    relationships.insert(ProjectedRelationship {
+                        channel_id: channel_id.clone(),
+                        relation: relation.to_owned(),
+                        subject: subject.id,
+                    });
+                }
+                malformed_family |= rows > HOST_GRANT_SCOPE_MAX_GRANT_ROWS;
+            }
+        }
+        Ok(ProjectionObservation {
+            marker,
+            relationships,
+            malformed_family,
+        })
+    }
+
+    /// Write a scope's intended projection and its marker in one
+    /// `WriteRelationships` request, conditioned on the exact marker it
+    /// replaces. See `permissions::host_grant::projection` for the protocol.
+    ///
+    /// `Ok` is an acknowledged outcome. An error after the request was sent
+    /// leaves the outcome unknown: the write may have been applied.
+    pub async fn write_host_grant_projection(
+        &self,
+        previous: Option<&ProjectionMarker>,
+        intent: &ProjectionIntent,
+    ) -> Result<ProjectionWrite, PermissionError> {
+        intent.check_replaces(previous)?;
+        intent.check_distinct()?;
+        let mut preconditions = Vec::new();
+        let mut updates = Vec::new();
+        match previous {
+            Some(previous) => {
+                preconditions.push(Precondition::must_exist(grant_projection_marker_filter(
+                    previous,
+                )));
+                updates.push(RelationshipUpdate::delete(grant_projection_marker(
+                    previous,
+                )?));
+            }
+            None => {
+                // A lifecycle without a marker is written only into a fresh
+                // namespace: no marker, and no affiliation relationship on
+                // any of the scope's rooms.
+                preconditions.push(Precondition::must_not_exist(
+                    RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION)
+                        .resource_id(intent.marker.resource_id()),
+                ));
+                for channel_id in &intent.channels {
+                    let object = Object::new(ObjectType::Channel, channel_id.as_str());
+                    for affiliation in RoomAffiliation::PROJECTED {
+                        if let Some(relation) = affiliation.relation() {
+                            preconditions.push(Precondition::must_not_exist(
+                                filter_for_object_and_relation(&object, relation)?,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        updates.push(RelationshipUpdate::touch(grant_projection_marker(
+            &intent.marker,
+        )?));
+        for grant in &intent.grants {
+            let object = Object::new(ObjectType::Channel, grant.channel_id.as_str());
+            let subject = Subject::user(grant.subject.as_str());
+            for affiliation in RoomAffiliation::PROJECTED {
+                let Some(relation) = affiliation.relation() else {
+                    continue;
+                };
+                let relationship = relationship_from_tuple(&Tuple::new(
+                    object.clone(),
+                    Relation::new(relation),
+                    subject.clone(),
+                ))?;
+                updates.push(if affiliation == grant.affiliation {
+                    RelationshipUpdate::touch(relationship)
+                } else {
+                    RelationshipUpdate::delete(relationship)
+                });
+            }
+        }
+        if updates.len() > WRITE_REQUEST_LIMIT || preconditions.len() > WRITE_REQUEST_LIMIT {
+            return Err(ProjectionRefusal::TooLarge.into());
+        }
+        match self
+            .client
+            .write_relationships(updates)
+            .preconditions(preconditions)
+            .timeout(HOST_GRANT_PROJECTION_RPC_TIMEOUT)
+            .await
+        {
+            Ok(_) => Ok(ProjectionWrite::Applied),
+            Err(prescience::Error::Status { code, .. })
+                if format!("{code:?}") == "FailedPrecondition" =>
+            {
+                Ok(ProjectionWrite::PreconditionFailed)
+            }
+            Err(error) => Err(map_spicedb_error(error)),
+        }
+    }
+
     async fn relationship_exists(&self, tuple: &Tuple) -> Result<bool, PermissionError> {
         let mut stream = self
             .client
@@ -810,6 +994,49 @@ fn codec_marker() -> Result<Relationship, PermissionError> {
         AUTHZ_CODEC_MARKER_RELATION,
         subject,
     ))
+}
+
+/// `waddle_grant_projection:<lifecycle>#marker@waddle_grant_projection:<stamp>`.
+/// Fixed ASCII IDs, deliberately not encoded, like the other markers.
+fn grant_projection_marker(marker: &ProjectionMarker) -> Result<Relationship, PermissionError> {
+    let resource = ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, marker.resource_id())
+        .map_err(|e| PermissionError::InvalidObject(e.to_string()))?;
+    let stamp = ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, marker.stamp())
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    let subject = SubjectReference::new(stamp, None::<String>)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    Ok(Relationship::new(
+        resource,
+        HOST_GRANT_PROJECTION_MARKER_RELATION,
+        subject,
+    ))
+}
+
+/// The filter that matches exactly `marker` and nothing else.
+fn grant_projection_marker_filter(marker: &ProjectionMarker) -> RelationshipFilter {
+    RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION)
+        .resource_id(marker.resource_id())
+        .relation(HOST_GRANT_PROJECTION_MARKER_RELATION)
+        .subject_filter(
+            SubjectFilter::new(HOST_GRANT_PROJECTION_DEFINITION).subject_id(marker.stamp()),
+        )
+}
+
+/// The marker a relationship of the marker definition records for
+/// `lifecycle`, if it is a well-formed marker.
+fn parse_grant_projection_marker(
+    lifecycle: ScopeLifecycleId,
+    relationship: &Relationship,
+) -> Option<ProjectionMarker> {
+    let well_formed = relationship.resource.object_id() == lifecycle.to_storage()
+        && relationship.relation == HOST_GRANT_PROJECTION_MARKER_RELATION
+        && relationship.subject.object().object_type() == HOST_GRANT_PROJECTION_DEFINITION
+        && relationship.subject.optional_relation().is_none()
+        && relationship.optional_caveat.is_none();
+    if !well_formed {
+        return None;
+    }
+    ProjectionMarker::parse(lifecycle, relationship.subject.object().object_id())
 }
 
 pub(crate) fn object_reference(object: &Object) -> Result<ObjectReference, PermissionError> {
