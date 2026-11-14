@@ -1335,12 +1335,19 @@ async fn withhold_managed_rooms(
     let mut managed = HashMap::new();
     let mut withheld = Vec::new();
     for (key, (room_jid, config, _)) in rooms.iter_mut() {
-        let enrolled_room = waddle_xmpp::parse_managed_room_jid(room_jid)
-            .is_some_and(|channel_id| enrolled.contains(&channel_id));
-        if !enrolled_room {
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid)
+            .filter(|channel_id| enrolled.contains(channel_id))
+        else {
             continue;
-        }
-        match state.host_grants.room(RoomBinding::Room(room_jid)).await {
+        };
+        // Read by the channel, the same key the enrolled check used, so the
+        // grants are those of the binding whatever domain the listing built
+        // the room's address with.
+        match state
+            .host_grants
+            .room(RoomBinding::Channel(&channel_id))
+            .await
+        {
             RoomGate::Managed(grants) if grants.allows(caller, HostGrantAction::View) => {
                 config.members_only = true;
                 managed.insert(key.clone(), grants);
