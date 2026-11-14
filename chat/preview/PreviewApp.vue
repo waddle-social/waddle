@@ -6,12 +6,17 @@ import { connectionStore } from "@/lib/connection-store";
 import { appController } from "@/stores/app-controller";
 import { $xmppStatus } from "@/stores/xmpp-status";
 import type { ChatAppController } from "@/shell/chat-app-controller";
+import { seedCallPreview } from "./call-fixtures";
+import CallErrorToast from "@/components/calls/CallErrorToast.vue";
+import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
+import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
  *   signin-one | signin-many | signin-none | checking | unavailable
  *   home (default) | jump | drawer-nav | drawer-details
  *   offline | reconnecting | error | reconnected | superseded
+ *   huddle-* | call-* (see call-fixtures.ts)
  * The account menu and the homeserver editor are opened by clicking.
  */
 const screen = new URLSearchParams(location.search).get("screen") ?? "home";
@@ -79,6 +84,7 @@ function seed(c: ChatAppController) {
   } else {
     $xmppStatus.set({ state: "online", detail: "" });
   }
+  if (screen.startsWith("huddle-") || screen.startsWith("call-")) seedCallPreview(c, screen);
 }
 
 watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: true });
@@ -87,5 +93,9 @@ watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: tru
 <template>
   <AppShell>
     <RoutePageShell route-id="home" />
+    <!-- XmppProvider hosts these in the app; the preview has no provider. -->
+    <IncomingCallToast />
+    <OutgoingCallToast />
+    <CallErrorToast />
   </AppShell>
 </template>
