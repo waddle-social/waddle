@@ -1212,7 +1212,21 @@ async fn handle_xmpp_frame_impl(
             // an IQ get/set gets a conformant resource-constraint/wait error and
             // message/presence are dropped (logged + metered).
             let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
-            if let Stanza::Message(message) = stanza.as_ref() {
+            // RFC 6120 §10.4: a message for a domain this deployment does
+            // not serve belongs to the remote route, never to the ingress
+            // authority's local delivery.
+            let unserved_message = match (stanza.as_ref(), phase.bound_jid()) {
+                (Stanza::Message(message), Some(sender)) => {
+                    handlers::unserved_route::unserved_destination(
+                        message.to.as_ref(),
+                        domain,
+                        state,
+                    )
+                    .map(|destination| (destination, sender.clone()))
+                }
+                _ => None,
+            };
+            if let (Stanza::Message(message), None) = (stanza.as_ref(), &unserved_message) {
                 if let Some(principal) = authenticated_session
                     .as_ref()
                     .and_then(|session| session.authenticated_principal_ref().ok())
@@ -1276,17 +1290,29 @@ async fn handle_xmpp_frame_impl(
                         .into()
                     }
 
-                    Stanza::Message(message) => handlers::message::handle_message(
-                        message,
-                        state,
-                        phase,
-                        state_machine.as_mut(),
-                        authenticated_session.as_ref(),
-                        ordered_relay_origin.clone(),
-                        None,
-                    )
-                    .await
-                    .into(),
+                    Stanza::Message(message) => match unserved_message {
+                        Some((destination, sender)) => {
+                            handlers::unserved_route::route_unserved_message(
+                                message,
+                                destination,
+                                &sender,
+                                state,
+                            )
+                            .await
+                            .into()
+                        }
+                        None => handlers::message::handle_message(
+                            message,
+                            state,
+                            phase,
+                            state_machine.as_mut(),
+                            authenticated_session.as_ref(),
+                            ordered_relay_origin.clone(),
+                            None,
+                        )
+                        .await
+                        .into(),
+                    },
                 }
             });
             let (dispatch_result, authority_revoked_after_start) = match admission {
