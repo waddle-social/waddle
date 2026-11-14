@@ -143,7 +143,12 @@ impl StanzaBackstop {
         // `tracing-opentelemetry` maps that field onto the OTEL span status.
         // The correlation fields (#1321/#1326) are declared Empty and recorded
         // only when known, so absent values don't serialize at all.
+        // An explicit root. The live connection actor handles frames inside
+        // kameo's `actor.lifecycle` span, which the span-noise sampler drops
+        // together with every descendant; inheriting it would drop the whole
+        // stanza trace.
         let span = info_span!(
+            parent: None,
             "xmpp.stanza.dispatch",
             stanza_kind = kind,
             payload_ns = %payload_ns,

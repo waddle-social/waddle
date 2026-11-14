@@ -41,7 +41,7 @@ pub(crate) async fn validate_session_token(
     domain: &str,
     token: &str,
 ) -> Result<XmppSession, XmppError> {
-    debug!(token_prefix = %&token[..token.len().min(8)], "Validating XMPP session token (OAUTHBEARER)");
+    debug!("Validating XMPP session token (OAUTHBEARER)");
 
     let session = validate_http_session(session_manager, token).await?;
 
@@ -79,9 +79,9 @@ async fn validate_http_session(
     token: &str,
 ) -> Result<Session, XmppError> {
     session_manager.validate_session(token).await.map_err(|e| {
-        warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
+        warn!(error = %e, "Session validation failed");
         match e {
-            AuthError::SessionNotFound(_) => XmppError::SessionNotFound,
+            AuthError::SessionNotFound => XmppError::SessionNotFound,
             AuthError::SessionExpired => XmppError::SessionNotFound,
             _ => XmppError::auth_failed(format!("Session validation failed: {}", e)),
         }
