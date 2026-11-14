@@ -15,19 +15,18 @@ use waddle_xmpp::stream_management::{
     SmSessionRegistry,
 };
 
-async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: bool) {
-    let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
-            .await
-            .expect("SM persistence"),
-    );
-    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
-    let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
+/// Seed a registry-held detached session on the fixture database.
+///
+/// A state built over the fixture database selects the durable
+/// stream-management store, which moves every `sm_sessions` row without a
+/// durable record to offline storage. Sessions are stored after every such
+/// state is built so their persisted rows remain.
+async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
     sm.store_session(DetachedSession {
         promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
-        stream_id: recipient.to_string(),
-        user_id: recipient.to_bare().to_string(),
-        jid: recipient.clone(),
+        stream_id: resource.to_string(),
+        user_id: resource.to_bare().to_string(),
+        jid: resource.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
         outbound_count: 0,
@@ -48,6 +47,16 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: boo
     })
     .await
     .expect("store detached session");
+}
+
+async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: bool) {
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     #[cfg(feature = "clustering")]
     let receiver = if cross_node {
@@ -59,6 +68,7 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: boo
     };
     let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
     deps.user_registry = Some(&state.deps.protocol.user_registry);
+    store_detached(&sm, &recipient).await;
     deps.sm_session_registry = Some(&sm);
     #[cfg(feature = "clustering")]
     if let Some(receiver) = &receiver {
@@ -565,31 +575,6 @@ async fn sealed_copy_for_a_session_detached_on_another_node(lose_first_record: b
         .find(|target| *target != &submission.sender)
         .expect("remote occupant")
         .clone();
-    sm.store_session(DetachedSession {
-        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
-        stream_id: target.to_string(),
-        user_id: target.to_bare().to_string(),
-        jid: target.clone(),
-        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-        inbound_count: 0,
-        outbound_count: 0,
-        last_acked: 0,
-        replay_gap_through: None,
-        unacked_stanzas: Vec::new(),
-        max_resume_time: Some(300),
-        detached_at: std::time::Instant::now(),
-        carbons_enabled: false,
-        roster_interested: false,
-        blocklist_interested: false,
-        presence_available: false,
-        presence_show: None,
-        presence_status: None,
-        presence_priority: 0,
-        presence_payloads: Vec::new(),
-        pending_subscribes_flushed: false,
-    })
-    .await
-    .expect("receiver detached session");
     let mut copy = submission
         .plan
         .room_canonical_message
@@ -621,6 +606,7 @@ async fn sealed_copy_for_a_session_detached_on_another_node(lose_first_record: b
     let receiver = Arc::new(
         CrossNodeReceiver::new_with_origin(&fixture, sm.clone(), &target, Some(room.clone())).await,
     );
+    store_detached(&sm, &target).await;
     let mut deps = Deps::new(
         &receiver.origin_state.deps.protocol.connection_registry,
         "example.com",

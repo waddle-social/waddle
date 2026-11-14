@@ -183,12 +183,12 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     } else {
         vec![a.clone(), b.clone()]
     };
+    let state = state_for(&f, sm.clone()).await;
     if !matches!(case, Case::Unavailable) {
         for r in &resources {
             store_detached(&sm, r).await;
         }
     }
-    let state = state_for(&f, sm.clone()).await;
     let mut submission = planned_room(&f, &state, case, &resources).await;
     store_detached(&sm, &submission.sender).await;
     let mut muc = submission
@@ -598,12 +598,12 @@ async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
 
     let sm = persistent_sm(&f).await;
     let occupant: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");
-    // A detached session is what makes the frozen copy REBUILDABLE and
-    // deliverable inside the same attempt.
-    store_detached(&sm, &occupant).await;
     let plugin_id = PluginId::try_new("muc-recovery-observer").expect("plugin id");
     let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
     let mut state = state_for(&f, sm.clone()).await;
+    // A detached session is what makes the frozen copy REBUILDABLE and
+    // deliverable inside the same attempt.
+    store_detached(&sm, &occupant).await;
     Arc::get_mut(&mut state)
         .expect("unique state")
         .deps
