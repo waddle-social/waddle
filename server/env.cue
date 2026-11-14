@@ -186,15 +186,21 @@ schema.#Project & {
 			}
 			provider: github: {
 				// cuenv has no per-task runner, so one expression selects it
-				// from the job's dependencies. A job that does not wait for
-				// fmt runs on the privileged 32-core builder: that is
-				// nixTestLocal, the longest gate, which therefore asks for
-				// its runner the moment the workflow starts, and fmt itself,
-				// which takes about a minute. Every other job waits for fmt
-				// and uses the normal profile. The JSON round trip permits a
-				// lookup of a dependency the job does not have; CI checks the
-				// generated graph and its default-success gates.
-				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
+				// for every job, and a runs-on expression can tell jobs apart
+				// only by their dependencies (github.job is unset until the
+				// job's steps run). The only job that waits for
+				// ciHelperContracts but not for fmt is nixTestLocal, and it
+				// alone runs on the privileged 32-core, 64 GB builder: its
+				// nextest archive needs the memory, and its shards keep 32
+				// CPUs. fmt, ciHelperContracts and every other job use the
+				// normal profile, so one push holds a single 32-vCPU builder
+				// against the account's Namespace concurrency limit. The two
+				// short roots start together; the builder is requested when
+				// the contracts pass, and the other gates when fmt does. The
+				// JSON round trip permits a lookup of a dependency the job
+				// does not have; CI checks the generated graph and its
+				// default-success gates.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result != '' && fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -215,6 +221,7 @@ schema.#Project & {
 				// Publish evidence: the shard-lane helper contracts, then the
 				// Postgres + all-features shards with the
 				// required-cluster-tests.txt executed-name check (#1796).
+				_t.ciHelperContracts,
 				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
@@ -257,15 +264,15 @@ schema.#Project & {
 			]
 		}
 		// Native PostgreSQL characterization is independent of image publishing.
-		// It gates nothing, so it runs after merge and on request, on a
-		// GitHub runner: Namespace capacity is left to the lanes that gate
-		// pull requests and publishing.
+		// It gates nothing, so it runs nightly (03:17 UTC) and on request,
+		// on a GitHub runner, rather than beside the publishing pipeline and
+		// the pull-request lanes that every push starts and that share the
+		// account's runner budget.
 		roomChildContract: {
 			mode: "expanded"
 			when: {
-				branch: ["main"]
-				defaultBranch: true
-				manual:        true
+				scheduled: "17 3 * * *"
+				manual:    true
 			}
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
@@ -309,15 +316,14 @@ schema.#Project & {
 			}
 			tasks: [_t.federationGrantFenceProof]
 		}
-		// Runs after merge and on request. Its build closure repeats the
-		// pull-request image, clippy and fmt builds, and the proof gates
-		// nothing, so pull requests do not run it.
+		// Runs nightly (03:37 UTC) and on request. Its build closure repeats
+		// the pull-request image, clippy and fmt builds, and the proof gates
+		// nothing, so neither pull requests nor main pushes run it.
 		parentMoveNative: {
 			mode: "expanded"
 			when: {
-				branch: ["main"]
-				defaultBranch: true
-				manual:        true
+				scheduled: "37 3 * * *"
+				manual:    true
 			}
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
@@ -330,13 +336,13 @@ schema.#Project & {
 			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
 		}
 		// Native SQL subscriber-capture characterization; no publishing task.
-		// Scheduled like roomChildContract, for the same reason.
+		// Nightly (03:57 UTC) and on request, like roomChildContract and
+		// for the same reason.
 		spaceFanoutContract: {
 			mode: "expanded"
 			when: {
-				branch: ["main"]
-				defaultBranch: true
-				manual:        true
+				scheduled: "57 3 * * *"
+				manual:    true
 			}
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
@@ -409,15 +415,15 @@ schema.#Project & {
 		xmppServerCompliance: {
 			// The pull-request shard lane (rustTests) runs these server
 			// tests with Postgres and every feature, so this lane runs
-			// after merge and on request. The measured source compile is
-			// 4m13 on Namespace versus 12m47 on GitHub's standard runner;
-			// nothing waits for this lane, so it takes the slower runner
-			// and leaves Namespace capacity to the publishing pipeline.
+			// nightly (04:17 UTC) and on request. The measured source
+			// compile is 4m13 on Namespace versus 12m47 on GitHub's
+			// standard runner; nothing waits for this lane, so it takes
+			// the slower runner and leaves Namespace capacity to the
+			// publishing pipeline.
 			mode: "expanded"
 			when: {
-				branch: ["main"]
-				defaultBranch: true
-				manual:        true
+				scheduled: "17 4 * * *"
+				manual:    true
 			}
 			provider: github: {
 				runner:      "ubuntu-24.04"
@@ -808,7 +814,8 @@ schema.#Project & {
 		// Contract tests for the shard lane's helpers (required-test check,
 		// shard planning, archive transfer) and the Postgres test-environment
 		// structure check. The PR rustTests workflow runs the same script
-		// before compiling, and on main nixTestLocal runs it first.
+		// before compiling; on main it is the profile-runner job that
+		// nixTestLocal waits for.
 		ciHelperContracts: schema.#Task & {
 			// Reads ../tests and ../scripts through ../ inputs, which cuenv
 			// 0.56 rejects under the "dir" sandbox.
@@ -838,16 +845,19 @@ schema.#Project & {
 			hermetic: false
 		}
 
-		// The main pipeline's publish evidence: the helper contracts, then
-		// the bounded shard lane, in one job. The contracts take under two
-		// minutes; as a separate job they made the longest gate wait for a
-		// second runner before it could ask for its own.
+		// The main pipeline's publish evidence: the bounded shard lane,
+		// after the helper contracts pass. The contracts run as their own
+		// job on the normal profile because that dependency is what lets
+		// the main pipeline's runner expression give the 32-core builder to
+		// this job alone. They take under two minutes and start with the
+		// workflow, so the builder is requested about two minutes in.
 		nixTestLocal: schema.#Task & {
-			command: "bash"
-			args: ["-euo", "pipefail", "-c", "bash scripts/check-ci-helper-contracts.sh && exec \(strings.Join(list.Concat([[tasks.nixTestShards.command], tasks.nixTestShards.args]), " "))"]
-			inputs: list.Concat([tasks.ciHelperContracts.inputs, tasks.nixTestShards.inputs])
+			command:  tasks.nixTestShards.command
+			args:     tasks.nixTestShards.args
+			inputs:   tasks.nixTestShards.inputs
 			outputs:  tasks.nixTestShards.outputs
 			hermetic: false
+			dependsOn: [tasks.ciHelperContracts]
 		}
 
 		// Preserve the complete inventory and stable all-shards success gate.
@@ -1681,6 +1691,7 @@ schema.#Project & {
 				// No image ships unless the helper contracts passed and the
 				// Postgres + all-features lane ran every required cluster
 				// test on this exact commit.
+				tasks.ciHelperContracts,
 				tasks.nixTestLocal,
 			]
 		}

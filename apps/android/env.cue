@@ -151,19 +151,22 @@ schema.#Project & {
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own job so a flaky emulator never delays unit-test feedback and
-		// can be re-run independently. It runs after merge and on request:
-		// it gates nothing, and on pull requests it held a Namespace runner
-		// for every change to the shared Rust crates. /dev/kvm + GMD on the
-		// Namespace runner were proven by a real pull_request execution
-		// (PR #1366). Caveat: a manual dispatch on an unchanged ref
-		// reports green after "No affected tasks" — cuenv's affectedness
-		// gate skips gmdCheck entirely, so dispatch-green on main means
+		// can be re-run independently. It gates nothing, so it runs nightly
+		// (04:37 UTC) and on request instead of taking a Namespace runner
+		// for every pull-request or main push that touches the shared Rust
+		// crates, beside the lanes that gate merging and publishing.
+		// /dev/kvm + GMD on the Namespace
+		// runner were proven by a real pull_request execution (PR #1366).
+		// Caveat: the generated job runs `cuenv ci` without --all, so
+		// cuenv's affectedness gate still applies. Without a pull-request
+		// base it compares against the previous commit, so a scheduled or
+		// manual run whose head commit touches none of gmdCheck's inputs
+		// reports green after "No affected tasks": green then means
 		// "skipped", not "passed".
 		deviceTests: {
 			when: {
-				branch: ["main"]
-				defaultBranch: true
-				manual:        true
+				scheduled: "37 4 * * *"
+				manual:    true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
 			"tasks": [tasks.gmdCheck]

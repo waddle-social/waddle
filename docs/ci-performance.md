@@ -533,22 +533,27 @@ could not ask for its 32-core builder until that finished. Each job spent about
 40 seconds on Nix, cache and cuenv setup. Pull requests produced about 85
 workflow runs that day against 15 pushes, on the same Namespace runners.
 
-The `default` pipeline now has eight gates instead of thirteen:
+The `default` pipeline has nine gates instead of thirteen:
 
 | Job | Runner | Waits for | Runs |
 | --- | --- | --- | --- |
-| `fmt` | 32-core builder | nothing | `cargo fmt --check` |
-| `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
+| `fmt` | profile | nothing | `cargo fmt --check` |
+| `ciHelperContracts` | profile | nothing | the shard lane's helper contracts |
+| `nixTestLocal` | 32-core builder | `ciHelperContracts` | the four shards |
 | `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
 | `mainClippy`, `mainTest`, `mainDoctest` | profile | `fmt` | the namespace clippy, test and doctest tasks |
 | `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
 | `publishContainerImage` | profile | every job above | publication |
 
 cuenv 0.63.2 has no per-task runner, and a GitHub `runs-on` expression can
-only tell jobs apart by their dependencies. The expression gives the builder
-to a job that does not wait for `fmt`. That lets `nixTestLocal` request its
-runner when the workflow starts; the price is that `fmt` (about a minute) also
-runs on the builder and the other gates start after it. Matrix tasks would
+only tell jobs apart by their dependencies (`github.job` is set only once the
+job's steps run). The expression gives the builder to the one job that waits
+for `ciHelperContracts` and not for `fmt`: `nixTestLocal`. Both roots run on the
+profile, so a push holds one 32-vCPU builder instead of two. The builder is
+requested when the contracts pass (under two minutes plus a profile runner's
+setup); an earlier layout gave the builder to every job without dependencies,
+which put `fmt` on a second 32-vCPU builder for its first minute and, with
+`nixTestLocal`, filled a 64 vCPU allowance on its own. Matrix tasks would
 select a runner by name, but 0.63.2 names the job `nixTestLocal-<value>` while
 dependents still need `nixTestLocal`, which is not a valid workflow.
 
@@ -557,23 +562,49 @@ features (about 180 `not(feature = ...)` sites in the server crates compile only
 there) and passes `--all-targets`; the shards build `--all-features --lib
 --tests`. Neither selection contains the other.
 
-Pull requests no longer start these lanes:
+Pull requests no longer start these lanes, and the lanes that gate nothing no
+longer start on every push to `main` either:
 
-| Lane | Runner it used | Now runs | Pull-request coverage that remains |
+| Lane | Runner | Runs | Pull-request coverage that remains |
 | --- | --- | --- | --- |
 | `waddle-integration` (a copy of every PR lane) | all of them | merge groups, dispatch | the original workflows |
 | `namespaceRustChecks` `clippy`, `doctest` | Namespace profile | `main` (`mainClippy`, `mainDoctest`) | `nixClippy`, `nixDoctest`: same workspace, features and lints |
-| `xmppServerCompliance` | Namespace profile | `main`, dispatch | `rustTests` runs the server tests with Postgres and all features |
-| `roomChildContract`, `spaceFanoutContract` | Namespace profile | `main`, dispatch | none; they gate nothing |
-| `parentMoveNativePullRequest` | GitHub | `main`, dispatch (`parentMoveNative`) | its build closure repeats `nixClippy`, `nixFmt` and `nixBuildImageStream` |
-| Android `deviceTests` | Namespace profile | `main`, dispatch | Android `pullRequest` |
+| `xmppServerCompliance` | GitHub | nightly 04:17 UTC, dispatch | `rustTests` runs the server tests with Postgres and all features |
+| `roomChildContract` | GitHub | nightly 03:17 UTC, dispatch | none; it gates nothing |
+| `spaceFanoutContract` | GitHub | nightly 03:57 UTC, dispatch | none; it gates nothing |
+| `parentMoveNative` | GitHub | nightly 03:37 UTC, dispatch | its build closure repeats `nixClippy`, `nixFmt` and `nixBuildImageStream` |
+| Android `deviceTests` | Namespace profile | nightly 04:37 UTC, dispatch | Android `pullRequest` |
+
+`parentMoveNativePullRequest` was removed in #2405; `parentMoveNative` runs the
+same proof and build closure. Its workflow file
+(`waddle-server-parentmovenativepullrequest.yml`) is therefore the one file of
+the 34 paused in #2046 that does not return.
 
 `namespaceRustChecks` keeps `test` on pull requests: it is the only pull-request
 lane that builds the default features, and it is a publish gate on `main`.
-On `main`, `roomChildContract`, `spaceFanoutContract` and
-`xmppServerCompliance` use GitHub runners, so they no longer take Namespace
-runners from the publishing pipeline that the same push starts.
+The nightly lanes need a scheduled run or a dispatch to report a regression;
+a failure there no longer points at a single push. Android `deviceTests` runs
+`cuenv ci` without `--all`, so a nightly run whose head commit touches none of
+`gmdCheck`'s inputs reports green after "No affected tasks".
+
+### Concurrency
+
+Every cuenv-generated workflow sets a workflow-level group of
+`${{ github.workflow }}-${{ github.head_ref || github.ref }}` with
+`cancel-in-progress: true` (`waddle-integration` keys its group on the event
+and ref the same way). A new push to a pull request cancels that branch's runs
+of the same workflow, and a new push to `main` cancels the running
+`waddle-server-default`, like every other generated `main` workflow, for the
+older commit, so at most one run of each workflow holds runners for a
+branch, and `main` holds at most one 32-core `nixTestLocal` builder. cuenv
+0.63.2 emits that group unconditionally and its schema has no job-level
+`concurrency`, so the repository cannot put the main and pull-request
+builders (`nixTestLocal` and `rustTests`' `nixTest-builder`) into one shared queue.
 
 These are design expectations, not measurements. The account's Namespace
-concurrency limit is unverified (see the 64 vCPU observation above); if it is
-64 vCPU, `fmt` and `nixTestLocal` together fill it for the first minute.
+concurrency limit is unverified (see the 64 vCPU observation above). The
+profile is 8 vCPU, so one `main` push peaks at 32 vCPU for `nixTestLocal` plus
+8 vCPU for each profile gate running beside it (up to six, 80 vCPU); against a
+64 vCPU limit some of those gates queue until others finish. A `main` builder
+and one pull request's 32-core `nixTest-builder` fill 64 vCPU between them, so
+any further pull-request builder, or the profile gates, wait for one of them.
