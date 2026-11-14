@@ -19,6 +19,8 @@ on:
     - colony/env.cue
     - colony/package.json
     - colony/package.json/**
+    - colony/panda.config.ts
+    - colony/panda.config.ts/**
     - colony/public/**
     - colony/schema/**
     - colony/scripts/oidc-smoke-worker.mjs
@@ -31,6 +33,10 @@ on:
     - colony/wrangler.jsonc
     - colony/wrangler.jsonc/**
     - cue.mod/**
+    - design/assets/**
+    - design/package.json
+    - design/package.json/**
+    - design/src/**
     - package.json
     - package.json/**
   workflow_dispatch: {}

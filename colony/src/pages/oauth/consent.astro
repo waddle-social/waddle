@@ -1,5 +1,9 @@
 ---
 import ColonyLayout from "../../layouts/ColonyLayout.astro";
+import { getAuth } from "../../lib/auth";
+import { css, cx } from "../../../styled-system/css";
+import { btn } from "../../../styled-system/recipes";
+import { heading, kicker, lead, mono, sheet } from "../../styles/text";
 
 const user = Astro.locals.user;
 
@@ -8,36 +12,106 @@ if (!user) {
 }
 
 const clientId = Astro.url.searchParams.get("client_id");
-const scopes = Astro.url.searchParams.get("scope")?.split(" ") ?? [];
+const scopes = Astro.url.searchParams.get("scope")?.split(" ").filter(Boolean) ?? [];
+
+let clientName = clientId ?? "An app";
+if (clientId) {
+  try {
+    const auth = await getAuth();
+    const client = await auth.api.getOAuthClientPublic({
+      query: { client_id: clientId },
+      headers: Astro.request.headers,
+    });
+    clientName = client.client_name?.trim() || clientId;
+  } catch {
+    // Unknown or disabled client: show the raw client_id.
+  }
+}
+const clientMark = clientName.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2).toLowerCase();
+
+const scopeCopy: Record<string, string> = {
+  openid: "Confirm who you are",
+  profile: "Your name and username",
+  email: "Your email address",
+};
+
+const githubUsername =
+  "githubUsername" in user && typeof user.githubUsername === "string" ? user.githubUsername.trim() : "";
+const handle = githubUsername || user.name || user.email;
+const actions = css({ display: "flex", gap: "2", flexWrap: "wrap", "& > .wd-btn": { flex: "1 1 160px", width: "auto" } });
 ---
 
-<ColonyLayout
-  title="Authorize - Colony"
-  heading="Authorize access"
-  description="Review the OAuth request before continuing."
-  panelClass="auth-panel--wide"
->
-  <div class="stack">
-    {clientId && (
-      <dl class="detail-list">
-        <div class="detail-row">
-          <dt>Client</dt>
-          <dd class="client-id">{clientId}</dd>
-        </div>
-      </dl>
-    )}
+<ColonyLayout title="Authorize - Colony" width="lg">
+  <svg
+    slot="mark"
+    aria-hidden="true"
+    viewBox="0 0 24 24"
+    width="20"
+    height="20"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.75"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    class={css({ color: "fg.soft", flex: "none" })}
+  >
+    <path d="M5 12h14M13 6l6 6-6 6" />
+  </svg>
+  <span
+    slot="mark"
+    aria-hidden="true"
+    class={css({
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      flex: "none",
+      width: "52px",
+      height: "52px",
+      borderRadius: "14px",
+      bg: "surface.2",
+      border: "1px solid {colors.border}",
+      font: "700 16px {fonts.mono}",
+      color: "fg.muted",
+    })}
+  >
+    {clientMark}
+  </span>
 
-    {scopes.length > 0 && (
-      <ul class="scope-list" aria-label="Requested scopes">
-        {scopes.map((scope) => <li>{scope}</li>)}
-      </ul>
-    )}
-
-    <div class="button-row button-row--split">
-      <button class="button button--primary" id="approve" type="button">Approve</button>
-      <button class="button button--secondary" id="deny" type="button">Deny</button>
-    </div>
+  <div class={css({ display: "flex", flexDirection: "column", gap: "2" })}>
+    <h1 class={heading}>Authorize access</h1>
+    <p class={cx(lead, css({ overflowWrap: "anywhere" }))}>{clientName} wants to use your Colony account.</p>
   </div>
+
+  {scopes.length > 0 && (
+    <div class={css({ display: "flex", flexDirection: "column", gap: "2" })}>
+      <span class={kicker} id="scope-heading">It will see</span>
+      <ul
+        aria-labelledby="scope-heading"
+        class={cx(
+          sheet,
+          css({
+            display: "flex",
+            flexDirection: "column",
+            "& > li": { px: "3.5", py: "3", fontSize: "sm", borderBottom: "1px solid {colors.border.soft}" },
+            "& > li:last-child": { borderBottom: "none" },
+          }),
+        )}
+      >
+        {scopes.map((scope) => (
+          <li>{scopeCopy[scope] ?? <span class={mono}>{scope}</span>}</li>
+        ))}
+      </ul>
+    </div>
+  )}
+
+  <div class={actions}>
+    <button class={btn()} id="deny" type="button">Deny</button>
+    <button class={btn({ variant: "primary" })} id="approve" type="button">Approve</button>
+  </div>
+
+  <Fragment slot="footer">
+    Signed in as <span class={mono}>{handle}</span> · <a href="/">Not you?</a>
+  </Fragment>
 
   <script>
     function getOAuthQuery(params: URLSearchParams) {
