@@ -3,11 +3,13 @@ import { Menu } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
 import { iconbtn } from "styled-system/recipes";
 
+withDefaults(defineProps<{ title?: string }>(), { title: "Settings" });
+
 const emit = defineEmits<{
   openNav: [];
 }>();
 
-// Mobile-Settings board: an ink (rail) bar in both themes, a 44px sidebar
+// Mobile-Settings / Mobile-Discuss boards: an ink (rail) bar in both themes, a 44px sidebar
 // button and the page title. The sidebar is inline from md, so it hides there.
 const barClass = css({
   position: "sticky",
@@ -31,6 +33,6 @@ const titleClass = css({ flex: 1, minWidth: 0, margin: 0, font: "700 18px/1.3 {f
     <button :class="buttonClass" type="button" aria-label="Open navigation" @click="emit('openNav')">
       <Menu aria-hidden="true" />
     </button>
-    <span :class="titleClass">Settings</span>
+    <span :class="titleClass">{{ title }}</span>
   </header>
 </template>
