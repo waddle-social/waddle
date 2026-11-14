@@ -9,6 +9,7 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 import { seedEvents } from "./seed-events";
 import { seedFeed } from "./seed-feed";
 import { seedPeople } from "./seed-people";
+import NotifyPreview from "./NotifyPreview.vue";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
@@ -94,5 +95,6 @@ watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: tru
 <template>
   <AppShell>
     <RoutePageShell route-id="home" />
+    <NotifyPreview v-if="screen === 'notify' && appController" :store="appController.notifySettings" />
   </AppShell>
 </template>
