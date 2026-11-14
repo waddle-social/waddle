@@ -23,13 +23,14 @@
 //!   The acceptance reduces its plan to the admitted audience before it
 //!   records anything (`ingress::host_grant_plan`).
 //! - A replica admits a managed room only after it verified its runtime
-//!   role's privileges on the store when it started
-//!   ([`HostGrantAttachment`]).
+//!   role's privileges on the store and the restore fence
+//!   ([`HostGrantAttachment`], held by the replica's [`HostGrantGate`]).
 //! - A restore of PostgreSQL cannot reopen authority a later revoke closed:
 //!   the authority incarnation is bound to the declared restore epoch, the
-//!   database lineage and the projection markers, a declared restore closes
-//!   every scope under a new incarnation, and a closed scope reopens only
-//!   through a verified reconstruction (`restore`).
+//!   database lineage and what SpiceDB witnesses (`witness`); a declared
+//!   restore closes every scope under a new incarnation, and a closed scope
+//!   reopens only through a verified reconstruction and an operator's
+//!   reopen (`restore`).
 //!
 //! The decisions behind the lock order, the store capabilities and the
 //! marker protocol are recorded in
@@ -48,6 +49,7 @@ mod projection;
 mod restore;
 mod runtime_attach;
 mod store;
+mod witness;
 
 pub(crate) use admission::{
     admit_room_acceptance, managing_scope, AdmissionRelations, ManagingScope, RoomManagement,
@@ -74,15 +76,23 @@ pub use model::{
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use projection::{
     MarkerObservation, ProjectedGrant, ProjectedRelationship, ProjectionIntent,
-    ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite,
+    ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite, RestoredPlan,
     HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
 };
 pub use restore::{
-    reconstruction_targets, verify_restore_fence, AuthorityBinding, ListedProjectionMarker,
-    ReconstructionTarget, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal,
-    RestoreFenceReport, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+    reconstruction_targets, verify_restore_fence, AuthorityBinding, FenceEvidence, OperatorRevoke,
+    ReconstructionTarget, ReopenReport, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal,
+    RestoreFenceReport, HOST_GRANT_RESTORE_FENCE_DEADLINE, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
-pub use runtime_attach::HostGrantAttachment;
+pub use runtime_attach::{
+    log_unverified, verification_retried, GateState, HostGrantAttachment, HostGrantGate,
+    REVERIFY_INTERVAL,
+};
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
-pub use store::{Activation, HostGrantStore};
+pub use store::{Activation, HostGrantStore, RESTORE_TRANSITION_BATCH};
+pub use witness::{
+    head_witness_resource, position_standing, position_witness_resource, room_witness_digest,
+    room_witness_resource, sync_journal_witness, sync_position_witness, ListedWitness,
+    PositionStanding, PositionWitness, PostgresPosition, WitnessSync,
+};

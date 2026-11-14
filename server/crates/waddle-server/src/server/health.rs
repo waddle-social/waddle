@@ -286,6 +286,29 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 })),
             )
         }
+        // The host-grant authority changed under this replica and verifying
+        // it again has not passed: managed rooms are refused here until it
+        // does, so the replica leaves the endpoint set.
+        Ok(Ok((Ok(health), Ok(report))))
+            if health.is_healthy()
+                && report.is_attested()
+                && state
+                    .host_grant_gate
+                    .get()
+                    .is_some_and(|gate| !gate.ready()) =>
+        {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "service": "waddle-server",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "database": "ready",
+                    "lineage": "attested",
+                    "host_grants": "authority_changed"
+                })),
+            )
+        }
         Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() && report.is_attested() => (
             StatusCode::OK,
             Json(json!({

@@ -42,11 +42,11 @@ pub enum HostGrantError {
     CommitOutcomeUnknown,
     /// PostgreSQL refused a statement for the role that ran it. Enrollment
     /// and retirement write the lifecycle ledger, and a restore transition
-    /// the authority incarnation, which the runtime role only reads, so this
-    /// is what each returns on a runtime handle.
+    /// and a position acknowledgement the authority row, which the runtime
+    /// role only reads, so this is what each returns on a runtime handle.
     #[error(
         "PostgreSQL refused a statement of the operation for this role; enrollment, \
-         retirement and restore transitions run in the owner phase"
+         retirement, restore transitions and position acknowledgements run in the owner phase"
     )]
     OwnerPhaseRequired,
     #[error("a stored host-grant row has an invalid {field}")]
@@ -95,6 +95,11 @@ pub enum HostGrantError {
     /// closed, or whose reconstruction was already activated.
     #[error("the scope is not closed by a restore transition")]
     ScopeNotRestored,
+    /// The projection or a witness recorded an operation the journal does
+    /// not; the scope is neither changed nor projected until a restore is
+    /// declared.
+    #[error("the scope is closed on evidence that the database lost operations")]
+    ScopeFenced,
     /// The authority is not served: a restore was not declared, or the
     /// configuration does not match the declared one.
     #[error(transparent)]
@@ -167,6 +172,7 @@ impl HostGrantError {
             Self::GrantLimit => "grant_limit",
             Self::IncarnationChanged => "incarnation_changed",
             Self::ScopeNotRestored => "scope_not_restored",
+            Self::ScopeFenced => "scope_fenced",
             Self::RestoreFence(_) => "restore_fence",
             Self::PolicyVersionUnsupported => "policy_version_unsupported",
             Self::Subject(_) => "subject",

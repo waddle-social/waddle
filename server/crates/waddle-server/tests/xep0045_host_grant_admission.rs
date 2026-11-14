@@ -1033,15 +1033,29 @@ async fn a_replica_admits_a_managed_room_only_after_it_verified_its_privileges()
 
     // The schema owner's login is not the restricted runtime role, so the
     // check a server runs when it starts yields no attachment for it.
+    let permissions = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
+        fixture.ingress.db.clone(),
+    )));
     assert!(matches!(
-        HostGrantAttachment::verify(&fixture.store, served(), RestoreEpoch::INITIAL).await,
+        HostGrantAttachment::verify(
+            &fixture.store,
+            &permissions,
+            served(),
+            RestoreEpoch::INITIAL
+        )
+        .await,
         Err(HostGrantError::UnsafeRuntimePrivileges { .. })
     ));
 
     // Once the replica holds an attachment, a new stanza is admitted. The
     // attachment is set once.
-    assert!(replica.attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
-    assert!(!replica.attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
+    let attachment = || async {
+        HostGrantAttachment::unfenced_for_test(&fixture.store, served())
+            .await
+            .expect("attachment")
+    };
+    assert!(replica.attach_host_grants(attachment().await));
+    assert!(!replica.attach_host_grants(attachment().await));
     let admitted = fixture.room_submission("verified-replica", "admitted now");
     assert_eq!(
         replica.commit(&admitted).await.class,

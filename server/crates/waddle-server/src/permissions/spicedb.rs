@@ -24,11 +24,11 @@ use super::authz_schema_version::{
     AUTHZ_SCHEMA_VERSION,
 };
 use super::host_grant::{
-    ListedProjectionMarker, MarkerObservation, ProjectedRelationship, ProjectionIntent,
-    ProjectionMarker, ProjectionObservation, ProjectionRefusal, ProjectionWrite, RoomAffiliation,
-    ScopeLifecycleId, HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
-    HOST_GRANT_PROJECTION_RPC_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    room_witness_resource, ListedWitness, MarkerObservation, ProjectedRelationship,
+    ProjectionIntent, ProjectionMarker, ProjectionObservation, ProjectionRefusal, ProjectionWrite,
+    RestoredPlan, RoomAffiliation, ScopeLifecycleId, HOST_GRANT_PROJECTION_DEFINITION,
+    HOST_GRANT_PROJECTION_MARKER_RELATION, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
+    HOST_GRANT_RESTORE_SCAN_TIMEOUT, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -788,51 +788,115 @@ impl SpiceDbPermissionBackend {
     pub async fn take_over_host_grant_projection(
         &self,
         previous: &ProjectionMarker,
-        intent: &ProjectionIntent,
+        plan: &RestoredPlan,
     ) -> Result<ProjectionWrite, PermissionError> {
+        let intent = &plan.plan().intent;
         intent.check_takes_over(previous)?;
         self.write_projection_request(Some(previous), intent).await
     }
 
-    /// Read every projection marker the store holds, grouped by the
-    /// lifecycle its resource names, fully consistently and within
-    /// [`HOST_GRANT_RESTORE_SCAN_TIMEOUT`]. A resource that holds more than
-    /// one relationship, or one that is not a canonical marker, is
-    /// malformed.
-    pub async fn list_host_grant_projection_markers(
+    /// Read every resource of the projection definition, markers and
+    /// witnesses alike, fully consistently and within
+    /// [`HOST_GRANT_RESTORE_SCAN_TIMEOUT`], with the stamps each holds.
+    pub async fn list_host_grant_witnesses(&self) -> Result<Vec<ListedWitness>, PermissionError> {
+        self.read_witness_resources(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
+            .await
+    }
+
+    /// Read one resource of the projection definition, fully consistently.
+    pub async fn read_host_grant_witness(
         &self,
-    ) -> Result<Vec<ListedProjectionMarker>, PermissionError> {
+        resource: &str,
+    ) -> Result<ListedWitness, PermissionError> {
+        let listed = self
+            .read_witness_resources(
+                RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION).resource_id(resource),
+            )
+            .await?;
+        Ok(listed.into_iter().next().unwrap_or_else(|| ListedWitness {
+            resource: resource.to_owned(),
+            stamps: Vec::new(),
+            well_formed: true,
+        }))
+    }
+
+    /// Replace one witness in one request: `next` touched, `previous`
+    /// deleted, conditioned on the resource holding exactly `previous`, or
+    /// nothing when `previous` is `None`.
+    pub async fn replace_host_grant_witness(
+        &self,
+        resource: &str,
+        previous: Option<&str>,
+        next: &str,
+    ) -> Result<ProjectionWrite, PermissionError> {
+        let mut preconditions = Vec::new();
+        let mut updates = Vec::new();
+        match previous {
+            Some(previous) => {
+                preconditions.push(Precondition::must_exist(grant_witness_filter(
+                    resource, previous,
+                )));
+                updates.push(RelationshipUpdate::delete(grant_witness(
+                    resource, previous,
+                )?));
+            }
+            None => preconditions.push(Precondition::must_not_exist(
+                RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION).resource_id(resource),
+            )),
+        }
+        updates.push(RelationshipUpdate::touch(grant_witness(resource, next)?));
+        match self
+            .client
+            .write_relationships(updates)
+            .preconditions(preconditions)
+            .timeout(HOST_GRANT_PROJECTION_RPC_TIMEOUT)
+            .await
+        {
+            Ok(_) => Ok(ProjectionWrite::Applied),
+            Err(prescience::Error::Status { code, .. })
+                if format!("{code:?}") == "FailedPrecondition" =>
+            {
+                Ok(ProjectionWrite::PreconditionFailed)
+            }
+            Err(error) => Err(map_spicedb_error(error)),
+        }
+    }
+
+    /// The resources `filter` matches, grouped, each with its stamps and
+    /// whether every relationship is a plain marker relationship.
+    async fn read_witness_resources(
+        &self,
+        filter: RelationshipFilter,
+    ) -> Result<Vec<ListedWitness>, PermissionError> {
         let mut stream = self
             .client
-            .read_relationships(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
+            .read_relationships(filter)
             .consistency(Consistency::FullyConsistent)
             .timeout(HOST_GRANT_RESTORE_SCAN_TIMEOUT)
             .send()
             .await
             .map_err(map_spicedb_error)?;
-        let mut resources: std::collections::BTreeMap<String, Vec<Relationship>> =
+        let mut resources: std::collections::BTreeMap<String, ListedWitness> =
             std::collections::BTreeMap::new();
         while let Some(item) = stream.next().await {
             let relationship = item.map_err(map_spicedb_error)?.relationship;
-            resources
-                .entry(relationship.resource.object_id().to_owned())
-                .or_default()
-                .push(relationship);
+            let resource = relationship.resource.object_id().to_owned();
+            let entry = resources
+                .entry(resource.clone())
+                .or_insert_with(|| ListedWitness {
+                    resource,
+                    stamps: Vec::new(),
+                    well_formed: true,
+                });
+            entry.well_formed &= relationship.relation == HOST_GRANT_PROJECTION_MARKER_RELATION
+                && relationship.subject.object().object_type() == HOST_GRANT_PROJECTION_DEFINITION
+                && relationship.subject.optional_relation().is_none()
+                && relationship.optional_caveat.is_none();
+            entry
+                .stamps
+                .push(relationship.subject.object().object_id().to_owned());
         }
-        Ok(resources
-            .into_iter()
-            .map(|(resource, relationships)| {
-                let lifecycle = ScopeLifecycleId::from_storage(&resource);
-                let marker = match (lifecycle, relationships.as_slice()) {
-                    (Some(lifecycle), [relationship]) => {
-                        parse_grant_projection_marker(lifecycle, relationship)
-                            .map_or(MarkerObservation::Malformed, MarkerObservation::Present)
-                    }
-                    _ => MarkerObservation::Malformed,
-                };
-                ListedProjectionMarker { lifecycle, marker }
-            })
-            .collect())
+        Ok(resources.into_values().collect())
     }
 
     /// One projection write: the marker `previous` replaced (or, without
@@ -878,6 +942,15 @@ impl SpiceDbPermissionBackend {
         updates.push(RelationshipUpdate::touch(grant_projection_marker(
             &intent.marker,
         )?));
+        // Each managed room's binding is witnessed with the projection, so a
+        // room of a lifecycle the canonical store loses stays known.
+        let lifecycle = intent.marker.lifecycle.to_storage();
+        for channel_id in &intent.channels {
+            updates.push(RelationshipUpdate::touch(grant_witness(
+                &room_witness_resource(channel_id),
+                &lifecycle,
+            )?));
+        }
         for grant in &intent.grants {
             let object = Object::new(ObjectType::Channel, grant.channel_id.as_str());
             let subject = Subject::user(grant.subject.as_str());
@@ -1079,6 +1152,30 @@ fn grant_projection_marker(marker: &ProjectionMarker) -> Result<Relationship, Pe
         HOST_GRANT_PROJECTION_MARKER_RELATION,
         subject,
     ))
+}
+
+/// `waddle_grant_projection:<resource>#marker@waddle_grant_projection:<stamp>`:
+/// a witness of the host-grant authority. Fixed ASCII IDs, like the markers.
+fn grant_witness(resource: &str, stamp: &str) -> Result<Relationship, PermissionError> {
+    let object = ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, resource)
+        .map_err(|e| PermissionError::InvalidObject(e.to_string()))?;
+    let stamp = ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, stamp)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    let subject = SubjectReference::new(stamp, None::<String>)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    Ok(Relationship::new(
+        object,
+        HOST_GRANT_PROJECTION_MARKER_RELATION,
+        subject,
+    ))
+}
+
+/// The filter that matches exactly one witness relationship.
+fn grant_witness_filter(resource: &str, stamp: &str) -> RelationshipFilter {
+    RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION)
+        .resource_id(resource)
+        .relation(HOST_GRANT_PROJECTION_MARKER_RELATION)
+        .subject_filter(SubjectFilter::new(HOST_GRANT_PROJECTION_DEFINITION).subject_id(stamp))
 }
 
 /// The filter that matches exactly `marker` and nothing else.

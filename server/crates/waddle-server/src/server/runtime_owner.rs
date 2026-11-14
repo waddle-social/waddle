@@ -806,8 +806,9 @@ pub async fn prepare_restricted_runtime_owner(
 /// lineage attested above, and declare a restore when the plan's epoch
 /// exceeds the recorded one: a new incarnation, with every scope that is not
 /// retired or exhausted closed until its projection is rebuilt, verified and
-/// activated. A plan below the recorded epoch, and an adopted database whose
-/// restore was not declared, are refused. See
+/// activated and an operator reopens it. A plan below the recorded epoch,
+/// and an adopted database whose restore was not declared, are refused. A
+/// transition an earlier run did not finish is finished. See
 /// `permissions::host_grant::restore`.
 async fn prepare_host_grant_restore(
     owner: &Database,
@@ -833,7 +834,12 @@ async fn prepare_host_grant_restore(
             epoch = epoch.value(),
             restored_scopes,
             "declared a host-grant restore: a new authority incarnation is established and \
-             every restored scope admits nothing until its reconstruction is verified"
+             every restored scope admits nothing until its reconstruction is verified and an \
+             operator reopens it"
+        ),
+        RestoreDeclaration::Resumed { restored_scopes } => tracing::warn!(
+            restored_scopes,
+            "finished a host-grant restore transition an earlier owner phase did not finish"
         ),
     }
     Ok(())

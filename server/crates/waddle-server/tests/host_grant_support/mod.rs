@@ -8,8 +8,9 @@
 //!
 //! The fixture's database login owns the schema, so it cannot pass the
 //! runtime-privilege check a server runs at startup. The fixture attaches
-//! the ingress unit of work without that check; the check itself is covered
-//! by the cases that create a restricted role.
+//! the ingress unit of work, bound to the database's authority, without
+//! that check and without the restore fence; the check is covered by the
+//! cases that create a restricted role, and the fence by the restore suite.
 
 use jid::{BareJid, FullJid};
 use uuid::Uuid;
@@ -98,10 +99,12 @@ impl GrantFixture {
     /// provide PostgreSQL and does not require it.
     pub async fn enrolled(label: &str) -> Option<Self> {
         let ingress = IngressFixture::postgres(label).await?;
-        assert!(ingress
-            .uow
-            .attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
         let store = HostGrantStore::open(ingress.db.clone()).expect("host-grant store");
+        assert!(ingress.uow.attach_host_grants(
+            HostGrantAttachment::unfenced_for_test(&store, served())
+                .await
+                .expect("attachment bound to the fixture's authority")
+        ));
         let policy = issuance_policy(&[]);
         let scope = enroll(&store, &policy).await;
         Some(Self {

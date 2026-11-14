@@ -122,9 +122,20 @@ pub(super) async fn admit_host_grants(
         return Ok(HostGrantAcceptance::Unmanaged);
     };
     let refused = |refusal| Ok(HostGrantAcceptance::Refused(refusal));
-    // An unmanaged room costs one indexed lookup and nothing else.
+    // An unmanaged room costs one indexed lookup, and a set lookup when the
+    // restore fence found rooms of a lifecycle only SpiceDB holds: such a
+    // room belongs to an enrollment the database lost and is refused rather
+    // than served as unmanaged.
     let scope = match HostGrantAdmissionRepository::managing_scope(tx, room).await? {
-        RoomManagement::Unmanaged => return Ok(HostGrantAcceptance::Unmanaged),
+        RoomManagement::Unmanaged => {
+            if tx
+                .host_grant_attachment()
+                .is_some_and(|attachment| attachment.refuses_unmanaged(room))
+            {
+                return refused(HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed));
+            }
+            return Ok(HostGrantAcceptance::Unmanaged);
+        }
         RoomManagement::NotCanonical => return refused(HostGrantRefusal::UnsupportedAcceptance),
         RoomManagement::Managed(scope) => scope,
     };
@@ -153,6 +164,9 @@ pub(super) async fn admit_host_grants(
         RoomAdmission::Denied(denial) => {
             if denial == AdmissionDenial::AuthorityChanged {
                 warn_authority_changed();
+                // Verify the fence again in place; until it passes, every
+                // acceptance for a managed room is refused.
+                tx.host_grant_gate().authority_changed();
             }
             return refused(HostGrantRefusal::Denied(denial));
         }
@@ -206,8 +220,8 @@ fn warn_authority_changed() {
         tracing::error!(
             kind = "authority_changed",
             "A managed room's acceptance was refused: the host-grant incarnation, its restore \
-             epoch or the PostgreSQL server changed since this replica attached; restart the \
-             replica so that it verifies the restore fence again \
+             epoch, the PostgreSQL server or its database changed since this replica attached; \
+             the replica verifies the restore fence again \
              (docs/operations/authz-host-grant-restore.md)"
         );
     }

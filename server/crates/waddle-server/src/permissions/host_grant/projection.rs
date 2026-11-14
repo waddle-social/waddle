@@ -232,9 +232,9 @@ pub struct ProjectionPlan {
     pub intent: ProjectionIntent,
     /// The latest generation whose projection was verified and activated.
     pub projected_generation: Option<GrantGeneration>,
-    /// Whether a restore transition closed the scope. Only such a scope's
-    /// projection may be taken over from another authority incarnation.
-    pub restored: bool,
+    /// Whether a restore transition closed the scope. Only the store sets
+    /// it, so a plan built anywhere else is never a takeover.
+    pub(crate) restored: bool,
 }
 
 impl ProjectionPlan {
@@ -245,5 +245,30 @@ impl ProjectionPlan {
     /// Whether the current generation still waits for its projection.
     pub fn pending(&self) -> bool {
         self.projected_generation != Some(self.intent.marker.generation)
+    }
+
+    /// Whether a restore transition closed the scope and its reconstruction
+    /// is not yet activated.
+    pub fn is_restored(&self) -> bool {
+        self.restored
+    }
+
+    /// The plan as the one kind a takeover accepts, if a restore transition
+    /// closed the scope.
+    pub fn into_restored(self) -> Option<RestoredPlan> {
+        self.restored.then_some(RestoredPlan(self))
+    }
+}
+
+/// The plan of a scope a restore transition closed, which only the store
+/// produces ([`ProjectionPlan::into_restored`]). A takeover of another
+/// incarnation's projection takes nothing else, so a plan of any other
+/// scope cannot replace a projection across incarnations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredPlan(ProjectionPlan);
+
+impl RestoredPlan {
+    pub fn plan(&self) -> &ProjectionPlan {
+        &self.0
     }
 }

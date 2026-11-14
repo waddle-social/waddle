@@ -132,6 +132,10 @@ pub struct AppState {
     /// the stream-management authority. Read it through
     /// [`Self::account_authority`].
     account_authority: OnceLock<AccountAuthoritySelection>,
+    /// The gate of the host-grant attachment, published when the ingress
+    /// authority is opened on PostgreSQL. Readiness fails while it has not
+    /// verified an authority that changed under the running replica.
+    pub(crate) host_grant_gate: OnceLock<Arc<crate::permissions::host_grant::HostGrantGate>>,
 }
 
 impl AppState {
@@ -238,6 +242,7 @@ impl AppState {
             clustering_enabled,
             lineage_startup: OnceLock::new(),
             lineage_latched: OnceLock::new(),
+            host_grant_gate: OnceLock::new(),
             lineage_adopt_matched: Mutex::new(HashSet::new()),
             runtime_progress: Arc::new(RuntimeProgress::new()),
             durable_sm: OnceLock::new(),

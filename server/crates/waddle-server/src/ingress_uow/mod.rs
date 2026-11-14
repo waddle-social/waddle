@@ -172,11 +172,10 @@ pub struct IngressUnitOfWork {
     /// unattested PostgreSQL handle, so later transactions do not look for
     /// them again. Shared by every clone.
     host_grant_relations: Arc<std::sync::atomic::AtomicBool>,
-    /// What this replica established about the host-grant store when it
-    /// started; empty until [`Self::attach_host_grants`]. A room an enrolled
-    /// scope manages is admitted only once it is set. Shared by every clone.
-    host_grant_attachment:
-        Arc<std::sync::OnceLock<crate::permissions::host_grant::HostGrantAttachment>>,
+    /// What this replica established about the host-grant store; empty
+    /// until [`Self::attach_host_grants`]. A room an enrolled scope manages
+    /// is admitted only while it holds an attachment. Shared by every clone.
+    host_grant_gate: Arc<crate::permissions::host_grant::HostGrantGate>,
     /// Optional full-identity writer capability retained by the exact
     /// physically attested pool.
     attested_pg_writer: Option<AttestedPostgresWriterCapability>,
@@ -232,20 +231,26 @@ impl IngressUnitOfWork {
             seated_rooms: Default::default(),
             mailbox_epoch_proven_at_ms: Default::default(),
             host_grant_relations: Default::default(),
-            host_grant_attachment: Default::default(),
+            host_grant_gate: Default::default(),
             fencing: IngressFencing::SingleNode,
         })
     }
 
     /// Record that this replica verified its runtime role's privileges on
-    /// the host-grant store. Until then every acceptance for a room an
-    /// enrolled scope manages is refused. The first attachment stays; the
-    /// answer is whether this call set it.
+    /// the host-grant store and its restore fence. Until then every
+    /// acceptance for a room an enrolled scope manages is refused. The first
+    /// attachment stays until the gate verifies a changed authority again;
+    /// the answer is whether this call set it.
     pub fn attach_host_grants(
         &self,
         attachment: crate::permissions::host_grant::HostGrantAttachment,
     ) -> bool {
-        self.host_grant_attachment.set(attachment).is_ok()
+        self.host_grant_gate.attach(attachment)
+    }
+
+    /// The gate that holds this replica's host-grant attachment.
+    pub fn host_grant_gate(&self) -> Arc<crate::permissions::host_grant::HostGrantGate> {
+        Arc::clone(&self.host_grant_gate)
     }
 
     /// Whether this unit of work can carry remote room acceptance through
@@ -555,7 +560,7 @@ impl IngressUnitOfWork {
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
             host_grant_relations: Arc::clone(&self.host_grant_relations),
-            host_grant_attachment: Arc::clone(&self.host_grant_attachment),
+            host_grant_gate: Arc::clone(&self.host_grant_gate),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
         })
@@ -596,8 +601,7 @@ pub struct IngressUowTransaction<'a> {
     /// Shared with the unit of work; see its field of the same name.
     host_grant_relations: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the unit of work; see its field of the same name.
-    host_grant_attachment:
-        Arc<std::sync::OnceLock<crate::permissions::host_grant::HostGrantAttachment>>,
+    host_grant_gate: Arc<crate::permissions::host_grant::HostGrantGate>,
     /// Node-authority guards minted for this transaction's claim fences.
     /// Held here — not on the independently droppable fence — so identity
     /// rotation or terminal disable cannot complete until this transaction
@@ -698,12 +702,17 @@ impl<'a> IngressUowTransaction<'a> {
         &self.lineage
     }
 
-    /// What this replica established about the host-grant store when it
-    /// started, if it has.
+    /// What this replica established about the host-grant store, if it
+    /// has.
     pub(crate) fn host_grant_attachment(
         &self,
     ) -> Option<crate::permissions::host_grant::HostGrantAttachment> {
-        self.host_grant_attachment.get().cloned()
+        self.host_grant_gate.current()
+    }
+
+    /// The gate that holds this replica's host-grant attachment.
+    pub(crate) fn host_grant_gate(&self) -> Arc<crate::permissions::host_grant::HostGrantGate> {
+        Arc::clone(&self.host_grant_gate)
     }
 
     pub(crate) fn receipt_schema(&self) -> Option<&str> {

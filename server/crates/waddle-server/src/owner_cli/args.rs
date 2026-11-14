@@ -15,9 +15,13 @@ use clap::{Args, Parser, Subcommand};
 use thiserror::Error;
 use uuid::Uuid;
 
+use jid::BareJid;
+use waddle_xmpp::identity::CanonicalDomain;
+
 use crate::db::lineage::PgSchemaName;
 use crate::db::physical_attestation::{validate_identifier, PgRoleName, PhysicalAttestationError};
 use crate::db::runtime_startup::valid_git_sha;
+use crate::permissions::host_grant::{GrantSubject, ScopeLifecycleId};
 
 const ABOUT: &str = "Waddle XMPP server";
 
@@ -39,6 +43,9 @@ Order for one database:
   1. owner-phase       as the migrator login
   2. install-attestor  as the attestor installer login
   3. emit-handoff      as the migrator login
+
+host-grant runs as the migrator login when an operator acts on the host-grant
+authority after a restore (docs/operations/authz-host-grant-restore.md).
 
 Exit codes:
   0  completed
@@ -91,6 +98,16 @@ Without clustering the phase does not check that it has the database to
 itself: stop every server before it runs. --identity-output replaces an
 existing file atomically and refuses a symbolic link.";
 
+const HOST_GRANT_ENVIRONMENT: &str = "\
+Environment (no flag; secret values are never printed):
+  WADDLE_DATABASE_URL  PostgreSQL URL of the migrator login, as for
+                       owner-phase.
+
+Each action is one or more short transactions on the host-grant store and can
+run while the servers run. `reopen` and `revoke` print what they recorded as
+JSON; repeat `revoke` with the same --operation-id after an unknown outcome.
+See docs/operations/authz-host-grant-restore.md.";
+
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
   WADDLE_DATABASE_URL  PostgreSQL URL of the attestor installer login.
@@ -137,6 +154,10 @@ pub(super) enum Command {
     /// Compose or verify the handoff document the restricted server starts with
     #[command(after_help = EMIT_HANDOFF_ENVIRONMENT)]
     EmitHandoff(EmitHandoffArgs),
+    /// Reopen restored host-grant scopes, acknowledge the PostgreSQL position
+    /// or revoke a grant the restored database lost
+    #[command(after_help = HOST_GRANT_ENVIRONMENT)]
+    HostGrant(HostGrantArgs),
 }
 
 /// The owner connection: the migrator login acting as the schema owner.
@@ -294,6 +315,55 @@ pub(super) enum ExclusiveDatabaseArg {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct HostGrantArgs {
+    #[command(flatten)]
+    pub(super) connection: OwnerConnectionArgs,
+    #[command(subcommand)]
+    pub(super) action: HostGrantActionArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum HostGrantActionArgs {
+    /// Reopen scopes whose reconstruction after a declared restore was
+    /// verified; the operator's acknowledgement of the restore
+    Reopen {
+        /// Lifecycle of the one scope to reopen (32 lowercase hex characters);
+        /// every reconstructed scope when absent
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: Option<ScopeLifecycleId>,
+    },
+    /// Acknowledge the PostgreSQL system and timeline the server now writes
+    /// on, after a promotion or a move the position witness cannot verify
+    AcknowledgePosition,
+    /// Revoke or ban one account in one managed room, in a closed scope too
+    Revoke {
+        /// Lifecycle of the scope (32 lowercase hex characters)
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+        /// The managed room's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_bare_jid)]
+        room: BareJid,
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+        /// Record a ban (outcast) instead of a revoke (none)
+        #[arg(long)]
+        ban: bool,
+        /// Operation ID of this revoke; generate one UUID and keep it
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// The account domain the servers serve, as their WADDLE_XMPP_DOMAIN
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+    },
+}
+
+#[derive(Debug, Args)]
 pub(super) struct InstallAttestorArgs {
     /// Database identity JSON that owner-phase printed
     #[arg(long, value_name = "FILE")]
@@ -367,9 +437,34 @@ fn parse_schema(value: &str) -> Result<PgSchemaName, PhysicalAttestationError> {
 pub(super) enum ArgumentError {
     #[error("expected 40 lowercase hexadecimal characters")]
     GitSha,
+    #[error("expected 32 lowercase hexadecimal characters")]
+    Lifecycle,
+    #[error("expected a bare JID")]
+    BareJid,
+    #[error("expected the bare JID of an account in canonical form")]
+    Subject,
+    #[error("expected a canonical domain (lowercase, no trailing dot, A-labels)")]
+    Domain,
     #[cfg(feature = "clustering")]
     #[error("expected a whole number followed by ms, s, m or h, such as 30s")]
     Duration,
+}
+
+fn parse_lifecycle(value: &str) -> Result<ScopeLifecycleId, ArgumentError> {
+    ScopeLifecycleId::from_storage(value).ok_or(ArgumentError::Lifecycle)
+}
+
+fn parse_bare_jid(value: &str) -> Result<BareJid, ArgumentError> {
+    value.parse().map_err(|_| ArgumentError::BareJid)
+}
+
+fn parse_subject(value: &str) -> Result<GrantSubject, ArgumentError> {
+    let jid = parse_bare_jid(value).map_err(|_| ArgumentError::Subject)?;
+    GrantSubject::new(jid).map_err(|_| ArgumentError::Subject)
+}
+
+fn parse_account_domain(value: &str) -> Result<CanonicalDomain, ArgumentError> {
+    CanonicalDomain::parse_exact(value).map_err(|_| ArgumentError::Domain)
 }
 
 fn parse_git_sha(value: &str) -> Result<String, ArgumentError> {

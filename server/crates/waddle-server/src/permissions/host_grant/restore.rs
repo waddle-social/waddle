@@ -1,52 +1,53 @@
 //! The restore incarnation of the host-grant authority (ADR-0020 D5
 //! condition B7, gate G13).
 //!
-//! Restoring PostgreSQL from a backup, or recovering it to an earlier point
-//! in time, brings back every scope's older generation together with its
-//! grants, its `active` flag and the authority incarnation that state was
-//! bound to. Nothing inside the restored database can tell it from the live
-//! one, so the incarnation is bound to three witnesses that a restore of the
-//! database does not bring back:
+//! Restoring PostgreSQL from a backup, recovering it to an earlier point
+//! in time, or failing over to a replica that missed commits brings back
+//! every scope's older generation together with its grants, its `active`
+//! flag and the authority incarnation that state was bound to. Nothing
+//! inside the restored database can tell it from the live one, so the
+//! incarnation is bound to what a restore of the database does not bring
+//! back:
 //!
 //! - the declared restore epoch ([`RestoreEpoch`]): an operator-supplied
 //!   counter in the deployment configuration of every replica and of the
 //!   owner phase, raised once for each restore. The database records the
 //!   epoch its incarnation was established under, and a replica serves only
-//!   a database that records its own configured epoch, so a database
-//!   restored to before the latest restore transition is refused;
-//! - the database lineage (`_lineage`), which a restore into another cluster
-//!   or database rotates through adoption. The owner phase binds the
-//!   incarnation to the lineage and refuses an adopted database until the
-//!   restore is declared;
-//! - the SpiceDB projection markers, which name the incarnation and the
-//!   generation each scope's projection was last written for. A replica
-//!   refuses to start while a marker names a scope, a generation or an
-//!   incarnation the canonical journal does not record: the database lost
-//!   operations that were projected, and the restore was not declared.
+//!   a database that records its own configured epoch;
+//! - the database lineage (`_lineage`), which a logical restore into another
+//!   database rotates through adoption. A physical copy keeps it;
+//! - what SpiceDB holds (`witness`): the projection markers, the journal
+//!   head of each scope, the room bindings of each projected scope and the
+//!   PostgreSQL position of the authority.
 //!
 //! Declaring a restore is an owner-phase act
 //! ([`HostGrantStore::prepare_restore_incarnation`](super::HostGrantStore::prepare_restore_incarnation)).
 //! When the configured epoch exceeds the stored one it mints a new
 //! incarnation, records the epoch and the live lineage, and closes every
 //! scope that is not retired or exhausted as `restored`, bound to the new
-//! incarnation at its next generation, in one transaction. From that commit:
+//! incarnation at its next generation and with no effective standing above
+//! `none`. From that commit:
 //!
 //! - no admission, mutation or activation can use the earlier incarnation or
 //!   any generation before the transition, so old queued and in-flight work
-//!   (a command decided under an older generation, a prepared admission
-//!   witness, a reconciliation pass that read an older plan) is refused or
-//!   superseded;
-//! - a replica attached to the earlier incarnation admits nothing, because
-//!   every acceptance compares the incarnation, the epoch and the start of
-//!   the PostgreSQL server it reads with those its attachment verified
-//!   ([`AuthorityBinding`]);
-//! - a restored scope admits nothing until reconciliation has rebuilt its
-//!   projection from the canonical rows, read it back and activated it
-//!   under the new incarnation. Reconstruction never grants from the
-//!   projection: where the projection shows that the restored database lost
-//!   projected operations, it lowers the canonical grants to what the
-//!   projection holds, so a revoke or a ban the restore lost stays in force
-//!   ([`reconstruction_targets`]).
+//!   is refused or superseded;
+//! - a replica attached to the earlier incarnation admits nothing: every
+//!   acceptance compares the authority it reads with the one its attachment
+//!   verified ([`AuthorityBinding`]), and a replica that finds it changed
+//!   verifies the fence again before it admits again;
+//! - a restored scope admits nothing, and honours no initiator, until
+//!   reconciliation has rebuilt its projection from the canonical rows,
+//!   read it back and activated it (it is then `reconstructed`) and an
+//!   operator has reopened it. Reconstruction never grants from the
+//!   projection: where the projection or the journal witness shows that the
+//!   restored database lost operations, it lowers the canonical grants to
+//!   what the projection holds ([`reconstruction_targets`]).
+//!
+//! An undeclared restore is found by the fence every replica passes before
+//! it admits a managed room ([`verify_restore_fence`]). A restore that
+//! affects the whole authority (another epoch, lineage, or PostgreSQL
+//! position) refuses the attachment; evidence about one scope closes that
+//! scope as `fenced`, and a lifecycle only SpiceDB knows refuses its rooms.
 //!
 //! The decisions and their limits are recorded in
 //! `server/docs/planning/host-grant-authority-2047.md`, "Restore incarnation
@@ -55,6 +56,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::future::Future;
 use std::time::Duration;
 
 use kameo::actor::ActorRef;
@@ -66,14 +68,24 @@ use super::issuance::IssuanceBasis;
 use super::marker::ProjectionMarker;
 use super::model::{
     AuthorityIncarnation, ClosedReason, Fingerprint, GrantGeneration, GrantOperationId,
-    GrantSubject, RoomAffiliation, ScopeLifecycleId,
+    GrantSubject, RoomAffiliation, ScopeLifecycleId, ScopeState,
 };
 use super::projection::{MarkerObservation, ProjectedRelationship, ProjectionIntent};
-use super::store::HostGrantStore;
-use crate::permissions::{ListHostGrantProjectionMarkers, PermissionActor};
+use super::store::{FenceSnapshot, HostGrantStore};
+use super::witness::{
+    position_standing, ListedWitness, PositionStanding, PositionWitness, WitnessResource,
+};
+use crate::permissions::{ListHostGrantWitnesses, PermissionActor};
 
-/// Deadline of the startup read of every projection marker.
+/// Deadline of the read of every projection marker and witness.
 pub const HOST_GRANT_RESTORE_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Deadline of all PostgreSQL reads and fence closures of one fence pass.
+pub const HOST_GRANT_RESTORE_FENCE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Passes a fence makes before it gives up on an authority that changes
+/// while it is verified.
+const FENCE_ATTEMPTS: usize = 3;
 
 /// The deployment's declared restore epoch: zero until the first restore,
 /// raised by one (or more) for each restore the operator declares. It is
@@ -123,16 +135,23 @@ pub struct AuthorityBinding {
     pub incarnation: AuthorityIncarnation,
     pub restore_epoch: RestoreEpoch,
     /// When the PostgreSQL server the binding was read from started, in
-    /// microseconds since the Unix epoch. A restore restarts the server, so
-    /// a restore under a running replica changes it; so does any other
-    /// restart, after which the replica admits no managed room until it is
-    /// restarted and has verified the restore fence again.
+    /// microseconds since the Unix epoch. A restore restarts the server,
+    /// and so does a failover; either changes it.
     pub server_started_at_us: i64,
+    /// The OID of the database the binding was read from. A logical restore
+    /// into a new database changes it; a physical copy keeps it.
+    pub database_oid: i64,
+    /// The name of that database.
+    pub database_name: String,
+    /// The OID of the authority relation. A logical restore that recreates
+    /// the host-grant relations (`pg_restore --clean`, a dump loaded into a
+    /// recreated schema) changes it without restarting the server.
+    pub authority_relation_oid: i64,
 }
 
-/// Why the authority is not served: a restore that was not declared, or a
-/// configuration that does not match the declared one. A refusal names no
-/// scope, room or account.
+/// Why the authority as a whole is not served: a restore that was not
+/// declared, or a configuration that does not match the declared one. A
+/// refusal names no scope, room or account.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum RestoreFenceRefusal {
     #[error(
@@ -145,24 +164,28 @@ pub enum RestoreFenceRefusal {
     },
     #[error(
         "the database lineage changed since the host-grant incarnation was established: the \
-         database was restored or cloned; declare the restore by raising the restore epoch"
+         database was adopted after a restore or a clone; declare the restore by raising the \
+         restore epoch"
     )]
     LineageChanged,
     #[error(
-        "the host-grant projection records an operation the canonical journal does not: the \
-         database lost operations and the restore was not declared"
+        "the PostgreSQL position is behind the one SpiceDB witnessed: the database was rolled \
+         back or recovered to an earlier point and the restore was not declared"
     )]
-    ProjectionAhead,
+    PositionRegressed,
     #[error(
-        "the host-grant projection was written by an authority incarnation the canonical \
-         journal does not record: the database is older than the projection"
+        "the PostgreSQL system or timeline changed since SpiceDB witnessed its position (a \
+         promotion, a point-in-time recovery or another cluster); acknowledge it with \
+         `waddle-server host-grant acknowledge-position` or declare a restore"
     )]
-    UnknownIncarnation,
+    PositionUnverified,
     #[error(
-        "the host-grant projection holds a scope the canonical store does not: the database \
-         lost an enrollment"
+        "the PostgreSQL position cannot be read by this role: pg_control_system(), \
+         pg_current_wal_flush_lsn() and pg_walfile_name() must be executable"
     )]
-    OrphanedProjection,
+    PositionUnreadable,
+    #[error("the host-grant authority changed while its restore fence was verified")]
+    AuthorityMoved,
 }
 
 impl RestoreFenceRefusal {
@@ -171,9 +194,10 @@ impl RestoreFenceRefusal {
         match self {
             Self::EpochMismatch { .. } => "epoch_mismatch",
             Self::LineageChanged => "lineage_changed",
-            Self::ProjectionAhead => "projection_ahead",
-            Self::UnknownIncarnation => "unknown_incarnation",
-            Self::OrphanedProjection => "orphaned_projection",
+            Self::PositionRegressed => "position_regressed",
+            Self::PositionUnverified => "position_unverified",
+            Self::PositionUnreadable => "position_unreadable",
+            Self::AuthorityMoved => "authority_moved",
         }
     }
 }
@@ -195,146 +219,372 @@ pub enum RestoreDeclaration {
         epoch: RestoreEpoch,
         restored_scopes: usize,
     },
+    /// A transition an earlier run recorded and did not finish was finished:
+    /// the scopes still bound to an earlier incarnation were closed.
+    Resumed { restored_scopes: usize },
 }
 
-/// A marker read from the whole projection store.
+/// What the fence found that one scope's canonical state contradicts. The
+/// scope is closed as `fenced` until a restore is declared.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ListedProjectionMarker {
-    /// The lifecycle the marker resource names; `None` when the resource ID
-    /// is not a lifecycle identity.
-    pub lifecycle: Option<ScopeLifecycleId>,
-    pub marker: MarkerObservation,
+pub enum FenceEvidence {
+    /// The projection marker names an operation of the scope's incarnation
+    /// that the journal does not record.
+    ProjectionAhead(ProjectionMarker),
+    /// The projection marker names an incarnation the scope's journal does
+    /// not record.
+    UnknownIncarnation(ProjectionMarker),
+    /// The journal witness names an operation the journal does not record.
+    JournalAhead(ProjectionMarker),
+    /// The scope admitted, so its projection was verified, and SpiceDB
+    /// holds no marker for it: the projection, and with it every witness
+    /// of the scope, was lost.
+    MarkerMissing,
 }
 
-/// What the startup fence found.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+impl FenceEvidence {
+    /// A stable name of the evidence for logs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ProjectionAhead(_) => "projection_ahead",
+            Self::UnknownIncarnation(_) => "unknown_incarnation",
+            Self::JournalAhead(_) => "journal_ahead",
+            Self::MarkerMissing => "marker_missing",
+        }
+    }
+}
+
+/// What a fence pass found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RestoreFenceReport {
+    /// The authority the pass verified, read before the projection and
+    /// again after it; `None` when the database holds no host-grant
+    /// relations.
+    pub binding: Option<AuthorityBinding>,
     /// The projection markers compared with the canonical store.
     pub markers: usize,
-    /// Markers of scopes a restore transition closed, which reconstruction
-    /// replaces.
+    /// Scopes a restore transition closed whose reconstruction is not yet
+    /// activated.
     pub awaiting_reconstruction: usize,
+    /// Scopes whose reconstruction was activated and which wait for an
+    /// operator to reopen them.
+    pub awaiting_reopen: usize,
+    /// Scopes this pass closed as `fenced`.
+    pub fenced: usize,
+    /// Lifecycles SpiceDB holds and the canonical store does not.
+    pub orphaned: usize,
+    /// The room witness digests of those lifecycles: their rooms are refused
+    /// rather than served as rooms no scope manages.
+    pub refused_rooms: BTreeSet<String>,
+    /// How the PostgreSQL position relates to its witness; `None` when the
+    /// backend holds no projection or the pass did not reach it.
+    pub position: Option<PositionStanding>,
 }
 
-/// Verify, before a replica serves anything, that the canonical store is the
-/// authority the deployment declared and not an undeclared restore of it.
+/// Verify, before a replica admits a managed room, that the canonical store
+/// is the authority the deployment declared and not an undeclared restore
+/// of it.
 ///
-/// A database that holds no scope, beside a projection that holds no
-/// marker, passes: there is no authority a restore could reopen. Otherwise
-/// it is refused, without reading further, when:
+/// One pass reads the authority binding, the lineage, the scopes that admit
+/// and the scope counts in one PostgreSQL snapshot, then every marker and
+/// witness SpiceDB holds, then the PostgreSQL position, then each named
+/// scope. It refuses the whole authority when:
 ///
 /// - the database lineage differs from the one the incarnation is bound to;
 /// - the configured restore epoch is not the stored one;
-/// - a projection marker names a scope the store does not hold, an
-///   operation of the scope's own incarnation that its journal does not
-///   record, or an incarnation its journal does not record. A scope a
-///   restore transition closed accepts a marker of any other incarnation:
-///   reconstruction replaces it.
+/// - the PostgreSQL position regressed, or changed system or timeline
+///   without an acknowledgement ([`position_standing`]).
 ///
-/// A malformed marker is not evidence of a restore and is left to
-/// reconciliation, which reports it. Each marker is compared with canonical
-/// state read after the marker, so an operation another replica recorded
-/// and projected meanwhile is found in the journal. A replica whose
-/// permission backend holds no projection compares only the epoch and the
-/// lineage.
+/// About each scope it decides alone: a marker or journal witness the
+/// journal contradicts, or a scope that admits without a marker, closes that
+/// scope as `fenced` in PostgreSQL; a lifecycle the store does not hold
+/// refuses the rooms its witnesses name. A database that holds no scope,
+/// beside a projection that names none, passes. A replica whose permission
+/// backend holds no projection compares only the epoch and the lineage.
+///
+/// Canonical state is read after what SpiceDB holds, so an operation another
+/// replica recorded and projected meanwhile is found in the journal. The
+/// binding is read again at the end of the pass, and the pass is repeated
+/// when it changed: the report's binding is the one the whole pass saw.
+/// The PostgreSQL reads of a pass share one deadline
+/// ([`HOST_GRANT_RESTORE_FENCE_DEADLINE`]).
 pub async fn verify_restore_fence(
     store: &HostGrantStore,
     permissions: &ActorRef<PermissionActor>,
     configured: RestoreEpoch,
 ) -> Result<RestoreFenceReport, HostGrantError> {
-    let Some(authority) = store.fence_authority().await? else {
-        return Ok(RestoreFenceReport::default());
-    };
-    let listed = permissions
-        .ask(ListHostGrantProjectionMarkers)
-        .await
-        .map_err(projection_store_error)?
-        .unwrap_or_default();
-    // A database that holds no scope, beside a projection that holds no
-    // marker, has no authority a restore could reopen.
-    if !authority.holds_scope && listed.is_empty() {
-        return Ok(RestoreFenceReport::default());
+    for _ in 0..FENCE_ATTEMPTS {
+        let deadline = tokio::time::Instant::now() + HOST_GRANT_RESTORE_FENCE_DEADLINE;
+        let Some(snapshot) = bounded(deadline, store.fence_snapshot()).await? else {
+            return Ok(RestoreFenceReport::default());
+        };
+        let report = fence_pass(store, permissions, configured, &snapshot, deadline).await?;
+        let reread = bounded(deadline, store.authority_binding()).await?;
+        if reread == snapshot.binding {
+            return Ok(report);
+        }
     }
-    if let Some(bound) = &authority.bound_lineage {
-        if authority.live_lineage.as_ref() != Some(bound) {
+    Err(RestoreFenceRefusal::AuthorityMoved.into())
+}
+
+/// A PostgreSQL step of the fence, within the pass's deadline; an expired
+/// deadline is [`HostGrantError::Busy`].
+async fn bounded<T>(
+    deadline: tokio::time::Instant,
+    step: impl Future<Output = Result<T, HostGrantError>>,
+) -> Result<T, HostGrantError> {
+    tokio::time::timeout_at(deadline, step)
+        .await
+        .unwrap_or(Err(HostGrantError::Busy))
+}
+
+async fn fence_pass(
+    store: &HostGrantStore,
+    permissions: &ActorRef<PermissionActor>,
+    configured: RestoreEpoch,
+    snapshot: &FenceSnapshot,
+    deadline: tokio::time::Instant,
+) -> Result<RestoreFenceReport, HostGrantError> {
+    let listed = permissions
+        .ask(ListHostGrantWitnesses)
+        .await
+        .map_err(projection_store_error)?;
+    let witnesses = listed.as_deref().map(Witnesses::from_listing);
+    let mut report = RestoreFenceReport {
+        binding: Some(snapshot.binding.clone()),
+        awaiting_reconstruction: snapshot.restored,
+        awaiting_reopen: snapshot.reconstructed,
+        ..RestoreFenceReport::default()
+    };
+    // A database that holds no scope, beside a projection that names none,
+    // has no authority a restore could reopen.
+    if !snapshot.holds_scope && !witnesses.as_ref().is_some_and(Witnesses::names_scope) {
+        return Ok(report);
+    }
+    if let Some(bound) = &snapshot.bound_lineage {
+        if snapshot.live_lineage.as_ref() != Some(bound) {
             return Err(RestoreFenceRefusal::LineageChanged.into());
         }
     }
-    if authority.restore_epoch != configured {
+    if snapshot.binding.restore_epoch != configured {
         return Err(RestoreFenceRefusal::EpochMismatch {
             configured,
-            stored: authority.restore_epoch,
+            stored: snapshot.binding.restore_epoch,
         }
         .into());
     }
-    let mut report = RestoreFenceReport {
-        markers: listed.len(),
-        awaiting_reconstruction: 0,
+    let Some(witnesses) = witnesses else {
+        return Ok(report);
     };
-    for entry in listed {
-        let (Some(lifecycle), MarkerObservation::Present(marker)) = (entry.lifecycle, entry.marker)
-        else {
+    report.markers = witnesses.markers.len();
+
+    let witnessed = match witnesses.positions.get(&snapshot.authority_id) {
+        None => None,
+        Some(Some(witness)) => Some(*witness),
+        Some(None) => return Err(RestoreFenceRefusal::PositionUnverified.into()),
+    };
+    let current = PositionWitness {
+        epoch: snapshot.binding.restore_epoch,
+        position: bounded(deadline, store.postgres_position()).await?,
+    };
+    let standing = position_standing(
+        witnessed.as_ref(),
+        &current,
+        snapshot.position_acknowledgement,
+    );
+    match standing {
+        PositionStanding::Regressed => return Err(RestoreFenceRefusal::PositionRegressed.into()),
+        PositionStanding::Unverified => return Err(RestoreFenceRefusal::PositionUnverified.into()),
+        _ => report.position = Some(standing),
+    }
+
+    for lifecycle in witnesses.lifecycles() {
+        let Some(scope) = bounded(deadline, store.scope(lifecycle)).await? else {
+            report.orphaned += 1;
+            report
+                .refused_rooms
+                .extend(witnesses.rooms_of(lifecycle).cloned());
             continue;
         };
-        match marker_standing(store, lifecycle, &marker).await? {
-            MarkerStanding::Consistent => {}
-            MarkerStanding::AwaitingReconstruction => report.awaiting_reconstruction += 1,
-            MarkerStanding::Refused(refusal) => return Err(refusal.into()),
+        let evidence = bounded(
+            deadline,
+            scope_evidence(
+                store,
+                &scope,
+                witnesses.markers.get(&lifecycle),
+                witnesses.heads.get(&lifecycle),
+            ),
+        )
+        .await?;
+        if let Some(evidence) = evidence {
+            if bounded(deadline, store.fence_scope(lifecycle, &evidence)).await? {
+                tracing::error!(
+                    evidence = evidence.kind(),
+                    "A host-grant scope was closed: SpiceDB records what its canonical store \
+                     does not (docs/operations/authz-host-grant-restore.md)"
+                );
+                report.fenced += 1;
+            }
+        }
+    }
+    // A scope that admitted when the pass began had its marker written
+    // before then, and a marker is only ever replaced, never removed.
+    for lifecycle in &snapshot.admitting {
+        if witnesses.markers.contains_key(lifecycle) {
+            continue;
+        }
+        let evidence = FenceEvidence::MarkerMissing;
+        if bounded(deadline, store.fence_scope(*lifecycle, &evidence)).await? {
+            tracing::error!(
+                evidence = evidence.kind(),
+                "A host-grant scope was closed: SpiceDB holds no projection of it \
+                 (docs/operations/authz-host-grant-restore.md)"
+            );
+            report.fenced += 1;
         }
     }
     Ok(report)
 }
 
-/// How one projection marker relates to the canonical store.
-enum MarkerStanding {
-    Consistent,
-    AwaitingReconstruction,
-    Refused(RestoreFenceRefusal),
-}
-
-async fn marker_standing(
+/// What SpiceDB holds that one known scope's canonical state contradicts,
+/// if anything. Malformed markers and witnesses are not evidence: the
+/// projection pass reports a malformed marker, and a malformed witness
+/// writer stops.
+async fn scope_evidence(
     store: &HostGrantStore,
-    lifecycle: ScopeLifecycleId,
-    marker: &ProjectionMarker,
-) -> Result<MarkerStanding, HostGrantError> {
-    let Some(scope) = store.scope(lifecycle).await? else {
-        return Ok(MarkerStanding::Refused(
-            RestoreFenceRefusal::OrphanedProjection,
-        ));
-    };
-    let restored = match scope.closed_reason {
-        // A retired or exhausted scope admits nothing, and its projection
-        // is never written again.
-        Some(ClosedReason::Retired | ClosedReason::Exhausted) => {
-            return Ok(MarkerStanding::Consistent)
+    scope: &ScopeState,
+    marker: Option<&MarkerObservation>,
+    head: Option<&MarkerObservation>,
+) -> Result<Option<FenceEvidence>, HostGrantError> {
+    let restore_handling = match scope.closed_reason {
+        // A retired or exhausted scope admits nothing and is never written
+        // again; a fenced one is closed already.
+        Some(ClosedReason::Retired | ClosedReason::Exhausted | ClosedReason::Fenced) => {
+            return Ok(None)
         }
-        Some(ClosedReason::Restored) => true,
+        Some(ClosedReason::Restored | ClosedReason::Reconstructed) => true,
         Some(ClosedReason::Enrolled) | None => false,
     };
-    if marker.incarnation == scope.authority_incarnation {
-        let recorded = store.recorded_marker(lifecycle, marker.generation).await?;
-        return Ok(if recorded.as_ref() == Some(marker) {
-            MarkerStanding::Consistent
-        } else {
-            MarkerStanding::Refused(RestoreFenceRefusal::ProjectionAhead)
-        });
-    }
-    if restored {
-        return Ok(MarkerStanding::AwaitingReconstruction);
-    }
-    Ok(
-        if store
-            .journal_holds_incarnation(lifecycle, marker.incarnation)
-            .await?
+    let lifecycle = scope.lifecycle;
+    if let Some(MarkerObservation::Present(marker)) = marker {
+        if marker.incarnation == scope.authority_incarnation {
+            if store
+                .recorded_marker(lifecycle, marker.generation)
+                .await?
+                .as_ref()
+                != Some(marker)
+            {
+                return Ok(Some(FenceEvidence::ProjectionAhead(marker.clone())));
+            }
+        } else if !restore_handling
+            && !store
+                .journal_holds_incarnation(lifecycle, marker.incarnation)
+                .await?
         {
-            // The projection store is older than the canonical one: it was
-            // restored or lost writes. Admission does not read it, and
-            // reconciliation reports the marker as a contradiction.
-            MarkerStanding::Consistent
-        } else {
-            MarkerStanding::Refused(RestoreFenceRefusal::UnknownIncarnation)
-        },
-    )
+            return Ok(Some(FenceEvidence::UnknownIncarnation(marker.clone())));
+        }
+        // Otherwise a marker of an earlier incarnation of this journal: SpiceDB
+        // is older than PostgreSQL, or a restored scope's reconstruction
+        // replaces it.
+    }
+    if let Some(MarkerObservation::Present(head)) = head {
+        let recorded = store
+            .recorded_marker(lifecycle, head.generation)
+            .await?
+            .as_ref()
+            == Some(head);
+        let explained = recorded
+            || (head.incarnation != scope.authority_incarnation
+                && (restore_handling
+                    || store
+                        .journal_holds_reopen(lifecycle, scope.authority_incarnation)
+                        .await?));
+        if !explained {
+            return Ok(Some(FenceEvidence::JournalAhead(head.clone())));
+        }
+    }
+    Ok(None)
+}
+
+/// Every marker and witness SpiceDB holds, by kind.
+#[derive(Debug, Default)]
+pub(crate) struct Witnesses {
+    pub(crate) markers: BTreeMap<ScopeLifecycleId, MarkerObservation>,
+    pub(crate) heads: BTreeMap<ScopeLifecycleId, MarkerObservation>,
+    /// The lifecycles each room witness names.
+    pub(crate) rooms: BTreeMap<String, BTreeSet<ScopeLifecycleId>>,
+    /// Each authority's position witness; `None` when it is malformed.
+    pub(crate) positions: BTreeMap<String, Option<PositionWitness>>,
+}
+
+impl Witnesses {
+    pub(crate) fn from_listing(listing: &[ListedWitness]) -> Self {
+        let mut witnesses = Self::default();
+        for listed in listing {
+            match WitnessResource::classify(&listed.resource) {
+                WitnessResource::Marker(lifecycle) => {
+                    witnesses
+                        .markers
+                        .insert(lifecycle, observe_marker(lifecycle, listed));
+                }
+                WitnessResource::Head(lifecycle) => {
+                    witnesses
+                        .heads
+                        .insert(lifecycle, observe_marker(lifecycle, listed));
+                }
+                WitnessResource::Room(digest) => {
+                    if listed.well_formed {
+                        let named = listed
+                            .stamps
+                            .iter()
+                            .filter_map(|stamp| ScopeLifecycleId::from_storage(stamp));
+                        witnesses.rooms.entry(digest).or_default().extend(named);
+                    }
+                }
+                WitnessResource::Position(authority) => {
+                    let witness = match listed.single_stamp() {
+                        Ok(Some(stamp)) => PositionWitness::parse(stamp),
+                        Ok(None) | Err(()) => None,
+                    };
+                    witnesses.positions.insert(authority, witness);
+                }
+                WitnessResource::Unknown => {}
+            }
+        }
+        witnesses
+    }
+
+    /// Whether any marker or witness names a scope.
+    fn names_scope(&self) -> bool {
+        !self.markers.is_empty() || !self.heads.is_empty() || !self.rooms.is_empty()
+    }
+
+    /// Every lifecycle a marker, a journal witness or a room witness names.
+    fn lifecycles(&self) -> BTreeSet<ScopeLifecycleId> {
+        self.markers
+            .keys()
+            .chain(self.heads.keys())
+            .copied()
+            .chain(self.rooms.values().flatten().copied())
+            .collect()
+    }
+
+    /// The room witness digests that name `lifecycle`.
+    fn rooms_of(&self, lifecycle: ScopeLifecycleId) -> impl Iterator<Item = &String> {
+        self.rooms
+            .iter()
+            .filter(move |(_, named)| named.contains(&lifecycle))
+            .map(|(digest, _)| digest)
+    }
+}
+
+fn observe_marker(lifecycle: ScopeLifecycleId, listed: &ListedWitness) -> MarkerObservation {
+    match listed.single_stamp() {
+        Ok(Some(stamp)) => ProjectionMarker::parse(lifecycle, stamp)
+            .map_or(MarkerObservation::Malformed, MarkerObservation::Present),
+        Ok(None) => MarkerObservation::Absent,
+        Err(()) => MarkerObservation::Malformed,
+    }
 }
 
 /// What a reconstruction records for one subject in one managed room before
@@ -481,4 +731,79 @@ pub(crate) fn restore_fingerprint(
     fingerprint.number(epoch.to_storage());
     fingerprint.text(&incarnation.to_storage());
     fingerprint.finish()
+}
+
+/// The fingerprint of the operation that closes one scope on fence
+/// evidence. Two passes that close the same scope on the same evidence at
+/// the same generation record one operation's input.
+pub(crate) fn fence_fingerprint(
+    lifecycle: ScopeLifecycleId,
+    generation: GrantGeneration,
+    evidence: &FenceEvidence,
+) -> String {
+    let mut fingerprint = Fingerprint::new("waddle:host-grant:fence:v1");
+    fingerprint.text(&lifecycle.to_storage());
+    fingerprint.number(generation.value());
+    fingerprint.text(evidence.kind());
+    match evidence {
+        FenceEvidence::ProjectionAhead(marker)
+        | FenceEvidence::UnknownIncarnation(marker)
+        | FenceEvidence::JournalAhead(marker) => fingerprint.text(&marker.stamp()),
+        FenceEvidence::MarkerMissing => {}
+    }
+    fingerprint.finish()
+}
+
+/// The fingerprint of the operation that reopens one scope.
+pub(crate) fn reopen_fingerprint(
+    lifecycle: ScopeLifecycleId,
+    generation: GrantGeneration,
+) -> String {
+    let mut fingerprint = Fingerprint::new("waddle:host-grant:reopen:v1");
+    fingerprint.text(&lifecycle.to_storage());
+    fingerprint.number(generation.value());
+    fingerprint.finish()
+}
+
+/// An operator's revoke or ban of one subject in one managed room, recorded
+/// in any scope that is not retired or exhausted, closed ones included, and
+/// with no initiator: the operator acts through the owner phase. It is how a
+/// revoke the restored database lost is applied again.
+#[derive(Clone, Debug)]
+pub struct OperatorRevoke {
+    pub operation: GrantOperationId,
+    pub lifecycle: ScopeLifecycleId,
+    pub room: jid::BareJid,
+    pub subject: GrantSubject,
+    /// `none` revokes, `outcast` bans.
+    pub ban: bool,
+}
+
+impl OperatorRevoke {
+    pub fn affiliation(&self) -> RoomAffiliation {
+        if self.ban {
+            RoomAffiliation::Outcast
+        } else {
+            RoomAffiliation::None
+        }
+    }
+
+    pub(crate) fn fingerprint(&self) -> String {
+        let mut fingerprint = Fingerprint::new("waddle:host-grant:operator-revoke:v1");
+        fingerprint.text(&self.lifecycle.to_storage());
+        fingerprint.text(self.room.as_str());
+        fingerprint.text(self.subject.as_str());
+        fingerprint.text(self.affiliation().as_storage());
+        fingerprint.finish()
+    }
+}
+
+/// What an operator's reopen did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReopenReport {
+    /// Scopes reopened.
+    pub reopened: usize,
+    /// Scopes closed by a restore whose reconstruction is not yet verified
+    /// and activated, or which a fence closed since: left closed.
+    pub not_reconstructed: usize,
 }

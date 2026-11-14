@@ -886,30 +886,25 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     Ok(router)
 }
 
-/// The first delay before the host-grant privilege check is repeated after
-/// a failure that may pass on a later attempt; each further failure doubles
-/// it up to [`HOST_GRANT_ATTACH_RETRY_MAX`].
-const HOST_GRANT_ATTACH_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(1);
-const HOST_GRANT_ATTACH_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Let the ingress authority admit rooms that enrolled host-grant scopes
 /// manage, if this replica's runtime role holds exactly the grant store's
-/// privileges and the store records the replica's configured restore epoch.
-/// The attachment binds the authority incarnation, the epoch and the start
-/// of the PostgreSQL server it read; an acceptance that reads anything else
-/// is refused until the replica restarts.
+/// privileges and the store passes the restore fence for the replica's
+/// configured restore epoch. The attachment binds the authority the fence
+/// verified; an acceptance that reads another one is refused, and makes the
+/// replica's gate verify the fence again in place.
 ///
 /// The first check runs before the WebSocket state exists, so when it
-/// passes no acceptance precedes it. A failure that may pass on a later
-/// attempt (a statement that failed, a lock or statement bound that
-/// expired, bounds that could not be installed) is retried in the
+/// passes no acceptance precedes it. A failure that a later attempt may pass
+/// (a statement that failed, a bound that expired, SpiceDB that did not
+/// answer, a fence refusal an operator can clear) is retried in the
 /// background with a capped exponential backoff until the check passes,
 /// finds that the role does not match the profile, or the replica stops.
-/// A role that does not match the profile leaves the authority unattached.
-/// While it is unattached every acceptance for a managed room is refused
-/// with a committed stanza error, and rooms that no scope manages are
-/// unaffected. SQLite holds no canonical grant store and no enrolled scope,
-/// so there is nothing to attach.
+/// While the authority is unattached every acceptance for a managed room is
+/// refused with a committed stanza error, and rooms that no scope manages
+/// are unaffected. Once attached, the gate runs the fence again every
+/// [`REVERIFY_INTERVAL`](crate::permissions::host_grant::REVERIFY_INTERVAL).
+/// SQLite holds no canonical grant store and no enrolled scope, so there is
+/// nothing to attach.
 async fn attach_host_grant_store(
     ingress: &Arc<IngressAuthority>,
     state: &AppState,
@@ -917,82 +912,28 @@ async fn attach_host_grant_store(
     restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     stop: tokio_util::sync::CancellationToken,
 ) {
-    use crate::permissions::host_grant::{HostGrantStore, ServedAccountDomains};
+    use crate::permissions::host_grant::ServedAccountDomains;
+    use crate::permissions::host_grant::{log_unverified, verification_retried, HostGrantStore};
     let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
         return;
     };
-    let served = ServedAccountDomains::new([account_domain]);
-    if !try_attach_host_grant_store(ingress, &store, &served, restore_epoch).await {
-        return;
-    }
-    let ingress = Arc::clone(ingress);
-    tokio::spawn(async move {
-        let mut delay = HOST_GRANT_ATTACH_RETRY_INITIAL;
-        loop {
-            tokio::select! {
-                () = stop.cancelled() => return,
-                () = tokio::time::sleep(delay) => {}
-            }
-            if !try_attach_host_grant_store(&ingress, &store, &served, restore_epoch).await {
-                return;
-            }
-            delay = delay.saturating_mul(2).min(HOST_GRANT_ATTACH_RETRY_MAX);
-        }
-    });
-}
-
-/// One host-grant privilege check. The answer is whether to check again:
-/// only a failure that a later attempt may pass is retried.
-async fn try_attach_host_grant_store(
-    ingress: &IngressAuthority,
-    store: &crate::permissions::host_grant::HostGrantStore,
-    served: &crate::permissions::host_grant::ServedAccountDomains,
-    restore_epoch: crate::permissions::host_grant::RestoreEpoch,
-) -> bool {
-    use crate::permissions::host_grant::{HostGrantAttachment, HostGrantError};
-    match HostGrantAttachment::verify(store, served.clone(), restore_epoch).await {
-        Ok(attachment) => {
-            ingress.attach_host_grants(attachment);
-            false
-        }
-        Err(error) => {
-            let retrying = matches!(
-                error,
-                HostGrantError::Database(_) | HostGrantError::Busy | HostGrantError::BoundsUnproven
-            );
-            log_unverified_host_grant_store(store, &error, retrying).await;
-            retrying
+    let gate = ingress.host_grant_gate();
+    let _ = state.host_grant_gate.set(Arc::clone(&gate));
+    gate.install_verifier(
+        store.clone(),
+        state.permission_actor.clone(),
+        ServedAccountDomains::new([account_domain]),
+        restore_epoch,
+        stop,
+    );
+    if let Err(error) = gate.verify_once().await {
+        let retrying = verification_retried(&error);
+        log_unverified(&store, &error, retrying).await;
+        if retrying {
+            gate.verify_in_background();
         }
     }
-}
-
-/// Log a failed host-grant privilege check by its kind only. The failure
-/// is an error when an unretired scope is enrolled, which this replica
-/// cannot serve, or when that cannot be read; otherwise the replica loses
-/// nothing by it and it is logged as information.
-async fn log_unverified_host_grant_store(
-    store: &crate::permissions::host_grant::HostGrantStore,
-    error: &crate::permissions::host_grant::HostGrantError,
-    retrying: bool,
-) {
-    const UNVERIFIED: &str = "The runtime role's privileges on the host-grant store, or the \
-                              restore epoch it records, are not verified; rooms of enrolled \
-                              scopes are unavailable on this replica";
-    match store.holds_unretired_scope().await {
-        Ok(false) => info!(kind = error.kind(), retrying, "{UNVERIFIED}"),
-        Ok(true) => tracing::error!(
-            kind = error.kind(),
-            retrying,
-            unretired_scope = true,
-            "{UNVERIFIED}"
-        ),
-        Err(probe) => tracing::error!(
-            kind = error.kind(),
-            retrying,
-            probe_kind = probe.kind(),
-            "{UNVERIFIED}"
-        ),
-    }
+    gate.watch(crate::permissions::host_grant::REVERIFY_INTERVAL);
 }
 
 async fn open_ingress_authority(

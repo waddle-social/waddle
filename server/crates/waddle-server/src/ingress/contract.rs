@@ -109,6 +109,12 @@ impl IngressAuthority {
         self.uow.attach_host_grants(attachment)
     }
 
+    /// The gate that holds this authority's host-grant attachment, and
+    /// verifies it again when an acceptance finds the authority changed.
+    pub fn host_grant_gate(&self) -> std::sync::Arc<crate::permissions::host_grant::HostGrantGate> {
+        self.uow.host_grant_gate()
+    }
+
     pub(crate) fn bind_receipt_fatal_fence(
         &self,
         fatal_fence: CancellationToken,

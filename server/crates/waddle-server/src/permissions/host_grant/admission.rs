@@ -12,8 +12,9 @@
 //! A room that no scope manages is not this authority's concern and keeps
 //! its existing admission. A managed room is admitted only when its scope is
 //! active under the current authority incarnation and policy version, that
-//! incarnation, its restore epoch and the start of the PostgreSQL server
-//! answering are the ones the replica's attachment verified, and the
+//! incarnation, its restore epoch, the start of the PostgreSQL server
+//! answering and the database it answers for are the ones the replica's
+//! attachment verified, and the
 //! sender's honoured affiliation allows the action. The decision also names
 //! the audience: of the principals the acceptance would deliver to, project
 //! for or notify, those whose honoured affiliation allows `Read`. The caller
@@ -33,7 +34,8 @@ use super::model::{
     HOST_GRANT_POLICY_VERSION,
 };
 use super::policy::{grant_allows, HostGrantAction};
-use super::restore::{AuthorityBinding, RestoreEpoch};
+use super::restore::AuthorityBinding;
+use super::store::{binding_query, decode_binding};
 use crate::db::{DatabaseError, Transaction};
 
 /// The relations admission reads, as the acceptance transaction names them.
@@ -57,10 +59,9 @@ pub struct RoomAcceptance<'a> {
     pub audience: &'a [BareJid],
     /// The account domains this deployment serves.
     pub served: &'a ServedAccountDomains,
-    /// The authority incarnation, restore epoch and PostgreSQL server start
-    /// the replica's attachment verified. `None` only for an attachment a
-    /// test made without verifying anything.
-    pub binding: Option<&'a AuthorityBinding>,
+    /// The authority the replica's attachment verified: its incarnation,
+    /// restore epoch, PostgreSQL server start and database.
+    pub binding: &'a AuthorityBinding,
 }
 
 /// The canonical state an admission was decided under. It is valid for the
@@ -79,11 +80,11 @@ pub enum AdmissionDenial {
     /// The scope is not active under the current incarnation and policy
     /// version, or its stored state cannot be read as valid.
     ScopeClosed,
-    /// The authority incarnation, its restore epoch or the PostgreSQL server
-    /// answering is not the one this replica verified when it attached: a
-    /// restore transition was made, or the database was restored or
-    /// restarted, since. The replica admits no managed room until it is
-    /// restarted and passes the restore fence again.
+    /// The authority incarnation, its restore epoch, the PostgreSQL server
+    /// answering or its database is not the one this replica verified when
+    /// it attached: a restore transition was made, or the database was
+    /// restored, moved or restarted, since. The replica admits no managed
+    /// room until it has passed the restore fence again.
     AuthorityChanged,
     /// The sender's honoured affiliation does not allow the action.
     SenderNotAdmitted,
@@ -181,46 +182,22 @@ pub(crate) async fn admit_room_acceptance(
     let active = row.get::<String>(4)? == "active";
     drop(rows);
 
-    let mut rows = tx
-        .query(
-            &format!(
-                "SELECT incarnation, restore_epoch, \
-                 (extract(epoch FROM pg_catalog.pg_postmaster_start_time()) * 1000000)::bigint \
-                 FROM {} WHERE singleton",
-                relations.authority
-            ),
-            (),
-        )
-        .await?;
+    let mut rows = tx.query(&binding_query(&relations.authority), ()).await?;
     let authority = match rows.next().await? {
-        Some(row) => Some((
-            AuthorityIncarnation::from_storage(&row.get::<String>(0)?),
-            RestoreEpoch::from_storage(row.get::<i64>(1)?),
-            row.get::<i64>(2)?,
-        )),
+        Some(row) => decode_binding(&row)?,
         None => None,
     };
     drop(rows);
 
-    let (
-        Some(incarnation),
-        Some(generation),
-        Some(operation),
-        Some((Some(current), Some(restore_epoch), server_started_at_us)),
-    ) = (incarnation, generation, operation, authority)
+    let (Some(incarnation), Some(generation), Some(operation), Some(read)) =
+        (incarnation, generation, operation, authority)
     else {
         return Ok(closed);
     };
-    if let Some(binding) = acceptance.binding {
-        let read = AuthorityBinding {
-            incarnation: current,
-            restore_epoch,
-            server_started_at_us,
-        };
-        if *binding != read {
-            return Ok(RoomAdmission::Denied(AdmissionDenial::AuthorityChanged));
-        }
+    if *acceptance.binding != read {
+        return Ok(RoomAdmission::Denied(AdmissionDenial::AuthorityChanged));
     }
+    let current = read.incarnation;
     if !active || incarnation != current || policy_version != i64::from(HOST_GRANT_POLICY_VERSION) {
         return Ok(closed);
     }

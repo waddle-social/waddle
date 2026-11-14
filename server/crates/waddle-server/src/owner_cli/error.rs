@@ -80,6 +80,8 @@ pub enum OwnerCliError {
     Handoff(#[source] HandoffError),
     #[error("the composed handoff did not pass the pinned preflight on the runtime connection")]
     Preflight(#[source] RuntimeStartupError),
+    #[error("the host-grant action did not complete")]
+    HostGrant(#[source] crate::permissions::host_grant::HostGrantError),
 }
 
 impl OwnerCliError {
@@ -94,6 +96,13 @@ impl OwnerCliError {
             // preflight itself reached no verdict.
             Self::Preflight(RuntimeStartupError::PreflightPoolCloseIndeterminate) => {
                 ExitStatus::Failed
+            }
+            Self::HostGrant(error) => {
+                if host_grant_error_is_transient(error) {
+                    ExitStatus::Failed
+                } else {
+                    ExitStatus::Refused
+                }
             }
             Self::OwnerPhase(_) | Self::Attestor(_) | Self::Handoff(_) | Self::Preflight(_) => {
                 if transient_failure(self) {
@@ -143,6 +152,21 @@ fn transient_failure(error: &(dyn Error + 'static)) -> bool {
         cause = error.source();
     }
     false
+}
+
+/// A failed statement or connection, an expired bound or an unacknowledged
+/// commit: a rerun may succeed. Everything else is a verdict on the store or
+/// the request.
+fn host_grant_error_is_transient(error: &crate::permissions::host_grant::HostGrantError) -> bool {
+    use crate::permissions::host_grant::HostGrantError;
+    matches!(
+        error,
+        HostGrantError::Database(_)
+            | HostGrantError::Busy
+            | HostGrantError::BoundsUnproven
+            | HostGrantError::CommitOutcomeUnknown
+            | HostGrantError::EpochUnproven(_)
+    )
 }
 
 /// Ledger, lineage and attestation errors are verdicts on the database.

@@ -370,6 +370,11 @@ pub enum OperationKind {
     /// incarnation shows, and recorded the subjects only the projection
     /// held, before the projection is rebuilt from the canonical rows.
     Reconstruct,
+    /// The projection or a witness recorded an operation the journal does
+    /// not: the scope was closed until a restore is declared.
+    Fence,
+    /// An operator reopened a scope whose reconstruction was verified.
+    Reopen,
 }
 
 impl OperationKind {
@@ -381,6 +386,8 @@ impl OperationKind {
             Self::Exhaust => "exhaust",
             Self::Restore => "restore",
             Self::Reconstruct => "reconstruct",
+            Self::Fence => "fence",
+            Self::Reopen => "reopen",
         }
     }
 
@@ -392,6 +399,8 @@ impl OperationKind {
             Self::Exhaust,
             Self::Restore,
             Self::Reconstruct,
+            Self::Fence,
+            Self::Reopen,
         ]
         .into_iter()
         .find(|kind| kind.as_storage() == value)
@@ -452,17 +461,35 @@ pub enum ClosedReason {
     Exhausted,
     /// A restore transition bound it to a new authority incarnation. It
     /// admits nothing until its projection has been rebuilt from the
-    /// canonical rows, verified and activated under that incarnation.
+    /// canonical rows, verified and activated under that incarnation, and an
+    /// operator has reopened it.
     Restored,
+    /// Its reconstruction after a declared restore was verified and
+    /// activated. It admits nothing until an operator reopens it.
+    Reconstructed,
+    /// Its projection or a witness recorded an operation the journal does
+    /// not: the database lost operations and no restore was declared. It
+    /// admits nothing, and is not projected again, until a restore is
+    /// declared.
+    Fenced,
 }
 
 impl ClosedReason {
+    /// Whether the scope is closed while a restore is handled: declared and
+    /// not yet reopened, or detected and not yet declared. No initiator's
+    /// standing is honoured in such a scope, whatever its grant rows hold.
+    pub fn awaits_restore_handling(self) -> bool {
+        matches!(self, Self::Restored | Self::Reconstructed | Self::Fenced)
+    }
+
     pub(crate) fn as_storage(self) -> &'static str {
         match self {
             Self::Enrolled => "enrolled",
             Self::Retired => "retired",
             Self::Exhausted => "exhausted",
             Self::Restored => "restored",
+            Self::Reconstructed => "reconstructed",
+            Self::Fenced => "fenced",
         }
     }
 
@@ -472,6 +499,8 @@ impl ClosedReason {
             Self::Retired,
             Self::Exhausted,
             Self::Restored,
+            Self::Reconstructed,
+            Self::Fenced,
         ]
         .into_iter()
         .find(|reason| reason.as_storage() == value)
