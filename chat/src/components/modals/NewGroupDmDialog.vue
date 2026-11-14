@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { Check, X } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { btn, iconbtn } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
+import { formClasses as f } from "@/components/modals/form-classes";
 import type { RosterContact } from "@/lib/xmpp/types";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import { isBotJid } from "@/lib/avatars/author-jid";
@@ -67,67 +71,70 @@ function handleSubmit() {
     memberJids: [...selected.value],
   });
 }
+const list = css({ display: "grid", gap: "0.5", maxHeight: "18rem", overflowY: "auto", mx: "-2" });
+const check = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "18px",
+  height: "18px",
+  flex: "none",
+  borderRadius: "4px",
+  border: "1px solid {colors.border.strong}",
+  color: "action.fg",
+  "[aria-pressed=true] > &": { bg: "action", borderColor: "action" },
+  "& svg": { width: "12px", height: "12px", strokeWidth: 3 },
+});
 </script>
 
 <template>
   <AppDialog v-model:open="open" labelled-by="new-group-dm-title">
-    <div class="chat-dialog-header">
-      <h2 id="new-group-dm-title" class="type-dialog-title">{{ props.title ?? "New group message" }}</h2>
+    <div :class="dialogParts.head">
+      <h2 id="new-group-dm-title">{{ props.title ?? "New group message" }}</h2>
       <button
-        class="chat-icon-button hover:bg-muted"
+        :class="iconbtn()"
         type="button"
         :aria-label="`Close ${props.title ?? 'new group message'} dialog`"
         @click="open = false"
       >
-        <X class="w-4 h-4 text-muted-foreground" />
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <div class="chat-field-stack chat-dialog-body">
-      <label for="new-group-dm-name" class="type-section-label text-muted-foreground">
-        Name
-      </label>
-      <input
-        id="new-group-dm-name"
-        v-model="name"
-        class="chat-field-control type-field"
-        :placeholder="defaultName || 'Alice, Bob'"
-      />
+    <div :class="dialogParts.body">
+      <div :class="f.field">
+        <label for="new-group-dm-name" :class="f.label">Name</label>
+        <input
+          id="new-group-dm-name"
+          v-model="name"
+          :class="f.input"
+          :placeholder="defaultName || 'Alice, Bob'"
+        />
+      </div>
 
-      <div class="grid max-h-72 gap-1 overflow-auto pr-1">
+      <div :class="list">
         <button
           v-for="contact in selectableContacts"
           :key="contact.jid"
-          class="chat-list-row flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-left hover:bg-muted"
+          :class="f.pickRow"
           type="button"
           :aria-pressed="selected.has(contact.jid)"
           @click="toggleContact(contact.jid)"
         >
-          <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-border">
-            <Check v-if="selected.has(contact.jid)" class="h-3.5 w-3.5 text-primary" />
+          <span :class="check" aria-hidden="true">
+            <Check v-if="selected.has(contact.jid)" />
           </span>
-          <span class="min-w-0 flex-1">
-            <span class="type-control block truncate text-foreground">{{ contactLabel(contact) }}</span>
-            <span class="type-caption block truncate text-muted-foreground">{{ contact.jid }}</span>
+          <span :class="f.rowText">
+            <span :class="f.rowName">{{ contactLabel(contact) }}</span>
+            <span :class="f.rowSub">{{ contact.jid }}</span>
           </span>
         </button>
       </div>
     </div>
 
-    <div class="chat-dialog-footer">
-      <button
-        class="chat-action-button chat-action-button--secondary type-control"
-        type="button"
-        @click="open = false"
-      >
-        Cancel
-      </button>
-      <button
-        class="chat-action-button chat-action-button--primary type-control disabled:opacity-40"
-        type="button"
-        :disabled="!canSubmit"
-        @click="handleSubmit"
-      >
+    <div :class="dialogParts.foot">
+      <button :class="btn()" type="button" @click="open = false">Cancel</button>
+      <button :class="btn({ variant: 'primary' })" type="button" :disabled="!canSubmit" @click="handleSubmit">
         {{ (props.minimumSelectedContacts ?? 2) < 2 ? "Add people" : "Create group" }}
       </button>
     </div>
