@@ -8,10 +8,7 @@ use super::{
     ConnectionPhase, DatabaseConfig, DatabasePool, InMemorySmSessionRegistry, PoolConfig, Stanza,
     TestStateOverrides, WebSocketState,
 };
-use super::{
-    get_or_create_room_actor, mpsc, register_test_connection, seed_local_account,
-    store_resumable_detached_session, RoomConfig,
-};
+use super::{get_or_create_room_actor, register_test_connection, seed_local_account, RoomConfig};
 // Its only use sits in a clustering-gated branch, so a default-feature build
 // sees it unused. Predates this work (#1786); invisible because every other
 // check runs with `--all-features`.
@@ -275,6 +272,13 @@ async fn message_waits_for_ingress_commit_before_responding_or_checkpointing() {
     });
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
+    // A checkpoint read waits for the held stream as the commit does, so
+    // the checkpoint is observed only once the commit has released it.
+    drop(blocked);
+    let (conn, frames) = task.await.expect("dispatch task");
+    assert_eq!(conn.sm_state.inbound_count(), 1);
+    assert!(!frames.is_empty());
+    // The checkpoint advances with the commit, never ahead of it.
     assert_eq!(
         state
             .deps
@@ -285,12 +289,8 @@ async fn message_waits_for_ingress_commit_before_responding_or_checkpointing() {
             .expect("checkpoint")
             .expect("enrolled stream")
             .to_storage(),
-        0
+        1
     );
-    drop(blocked);
-    let (conn, frames) = task.await.expect("dispatch task");
-    assert_eq!(conn.sm_state.inbound_count(), 1);
-    assert!(!frames.is_empty());
 }
 
 #[tokio::test]
@@ -952,9 +952,6 @@ mod timeout;
 #[cfg(feature = "clustering")]
 #[path = "ingress_authority_relay.rs"]
 mod relay;
-
-#[path = "ingress_authority_fence.rs"]
-mod fence;
 
 #[cfg(feature = "clustering")]
 #[tokio::test]

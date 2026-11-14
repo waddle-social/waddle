@@ -345,33 +345,29 @@ pub async fn websocket_state_with_sasl2() -> Arc<WebSocketState> {
     .await
 }
 
-/// [`websocket_state_with_sasl2`] with the durable stream-management
-/// authority selected on the fixture's database, as startup selects it. The
-/// dark SASL2 handshake then processes XEP-0198 inline resume and XEP-0386
+/// [`websocket_state_with_sasl2`]. Every fixture selects the durable
+/// stream-management authority on its database, as startup does, so the
+/// dark SASL2 handshake processes XEP-0198 inline resume and XEP-0386
 /// Bind 2.
 #[cfg(feature = "test-support")]
 pub async fn websocket_state_with_sasl2_and_durable_sm() -> Arc<WebSocketState> {
-    let state = websocket_state_with_sasl2().await;
-    let selection =
-        crate::sm_authority::DurableSmSelection::open(state.deps.app_state.db_pool.global(), false)
-            .await
-            .expect("open the durable SM store on the fixture database");
-    let store = selection
-        .store()
-        .expect("the durable selection carries a store")
-        .clone();
-    assert!(
-        state.deps.app_state.publish_durable_sm(selection),
-        "the fixture selects its stream-management authority once"
-    );
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .attach_durable_detached(Arc::new(
-            crate::sm_authority::DurableDetachedRecipients::new(store),
-        ));
-    state
+    websocket_state_with_sasl2().await
+}
+
+/// [`websocket_state_with_sasl2`] on a state that never selected a
+/// stream-management authority.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_sasl2_without_durable_sm() -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            sasl2_test_capability: true,
+            without_durable_sm: true,
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
 }
 
 /// Resolve store URL provenance with the same normalization used by startup.

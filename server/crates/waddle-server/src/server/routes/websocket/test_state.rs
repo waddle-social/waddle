@@ -33,6 +33,7 @@ use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
 use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
 use crate::server::routes::websocket::DmPinStore;
 use crate::server::AppState;
+use crate::sm_authority::DurableSmStore;
 use crate::threads::storage::InboxBackedThreadsStorage;
 use kameo::actor::Spawn;
 use std::sync::Arc;
@@ -69,6 +70,10 @@ pub(crate) struct TestStateOverrides {
     /// production does, for tests that drive admin commands and janitors
     /// against the same rooms.
     pub(crate) share_app_room_registry: bool,
+    /// Leave the stream-management authority unselected, as on a state that
+    /// never ran startup's selection, instead of selecting the durable store
+    /// on the fixture's database.
+    pub(crate) without_durable_sm: bool,
 }
 
 /// Push-service signing secret shared by every test state in this process, so
@@ -129,6 +134,7 @@ where
         ingress: ingress_override,
         notification_settings_projection: notification_settings_projection_override,
         share_app_room_registry,
+        without_durable_sm,
     } = overrides;
     let db_pool = match db_pool_override {
         Some(db_pool) => db_pool,
@@ -219,6 +225,16 @@ where
     .await
     .expect("open the account coordinator on the fixture database");
     app_state.publish_account_authority(account_authority);
+    // Startup always selects the durable stream-management store; the
+    // fixture selects a single-node one on its own database. A state that
+    // already carries a selection keeps it.
+    if !without_durable_sm && app_state.durable_sm().is_none() {
+        let selection =
+            crate::sm_authority::DurableSmSelection::open(app_state.db_pool.global(), false)
+                .await
+                .expect("open the durable SM store on the fixture database");
+        app_state.publish_durable_sm(selection);
+    }
     let mut auth_state_inner = AuthState::new(
         app_state.clone(),
         &server_config,
@@ -421,11 +437,22 @@ where
                     dnd_projection,
                     dnd_reader,
                     notification_activity,
-                    sm_session_registry: sm_session_registry_override.unwrap_or_else(|| {
-                        Arc::new(InMemorySmSessionRegistry::new().with_persistence(Arc::new(
-                            waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
-                        )))
-                    }),
+                    sm_session_registry: {
+                        let registry = sm_session_registry_override.unwrap_or_else(|| {
+                            Arc::new(InMemorySmSessionRegistry::new().with_persistence(Arc::new(
+                                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+                            )))
+                        });
+                        // As at startup, the registry's detached readers and
+                        // appenders reach the durable sessions through this
+                        // attachment.
+                        if let Some(store) = app_state.durable_sm() {
+                            registry.attach_durable_detached(Arc::new(
+                                crate::sm_authority::DurableDetachedRecipients::new(DurableSmStore::clone(store)),
+                            ));
+                        }
+                        registry
+                    },
                     // Finish every schema constructor, including push registration,
                     // before invoking the deferred authority factory.
                     ingress: match ingress_override {

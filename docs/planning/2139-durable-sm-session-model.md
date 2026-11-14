@@ -438,6 +438,27 @@ The drain reads `sm_sessions`, `sm_unacked`, `sm_acknowledged_windows`,
 `pending_delivery_sm_promotions` and `sm_ingress_appends`; the durable
 authority keeps using `sm_sessions` and `sm_unacked` for its own sessions.
 
+Nothing writes a new session of that kind. Every resumable `<enable/>` and
+every `<resume/>` is the durable authority's decision
+(`W/stream_management/implementation.rs`); the in-memory registry's own
+resumable enable and resume, and its cross-node resume attempt, are
+deleted. A non-resumable `<enable/>` takes no session claim and enrolls no
+ingress stream: its counters live only on the connection, and its cleanup
+stores nothing, because a non-resumable state yields no detached session
+to store or promote. An application state on which startup's selection
+never ran, which serving never uses, has no durable store
+(`AppState::durable_sm` is `None`): a resumable `<enable/>` is answered
+`<failed/>` with `feature-not-implemented` and a `<resume/>` with
+`item-not-found`, and no session is made. Every test fixture selects the
+durable store on its database, as startup does.
+
+The registry's persistence therefore writes no `sm_sessions` or `sm_unacked`
+row of its own under the durable authority: every row there belongs to a
+durable session. `tests/xep0198_durable_ws.rs`
+(`the_session_registry_writes_no_rows_of_its_own_beside_the_authority`)
+checks that through enable, delivery, acknowledgement, detach, resume,
+replacement, close, a non-resumable stream and a restart.
+
 ## Schema and the epoch guard
 
 On PostgreSQL, migration V1034 creates `sm_durable_sessions` and

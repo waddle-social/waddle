@@ -1008,7 +1008,6 @@ async fn cleanup_connection_shutdown_inner(
             }
             conn.pending_resume_stream_id = None;
             conn.pending_resume_h = None;
-            drop(conn.pending_resume_claim.take());
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");

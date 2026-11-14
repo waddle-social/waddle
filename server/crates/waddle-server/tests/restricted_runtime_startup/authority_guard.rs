@@ -283,7 +283,7 @@ async fn authority_relations_accept_only_matrix_writes_that_prove_the_live_epoch
     let selection = open_durable_sm(main)
         .await
         .expect("the durable session store attaches under the runtime role");
-    let sessions = selection.store().expect("the durable store is selected");
+    let sessions = selection.store();
     let principal = alice();
     let phone = resource("phone");
     let owner = fresh_binding();

@@ -1,18 +1,12 @@
 use super::frame::{ResponseFrame, StreamErrorFrame};
 use super::transport_xml::websocket_stream_close_element;
 use super::{
-    debug, info, warn, BareJid, ConnectionPhase, Element, FromStr, Session, SmEnable, SmResume,
-    SmStanza, StreamManagementState, WebSocketState,
+    debug, info, warn, ConnectionPhase, Element, FromStr, Session, SmEnable, SmResume, SmStanza,
+    StreamManagementState, WebSocketState,
 };
-use crate::auth::session::PrincipalResolution;
-use crate::db::actor::DbExecute;
 use crate::ingress_uow::IngressUowError;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
-#[cfg(test)]
-use std::sync::Arc;
 mod observe;
-#[cfg(test)]
-mod timeout_tests;
 use observe::{apply_sm_ack_observation, observe_sm_ack, SmAckObservation};
 
 #[cfg(test)]
@@ -154,113 +148,6 @@ mod ingress_checkpoint_tests {
     }
 
     #[tokio::test]
-    async fn resume_checkpoint_restores_wrap_aware_maximum() {
-        let state = create_test_websocket_state().await;
-        let stream = SmSessionId::new("resume-checkpoint-wrap");
-        let id = state
-            .deps
-            .protocol
-            .ingress
-            .enroll_stream(&stream)
-            .await
-            .expect("enroll");
-        let mut sm = StreamManagementState::new();
-        sm.enable(stream.to_string(), true, Some(300));
-        sm.inbound_count = u32::MAX;
-        let mut detached = sm
-            .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
-                user_id: "alice@example.com".into(),
-                jid: "alice@example.com/web".parse().expect("jid"),
-                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-                carbons_enabled: false,
-                roster_interested: false,
-                blocklist_interested: false,
-                presence_available: false,
-                presence_show: None,
-                presence_status: None,
-                presence_priority: 0,
-                presence_payloads: Vec::new(),
-                pending_subscribes_flushed: false,
-            })
-            .expect("detached");
-        state
-            .deps
-            .protocol
-            .ingress
-            .flush_checkpoint(id, WireHandledCount::from_storage(1))
-            .await
-            .expect("flush");
-        restore_ingress_checkpoint(&state, &mut detached)
-            .await
-            .expect("restore checkpoint");
-        assert_eq!(detached.inbound_count, 1);
-        detached.inbound_count = 2;
-        restore_ingress_checkpoint(&state, &mut detached)
-            .await
-            .expect("restore checkpoint");
-        assert_eq!(
-            detached.inbound_count, 2,
-            "snapshot ahead of checkpoint wins"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancelled_enabled_write_retires_unpublished_ingress_stream() {
-        let state = create_test_websocket_state().await;
-        let mut sm = StreamManagementState::new();
-        let phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("jid"), false);
-        let mut pending = None;
-        let frames = handle_sm_enable(
-            SmEnable::with_resume(Some(300)),
-            &state,
-            &mut sm,
-            &phase,
-            &mut pending,
-            implementation::SmEnableOwner {
-                durable_sm: &mut DurableSmLink::default(),
-                binding: None,
-                session: None,
-                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            },
-        )
-        .await;
-        let enabled = frames
-            .into_iter()
-            .next()
-            .expect("enabled")
-            .into_serialized_xml()
-            .parse::<Element>()
-            .expect("enabled XML");
-        assert_eq!(enabled.name(), "enabled");
-        let stream = SmSessionId::new(enabled.attr("id").expect("stream id"));
-        assert!(state
-            .deps
-            .protocol
-            .ingress
-            .lookup_stream(&stream)
-            .await
-            .expect("lookup")
-            .is_some());
-        assert!(!sm.enabled, "unwritten enabled cannot publish SM");
-        drop(pending.take());
-        state
-            .deps
-            .protocol
-            .sm_session_registry
-            .retry_pending_claim_releases(64)
-            .await;
-        crate::server::session_janitors::run_ingress_retirement_sweep(&state).await;
-        assert!(state
-            .deps
-            .protocol
-            .ingress
-            .lookup_stream(&stream)
-            .await
-            .expect("lookup")
-            .is_none());
-    }
-
-    #[tokio::test]
     async fn checkpoint_failure_never_exposes_ack() {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
@@ -297,22 +184,15 @@ pub(super) use durable::{
 #[cfg(test)]
 pub(super) use implementation::apply_sm_ack;
 pub(super) use implementation::apply_sm_ack_with_fence;
-pub(super) use implementation::attempt_cross_node_resume_raced;
 pub(super) use implementation::complete_acknowledged_ingress_receipts;
 pub(super) use implementation::defer_superseded_sm_claim;
 pub(super) use implementation::flush_ingress_checkpoint;
-#[cfg(test)]
-use implementation::handle_sm_enable;
 pub(super) use implementation::handle_sm_stanza;
 pub(super) use implementation::is_countable_stanza;
-#[cfg(test)]
-use implementation::restore_ingress_checkpoint;
 pub(super) use implementation::sm_show_from_name;
 pub(super) use implementation::sm_show_name;
 pub(super) use implementation::terminate_if_demoted_during_publication;
-pub(super) use implementation::CrossNodeAttemptOutcome;
 pub(super) use implementation::SmCtx;
 #[cfg(test)]
 use implementation::SmEnableClaimGuard;
 pub(super) use implementation::SmEnableCommit;
-pub(super) use implementation::SmResumeClaimGuard;

@@ -1825,8 +1825,6 @@ pub(super) struct WsConnState {
     /// registered, closing the take-before-register fanout gap.
     pub(super) pending_resume_stream_id: Option<String>,
     pub(super) pending_resume_h: Option<u32>,
-    /// Claim ownership retained from `<resume/>` through registration.
-    pub(super) pending_resume_claim: Option<super::stream_management::SmResumeClaimGuard>,
     /// Finalized XEP-0198 resume result awaiting its terminal frame write.
     /// Set by registration once authority is revalidated; consumed by the
     /// main loop only after the response batch actually reaches the wire,
@@ -1834,9 +1832,6 @@ pub(super) struct WsConnState {
     /// the client did not receive.
     pub(super) pending_finalized_resume_outcome:
         Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
-    #[cfg(test)]
-    pub(super) pre_final_principal_recheck_test_hook:
-        Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     #[cfg(test)]
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -2005,10 +2000,7 @@ impl WsConnState {
             pending_subscribes_flushed: false,
             pending_resume_stream_id: None,
             pending_resume_h: None,
-            pending_resume_claim: None,
             pending_finalized_resume_outcome: None,
-            #[cfg(test)]
-            pre_final_principal_recheck_test_hook: None,
             #[cfg(test)]
             post_sm_finalization_test_hook: None,
             registry_owner: None,

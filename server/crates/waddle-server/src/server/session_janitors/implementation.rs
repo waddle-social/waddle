@@ -4177,7 +4177,7 @@ pub(crate) async fn run_pending_delivery_claim_sweep(
         // A session of the durable authority is never in the in-memory
         // registry. While it can be resumed its claimed rows are not
         // orphaned, attached or detached.
-        if let Some(store) = state.deps.app_state.durable_sm().store() {
+        if let Some(store) = state.deps.app_state.durable_sm() {
             match store.live_stream_ids().await {
                 Ok(streams) => live_sessions.extend(streams),
                 Err(error) => {

@@ -987,11 +987,12 @@ fn admission_refusal(fence: &OwnerFence, rejection: &AdmissionRejection) -> Cust
     }
 }
 
-/// The durable store, when the durable authority is selected.
+/// The durable store startup selected. `None` only on a state that never
+/// ran startup's selection.
 pub(in crate::server::routes::websocket) fn selected_store(
     state: &WebSocketState,
 ) -> Option<&DurableSmStore> {
-    state.deps.app_state.durable_sm().store()
+    state.deps.app_state.durable_sm().map(|store| &**store)
 }
 
 /// What a resumable `<enable/>` presents to the durable authority.
@@ -1689,9 +1690,6 @@ pub(super) async fn resume(
         pending_subscribes_flushed,
         pending_resume_stream_id,
         pending_resume_h,
-        pending_resume_claim: _,
-        #[cfg(test)]
-            pre_final_principal_recheck_test_hook: _,
         suppress_sm_record_next_batch,
         roster_interested,
         blocklist_interested,
