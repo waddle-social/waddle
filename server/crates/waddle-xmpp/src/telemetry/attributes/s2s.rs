@@ -66,11 +66,16 @@ pub enum S2sOutcome {
     Shutdown,
     /// Reading from or writing to the socket failed.
     Io,
+    /// Server Dialback did not authenticate the pair: the key was refused
+    /// or could not be verified.
+    Dialback,
+    /// A dialback verification connection received its answer and closed.
+    Verified,
 }
 
 impl S2sOutcome {
     /// Every value, for zero-registration and tests.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::Established,
         Self::Capacity,
         Self::Admission,
@@ -86,6 +91,8 @@ impl S2sOutcome {
         Self::Conflict,
         Self::Shutdown,
         Self::Io,
+        Self::Dialback,
+        Self::Verified,
     ];
 }
 
@@ -112,6 +119,8 @@ impl MetricAttribute for S2sOutcome {
             Self::Conflict => "conflict",
             Self::Shutdown => "shutdown",
             Self::Io => "io",
+            Self::Dialback => "dialback",
+            Self::Verified => "verified",
         }
     }
 }
@@ -137,11 +146,13 @@ pub enum S2sResource {
     /// Streams negotiating with one remote domain in one direction; an
     /// inbound stream counts once TLS has verified the domain.
     PerPeer,
+    /// The global rate of new outbound connections.
+    DialRate,
 }
 
 impl S2sResource {
     /// Every value, for zero-registration and tests.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Sockets,
         Self::Unauthenticated,
         Self::SourceAddress,
@@ -150,6 +161,7 @@ impl S2sResource {
         Self::Streams,
         Self::Peers,
         Self::PerPeer,
+        Self::DialRate,
     ];
 }
 
@@ -169,6 +181,7 @@ impl MetricAttribute for S2sResource {
             Self::Streams => "streams",
             Self::Peers => "peers",
             Self::PerPeer => "per_peer",
+            Self::DialRate => "dial_rate",
         }
     }
 }
@@ -197,6 +210,145 @@ impl MetricAttribute for S2sTransport {
         match self {
             Self::StartTls => "starttls",
             Self::DirectTls => "direct_tls",
+        }
+    }
+}
+
+/// `strength` — how an established S2S stream's domain pair authenticated
+/// (ADR-0020 D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S2sStrength {
+    /// TLS certificate verification and SASL EXTERNAL.
+    Pkix,
+    /// XEP-0220 Server Dialback over TLS.
+    Dialback,
+}
+
+impl S2sStrength {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 2] = [Self::Pkix, Self::Dialback];
+}
+
+impl sealed::Sealed for S2sStrength {}
+impl MetricAttribute for S2sStrength {
+    fn key(&self) -> &'static str {
+        "strength"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Pkix => "pkix",
+            Self::Dialback => "dialback",
+        }
+    }
+}
+
+/// `role` — the XEP-0220 role in which this server took part in a dialback
+/// exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S2sDialbackRole {
+    /// Sent a key for its own domain on an outbound stream.
+    Initiating,
+    /// Verified a key an inbound peer sent, with that peer's Authoritative
+    /// Server.
+    Receiving,
+    /// Answered a verification request about a key it issued.
+    Authoritative,
+}
+
+impl S2sDialbackRole {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 3] = [Self::Initiating, Self::Receiving, Self::Authoritative];
+}
+
+impl sealed::Sealed for S2sDialbackRole {}
+impl MetricAttribute for S2sDialbackRole {
+    fn key(&self) -> &'static str {
+        "role"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Initiating => "initiating",
+            Self::Receiving => "receiving",
+            Self::Authoritative => "authoritative",
+        }
+    }
+}
+
+/// `result` — what a dialback exchange concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S2sDialbackResult {
+    Valid,
+    Invalid,
+    /// The key could not be verified, or the exchange failed.
+    Error,
+}
+
+impl S2sDialbackResult {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 3] = [Self::Valid, Self::Invalid, Self::Error];
+}
+
+impl sealed::Sealed for S2sDialbackResult {}
+impl MetricAttribute for S2sDialbackResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// `source` — where an outbound connection's endpoints came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S2sDiscovery {
+    /// Explicitly configured endpoints.
+    Configured,
+    /// `_xmpps-server` and `_xmpp-server` SRV records.
+    Srv,
+    /// A/AAAA records of the domain on port 5269, after both SRV lookups
+    /// answered that no record exists.
+    Fallback,
+    /// DNS says the service is not offered, or nothing is configured.
+    NoService,
+    /// A lookup failed; not the absence of records.
+    LookupFailed,
+    /// Every address DNS returned is in a blocked class.
+    Blocked,
+}
+
+impl S2sDiscovery {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 6] = [
+        Self::Configured,
+        Self::Srv,
+        Self::Fallback,
+        Self::NoService,
+        Self::LookupFailed,
+        Self::Blocked,
+    ];
+}
+
+impl sealed::Sealed for S2sDiscovery {}
+impl MetricAttribute for S2sDiscovery {
+    fn key(&self) -> &'static str {
+        "source"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Srv => "srv",
+            Self::Fallback => "fallback",
+            Self::NoService => "no_service",
+            Self::LookupFailed => "lookup_failed",
+            Self::Blocked => "blocked",
         }
     }
 }

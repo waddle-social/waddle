@@ -13,8 +13,10 @@
 //! - [`StreamHeader`] and [`StreamErrorCondition`]: typed stream headers and
 //!   stream errors;
 //! - [`Negotiation`]: the initiating and receiving negotiation state machine
-//!   (STARTTLS, SASL EXTERNAL, authenticated restart), with Server Dialback
-//!   decision points that refuse while [`DialbackMode::Disabled`];
+//!   (STARTTLS or XEP-0368 direct TLS, SASL EXTERNAL, authenticated
+//!   restart), with XEP-0220 Server Dialback over TLS in the Initiating,
+//!   Receiving and Authoritative Server roles when [`DialbackMode`] and the
+//!   owner's admission enable them, and verification connections;
 //! - [`S2sStream`]: a driver combining all of the above for one connection.
 //!
 //! Stream header addresses are read from the raw attribute text into the
@@ -36,8 +38,10 @@ pub use encoder::{EncodeError, StreamEncoder};
 pub use header::{HeaderAddress, StreamHeader, StreamId, StreamLanguage, StreamVersion};
 pub use limits::{CodecLimits, LimitKind, SaslLimits};
 pub use negotiation::{
-    AuthorizationDecision, AuthorizationRequest, CloseReason, DestinationStatus, DialbackMode,
-    ExchangeId, InboundAdmission, InitiatingConfig, NegotiatedStream, Negotiation,
-    NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Signal, Step, TlsPeer,
+    AuthorizationDecision, AuthorizationRequest, CloseReason, DestinationStatus, DialbackError,
+    DialbackKey, DialbackKeys, DialbackMode, DialbackOutcome, DialbackRequest, ExchangeId,
+    InboundAdmission, InitiatingConfig, NegotiatedStream, Negotiation, NegotiationInput,
+    NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication, TlsEntry, TlsPeer,
+    VerifyRequest, VerifyVerdict, MAX_DIALBACK_KEY_BYTES,
 };
 pub use stream::{Output, S2sStream};

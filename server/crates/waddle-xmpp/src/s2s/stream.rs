@@ -6,9 +6,10 @@ use super::decoder::{Inbound, StreamDecoder, TlsHandoff};
 use super::encoder::StreamEncoder;
 use super::limits::CodecLimits;
 use super::negotiation::{
-    AuthorizationDecision, AuthorizationRequest, CloseReason, ExchangeId, InitiatingConfig,
-    NegotiatedStream, Negotiation, NegotiationInput, NegotiationPhase, ReceivingConfig, Role,
-    Signal, Step, TlsPeer,
+    AuthorizationDecision, AuthorizationRequest, CloseReason, DialbackOutcome, DialbackRequest,
+    ExchangeId, InitiatingConfig, NegotiatedStream, Negotiation, NegotiationInput,
+    NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication, TlsEntry, TlsPeer,
+    VerifyRequest, VerifyVerdict,
 };
 
 /// What the connection owner must do next, in order.
@@ -21,8 +22,9 @@ pub enum Output {
     /// already received after the boundary element; feed them to the TLS
     /// engine before reading the socket again. It is always empty in the
     /// receiving role, which refuses input sent after `<starttls/>` before
-    /// `<proceed/>`; in the initiating role it holds bytes that followed the
-    /// peer's `<proceed/>`.
+    /// `<proceed/>`, and on a direct-TLS connection, where this is the
+    /// first output; in the initiating role it holds bytes that followed
+    /// the peer's `<proceed/>`.
     StartTls(TlsHandoff),
     /// Decide SASL EXTERNAL authorization and answer with
     /// [`S2sStream::authorization`].
@@ -33,6 +35,15 @@ pub enum Output {
     /// stream's address checks, for the connection owner to accept or
     /// refuse. Emitted only after [`S2sStream::deliver_stanzas`].
     Stanza(Element),
+    /// Verify this dialback key with the Authoritative Server of its source
+    /// domain and answer with [`S2sStream::dialback`].
+    VerifyDialback(DialbackRequest),
+    /// A verification connection received the Authoritative Server's
+    /// answer; the stream closes next.
+    VerifyVerdict(VerifyVerdict),
+    /// This server answered a `<db:verify/>` request as the Authoritative
+    /// Server.
+    DialbackAnswered { valid: bool },
     /// Close the transport after writing all earlier output.
     Close(CloseReason),
 }
@@ -44,7 +55,8 @@ pub enum Output {
 /// returned [`Output`]s in order.
 ///
 /// The decoder runs in its pre-authentication mode
-/// ([`StreamDecoder::pre_authentication`]) until SASL succeeds: a
+/// ([`StreamDecoder::pre_authentication`]) until SASL succeeds or dialback
+/// establishes the stream: a
 /// first-level element outside the stream, TLS, SASL and dialback
 /// namespaces is refused when its head closes, and negotiation elements are
 /// held to the control-element ceiling.
@@ -69,9 +81,33 @@ impl S2sStream {
         }
     }
 
-    /// Start an outbound connection; the output opens the initial stream.
+    /// Start an outbound connection with STARTTLS; the output opens the
+    /// initial stream.
     pub fn initiate(config: InitiatingConfig, limits: CodecLimits) -> (Self, Vec<Output>) {
-        Self::start(Negotiation::initiating(config), limits)
+        Self::initiate_with(config, TlsEntry::StartTls, limits)
+    }
+
+    /// Start an outbound connection that reaches TLS by `entry`. For direct
+    /// TLS the only output is [`Output::StartTls`] with an empty handoff:
+    /// the handshake comes first, then the stream header.
+    pub fn initiate_with(
+        config: InitiatingConfig,
+        entry: TlsEntry,
+        limits: CodecLimits,
+    ) -> (Self, Vec<Output>) {
+        Self::start(Negotiation::initiating_with(config, entry), limits)
+    }
+
+    /// Start a verification connection to the Authoritative Server of
+    /// `config.destination` (XEP-0220 §2.1.2). It reports the answer as
+    /// [`Output::VerifyVerdict`] and closes.
+    pub fn verify(
+        config: InitiatingConfig,
+        request: VerifyRequest,
+        entry: TlsEntry,
+        limits: CodecLimits,
+    ) -> (Self, Vec<Output>) {
+        Self::start(Negotiation::verifying(config, request, entry), limits)
     }
 
     fn start(started: (Negotiation, Vec<Step>), limits: CodecLimits) -> (Self, Vec<Output>) {
@@ -141,6 +177,11 @@ impl S2sStream {
         decision: AuthorizationDecision,
     ) -> Vec<Output> {
         self.input(NegotiationInput::Authorization { exchange, decision })
+    }
+
+    /// Answer an [`Output::VerifyDialback`] request.
+    pub fn dialback(&mut self, outcome: DialbackOutcome) -> Vec<Output> {
+        self.input(NegotiationInput::Dialback(outcome))
     }
 
     /// Report a deadline, expiry, drain or resource event.
@@ -225,8 +266,18 @@ impl S2sStream {
                     premature |= !self.decoder.restart_after_sasl().is_empty();
                 }
                 Step::Authorize(request) => out.push(Output::Authorize(request)),
-                Step::Established(stream) => out.push(Output::Established(stream)),
+                Step::Established(stream) => {
+                    // Dialback authenticates without a restart, so the
+                    // pre-authentication mode ends here instead.
+                    if stream.authentication == StreamAuthentication::Dialback {
+                        self.decoder.end_pre_authentication();
+                    }
+                    out.push(Output::Established(stream));
+                }
                 Step::Deliver(stanza) => out.push(Output::Stanza(stanza)),
+                Step::VerifyDialback(request) => out.push(Output::VerifyDialback(request)),
+                Step::VerifyVerdict(verdict) => out.push(Output::VerifyVerdict(verdict)),
+                Step::DialbackAnswered { valid } => out.push(Output::DialbackAnswered { valid }),
                 Step::Close(reason) => self.close(reason, out),
             }
         }

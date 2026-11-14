@@ -3,15 +3,20 @@
 use super::initiating::Initiating;
 use super::receiving::Receiving;
 use super::types::{
-    InitiatingConfig, NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Step,
+    InitiatingConfig, NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Step, TlsEntry,
+    VerifyRequest,
 };
 
 /// The S2S negotiation state machine for one TCP connection.
 ///
 /// Both roles follow RFC 6120 with the restricted federation profile:
 /// plaintext header → mandatory STARTTLS → TLS → header → SASL EXTERNAL →
-/// authenticated header → established. Exactly one TLS restart and one
-/// SASL restart can occur because each role's states are strictly ordered.
+/// authenticated header → established. An initiating stream may instead
+/// start with XEP-0368 direct TLS, which replaces the plaintext header and
+/// STARTTLS. Where SASL EXTERNAL is not possible and the owner enables it,
+/// XEP-0220 dialback over TLS replaces SASL and the authenticated restart.
+/// At most one TLS restart and one SASL restart can occur because each
+/// role's states are strictly ordered.
 /// The machine performs no I/O; it consumes typed inputs and returns
 /// [`Step`]s to execute in order.
 #[derive(Debug)]
@@ -33,9 +38,31 @@ impl Negotiation {
         }
     }
 
-    /// An initiating-role machine and the steps that open its stream.
+    /// An initiating-role machine that reaches TLS with STARTTLS, and the
+    /// steps that open its stream.
     pub fn initiating(config: InitiatingConfig) -> (Self, Vec<Step>) {
-        let (machine, steps) = Initiating::start(config);
+        Self::initiating_with(config, TlsEntry::StartTls)
+    }
+
+    /// An initiating-role machine that reaches TLS by `entry`, and the
+    /// steps that start it: the plaintext header for STARTTLS, or
+    /// [`Step::StartTls`] at once for direct TLS.
+    pub fn initiating_with(config: InitiatingConfig, entry: TlsEntry) -> (Self, Vec<Step>) {
+        Self::wrap(Initiating::start(config, entry))
+    }
+
+    /// A verification connection from `config.source`, as Receiving
+    /// Server, to the Authoritative Server of `config.destination`
+    /// (XEP-0220 §2.1.2), and the steps that start it.
+    pub fn verifying(
+        config: InitiatingConfig,
+        request: VerifyRequest,
+        entry: TlsEntry,
+    ) -> (Self, Vec<Step>) {
+        Self::wrap(Initiating::verify(config, request, entry))
+    }
+
+    fn wrap((machine, steps): (Initiating, Vec<Step>)) -> (Self, Vec<Step>) {
         (
             Self {
                 role: RoleMachine::Initiating(machine),

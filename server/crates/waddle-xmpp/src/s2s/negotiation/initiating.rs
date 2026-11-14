@@ -1,18 +1,21 @@
-//! Initiating-role negotiation: STARTTLS, SASL EXTERNAL, authenticated
-//! restart.
+//! Initiating-role negotiation: STARTTLS or XEP-0368 direct TLS, then SASL
+//! EXTERNAL and the authenticated restart, or XEP-0220 dialback as the
+//! Initiating Server; and verification connections, on which a Receiving
+//! Server asks an Authoritative Server about one dialback key.
 
 use minidom::Element;
 
 use crate::ns::{SASL, TLS};
 use crate::s2s::condition::StreamErrorCondition;
 use crate::s2s::decoder::DecodeError;
-use crate::s2s::header::{HeaderAddress, StreamHeader, StreamVersion};
+use crate::s2s::header::{HeaderAddress, StreamHeader, StreamId, StreamVersion};
 
 use super::classify::{classify, SaslPayload, TopLevel};
+use super::dialback::{self, DialbackElement, DialbackType};
 use super::elements::{self, EXTERNAL};
 use super::types::{
-    CloseReason, DialbackMode, InitiatingConfig, NegotiatedStream, NegotiationInput,
-    NegotiationPhase, Role, Step, TlsPeer,
+    CloseReason, InitiatingConfig, NegotiatedStream, NegotiationInput, NegotiationPhase, Role,
+    Step, StreamAuthentication, TlsEntry, TlsPeer, VerifyRequest,
 };
 
 /// SASL success data accepted from the receiving server. EXTERNAL defines
@@ -40,27 +43,82 @@ enum State {
     AwaitProceed,
     TlsHandshake,
     AwaitSaslOutcome,
+    /// A dialback key was sent; awaiting the Receiving Server's result.
+    AwaitDialbackResult,
+    /// A verification request was sent; awaiting the answer.
+    AwaitVerifyResult,
     Established,
     Closed,
+}
+
+/// What the connection is for.
+#[derive(Debug, Clone)]
+enum Purpose {
+    /// Authenticate the source domain to the destination and carry its
+    /// stanzas.
+    Stream,
+    /// Ask the destination's Authoritative Server about one key and close.
+    Verify(VerifyRequest),
 }
 
 #[derive(Debug)]
 pub(crate) struct Initiating {
     config: InitiatingConfig,
+    purpose: Purpose,
     state: State,
+    /// The ID of the latest response header the receiving server sent.
+    stream_id: Option<StreamId>,
 }
 
 impl Initiating {
-    /// Start a stream; the returned steps open the initial stream header.
-    pub(crate) fn start(config: InitiatingConfig) -> (Self, Vec<Step>) {
-        let open = Step::Open(initial_header(&config));
-        (
-            Self {
-                config,
-                state: State::AwaitHeader(Stage::PreTls),
-            },
-            vec![open],
-        )
+    /// Start a stream that reaches TLS by `entry`. With STARTTLS the
+    /// returned steps open the plaintext stream header; with direct TLS
+    /// they start TLS at once, and the first header follows the handshake.
+    pub(crate) fn start(config: InitiatingConfig, entry: TlsEntry) -> (Self, Vec<Step>) {
+        Self::begin(config, Purpose::Stream, entry)
+    }
+
+    /// Start a verification connection (XEP-0220 §2.1.2): once TLS has
+    /// verified the destination, send `request` as `<db:verify/>`, report
+    /// the answer as [`Step::VerifyVerdict`] and close. SASL is never
+    /// attempted on it.
+    pub(crate) fn verify(
+        config: InitiatingConfig,
+        request: VerifyRequest,
+        entry: TlsEntry,
+    ) -> (Self, Vec<Step>) {
+        Self::begin(config, Purpose::Verify(request), entry)
+    }
+
+    fn begin(config: InitiatingConfig, purpose: Purpose, entry: TlsEntry) -> (Self, Vec<Step>) {
+        let mut machine = Self {
+            config,
+            purpose,
+            state: State::AwaitHeader(Stage::PreTls),
+            stream_id: None,
+        };
+        let steps = match entry {
+            TlsEntry::StartTls => vec![Step::Open(machine.header())],
+            // XEP-0368: TLS from the first byte; no plaintext stream and
+            // no `<starttls/>`.
+            TlsEntry::DirectTls => {
+                machine.state = State::TlsHandshake;
+                vec![Step::StartTls]
+            }
+        };
+        (machine, steps)
+    }
+
+    /// Whether emitted headers declare the dialback namespace: on every
+    /// verification connection, and on streams that may use dialback.
+    fn declares_dialback(&self) -> bool {
+        matches!(self.purpose, Purpose::Verify(_)) || self.config.dialback.keys().is_some()
+    }
+
+    fn header(&self) -> StreamHeader {
+        let mut header = initial_header(&self.config);
+        header.declare_dialback = self.declares_dialback();
+        header
     }
 
     pub(crate) fn phase(&self) -> NegotiationPhase {
@@ -74,6 +132,8 @@ impl Initiating {
             | State::AwaitPeerError(Stage::Tls, _)
             | State::AwaitFeatures(Stage::Tls) => NegotiationPhase::TlsStream,
             State::AwaitSaslOutcome => NegotiationPhase::SaslAwaitOutcome,
+            State::AwaitDialbackResult => NegotiationPhase::DialbackAwaitResult,
+            State::AwaitVerifyResult => NegotiationPhase::VerifyAwaitResult,
             State::AwaitHeader(Stage::Authenticated)
             | State::AwaitPeerError(Stage::Authenticated, _)
             | State::AwaitFeatures(Stage::Authenticated) => NegotiationPhase::AuthenticatedRestart,
@@ -101,8 +161,9 @@ impl Initiating {
                 self.fail(&mut steps, StreamErrorCondition::PolicyViolation)
             }
             NegotiationInput::TlsEstablished(peer) => self.on_tls(peer, &mut steps),
-            // The initiating role never requests an authorization decision.
-            NegotiationInput::Authorization { .. } => {}
+            // The initiating role never requests an authorization or
+            // dialback decision.
+            NegotiationInput::Authorization { .. } | NegotiationInput::Dialback(_) => {}
             NegotiationInput::Signal(signal) => self.fail(&mut steps, signal.condition()),
         }
         steps
@@ -113,7 +174,10 @@ impl Initiating {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         };
         match self.check_response_header(header) {
-            Ok(()) => self.state = State::AwaitFeatures(stage),
+            Ok(()) => {
+                self.stream_id = header.id.clone();
+                self.state = State::AwaitFeatures(stage);
+            }
             Err(condition) => self.state = State::AwaitPeerError(stage, condition),
         }
     }
@@ -155,7 +219,7 @@ impl Initiating {
             }
             (State::AwaitPeerError(_, condition), _) => self.fail(steps, condition),
             (_, TopLevel::ClientStanza) => self.fail(steps, StreamErrorCondition::InvalidNamespace),
-            (_, TopLevel::Dialback) => self.on_dialback(steps),
+            (_, TopLevel::Dialback(element)) => self.on_dialback(element, steps),
             (State::Established, _) => self.fail(steps, StreamErrorCondition::PolicyViolation),
             (_, TopLevel::Stanza(_)) => self.fail(steps, StreamErrorCondition::NotAuthorized),
             // STARTTLS is mandatory in this profile: request it whether or
@@ -180,7 +244,7 @@ impl Initiating {
                 TopLevel::Success(Ok(SaslPayload::Absent | SaslPayload::Empty)),
             ) => {
                 steps.push(Step::RestartAfterSasl);
-                steps.push(Step::Open(initial_header(&self.config)));
+                steps.push(Step::Open(self.header()));
                 self.state = State::AwaitHeader(Stage::Authenticated);
             }
             (State::AwaitSaslOutcome, TopLevel::SaslFailure(condition)) => {
@@ -195,10 +259,24 @@ impl Initiating {
 
     /// Post-TLS features. Only the STARTTLS and SASL EXTERNAL offers
     /// matter; other children, including unknown or malformed ones, are
-    /// ignored.
+    /// ignored. A verification connection sends its request whatever is
+    /// offered: it never authenticates.
     fn on_tls_features(&mut self, features: Element, steps: &mut Vec<Step>) {
         if offers_starttls(&features) {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
+        }
+        if let Purpose::Verify(request) = &self.purpose {
+            // `from` is this (Receiving) server, `to` the Sender Domain
+            // whose Authoritative Server this connection reached, and `id`
+            // the stream the key arrived on (XEP-0220 §2.1.2).
+            steps.push(Step::Send(dialback::verify_request(
+                &self.config.source,
+                &self.config.destination,
+                &request.stream_id,
+                &request.key,
+            )));
+            self.state = State::AwaitVerifyResult;
+            return;
         }
         if offered_mechanisms(&features).any(|mechanism| mechanism == EXTERNAL) {
             steps.push(Step::Send(elements::external_auth()));
@@ -214,10 +292,15 @@ impl Initiating {
         if offers_starttls(&features) || offered_mechanisms(&features).next().is_some() {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
+        self.establish(StreamAuthentication::SaslExternal, steps);
+    }
+
+    fn establish(&mut self, authentication: StreamAuthentication, steps: &mut Vec<Step>) {
         steps.push(Step::Established(NegotiatedStream {
             role: Role::Initiating,
             source: self.config.source.clone(),
             destination: self.config.destination.clone(),
+            authentication,
         }));
         self.state = State::Established;
     }
@@ -228,7 +311,7 @@ impl Initiating {
         }
         match peer {
             TlsPeer::Verified(domain) if domain == self.config.destination => {
-                steps.push(Step::Open(initial_header(&self.config)));
+                steps.push(Step::Open(self.header()));
                 self.state = State::AwaitHeader(Stage::Tls);
             }
             TlsPeer::Verified(_) | TlsPeer::NoCertificate => {
@@ -237,18 +320,80 @@ impl Initiating {
         }
     }
 
-    /// Decision point for XEP-0220 when SASL EXTERNAL is not offered.
+    /// Decision point for XEP-0220 when SASL EXTERNAL is not offered: send a
+    /// dialback key as the Initiating Server (XEP-0220 §2.1.1), computed
+    /// for the stream ID of the receiving server's post-TLS header. TLS has
+    /// already verified the receiving server's certificate.
     fn weak_identity_fallback(&mut self, steps: &mut Vec<Step>) {
-        match self.config.dialback {
-            DialbackMode::Disabled => self.fail(steps, StreamErrorCondition::PolicyViolation),
+        let Some(keys) = self.config.dialback.keys() else {
+            return self.fail(steps, StreamErrorCondition::PolicyViolation);
+        };
+        let Some(stream_id) = self.stream_id.as_ref() else {
+            return self.fail(steps, StreamErrorCondition::BadFormat);
+        };
+        let Some(key) = keys.key(&self.config.destination, &self.config.source, stream_id) else {
+            return self.fail(steps, StreamErrorCondition::InternalServerError);
+        };
+        steps.push(Step::Send(dialback::result_request(
+            &self.config.source,
+            &self.config.destination,
+            &key,
+        )));
+        self.state = State::AwaitDialbackResult;
+    }
+
+    /// Received XEP-0220 elements. Only the answer this connection asked
+    /// for is accepted: a `<db:result/>` result for the stream's pair after
+    /// a key was sent, or a `<db:verify/>` answer for the pending request
+    /// on a verification connection. Anything else, including requests,
+    /// answers for another pair or stream ID and anything unsolicited, ends
+    /// the stream with `policy-violation` (XEP-0220 §4.1).
+    fn on_dialback(&mut self, element: DialbackElement, steps: &mut Vec<Step>) {
+        match (self.state, element) {
+            (
+                State::AwaitDialbackResult,
+                DialbackElement::Result {
+                    from: HeaderAddress::Domain(from),
+                    to: HeaderAddress::Domain(to),
+                    kind,
+                    ..
+                },
+            ) if from == self.config.destination && to == self.config.source => match kind {
+                DialbackType::Valid => self.establish(StreamAuthentication::Dialback, steps),
+                DialbackType::Invalid | DialbackType::Error => {
+                    self.close(steps, CloseReason::DialbackRefused)
+                }
+                DialbackType::Request | DialbackType::Unknown => {
+                    self.fail(steps, StreamErrorCondition::PolicyViolation)
+                }
+            },
+            (
+                State::AwaitVerifyResult,
+                DialbackElement::Verify {
+                    from: HeaderAddress::Domain(from),
+                    to: HeaderAddress::Domain(to),
+                    id: Some(id),
+                    kind,
+                    ..
+                },
+            ) if from == self.config.destination
+                && to == self.config.source
+                && self.is_pending_request(&id) =>
+            {
+                match dialback::verdict(kind) {
+                    Some(verdict) => {
+                        steps.push(Step::VerifyVerdict(verdict));
+                        self.close(steps, CloseReason::VerificationComplete);
+                    }
+                    None => self.fail(steps, StreamErrorCondition::PolicyViolation),
+                }
+            }
+            _ => self.fail(steps, StreamErrorCondition::PolicyViolation),
         }
     }
 
-    /// Decision point for received XEP-0220 elements.
-    fn on_dialback(&mut self, steps: &mut Vec<Step>) {
-        match self.config.dialback {
-            DialbackMode::Disabled => self.fail(steps, StreamErrorCondition::PolicyViolation),
-        }
+    fn is_pending_request(&self, id: &StreamId) -> bool {
+        matches!(&self.purpose, Purpose::Verify(request) if request.stream_id == *id)
     }
 
     /// Close with a stream error. The initiating role always has its
