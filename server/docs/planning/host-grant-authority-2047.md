@@ -19,14 +19,21 @@ for its scope, records the decision here and has it independently reviewed
 before that slice merges into the integration branch; an open entry is not
 approval to merge the surfaces it covers. The evidence is discharged by
 executed tests: the first grant-authority slice's and the revocation fence's
-focused tests run when those slices complete (ADR-0020 D9), and the rest in
-the verification phase. The ledger names the owning slice of each entry.
+focused sets run when those slices complete (ADR-0020 D9), and the rest in
+the verification phase. The ledger names the owning slice of each entry, and
+the [acceptance matrix](#required-native-acceptance-matrix) names the slice
+that owns each case.
 
-ADR-0020 also decides that remote principals never receive privileged grants
-(D8): owner, admin or manager standing, or any other grant that confers a
-management permission. Grant issuance, bootstrap and repair refuse them, and
-admission does not honor such authority for a remote principal whatever is
-stored. Policy (B2) must encode both.
+ADR-0020 D8 also bounds remote authority. A remote principal may hold a
+privileged grant (owner, admin or manager standing, or any other grant that
+confers a management permission) only when its home domain is on the
+operator's trusted-home list, and admission honors that grant only on a
+stream with `pkix` strength while the home is still listed. Grant issuance,
+bootstrap and repair refuse a privileged grant to a JID of any other home.
+Room moderation (the XEP-0045 moderator role and the channel `moderate`
+permission) is honored for a remote principal only on a `pkix` stream. A
+message author's own `edit` and `delete` are neither. Policy (B2) must encode
+all of these.
 
 ## Evidence and assumptions
 
@@ -170,19 +177,26 @@ records one canonical binding and coordinates both projections. Reopening
 verifies the same move operation on both sides. Bookmarks cannot choose parent
 authority. Bounded atomic writes may suffice for the first relation family;
 larger graphs, chunking, multi-scope reconstruction and exact comparison rules
-need proof before their implementation (B3).
+need a reviewed decision before the slice that adds them merges into the
+integration branch, and executed evidence in verification (B3).
 
 ## Admission, custody and lock lifetime
 
 Prepare a witness outside the acceptance transaction: canonical subject, exact
-action/resource, authority/scope lifecycle, policy/schema generation, anchored
-graph result and relevant room state. A cached boolean is insufficient. For a
-remote principal the witness also binds its verified domain, the authentication
-strength of the stream it arrived on (`pkix` or `dialback`) and the current
-ADR-0020 D1 admission decision for that domain. Admission rejects work from a
-domain that is no longer admitted, never honors privileged authority for a
-remote principal, and enforces any host policy that requires `pkix` strength
-(ADR-0020 gate G17).
+action/resource, authority/scope lifecycle, policy/schema generation, relevant
+room state and, where admission reads the projection, the anchored graph
+result. A cached boolean is insufficient. In the first slice, admission does
+not read the projection: its witness is the PostgreSQL policy state locked in
+the acceptance transaction (see [first slice](#first-slice)).
+
+For a remote principal the witness also binds its verified domain, the
+authentication strength of the stream it arrived on (`pkix` or `dialback`), the
+current ADR-0020 D1 admission decision for that domain, including a denylist
+entry for a parent domain, and whether its home is on the trusted-home list
+the replica runs. Admission rejects work from a domain that is no longer
+admitted; honors privileged authority only for a trusted home on a `pkix`
+stream and room moderation only on a `pkix` stream (D8); and enforces any host
+policy that requires `pkix` strength (ADR-0020 gate G17).
 
 For a fresh room manifest, revalidate and retain authority locks inside the
 same PostgreSQL transaction that accepts the canonical message and seals frozen
@@ -292,7 +306,8 @@ community stays unavailable; default-off is not permission to expose only the
 sinks converted so far. The first grant-authority slice (W5b in the plan)
 decides the store capabilities and credential separation; the writer-fencing
 slice (W5c) closes the writer inventory; retiring old binaries and credentials
-is part of the enrollment and activation runbook (ADR-0020 gate G22).
+is part of the rollout runbook that merges the work into main (ADR-0020
+gate G24) and of the activation runbook (G22).
 
 ## Identity, migration and restoration
 
@@ -368,12 +383,20 @@ silent active corruption is not covered by an old marker.
 
 Home-account deletion does not automatically revoke remote grants. Waddle homes
 enforce durable non-reuse of retired account JIDs across their provisioning
-paths (the revocation slice, W5d). Third-party homes cannot be required to: by
-ADR-0020 D8, a reassigned third-party JID may inherit member-level grants, an
-accepted limitation, and never privileged ones. After a reported reassignment,
-the host revokes the JID's grants through the fence and issues any grant for
-the new holder only after re-verifying the holder with the remote home's
-operator outside the protocol.
+paths (the revocation slice, W5d). Other homes cannot be required to. By
+ADR-0020 D8, a reassigned JID at a home that is not on the trusted-home list
+may inherit non-privileged grants, including room moderation, as an accepted
+limitation, and never privileged ones; a trusted home is trusted for
+non-reuse, and an operator who lists it accepts that its reassignments could
+pass on privileged grants. After a reported reassignment, the host revokes the
+JID's grants through the fence and issues any grant for the new holder only
+after confirming the holder with the remote home's operator outside the
+protocol.
+
+The identity-profile slice also defines the canonical domain form (RFC 7622
+preparation, trailing dot, U-label and A-label equivalence) that ADR-0020 D1's
+admission, dialback and trusted-home lists, the verifier's reference
+identities and S2S routing compare in (gates G1 and G10).
 
 ## First slice
 
@@ -386,8 +409,11 @@ stream-management fanout, queued work and room administration) and the writer
 inventory belong to the writer-fencing slice (W5c), and admission of remote
 principals to the effect-boundary slice (W5e).
 
-B1, B4 and B6 must be decided for this scope, and B2 for the actions it
-protects, before the slice merges into the integration branch. It adds:
+Before the slice merges into the integration branch, these must be decided for
+its scope and independently reviewed: B1 (store capabilities and credential
+separation), B4, B6 as it applies to grant subjects, B2 for the actions it
+protects, and the B3 marker protocol for the projection writes it makes. It
+adds:
 
 1. Typed canonical operation/receipt/witness APIs, PostgreSQL journal and closed
    admission state with exact-operation recovery.
@@ -402,7 +428,8 @@ protects, before the slice merges into the integration branch. It adds:
 Expected files: `permissions/{actor,spicedb,schema}.rs`, a focused authority
 repository/migration, `ingress/commit/implementation.rs`, `ingress/commit_room.rs`,
 `ingress_uow`, and narrow MUC-admin integration. Actor projection and external
-request/result semantics need preimplementation review. Unmanaged rooms,
+request/result semantics need a reviewed decision (B2) before the slice merges
+into the integration branch. Unmanaged rooms,
 alternate grants and unsupported sinks in enrolled scopes reject access.
 Release configuration stays off; native fixtures exercise the path without
 exposing a partially authorized community.
@@ -415,6 +442,17 @@ still decides the marker protocol for the projection writes it makes. B3 gates
 any later admission that reads the projection, which D5 defers until
 inheritance needs it.
 
+SQL admission is therefore independent of SpiceDB availability. While SpiceDB
+is unavailable or behind, this slice's admission keeps deciding from
+PostgreSQL: a revoke takes effect at its PostgreSQL commit, and a grant that
+is already effective keeps admitting. A new grant stays recorded but not
+effective until its projection is verified and activated, as above. Only a
+decision that consults SpiceDB depends on the projection: no admission inside
+this slice's enrolled scope does, and the surfaces outside it keep their
+existing checks until later slices fence them. A later admission that does
+consult the projection fails closed on missing, stale or malformed projection
+state (B3).
+
 Clustered manifest activation remains dark until its roadmap dependencies
 permit it. Single-node manifest evidence does not prove clustered delivery.
 Independent authority contenders can prove database serialization without
@@ -425,33 +463,56 @@ enable S2S or advertise an XMPP feature.
 
 Use real PostgreSQL/production SpiceDB, independent processes and deterministic
 barriers. Missing prerequisites fail; assert exact inventory/execution count.
-Record boundary and backend. These are proposed tests, not results:
+Record boundary and backend. These are proposed tests, not results.
 
-| Schedule/control | Required observation |
-| --- | --- |
-| Revoke after graph allow, before acceptance | No new manifest/child under stale witness. |
-| Acceptance first | Revoke waits for transaction resolution; accepted children retain their replay contract. |
-| Two replicas, cancellation/death at every stage | Recovery uses exact durable identity, not process-local authority. |
-| Lost PostgreSQL commit reply, lost/never-forwarded graph reply | Exact readback separates committed, absent and unknown; timeout is not rollback. |
-| Delayed grant/repair/compensation/activation | Cannot overwrite/reopen after newer revoke, including CAS-precondition refresh. |
-| Bootstrap/restart after revoke/Outcast | No configured-owner or actor-restoration regrant. |
-| Authority/projection/schema unavailable or malformed | New admission fails closed; revoke commit and effective grant stay distinct. |
-| Backend termination between read and effect | No external effect before confirmed canonical acceptance; retain DirectFrame unsafe control. |
-| Stalled scope and full queue | Bounded work and independent local/community progress; no network/queue wait under grant locks. |
-| Exact retry and key reuse with changed input | Original outcome versus typed conflict; no new authorization. |
-| Lifecycle/ABA/exhaustion/restored-old-state | Stale identity fails; restore cannot reopen old authority. |
-| Initiator revoked while mutation prepared | Target mutation cannot use stale administrator authority. |
-| Negative override/private config/alternate grant | Action policy, especially outcast precedence, not merely positive-path success. |
-| #2052 accepted-child regressions | Frozen target/payload, occupancy and lifecycle remain unchanged. |
-| Raw versus typed JIDs; XML character references; case, sharp-s, trailing-dot and A-label/U-label pairs | Enforce the approved identity profile before lossy parsing; reject unsupported input without aliasing another account. Provisioning/authentication/lookup/ingress agree on audited bindings. |
-| Privileged grant to a remote JID; privileged grant stored for a remote JID outside the canonical path | Issuance, bootstrap and repair refuse it; admission never honors it, on `pkix` and `dialback` streams alike. |
-| Outcast on every channel action, including `moderate`, `manage` and `delete` | Outcast wins every action at this slice's admission. The outcast slice's own suite covers an older replica starting after the schema change, which must refuse to start rather than rewrite the schema. |
+Each case names the slice that owns it and, through the federation plan, when
+it runs. A case marked W5b belongs to this slice's focused set, which runs when
+the slice completes (ADR-0020 D9); it needs only this slice and the slices it
+depends on. A case marked W5d belongs to the revocation fence's focused set,
+which runs when that slice completes. Every other case is evidence for its
+owning slice and runs in the verification phase: step 2 for suites, step 4
+for native PostgreSQL and SpiceDB cases, and steps 6 and 7 for cases that need
+S2S.
 
-The slice's static checks run with it; its focused native tests run when it
-completes, under ADR-0020 D9, and again in verification. No S2S transport is
-needed; do not waive the existing harness restriction. Broader suites and live
-tests are separate evidence. Later slices must close join, read-response,
-PubSub, topology, actor-restoration and remote-custody gaps individually.
+| Schedule/control | Required observation | Owner |
+| --- | --- | --- |
+| Revoke commits after a candidate admission read, before acceptance | The acceptance transaction re-reads and locks the SQL policy state; no manifest or child is accepted under the stale read. | W5b |
+| Acceptance first | Revoke waits for transaction resolution; accepted children retain their replay contract. | W5b |
+| Two replicas, cancellation/death at every stage | Recovery uses exact durable identity, not process-local authority. | W5b |
+| Lost PostgreSQL commit reply; lost or never-forwarded projection-write reply | Exact readback separates committed, absent and unknown; timeout is not rollback. | W5b |
+| Delayed grant, projection write or activation for this slice's relation family | Cannot overwrite/reopen after newer revoke, including CAS-precondition refresh. | W5b |
+| Delayed repair or compensation by any other writer | Cannot overwrite/reopen after newer revoke. | W5c (step 4) |
+| Restart after revoke/Outcast within the enrolled scope | Legacy mutation routes stay rejected for the scope; no configured-owner or actor-restoration regrant. | W5b |
+| Bootstrap, owner reseed and actor restoration after revoke/Outcast, across every writer | No regrant from any retired or fenced writer. | W5c (step 4) |
+| PostgreSQL authority unavailable, or a commit outcome uncertain | New admission fails closed; revoke commit and effective grant stay distinct. | W5b |
+| SpiceDB unavailable, lagging or malformed while SQL admission runs | SQL admission continues: a revoke is effective at its PostgreSQL commit and already effective grants keep admitting; a new grant does not become effective before its projection is verified; no projection state reopens a revoked grant. | W5b |
+| Built-in schema differs from the stored versioned schema at startup | The replica refuses to start rather than rewrite the schema. | W5o (steps 2 and 4) |
+| Backend termination between read and effect on the manifest path | No external effect before confirmed canonical acceptance. | W5b |
+| #2056 captured Space fanout after a revoke ACK | The stale capture never reaches the queue; the control that showed the unsafe delivery passes as a fence test. | W5d |
+| Stalled scope and full queue | Bounded work and independent local/community progress; no network/queue wait under grant locks. | W5b |
+| Exact retry and key reuse with changed input | Original outcome versus typed conflict; no new authorization. | W5b |
+| Generation and lifecycle-identity exhaustion in the enrolled scope | Stale identity fails; exhaustion fails closed; identities are never reused. | W5b |
+| Space, room or node deletion and recreation | Old witnesses, grants and markers do not apply to the new lifecycle. | W5c (step 4) |
+| Restored older PostgreSQL state | Restore cannot reopen old authority; old credentials and work are invalid; admission stays closed until verified reconstruction. | W5r (step 4) |
+| Initiator revoked while mutation prepared | Target mutation cannot use stale administrator authority. | W5b |
+| Negative override/private config/alternate grant | Action policy, especially outcast precedence, not merely positive-path success. | W5b |
+| #2052 accepted-child regressions | Frozen target/payload, occupancy and lifecycle remain unchanged. | W5b |
+| Full JID or service identity offered as an account-grant subject | Refused; grant keys use the identity profile's canonical bare-JID binding. | W5b |
+| Raw versus typed JIDs; XML character references; case, sharp-s, trailing-dot and A-label/U-label pairs | Enforce the approved identity profile before lossy parsing; reject unsupported input without aliasing another account. Provisioning/authentication/lookup/ingress agree on audited bindings. | W5i (step 2); W5a at S2S ingress (step 6) |
+| Privileged grant issued through this slice's path to a remote JID, with the trusted-home set supplied as input | Refused for a home outside the set; recorded for a home in it. | W5b |
+| Privileged grant for a JID of a home not on the trusted-home list, written by bootstrap or repair | Refused. | W5c (step 4) |
+| Stored privileged grant for a remote principal: trusted home on `pkix` and on dialback-only streams; home removed from the list; home never listed, grant stored outside the canonical path | Honored only for a listed home on `pkix`; otherwise ignored, whatever is stored. | W5e (steps 6 and 7) |
+| Room moderation by a remote principal on `pkix` and on dialback-only streams; a message author's own edit and delete | Moderation honored only on `pkix`; the author's own edit and delete are not moderation and are not restricted by it. | W5e (steps 6 and 7) |
+| Outcast on every channel action, including `moderate`, `manage` and `delete` | Outcast wins every action at this slice's admission. | W5b |
+| Acknowledged revoke across two replicas with queued work at joins, protected reads, PubSub and stream-management fanout and room administration | No new protected admission under the revoked grant after the fence, on any replica. | W5d |
+| Retired account JID on a Waddle home | Never issued to a new holder through any provisioning path. | W5d |
+
+The W5b focused set is every row marked W5b; the W5d focused set is every row
+marked W5d. Both run again on the integrated tree in verification step 4. No
+S2S transport is needed for either; do not waive the existing harness
+restriction. Broader suites and live tests are separate evidence. Later slices
+must close join, read-response, PubSub, topology, actor-restoration and
+remote-custody gaps individually.
 
 ## Blocking review ledger
 
@@ -461,12 +522,12 @@ evidence.
 
 | ID | Unresolved decision/evidence | Work blocked | Under ADR-0020 |
 | --- | --- | --- | --- |
-| B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation) and W5c (writer inventory and exclusion); old binaries and credentials are retired in the activation runbook (G22). |
-| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel action (W5o) and the D8 rule that remote principals hold no privileged grants. |
+| B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation) and W5c (writer inventory and exclusion); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
+| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel action (W5o) and the D8 rules: privileged grants for remote principals only from trusted homes and only on `pkix` streams, and room moderation only on `pkix` streams. |
 | B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes, and W5o the fenced schema transition. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b and extended by W5c for each surface it fences. |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c; W5d's #2056 control is its evidence. |
-| B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, and W5a applies it at S2S ingress. |
+| B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |
 | B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r. |
 
 The coarse fence's availability cost is a non-blocking tradeoff once bounded

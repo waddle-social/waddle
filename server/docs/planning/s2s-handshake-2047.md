@@ -14,14 +14,18 @@ nothing and does not authorize protected dispatch or production activation.
 [Status after ADR-0020](#status-after-adr-0020) records what the ADR settled
 and which slice owns each remaining item.
 
-**Amended by ADR-0020 decisions D1–D3 and D9.** Where this document conflicts
-with them, they control:
+**Amended by ADR-0020 decisions D1–D3, D8 and D9.** Where this document
+conflicts with them, they control:
 
 - Peer admission uses the `closed`, `allowlist` and `open` modes of D1. The
   explicit pair configuration below remains the fixture profile. The
-  connection manager defines the configuration for the D1 modes, including how
-  an admission change reaches every replica and closes the streams of a domain
-  that is no longer admitted (gate G7).
+  connection manager defines the configuration for the D1 modes, the inbound
+  dialback list and the D8 trusted-home list, including how a change reaches
+  every replica and closes the streams of a domain that is no longer admitted
+  (gate G7). Allowlist, dialback-list and trusted-home entries match exactly;
+  a denylist entry also covers every subdomain of its domain. All of them, and
+  every stream domain, are compared in the canonical domain form that the
+  identity-profile slice defines (gates G1 and G10).
 - A leaf whose extended key usage is serverAuth only is accepted in both TLS
   roles, in every trust profile and admission mode (see
   [the verifier design](s2s-verifier-2047.md)).
@@ -44,9 +48,12 @@ with them, they control:
   stream's authentication strength, `pkix` or `dialback`, which travels into
   the remote principal and the protected-effect admission witness.
 - DNS discovery follows D3, including the blocked address classes checked on
-  every DNS-derived address. DNS never supplies a reference identity.
+  every DNS-derived address. DNS never supplies a reference identity. An
+  IP-literal remote domain is refused in both directions, and a
+  `see-other-host` stream error ends the connection attempt; Waddle never
+  follows or sends one.
 - Tests are written with the transport slices and executed in the
-  verification phase, except the verifier's focused tests, which run when its
+  verification phase, except the verifier's focused set, which runs when its
   slice completes (D9).
 
 The loopback and `.test` restriction on enabled listeners, endpoints and
@@ -127,7 +134,8 @@ The file has these mandatory, typed fields; unknown fields fail validation:
 | `inbound_pairs` | Explicit `(peer, remote_source_domain, local_destination_domain)` tuples. |
 | `outbound_pairs` | Explicit `(peer, local_source_domain, remote_destination_domain, endpoint)` tuples. |
 
-Normalize domains once using the selected XMPP address preparation rules. Reject
+Normalize domains once into the identity profile's canonical domain form
+(ADR-0020 gate G10). Reject
 local/remote overlap, duplicate pairs, contradictory domain-to-peer assignments,
 unserved local identities and missing credentials/trust/CRLs. No wildcard trust
 entries, suffix matching or implicit parent-domain authority. Maximum 2 peers,
@@ -213,7 +221,9 @@ snapshot; removal still requires retirement of every old process. An emergency
 withdrawal stops old-generation connections before any restart.
 
 An active stream expires at the earliest certificate-chain expiration, CRL
-`nextUpdate`, or 10-minute maximum connection age. Timer-driven closure applies
+`nextUpdate`, or maximum connection age. The 10-minute maximum age is a
+fixture-profile value; the connection manager sets and reviews the general
+value with its resource model (gate G7). Timer-driven closure applies
 even to idle sockets. Recheck validity before successful EXTERNAL completion;
 a backward wall-clock jump or inability to establish current time fails the
 connection closed. Monotonic deadlines bound lifetimes; wall clock validates
@@ -297,7 +307,7 @@ cases.
 | Global/pre-auth capacity unavailable before a safe stream | Close TCP immediately. |
 | Malformed XML / forbidden DTD or entity declarations | `not-well-formed` / `restricted-xml` stream error, then close. |
 | Wrong stream/content namespace or unsupported stream version | `invalid-namespace` / `unsupported-version`, then close. |
-| Missing/invalid domain-only stream header address | `bad-format`, then close. A mandatory pre-TLS `from` is ADR-0020 D2 policy; the exact error for its absence is part of B1. |
+| Missing/invalid domain-only stream header address | `bad-format`, then close. A mandatory pre-TLS `from` is ADR-0020 D2 policy; its absence also receives `bad-format` (see [codec decisions](#codec-decisions-for-g1-and-g3)). |
 | Header recipient not served or not the selected destination | `host-unknown`, then close. |
 | Source pair not allowed, or source identity changes | `invalid-from`, then close. |
 | Application stanza before completed authentication | `not-authorized`, then close. |
@@ -372,9 +382,9 @@ waiting for a remote peer. The two-process tests must prove unrelated C2S progre
 These remain blocking decisions; an implementation that compiles waives none of
 them. Under ADR-0020's gate semantics, each is decided by its owning slice and
 reviewed before that slice merges into the integration branch. The executable
-proofs that B2 and B3 call for are evidence: under D9 they run with the
-verifier's focused tests when its slice completes and in the verification
-phase, rather than before the code is written. The authorization ID codec
+proofs that B2 and B3 call for are evidence, rather than preconditions for
+writing the code: under D9, B2's run with the verifier's focused set when its
+slice completes and again in verification, and B3's run in verification. The authorization ID codec
 (gate G9), the identity profile (G10) and the host-grant fence (G11–G17) remain
 separate gates for remote grants and protected dispatch even if B1–B4 pass.
 No two-process handshake result relaxes those gates or the production window
@@ -391,10 +401,137 @@ table also names the verification step for each item.
 
 | ID | Settled by ADR-0020 | Remaining items, owner and gate |
 | --- | --- | --- |
-| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; per-domain trust profiles; inbound STARTTLS only, with a mandatory pre-TLS `from`; inbound dialback policy and outbound dialback roles; one domain pair per stream. D3: discovery, the source domain as the only reference identity, blocked address classes, lookup failure versus absence. D1: admission modes. | Verifier slice (W4b): updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix; IDNA and preparation of reference identities. Codec slice (W4a): malformed-header and stream-error behavior, including the error for a missing pre-TLS `from`; remaining SASL conformance. Dialback slice (W4d): dialback wire profile and the classification of active certificate failures (gate G5). Gate G1. |
-| B2 | D2: per-domain profiles with public WebPKI by default; serverAuth-only EKU accepted; hard CRL checks only for configured private CAs. | Verifier slice (W4b): concrete verifier for both profiles; revocation handling for public chains; algorithm intersection; parser and CRL ceilings; cancellation and resource bounds. Evidence: the verifier's focused tests when the slice completes, then two-process evidence in verification. Gate G2. |
-| B3 | Nothing. | Codec slice (W4a), unchanged; evidence in verification. Gate G3. |
-| B4 | Nothing; accepting the ADR is not this review. | Independent review of this design with its recorded B1–B3 decisions, before the connection manager (W4c) merges into the integration branch. Gate G4. |
+| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; per-domain trust profiles; inbound STARTTLS only, with a mandatory pre-TLS `from`; inbound dialback policy and outbound dialback roles; one domain pair per stream. D3: discovery, the source domain as the only reference identity, blocked address classes, lookup failure versus absence, IP-literal domains and redirects. D1: admission modes and list matching. | Codec slice (W4a): header and stream-error behavior, including the error for a missing pre-TLS `from`, and SASL conformance, recorded in [codec decisions](#codec-decisions-for-g1-and-g3). Verifier slice (W4b): updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix. Identity-profile slice (W5i): the canonical domain form and IDNA processing that reference identities and admission lists use. Gate G1. The dialback wire profile and the classification of certificate outcomes are not part of B1; the dialback slice (W4d) decides them under gate G5. |
+| B2 | D2: per-domain profiles with public WebPKI by default; serverAuth-only EKU accepted; hard CRL checks only for configured private CAs. | Verifier slice (W4b): concrete verifier for both profiles; revocation handling for public chains; algorithm intersection; parser and CRL ceilings; cancellation and resource bounds. Evidence: the verifier's focused set when the slice completes, then two-process evidence in verification. Gate G2. |
+| B3 | Nothing. | Codec slice (W4a): decided as recorded in [codec decisions](#codec-decisions-for-g1-and-g3); evidence in verification. Gate G3. |
+| B4 | Nothing; accepting the ADR is not this review. | Independent review of this design with its recorded B1–B3 decisions, including the codec decisions and the identity profile's canonical domain form, before the connection manager (W4c) merges into the integration branch. Gate G4. |
+
+### Codec decisions for G1 and G3
+
+The codec slice (W4a) decided the following for the `waddle-xmpp::s2s` codec
+and negotiation machine. They are recorded here for the G4 review; nothing in
+this section is executed evidence. Their evidence is the codec's suites,
+`crates/waddle-xmpp/tests/s2s_codec.rs` and
+`crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs`, which are compiled and
+run in verification step 2.
+
+**Parser and restart buffers (G3).** The decoder drives `rxml`'s
+non-validating `RawParser`, the version the vendored `minidom` uses, and
+resolves namespaces itself, so every ceiling is checked against bytes handed
+to the parser before state is retained. It parses one first-level item per
+call and records the exact input offset where that item ended. After
+`<proceed/>`, the bytes that followed are handed to the TLS engine and never
+reach an XML parser; in the receiving role that handoff is always empty,
+because input the initiator sends after `<starttls/>` without waiting for
+`<proceed/>` closes the stream with `policy-violation` (RFC 6120 section
+5.4.3.1). Bytes received between SASL success and the post-SASL stream header
+are discarded and close the stream with `policy-violation`. Each read handed
+to the decoder is at most the buffered-input ceiling minus the stanza ceiling
+(64 KiB with the fixture limits).
+
+**Codec limits.** The fixture limits match the ceilings above (8 KiB header,
+64 KiB stanza, depth 32, 32 attributes per element, 1,024 elements and 8 KiB
+of attributes per stanza, 128 KiB buffered) and add: 8 KiB for a first-level
+STARTTLS, SASL or dialback element; 8 KiB for one name or attribute value
+while the parser assembles it; 1 KiB for a declared namespace name; and
+128 KiB for the strings retained by the decoded tree of one first-level
+element, charged as the tree is built because decoding copies an inherited
+namespace name into every element. By the codec's own accounting the worst
+case is about 1.7 MiB resident per connection, dominated by element node
+structure that no byte ceiling charges; this is an analysis, not a
+measurement.
+
+**Header checks.** The receiving role checks each stream header in this order
+and closes with the first failing condition:
+
+| Check | Stream error |
+| --- | --- |
+| `version` absent or below 1.0 | `unsupported-version` |
+| `to` absent, empty, not a JID or not domain-only | `bad-format` |
+| `to` names a formerly served domain | `host-gone` |
+| `to` names a domain that is not served | `host-unknown` |
+| `from` absent, empty, not a JID or not domain-only, on any header including the pre-TLS one | `bad-format` |
+| A later header changes the destination | `host-unknown` |
+| A later header changes the source | `invalid-from` |
+| The source and destination pair is not admitted | `invalid-from` |
+
+A certificate verified for a domain other than the header's `from` closes
+with `invalid-from`. The initiating role checks the response header in the
+same spirit: `unsupported-version` for a missing or old version; `bad-format`
+for a missing or invalid `from` or `to` or a missing stream ID; `invalid-from`
+when `from` is not the destination; `host-unknown` when `to` is not the
+source.
+
+**Decoding and stream errors.** Comments, processing instructions, DTDs and
+other markup declarations, and entity references other than the predefined
+ones, are `restricted-xml`; so is an XML declaration naming an encoding other
+than UTF-8, which the parser cannot distinguish from other forbidden
+declarations. Invalid UTF-8 is `unsupported-encoding`. A stream namespace
+other than `http://etherx.jabber.org/streams`, a content namespace other than
+`jabber:server`, or any namespace other than the stream and dialback
+namespaces declared on the header, is `invalid-namespace`; a stream prefix
+other than `stream` or a prefixed `jabber:server` or `jabber:client` first-level
+element is `bad-namespace-prefix`. Non-whitespace text between first-level
+elements, a root element other than `stream`, and a malformed `version` or
+`xml:lang` are `bad-format`. Exceeding any ceiling is `policy-violation`. A
+`jabber:client` stanza is `invalid-namespace`; a stanza before authentication
+is `not-authorized`; a negotiation element out of sequence is
+`policy-violation`. On an established receiving stream, a stanza without a
+valid `to` and `from` is `improper-addressing`, a recipient outside the
+stream's destination is `host-unknown`, a sender outside its source is
+`invalid-from`, any other stanza is `policy-violation` while application
+dispatch is disabled, and a first-level element that is not a stanza is
+`unsupported-stanza-type`. Streams are directional, so any first-level
+element received on an established initiating stream is `policy-violation`.
+
+When the receiving role has no response header open, it opens one before the
+error, with `from` set to the last served recipient or the configured default
+domain, no `to` and a fresh stream ID (RFC 6120 sections 4.9.1.2 and
+4.9.1.3). No XML is sent during the TLS handshake. Stream errors and SASL
+failures carry only the defined condition: no text, no application-specific
+element and nothing reflected from the peer. A received stream error closes
+the stream without a reply; an unknown condition is treated as
+`undefined-condition` (RFC 6120 section 4.9.2). The codec never sends
+`see-other-host`, and a received one closes the stream like any other peer
+error; it is not followed. Timeouts close with `connection-timeout`,
+certificate, CRL or age expiry with `reset`, a drain with `system-shutdown`,
+and resource exhaustion after the stream opened with `resource-constraint`.
+
+**SASL conformance.** The receiving role offers only EXTERNAL, and only after
+TLS verified a certificate for the header's `from`. A SASL element with child
+elements is `malformed-request`; base64 that does not decode is
+`incorrect-encoding`; data longer than the authzid ceiling is
+`malformed-request`. An omitted initial response receives one empty challenge,
+and `=` is an empty response. An authzid that is not UTF-8 is
+`incorrect-encoding`, and one that is not the verified source domain is
+`invalid-authzid`. An unsupported mechanism, including in a replacement
+`auth`, is `invalid-mechanism`, and the stream closes. Authorization is an
+explicit asynchronous decision by the connection owner, tagged with the
+exchange it belongs to, so a decision for a replaced or aborted exchange is
+ignored; a denial is `not-authorized`. The `auth` and `abort` budgets follow
+the SASL table above. A received SASL failure with an unknown condition is
+treated as `not-authorized` (RFC 6120 section 6.5). The initiating role sends
+`=` with no authzid, requests STARTTLS whether or not it was advertised,
+closes on a TLS `failure`, closes with `policy-violation` unless TLS verified
+the receiving server's certificate for the destination, refuses a post-TLS
+feature list that still offers STARTTLS or a final feature list that offers
+STARTTLS or SASL, and accepts SASL success only without additional data.
+
+**Dialback.** Received dialback elements, a receiving-side TLS peer without a
+usable certificate, and an initiating side whose peer offers no EXTERNAL are
+explicit decision points. While dialback is disabled each closes with
+`policy-violation`; the dialback slice decides their behavior under gate G5.
+
+**Carried to the connection manager (G7).** The codec builds the full tree of
+a first-level stanza, up to the stanza ceilings, before the negotiation
+refuses it with `not-authorized`. The connection manager adds a
+pre-authentication decoder mode: until SASL succeeds, a first-level element
+outside the stream, TLS, SASL and dialback namespaces is refused as soon as
+its head closes, before any tree is built, and negotiation elements keep the
+control-element ceiling. It also owns the deadlines, rate limits, per-address
+and global socket caps, the verifier-backed TLS peer, the certificate recheck
+before authorization, `VerifiedPeerStream`, and capacity planning that uses
+the resident-memory figure above.
 
 ## Acceptance evidence required of the future implementation
 
