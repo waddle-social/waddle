@@ -29,6 +29,9 @@ use crate::db::Database;
 /// At most one warning a minute that a managed room was refused on a replica
 /// without an attachment; only the kind of the refusal is logged.
 static UNATTACHED: RateLimitedWarning = RateLimitedWarning::new();
+/// At most one warning a minute that the store could not be read for a
+/// decision; only the kind of the failure is logged.
+static UNREADABLE: RateLimitedWarning = RateLimitedWarning::new();
 
 /// A once-a-minute limiter for one warning.
 struct RateLimitedWarning {
@@ -165,10 +168,12 @@ impl HostGrantGate {
                 }
             },
             Err(error) => {
-                tracing::warn!(
-                    kind = error.kind(),
-                    "The host-grant store could not be read for a room decision"
-                );
+                if UNREADABLE.due() {
+                    tracing::warn!(
+                        kind = error.kind(),
+                        "The host-grant store could not be read for a room decision"
+                    );
+                }
                 RoomGate::Unavailable
             }
         }
@@ -199,10 +204,12 @@ impl HostGrantGate {
             .await
             .map(|enrolled| !enrolled.is_empty())
             .map_err(|error| {
-                tracing::warn!(
-                    kind = error.kind(),
-                    "The host-grant store could not be read for an enrolled-room lookup"
-                );
+                if UNREADABLE.due() {
+                    tracing::warn!(
+                        kind = error.kind(),
+                        "The host-grant store could not be read for an enrolled-room lookup"
+                    );
+                }
                 HostGrantUnavailable
             })
     }
@@ -216,10 +223,12 @@ impl HostGrantGate {
             return Ok(BTreeSet::new());
         };
         store.enrolled_channels(channel_ids).await.map_err(|error| {
-            tracing::warn!(
-                kind = error.kind(),
-                "The host-grant store could not be read for an enrolled-room lookup"
-            );
+            if UNREADABLE.due() {
+                tracing::warn!(
+                    kind = error.kind(),
+                    "The host-grant store could not be read for an enrolled-room lookup"
+                );
+            }
             HostGrantUnavailable
         })
     }
@@ -231,10 +240,12 @@ impl HostGrantGate {
             return Ok(false);
         };
         store.enrolled_space_node(node).await.map_err(|error| {
-            tracing::warn!(
-                kind = error.kind(),
-                "The host-grant store could not be read for an enrolled-Space lookup"
-            );
+            if UNREADABLE.due() {
+                tracing::warn!(
+                    kind = error.kind(),
+                    "The host-grant store could not be read for an enrolled-Space lookup"
+                );
+            }
             HostGrantUnavailable
         })
     }
