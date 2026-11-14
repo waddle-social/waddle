@@ -6,7 +6,9 @@
 //! admins gain the channel's management and deleting the Space destroys
 //! the channel. Authority over the Space node alone is therefore not
 //! enough to place a channel there: the publisher must manage the channel,
-//! or the channel must already belong to that Space.
+//! the channel must already belong to that Space, or the publisher must be
+//! the deployment owner, who can already place any channel through the
+//! channel administration commands.
 //!
 //! The cases drive the production router over a loopback WebSocket against
 //! an in-memory state whose catalog rows, links and permission
@@ -247,4 +249,22 @@ async fn a_space_owner_may_republish_a_channel_already_in_their_space() {
         "moving out of the Space still needs the channel: {reply:?}"
     );
     assert_eq!(fixture.linked_space().await.as_deref(), Some(VICTIM_SPACE));
+}
+
+#[tokio::test]
+async fn the_deployment_owner_places_a_channel_it_does_not_manage() {
+    let fixture = Fixture::start().await;
+    let operator = fixture.server.account("operator").await;
+    // The deployment's server object, as account bootstrap names it.
+    fixture
+        .relate(
+            Object::new(ObjectType::Server, "deployment"),
+            "owner",
+            Subject::user(operator.as_str()),
+        )
+        .await;
+    let mut operator = fixture.server.client("operator", "laptop").await;
+    let reply = round_trip(&mut operator, bookmark_publish("place", OTHER_SPACE)).await;
+    assert!(is_result(&reply), "deployment owner refused: {reply:?}");
+    assert_eq!(fixture.linked_space().await.as_deref(), Some(OTHER_SPACE));
 }

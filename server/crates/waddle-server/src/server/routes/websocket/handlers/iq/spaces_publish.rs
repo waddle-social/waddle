@@ -1,6 +1,6 @@
 use super::permissions::{
-    delete_channel_parent_tuple, permission_allowed, write_channel_parent_tuple,
-    write_channel_parent_tuple_if_absent,
+    delete_channel_parent_tuple, permission_allowed, server_permission_allowed,
+    write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::{
@@ -9,6 +9,7 @@ use super::{
     Permission, PubSubError, PubSubItem, WebSocketState,
 };
 use crate::channel_space_links::ChannelSpaceLink;
+use crate::permissions::{ListSubjects, Relation, SubjectType};
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
@@ -391,9 +392,11 @@ pub(super) async fn handle_spaces_publish(
 /// the channel's `manage`, `moderate` and `delete`), and lets deleting the
 /// Space destroy the channel. That is the channel's decision: the publisher
 /// must hold the channel's `manage` permission, or the channel must already
-/// belong to this Space, in which case the publish only updates its
-/// bookmark. A room an enrolled host-grant scope manages is placed by its
-/// canonical topology only, never by a Spaces publish.
+/// belong to this Space (its link or its parent names the Space), in which
+/// case the publish changes no authority. The deployment owner, who can
+/// already place any channel through the channel administration commands,
+/// may place it here as well. A room an enrolled host-grant scope manages is
+/// placed by its canonical topology only, never by a Spaces publish.
 async fn channel_placement_allowed(
     state: &WebSocketState,
     principal: Option<ResolvedPrincipal<'_>>,
@@ -424,13 +427,33 @@ async fn channel_placement_allowed(
     }) {
         return Ok(true);
     }
-    permission_allowed(
+    let parents = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(ListSubjects {
+            object: Object::new(ObjectType::Channel, channel_id),
+            relation: Relation::new("parent"),
+        })
+        .await
+        .map_err(|error| format!("channel parent lookup failed: {error}"))?;
+    if parents
+        .iter()
+        .any(|parent| parent.subject_type == SubjectType::Space && parent.id == node)
+    {
+        return Ok(true);
+    }
+    if permission_allowed(
         state,
         principal,
         Object::new(ObjectType::Channel, channel_id),
         Permission::Manage,
     )
-    .await
+    .await?
+    {
+        return Ok(true);
+    }
+    server_permission_allowed(state, principal, Permission::Owner).await
 }
 
 async fn restore_channel_space_link_projection(
