@@ -23,6 +23,13 @@ pub enum ComputedPermission {
     /// Format: (relation_to_follow, permission_on_parent)
     /// Example: ("parent", "admin") means follow the "parent" relation and check for "admin" permission
     Arrow(String, String),
+
+    /// Permission is granted if the first computation is satisfied and the
+    /// second is not, like SpiceDB's `-` operator. The subtracted computation
+    /// wins over every grant in the first, including grants reached through
+    /// arrows and usersets.
+    /// Format: (granted, subtracted)
+    Exclusion(Box<ComputedPermission>, Box<ComputedPermission>),
 }
 
 impl ComputedPermission {
@@ -39,6 +46,11 @@ impl ComputedPermission {
     /// Create an arrow permission
     pub fn arrow(relation: &str, permission: &str) -> Self {
         ComputedPermission::Arrow(relation.to_string(), permission.to_string())
+    }
+
+    /// Create a permission granted by `granted` unless `subtracted` holds
+    pub fn exclusion(granted: ComputedPermission, subtracted: ComputedPermission) -> Self {
+        ComputedPermission::Exclusion(Box::new(granted), Box::new(subtracted))
     }
 }
 
@@ -149,6 +161,26 @@ impl Default for PermissionSchema {
     }
 }
 
+/// The built-in SpiceDB schema, version [`AUTHZ_SCHEMA_VERSION`].
+///
+/// Startup writes it only to install or upgrade a store, and never over a
+/// store recorded at another version (`permissions::authz_schema_version`).
+/// Any change to this text therefore needs a new schema version: bump
+/// [`AUTHZ_SCHEMA_VERSION`] and rename the `version_N` relation of
+/// `waddle_authz_schema` to match.
+///
+/// Channel outcast precedence: every channel permission subtracts `outcast`,
+/// including what a subject holds through the parent Space (`parent->...`), so
+/// a room ban wins over every channel grant and over Space-inherited access.
+/// Message permissions that go through the channel (`read`, `react`, and a
+/// moderator's `delete` through `channel->moderate`) inherit it. A message
+/// author's own `edit` and `delete` derive from the message's `author`
+/// relation, so they subtract the channel's `outcast` explicitly
+/// (`channel->outcast`): an author banned from a room loses control over the
+/// messages they wrote there, while the room's moderators can still remove
+/// them.
+///
+/// [`AUTHZ_SCHEMA_VERSION`]: super::authz_schema_version::AUTHZ_SCHEMA_VERSION
 pub const SPICEDB_SCHEMA: &str = r#"
 definition user {}
 
@@ -187,12 +219,12 @@ definition channel {
   relation writer: user
   relation viewer: user
 
-  permission delete = parent->admin
-  permission manage = owner + admin + manager + parent->admin
-  permission moderate = owner + admin + moderator + manager + parent->moderator + parent->admin
-  permission send_message = owner + admin + member + writer + moderator + manager + parent->view
-  permission read = owner + admin + member + viewer + writer + moderator + manager + parent->view
-  permission view = owner + admin + member + viewer + writer + moderator + manager + parent->view
+  permission delete = (parent->admin) - outcast
+  permission manage = (owner + admin + manager + parent->admin) - outcast
+  permission moderate = (owner + admin + moderator + manager + parent->moderator + parent->admin) - outcast
+  permission send_message = (owner + admin + member + writer + moderator + manager + parent->view) - outcast
+  permission read = (owner + admin + member + viewer + writer + moderator + manager + parent->view) - outcast
+  permission view = (owner + admin + member + viewer + writer + moderator + manager + parent->view) - outcast
 }
 
 definition message {
@@ -200,8 +232,8 @@ definition message {
   relation author: user
 
   permission read = channel->read
-  permission edit = author
-  permission delete = author + channel->moderate
+  permission edit = author - channel->outcast
+  permission delete = (author - channel->outcast) + channel->moderate
   permission react = channel->read
 }
 
@@ -225,6 +257,10 @@ definition role {
 
 definition waddle_authz_codec {
   relation codec: waddle_authz_codec
+}
+
+definition waddle_authz_schema {
+  relation version_1: waddle_authz_schema
 }
 "#;
 
@@ -341,7 +377,8 @@ fn space_schema() -> ObjectTypeSchema {
         )
 }
 
-/// Schema for Channel objects
+/// Schema for Channel objects. Mirrors the `channel` definition of
+/// [`SPICEDB_SCHEMA`], including outcast precedence on every permission.
 fn channel_schema() -> ObjectTypeSchema {
     ObjectTypeSchema::new()
         // Relations
@@ -358,31 +395,31 @@ fn channel_schema() -> ObjectTypeSchema {
         .with_permission(
             "delete",
             // Only space admin can delete channels
-            ComputedPermission::arrow("parent", "admin"),
+            without_outcast(ComputedPermission::arrow("parent", "admin")),
         )
         .with_permission(
             "manage",
-            ComputedPermission::union(vec![
+            without_outcast(ComputedPermission::union(vec![
                 ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "admin"),
-            ]),
+            ])),
         )
         .with_permission(
             "moderate",
-            ComputedPermission::union(vec![
+            without_outcast(ComputedPermission::union(vec![
                 ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "moderator"),
                 ComputedPermission::arrow("parent", "admin"),
-            ]),
+            ])),
         )
         .with_permission(
             "send_message",
-            ComputedPermission::union(vec![
+            without_outcast(ComputedPermission::union(vec![
                 ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("member"),
@@ -390,11 +427,11 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "view"),
-            ]),
+            ])),
         )
         .with_permission(
             "read",
-            ComputedPermission::union(vec![
+            without_outcast(ComputedPermission::union(vec![
                 ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("member"),
@@ -403,11 +440,11 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "view"),
-            ]),
+            ])),
         )
         .with_permission(
             "view",
-            ComputedPermission::union(vec![
+            without_outcast(ComputedPermission::union(vec![
                 ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("member"),
@@ -416,11 +453,17 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "view"),
-            ]),
+            ])),
         )
 }
 
-/// Schema for Message objects
+/// A channel permission that a channel `outcast` never holds.
+fn without_outcast(granted: ComputedPermission) -> ComputedPermission {
+    ComputedPermission::exclusion(granted, ComputedPermission::direct("outcast"))
+}
+
+/// Schema for Message objects. The author's own `edit` and `delete` subtract
+/// a ban in the message's channel; see [`SPICEDB_SCHEMA`].
 fn message_schema() -> ObjectTypeSchema {
     ObjectTypeSchema::new()
         // Relations
@@ -430,13 +473,21 @@ fn message_schema() -> ObjectTypeSchema {
         .with_permission(
             "delete",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("author"),
+                author_unless_outcast(),
                 ComputedPermission::arrow("channel", "moderate"),
             ]),
         )
-        .with_permission("edit", ComputedPermission::direct("author"))
+        .with_permission("edit", author_unless_outcast())
         .with_permission("react", ComputedPermission::arrow("channel", "view"))
         .with_permission("read", ComputedPermission::arrow("channel", "view"))
+}
+
+/// A message's author, unless they are an outcast of the message's channel.
+fn author_unless_outcast() -> ComputedPermission {
+    ComputedPermission::exclusion(
+        ComputedPermission::direct("author"),
+        ComputedPermission::arrow("channel", "outcast"),
+    )
 }
 
 /// Schema for DM (direct message) objects

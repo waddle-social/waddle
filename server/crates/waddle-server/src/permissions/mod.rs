@@ -4,6 +4,7 @@ use crate::db::DatabaseError;
 pub mod actor;
 mod authz_id;
 mod authz_incarnation;
+mod authz_schema_version;
 mod check;
 mod schema;
 mod spicedb;
@@ -12,7 +13,7 @@ mod tuple;
 pub use actor::{
     CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation, EnsureSchema, ExclusiveRelationSwap,
     ListRelations, ListSubjects, LookupResources, LookupSubjects, Permission, PermissionActor,
-    ReplaceExclusiveRelation, SwapExclusiveRelation, WriteTuple,
+    RecordAuthzSchemaVersion, ReplaceExclusiveRelation, SwapExclusiveRelation, WriteTuple,
 };
 pub use authz_id::{
     decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, EncodedObjectId,
@@ -22,6 +23,12 @@ pub use authz_incarnation::{
     classify_codec_markers, guarded_resource_definitions, AuthzIncarnationError, CodecMarkerRow,
     CodecMarkerState, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID,
     AUTHZ_CODEC_MARKER_READ_LIMIT, AUTHZ_CODEC_MARKER_RELATION, AUTHZ_CODEC_VERSION,
+};
+pub use authz_schema_version::{
+    authz_schema_retaining_version, authz_schema_version_relation, builtin_authz_schema,
+    classify_schema_markers, parse_authz_schema_version_relation, AuthzSchemaVersionError,
+    SchemaMarkerRow, SchemaMarkerState, AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID,
+    AUTHZ_SCHEMA_MARKER_READ_LIMIT, AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION_RELATION_PREFIX,
 };
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
@@ -58,6 +65,9 @@ pub enum PermissionError {
 
     #[error("Authorization store refused: {0}")]
     AuthzIncarnation(#[from] AuthzIncarnationError),
+
+    #[error("Authorization store refused: {0}")]
+    AuthzSchemaVersion(#[from] AuthzSchemaVersionError),
 
     #[error("Invalid relation: {0}")]
     InvalidRelation(String),

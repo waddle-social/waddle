@@ -78,18 +78,47 @@ fn spicedb_runtime_and_chart_stay_free_of_removed_bootstrap_knobs() {
 }
 
 #[test]
-fn spicedb_schema_ensure_always_writes_builtin_schema() {
+fn spicedb_schema_writes_are_decided_by_the_version_marker() {
     let contents = read("src/permissions/spicedb.rs");
     assert!(
         contents.contains("pub async fn ensure_schema(&self, schema: &str)"),
         "SpiceDB backend should own schema reconciliation",
     );
     assert!(
+        contents.contains("pub async fn record_schema_version(&self, schema: &str)"),
+        "SpiceDB backend should own the schema-version record",
+    );
+    assert!(
         contents.contains(".write_schema(schema)"),
-        "startup schema reconciliation must write the built-in schema idempotently",
+        "startup must still install or upgrade the built-in schema",
+    );
+    assert!(
+        contents.contains("self.schema_marker_state().await"),
+        "schema writes must be decided by the schema-version marker relationship",
+    );
+    assert!(
+        !contents.contains(".read_schema("),
+        "schema writes must not be decided by read_schema; SpiceDB can serve cached schema after direct datastore resets",
     );
     assert!(
         !contents.contains("current.trim() == schema.trim()"),
         "schema reconciliation must not skip writes based on read_schema equality; SpiceDB can serve cached schema after direct datastore resets",
+    );
+}
+
+#[test]
+fn startup_records_the_schema_version_after_the_codec_guard() {
+    let contents = read("src/server/lifecycle.rs");
+    let position = |needle: &str| {
+        contents
+            .find(needle)
+            .unwrap_or_else(|| panic!("lifecycle no longer sends {needle}"))
+    };
+    let schema = position("crate::permissions::EnsureSchema)");
+    let codec = position("crate::permissions::EnsureAuthzCodecIncarnation)");
+    let version = position("crate::permissions::RecordAuthzSchemaVersion)");
+    assert!(
+        schema < codec && codec < version,
+        "startup must write the schema, then bind the codec, then record the schema version"
     );
 }

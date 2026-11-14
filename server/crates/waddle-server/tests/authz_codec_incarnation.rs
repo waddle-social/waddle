@@ -24,7 +24,7 @@ use waddle_server::permissions::{
     Object, ObjectType, PermissionActor, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID,
     AUTHZ_CODEC_MARKER_READ_LIMIT, AUTHZ_CODEC_MARKER_RELATION, AUTHZ_CODEC_VERSION,
-    AUTHZ_ID_WIRE_PREFIX, MAX_AUTHZ_ID_BYTES,
+    AUTHZ_ID_WIRE_PREFIX, AUTHZ_SCHEMA_MARKER_DEFINITION, MAX_AUTHZ_ID_BYTES,
 };
 use waddle_server::ServerConfig;
 
@@ -219,13 +219,19 @@ impl LiveSpiceDb {
             insecure: true,
         });
         let live = Self { config, client };
-        // Drop any marker an earlier test left, so that writing the schema is
-        // not refused. On a fresh SpiceDB the definition does not exist yet
-        // and the delete fails; that is the state wanted.
-        let _ = live
-            .client
-            .delete_relationships(RelationshipFilter::new(AUTHZ_CODEC_MARKER_DEFINITION))
-            .await;
+        // Drop any codec or schema-version marker an earlier test left, so
+        // that writing the schema is neither refused nor skipped. On a fresh
+        // SpiceDB the definitions do not exist yet and the deletes fail; that
+        // is the state wanted.
+        for marker in [
+            AUTHZ_CODEC_MARKER_DEFINITION,
+            AUTHZ_SCHEMA_MARKER_DEFINITION,
+        ] {
+            let _ = live
+                .client
+                .delete_relationships(RelationshipFilter::new(marker))
+                .await;
+        }
         // Write the built-in schema through the production path, then empty
         // every definition it declares.
         live.actor()

@@ -42,6 +42,7 @@
 use thiserror::Error;
 
 use super::authz_id::AUTHZ_ID_WIRE_PREFIX;
+use super::authz_schema_version::AUTHZ_SCHEMA_MARKER_DEFINITION;
 use super::schema::spicedb_definition_names;
 
 /// Schema definition that holds only the codec marker.
@@ -142,8 +143,13 @@ pub fn classify_codec_markers(rows: &[CodecMarkerRow]) -> CodecMarkerState {
 }
 
 /// Every schema definition whose relationships the guard requires to be absent
-/// before it marks a store: all of them except the marker definition. Derived
-/// from the built-in schema so a new definition is covered automatically.
+/// before it marks a store: all of them except the codec marker definition and
+/// the schema-version marker definition (`permissions::authz_schema_version`).
+/// Both markers use fixed ASCII IDs that bypass the codec, so neither can hold
+/// an ID written by another encoding. Derived from the built-in schema so a
+/// new definition is covered automatically.
 pub fn guarded_resource_definitions() -> impl Iterator<Item = &'static str> {
-    spicedb_definition_names().filter(|name| *name != AUTHZ_CODEC_MARKER_DEFINITION)
+    spicedb_definition_names().filter(|name| {
+        *name != AUTHZ_CODEC_MARKER_DEFINITION && *name != AUTHZ_SCHEMA_MARKER_DEFINITION
+    })
 }

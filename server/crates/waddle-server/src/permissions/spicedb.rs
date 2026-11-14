@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::str::FromStr;
 
@@ -15,6 +16,11 @@ use super::authz_incarnation::{
     classify_codec_markers, guarded_resource_definitions, AuthzIncarnationError, CodecMarkerRow,
     CodecMarkerState, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID,
     AUTHZ_CODEC_MARKER_READ_LIMIT, AUTHZ_CODEC_MARKER_RELATION, AUTHZ_CODEC_VERSION,
+};
+use super::authz_schema_version::{
+    authz_schema_retaining_version, authz_schema_version_relation, classify_schema_markers,
+    AuthzSchemaVersionError, SchemaMarkerRow, SchemaMarkerState, AUTHZ_SCHEMA_MARKER_DEFINITION,
+    AUTHZ_SCHEMA_MARKER_ID, AUTHZ_SCHEMA_MARKER_READ_LIMIT, AUTHZ_SCHEMA_VERSION,
 };
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -35,18 +41,164 @@ impl SpiceDbPermissionBackend {
         Ok(Self { client })
     }
 
-    /// Write the built-in schema. A store already marked for another ID codec
+    /// Install or upgrade the built-in schema, whose version is
+    /// [`AUTHZ_SCHEMA_VERSION`]. A store already marked for another ID codec
     /// is refused first, so this build never rewrites the schema of a store
-    /// that belongs to a different codec version.
+    /// that belongs to a different codec version. A store recorded at this
+    /// schema version is left as it is, and one recorded at a newer or
+    /// unrecognised version is refused without writing. See
+    /// `permissions::authz_schema_version` for the protocol.
     pub async fn ensure_schema(&self, schema: &str) -> Result<(), PermissionError> {
         if self.codec_marker_state_before_schema().await? == CodecMarkerState::Incompatible {
             return Err(refuse(AuthzIncarnationError::IncompatibleMarker));
         }
-        self.client
-            .write_schema(schema)
-            .await
-            .map_err(map_spicedb_error)?;
-        Ok(())
+        let text = match self.schema_marker_state().await? {
+            SchemaMarkerState::Current => return Ok(()),
+            SchemaMarkerState::Absent => Cow::Borrowed(schema),
+            SchemaMarkerState::Older(stored) => Cow::Owned(
+                authz_schema_retaining_version(schema, AUTHZ_SCHEMA_VERSION, stored).ok_or(
+                    PermissionError::AuthzSchemaVersion(
+                        AuthzSchemaVersionError::BuiltinSchemaUnversioned,
+                    ),
+                )?,
+            ),
+            SchemaMarkerState::Newer(stored) => return Err(refuse_newer_schema(stored)),
+            SchemaMarkerState::Unrecognised => {
+                return Err(refuse_schema(AuthzSchemaVersionError::UnrecognisedMarker))
+            }
+        };
+        self.write_schema_or_decide(&text).await
+    }
+
+    /// Record the built-in schema version once the codec guard has accepted
+    /// the store. See `permissions::authz_schema_version` for the protocol.
+    pub async fn record_schema_version(&self, schema: &str) -> Result<(), PermissionError> {
+        match self.schema_marker_state().await? {
+            SchemaMarkerState::Current => Ok(()),
+            SchemaMarkerState::Absent => {
+                let created = self
+                    .client
+                    .write_relationships(vec![RelationshipUpdate::create(schema_marker(
+                        AUTHZ_SCHEMA_VERSION,
+                    )?)])
+                    .preconditions(vec![Precondition::must_not_exist(RelationshipFilter::new(
+                        AUTHZ_SCHEMA_MARKER_DEFINITION,
+                    ))])
+                    .await;
+                match created {
+                    Ok(_) => {
+                        tracing::info!(
+                            schema_version = AUTHZ_SCHEMA_VERSION,
+                            "Recorded the authorization schema version"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => self.decide_after_marker_conflict(error).await,
+                }
+            }
+            SchemaMarkerState::Older(stored) => {
+                let replaced = self
+                    .client
+                    .write_relationships(vec![
+                        RelationshipUpdate::delete(schema_marker(stored)?),
+                        RelationshipUpdate::create(schema_marker(AUTHZ_SCHEMA_VERSION)?),
+                    ])
+                    .preconditions(vec![Precondition::must_exist(
+                        RelationshipFilter::new(AUTHZ_SCHEMA_MARKER_DEFINITION)
+                            .resource_id(AUTHZ_SCHEMA_MARKER_ID)
+                            .relation(authz_schema_version_relation(stored)),
+                    )])
+                    .await;
+                if let Err(error) = replaced {
+                    self.decide_after_marker_conflict(error).await?;
+                }
+                // Drop the older marker relation, which now holds nothing.
+                self.write_schema_or_decide(schema).await?;
+                tracing::info!(
+                    from_schema_version = stored,
+                    schema_version = AUTHZ_SCHEMA_VERSION,
+                    "Upgraded the authorization schema version"
+                );
+                Ok(())
+            }
+            SchemaMarkerState::Newer(stored) => Err(refuse_newer_schema(stored)),
+            SchemaMarkerState::Unrecognised => {
+                Err(refuse_schema(AuthzSchemaVersionError::UnrecognisedMarker))
+            }
+        }
+    }
+
+    /// Write `schema`. SpiceDB refuses the write if it would remove a marker
+    /// relation that holds the marker, which happens when another replica
+    /// recorded a different version meanwhile; that case is reported as the
+    /// refusal for what is now stored.
+    async fn write_schema_or_decide(&self, schema: &str) -> Result<(), PermissionError> {
+        let Err(error) = self.client.write_schema(schema).await else {
+            return Ok(());
+        };
+        match self.schema_marker_state().await {
+            Ok(state) => match state.refusal(AUTHZ_SCHEMA_VERSION) {
+                Some(refusal) => Err(refuse_schema(refusal)),
+                None => Err(map_spicedb_error(error)),
+            },
+            Err(_) => Err(map_spicedb_error(error)),
+        }
+    }
+
+    /// A marker write failed. Accept the store if it now holds this version's
+    /// marker, written by another replica; otherwise refuse it.
+    async fn decide_after_marker_conflict(
+        &self,
+        error: prescience::Error,
+    ) -> Result<(), PermissionError> {
+        let state = self.schema_marker_state().await?;
+        if state == SchemaMarkerState::Current {
+            return Ok(());
+        }
+        if let Some(refusal) = state.refusal(AUTHZ_SCHEMA_VERSION) {
+            return Err(refuse_schema(refusal));
+        }
+        if is_write_conflict(&error) {
+            return Err(refuse_schema(AuthzSchemaVersionError::Contended));
+        }
+        Err(map_spicedb_error(error))
+    }
+
+    /// The schema-version marker state. A stored schema without the marker
+    /// definition, or no schema at all, has no marker.
+    async fn schema_marker_state(&self) -> Result<SchemaMarkerState, PermissionError> {
+        match self.read_schema_marker_rows().await {
+            Ok(rows) => Ok(classify_schema_markers(&rows, AUTHZ_SCHEMA_VERSION)),
+            Err(error) if is_unknown_definition(&error, AUTHZ_SCHEMA_MARKER_DEFINITION) => {
+                Ok(SchemaMarkerState::Absent)
+            }
+            Err(error) => Err(map_spicedb_error(error)),
+        }
+    }
+
+    async fn read_schema_marker_rows(&self) -> Result<Vec<SchemaMarkerRow>, prescience::Error> {
+        let mut stream = self
+            .client
+            .read_relationships(RelationshipFilter::new(AUTHZ_SCHEMA_MARKER_DEFINITION))
+            .consistency(Consistency::FullyConsistent)
+            .limit(AUTHZ_SCHEMA_MARKER_READ_LIMIT)
+            .send()
+            .await?;
+        let mut rows = Vec::new();
+        while let Some(item) = stream.next().await {
+            let relationship = item?.relationship;
+            rows.push(SchemaMarkerRow {
+                resource_id: relationship.resource.object_id().to_string(),
+                relation: relationship.relation,
+                subject_type: relationship.subject.object().object_type().to_string(),
+                subject_id: relationship.subject.object().object_id().to_string(),
+                subject_relation: relationship
+                    .subject
+                    .optional_relation()
+                    .map(ToString::to_string),
+            });
+        }
+        Ok(rows)
     }
 
     /// Bind this store to the current ID codec, or refuse it. See
@@ -516,6 +668,51 @@ fn refuse(error: AuthzIncarnationError) -> PermissionError {
         "Refusing the authorization store: it is not bound to the current ID codec"
     );
     error.into()
+}
+
+fn refuse_schema(error: AuthzSchemaVersionError) -> PermissionError {
+    tracing::error!(
+        reason = %error,
+        schema_version = AUTHZ_SCHEMA_VERSION,
+        runbook = "docs/operations/authz-schema-versions.md",
+        "Refusing the authorization store: its schema version is not one this server may write"
+    );
+    error.into()
+}
+
+fn refuse_newer_schema(stored: u32) -> PermissionError {
+    refuse_schema(AuthzSchemaVersionError::Newer {
+        stored,
+        supported: AUTHZ_SCHEMA_VERSION,
+    })
+}
+
+/// A write refused because its preconditions no longer held, or because the
+/// relationship it creates already exists.
+fn is_write_conflict(error: &prescience::Error) -> bool {
+    let prescience::Error::Status { code, .. } = error else {
+        return false;
+    };
+    matches!(
+        format!("{code:?}").as_str(),
+        "FailedPrecondition" | "AlreadyExists"
+    )
+}
+
+/// `waddle_authz_schema:installed#version_N@waddle_authz_schema:installed`.
+/// Fixed IDs, deliberately not encoded, like the codec marker.
+fn schema_marker(version: u32) -> Result<Relationship, PermissionError> {
+    let resource = ObjectReference::new(AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID)
+        .map_err(|e| PermissionError::InvalidObject(e.to_string()))?;
+    let marker = ObjectReference::new(AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    let subject = SubjectReference::new(marker, None::<String>)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    Ok(Relationship::new(
+        resource,
+        authz_schema_version_relation(version),
+        subject,
+    ))
 }
 
 /// `waddle_authz_codec:incarnation#codec@waddle_authz_codec:v2`. Fixed IDs,

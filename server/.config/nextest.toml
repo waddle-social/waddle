@@ -157,7 +157,7 @@ filter = 'package(waddle-server) & binary(xmpp_e2e_cue)'
 threads-required = 'num-cpus'
 
 [[profile.default.overrides]]
-filter = 'package(waddle-server) & (binary(authz_id_codec) | binary(authz_codec_incarnation)) & test(/^live_spicedb_/)'
+filter = 'package(waddle-server) & (binary(authz_id_codec) | binary(authz_codec_incarnation) | binary(authz_schema_version) | binary(channel_outcast_precedence)) & test(/^live_spicedb_/)'
 test-group = 'spicedb-live'
 
 [profile.ci]
