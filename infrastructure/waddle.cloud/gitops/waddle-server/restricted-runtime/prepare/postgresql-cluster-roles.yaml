@@ -4,12 +4,10 @@ metadata:
   name: postgresql
   namespace: waddle
 spec:
-  # The owner phase's keypair-slot retirement check is written against
-  # PostgreSQL 17 and fails closed on 18. Before enabling this component,
-  # confirm the running major version is 17 (`SELECT version()`) and replace
-  # this tag with the exact minor that is running: a different image restarts
-  # the instances.
-  imageName: ghcr.io/cloudnative-pg/postgresql:17
+  # The server is built and tested against PostgreSQL 17 (the keypair-slot
+  # retirement check fails closed on 18). The cluster is created on this
+  # exact minor; changing the tag restarts the instances.
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11
   managed:
     roles:
       # The operator reconciles attributes, passwords and memberships of the

@@ -25,9 +25,44 @@ Markers used below:
 | Piece | Location | Off until |
 |---|---|---|
 | Chart support (`restrictedRuntime.*`, owner CronJob) | `server/charts/waddle-server` ≥ 0.4.11 | `restrictedRuntime.ownerJob.enabled` / `restrictedRuntime.enabled` |
+| Zero replicas while no handoff exists (`restrictedRuntime.handoff.awaitOwnerJob`) | `server/charts/waddle-server` ≥ 0.4.13 | set by `restricted-runtime/serve` |
 | Roles, PostgreSQL image pin, owner CronJob values | `infrastructure/waddle.cloud/gitops/waddle-server/restricted-runtime/prepare` | listed under `components:` in that directory's `kustomization.yaml` |
 | Serving switch | `…/restricted-runtime/serve` | listed under `components:` |
 | `restrictedRuntime.releaseGitSha` | written by the release automation next to `WADDLE_GIT_SHA` | always written; inert while both switches are off |
+
+Production's `kustomization.yaml` lists both components, and their values
+describe a freshly created database (see "Fresh install" below). Running
+this cutover against an existing database instead needs that database's
+own cutover record, `role_oid` and `--legacy-keypair-slots retire`
+arguments in `restricted-runtime/prepare/helmrelease-owner-job.yaml`, and
+the components taken out of `kustomization.yaml` until the steps below add
+them.
+
+## Fresh install
+
+A new, empty database has nothing to drain, stamp or retire, and no data
+has to survive, so the rollback backup and the credential cutoff of Phase B
+(steps 3 to 5) do not apply. [Fresh production
+install](fresh-production-install.md) is the procedure. What differs from
+the cutover:
+
+- CloudNativePG creates the database, its owner login `waddle` and the six
+  managed roles. The provisioning procedure (Phase B step 6) runs on the
+  empty database; the cutover record names `waddle` and its OID as the old
+  runtime.
+- `owner-phase` builds the schema from the baseline: the default
+  `WADDLE_DB_BASELINE_ACTION` (`stamp`) applies the baseline to an empty
+  database and stamps only a database that holds the retired history. It
+  runs without `ownerPhaseExtraArgs`.
+- Both components are listed from the start. With
+  `restrictedRuntime.handoff.awaitOwnerJob` the first release renders the
+  Deployment at zero replicas next to the owner CronJob, because no handoff
+  exists yet. Once the Job has published it, `flux reconcile helmrelease
+  waddle-server -n waddle --force` starts the configured replicas. A
+  serving Deployment is never scaled down for a missing handoff; that
+  render fails.
+- The owner phase activates protocol epoch 2 before any replica serves, so
+  production starts at two replicas.
 
 Names used below: namespace `waddle`, CloudNativePG cluster `postgresql`,
 database `waddle`, schema `public`, HelmRelease and Deployment
