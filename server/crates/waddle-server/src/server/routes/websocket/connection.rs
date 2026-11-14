@@ -2812,6 +2812,12 @@ where
     // stream-management reference reaches the account coordinator before
     // the next frame is read.
     super::account_binding::sync_snapshot(state.as_ref(), conn).await;
+    // Queued subscription requests are read only once the coordinator holds
+    // the resource's availability, so none is queued after the read by a
+    // sender that saw the resource unavailable.
+    if let (Some(jid), Some(owner)) = (conn.phase.bound_jid(), conn.registry_owner.as_ref()) {
+        super::handlers::presence::present_pending_subscriptions(state.as_ref(), jid, owner).await;
+    }
 
     // Register the connection after successful authentication and
     // resource binding. This keeps the transport loop focused on

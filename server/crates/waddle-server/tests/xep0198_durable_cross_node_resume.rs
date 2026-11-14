@@ -18,9 +18,10 @@ pub mod cluster_support;
 use std::time::Duration;
 
 use cluster_support::{
-    cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db, reset_and_enroll,
-    reset_node_lease_tables, spawn_cluster_server_with_envs, wait_for_cross_node_registration,
-    wait_for_node_lease_lapse, wait_for_readiness, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    activate_mailbox_epoch, cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db,
+    reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
+    wait_for_cross_node_registration, wait_for_node_lease_lapse, wait_for_readiness,
+    CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use minidom::Element;
 use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
@@ -88,6 +89,14 @@ async fn cluster(extra_envs: &[(&str, &str)]) -> Option<Cluster> {
         spawn_cluster_server_with_envs(&postgres_url, &pool.pool_env, port_b, &[port_a], &envs)
             .await;
     wait_for_cross_node_registration(&node_a, &node_b).await;
+    // A full JID bound on another node is reached by a bound request, which
+    // the mailbox carries only from protocol epoch 2 on
+    // (`docs/planning/2173-direct-lanes.md`, "Below protocol epoch 2"); a
+    // multi-replica deployment reaches that epoch before it serves. The
+    // shared database holds whatever epoch an earlier test left, so it is
+    // set here, once the first node has built the schema the epoch row
+    // lives in.
+    activate_mailbox_epoch(&db).await;
     let owner_password = node_b.fixed_account_password().to_owned();
     Some(Cluster {
         db,

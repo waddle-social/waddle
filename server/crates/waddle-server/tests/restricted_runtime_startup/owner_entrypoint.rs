@@ -107,7 +107,8 @@ impl Operator {
     /// Run one subcommand of the server binary to completion and check its
     /// output for every secret.
     async fn run(&self, database_url: &str, args: &[&str], extra: &[(&str, &str)]) -> Finished {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+        let mut command =
+            tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
             if key_text.starts_with("WADDLE_")
@@ -919,6 +920,7 @@ struct PasswordCluster {
 }
 
 const CLUSTER_PASSWORD: &str = "cluster-administrator-password-never-printed";
+const CLUSTER_PORT: &str = "5432";
 
 impl PasswordCluster {
     /// `None` when the PostgreSQL server programs are not on `PATH`.
@@ -955,6 +957,10 @@ impl PasswordCluster {
             .arg(&data)
             .arg("-k")
             .arg(directory.path())
+            // The port names the socket file. It is explicit because the
+            // server otherwise takes `PGPORT` from the environment, which the
+            // Nix test lanes set for their shared cluster.
+            .args(["-p", CLUSTER_PORT])
             .args(["-c", "listen_addresses=", "-c", "fsync=off"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -980,7 +986,7 @@ impl PasswordCluster {
 
     fn url(&self) -> String {
         format!(
-            "postgresql:///postgres?host={}&port=5432&user=postgres&password={CLUSTER_PASSWORD}",
+            "postgresql:///postgres?host={}&port={CLUSTER_PORT}&user=postgres&password={CLUSTER_PASSWORD}",
             self.directory.path().display()
         )
     }
