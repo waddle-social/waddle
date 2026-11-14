@@ -18,8 +18,10 @@
 //!   additionally be bare account JIDs that the `jid` parser leaves
 //!   byte-for-byte unchanged (see [`AuthzUserJid`]), so a spelling that the
 //!   parser would rewrite is rejected rather than silently aliased. That
-//!   acceptance set is defined by the `jid` parser, so the workspace pins it
-//!   to an exact version: changing the parser is a codec version change.
+//!   acceptance set is defined by the `jid` parser and by the `stringprep`
+//!   and `idna` versions it resolves to. This crate pins `jid` exactly in its
+//!   manifest and Cargo.lock fixes the other two; changing any of them is a
+//!   codec version change.
 //! - Length: at most [`MAX_AUTHZ_ID_BYTES`] source bytes, which encode to at
 //!   most 1023 wire bytes. Longer identifiers, including some valid JIDs, are
 //!   unsupported and rejected.

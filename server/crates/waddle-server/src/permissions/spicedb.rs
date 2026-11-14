@@ -35,7 +35,13 @@ impl SpiceDbPermissionBackend {
         Ok(Self { client })
     }
 
+    /// Write the built-in schema. A store already marked for another ID codec
+    /// is refused first, so this build never rewrites the schema of a store
+    /// that belongs to a different codec version.
     pub async fn ensure_schema(&self, schema: &str) -> Result<(), PermissionError> {
+        if self.codec_marker_state_before_schema().await? == CodecMarkerState::Incompatible {
+            return Err(refuse(AuthzIncarnationError::IncompatibleMarker));
+        }
         self.client
             .write_schema(schema)
             .await
@@ -53,7 +59,9 @@ impl SpiceDbPermissionBackend {
             }
             CodecMarkerState::Absent => {}
         }
-        self.refuse_unmarked_relationships().await?;
+        if self.scan_unmarked_store().await? == UnmarkedScan::MarkedMeanwhile {
+            return Ok(());
+        }
 
         // Create the marker only if the store is still exactly as scanned.
         let preconditions = guarded_resource_definitions()
@@ -86,28 +94,50 @@ impl SpiceDbPermissionBackend {
                     CodecMarkerState::Incompatible => {
                         Err(refuse(AuthzIncarnationError::IncompatibleMarker))
                     }
-                    CodecMarkerState::Absent => {
-                        self.refuse_unmarked_relationships().await?;
-                        Err(refuse(AuthzIncarnationError::Contended))
-                    }
+                    CodecMarkerState::Absent => match self.scan_unmarked_store().await? {
+                        UnmarkedScan::MarkedMeanwhile => Ok(()),
+                        UnmarkedScan::Empty => Err(refuse(AuthzIncarnationError::Contended)),
+                    },
                 }
             }
             Err(error) => Err(map_spicedb_error(error)),
         }
     }
 
+    /// The marker state of a store whose schema may predate the marker
+    /// definition, or may not exist at all. A store without the definition
+    /// cannot hold a marker, so it reads as [`CodecMarkerState::Absent`];
+    /// [`Self::ensure_codec_incarnation`] still decides such a store after
+    /// the schema is written.
+    async fn codec_marker_state_before_schema(&self) -> Result<CodecMarkerState, PermissionError> {
+        match self.read_codec_marker_rows().await {
+            Ok(rows) => Ok(classify_codec_markers(&rows)),
+            Err(error) if is_unknown_definition(&error, AUTHZ_CODEC_MARKER_DEFINITION) => {
+                Ok(CodecMarkerState::Absent)
+            }
+            Err(error) => Err(map_spicedb_error(error)),
+        }
+    }
+
     async fn codec_marker_state(&self) -> Result<CodecMarkerState, PermissionError> {
+        let rows = self
+            .read_codec_marker_rows()
+            .await
+            .map_err(map_spicedb_error)?;
+        Ok(classify_codec_markers(&rows))
+    }
+
+    async fn read_codec_marker_rows(&self) -> Result<Vec<CodecMarkerRow>, prescience::Error> {
         let mut stream = self
             .client
             .read_relationships(RelationshipFilter::new(AUTHZ_CODEC_MARKER_DEFINITION))
             .consistency(Consistency::FullyConsistent)
             .limit(AUTHZ_CODEC_MARKER_READ_LIMIT)
             .send()
-            .await
-            .map_err(map_spicedb_error)?;
+            .await?;
         let mut rows = Vec::new();
         while let Some(item) = stream.next().await {
-            let relationship = item.map_err(map_spicedb_error)?.relationship;
+            let relationship = item?.relationship;
             rows.push(CodecMarkerRow {
                 resource_id: relationship.resource.object_id().to_string(),
                 relation: relationship.relation,
@@ -119,12 +149,34 @@ impl SpiceDbPermissionBackend {
                     .map(ToString::to_string),
             });
         }
-        Ok(classify_codec_markers(&rows))
+        Ok(rows)
     }
 
-    /// Refuse a store that holds any Waddle relationship. One row per
+    /// Scan a store that was read without a marker, and refuse it if it holds
+    /// any Waddle relationship and still has no marker.
+    ///
+    /// The marker is read again after a populated definition is found: a
+    /// replica that saw no marker can scan after another replica marked the
+    /// empty store and started writing grants. Such a store is valid for this
+    /// codec and is accepted.
+    async fn scan_unmarked_store(&self) -> Result<UnmarkedScan, PermissionError> {
+        let Some(definition) = self.first_populated_definition().await? else {
+            return Ok(UnmarkedScan::Empty);
+        };
+        match self.codec_marker_state().await? {
+            CodecMarkerState::Current => Ok(UnmarkedScan::MarkedMeanwhile),
+            CodecMarkerState::Incompatible => {
+                Err(refuse(AuthzIncarnationError::IncompatibleMarker))
+            }
+            CodecMarkerState::Absent => Err(refuse(AuthzIncarnationError::UnmarkedStoreNotEmpty {
+                resource_type: definition,
+            })),
+        }
+    }
+
+    /// The first Waddle definition that holds a relationship. One row per
     /// definition is enough to decide, so each read is bounded to one.
-    async fn refuse_unmarked_relationships(&self) -> Result<(), PermissionError> {
+    async fn first_populated_definition(&self) -> Result<Option<&'static str>, PermissionError> {
         for definition in guarded_resource_definitions() {
             let mut stream = self
                 .client
@@ -136,12 +188,10 @@ impl SpiceDbPermissionBackend {
                 .map_err(map_spicedb_error)?;
             if let Some(item) = stream.next().await {
                 item.map_err(map_spicedb_error)?;
-                return Err(refuse(AuthzIncarnationError::UnmarkedStoreNotEmpty {
-                    resource_type: definition,
-                }));
+                return Ok(Some(definition));
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     pub async fn check(
@@ -427,11 +477,42 @@ fn map_spicedb_error(error: prescience::Error) -> PermissionError {
     }
 }
 
+/// Outcome of [`SpiceDbPermissionBackend::scan_unmarked_store`] when the
+/// store is not refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnmarkedScan {
+    /// No Waddle relationship exists: the store may be marked.
+    Empty,
+    /// Relationships exist, but the store now carries this codec's marker.
+    MarkedMeanwhile,
+}
+
+/// Whether SpiceDB rejected a read because `definition` is not in the
+/// schema. SpiceDB reports this with the `ERROR_REASON_UNKNOWN_DEFINITION`
+/// reason; the message form is also recognised for servers that omit error
+/// details. Neither mistake accepts a store: a store read as unmarked is still
+/// decided by the guard after the schema is written, and a missed match only
+/// fails startup.
+fn is_unknown_definition(error: &prescience::Error, definition: &str) -> bool {
+    let prescience::Error::Status {
+        message, details, ..
+    } = error
+    else {
+        return false;
+    };
+    let by_reason = details
+        .as_ref()
+        .and_then(|details| details.error_reason.as_deref())
+        == Some("ERROR_REASON_UNKNOWN_DEFINITION");
+    by_reason || message.contains(&format!("`{definition}` not found"))
+}
+
 /// Log a refusal without identifiers and return it as a permission error.
 fn refuse(error: AuthzIncarnationError) -> PermissionError {
     tracing::error!(
         reason = %error,
         codec = AUTHZ_CODEC_VERSION,
+        runbook = "docs/operations/authz-codec-cutover.md",
         "Refusing the authorization store: it is not bound to the current ID codec"
     );
     error.into()

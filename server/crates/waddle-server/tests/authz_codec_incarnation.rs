@@ -4,7 +4,9 @@
 //! definitions the guard requires to be empty. The `live_spicedb_` tests run
 //! the production backend against a disposable SpiceDB: an empty store is
 //! marked, a store holding legacy relationships or another codec's marker is
-//! refused, a marked store is accepted, and racing replicas write one marker.
+//! refused (another codec's marker before the schema is rewritten), a marked
+//! store is accepted, and racing replicas that write grants as soon as they
+//! pass write one marker and all start.
 #![cfg(feature = "test-support")]
 
 use futures::StreamExt;
@@ -22,7 +24,7 @@ use waddle_server::permissions::{
     Object, ObjectType, PermissionActor, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID,
     AUTHZ_CODEC_MARKER_READ_LIMIT, AUTHZ_CODEC_MARKER_RELATION, AUTHZ_CODEC_VERSION,
-    AUTHZ_ID_WIRE_PREFIX,
+    AUTHZ_ID_WIRE_PREFIX, MAX_AUTHZ_ID_BYTES,
 };
 use waddle_server::ServerConfig;
 
@@ -176,8 +178,17 @@ fn account_subjects_require_parser_canonical_parts() {
             "{username:?} {domain:?}"
         );
     }
-    let long = "a".repeat(700);
-    assert!(AuthzUserJid::from_account_parts(&long, "example.org").is_err());
+    // The codec limit applies to the whole bare JID, not to the localpart.
+    let domain = "example.org";
+    let fits = "a".repeat(MAX_AUTHZ_ID_BYTES - domain.len() - 1);
+    let too_long = "a".repeat(MAX_AUTHZ_ID_BYTES - domain.len());
+    assert_eq!(format!("{fits}@{domain}").len(), MAX_AUTHZ_ID_BYTES);
+    assert_eq!(format!("{too_long}@{domain}").len(), MAX_AUTHZ_ID_BYTES + 1);
+    assert!(AuthzUserJid::from_account_parts(&fits, domain).is_ok());
+    assert_eq!(
+        AuthzUserJid::from_account_parts(&too_long, domain),
+        Err(waddle_server::permissions::AuthzIdError::TooLong)
+    );
 }
 
 // Live tests share one SpiceDB and each replaces its whole content, so they
@@ -208,6 +219,13 @@ impl LiveSpiceDb {
             insecure: true,
         });
         let live = Self { config, client };
+        // Drop any marker an earlier test left, so that writing the schema is
+        // not refused. On a fresh SpiceDB the definition does not exist yet
+        // and the delete fails; that is the state wanted.
+        let _ = live
+            .client
+            .delete_relationships(RelationshipFilter::new(AUTHZ_CODEC_MARKER_DEFINITION))
+            .await;
         // Write the built-in schema through the production path, then empty
         // every definition it declares.
         live.actor()
@@ -280,10 +298,20 @@ impl LiveSpiceDb {
 }
 
 async fn guard(actor: &ActorRef<PermissionActor>) -> Result<(), AuthzIncarnationError> {
-    match actor.ask(EnsureAuthzCodecIncarnation).await {
+    incarnation_outcome(actor.ask(EnsureAuthzCodecIncarnation).await)
+}
+
+async fn ensure_schema(actor: &ActorRef<PermissionActor>) -> Result<(), AuthzIncarnationError> {
+    incarnation_outcome(actor.ask(EnsureSchema).await)
+}
+
+fn incarnation_outcome<M>(
+    result: Result<(), SendError<M, PermissionError>>,
+) -> Result<(), AuthzIncarnationError> {
+    match result {
         Ok(()) => Ok(()),
         Err(SendError::HandlerError(PermissionError::AuthzIncarnation(error))) => Err(error),
-        Err(other) => panic!("guard failed outside the incarnation check: {other:?}"),
+        Err(other) => panic!("startup step failed outside the incarnation check: {other:?}"),
     }
 }
 
@@ -356,8 +384,15 @@ async fn live_spicedb_refuses_another_codec_version() {
     )
     .await;
 
+    // A restarting replica refuses before rewriting that codec's schema, and
+    // the guard refuses on its own as well.
+    let replica = live.actor().await;
     assert_eq!(
-        guard(&live.actor().await).await,
+        ensure_schema(&replica).await,
+        Err(AuthzIncarnationError::IncompatibleMarker)
+    );
+    assert_eq!(
+        guard(&replica).await,
         Err(AuthzIncarnationError::IncompatibleMarker)
     );
     assert_eq!(
@@ -375,9 +410,37 @@ async fn live_spicedb_refuses_another_codec_version() {
 async fn live_spicedb_racing_replicas_write_one_marker() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
-    let replicas = [live.actor().await, live.actor().await, live.actor().await];
+    let mut replicas = Vec::new();
+    for _ in 0..8 {
+        replicas.push(live.actor().await);
+    }
 
-    let results = futures::future::join_all(replicas.iter().map(guard)).await;
+    // Each replica writes a grant as soon as its own guard passes, as the
+    // startup reseed does. A replica that first read no marker can therefore
+    // find another replica's grants when it scans; it must accept the store
+    // once the marker is there rather than refuse it as legacy.
+    let results = futures::future::join_all(replicas.iter().enumerate().map(
+        |(index, replica)| async move {
+            guard(replica).await?;
+            replica
+                .ask(WriteTuple {
+                    tuple: Tuple::new(
+                        Object::new(ObjectType::Server, "deployment"),
+                        Relation::new("member"),
+                        Subject::user(format!("replica{index}@example.org")),
+                    ),
+                })
+                .await
+                .expect("grant after the guard");
+            Ok::<(), AuthzIncarnationError>(())
+        },
+    ))
+    .await;
     assert!(results.iter().all(Result::is_ok), "{results:?}");
     assert_eq!(live.marker_rows().await, vec![CodecMarkerRow::current()]);
+
+    // A replica restarted afterwards sees the marker and the grants.
+    guard(&live.actor().await)
+        .await
+        .expect("marked store with grants");
 }

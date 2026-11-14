@@ -9,15 +9,22 @@
 //!
 //! The guard therefore records the codec in a marker relationship,
 //! `waddle_authz_codec:incarnation#codec@waddle_authz_codec:v2`, and writes
-//! it only into a store that holds no Waddle relationships. Before serving:
+//! it only into a store that holds no Waddle relationships.
+//!
+//! Before the built-in schema is written, the marker is read: a store marked
+//! for another codec is refused without rewriting its schema. A store whose
+//! schema lacks the marker definition, or has no schema yet, has no marker.
+//! After the schema is written and before serving:
 //!
 //! - the marker names this codec: proceed;
 //! - the marker definition holds anything else: refuse;
 //! - there is no marker: read one relationship of each Waddle definition. If
-//!   any exists, refuse. Otherwise create the marker with preconditions that
-//!   the marker definition and every Waddle definition are still empty, so
-//!   that of several replicas starting together exactly one writes it and the
-//!   others re-read it.
+//!   any exists, read the marker again: another replica may have marked the
+//!   empty store and started writing grants since the first read. Proceed if
+//!   it now names this codec, otherwise refuse. If the store is empty, create
+//!   the marker with preconditions that the marker definition and every
+//!   Waddle definition are still empty, so that of several replicas starting
+//!   together exactly one writes it and the others re-read it.
 //!
 //! Marker IDs are fixed ASCII and deliberately bypass the codec, so a later
 //! codec can still read which encoding a store holds. Refusals carry the
@@ -25,6 +32,12 @@
 //!
 //! The guard applies to the SpiceDB backend only. The local test backend keeps
 //! identifiers unencoded in its own SQL tables.
+//!
+//! The marker is the store's only record of its encoding: once it exists, a
+//! binary built before this guard must not run against the store, and the
+//! marker must not be removed by hand. The operator procedure, including the
+//! loss of every grant when a store is emptied, is
+//! `docs/operations/authz-codec-cutover.md` at the repository root.
 
 use thiserror::Error;
 
@@ -67,13 +80,21 @@ pub const AUTHZ_CODEC_MARKER_READ_LIMIT: u32 = 4;
 pub enum AuthzIncarnationError {
     #[error(
         "authorization store holds `{resource_type}` relationships but no codec marker; \
-         it was written by another ID encoding and must be emptied or rebuilt before this \
-         server can use it"
+         it was written by another ID encoding and must be emptied, with every older \
+         server stopped, before this server can use it; see \
+         docs/operations/authz-codec-cutover.md"
     )]
     UnmarkedStoreNotEmpty { resource_type: &'static str },
-    #[error("authorization store is marked for a different or unrecognised ID codec")]
+    #[error(
+        "authorization store is marked for a different or unrecognised ID codec; run the \
+         server release that wrote it and do not edit the marker; see \
+         docs/operations/authz-codec-cutover.md"
+    )]
     IncompatibleMarker,
-    #[error("authorization store changed while its codec marker was being written")]
+    #[error(
+        "authorization store changed while its codec marker was being written; restart to \
+         decide again"
+    )]
     Contended,
 }
 

@@ -55,11 +55,10 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgre
 # Actor Framework
 kameo = "0.20"
 
-# Pinned exactly: the set of user IDs the SpiceDB authorization codec accepts
-# is "bare JIDs this parser leaves unchanged" (waddle-server
-# `permissions::authz_id`). Upgrading the parser can change that set, so it is
-# a deliberate codec version bump, never a routine dependency update.
-jid = { version = "=0.12.2", features = ["serde"] }
+# waddle-server pins its own `jid` exactly; see its manifest. The pin is not
+# here because client crates inherit this entry and are also built from other
+# workspaces (apps/linux) with their own lockfiles.
+jid = { version = "0.12", features = ["serde"] }
 xmpp-parsers = "0.22"
 minidom = "0.18"
 rxml = "0.14"
