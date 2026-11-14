@@ -377,13 +377,12 @@ fn parse_public_websocket_url(raw: Option<&str>, xmpp_domain: &str) -> anyhow::R
     Ok(url)
 }
 
-/// Parse an optional typed env var. Returns `Ok(None)` when the var is
-/// unset (or empty after trimming); `Ok(Some(value))` when set and
-/// parsed successfully; `Err` with a clear context when set but
-/// unparseable.
 /// Read an optional env value that must already be written in the identity
-/// profile's canonical form. Surrounding whitespace is ignored; any other
-/// spelling the profile would change is refused rather than folded.
+/// profile's canonical form. Returns `Ok(None)` when the variable is unset
+/// or empty after trimming, and `Ok(Some(value))` when `parse` accepts the
+/// trimmed value. Surrounding whitespace is ignored; any other spelling the
+/// profile would change is an `Err` naming the variable rather than being
+/// folded.
 fn parse_optional_canonical_env<T>(
     env_key: &str,
     parse: impl FnOnce(&str) -> Result<T, IdentityError>,

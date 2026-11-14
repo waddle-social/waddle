@@ -82,8 +82,9 @@ pub struct OwnerLocalpartError {
     pub reason: IdentityError,
 }
 
-/// Parse an owner list separated by commas or whitespace. Each entry must be
-/// a canonical localpart exactly as written; duplicates are removed.
+/// Parse an owner list separated by commas, spaces, tabs or line breaks (LF
+/// or CRLF). Each entry must be a canonical localpart exactly as written;
+/// duplicates are removed.
 pub fn parse_owner_localparts(value: &str) -> Result<Vec<String>, OwnerLocalpartError> {
     let mut localparts: Vec<String> = Vec::new();
     for entry in owner_entries(value) {
@@ -100,7 +101,7 @@ pub fn parse_owner_localparts(value: &str) -> Result<Vec<String>, OwnerLocalpart
 
 fn owner_entries(value: &str) -> impl Iterator<Item = &str> {
     value
-        .split([',', ' ', '\n', '\t'])
+        .split([',', ' ', '\n', '\r', '\t'])
         .filter(|entry| !entry.is_empty())
 }
 
@@ -293,6 +294,12 @@ mod tests {
                 "icepuma".to_owned(),
                 "randax".to_owned()
             ])
+        );
+        // A list written with CRLF line endings, as a Windows-edited env
+        // file or secret produces.
+        assert_eq!(
+            parse_owner_localparts("rawkode\r\nicepuma\r\n"),
+            Ok(vec!["rawkode".to_owned(), "icepuma".to_owned()])
         );
         for refused in [
             "Rawkode",

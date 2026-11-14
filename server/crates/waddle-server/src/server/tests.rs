@@ -917,7 +917,7 @@ async fn test_seed_fixed_test_account_creates_user() {
         email: Some("admin@localhost".to_string()),
     };
 
-    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+    fixed_account::seed_fixed_test_account(state.db_pool.global_actor(), &config)
         .await
         .unwrap();
 
@@ -955,7 +955,7 @@ async fn test_seed_fixed_test_account_replaces_existing_credentials() {
         domain: "localhost".to_string(),
         email: None,
     };
-    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+    fixed_account::seed_fixed_test_account(state.db_pool.global_actor(), &config)
         .await
         .unwrap();
 
@@ -1005,7 +1005,7 @@ async fn test_seed_fixed_test_account_replaces_an_unkeyed_account() {
         email: None,
     };
 
-    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+    fixed_account::seed_fixed_test_account(state.db_pool.global_actor(), &config)
         .await
         .unwrap();
 

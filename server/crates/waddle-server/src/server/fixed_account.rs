@@ -1,16 +1,19 @@
 use crate::auth::{NativeUserStore, RegisterRequest};
+use crate::db::actor::DbActor;
 use crate::db::DatabasePool;
 use crate::server::XmppConfig;
 use anyhow::Result;
+use kameo::actor::ActorRef;
 use std::sync::Arc;
 use tracing::info;
 
+/// A native account the server resets and provisions at startup.
 #[derive(Debug, Clone)]
-pub(crate) struct FixedTestAccountConfig {
-    pub(crate) username: String,
-    pub(crate) password: String,
-    pub(crate) domain: String,
-    pub(crate) email: Option<String>,
+pub struct FixedTestAccountConfig {
+    pub username: String,
+    pub password: String,
+    pub domain: String,
+    pub email: Option<String>,
 }
 
 pub(crate) fn fixed_test_account_enabled() -> bool {
@@ -66,7 +69,7 @@ pub(crate) async fn ensure_fixed_test_account(
         .filter(|value| !value.is_empty());
 
     seed_fixed_test_account(
-        db_pool,
+        db_pool.global_actor(),
         &FixedTestAccountConfig {
             username,
             password,
@@ -85,7 +88,7 @@ pub(crate) async fn ensure_fixed_test_account(
                 anyhow::bail!("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS entries must be username:password");
             };
             seed_fixed_test_account(
-                db_pool,
+                db_pool.global_actor(),
                 &FixedTestAccountConfig {
                     username: username.trim().to_string(),
                     password: password.trim().to_string(),
@@ -100,8 +103,11 @@ pub(crate) async fn ensure_fixed_test_account(
     Ok(())
 }
 
-pub(crate) async fn seed_fixed_test_account(
-    db_pool: &Arc<DatabasePool>,
+/// Reset and provision one fixed account. The account is validated against
+/// the account profile before anything is deleted, so an invalid
+/// configuration fails without touching existing accounts.
+pub async fn seed_fixed_test_account(
+    actor: &ActorRef<DbActor>,
     config: &FixedTestAccountConfig,
 ) -> Result<()> {
     // Validate before deleting: the reset looks the name up by its folded
@@ -109,7 +115,7 @@ pub(crate) async fn seed_fixed_test_account(
     // delete another account (`admin`) before registration refuses it.
     NativeUserStore::validate_new_account(&config.username, &config.domain)
         .map_err(|err| anyhow::anyhow!("Invalid fixed test account: {err}"))?;
-    let native_user_store = NativeUserStore::new(db_pool.global_actor().clone());
+    let native_user_store = NativeUserStore::new(actor.clone());
     // Seeding runs before the startup key backfill, so this also removes a
     // row an older node wrote without its key; it would block the insert.
     native_user_store

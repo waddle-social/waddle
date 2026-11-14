@@ -16,6 +16,7 @@ use waddle_server::auth::{
 };
 use waddle_server::db::actor::{DbActor, DbExecute};
 use waddle_server::db::{Database, MigrationRunner, Value};
+use waddle_server::server::{seed_fixed_test_account, FixedTestAccountConfig};
 use waddle_xmpp::identity::{AccountLocalpart, CanonicalDomain, IdentityError};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 
@@ -67,6 +68,22 @@ async fn seed_native(actor: &ActorRef<DbActor>, username: &str, domain: &str, ke
             username.into(),
             domain.into(),
             key.map_or(Value::NullText, Value::from),
+        ],
+    )
+    .await;
+}
+
+/// The `auth_identities` row an identity provider sign-in writes for an
+/// OIDC account it provisioned.
+async fn seed_idp_identity(actor: &ActorRef<DbActor>, user_jid: &str, subject: &str) {
+    execute(
+        actor,
+        "INSERT INTO auth_identities (id, user_jid, provider_id, issuer, subject, raw_claims_json, created_at, last_login_at) \
+         VALUES (?, ?, 'idp', 'https://idp.example', ?, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        vec![
+            format!("identity-{subject}").into(),
+            user_jid.into(),
+            subject.into(),
         ],
     )
     .await;
@@ -215,9 +232,15 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
     // Spellings preparation would change.
     seed_oidc(&actor, "straße@localhost", "straße", Some("strasse")).await;
     seed_native(&actor, "Carol", DOMAIN, Some("carol@localhost")).await;
-    // Unkeyed, with the OIDC row a SCRAM sign-in writes for the same
-    // name: one account in both stores, not a collision.
+    // Unkeyed, with an OIDC row of the same name that no identity
+    // provider provisioned (no `auth_identities` row): one account in both
+    // stores, not a collision.
     seed_native(&actor, "alice", DOMAIN, None).await;
+    // An identity provider provisioned an OIDC account under a native
+    // account's exact name: two accounts, one address.
+    seed_native(&actor, "bob", DOMAIN, Some("bob@localhost")).await;
+    seed_oidc(&actor, "bob@localhost", "bob", Some("bob")).await;
+    seed_idp_identity(&actor, "bob@localhost", "bob-subject").await;
     // Folding onto the native `Carol` across the stores.
     seed_oidc(&actor, "carol@localhost", "carol", Some("carol")).await;
     // Another deployment's domain.
@@ -234,7 +257,7 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
     let report = reconcile_identity_profile(&actor, &domain)
         .await
         .expect("reconciliation");
-    assert_eq!(report.accounts, 9);
+    assert_eq!(report.accounts, 11);
     assert!(!report.is_clean());
 
     let native = |username: &'static str| {
@@ -277,6 +300,14 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
     );
     assert_eq!(report.findings(&oidc("alice@localhost")), None);
     assert_eq!(
+        report.findings(&native("bob").await),
+        Some(&[AccountFinding::FoldedCollision][..])
+    );
+    assert_eq!(
+        report.findings(&oidc("bob@localhost")),
+        Some(&[AccountFinding::FoldedCollision][..])
+    );
+    assert_eq!(
         report.findings(&native("remote").await),
         Some(&[AccountFinding::ForeignDomain][..])
     );
@@ -284,8 +315,8 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
         report.findings(&native("dave").await),
         Some(&[AccountFinding::KeyMismatch][..])
     );
-    assert_eq!(report.count(AccountFinding::FoldedCollision), 2);
-    assert_eq!(report.outside.len(), 7);
+    assert_eq!(report.count(AccountFinding::FoldedCollision), 4);
+    assert_eq!(report.outside.len(), 9);
 
     // The report is read only: running it again finds the same.
     assert_eq!(
@@ -317,20 +348,71 @@ fn oidc_names_are_transliterated_into_the_account_profile() {
     }
 }
 
-#[test]
-fn a_fixed_account_is_validated_before_it_is_reset() {
+#[tokio::test]
+async fn a_fixed_account_is_validated_before_it_is_reset() {
     assert_eq!(
         NativeUserStore::validate_new_account("admin", DOMAIN)
             .expect("account profile")
             .as_str(),
         "admin@localhost"
     );
+
+    // Seeding deletes the configured name's account before registering it,
+    // and the delete finds the row by its folded key. An invalid fixed
+    // account that folds onto an existing one (`Admin`, or `admin` at
+    // `Localhost`) must fail before that delete, leaving `admin` intact.
+    let actor = accounts_actor("identity-profile-fixed-account").await;
+    let store = NativeUserStore::new(actor.clone());
+    store
+        .register(register("admin"))
+        .await
+        .expect("register admin");
+    let original = admin_credentials(&store)
+        .await
+        .expect("existing admin credentials");
     for (username, domain) in [("Admin", DOMAIN), ("admin", "Localhost"), ("äda", DOMAIN)] {
         assert!(
             NativeUserStore::validate_new_account(username, domain).is_err(),
             "{username}@{domain}"
         );
+        let seeded = seed_fixed_test_account(
+            &actor,
+            &FixedTestAccountConfig {
+                username: username.to_owned(),
+                password: "replacement-password".to_owned(),
+                domain: domain.to_owned(),
+                email: None,
+            },
+        )
+        .await;
+        assert!(seeded.is_err(), "{username}@{domain}");
+        assert_eq!(
+            admin_credentials(&store).await.as_ref(),
+            Some(&original),
+            "{username}@{domain} reset the existing account"
+        );
     }
+    let rows = actor
+        .ask(waddle_server::db::actor::DbQuery {
+            sql: "SELECT username, domain FROM native_users".to_owned(),
+            params: vec![],
+        })
+        .await
+        .expect("native rows");
+    assert_eq!(
+        rows,
+        vec![vec![Value::from("admin"), Value::from(DOMAIN)]],
+        "no fixed account was written"
+    );
+}
+
+/// The salt and stored key of `admin@localhost`, which a reset replaces.
+async fn admin_credentials(store: &NativeUserStore) -> Option<(String, Vec<u8>)> {
+    store
+        .get_scram_credentials("admin", DOMAIN)
+        .await
+        .expect("credentials lookup")
+        .map(|credentials| (credentials.salt_b64, credentials.stored_key))
 }
 
 fn form(fields: Vec<Field>) -> DataForm {

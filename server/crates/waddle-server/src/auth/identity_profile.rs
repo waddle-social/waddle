@@ -68,10 +68,13 @@ pub enum AccountFinding {
     MissingKey,
     /// The recorded lookup key is not the key of the stored name.
     KeyMismatch,
-    /// The stored names of two or more accounts fold to one address, across
-    /// both stores. At most one of them can hold that address. Rows whose
-    /// stored names are identical (an OIDC row and the native account whose
-    /// SCRAM sign-in created it) are one account, not a collision.
+    /// Two or more accounts claim one address, across both stores: their
+    /// stored names fold to it, or an identity provider provisioned an OIDC
+    /// account under a native account's exact name. At most one of them can
+    /// hold that address. A native account and an OIDC row with its exact
+    /// name that no identity provider provisioned (a `users` row with no
+    /// `auth_identities` row, such as one written for that native account)
+    /// are one account, not a collision.
     FoldedCollision,
     /// A native account whose domain is not this deployment's account
     /// domain. It is not an account of this deployment.
@@ -142,10 +145,30 @@ impl IdentityProfileReport {
     }
 }
 
+/// A row that holds a stored name.
+#[derive(Clone, Debug)]
+struct NameHolder {
+    record: AccountRecord,
+    /// An OIDC row with an `auth_identities` row: an identity provider
+    /// provisioned it, so it is an account of its own even when a native
+    /// account has the same name. A row without one mirrors the native
+    /// account of that name.
+    provisioned_by_idp: bool,
+}
+
 /// Rows grouped by the address their stored names fold to, and within that
-/// by the exact stored name and domain. Rows with the same exact name are
-/// one account; more than one exact name in a group is a collision.
-type FoldedNames = BTreeMap<String, BTreeMap<(String, String), Vec<AccountRecord>>>;
+/// by the exact stored name and domain. More than one exact name in a group
+/// is a collision. Rows with the same exact name are one account, unless an
+/// identity provider provisioned the OIDC row: then it is a separate
+/// account that shares the native account's name, also a collision.
+type FoldedNames = BTreeMap<String, BTreeMap<(String, String), Vec<NameHolder>>>;
+
+fn exact_name_is_shared(holders: &[NameHolder]) -> bool {
+    let native = holders
+        .iter()
+        .any(|holder| matches!(holder.record, AccountRecord::Native { .. }));
+    native && holders.iter().any(|holder| holder.provisioned_by_idp)
+}
 
 /// Read both account stores and report every account outside the identity
 /// profile at `domain`, this deployment's canonical account domain. Read
@@ -160,7 +183,10 @@ pub async fn reconcile_identity_profile(
 
     let users = query(
         actor,
-        "SELECT jid, xmpp_localpart, localpart_key FROM users",
+        "SELECT jid, xmpp_localpart, localpart_key, \
+         CASE WHEN EXISTS (SELECT 1 FROM auth_identities WHERE auth_identities.user_jid = users.jid) \
+         THEN 1 ELSE 0 END \
+         FROM users",
     )
     .await?;
     for row in users {
@@ -168,6 +194,7 @@ pub async fn reconcile_identity_profile(
         let stored_jid = text(&row, 0)?;
         let localpart = text(&row, 1)?;
         let key = optional_text(&row, 2)?;
+        let provisioned_by_idp = integer(&row, 3)? != 0;
         let record = AccountRecord::Oidc {
             jid: stored_jid.clone(),
         };
@@ -194,7 +221,10 @@ pub async fn reconcile_identity_profile(
                 .or_default()
                 .entry((localpart.clone(), domain.as_str().to_owned()))
                 .or_default()
-                .push(record.clone());
+                .push(NameHolder {
+                    record: record.clone(),
+                    provisioned_by_idp,
+                });
         }
         if !found.is_empty() {
             findings.entry(record).or_default().extend(found);
@@ -244,17 +274,25 @@ pub async fn reconcile_identity_profile(
                 .or_default()
                 .entry((username.clone(), row_domain.clone()))
                 .or_default()
-                .push(record.clone());
+                .push(NameHolder {
+                    record: record.clone(),
+                    provisioned_by_idp: false,
+                });
         }
         if !found.is_empty() {
             findings.entry(record).or_default().extend(found);
         }
     }
 
-    for names in folded.into_values().filter(|names| names.len() > 1) {
-        for record in names.into_values().flatten() {
+    for names in folded.into_values() {
+        let colliding =
+            names.len() > 1 || names.values().any(|holders| exact_name_is_shared(holders));
+        if !colliding {
+            continue;
+        }
+        for holder in names.into_values().flatten() {
             findings
-                .entry(record)
+                .entry(holder.record)
                 .or_default()
                 .push(AccountFinding::FoldedCollision);
         }
@@ -323,7 +361,7 @@ fn integer(row: &[Value], index: usize) -> Result<i64, AuthError> {
     match row_value(row, index).map_err(|error| AuthError::DatabaseError(error.to_string()))? {
         Value::Integer(value) => Ok(*value),
         _ => Err(AuthError::DatabaseError(
-            "native account id is not an integer".to_string(),
+            "account column is not an integer".to_string(),
         )),
     }
 }

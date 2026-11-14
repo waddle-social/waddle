@@ -321,7 +321,7 @@ pub async fn local_account_jid_exists(
 /// rather than presented under another account's address.
 ///
 /// Rows are one account only when their stored names are identical (an OIDC
-/// row and the native row its SCRAM sign-in mirrors). Names that differ only
+/// row and a native row for the same name). Names that differ only
 /// in case are different rows, so a legacy `Bob` never takes the place of
 /// the canonical `bob` before the non-canonical row is left out.
 pub(crate) async fn search_local_accounts(
