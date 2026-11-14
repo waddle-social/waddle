@@ -441,6 +441,15 @@ JIDs. Both issues must be resolved before remote grants can be used.
   is on the trusted-home list that the replica runs, so removing a home from
   the list withdraws that authority without revoking grants one by one (G17).
   Condition (b) is never met on a dialback-only stream.
+- A `pkix` stream of a trusted home may be verified under the public-WebPKI
+  trust profile (D2) as well as a private-CA profile; the S2S configuration
+  can require a private-CA profile for a given trusted home. Public chains
+  are not checked for revocation, so a trusted home whose key is
+  compromised keeps privileged authority and room moderation over `pkix`
+  streams until that certificate expires, at most the public leaf validity
+  ceiling, unless the operator removes the home from the trusted-home list
+  or denylists it. This residual risk is accepted as part of activation
+  (G22).
 - A grant that is not honored contributes nothing to admission. A privileged
   or moderator grant that fails either condition yields neither `moderate` nor
   the member-level permissions, such as `read` and `send_message`, that the

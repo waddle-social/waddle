@@ -313,7 +313,8 @@ cases.
 | Wrong stream/content namespace or unsupported stream version | `invalid-namespace` / `unsupported-version`, then close. |
 | Missing/invalid domain-only stream header address | `bad-format`, then close. A mandatory pre-TLS `from` is ADR-0020 D2 policy; its absence also receives `bad-format` (see [codec decisions](#codec-decisions-for-g1-and-g3)). |
 | Header recipient not served or not the selected destination | `host-unknown`, then close. |
-| Source pair not allowed, or source identity changes | `invalid-from`, then close. |
+| Source pair not admitted, whichever rule refused it | `policy-violation`, then close (see [decisions after the G4 review](#decisions-after-the-g4-review)). |
+| Source identity changes on a later header, or a source spelling the identity profile refuses | `invalid-from`, then close. |
 | Application stanza before completed authentication | `not-authorized`, then close. |
 | Peer declines/strips STARTTLS or sends another negotiation command | Attempt required STARTTLS if the feature was stripped; refuse any fallback. Unexpected command outside the defined SASL replacement/abort transitions: `policy-violation`; close. |
 | TLS/certificate/path/name/revocation failure | TLS alert when available, then TCP close; never EXTERNAL success. |
@@ -362,10 +363,10 @@ cancellation; no unbounded spawned-task or logging queue is allowed.
 | TCP connect / initial header / TLS / each expected stream restart | 5 seconds each; 20 seconds total through authenticated post-SASL header. Timers do not reset on partial bytes. |
 | Whole SASL phase | 5 seconds from mechanisms offer, including challenges, replacements and abort/retry; never renew this or the total negotiation deadline. |
 | SASL exchanges / aborts / XML stream restarts | 3 auth starts total, 3 abort elements total; at most the expected post-TLS and post-success headers. Replacements/aborts never add a stream restart. |
-| Established incomplete element / idle | 5 seconds / 30 seconds; continuous whitespace cannot avoid the element/rate limits. |
+| Established incomplete element / idle | 5 seconds / 300 seconds, as [the connection-manager design](s2s-connection-manager-2047.md#deadlines) sets them (gate G7); continuous whitespace cannot avoid the element/rate limits. |
 | Input rate | 64 KiB/second, burst 128 KiB per socket; 512 KiB/second, burst 1 MiB globally. |
 | Terminal write and close / operator drain | 1 second / 5 seconds, capped by the process's remaining drain budget. |
-| Reconnect | One attempt per configured pair at startup; no autonomous retry in this slice. Fixture restarts initiate fresh attempts. |
+| Outbound attempts | Made on demand through the connection manager, one in progress per directional pair, with per-domain backoff after a failure (gate G7); no autonomous retry. |
 
 Bound source-IP accounting to the admitted socket set plus at most 256 expiring
 rate-bucket entries with a 60-second inactive expiry; reject new buckets while full. Source-domain claims cannot
@@ -558,19 +559,28 @@ here is executed evidence; the evidence is
 
 **Internationalized domains (B1).** A stream header's `from` and `to` are
 read from the raw attribute text into the identity profile's
-`CanonicalDomain` (`CanonicalDomain::parse_exact`), not through JID
-preparation, which folds some spellings (for example `ß` to `ss`). A U-label
+`CanonicalDomain` (`CanonicalDomain::parse_exact`), never through JID
+preparation: Nameprep folds some spellings (for example `ß` to `ss`) and,
+with its Unicode 3.2 tables, refuses IDNA2008 labels made of later code
+points (Tifinagh, N'Ko, Glagolitic and others) whose A-labels it accepts,
+so two Waddle deployments could not reach each other under such a name. A
+value is domain-only when it contains neither `@` nor `/`. ASCII uppercase
+letters are mapped to lowercase before the domain is read, which joins
+nothing DNS keeps apart; any other spelling that preparation would change,
+such as a width, compatibility or non-ASCII case form, is refused. The same
+reading applies to an authorization identity in SASL EXTERNAL. A U-label
 and an A-label spelling of one domain are the same address, and every pair,
 admission and TLS-peer comparison uses the canonical form; `TlsPeer`,
 `InboundAdmission`, `InitiatingConfig`, `AuthorizationRequest` and
-`NegotiatedStream` carry `CanonicalDomain`. A spelling the profile refuses,
-such as one that needs case or width folding, closes the stream with an
-explicit error: `invalid-from` for `from` and `host-unknown` for `to`, in
-both roles (the table above). Emitted headers write U-labels, as RFC 7622
-§3.2.1 asks of an address presented to a peer; stanza addresses sent to
-peers will also be U-labels when routing exists (W5a). Stanza addresses on
-an established stream are compared with the stream's pair after mapping
-their domain into the canonical form.
+`NegotiatedStream` carry `CanonicalDomain`. A refused spelling closes the
+stream with an explicit error: `invalid-from` for `from` and
+`host-unknown` for `to`, in both roles (the table above). Emitted headers
+write U-labels, as RFC 7622 §3.2.1 asks of an address presented to a peer;
+stanza addresses sent to peers will also be U-labels when routing exists
+(W5a). A stanza's `to` and `from` on an established stream are read with
+the identity profile's address parser (`identity::parse_jid`), also without
+JID preparation, compared with the stream's pair, and handed on rewritten
+in canonical form.
 
 **Direct TLS.** Outbound XEP-0368 direct TLS is deferred to the discovery
 slice (W4d), which brings `_xmpps-server` targets. The connection manager
@@ -605,6 +615,18 @@ header check found.
 `jabber:server:dialback` namespace to the `db` prefix on an emitted header,
 for the dialback slice. Nothing sets it in this release.
 
+**Trusted homes on the public profile (D8).** A domain on the trusted-home
+list may authenticate under the public-WebPKI profile; an operator who
+wants a trusted home to count only on its own CA lists it in
+`admission.require_private_ca` with a private-CA profile. Public chains are
+not checked for revocation (verifier design, "Revocation of public
+chains"), so a trusted home's compromised key keeps its privileged
+authority until its certificate expires, at most the public leaf validity
+ceiling, unless the operator denylists the domain or removes it from the
+trusted-home list and restarts. This residual risk is recorded in
+[ADR-0020 D8](../adrs/0020-independent-community-federation.md#decision-remote-authority-and-reassigned-jids-d8)
+and accepted as part of the activation decision (gate G22).
+
 **Recorded deviations and restrictions (B1).**
 
 - RFC 6120 §13.8.4 names `TLS_RSA_WITH_AES_128_CBC_SHA` as mandatory to
@@ -623,6 +645,31 @@ for the dialback slice. Nothing sets it in this release.
   which closes with `conflict`, rate limited as the connection-manager
   design records; the earlier rule above, which refused the duplicate and
   kept the incumbent, is superseded.
+- One stream per directional pair is a restriction: RFC 6120 allows more,
+  and a pooled or clustered peer, such as ejabberd with
+  `max_s2s_connections` above one, opens several. Its streams replace one
+  another about once per replacement interval (30 seconds by default), and
+  a stream refused with `conflict` in between is retried by the peer. The
+  harness slice (W10) tests clustered ejabberd with `max_s2s_connections`
+  above one.
+- ASCII uppercase letters in a stream header address or a SASL
+  authorization identity are mapped to lowercase, more liberal than the
+  identity profile's exact-spelling rule and safe because DNS does not
+  distinguish ASCII case. Other spellings that RFC 7622 preparation would
+  map (width, compatibility and non-ASCII case forms) are refused instead
+  of being folded.
+- A-labels are accepted in received headers and stanza addresses and read
+  as the same domain as their U-labels, although RFC 7622 §3.2.1 says a
+  prepared domainpart contains no A-labels; emitted headers use U-labels.
+- A stanza address on an established stream gets no ASCII case mapping:
+  its domain must be one canonical spelling, as everywhere else the
+  identity profile reads addresses, and a stanza whose `to` or `from` is
+  outside the profile closes the stream with `improper-addressing`.
+- A failed SASL EXTERNAL exchange closes the stream. RFC 6120 §6.4.5 says
+  the receiving entity SHOULD allow a reasonable number of retries where
+  appropriate for the mechanism; a certificate that failed once fails
+  again, so this profile allows none. Replacement and abort within the
+  exchange budget are the only second attempts.
 
 ## Acceptance evidence required of the future implementation
 
