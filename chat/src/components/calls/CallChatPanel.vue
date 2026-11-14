@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { css } from "styled-system/css";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -90,33 +91,43 @@ watch(
 );
 
 onMounted(() => void nextTick(scrollToBottom));
+
+// HuddlePanel board thread: avatar · author + time · body, composer below.
+const rootClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" });
+const logClass = css({ flex: "1 1 auto", minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", padding: "8px 0" });
+const emptyClass = css({ margin: "auto", padding: "4", textAlign: "center", fontSize: "13px", color: "fg.muted" });
+const rowClass = css({ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr)", gap: "2px 10px", padding: "8px 16px", "& > :first-child": { gridRow: "1 / span 2" } });
+const metaClass = css({ display: "flex", alignItems: "baseline", gap: "1.5", minWidth: 0 });
+const authorClass = css({ font: "700 14px/1.3 {fonts.body}", color: "fg" });
+const timeClass = css({ fontSize: "13px", color: "fg.muted" });
+const bodyClass = css({ minWidth: 0, fontSize: "14px", lineHeight: "1.45" });
 </script>
 
 <template>
-  <div class="call-chat">
-    <div ref="messagesRef" class="call-chat__messages" role="log" aria-label="Call chat messages">
-      <p v-if="!hasMessages" class="call-chat__empty type-caption text-muted-foreground">
+  <div :class="rootClass">
+    <div ref="messagesRef" :class="logClass" role="log" aria-label="Call chat messages">
+      <p v-if="!hasMessages" :class="emptyClass">
         No messages yet. Say hello.
       </p>
       <div
         v-for="m in messages"
         :key="m.id"
-        class="call-chat__row"
+        :class="rowClass"
         :data-message-id="m.id"
       >
         <UserAvatar
           :name="m.author"
           :jid="avatarJidFor(m)"
-          size="xs"
+          size="sm"
         />
-        <div class="call-chat__bubble">
-          <div class="call-chat__meta">
-            <span class="call-chat__author type-control">{{ m.author }}</span>
-            <time
-              :datetime="m.createdAt"
-              class="call-chat__time type-caption text-muted-foreground"
-            >{{ timeLabel(m.createdAt) }}</time>
-          </div>
+        <div :class="metaClass">
+          <span :class="authorClass">{{ m.author }}</span>
+          <time
+            :datetime="m.createdAt"
+            :class="timeClass"
+          >{{ timeLabel(m.createdAt) }}</time>
+        </div>
+        <div :class="bodyClass">
           <MessageBody :message="m" compact />
         </div>
       </div>
@@ -141,48 +152,3 @@ onMounted(() => void nextTick(scrollToBottom));
     />
   </div>
 </template>
-
-<style scoped>
-.call-chat {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.call-chat__messages {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  padding: 0.75rem;
-}
-
-.call-chat__empty {
-  margin: auto;
-  text-align: center;
-}
-
-.call-chat__row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-}
-
-.call-chat__bubble {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.call-chat__meta {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-
-.call-chat__author {
-  font-weight: 600;
-}
-</style>
