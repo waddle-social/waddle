@@ -350,7 +350,7 @@ cancellation; no unbounded spawned-task or logging queue is allowed.
 | Open S2S sockets, all stages | 32 per process; 16 inbound and 16 outbound. |
 | Unauthenticated inbound sockets | 8 globally; 4 per source IP, before header parsing. |
 | Concurrent expensive handshakes | 4 globally; per-IP and peer limits also apply. |
-| Established streams | 1 per exact directional pair; reject duplicate, do not evict incumbent. |
+| Established streams | 1 per exact directional pair; a new authenticated stream replaces the incumbent, rate limited (see [decisions after the G4 review](#decisions-after-the-g4-review)). |
 | Inbound accept rate | Token bucket 8/second, burst 8 globally; 2/second, burst 4 per source IP. |
 | Initial/restarted header or SASL element | 8 KiB including attributes; decoded authzid at most 1 KiB. |
 | XML top-level stanza | 64 KiB raw UTF-8, bounded incrementally before DOM construction. |
@@ -453,12 +453,14 @@ and closes with the first failing condition:
 | --- | --- |
 | `version` absent or below 1.0 | `unsupported-version` |
 | `to` absent, empty, not a JID or not domain-only | `bad-format` |
+| `to` spelled in a form the identity profile refuses | `host-unknown` |
 | `to` names a formerly served domain | `host-gone` |
 | `to` names a domain that is not served | `host-unknown` |
 | `from` absent, empty, not a JID or not domain-only, on any header including the pre-TLS one | `bad-format` |
+| `from` spelled in a form the identity profile refuses | `invalid-from` |
 | A later header changes the destination | `host-unknown` |
 | A later header changes the source | `invalid-from` |
-| The source and destination pair is not admitted | `invalid-from` |
+| The source and destination pair is not admitted | `policy-violation` |
 
 A certificate verified for a domain other than the header's `from` closes
 with `invalid-from`. The initiating role checks the response header in the
@@ -530,7 +532,8 @@ usable certificate, and an initiating side whose peer offers no EXTERNAL are
 explicit decision points. While dialback is disabled each closes with
 `policy-violation`; the dialback slice decides their behavior under gate G5.
 
-**Carried to the connection manager (G7).** The codec builds the full tree of
+**Carried to the connection manager (G7).** Implemented and recorded in
+[the connection-manager design](s2s-connection-manager-2047.md). The codec builds the full tree of
 a first-level stanza, up to the stanza ceilings, before the negotiation
 refuses it with `not-authorized`. The connection manager adds a
 pre-authentication decoder mode: until SASL succeeds, a first-level element
@@ -540,6 +543,86 @@ control-element ceiling. It also owns the deadlines, rate limits, per-address
 and global socket caps, the verifier-backed TLS peer, the certificate recheck
 before authorization, `VerifiedPeerStream`, and capacity planning that uses
 the resident-memory figure above.
+
+### Decisions after the G4 review
+
+The independent G4 review of this design did not pass. The owner decided
+the following on 2026-11-14, and the connection-manager slice (W4c)
+implemented them in the codec; the resource-model decisions of the same
+review are recorded in
+[the connection-manager design](s2s-connection-manager-2047.md). Nothing
+here is executed evidence; the evidence is
+`crates/waddle-xmpp/tests/s2s_stream_addresses.rs`,
+`crates/waddle-xmpp/tests/s2s_pre_authentication.rs` and the updated
+`crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs`.
+
+**Internationalized domains (B1).** A stream header's `from` and `to` are
+read from the raw attribute text into the identity profile's
+`CanonicalDomain` (`CanonicalDomain::parse_exact`), not through JID
+preparation, which folds some spellings (for example `ß` to `ss`). A U-label
+and an A-label spelling of one domain are the same address, and every pair,
+admission and TLS-peer comparison uses the canonical form; `TlsPeer`,
+`InboundAdmission`, `InitiatingConfig`, `AuthorizationRequest` and
+`NegotiatedStream` carry `CanonicalDomain`. A spelling the profile refuses,
+such as one that needs case or width folding, closes the stream with an
+explicit error: `invalid-from` for `from` and `host-unknown` for `to`, in
+both roles (the table above). Emitted headers write U-labels, as RFC 7622
+§3.2.1 asks of an address presented to a peer; stanza addresses sent to
+peers will also be U-labels when routing exists (W5a). Stanza addresses on
+an established stream are compared with the stream's pair after mapping
+their domain into the canonical form.
+
+**Direct TLS.** Outbound XEP-0368 direct TLS is deferred to the discovery
+slice (W4d), which brings `_xmpps-server` targets. The connection manager
+dials STARTTLS only, and the codec has no direct-TLS entry point.
+
+**Admission refusals before TLS** receive `policy-violation`, whichever rule
+refused the pair (the table above). A probe can still tell an admitted
+domain from a refused one by whether STARTTLS is offered; that disclosure
+of list membership is accepted as low risk.
+
+**Pre-authentication decoding.** Besides the rules carried to the
+connection manager below, the control-element ceiling also applies to
+stream-namespace elements (features and stream errors) before SASL
+succeeds, and a connection whose first bytes are not XML, such as a TLS
+ClientHello sent to the STARTTLS port, closes without any XML
+(`CloseReason::NotXml`).
+
+**Peer features.** The initiating role reads only whether a features
+element offers STARTTLS and whether it offers the SASL EXTERNAL mechanism;
+unknown, malformed or unrelated children are ignored instead of failing the
+stream with `bad-format`.
+
+**Error responses.** When the receiving server's response header fails the
+initiating role's checks, for example because it carries `from=''` as
+RFC 6120 §4.9.1.3 allows a server that cannot serve the requested domain,
+the next element decides: a stream error from the peer closes the stream
+with that error, which the connection manager classifies for backoff (for
+example `host-unknown`), and anything else closes it with the condition the
+header check found.
+
+**Dialback namespace.** `StreamHeader::declare_dialback` binds the
+`jabber:server:dialback` namespace to the `db` prefix on an emitted header,
+for the dialback slice. Nothing sets it in this release.
+
+**Recorded deviations and restrictions (B1).**
+
+- RFC 6120 §13.8.4 names `TLS_RSA_WITH_AES_128_CBC_SHA` as mandatory to
+  implement. It is not offered: RFC 9325 §4.2.1 recommends against static
+  RSA key transport and CBC suites, and rustls implements neither.
+- A receiving server ignores the TLS Server Name Indication of an inbound
+  connection and selects the local domain and its certificate from the
+  stream header's `to` (RFC 7590 §3.5 and RFC 6120 allow either). The
+  header is read before the handshake on a STARTTLS connection, which is
+  the only kind accepted.
+- A stream header without `version` is refused with `unsupported-version`
+  (RFC 6120 §4.7.5 reads it as version 0.9, which this profile does not
+  speak), and one without `to` with `bad-format`. Both are restrictions of
+  this profile.
+- A duplicate stream for a directional pair replaces the existing one,
+  which closes with `conflict`, rate limited as the connection-manager
+  design records; the earlier rule above, which refused the duplicate and
+  kept the incumbent, is superseded.
 
 ## Acceptance evidence required of the future implementation
 
