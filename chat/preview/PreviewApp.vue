@@ -6,6 +6,9 @@ import { connectionStore } from "@/lib/connection-store";
 import { appController } from "@/stores/app-controller";
 import { $xmppStatus } from "@/stores/xmpp-status";
 import type { ChatAppController } from "@/shell/chat-app-controller";
+import { seedEvents } from "./seed-events";
+import { seedFeed } from "./seed-feed";
+import { seedPeople } from "./seed-people";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
@@ -67,6 +70,10 @@ function seed(c: ChatAppController) {
   c.messaging.mentionedChannelCounts.value = { [room("design")]: 1 };
 
   if (["offline", "reconnecting", "error", "reconnected", "superseded", "drawer-details"].includes(screen)) void c.selectChannel("general");
+  // Community pages (events-*, feed-*, members-*, rooms-*, dialog-*): each seeder ignores other screens.
+  seedEvents(c, screen);
+  seedFeed(c, screen);
+  seedPeople(c, screen);
   if (screen === "jump") c.ui.showQuickSwitcher.value = true;
   if (screen === "drawer-nav") c.ui.showMobileNav.value = true;
   if (screen === "drawer-details") c.ui.showMobileDetails.value = true;
