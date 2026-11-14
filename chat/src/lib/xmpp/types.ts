@@ -567,6 +567,8 @@ export interface DiscoveredChannel {
 
 export interface DiscoveredSpace {
   id: string;
+  /** PubSub service that hosts the Space node; `id` is the node on this service. */
+  serviceJid?: string;
   name: string;
   role?: "owner" | "admin" | "moderator" | "member" | null;
 }

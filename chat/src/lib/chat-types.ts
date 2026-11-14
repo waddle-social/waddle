@@ -1,5 +1,7 @@
 export interface SpaceSummary {
   id: string;
+  /** PubSub service that hosts the Space node; `id` is the node on this service. */
+  serviceJid?: string;
   name: string;
   description?: string | null;
   icon_url?: string | null;

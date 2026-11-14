@@ -127,6 +127,7 @@ export function useChannelMessages(
     activeChannelId,
     currentChannel,
     messages,
+    roomJidForChannel,
   });
   const {
     firstUnseenId,

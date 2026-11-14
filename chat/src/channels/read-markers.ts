@@ -28,13 +28,15 @@ type UseChannelReadMarkersDeps = {
   activeChannelId: Ref<string | null>;
   currentChannel: Ref<ChannelSummary | null>;
   messages: Ref<TimelineMessage[]>;
+  /** Canonical room address for a local channel id; `null` when unknown or ambiguous. */
+  roomJidForChannel?: (channelId: string) => string | null;
 };
 type MarkDisplayedOptions = {
   syncMds?: boolean;
 };
 
 export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
-  const { xmppClient, activeSpaceId, activeChannelId, currentChannel, messages } = deps;
+  const { xmppClient, activeSpaceId, activeChannelId, currentChannel, messages, roomJidForChannel } = deps;
 
   const firstUnseenId = ref<string | null>(null);
   const { sendDisplayedMarkers } = useReadReceiptPreference();
@@ -98,7 +100,11 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
 
   function persistLastSeen(channelId: string, messageId: string) {
     if (xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return;
-    setLastSeen(roomKey(channelId), messageId);
+    const channel = currentChannel.value;
+    const roomJid = roomJidForChannel?.(channelId)
+      ?? (channel?.id === channelId && channel.jid ? barePeerJid(channel.jid) : null);
+    if (!roomJid) return;
+    setLastSeen(roomKey(roomJid), messageId);
   }
 
   return {

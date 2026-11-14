@@ -10,6 +10,7 @@ import type {
 } from "./types";
 import type { XmppCondition, XmppStreamReason } from "../telemetry-observations";
 import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
+import { qualifiedSpaceKey } from "./qualified-identity";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 import { stanzaErrorContext } from "./stanza-error-context";
 
@@ -483,6 +484,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const spaceBookmarkedRoomJids = new Set<string>();
   const userBookmarkedRoomJids = new Set<string>();
   const spaces: DiscoveredSpace[] = [];
+  const seenSpaceKeys = new Set<string>();
   let serverRole: DiscoveryRole = null;
 
   const serverInfoResult = await sendDiscoInfo(xmpp, domain).catch(() => null);
@@ -495,6 +497,8 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     for (const item of spaceItems) {
       if (!item.node) continue;
       const spaceId = item.node;
+      const spaceKey = qualifiedSpaceKey(services.spaces, item.node);
+      if (seenSpaceKeys.has(spaceKey)) continue;
       let role = serverRole;
       try {
         const info = await sendDiscoInfo(xmpp, services.spaces, item.node);
@@ -522,7 +526,8 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         roomCatalogComplete = false;
         bookmarkCatalogComplete = false;
       }
-      spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
+      seenSpaceKeys.add(spaceKey);
+      spaces.push({ id: spaceId, serviceJid: services.spaces, name: item.name ?? spaceId, role });
     }
   } catch {
     roomCatalogComplete = false;
