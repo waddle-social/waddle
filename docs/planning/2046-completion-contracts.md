@@ -350,6 +350,16 @@ In dependency order. Sizes are estimates from reading source.
    exist, and a release whose owner preparation changed has no automated
    sequencing of the owner Job.
 
+   Production is installed fresh instead of cut over: its data is
+   discarded, both components are listed in `kustomization.yaml` with the
+   cutover record of a newly created database, and chart 0.4.13 adds
+   `restrictedRuntime.handoff.awaitOwnerJob`, which renders the Deployment
+   at zero replicas until the owner Job has published the handoff, so that
+   the first release can render the owner CronJob. A serving Deployment is
+   never scaled down for a missing handoff. The procedure is
+   [the fresh install runbook](../runbooks/fresh-production-install.md);
+   it has not been run against the cluster.
+
 Exit test:
 `restricted_startup_runs_pinned_preflight_then_refuses_unprepared_stores`
 (`server/crates/waddle-server/tests/physical_attestation/runtime_startup.rs`)

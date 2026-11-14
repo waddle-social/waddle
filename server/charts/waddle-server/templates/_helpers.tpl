@@ -172,20 +172,48 @@ nothing without cluster access (`helm template`), so an offline render needs
 the document in values.
 */}}
 {{- define "waddle-server.restrictedHandoff" -}}
-{{- $document := dict -}}
+{{- $source := include "waddle-server.restrictedHandoffSource" . -}}
+{{- if not $source -}}
+{{- fail (printf "restrictedRuntime.enabled needs the handoff: set restrictedRuntime.handoff.document, or run the owner Job so that ConfigMap %s exists" (include "waddle-server.handoffPinsConfigMapName" .)) -}}
+{{- end -}}
+{{- $document := fromJson $source -}}
+{{- $_ := set $document "release_git_sha" .Values.restrictedRuntime.releaseGitSha -}}
+{{- toJson $document -}}
+{{- end -}}
+
+{{/*
+The handoff document as its source holds it, as JSON, or an empty string
+when neither values nor the published ConfigMap holds one.
+*/}}
+{{- define "waddle-server.restrictedHandoffSource" -}}
 {{- if .Values.restrictedRuntime.handoff.document -}}
-{{- $document = deepCopy .Values.restrictedRuntime.handoff.document -}}
+{{- toJson .Values.restrictedRuntime.handoff.document -}}
 {{- else -}}
 {{- $published := lookup "v1" "ConfigMap" .Release.Namespace (include "waddle-server.handoffPinsConfigMapName" .) -}}
 {{- if and $published $published.data (hasKey $published.data "handoff.json") -}}
-{{- $document = fromJson (index $published.data "handoff.json") -}}
+{{- toJson (fromJson (index $published.data "handoff.json")) -}}
 {{- end -}}
 {{- end -}}
-{{- if not $document -}}
-{{- fail (printf "restrictedRuntime.enabled needs the handoff: set restrictedRuntime.handoff.document, or run the owner Job so that ConfigMap %s exists" (include "waddle-server.handoffPinsConfigMapName" .)) -}}
 {{- end -}}
-{{- $_ := set $document "release_git_sha" .Values.restrictedRuntime.releaseGitSha -}}
-{{- toJson $document -}}
+
+{{/*
+"true" when the restricted server has to wait for the owner Job of a fresh
+install: `handoff.awaitOwnerJob` is set and no handoff exists yet. The
+release then renders the Deployment at zero replicas and no handoff
+ConfigMap, so that the same release renders the owner CronJob that
+produces the handoff. A Deployment that is serving is never scaled down for
+this: without a handoff its render fails, as it does when the setting is
+off.
+*/}}
+{{- define "waddle-server.restrictedHandoffPending" -}}
+{{- $restricted := .Values.restrictedRuntime -}}
+{{- if and $restricted.enabled $restricted.handoff.awaitOwnerJob (not (include "waddle-server.restrictedHandoffSource" .)) -}}
+{{- $live := lookup "apps/v1" "Deployment" .Release.Namespace (include "waddle-server.fullname" .) -}}
+{{- if and $live $live.spec (gt (int ($live.spec.replicas | default 0)) 0) -}}
+{{- fail (printf "restrictedRuntime.enabled needs the handoff, and Deployment %s is serving: run the owner Job so that ConfigMap %s exists" (include "waddle-server.fullname" .) (include "waddle-server.handoffPinsConfigMapName" .)) -}}
+{{- end -}}
+true
+{{- end -}}
 {{- end -}}
 
 {{/*

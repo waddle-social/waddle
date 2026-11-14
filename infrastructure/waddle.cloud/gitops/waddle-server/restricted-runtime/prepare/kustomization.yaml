@@ -1,14 +1,9 @@
 # Restricted PostgreSQL runtime, preparation half (#2116).
 #
-# Not referenced by ../../kustomization.yaml, so it changes nothing until an
-# operator adds
-#
-#   components:
-#     - restricted-runtime/prepare
-#
-# there, as the cutover runbook (docs/runbooks/restricted-runtime-cutover.md)
-# directs. It declares the PostgreSQL roles and renders the suspended owner
-# CronJob. The server keeps serving under its current login.
+# Listed under `components:` in ../../kustomization.yaml. It declares the
+# PostgreSQL roles and renders the suspended owner CronJob that an operator
+# runs as docs/runbooks/fresh-production-install.md (a new database) or
+# docs/runbooks/restricted-runtime-cutover.md (an existing one) directs.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 patches:

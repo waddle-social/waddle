@@ -32,36 +32,40 @@ spec:
           secretName: postgresql-waddle-attestor-installer
       ownerJob:
         enabled: true
-        # Replace each all-zero UUID with one generated for this cutover
-        # (`uuidgen`), and `role_oid` with the old login's OID. The chart
-        # refuses to render the all-zero operation ID and generation, and
-        # `emit-handoff` refuses an all-zero or repeated record ID.
-        keypoolGeneration: 00000000-0000-0000-0000-000000000000
-        installationOperationId: 00000000-0000-0000-0000-000000000000
-        # First cutover only: the old servers' keypair-slot table is retired
-        # under the lease lifetime they ran with (30 s unless
-        # WADDLE_CLUSTERING_LEASE_TTL_MS was raised). Remove afterwards.
-        ownerPhaseExtraArgs:
-          - --legacy-keypair-slots
-          - retire
-          - --legacy-ttl
-          - 30s
+        # Generated (`uuidgen`) for the fresh install of this database
+        # (docs/runbooks/fresh-production-install.md). The keypool generation
+        # and the installation operation ID stay the same on every later run
+        # of the Job against this database. Generate new values when the
+        # database is created again, so that records of different databases
+        # never share an ID. The chart refuses the all-zero operation ID and
+        # generation; `emit-handoff` refuses an all-zero or repeated record
+        # ID.
+        keypoolGeneration: 87993d52-f846-42f7-b1ee-e79d2b2ee10e
+        installationOperationId: 83cb8320-75b1-473f-b189-3df0ef165700
+        # A fresh database has no keypair-slot table of an older server, so
+        # the owner phase takes no legacy retirement arguments.
+        ownerPhaseExtraArgs: []
         cutover:
-          transition_id: 00000000-0000-0000-0000-000000000000
+          transition_id: 9488eb46-0758-47c4-863f-e48b0d3d848d
           primary:
             provider: cloudnative-pg
             cluster_id: waddle/postgresql
             instance_id: postgresql-rw
             endpoint_host: postgresql-rw
             endpoint_port: 5432
-            observation_record_id: 00000000-0000-0000-0000-000000000000
+            observation_record_id: 6a9484f5-368d-44c3-beae-18feafc9ab77
+          # `waddle` is the login CloudNativePG creates as the database owner
+          # at bootstrap; provisioning takes its ownership away and it never
+          # serves. `role_oid` is its OID in the running cluster:
+          #   SELECT oid FROM pg_roles WHERE rolname = 'waddle'
+          # 0 is refused by `emit-handoff`; set it once the cluster exists.
           old_runtime:
             login: waddle
             role_oid: 0
-            credential_cutoff_record_id: 00000000-0000-0000-0000-000000000000
-          listener_cutoff_record_id: 00000000-0000-0000-0000-000000000000
-          backend_cutoff_record_id: 00000000-0000-0000-0000-000000000000
-          prepared_transaction_cutoff_record_id: 00000000-0000-0000-0000-000000000000
+            credential_cutoff_record_id: 5bf02b86-f396-4177-98b3-ca83c4789b3b
+          listener_cutoff_record_id: 490016fa-4f85-485b-83d2-fd78d6150c7c
+          backend_cutoff_record_id: 3156be4d-256a-48de-9f0e-b42673100052
+          prepared_transaction_cutoff_record_id: c28d4ec0-9f1e-4453-8da1-802d9e3d81d3
           mutator_policy:
             mode: quiesced_for_serving_interval
-            record_id: 00000000-0000-0000-0000-000000000000
+            record_id: f5c28c71-5f8d-4fd3-8532-63b2c309b2a3
