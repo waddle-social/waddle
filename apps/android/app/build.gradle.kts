@@ -151,15 +151,25 @@ android {
                 }
             }
         }
-        // The sideloaded rolling build: release-optimised (R8, shrinking,
-        // non-debuggable, mobile-profile Rust core) but signed with the
-        // shared checked-in key so it installs in place over earlier
-        // rolling and debug builds without wiping app data. The key is
-        // public, so this APK proves nothing about its origin; store
-        // distribution uses `release` and the upload key instead.
+        // Distributed previews use a private key, independent of local debug
+        // and Play upload keys. Missing credentials never fall back to either.
         create("preview") {
             initWith(getByName("release"))
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = null
+            val signingDir = System.getenv("WADDLE_ANDROID_PREVIEW_SIGNING_DIR")
+            if (!signingDir.isNullOrBlank()) {
+                check(!gradle.startParameter.isConfigurationCacheRequested) {
+                    "Private preview signing requires --no-configuration-cache to protect signing credentials"
+                }
+                val privateDir = file(signingDir)
+                signingConfig = signingConfigs.create("previewPrivate") {
+                    storeFile = privateDir.resolve("preview.p12")
+                    storeType = "PKCS12"
+                    storePassword = privateDir.resolve("store-password").readText()
+                    keyAlias = "waddle-preview"
+                    keyPassword = storePassword
+                }
+            }
             matchingFallbacks += "release"
         }
     }
@@ -301,3 +311,19 @@ val verifyPlayRuntimeClasspath by tasks.registering(VerifyRuntimeClasspath::clas
     )
     bannedPrefixes.set(bannedModules("play"))
 }
+
+// Keep PR debug builds, tests and lint usable without publication credentials.
+val checkPreviewSigning by tasks.registering {
+    doLast {
+        val signingDir = System.getenv("WADDLE_ANDROID_PREVIEW_SIGNING_DIR")
+        if (signingDir.isNullOrBlank()) {
+            throw GradleException("Preview APKs require private signing: WADDLE_ANDROID_PREVIEW_SIGNING_DIR")
+        }
+        for (name in listOf("preview.p12", "store-password")) {
+            if (!file(signingDir).resolve(name).isFile) {
+                throw GradleException("Missing preview signing file: $name")
+            }
+        }
+    }
+}
+tasks.matching { it.name == "preFossPreviewBuild" }.configureEach { dependsOn(checkPreviewSigning) }

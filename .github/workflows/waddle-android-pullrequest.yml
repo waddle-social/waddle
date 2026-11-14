@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
     - .cargo/**
+    - .github/actions/android-preview-signing/**
     - .github/workflows/waddle-android-*.yml
     - .github/workflows/waddle-android-pullrequest.yml
     - apps/android/**/build.gradle.kts
@@ -43,6 +44,8 @@ on:
     - flake.nix/**
     - scripts/android-ci-gradle.sh
     - scripts/android-ci-gradle.sh/**
+    - scripts/android-preview-signing.sh
+    - scripts/android-preview-signing.sh/**
     - scripts/build-android-rust.sh
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh
@@ -55,6 +58,8 @@ on:
     - scripts/setup-android-sdk.sh/**
     - scripts/test_android_ci_gradle.py
     - scripts/test_android_ci_gradle.py/**
+    - scripts/test_android_preview_signing.py
+    - scripts/test_android_preview_signing.py/**
     - server/.cargo/**
     - server/Cargo.lock
     - server/Cargo.lock/**
