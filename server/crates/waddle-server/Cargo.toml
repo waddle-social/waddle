@@ -104,6 +104,17 @@ tracing-opentelemetry = { workspace = true }
 # Security/Crypto
 rustls = { workspace = true, features = ["ring"] }
 rustls-acme = { workspace = true }
+# S2S certificate verification (`s2s::verify`, ADR-0020 D2). All three were
+# already in Cargo.lock at these versions. `rustls-webpki` is the path
+# builder rustls uses internally; the S2S verifier calls it directly because
+# the stock rustls verifiers cannot express its trust profiles, revocation
+# policy or XMPP identifiers. `webpki-roots` is the Mozilla root program
+# compiled in, which is the public-WebPKI profile's root store. `x509-parser`
+# reads the certificate and CRL metadata that webpki verifies but does not
+# expose (key usage, validity, issuing distribution points).
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
+webpki-roots = "1"
+x509-parser = "0.18.1"
 hmac = { workspace = true }
 sha2 = { workspace = true }
 p256 = { workspace = true }

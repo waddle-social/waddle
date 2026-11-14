@@ -7782,6 +7782,7 @@ dependencies = [
  "rmp-serde",
  "rustls",
  "rustls-acme",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7813,7 +7814,9 @@ dependencies = [
  "waddle-xmpp",
  "waddle-xmpp-client",
  "waddle-xmpp-core",
+ "webpki-roots 1.0.7",
  "wiremock",
+ "x509-parser 0.18.1",
  "xmpp-parsers",
  "zeroize",
 ]
