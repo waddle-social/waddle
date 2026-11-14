@@ -576,8 +576,8 @@ admission and TLS-peer comparison uses the canonical form; `TlsPeer`,
 stream with an explicit error: `invalid-from` for `from` and
 `host-unknown` for `to`, in both roles (the table above). Emitted headers
 write U-labels, as RFC 7622 §3.2.1 asks of an address presented to a peer;
-stanza addresses sent to peers will also be U-labels when routing exists
-(W5a). A stanza's `to` and `from` on an established stream are read with
+stanza addresses sent to peers are U-labels too
+([routing design](s2s-routing-2047.md)). A stanza's `to` and `from` on an established stream are read with
 the identity profile's address parser (`identity::parse_jid`), also without
 JID preparation, compared with the stream's pair, and handed on rewritten
 in canonical form.
@@ -670,14 +670,16 @@ and accepted as part of the activation decision (gate G22).
   and the stanza is handed on with the canonical lowercase domain. The
   localpart and resourcepart are read exactly. Any other address the
   identity profile refuses closes the stream with `improper-addressing`.
-  For the routing slice (W5a): a syntactically valid address in a
-  spelling the profile refuses (an uppercase localpart, a width or
-  compatibility form) is to be answered with a `jid-malformed` stanza
-  error and the stream kept; stream errors stay for an absent, empty or
-  unparseable address and for a domain outside the stream's pair. This
-  release has no stanza reply path, since every stanza that passes the
-  checks is refused with `policy-violation`, so the stanza error arrives
-  with routing.
+  A syntactically valid address in a spelling the profile refuses (an
+  uppercase localpart, a width or compatibility form) is read through
+  RFC 7622 preparation only to compare its domain with the pair and to
+  address a reply, and the stanza is handed to the connection owner as
+  malformed; the S2S router answers it with a `jid-malformed` stanza error
+  and the stream stays open
+  ([routing design](s2s-routing-2047.md#ingress-g10)). Stream errors stay
+  for an absent, empty or unparseable address and for a domain outside the
+  stream's pair, and for a refused spelling on a stream whose owner does
+  not take stanzas.
 - Whitespace (or U+FEFF) before a stream header, initial or restarted, is
   refused with `not-well-formed`, although XML 1.0 allows whitespace before
   the root element of a document without an XML declaration. The harness

@@ -172,13 +172,22 @@ wiring in `server/lifecycle.rs`.
   `to` and `from` with the identity profile's parser, not JID preparation,
   after mapping ASCII uppercase in the domainpart to lowercase as stream
   headers do, and hands the stanza on with both rewritten in canonical form
-  (a trailing dot removed, the domain in A-labels and lowercase). Any other
-  spelling the profile refuses closes the stream with `improper-addressing`;
-  the routing slice is to answer a syntactically valid address in such a
-  spelling with a `jid-malformed` stanza error instead and keep the stream
+  (a trailing dot removed, the domain in A-labels and lowercase). A
+  syntactically valid address in another spelling the profile refuses is
+  handed to the sink as malformed, which may answer it with a
+  `jid-malformed` stanza error and keep the stream; a sink that refuses it
+  closes the stream with `improper-addressing`, as does an address that is
+  not valid at all
   ([handshake design](s2s-handshake-2047.md#decisions-after-the-g4-review)).
-  The sink of this release refuses every stanza, and the stream closes with
-  `policy-violation`; the routing slice replaces it.
+  `RefuseAllStanzas` refuses every stanza and closes the stream with
+  `policy-violation`; with S2S enabled the S2S router is the sink
+  ([routing design](s2s-routing-2047.md)).
+- **Outbound stanzas.** An established outbound stream writes the stanzas
+  `S2sHandle::transmit` hands it, one at a time through a channel of
+  capacity one, and reports whether each was written to the TLS session
+  within the write deadline, was never taken (returned unwritten because
+  the stream was replaced or closing), or has an unknown outcome. Stanza
+  addresses are written with U-label domains, as stream headers are.
 - **Duplicate pairs.** A new fully authenticated stream for a directional
   pair replaces the existing one, which closes with `conflict` (owner
   decision). To prevent two peers making a pair flap, a stream younger than
@@ -415,16 +424,10 @@ id, codes and counts; certificate failures log `VerifyError::code` only.
 - The dialback slice: the `dialback` strength, the dialback list's use, and
   its own decision whether an absent client certificate may reach dialback
   (the receiving TLS configuration requires one today).
-- Routing: replace `RefuseAllStanzas`, carry the stream's strength and
-  trust-profile kind into the remote principal, and address stanzas to
-  peers in U-labels as stream headers already are.
 - The harness slice (W10): clustered ejabberd with `max_s2s_connections`
   above one, for the one-stream-per-pair restriction; a stanza whose `to`
   domain is in mixed case; and whether Prosody or ejabberd ever sends
   whitespace before a stream header, which this profile refuses.
-- Routing: answer a stanza whose syntactically valid address is in a
-  spelling the identity profile refuses with a `jid-malformed` stanza error
-  and keep the stream.
 - Measurement: the time a stanza at the 512 KiB ceiling takes when many
   streams share an exhausted global input rate, against the 30-second
   bound on one element.
