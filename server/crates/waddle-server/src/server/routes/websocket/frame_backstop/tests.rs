@@ -453,3 +453,34 @@ async fn commit_backstop_preserves_decision_after_admission_revocation() {
         Ok(crate::ingress::IngressDecisionClass::Accepted)
     );
 }
+
+/// The live connection actor handles socket frames inside kameo's
+/// `actor.lifecycle` span, which the span-noise sampler drops together with
+/// every descendant. The dispatch span must therefore start its own trace.
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_span_is_a_root_inside_the_actor_lifecycle_span() {
+    use tracing::Instrument as _;
+
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let stanza = message_stanza();
+
+    let lifecycle = tracing::info_span!("actor.lifecycle");
+    async {
+        let backstop = StanzaBackstop::capture(&stanza, None);
+        let _ = run_with_backstop(backstop, async { Vec::<String>::new() }).await;
+    }
+    .instrument(lifecycle)
+    .await;
+
+    let exported = spans.exported();
+    let dispatch = exported
+        .iter()
+        .find(|span| span.name == "xmpp.stanza.dispatch")
+        .expect("dispatch span must export");
+    assert_eq!(
+        dispatch.parent_span_id,
+        opentelemetry::trace::SpanId::INVALID,
+        "dispatch must not be parented to the suppressed actor lifecycle span"
+    );
+}
