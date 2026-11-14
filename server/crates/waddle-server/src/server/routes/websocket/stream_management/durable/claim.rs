@@ -202,7 +202,10 @@ pub(super) async fn claim_for_resume(
             info!(%stream_id, "durable SM resume lost the session claim to another taker");
             return Err(ClaimRefusal::HeldElsewhere);
         }
-        SessionClaimTakeover::Unavailable => return Err(ClaimRefusal::Unavailable),
+        SessionClaimTakeover::Unavailable => {
+            warn!(%stream_id, "durable SM resume could not move the session claim to this node");
+            return Err(ClaimRefusal::Unavailable);
+        }
     };
     info!(
         %stream_id,

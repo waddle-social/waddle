@@ -11,6 +11,7 @@ use crate::ingress::IngressAuthority;
 use crate::server::routes::websocket::transport_xml::{element_to_xml, stanza_to_xml};
 use jid::FullJid;
 use minidom::Element;
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::stream_management::{
     DetachedSession, DetachedUnackedStanza, PromotionCaptureCustody, SmSessionRegistry, SM_NS,
@@ -26,8 +27,8 @@ async fn fixture() -> (
     WsConnState,
 ) {
     let directory = tempfile::tempdir().expect("database directory");
-    // Keep checkpoint contention separate from authentication and registry I/O,
-    // so the held writer can only stall this resume at checkpoint acquisition.
+    // Keep the checkpoint database separate from authentication and registry
+    // I/O, so the held stream can only stall this resume at the checkpoint.
     let database = Database::open_local("resume-checkpoint", directory.path().join("ingress.db"))
         .await
         .expect("checkpoint database");
@@ -122,12 +123,16 @@ async fn assert_unresumed_and_reclaimable(state: &WebSocketState, conn: &WsConnS
 }
 
 #[tokio::test]
-async fn checkpoint_acquisition_timeout_releases_resume_claim_without_replay() {
-    let (_directory, database, state, mut conn) = fixture().await;
-    let writer = database
-        .begin_immediate()
-        .await
-        .expect("hold checkpoint writer");
+async fn checkpoint_stream_wait_timeout_releases_resume_claim_without_replay() {
+    let (_directory, _database, state, mut conn) = fixture().await;
+    // An enrollment or retirement of the stream holds it exclusively; the
+    // checkpoint read waits for it within a bound.
+    let retirement = state
+        .deps
+        .protocol
+        .ingress
+        .block_test_stream(&SmSessionId::new(STREAM))
+        .await;
     let wire = resume_xml();
     let responses = {
         let resume = handle_xmpp_frame(&wire, "example.com", &state, &mut conn);
@@ -166,16 +171,20 @@ async fn checkpoint_acquisition_timeout_releases_resume_claim_without_replay() {
         )
         .is_some());
     assert_unresumed_and_reclaimable(&state, &conn).await;
-    writer.commit().await.expect("release writer");
+    drop(retirement);
 }
 
 #[tokio::test]
-async fn cancelling_checkpoint_acquisition_releases_resume_claim_without_replay() {
-    let (_directory, database, state, mut conn) = fixture().await;
-    let writer = database
-        .begin_immediate()
-        .await
-        .expect("hold checkpoint writer");
+async fn cancelling_checkpoint_stream_wait_releases_resume_claim_without_replay() {
+    let (_directory, _database, state, mut conn) = fixture().await;
+    // An enrollment or retirement of the stream holds it exclusively; the
+    // checkpoint read waits for it within a bound.
+    let retirement = state
+        .deps
+        .protocol
+        .ingress
+        .block_test_stream(&SmSessionId::new(STREAM))
+        .await;
     let wire = resume_xml();
     {
         let resume = handle_xmpp_frame(&wire, "example.com", &state, &mut conn);
@@ -196,12 +205,12 @@ async fn cancelling_checkpoint_acquisition_releases_resume_claim_without_replay(
                 .is_none(),
             "resume holds its claim"
         );
-        // Drop while restore_ingress_checkpoint is waiting for BEGIN IMMEDIATE.
+        // Drop while restore_ingress_checkpoint is waiting for the stream.
         // The handler returns frames only after completion, so no response or
         // replay has escaped this cancelled future.
     }
     assert_unresumed_and_reclaimable(&state, &conn).await;
-    writer.commit().await.expect("release writer");
+    drop(retirement);
     assert!(
         state
             .deps

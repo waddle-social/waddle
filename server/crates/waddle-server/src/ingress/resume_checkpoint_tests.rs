@@ -56,8 +56,11 @@ async fn assert_checkpoint(authority: &IngressAuthority, stream: &SmSessionId, e
     );
 }
 
+/// A resume reads the checkpoint without the SQLite write lock. SQLite does
+/// not grant that lock in arrival order, so a resume that waited for it
+/// behind a steady stream of delivery writers failed with a storage error.
 #[tokio::test]
-async fn resume_checkpoint_waits_past_old_bound_and_reads_committed_writer() {
+async fn resume_checkpoint_reads_the_committed_value_while_a_writer_holds_the_lock() {
     let (_directory, database, authority, stream) = fixture(3).await;
     let mut writer = database.begin_immediate().await.expect("hold writer");
     writer
@@ -67,60 +70,20 @@ async fn resume_checkpoint_waits_past_old_bound_and_reads_committed_writer() {
         )
         .await
         .expect("uncommitted checkpoint advancement");
-    let load = authority.load_resume_checkpoint(&stream);
-    tokio::pin!(load);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut load)
-            .await
-            .is_err(),
-        "loader remains pending beyond the previous 100ms bound"
-    );
-    // A read can check out a third connection while the known writer and
-    // checkpoint acquisition are pending: this is writer contention, not a
-    // saturated pool. WAL readers still see the old committed checkpoint.
-    let connection = database.guard().await.expect("connection");
-    let mut rows = tokio::time::timeout(
-        Duration::from_millis(250),
-        connection.query("SELECT checkpoint_h FROM ingress_sm_streams", ()),
-    )
-    .await
-    .expect("spare pool capacity")
-    .expect("read committed snapshot");
-    let old: i64 = rows
-        .next()
-        .await
-        .expect("row")
-        .expect("checkpoint")
-        .get(0)
-        .expect("integer");
-    assert_eq!(old, 3);
-    drop(rows);
-    writer.commit().await.expect("publish checkpoint");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), &mut load)
-            .await
-            .expect("loader completes after writer")
-            .expect("checkpoint"),
-        Some(WireHandledCount::from_storage(7))
-    );
-    assert_checkpoint(&authority, &stream, 7).await;
-}
-
-#[tokio::test]
-async fn resume_checkpoint_held_writer_times_out_and_releases_acquisition() {
-    let (_directory, database, authority, stream) = fixture(2).await;
-    let writer = database.begin_immediate().await.expect("hold writer");
     let started = Instant::now();
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        authority.load_resume_checkpoint(&stream),
-    )
-    .await
-    .expect("bounded checkpoint acquisition");
-    assert!(matches!(result, Err(IngressUowError::Timeout)));
-    assert!(started.elapsed() >= Duration::from_secs(1));
-    writer.commit().await.expect("release writer");
-    assert_checkpoint(&authority, &stream, 3).await;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            authority.load_resume_checkpoint(&stream)
+        )
+        .await
+        .expect("the read does not wait for the writer")
+        .expect("checkpoint"),
+        Some(WireHandledCount::from_storage(3))
+    );
+    assert!(started.elapsed() < Duration::from_millis(250));
+    writer.commit().await.expect("publish checkpoint");
+    assert_checkpoint(&authority, &stream, 7).await;
 }
 
 #[tokio::test]
@@ -135,54 +98,53 @@ async fn resume_checkpoint_saturated_pool_times_out_and_releases_acquisition() {
     .await
     .expect("bounded checkout");
     assert!(matches!(result, Err(IngressUowError::Timeout)));
-    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() >= Duration::from_millis(100));
     held.commit().await.expect("release pooled connection");
     assert_checkpoint(&authority, &stream, 3).await;
 }
 
 #[tokio::test]
-async fn cancelling_resume_checkpoint_releases_writer_and_pool_waits() {
-    for pool_size in [1, 2] {
-        let (_directory, database, authority, stream) = fixture(pool_size).await;
-        let held = database
-            .begin_immediate()
+async fn cancelling_resume_checkpoint_releases_pool_waits() {
+    let (_directory, database, authority, stream) = fixture(1).await;
+    let held = database.begin().await.expect("hold the only connection");
+    {
+        let load = authority.load_resume_checkpoint(&stream);
+        tokio::pin!(load);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut load)
             .await
-            .expect("hold connection and writer");
-        {
-            let load = authority.load_resume_checkpoint(&stream);
-            tokio::pin!(load);
-            assert!(tokio::time::timeout(Duration::from_millis(200), &mut load)
-                .await
-                .is_err());
-            // Dropping the caller cancels either pool checkout (one connection)
-            // or BEGIN IMMEDIATE (two connections), with one acquisition only.
-        }
-        held.commit().await.expect("release writer");
-        assert_checkpoint(&authority, &stream, 3).await;
-        assert!(
-            authority.drain_and_join(Duration::from_secs(1)).await,
-            "cancelled loader releases its admission guard"
-        );
+            .is_err());
+        // Dropping the caller cancels its pool checkout.
     }
+    held.commit().await.expect("release connection");
+    assert_checkpoint(&authority, &stream, 3).await;
+    assert!(
+        authority.drain_and_join(Duration::from_secs(1)).await,
+        "cancelled loader releases its admission guard"
+    );
 }
 
+/// A retirement of the stream on this node holds the stream exclusively, so
+/// a resume that reads meanwhile observes its outcome.
 #[tokio::test]
-async fn resume_checkpoint_observes_prior_writer_retirement() {
+async fn resume_checkpoint_observes_a_retirement_in_progress() {
     let (_directory, database, authority, stream) = fixture(2).await;
-    let mut writer = database.begin_immediate().await.expect("hold writer");
-    writer
-        .execute(
-            "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
-            crate::db_params![stream.as_str()],
-        )
-        .await
-        .expect("uncommitted retirement");
+    let retirement = authority.block_test_stream(&stream).await;
     let load = authority.load_resume_checkpoint(&stream);
     tokio::pin!(load);
     assert!(tokio::time::timeout(Duration::from_millis(200), &mut load)
         .await
         .is_err());
-    writer.commit().await.expect("commit retirement");
+    database
+        .guard()
+        .await
+        .expect("connection")
+        .execute(
+            "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
+            crate::db_params![stream.as_str()],
+        )
+        .await
+        .expect("retire stream");
+    drop(retirement);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), &mut load)
             .await

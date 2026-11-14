@@ -89,7 +89,16 @@ authority is the only writer of those rows for the sessions it enabled.
 The inbound handled count for stanzas that entered canonical ingress remains
 owned by `ingress_sm_streams`. `inbound_handled` is the value the owner last
 reported; a resume returns it as a floor and the caller joins the ingress
-checkpoint as it does today.
+checkpoint as it does today. The resume reads that checkpoint in a read
+transaction (`IngressAuthority::load_resume_checkpoint`), after any
+enrollment or retirement of the stream on this node has finished. On SQLite
+it does not take the database write lock: SQLite does not grant that lock
+in arrival order, and a resume waiting for it behind a steady stream of
+delivery writers failed with `internal-server-error`. A checkpoint is
+flushed only when the connection answers an `<r/>`, so it already trails
+the stanzas ingress handled; a read just before a concurrent flush commits
+is the same as a resume that arrives before that `<r/>`. Every resume
+refusal for storage is logged with its cause.
 
 ## Counters and exposure bounds
 
@@ -287,7 +296,9 @@ rules a detached legacy session has (`S/sm_authority/detached.rs`):
 - **Selection.** The stream-management session registry's detached
   readers (`detached_resources_for_user`, the carbon, presence, roster and
   block-list variants, `detached_presence_state`) list the account's
-  `Detached` rows whose window has not elapsed, with the flags and presence
+  `Detached` and `TransferHydrating` rows whose window has not elapsed, as
+  the legacy registry lists a session a resume has claimed, with the flags
+  and presence
   of the stored resource snapshot. A session whose owner was lost before
   it detached has no snapshot and is listed as unavailable, without
   carbons or interest. Every routing path that reads those registry calls,
@@ -297,7 +308,13 @@ rules a detached legacy session has (`S/sm_authority/detached.rs`):
   selects the live resources of the highest non-negative priority and
   every detached session.
 - **Admission.** The registry's detached appenders admit the stanza on
-  `AdmissionAuthority::Detached` at the generation read with the row. The
+  `AdmissionAuthority::Detached` at the generation read with the row, to a
+  `Detached` or a `TransferHydrating` session. A row that a resume moved
+  to a new generation between the read and the admission refuses it as a
+  stale generation without retaining anything; the row is read again and
+  the stanza offered at the generation it holds now, up to three offers.
+  On a clustered store a hydrating session is admitted to only where this
+  node already holds its claim, which belongs to the resume. The
   frame is retained without raising the exposure ceiling, so a resume
   replays it in ordinal order ahead of anything admitted later. A copy an
   ingress transaction owns is admitted under an operation id derived from
@@ -321,8 +338,16 @@ rules a detached legacy session has (`S/sm_authority/detached.rs`):
   transferred to offline delivery by the janitor once and its custody is
   released (`settle_terminal_session`).
 
-Limits: a frame that arrives while the session is `TransferHydrating` is
-refused and takes the offline path; it is not replayed by that resume. A
+A frame admitted while the session is `TransferHydrating` is retained above
+the replay range and returned in the tail of the completion, which the
+resuming connection writes after the replay and before any live frame
+(`sm_durable_resume::a_detached_delivery_during_hydration_joins_the_completion_tail`,
+`sm_durable_resume::a_hydrating_session_stays_a_routing_recipient_until_its_resume_completes`).
+Its connection is not published for live delivery until the commit, so a
+refusal there had no live route to fall back to and lost the frame.
+
+Limits: a hydrating session whose claim another node holds refuses the
+frame, which takes the offline path; it is not replayed by that resume. A
 claim moved here right after the holder detached refuses the holder's
 admission of the frames its endpoint accepted after the detach
 (`admit_detached_tail`); those frames are in no custody and only the
