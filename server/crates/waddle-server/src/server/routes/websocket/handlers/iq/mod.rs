@@ -152,6 +152,7 @@ use extension_forms::{
     extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
     CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
+pub(crate) use extension_route_items::{extension_route_room_access, ExtensionRouteAccess};
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::route_full_jid_iq;
 use last_activity::handle_last_activity_iq;

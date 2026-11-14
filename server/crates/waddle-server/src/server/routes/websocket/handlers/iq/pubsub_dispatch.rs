@@ -84,6 +84,20 @@ pub(super) async fn handle_pubsub_iq(
                 if !matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
                     return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
                 }
+                // A room-bound extension node is written by the room's
+                // current right, not by an affiliation an earlier read left.
+                if super::extension_route_room_access(
+                    state,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    crate::permissions::Permission::SendMessage,
+                )
+                .await
+                    == super::ExtensionRouteAccess::Denied
+                {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                }
 
                 if target_jid.to_string() == spaces_domain {
                     return handle_spaces_publish(

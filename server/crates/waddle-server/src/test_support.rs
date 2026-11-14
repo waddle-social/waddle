@@ -278,6 +278,22 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// The default in-memory WebSocket state with `extension_manager` in place
+/// of the empty one, for suites that serve extension routes.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_extension_manager(
+    extension_manager: Arc<waddle_extensions::ExtensionManager>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        extension_manager,
+        TestStateOverrides::default(),
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// Pause each receipt continuation attempt for a canonical message.
 #[cfg(feature = "test-support")]
 pub fn receipt_custody_probe(

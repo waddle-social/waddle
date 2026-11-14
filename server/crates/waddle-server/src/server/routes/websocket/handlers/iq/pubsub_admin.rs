@@ -211,6 +211,21 @@ pub(super) async fn handle_pubsub_admin_request(
                 let error = build_pubsub_error(iq, PubSubError::Forbidden);
                 return vec![iq_to_xml(error)];
             }
+            // A room-bound extension node is subscribed to by the room's
+            // current right, not by an affiliation an earlier read left.
+            if super::extension_route_room_access(
+                state,
+                target_jid,
+                &node,
+                &subscription_jid,
+                crate::permissions::Permission::View,
+            )
+            .await
+                == super::ExtensionRouteAccess::Denied
+            {
+                let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                return vec![iq_to_xml(error)];
+            }
 
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
             match crate::pubsub_authz::can_subscribe(

@@ -212,6 +212,21 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     }
 
     for sub in subscribers {
+        // A room-bound extension node delivers to whoever may read the room
+        // now: a subscription and its affiliation outlive a ban.
+        if !is_pep
+            && crate::server::routes::websocket::handlers::iq::extension_route_room_access(
+                state,
+                owner,
+                node,
+                &sub.subscriber.to_bare(),
+                crate::permissions::Permission::View,
+            )
+            .await
+                == crate::server::routes::websocket::handlers::iq::ExtensionRouteAccess::Denied
+        {
+            continue;
+        }
         if is_private_pep_node
             && !private_node_subscriber_allowed(
                 state,

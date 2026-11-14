@@ -1,7 +1,8 @@
 use super::permissions::permission_allowed;
 use super::{
     build_pubsub_error, build_pubsub_items_result, iq_to_xml, managed_channel_permission_allowed,
-    warn, BareJid, Object, ObjectType, Permission, PubSubError, WebSocketState,
+    warn, BareJid, CheckPermission, Object, ObjectType, Permission, PubSubError, Subject,
+    WebSocketState,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::identity::CanonicalBareJid;
@@ -58,6 +59,109 @@ fn extension_route_placeholder_value(
     value
 }
 
+/// What a room-bound extension route node allows an account, decided from
+/// the room's current right and never from the node's PubSub affiliations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExtensionRouteAccess {
+    /// The node is not bound to a room; PubSub's own rules apply.
+    NotRoomBound,
+    Allowed,
+    Denied,
+}
+
+/// The room right behind a room-bound extension route node of the
+/// extensions service `owner`.
+///
+/// Reading a room's extension state hands the reader a PubSub `member`
+/// affiliation on the node, and that row outlives a later ban. Every use of
+/// the node that an affiliation would otherwise decide (subscribe, event
+/// fan-out, publish) is therefore decided by the room as it stands: the
+/// account must not be a channel outcast and must hold `permission` on the
+/// channel. A room an enrolled host-grant scope manages serves no extension
+/// state, so every account is denied there, as it is when the room cannot
+/// be read.
+pub(crate) async fn extension_route_room_access(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    account: &BareJid,
+    permission: Permission,
+) -> ExtensionRouteAccess {
+    if owner.as_str() != state.deps.service_domains.extensions {
+        return ExtensionRouteAccess::NotRoomBound;
+    }
+    let room_jid = match extension_route_room_for_node(state, node) {
+        None => return ExtensionRouteAccess::NotRoomBound,
+        Some(Err(())) => return ExtensionRouteAccess::Denied,
+        Some(Ok(room_jid)) => room_jid,
+    };
+    if room_jid.domain().as_str() != state.deps.service_domains.muc {
+        return ExtensionRouteAccess::Denied;
+    }
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+        return ExtensionRouteAccess::Denied;
+    };
+    match host_grant_room_serves_extensions(state, &room_jid).await {
+        Ok(true) => {}
+        Ok(false) | Err(()) => return ExtensionRouteAccess::Denied,
+    }
+    let subject = Subject::user(account.to_string());
+    let outcast = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: subject.clone(),
+            permission: Permission::Custom("outcast".into()),
+            object: Object::new(ObjectType::Channel, channel_id.clone()),
+        })
+        .await;
+    match outcast {
+        Ok(response) if !response.allowed => {}
+        Ok(_) => return ExtensionRouteAccess::Denied,
+        Err(error) => {
+            warn!(node, error = %error, "Failed to check extension route outcast state");
+            return ExtensionRouteAccess::Denied;
+        }
+    }
+    match crate::server::extension_commands::pubsub::managed_channel_permission_allowed(
+        &state.deps.app_state,
+        &subject,
+        &channel_id,
+        permission,
+    )
+    .await
+    {
+        Ok(true) => ExtensionRouteAccess::Allowed,
+        Ok(false) => ExtensionRouteAccess::Denied,
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize extension route access");
+            ExtensionRouteAccess::Denied
+        }
+    }
+}
+
+/// Whether a room serves extension route state: a room that an enrolled
+/// host-grant scope manages does not (`Ok(false)`), and `Err` when that
+/// cannot be read.
+async fn host_grant_room_serves_extensions(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Result<bool, ()> {
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room_jid))
+        .await
+    {
+        RoomGate::Unmanaged => Ok(true),
+        RoomGate::Managed(_) => Ok(false),
+        RoomGate::Unavailable => Err(()),
+    }
+}
+
 pub(super) struct PubSubItemsRead<'a> {
     pub(super) target_jid: &'a BareJid,
     pub(super) requester_jid: &'a BareJid,
@@ -85,6 +189,15 @@ pub(super) async fn handle_extension_route_items(
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
+    // A room an enrolled host-grant scope manages serves no extension
+    // state: the read below would hand the reader a PubSub affiliation the
+    // canonical grants know nothing about.
+    match host_grant_room_serves_extensions(state, &room_jid).await {
+        Ok(true) => {}
+        Ok(false) | Err(()) => {
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+        }
+    }
     match permission_allowed(
         state,
         principal,
