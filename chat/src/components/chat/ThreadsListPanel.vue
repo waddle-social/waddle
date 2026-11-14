@@ -45,8 +45,8 @@ const retryClass = btn({ size: "sm" });
 const loaderClass = waddle();
 
 // Disc-List board: search, the All / Unread / Following switch and a sort.
-// The time-window and channel filters are cut to keep the page calm; a
-// restored `?active=` / `?channel=` URL still applies (threads-view-state).
+// The time-window and channel filters are cut to keep the page calm, so the
+// default window is all time; a `?active=` / `?channel=` URL still applies.
 const rootClass = css({ display: "flex", flexDirection: "column", gap: "2.5", md: { gap: "6" } });
 const filtersClass = css({ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "2" });
 const searchClass = css({
