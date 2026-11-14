@@ -61,7 +61,7 @@ spec:
           # 0 is refused by `emit-handoff`; set it once the cluster exists.
           old_runtime:
             login: waddle
-            role_oid: 0
+            role_oid: 16384
             credential_cutoff_record_id: 5bf02b86-f396-4177-98b3-ca83c4789b3b
           listener_cutoff_record_id: 490016fa-4f85-485b-83d2-fd78d6150c7c
           backend_cutoff_record_id: 3156be4d-256a-48de-9f0e-b42673100052
