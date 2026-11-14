@@ -33,6 +33,7 @@ class UnsafeDiagnosticSidecar(InputError):
 
 STORE_DIR = Path('/nix/store')
 STORE_NAME = re.compile(r'^[0123456789abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+$')
+OUTPUT_NAME = re.compile(r'[A-Za-z0-9+_?=-][A-Za-z0-9+._?=-]*')
 DIAGNOSTICS = Path('server/.ci/nextest-archive')
 ARTIFACTS = ('whole-inventory.json', 'shared-inventory.json', 'whole-coverage.json',
              'shared-coverage.json', 'junit-whole.xml', 'junit-shared.xml')
@@ -139,8 +140,21 @@ def derivation_identities(drvs, source, candidate, run_id):
     else:
         raise InputError('Nix returned unexpected derivations')
     identities = []
+    inputs = {}
     for partition, (drv, entry) in enumerate(zip(drvs, entries), 1):
         try:
+            input_drvs = entry['inputs']['drvs'] if versioned else entry['inputDrvs']
+            if not isinstance(input_drvs, dict):
+                raise InputError(f'shard {partition} has invalid input derivations')
+            for input_drv, wanted in input_drvs.items():
+                if versioned:
+                    input_drv = str(STORE_DIR / input_drv)
+                input_drv = str(store_path(input_drv, derivation=True))
+                names = wanted['outputs'] if isinstance(wanted, dict) else wanted
+                if (not isinstance(names, list) or not names
+                        or not all(isinstance(name, str) and OUTPUT_NAME.fullmatch(name) for name in names)):
+                    raise InputError(f'shard {partition} has invalid input derivation outputs')
+                inputs.setdefault(input_drv, set()).update(names)
             env = entry['env']
             attrs = {
                 'waddleQualificationCandidateSha': candidate,
@@ -169,7 +183,9 @@ def derivation_identities(drvs, source, candidate, run_id):
         identities.append({'partition': partition, 'drv_path': drv, 'output_path': output})
     if len({item['output_path'] for item in identities}) != 4:
         raise InputError('shard outputs are not unique')
-    return identities
+    if inputs.keys() & set(drvs):
+        raise InputError('a shard derivation depends on another shard')
+    return identities, [f"{drv}^{','.join(sorted(names))}" for drv, names in sorted(inputs.items())]
 
 
 def reject_existing_outputs(identities):
@@ -469,8 +485,17 @@ def run(root, diagnostics):
     wrapper = source / 'server/scripts/qualification-shards.nix'
     drvs = command(['nix-instantiate', '--store', 'daemon', str(wrapper), '--argstr', 'sourcePath', str(source),
                     '--argstr', 'candidateSha', candidate, '--argstr', 'runId', run_id]).splitlines()
-    identities = derivation_identities(drvs, source, candidate, run_id)
+    identities, input_outputs = derivation_identities(drvs, source, candidate, run_id)
     reject_existing_outputs(identities)
+    # Realise the shards' dependencies first, from binary caches where
+    # available: a fresh runner cannot rebuild the nixpkgs bootstrap from
+    # source. Only the run-specific shard outputs below are built with
+    # substitution disabled. 'allowSubstitutes = false' on the shards alone is
+    # not enough because 'always-allow-substitutes' (set by the Determinate
+    # Nix installer) overrides it.
+    if input_outputs:
+        command(['nix', 'build', '--print-build-logs', '--no-link', '--max-jobs', '4', '--cores', '8',
+                 *isolation, *input_outputs], cwd=root / 'server', capture=False)
     results = command(['nix', 'build', '--print-build-logs', '--no-link', '--json', '--keep-going',
                        '--max-jobs', '4', '--cores', '8', *isolation, '--option', 'substitute', 'false',
                        *(f'{drv}^out' for drv in drvs)], cwd=root / 'server')
