@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref, useId } from "vue";
 import {
   CalendarDays,
   ChevronLeft,
@@ -7,13 +7,13 @@ import {
   Clock3,
   Copy,
   List,
+  MapPin,
   Menu,
   Pencil,
   Plus,
   RefreshCw,
   Repeat,
   Trash2,
-  X,
 } from "lucide-vue-next";
 import CalendarFeedUrlPanel from "@/components/community/CalendarFeedUrlPanel.vue";
 import RecurrencePicker from "@/components/community/RecurrencePicker.vue";
@@ -39,8 +39,9 @@ import {
 } from "@/lib/xmpp-client";
 import { useCalendarFeedCopy } from "@/lib/use-calendar-feed-copy";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
-import { btn, kicker } from "styled-system/recipes";
-import { cardClasses, liveKicker } from "@/ui/part-classes";
+import spot from "@waddle/design/assets/spot-stickers.svg?url";
+import { css, cx } from "styled-system/css";
+import { btn, chip, empty, iconbtn, input, kicker, scrim, seg } from "styled-system/recipes";
 
 interface EventsPaneProps {
   events: readonly CommunityEvent[];
@@ -100,25 +101,251 @@ const selfAttendeeUri = computed(() => {
   return bare ? `xmpp:${bare}` : null;
 });
 
-// ─── Recipe classes ───────────────────────────────────────────────────────────
+// ─── Classes ──────────────────────────────────────────────────────────────────
 
-const liveCard = cardClasses("live");
-const quietCard = cardClasses("quiet");
 const kickerClass = kicker();
-const liveKickerClass = liveKicker;
-const primaryButtonClass = btn({ variant: "primary", size: "sm" });
+const primaryButtonClass = btn({ variant: "primary" });
+const primarySmButtonClass = btn({ variant: "primary", size: "sm" });
 const quietButtonClass = btn({ size: "sm" });
-const dangerButtonClass = btn({ variant: "danger", size: "sm" });
+const quietButtonLgClass = btn();
+const segClass = seg();
+const chipClass = chip();
+const iconButtonClass = iconbtn();
+const inputClass = input();
+const spotUrl = spot;
+const scrimClass = cx(scrim(), css({ position: "absolute", inset: 0, zIndex: "auto" }));
+const formTitleId = useId();
 
-// Pill toggles: hairline at rest, teal when pressed.
-const PILL_BASE = "inline-flex h-8 items-center gap-1 rounded-full border px-3 text-[13px] font-semibold transition-colors";
-const PILL_IDLE = "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground";
-const PILL_ON = "border-primary bg-primary text-primary-foreground";
-function pillClass(pressed: boolean): string {
-  return `${PILL_BASE} ${pressed ? PILL_ON : PILL_IDLE}`;
-}
-
-const FIELD_CLASS = "w-full rounded-[10px] border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+const ui = {
+  root: css({ display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0, bg: "bg", color: "fg" }),
+  mobileBar: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "1.5",
+    flex: "none",
+    padding: "2",
+    borderBottom: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    color: "fg",
+    md: { display: "none" },
+  }),
+  mobileTitle: css({ flex: 1, minWidth: 0, font: "700 18px/1.3 {fonts.display}" }),
+  mobileNav: cx(iconbtn(), css({ width: "44px", height: "44px" })),
+  scroll: css({ flex: "1 1 0%", minHeight: 0, overflowX: "hidden", overflowY: "auto", scrollbarGutter: "stable" }),
+  content: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "5",
+    width: "100%",
+    maxWidth: "1000px",
+    boxSizing: "border-box",
+    padding: "14px 12px 32px",
+    md: { padding: "32px 40px" },
+  }),
+  head: css({ display: "none", alignItems: "center", gap: "3", flexWrap: "wrap", md: { display: "flex" } }),
+  h1: css({ margin: 0, flex: 1, font: "700 30px/1.2 {fonts.display}", letterSpacing: "-0.01em" }),
+  toolbar: css({ display: "flex", alignItems: "center", gap: "2.5", flexWrap: "wrap" }),
+  feedTools: css({ display: "flex", alignItems: "center", gap: "2", ml: "auto" }),
+  status: css({ fontSize: "xs", color: "fg.muted", md: { minWidth: "5.5rem" } }),
+  spin: css({ _motionSafe: { animation: "spin 1s linear infinite" } }),
+  error: css({
+    padding: "10px 14px",
+    borderRadius: "control",
+    border: "1px solid {colors.danger}",
+    bg: "danger.subtle",
+    color: "danger.text",
+    fontSize: "sm",
+  }),
+  // Form (Events-Form board)
+  formTitle: css({ margin: 0, font: "700 24px/1.2 {fonts.display}", letterSpacing: "-0.01em" }),
+  form: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "4",
+    maxWidth: "680px",
+    padding: "5",
+    borderRadius: "panel",
+    bg: "surface",
+    border: "1px solid {colors.border.soft}",
+  }),
+  titleInput: cx(input(), css({ width: "100%", height: "48px", font: "600 18px/1.3 {fonts.display}" })),
+  field: css({ display: "flex", flexDirection: "column", gap: "1.5", minWidth: 0, fontSize: "13px", fontWeight: 600, color: "fg.muted" }),
+  fieldInput: cx(input(), css({ width: "100%", minWidth: 0, fontWeight: 400 })),
+  textarea: cx(input(), css({ width: "100%", height: "auto", minHeight: "88px", py: "2.5", resize: "vertical", font: "400 14px/1.5 {fonts.body}" })),
+  pair: css({ display: "grid", gap: "3", md: { gridTemplateColumns: "1fr 1fr" } }),
+  span2: css({ md: { gridColumn: "span 2" } }),
+  allDay: css({
+    alignSelf: "flex-start",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "2",
+    height: "chipH",
+    px: "3",
+    borderRadius: "pill",
+    border: "1px solid {colors.border}",
+    fontSize: "13px",
+    fontWeight: 600,
+    color: "fg",
+    cursor: "pointer",
+    "& input": { width: "16px", height: "16px", margin: 0, accentColor: "{colors.action}" },
+    "&:has(input:checked)": { borderColor: "action", bg: "action.subtle" },
+    "&:has(input:focus-visible)": { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+  }),
+  alert: css({ display: "flex", alignItems: "center", gap: "1.5", margin: "-8px 0 0", fontSize: "13px", color: "danger.text", "& svg": { width: "16px", height: "16px", flex: "none" } }),
+  formFoot: css({ display: "flex", justifyContent: "flex-end", gap: "2", pt: "1" }),
+  // Month grid (Events-Calendar board)
+  monthNav: css({ display: "flex", alignItems: "center", gap: "2", flexWrap: "wrap" }),
+  monthTitle: css({ margin: 0, minWidth: "170px", textAlign: "center", font: "700 20px/1.25 {fonts.display}" }),
+  todayButton: cx(btn({ size: "sm" }), css({ ml: "auto" })),
+  grid: css({
+    display: "grid",
+    gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+    gap: "1",
+    padding: "2",
+    borderRadius: "panel",
+    bg: "surface",
+    border: "1px solid {colors.border.soft}",
+    _narrow: { gap: "0.5", padding: "1" },
+  }),
+  dow: cx(kicker(), css({ textAlign: "center", py: "1" })),
+  cell: css({
+    position: "relative",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "stretch",
+    gap: "3px",
+    minWidth: 0,
+    height: "92px",
+    boxSizing: "border-box",
+    padding: "6px",
+    border: 0,
+    borderRadius: "10px",
+    bg: "transparent",
+    color: "fg",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+    overflow: "hidden",
+    _hover: { bg: "state.hover" },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+    _disabled: { cursor: "default", _hover: { bg: "transparent" } },
+    "&[aria-pressed=true]": { bg: "surface.2", boxShadow: "inset 0 0 0 1px {colors.border.strong}" },
+    "&[data-today]": { bg: "surface.2", boxShadow: "inset 0 0 0 2px {colors.gold}" },
+    _narrow: { height: "56px", padding: "4px", alignItems: "center" },
+  }),
+  cellNum: css({
+    fontSize: "13px",
+    fontWeight: 500,
+    fontVariantNumeric: "tabular-nums",
+    "[data-today] > &": { fontWeight: 700, color: "gold.text" },
+  }),
+  pill: css({
+    display: "block",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    padding: "2px 6px",
+    borderRadius: "6px",
+    fontSize: "12px",
+    lineHeight: "16px",
+    bg: "surface.2",
+    color: "fg.muted",
+    "&[data-mine]": { bg: "action.subtle", color: "action.text" },
+    _narrow: { display: "none" },
+  }),
+  more: css({ px: "1", fontSize: "11px", color: "fg.muted", _narrow: { display: "none" } }),
+  dot: css({ display: "none", width: "5px", height: "5px", borderRadius: "pill", bg: "action", _narrow: { display: "block" } }),
+  // Day sections and the one event card (EventCard board)
+  section: css({ display: "flex", flexDirection: "column", gap: "2.5" }),
+  dayTitle: css({ margin: 0, font: "600 18px/1.3 {fonts.display}" }),
+  card: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "2",
+    padding: "16px 20px",
+    borderRadius: "panel",
+    bg: "surface",
+    border: "1px solid {colors.border.soft}",
+    color: "fg",
+    "&[data-live]": { borderColor: "live" },
+    _narrow: { padding: "14px 16px" },
+  }),
+  cardHead: css({ display: "flex", alignItems: "flex-start", gap: "2" }),
+  cardMain: css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1" }),
+  cardKicker: cx(kicker(), css({ color: "action.text", "[data-live] &": { color: "live.text" } })),
+  cardTitle: css({ margin: 0, font: "700 18px/1.3 {fonts.display}", letterSpacing: "-0.01em", overflowWrap: "anywhere" }),
+  cardMeta: css({ display: "inline-flex", alignItems: "center", gap: "1", fontSize: "xs", color: "fg.muted", "& svg": { width: "14px", height: "14px", flex: "none" } }),
+  cardDesc: css({ margin: 0, fontSize: "14px", lineHeight: "1.5", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }),
+  cardRepeat: css({ display: "inline-flex", alignItems: "center", gap: "1.5", fontSize: "13px", color: "action.text", "& svg": { width: "16px", height: "16px" } }),
+  cardFoot: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "3",
+    flexWrap: "wrap",
+    mt: "1",
+    pt: "1.5",
+    borderTop: "1px solid {colors.border.soft}",
+  }),
+  counts: css({ fontSize: "xs", color: "fg.muted", fontVariantNumeric: "tabular-nums" }),
+  dayEmpty: css({
+    padding: "4",
+    borderRadius: "panel",
+    border: "1px dashed {colors.border}",
+    fontSize: "sm",
+    color: "fg.muted",
+    textAlign: "center",
+  }),
+  empty: cx(empty(), css({ py: "16", "& h2": { margin: 0, font: "700 24px/1.25 {fonts.display}", color: "fg", textWrap: "balance" } })),
+  // Cancel sheet (Events-Cancel / Mobile-Events boards)
+  sheetPositioner: css({
+    position: "fixed",
+    inset: 0,
+    zIndex: "dialog",
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    md: { alignItems: "center", padding: "4" },
+  }),
+  sheet: css({
+    position: "relative",
+    display: "flex",
+    flexDirection: "column",
+    gap: "3",
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "10px 16px 30px",
+    borderRadius: "24px 24px 0 0",
+    bg: "surface",
+    borderTop: "1px solid {colors.border}",
+    boxShadow: "overlay",
+    color: "fg",
+    md: { width: "440px", padding: "6", borderRadius: "20px", border: "1px solid {colors.border}" },
+  }),
+  grabber: css({ alignSelf: "center", width: "40px", height: "4px", borderRadius: "pill", bg: "border", md: { display: "none" } }),
+  sheetTitle: css({ margin: "4px 0 0", font: "700 19px/1.3 {fonts.display}", md: { margin: 0, fontSize: "20px" } }),
+  sheetBody: css({ margin: 0, fontSize: "14px", color: "fg.muted" }),
+  option: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "3",
+    width: "100%",
+    minHeight: "52px",
+    padding: "0 16px",
+    borderRadius: "12px",
+    border: "1px solid {colors.border}",
+    bg: "surface",
+    color: "fg",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+    _hover: { bg: "state.hover" },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+    "& > :first-child": { flex: 1, fontWeight: 600 },
+    "& > :last-child": { fontSize: "xs", color: "fg.muted" },
+  }),
+  optionDanger: css({ borderColor: "danger", color: "danger.text", "& > :first-child": { fontWeight: 700 }, "& > :last-child": { color: "inherit" } }),
+  sheetFoot: css({ display: "flex", justifyContent: "flex-end", pt: "1", "& > button": { _narrow: { width: "100%", height: "48px", justifyContent: "center" } } }),
+};
 
 // ─── Live window ──────────────────────────────────────────────────────────────
 
@@ -134,10 +361,6 @@ function isEventLive(event: CommunityEvent, nowMs = Date.now()): boolean {
   const startMs = event.dtstart.ms;
   const endMs = event.dtend?.kind === "date-time" ? event.dtend.ms : startMs + 60 * 60 * 1000;
   return startMs - nowMs <= SOON_WINDOW_MS && endMs > nowMs;
-}
-
-function eventCard(event: CommunityEvent) {
-  return isEventLive(event) ? liveCard : quietCard;
 }
 
 function eventKicker(event: CommunityEvent, dayStartMs: number | null): string {
@@ -274,7 +497,7 @@ const calGrid = computed<CalCell[][]>(() => {
   const y = calYear.value;
   const m = calMonth.value;
   const todayStr = new Date().toDateString();
-  const firstDow = new Date(y, m, 1).getDay(); // 0 = Sun
+  const firstDow = (new Date(y, m, 1).getDay() + 6) % 7; // weeks start on Monday
   const daysInMonth = new Date(y, m + 1, 0).getDate();
 
   const cells: CalCell[] = [];
@@ -361,12 +584,14 @@ function formatStart(event: CommunityEvent): string {
     weekday: "short",
     month: "short",
     day: "numeric",
-    hour: "numeric",
+    hour: "2-digit",
+    hourCycle: "h23",
     minute: "2-digit",
   });
   if (event.dtend?.kind !== "date-time") return start;
   return `${start} - ${new Date(event.dtend.ms).toLocaleTimeString(undefined, {
-    hour: "numeric",
+    hour: "2-digit",
+    hourCycle: "h23",
     minute: "2-digit",
   })}`;
 }
@@ -375,7 +600,8 @@ function formatTime(event: CommunityEvent): string {
   if (!event.dtstart) return "TBD";
   if (event.dtstart.kind === "date") return "All day";
   return new Date(event.dtstart.ms).toLocaleTimeString(undefined, {
-    hour: "numeric",
+    hour: "2-digit",
+    hourCycle: "h23",
     minute: "2-digit",
   });
 }
@@ -389,7 +615,8 @@ function formatVisibleTime(event: CommunityEvent, dayStartMs: number | null): st
   if (startDay === visibleDay) return formatTime(event);
   if (event.dtend?.kind === "date-time" && localDateStringFromMs(event.dtend.ms) === visibleDay) {
     return `continues until ${new Date(event.dtend.ms).toLocaleTimeString(undefined, {
-      hour: "numeric",
+      hour: "2-digit",
+    hourCycle: "h23",
       minute: "2-digit",
     })}`;
   }
@@ -696,607 +923,448 @@ function buildDateInput(): Pick<CommunityEventInput, "dtstart" | "dtend"> | null
 
 const copyCalendarFeedUrl = calendarFeedCopy.copy;
 
-const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// ─── Page sections ───────────────────────────────────────────────────────────
+// Every event renders through the one card in the template; sections say
+// which heading and kicker it gets. The month grid is a section too so the
+// DOM order matches the visual order (next up, grid, selected day).
+
+interface CardSection {
+  kind: "cards";
+  key: string;
+  heading: string;
+  headingClass: string;
+  events: CommunityEvent[];
+  kicker: (event: CommunityEvent) => string;
+}
+type PageSection = CardSection | { kind: "grid"; key: "grid" };
+
+const sections = computed<PageSection[]>(() => {
+  if (viewMode.value === "week") {
+    return [...weekEventsByDay.value].map(([dayLabel, day]) => ({
+      kind: "cards",
+      key: dayLabel,
+      heading: dayLabel,
+      headingClass: kickerClass,
+      events: day.events,
+      kicker: (event) => eventKicker(event, day.startMs),
+    }));
+  }
+  const list: PageSection[] = [];
+  const next = nextEvent.value;
+  if (next) {
+    list.push({
+      kind: "cards",
+      key: "next",
+      heading: "Next up",
+      headingClass: kickerClass,
+      events: [next],
+      kicker: formatStart,
+    });
+  }
+  list.push({ kind: "grid", key: "grid" });
+  if (selectedDay.value !== null && selectedDayEvents.value.length > 0) {
+    list.push({
+      kind: "cards",
+      key: "selected",
+      heading: selectedDayLabel.value,
+      headingClass: ui.dayTitle,
+      events: selectedDayEvents.value,
+      kicker: (event) => eventKicker(event, selectedDayStartMs.value),
+    });
+  }
+  return list;
+});
+
+const RSVP_CHOICES: { partstat: PartStat; label: string }[] = [
+  { partstat: "ACCEPTED", label: "Going" },
+  { partstat: "TENTATIVE", label: "Maybe" },
+  { partstat: "DECLINED", label: "Can't" },
+];
+
+function isMine(event: CommunityEvent): boolean {
+  const mine = myPartstat(event);
+  return mine === "ACCEPTED" || mine === "TENTATIVE";
+}
 </script>
 
 <template>
-  <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
-    <div class="mx-auto grid w-full max-w-3xl gap-5">
+  <div :class="ui.root">
+    <!-- Phone header: the rail bar with the sidebar button (Mobile-Events board). -->
+    <header :class="ui.mobileBar" data-theme="night">
+      <button
+        type="button"
+        :class="ui.mobileNav"
+        aria-label="Open navigation"
+        @click="emit('openNav')"
+      >
+        <Menu aria-hidden="true" />
+      </button>
+      <b :class="ui.mobileTitle">Calendar</b>
+      <button
+        v-if="canPost"
+        type="button"
+        :class="primarySmButtonClass"
+        @click="composerOpen ? resetComposer() : openComposer()"
+      >
+        {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
+      </button>
+      <button
+        v-else
+        type="button"
+        :class="iconButtonClass"
+        aria-label="Refresh"
+        :disabled="isLoading"
+        @click="emit('refresh')"
+      >
+        <RefreshCw :class="{ [ui.spin]: isLoading }" aria-hidden="true" />
+      </button>
+    </header>
 
-      <!-- Header -->
-      <header class="grid gap-3">
-        <div class="flex items-center gap-3">
+    <div :class="ui.scroll">
+      <div :class="ui.content">
+        <div :class="ui.head">
+          <h1 :class="ui.h1">Calendar</h1>
           <button
+            v-if="canPost"
             type="button"
-            class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
-            aria-label="Open navigation"
-            @click="emit('openNav')"
+            :class="primaryButtonClass"
+            @click="composerOpen ? resetComposer() : openComposer()"
           >
-            <Menu class="h-4 w-4" aria-hidden="true" />
+            <Plus v-if="!composerOpen" aria-hidden="true" />
+            {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
           </button>
-          <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">Events</h1>
-          <div class="ml-auto flex items-center gap-2">
-            <button
-              v-if="canPost"
-              type="button"
-              :class="primaryButtonClass"
-              @click="composerOpen ? resetComposer() : openComposer()"
-            >
-              <Plus class="h-3.5 w-3.5" aria-hidden="true" />
-              {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
-            </button>
-            <button
-              v-else
-              type="button"
-              :class="quietButtonClass"
-              :disabled="isLoading"
-              @click="emit('refresh')"
-            >
-              <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isLoading }" aria-hidden="true" />
-              Refresh
-            </button>
-          </div>
+          <button
+            v-else
+            type="button"
+            :class="quietButtonLgClass"
+            :disabled="isLoading"
+            @click="emit('refresh')"
+          >
+            <RefreshCw :class="{ [ui.spin]: isLoading }" aria-hidden="true" />
+            Refresh
+          </button>
         </div>
 
-        <div class="flex flex-wrap items-center gap-2">
-          <!-- View mode toggle -->
-          <div class="flex items-center gap-1.5" role="group" aria-label="Calendar view">
+        <div v-if="!composerOpen" :class="ui.toolbar">
+          <div :class="segClass" role="group" aria-label="Calendar view">
             <button
               type="button"
-              :class="pillClass(viewMode === 'week')"
               :aria-pressed="viewMode === 'week' ? 'true' : 'false'"
               @click="viewMode = 'week'"
             >
-              <List class="h-3.5 w-3.5" aria-hidden="true" />
+              <List aria-hidden="true" />
               7 days
             </button>
             <button
               type="button"
-              :class="pillClass(viewMode === 'month')"
               :aria-pressed="viewMode === 'month' ? 'true' : 'false'"
               @click="viewMode = 'month'"
             >
-              <CalendarDays class="h-3.5 w-3.5" aria-hidden="true" />
+              <CalendarDays aria-hidden="true" />
               Month
             </button>
           </div>
 
-          <!-- Attending filter -->
           <button
             v-if="selfBareJid"
             type="button"
-            :class="pillClass(activeFilter === 'attending')"
+            :class="chipClass"
             :aria-pressed="activeFilter === 'attending' ? 'true' : 'false'"
             @click="activeFilter = activeFilter === 'attending' ? 'all' : 'attending'"
           >
             Going or maybe
           </button>
 
-          <!-- Calendar feed -->
-          <div class="ml-auto flex items-center gap-2">
+          <div :class="ui.feedTools">
             <button
               type="button"
               :class="quietButtonClass"
               :disabled="!canCopyFeedUrl || feedCopyState === 'loading'"
               @click="copyCalendarFeedUrl"
             >
-              <Copy class="h-3.5 w-3.5" aria-hidden="true" />
+              <Copy aria-hidden="true" />
               Copy feed URL
             </button>
-            <span
-              class="type-caption min-w-[5.5rem] text-muted-foreground"
-              role="status"
-              aria-live="polite"
-            >
+            <span :class="ui.status" role="status" aria-live="polite">
               {{ feedCopyStatusLabel }}
             </span>
           </div>
         </div>
-      </header>
 
-      <CalendarFeedUrlPanel v-if="feedCopyUrl" :url="feedCopyUrl" />
+        <CalendarFeedUrlPanel v-if="feedCopyUrl && !composerOpen" :url="feedCopyUrl" />
 
-      <!-- Error -->
-      <div
-        v-if="error"
-        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
-      >
-        Couldn't load events: {{ error }}
-      </div>
-
-      <!-- Composer -->
-      <form
-        v-if="composerOpen"
-        class="grid gap-3 rounded-2xl border border-border bg-card p-4"
-        @input="markComposerTouched"
-        @submit.prevent="submit"
-      >
-        <p :class="kickerClass">{{ editingId ? "Edit event" : "New event" }}</p>
-        <input
-          v-model="summary"
-          type="text"
-          :class="FIELD_CLASS"
-          placeholder="Event title"
-          required
-          aria-label="Event title"
-        />
-        <label class="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-background px-3 py-1.5 text-[13px] text-foreground">
-          <input
-            v-model="allDay"
-            type="checkbox"
-            class="h-4 w-4 rounded border-border accent-[var(--primary)]"
-          />
-          All day
-        </label>
-        <div v-if="allDay" class="grid gap-2 md:grid-cols-2">
-          <label class="grid gap-1">
-            <span :class="kickerClass">Start date</span>
-            <input
-              v-model="allDayStart"
-              type="date"
-              :class="FIELD_CLASS"
-            />
-          </label>
-          <label class="grid gap-1">
-            <span :class="kickerClass">End date</span>
-            <input
-              v-model="allDayEnd"
-              type="date"
-              :class="FIELD_CLASS"
-            />
-          </label>
+        <div v-if="error" :class="ui.error" role="alert">
+          Couldn't load events: {{ error }}
         </div>
-        <div v-else class="grid gap-2 md:grid-cols-2">
-          <label class="grid gap-1">
-            <span :class="kickerClass">Starts</span>
-            <input
-              v-model="dtstart"
-              type="datetime-local"
-              :class="FIELD_CLASS"
-            />
-          </label>
-          <label class="grid gap-1">
-            <span :class="kickerClass">Duration</span>
-            <select
-              v-model="durationChoice"
-              :class="FIELD_CLASS"
-            >
-              <option
-                v-for="option in DURATION_OPTIONS"
-                :key="option.value"
-                :value="option.value"
-              >
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <label v-if="durationChoice === 'custom'" class="grid gap-1 md:col-span-2">
-            <span :class="kickerClass">Ends</span>
-            <input
-              v-model="dtend"
-              type="datetime-local"
-              :class="FIELD_CLASS"
-            />
-          </label>
-        </div>
-        <input
-          v-model="location"
-          type="text"
-          :class="FIELD_CLASS"
-          placeholder="Location (optional)"
-          aria-label="Event location"
-        />
-        <textarea
-          v-model="description"
-          :class="[FIELD_CLASS, 'min-h-[3rem] resize-y']"
-          placeholder="Description (optional)"
-          aria-label="Event description"
-        />
-        <RecurrencePicker v-model="rrule" />
-        <p
-          v-if="visibleComposerError"
-          class="type-caption inline-flex items-center gap-1 text-destructive-text"
-          role="alert"
-        >
-          <Clock3 class="h-3.5 w-3.5" aria-hidden="true" />
-          {{ visibleComposerError }}
-        </p>
-        <div class="flex items-center justify-end gap-2">
-          <button
-            type="button"
-            :class="quietButtonClass"
-            :disabled="isPosting"
-            @click="resetComposer"
+
+        <!-- Composer (Events-Form board): replaces the calendar while open. -->
+        <template v-if="composerOpen">
+          <h2 :id="formTitleId" :class="ui.formTitle">{{ editingId ? "Edit event" : "New event" }}</h2>
+          <form
+            :class="ui.form"
+            :aria-labelledby="formTitleId"
+            @input="markComposerTouched"
+            @submit.prevent="submit"
           >
-            <X class="h-3.5 w-3.5" aria-hidden="true" />
-            Cancel
-          </button>
-          <button
-            type="submit"
-            :class="primaryButtonClass"
-            :disabled="!canSubmit"
-          >
-            {{ isPosting ? (editingId ? "Saving…" : "Publishing…") : (editingId ? "Save changes" : "Publish event") }}
-          </button>
-        </div>
-      </form>
-
-      <!-- ── 7-day list view ─────────────────────────────────────────────── -->
-      <template v-if="viewMode === 'week'">
-        <div v-if="weekEventsByDay.size > 0" class="grid gap-5">
-          <section
-            v-for="[dayLabel, day] in weekEventsByDay"
-            :key="dayLabel"
-            class="grid gap-2"
-          >
-            <h2 :class="kickerClass">{{ dayLabel }}</h2>
-            <article
-              v-for="event in day.events"
-              :key="event.id"
-              :class="eventCard(event).root"
-            >
-              <header class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <p :class="eventCard(event).kicker">{{ eventKicker(event, day.startMs) }}</p>
-                  <h3 :class="[eventCard(event).title, 'mt-1']">{{ event.summary }}</h3>
-                </div>
-                <div v-if="isOrganiser(event)" class="flex shrink-0 items-center gap-1">
-                  <button
-                    type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                    aria-label="Edit event"
-                    @click="startEdit(event)"
-                  >
-                    <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive-text"
-                    aria-label="Cancel event"
-                    @click="onCancelEvent(event)"
-                  >
-                    <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                </div>
-              </header>
-              <p v-if="event.location" class="type-caption text-muted-foreground">
-                {{ event.location }}
-              </p>
-              <p v-if="event.description" class="whitespace-pre-wrap break-words text-sm text-foreground">
-                {{ event.description }}
-              </p>
-              <p v-if="event.rrule" class="type-caption inline-flex items-center gap-1 text-primary">
-                <Repeat class="h-3 w-3" aria-hidden="true" />
-                {{ summarizeRrule(event.rrule) }}
-              </p>
-              <p v-if="event.organizer" class="type-caption text-muted-foreground">
-                Hosted by {{ authorLabel(event.organizer) }}
-              </p>
-              <div v-if="selfBareJid" :class="[eventCard(event).footer, 'flex-wrap']">
-                <div class="inline-flex gap-1 rounded-full border border-border bg-background p-0.5" role="group" aria-label="RSVP">
-                  <button
-                    type="button"
-                    class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                    :class="myPartstat(event) === 'ACCEPTED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                    :aria-pressed="myPartstat(event) === 'ACCEPTED' ? 'true' : 'false'"
-                    @click="onRsvp(event, 'ACCEPTED')"
-                  >Going</button>
-                  <button
-                    type="button"
-                    class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                    :class="myPartstat(event) === 'TENTATIVE' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                    :aria-pressed="myPartstat(event) === 'TENTATIVE' ? 'true' : 'false'"
-                    @click="onRsvp(event, 'TENTATIVE')"
-                  >Maybe</button>
-                  <button
-                    type="button"
-                    class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                    :class="myPartstat(event) === 'DECLINED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                    :aria-pressed="myPartstat(event) === 'DECLINED' ? 'true' : 'false'"
-                    @click="onRsvp(event, 'DECLINED')"
-                  >Can't</button>
-                </div>
-                <span class="type-caption text-muted-foreground">
-                  {{ attendeesByPartstat(event)["ACCEPTED"].length }} going ·
-                  {{ attendeesByPartstat(event)["TENTATIVE"].length }} maybe ·
-                  {{ attendeesByPartstat(event)["DECLINED"].length }} can't
-                </span>
-              </div>
-            </article>
-          </section>
-        </div>
-
-        <div
-          v-else-if="!isLoading"
-          class="rounded-2xl border border-dashed border-border px-4 py-8 text-center"
-        >
-          <p class="font-display text-lg font-semibold text-foreground">
-            {{ activeFilter === 'attending' ? "Nothing you're going to this week." : "Nothing scheduled this week." }}
-          </p>
-          <p class="type-caption mt-1 text-muted-foreground">
-            {{ activeFilter === 'attending'
-              ? "Say yes to something, or schedule one yourself."
-              : canPost ? "Schedule one to get the community together." : "Check back later." }}
-          </p>
-        </div>
-      </template>
-
-      <!-- ── Month calendar view ────────────────────────────────────────────── -->
-      <template v-else>
-        <!-- Next event -->
-        <section v-if="nextEvent" class="grid gap-2" aria-label="Next event">
-          <h2 :class="isEventLive(nextEvent) ? liveKickerClass : kickerClass">Next up</h2>
-          <article :class="eventCard(nextEvent).root">
-            <p :class="eventCard(nextEvent).kicker">{{ formatStart(nextEvent) }}</p>
-            <h3 :class="eventCard(nextEvent).title">{{ nextEvent.summary }}</h3>
-            <p v-if="nextEvent.location" class="type-caption text-muted-foreground">{{ nextEvent.location }}</p>
-            <p v-if="nextEvent.description" class="line-clamp-3 whitespace-pre-wrap break-words text-sm text-foreground">
-              {{ nextEvent.description }}
-            </p>
-            <p v-if="nextEvent.organizer" class="type-caption text-muted-foreground">
-              Hosted by {{ authorLabel(nextEvent.organizer) }}
-            </p>
-            <div v-if="selfBareJid" :class="[eventCard(nextEvent).footer, 'flex-wrap']">
-              <div class="inline-flex gap-1 rounded-full border border-border bg-background p-0.5" role="group" aria-label="RSVP">
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                  :class="myPartstat(nextEvent) === 'ACCEPTED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                  :aria-pressed="myPartstat(nextEvent) === 'ACCEPTED' ? 'true' : 'false'"
-                  @click="onRsvp(nextEvent, 'ACCEPTED')"
-                >Going</button>
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                  :class="myPartstat(nextEvent) === 'TENTATIVE' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                  :aria-pressed="myPartstat(nextEvent) === 'TENTATIVE' ? 'true' : 'false'"
-                  @click="onRsvp(nextEvent, 'TENTATIVE')"
-                >Maybe</button>
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                  :class="myPartstat(nextEvent) === 'DECLINED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                  :aria-pressed="myPartstat(nextEvent) === 'DECLINED' ? 'true' : 'false'"
-                  @click="onRsvp(nextEvent, 'DECLINED')"
-                >Can't</button>
-              </div>
-              <span class="type-caption text-muted-foreground">
-                {{ attendeesByPartstat(nextEvent)["ACCEPTED"].length }} going ·
-                {{ attendeesByPartstat(nextEvent)["TENTATIVE"].length }} maybe ·
-                {{ attendeesByPartstat(nextEvent)["DECLINED"].length }} can't
-              </span>
+            <input
+              v-model="summary"
+              type="text"
+              :class="ui.titleInput"
+              placeholder="Event title"
+              required
+              aria-label="Event title"
+              :aria-invalid="visibleComposerError === 'Add an event title.' ? 'true' : undefined"
+            />
+            <label :class="ui.allDay">
+              <input v-model="allDay" type="checkbox" />
+              All day
+            </label>
+            <div v-if="allDay" :class="ui.pair">
+              <label :class="ui.field">
+                Start date
+                <input v-model="allDayStart" type="date" :class="ui.fieldInput" />
+              </label>
+              <label :class="ui.field">
+                End date
+                <input v-model="allDayEnd" type="date" :class="ui.fieldInput" />
+              </label>
             </div>
-          </article>
-        </section>
-
-        <!-- Month navigation -->
-        <div class="flex items-center justify-between">
-          <button
-            type="button"
-            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Previous month"
-            @click="prevMonth"
-          >
-            <ChevronLeft class="h-4 w-4" aria-hidden="true" />
-          </button>
-          <div class="flex items-center gap-2">
-            <span class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">{{ calTitle }}</span>
-            <button
-              type="button"
-              :class="pillClass(false)"
-              aria-label="Jump to today"
-              @click="goToToday"
-            >
-              Today
-            </button>
-          </div>
-          <button
-            type="button"
-            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Next month"
-            @click="nextMonth"
-          >
-            <ChevronRight class="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-
-        <!-- Calendar grid -->
-        <div class="overflow-hidden rounded-2xl border border-border bg-card">
-          <!-- Day-of-week headers -->
-          <div class="grid grid-cols-7 border-b border-border">
-            <div
-              v-for="label in DOW_LABELS"
-              :key="label"
-              :class="[kickerClass, 'py-2 text-center']"
-            >
-              {{ label }}
+            <div v-else :class="ui.pair">
+              <label :class="ui.field">
+                Starts
+                <input v-model="dtstart" type="datetime-local" :class="ui.fieldInput" />
+              </label>
+              <label :class="ui.field">
+                Duration
+                <select v-model="durationChoice" :class="ui.fieldInput">
+                  <option
+                    v-for="option in DURATION_OPTIONS"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="durationChoice === 'custom'" :class="[ui.field, ui.span2]">
+                Ends
+                <input v-model="dtend" type="datetime-local" :class="ui.fieldInput" />
+              </label>
             </div>
-          </div>
-
-          <!-- Weeks -->
-          <div class="grid">
-            <div
-              v-for="(week, wi) in calGrid"
-              :key="wi"
-              class="grid grid-cols-7 divide-x divide-border"
-              :class="{ 'border-t border-border': wi > 0 }"
-            >
+            <label :class="ui.field">
+              Location (optional)
+              <input
+                v-model="location"
+                type="text"
+                :class="ui.fieldInput"
+                placeholder="Room, address or link"
+                aria-label="Event location"
+              />
+            </label>
+            <label :class="ui.field">
+              Description (optional)
+              <textarea
+                v-model="description"
+                :class="ui.textarea"
+                rows="3"
+                aria-label="Event description"
+              />
+            </label>
+            <RecurrencePicker v-model="rrule" />
+            <p v-if="visibleComposerError" :class="ui.alert" role="alert">
+              <Clock3 aria-hidden="true" />
+              {{ visibleComposerError }}
+            </p>
+            <div :class="ui.formFoot">
               <button
-                v-for="(cell, di) in week"
-                :key="di"
                 type="button"
-                class="min-h-[4.5rem] p-1.5 text-left align-top transition-colors"
-                :class="[
-                  cell.day === null ? 'bg-background/40 cursor-default' : 'cursor-pointer hover:bg-muted',
-                  cell.day !== null && cell.day === selectedDay ? 'bg-muted' : '',
-                ]"
-                :disabled="cell.day === null"
-                :aria-pressed="cell.day !== null ? (cell.day === selectedDay ? 'true' : 'false') : undefined"
-                :aria-label="cell.day !== null ? `${cell.day}${cell.isToday ? ', today' : ''}, ${cell.events.length} ${cell.events.length === 1 ? 'event' : 'events'}` : undefined"
-                @click="cell.day !== null && (selectedDay = cell.day)"
+                :class="quietButtonLgClass"
+                :disabled="isPosting"
+                @click="resetComposer"
               >
-                <span
-                  v-if="cell.day !== null"
-                  class="inline-flex h-6 min-w-6 items-center justify-center px-1 font-mono text-xs tabular-nums"
-                  :class="cell.isToday
-                    ? 'rounded-full border border-live font-bold text-live-text'
-                    : 'text-muted-foreground'"
-                >{{ cell.day }}</span>
-
-                <!-- Event pills (up to 3) -->
-                <div class="mt-1 grid gap-0.5">
-                  <div
-                    v-for="ev in cell.events.slice(0, 3)"
-                    :key="ev.id"
-                    class="truncate rounded-full px-1.5 py-px text-[11px] leading-tight"
-                    :class="myPartstat(ev) === 'ACCEPTED' || myPartstat(ev) === 'TENTATIVE'
-                      ? 'bg-primary/15 text-primary'
-                      : 'bg-muted text-muted-foreground'"
-                  >
-                    {{ monthPillLabel(ev, cell.rangeStartMs) }}
-                  </div>
-                  <div
-                    v-if="cell.events.length > 3"
-                    class="px-1 text-[11px] text-muted-foreground"
-                  >
-                    +{{ cell.events.length - 3 }} more
-                  </div>
-                </div>
+                Cancel
+              </button>
+              <button type="submit" :class="primaryButtonClass" :disabled="!canSubmit">
+                {{ isPosting ? (editingId ? "Saving…" : "Publishing…") : (editingId ? "Save changes" : "Publish event") }}
               </button>
             </div>
+          </form>
+        </template>
+
+        <template v-else>
+          <template v-for="section in sections" :key="section.key">
+            <!-- Month grid (Events-Calendar board) -->
+            <section v-if="section.kind === 'grid'" :class="ui.section" :aria-label="calTitle">
+              <div :class="ui.monthNav">
+                <button
+                  type="button"
+                  :class="iconButtonClass"
+                  aria-label="Previous month"
+                  @click="prevMonth"
+                >
+                  <ChevronLeft aria-hidden="true" />
+                </button>
+                <h2 :class="ui.monthTitle">{{ calTitle }}</h2>
+                <button
+                  type="button"
+                  :class="iconButtonClass"
+                  aria-label="Next month"
+                  @click="nextMonth"
+                >
+                  <ChevronRight aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  :class="ui.todayButton"
+                  aria-label="Jump to today"
+                  @click="goToToday"
+                >
+                  Today
+                </button>
+              </div>
+              <div :class="ui.grid">
+                <span v-for="label in DOW_LABELS" :key="label" :class="ui.dow">{{ label }}</span>
+                <template v-for="(week, wi) in calGrid" :key="wi">
+                  <button
+                    v-for="(cell, di) in week"
+                    :key="di"
+                    type="button"
+                    :class="ui.cell"
+                    :data-today="cell.isToday ? '' : undefined"
+                    :disabled="cell.day === null"
+                    :aria-pressed="cell.day !== null ? (cell.day === selectedDay ? 'true' : 'false') : undefined"
+                    :aria-label="cell.day !== null ? `${cell.day}${cell.isToday ? ', today' : ''}, ${cell.events.length} ${cell.events.length === 1 ? 'event' : 'events'}` : undefined"
+                    @click="cell.day !== null && (selectedDay = cell.day)"
+                  >
+                    <span v-if="cell.day !== null" :class="ui.cellNum">{{ cell.day }}</span>
+                    <span
+                      v-for="ev in cell.events.slice(0, 3)"
+                      :key="ev.id"
+                      :class="ui.pill"
+                      :data-mine="isMine(ev) ? '' : undefined"
+                    >{{ monthPillLabel(ev, cell.rangeStartMs) }}</span>
+                    <span v-if="cell.events.length > 3" :class="ui.more">
+                      +{{ cell.events.length - 3 }} more
+                    </span>
+                    <span v-if="cell.events.length > 0" :class="ui.dot" aria-hidden="true" />
+                  </button>
+                </template>
+              </div>
+              <p
+                v-if="selectedDay !== null && selectedDayEvents.length === 0"
+                :class="ui.dayEmpty"
+              >
+                Nothing on this day. A good one to plan something.
+              </p>
+            </section>
+
+            <!-- Day / next-up sections: the one event card (EventCard board) -->
+            <section v-else :class="ui.section" :aria-label="section.heading">
+              <h2 :class="section.headingClass">{{ section.heading }}</h2>
+              <article
+                v-for="event in section.events"
+                :key="event.id"
+                :class="ui.card"
+                :data-live="isEventLive(event) ? '' : undefined"
+                :aria-label="event.summary"
+              >
+                <div :class="ui.cardHead">
+                  <div :class="ui.cardMain">
+                    <p :class="ui.cardKicker">{{ section.kicker(event) }}</p>
+                    <h3 :class="ui.cardTitle">{{ event.summary }}</h3>
+                    <span v-if="event.location || event.organizer" :class="ui.cardMeta">
+                      <MapPin v-if="event.location" aria-hidden="true" />
+                      {{ [event.location, event.organizer ? `Hosted by ${authorLabel(event.organizer)}` : null].filter(Boolean).join(" · ") }}
+                    </span>
+                  </div>
+                  <template v-if="isOrganiser(event)">
+                    <button
+                      type="button"
+                      :class="iconButtonClass"
+                      aria-label="Edit event"
+                      @click="startEdit(event)"
+                    >
+                      <Pencil aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      :class="iconButtonClass"
+                      aria-label="Cancel event"
+                      @click="onCancelEvent(event)"
+                    >
+                      <Trash2 aria-hidden="true" />
+                    </button>
+                  </template>
+                </div>
+                <p v-if="event.description" :class="ui.cardDesc">{{ event.description }}</p>
+                <span v-if="event.rrule" :class="ui.cardRepeat">
+                  <Repeat aria-hidden="true" />
+                  {{ summarizeRrule(event.rrule) }}
+                </span>
+                <div v-if="selfBareJid" :class="ui.cardFoot">
+                  <div :class="segClass" role="group" aria-label="RSVP">
+                    <button
+                      v-for="choice in RSVP_CHOICES"
+                      :key="choice.partstat"
+                      type="button"
+                      :aria-pressed="myPartstat(event) === choice.partstat ? 'true' : 'false'"
+                      @click="onRsvp(event, choice.partstat)"
+                    >{{ choice.label }}</button>
+                  </div>
+                  <span :class="ui.counts">
+                    {{ attendeesByPartstat(event)["ACCEPTED"].length }} going ·
+                    {{ attendeesByPartstat(event)["TENTATIVE"].length }} maybe ·
+                    {{ attendeesByPartstat(event)["DECLINED"].length }} can't
+                  </span>
+                </div>
+              </article>
+            </section>
+          </template>
+
+          <div v-if="viewMode === 'week' && sections.length === 0 && !isLoading" :class="ui.empty">
+            <img :src="spotUrl" alt="" />
+            <h2>
+              {{ activeFilter === 'attending' ? "Nothing you're going to this week." : "Nothing scheduled this week." }}
+            </h2>
+            <p>
+              {{ activeFilter === 'attending'
+                ? "Say yes to something, or schedule one yourself."
+                : canPost ? "Schedule one to get the community together." : "Check back later." }}
+            </p>
+            <button v-if="canPost" type="button" :class="primaryButtonClass" @click="openComposer">
+              New event
+            </button>
           </div>
-        </div>
-
-        <!-- Selected day event list -->
-        <section v-if="selectedDay !== null && selectedDayEvents.length > 0" class="grid gap-2">
-          <h2 :class="kickerClass">{{ selectedDayLabel }}</h2>
-          <article
-            v-for="event in selectedDayEvents"
-            :key="event.id"
-            :class="eventCard(event).root"
-          >
-            <header class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <p :class="eventCard(event).kicker">{{ eventKicker(event, selectedDayStartMs) }}</p>
-                <h3 :class="[eventCard(event).title, 'mt-1']">{{ event.summary }}</h3>
-              </div>
-              <div v-if="isOrganiser(event)" class="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                  aria-label="Edit event"
-                  @click="startEdit(event)"
-                >
-                  <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive-text"
-                  aria-label="Cancel event"
-                  @click="onCancelEvent(event)"
-                >
-                  <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-              </div>
-            </header>
-            <p v-if="event.location" class="type-caption text-muted-foreground">
-              {{ event.location }}
-            </p>
-            <p v-if="event.description" class="whitespace-pre-wrap break-words text-sm text-foreground">
-              {{ event.description }}
-            </p>
-            <p v-if="event.rrule" class="type-caption inline-flex items-center gap-1 text-primary">
-              <Repeat class="h-3 w-3" aria-hidden="true" />
-              {{ summarizeRrule(event.rrule) }}
-            </p>
-            <p v-if="event.organizer" class="type-caption text-muted-foreground">
-              Hosted by {{ authorLabel(event.organizer) }}
-            </p>
-            <div v-if="selfBareJid" :class="[eventCard(event).footer, 'flex-wrap']">
-              <div class="inline-flex gap-1 rounded-full border border-border bg-background p-0.5" role="group" aria-label="RSVP">
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                  :class="myPartstat(event) === 'ACCEPTED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                  :aria-pressed="myPartstat(event) === 'ACCEPTED' ? 'true' : 'false'"
-                  @click="onRsvp(event, 'ACCEPTED')"
-                >Going</button>
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                  :class="myPartstat(event) === 'TENTATIVE' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                  :aria-pressed="myPartstat(event) === 'TENTATIVE' ? 'true' : 'false'"
-                  @click="onRsvp(event, 'TENTATIVE')"
-                >Maybe</button>
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
-                  :class="myPartstat(event) === 'DECLINED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                  :aria-pressed="myPartstat(event) === 'DECLINED' ? 'true' : 'false'"
-                  @click="onRsvp(event, 'DECLINED')"
-                >Can't</button>
-              </div>
-              <span class="type-caption text-muted-foreground">
-                {{ attendeesByPartstat(event)["ACCEPTED"].length }} going ·
-                {{ attendeesByPartstat(event)["TENTATIVE"].length }} maybe ·
-                {{ attendeesByPartstat(event)["DECLINED"].length }} can't
-              </span>
-            </div>
-          </article>
-        </section>
-
-        <p
-          v-else-if="selectedDay !== null && selectedDayEvents.length === 0"
-          class="type-caption rounded-2xl border border-dashed border-border px-4 py-4 text-center text-muted-foreground"
-        >
-          Nothing on this day. A good one to plan something.
-        </p>
-      </template>
-
+        </template>
+      </div>
     </div>
 
-    <!-- Cancel action sheet (recurring events only) -->
-    <div
-      v-if="cancelTarget"
-      class="fixed inset-0 z-50 flex items-end justify-center bg-background/70 p-4 sm:items-center"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="events-cancel-title"
-      @click.self="dismissCancelSheet"
-    >
-      <div class="w-full max-w-sm rounded-2xl border border-border bg-card p-4 shadow-[var(--shadow-elevated)]">
-        <h2 id="events-cancel-title" class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
-          Cancel "{{ cancelTarget.summary }}"
+    <!-- Cancel sheet (recurring events only): a bottom sheet on phones, a dialog from md. -->
+    <div v-if="cancelTarget" :class="ui.sheetPositioner">
+      <div :class="scrimClass" aria-hidden="true" @click="dismissCancelSheet" />
+      <div
+        :class="ui.sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="events-cancel-title"
+      >
+        <span :class="ui.grabber" aria-hidden="true" />
+        <h2 id="events-cancel-title" :class="ui.sheetTitle">
+          Cancel “{{ cancelTarget.summary }}”
         </h2>
-        <p class="type-caption mt-1 text-muted-foreground">
-          This event repeats. Choose what to cancel:
-        </p>
-        <div class="mt-3 grid gap-2">
-          <button
-            type="button"
-            class="inline-flex items-center justify-between rounded-[10px] border border-border px-3 py-2 text-sm text-foreground hover:bg-muted"
-            @click="confirmCancelInstance"
-          >
-            <span>Just this occurrence</span>
-            <span class="type-caption text-muted-foreground">
-              {{ formatStart(cancelTarget) }}
-            </span>
-          </button>
-          <button
-            type="button"
-            :class="[dangerButtonClass, '!justify-between']"
-            @click="confirmCancelSeries"
-          >
-            <span>The entire series</span>
-            <span class="type-caption">All future occurrences</span>
-          </button>
-        </div>
-        <div class="mt-3 flex justify-end">
-          <button
-            type="button"
-            :class="quietButtonClass"
-            @click="dismissCancelSheet"
-          >
+        <p :class="ui.sheetBody">This event repeats. Choose what to cancel:</p>
+        <button type="button" :class="ui.option" @click="confirmCancelInstance">
+          <span>Just this occurrence</span>
+          <span>{{ formatStart(cancelTarget) }}</span>
+        </button>
+        <button type="button" :class="[ui.option, ui.optionDanger]" @click="confirmCancelSeries">
+          <span>The entire series</span>
+          <span>All future occurrences</span>
+        </button>
+        <div :class="ui.sheetFoot">
+          <button type="button" :class="quietButtonLgClass" @click="dismissCancelSheet">
             Keep event
           </button>
         </div>

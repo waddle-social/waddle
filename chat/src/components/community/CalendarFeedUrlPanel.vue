@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { ExternalLink } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, input, kicker } from "styled-system/recipes";
 import { calendarFeedSubscriptionHref } from "@/lib/calendar-feed-url";
 
 const props = defineProps<{
@@ -14,29 +16,43 @@ function selectFeedUrl(event: FocusEvent) {
     event.target.select();
   }
 }
+
+const rootClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2.5",
+  padding: "14px 16px",
+  borderRadius: "12px",
+  bg: "surface",
+  border: "1px solid {colors.border.soft}",
+});
+const headClass = css({ display: "flex", alignItems: "center", gap: "2.5", flexWrap: "wrap" });
+const titleClass = cx(kicker(), css({ margin: 0, flex: 1 }));
+const linkClass = cx(btn({ size: "sm" }), css({ textDecoration: "none", _coarse: { minHeight: "44px" } }));
+const inputClass = cx(input(), css({ width: "100%", minWidth: 0, fontFamily: "mono", fontSize: "13px" }));
 </script>
 
 <template>
-  <div class="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
-    <span class="text-xs font-medium text-muted-foreground">
-      Calendar subscription URL
-    </span>
-    <a
-      v-if="subscriptionHref"
-      :href="subscriptionHref"
-      target="_blank"
-      rel="noopener noreferrer"
-      class="inline-flex min-h-11 items-center gap-1 rounded-md border border-input px-2.5 py-1.5 text-xs font-medium text-primary hover:bg-background hover:underline"
-    >
-      <ExternalLink class="h-3.5 w-3.5" aria-hidden="true" />
-      Subscribe to calendar
-    </a>
+  <section :class="rootClass" aria-label="Calendar subscription URL">
+    <div :class="headClass">
+      <h2 :class="titleClass">Subscribe in your calendar app</h2>
+      <a
+        v-if="subscriptionHref"
+        :href="subscriptionHref"
+        target="_blank"
+        rel="noopener noreferrer"
+        :class="linkClass"
+      >
+        Subscribe to calendar
+        <ExternalLink aria-hidden="true" />
+      </a>
+    </div>
     <input
-      class="min-h-11 min-w-0 basis-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground sm:basis-0 sm:flex-1"
+      :class="inputClass"
       readonly
       :value="url"
       aria-label="Calendar feed URL"
       @focus="selectFeedUrl"
     />
-  </div>
+  </section>
 </template>
