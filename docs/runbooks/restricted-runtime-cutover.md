@@ -43,6 +43,29 @@ psql_primary() { kubectl -n waddle exec -i "$PRIMARY" -c postgres -- psql -v ON_
 the local socket; superuser access does not need to be enabled on the
 cluster.
 
+## Multi-replica deployments: epoch 2 before serving
+
+A deployment of this release with more than one `waddle-server` replica
+must complete the owner phase of the cutover, which activates ingress
+protocol epoch 2 (`activate_ingress_protocol_epoch` in
+`server/crates/waddle-server/src/server/runtime_owner.rs`), before any
+replica serves clients. Below epoch 2, cross-node full-JID delivery is not
+live: a stanza for a full JID whose binding another replica hosts needs a
+bound direct request, which is carried only at epoch 2, so it is reported
+unavailable and goes to offline storage or is bounced instead of reaching
+the connected client ([direct lanes, "Below protocol epoch
+2"](../planning/2173-direct-lanes.md#below-protocol-epoch-2)). The
+PostgreSQL owner-as-runtime startup never activates the epoch, so do not
+scale such a deployment above one replica, and keep the Deployment at zero
+replicas through Phase B until step 9 restores the count. Confirm the epoch
+before scaling up:
+
+```sh
+psql_primary -Atc "SELECT epoch FROM public.ingress_protocol_epoch WHERE id = 1"
+```
+
+Expected: `2` or greater.
+
 ## Phase A: stage (no outage)
 
 Everything in this phase is **[reversible]** by reverting the commit, except
