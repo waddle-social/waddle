@@ -10,6 +10,9 @@
 //! against is fixed; sockets are real loopback TCP. No PostgreSQL, SpiceDB
 //! or second process is involved.
 
+// The support module is shared with the XEP-0368 and XEP-0220 suites;
+// each suite uses only part of it.
+#[allow(dead_code)]
 #[path = "s2s_connection_manager/support.rs"]
 mod support;
 
