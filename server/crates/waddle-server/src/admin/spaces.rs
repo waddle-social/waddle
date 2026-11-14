@@ -35,6 +35,7 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
+use waddle_xmpp::identity::CanonicalBareJid;
 use waddle_xmpp::muc::room_actor::GetConfig;
 use waddle_xmpp::muc::room_registry_actor::GetRoom;
 use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
@@ -456,10 +457,13 @@ fn parse_required_text(form: &DataForm, var: &str) -> Result<String, String> {
     parse_optional_text(form, var).ok_or_else(|| format!("'{var}' is required"))
 }
 
+/// A required bare-JID field, taken exactly under the identity profile
+/// ([`DataForm::bare_jid`]): a spelling preparation would change is refused
+/// rather than folded onto another space or member.
 fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String> {
-    let raw = parse_required_text(form, var)?;
-    raw.parse()
-        .map_err(|e| format!("'{var}' is not a valid bare JID '{raw}': {e}"))
+    form.bare_jid(var)
+        .ok_or_else(|| format!("'{var}' is required"))?
+        .map_err(|error| format!("'{var}' is not a bare JID in canonical form: {error}"))
 }
 
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {
@@ -1098,7 +1102,13 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     //      admin-managed channels.
     //   2. Legacy/bookmark items stored on the space's pubsub node
     //      (each item's `id` is a managed-room JID).
-    // Both are unioned so the cascade is total.
+    // Both are unioned so the cascade is total, with one exception. An
+    // item whose id is not the room's canonical text
+    // (`Room@muc.example.com`, stored as written by earlier releases) folds
+    // onto a room that need not belong to this space: publishing it gave
+    // that room a parent tuple on this node and moved its link here. Such
+    // a room loses that tuple and link, but is destroyed only when an item
+    // under its canonical id is on this node too.
     let (node_name, space_jid) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
 
@@ -1126,6 +1136,16 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     }
     let bookmarked_rooms: BTreeSet<BareJid> = items
         .iter()
+        .filter_map(|stored| stored.id.parse::<BareJid>().ok())
+        .collect();
+    let canonically_bookmarked_rooms: BTreeSet<BareJid> = items
+        .iter()
+        .filter_map(|stored| CanonicalBareJid::parse_exact(&stored.id).ok())
+        .map(CanonicalBareJid::into_bare_jid)
+        .collect();
+    let folded_onto_rooms: BTreeSet<BareJid> = items
+        .iter()
+        .filter(|stored| CanonicalBareJid::parse_exact(&stored.id).is_err())
         .filter_map(|stored| stored.id.parse::<BareJid>().ok())
         .collect();
 
@@ -1242,6 +1262,14 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                     "clearing channel-space link failed for {room_jid}: {error}"
                 )));
             }
+        }
+        if folded_onto_rooms.contains(room_jid) && !canonically_bookmarked_rooms.contains(room_jid)
+        {
+            // Only items whose ids fold onto this room name it here. Their
+            // parent tuple and a link to this node are gone with the space;
+            // the room itself is not shown to be this space's.
+            cleanups.push(cleanup);
+            continue;
         }
         destroy_targets.insert(room_jid.clone());
         cleanups.push(cleanup);

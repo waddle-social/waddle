@@ -122,7 +122,8 @@ fn bearer(token: &str, authzid: Option<&str>) -> Vec<u8> {
 async fn open_replies_with_to_only_for_the_current_hint() {
     let state = websocket_state().await;
     let (mut peer, server) = connect(state).await;
-    let first = start_stream(&mut peer, Some("Alice@EXAMPLE.com")).await;
+    // A trailing dot is removed from the hint; it is the same account.
+    let first = start_stream(&mut peer, Some("alice@example.com.")).await;
     assert_eq!(first.attr("to"), Some("alice@example.com"));
     let second = start_stream(&mut peer, None).await;
     assert_eq!(second.attr("to"), None);
@@ -140,6 +141,10 @@ async fn invalid_open_from_gets_separate_open_error_close_and_websocket_close() 
         "example.com",
         "alice@example.com/device",
         "@example.com",
+        // Spellings the identity profile refuses instead of folding.
+        "Alice@EXAMPLE.com",
+        "alice@EXAMPLE.com",
+        "stra\u{df}e@example.com",
     ] {
         let (mut peer, server) = connect(Arc::clone(&state)).await;
         send(&mut peer, open(Some(invalid))).await;
@@ -277,17 +282,21 @@ async fn oauth_checks_supplied_authzid_without_committing_failed_attempts() {
         .last_used_at;
     let (mut peer, server) = connect(Arc::clone(&state)).await;
     start_stream(&mut peer, Some("alice@example.com")).await;
-    send(
-        &mut peer,
-        oauth(&bearer(&session.id, Some("bob@example.com"))),
-    )
-    .await;
-    let failed = receive(&mut peer).await;
-    assert_eq!(
-        (failed.name(), failed.ns()),
-        ("failure", NS_SASL.to_owned())
-    );
-    assert!(failed.get_child("invalid-authzid", NS_SASL).is_some());
+    // Another account, and a spelling of this account's JID that preparation
+    // would fold, are both refused.
+    for authzid in ["bob@example.com", "Alice@example.com"] {
+        send(&mut peer, oauth(&bearer(&session.id, Some(authzid)))).await;
+        let failed = receive(&mut peer).await;
+        assert_eq!(
+            (failed.name(), failed.ns()),
+            ("failure", NS_SASL.to_owned()),
+            "{authzid}"
+        );
+        assert!(
+            failed.get_child("invalid-authzid", NS_SASL).is_some(),
+            "{authzid}"
+        );
+    }
     assert_eq!(
         sessions
             .get_session(&session.id)

@@ -20,6 +20,8 @@ kameo = { workspace = true }
 
 # XMPP
 jid = { workspace = true }
+# IDNA2008 (UTS #46) processing for the identity profile's canonical domains.
+idna = "1"
 xmpp-parsers = { workspace = true }
 minidom = { workspace = true }
 rxml = { workspace = true }

@@ -10,9 +10,10 @@ use waddle_xmpp::XmppError;
 use super::DatabasePubSubStorage;
 use crate::dnd_projection::{delete_dnd_projection_tx, upsert_dnd_projection_tx, DndProjection};
 use crate::notification_settings_projection::{
-    derive_dm_bookmark_projection_mutation, derive_validated_bookmark_projection_mutation,
-    validate_dm_bookmark_publish, validate_xep0402_bookmark_publish, ConversationKind,
-    NotificationSettingsProjectionMutation, NotificationSettingsSource,
+    derive_bookmark_projection_mutation, derive_dm_bookmark_projection_mutation,
+    derive_validated_bookmark_projection_mutation, validate_dm_bookmark_publish,
+    validate_xep0402_bookmark_publish, ConversationKind, NotificationSettingsProjectionMutation,
+    NotificationSettingsSource,
 };
 
 impl DatabasePubSubStorage {
@@ -353,9 +354,10 @@ impl DatabasePubSubStorage {
             .map_err(|error| XmppError::internal(error.to_string()))?;
             apply_projection_mutation_tx(&mut tx, mutation).await?;
             for evicted_item_id in &evicted_item_ids {
-                delete_bookmark_projection_for_item_tx(
+                reconcile_bookmark_projection_after_removal_tx(
                     &mut tx,
                     owner,
+                    node_name,
                     evicted_item_id,
                     NotificationSettingsSource::Xep0402Bookmarks,
                 )
@@ -378,9 +380,10 @@ impl DatabasePubSubStorage {
             // clobbers a MUC-sourced row that happens to share the same
             // conversation JID (the projection PK is source-agnostic).
             for evicted_item_id in &evicted_item_ids {
-                delete_bookmark_projection_for_item_tx(
+                reconcile_bookmark_projection_after_removal_tx(
                     &mut tx,
                     owner,
+                    node_name,
                     evicted_item_id,
                     NotificationSettingsSource::WaddleDmBookmarks,
                 )
@@ -519,7 +522,10 @@ impl DatabasePubSubStorage {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             if affected > 0 {
-                delete_bookmark_projection_for_item_tx(&mut tx, owner, item_id, source).await?;
+                reconcile_bookmark_projection_after_removal_tx(
+                    &mut tx, owner, node_name, item_id, source,
+                )
+                .await?;
             }
             tx.commit()
                 .await
@@ -800,6 +806,112 @@ async fn delete_bookmark_projection_for_item_tx(
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;
     Ok(())
+}
+
+/// Bring the projection row of the conversation `item_id` names up to date
+/// after the item `item_id` left the owner's `node_name`.
+///
+/// Projection rows are keyed by the conversation the `jid` parser reads from
+/// an item id, so the store can hold two items that feed one row: one under
+/// the conversation's canonical id (`room@muc.example.com`) and one under a
+/// spelling the parser folds onto it (`Room@muc.example.com`), which earlier
+/// releases accepted as written. Removing the non-canonical item while the
+/// canonical one remains derives the row again from the remaining item
+/// instead of deleting it, so clearing a stray item never clears settings
+/// the canonical item still carries.
+async fn reconcile_bookmark_projection_after_removal_tx(
+    tx: &mut Transaction<'_>,
+    owner: &BareJid,
+    node_name: &str,
+    item_id: &str,
+    source: NotificationSettingsSource,
+) -> Result<(), XmppError> {
+    let conversation_jid: BareJid = item_id
+        .parse()
+        .map_err(|error| XmppError::internal(format!("invalid bookmark item id: {error}")))?;
+    let conversation_id = conversation_jid.to_string();
+    if conversation_id != item_id {
+        if let Some(mutation) =
+            remaining_bookmark_projection_tx(tx, owner, node_name, &conversation_id, source).await?
+        {
+            return apply_projection_mutation_tx(tx, mutation).await;
+        }
+    }
+    delete_bookmark_projection_for_item_tx(tx, owner, item_id, source).await
+}
+
+/// The projection mutation the item stored under `conversation_id` on the
+/// owner's `node_name` derives, or `None` when no such item is stored or its
+/// payload no longer derives one.
+async fn remaining_bookmark_projection_tx(
+    tx: &mut Transaction<'_>,
+    owner: &BareJid,
+    node_name: &str,
+    conversation_id: &str,
+    source: NotificationSettingsSource,
+) -> Result<Option<NotificationSettingsProjectionMutation>, XmppError> {
+    let mut rows = tx
+        .query(
+            "SELECT payload_xml, published_at_ms FROM pubsub_items \
+             WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
+            crate::db_params![owner.to_string(), node_name, conversation_id],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let payload_xml: Option<String> = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let published_at_ms: i64 = row
+        .get(1)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(payload) = payload_xml.and_then(|xml| xml.parse::<minidom::Element>().ok()) else {
+        warn!(
+            owner = %owner,
+            node_name,
+            "stored bookmark item has no readable payload; clearing its projection row"
+        );
+        return Ok(None);
+    };
+    let source_version = next_notification_settings_source_version_tx(tx).await?;
+    let derived = match source {
+        NotificationSettingsSource::Xep0402Bookmarks => derive_bookmark_projection_mutation(
+            owner,
+            conversation_id,
+            Some(&payload),
+            ConversationKind::PrivateGroup,
+            published_at_ms,
+            source_version,
+        ),
+        NotificationSettingsSource::WaddleDmBookmarks => {
+            validate_dm_bookmark_publish(conversation_id, &payload).and_then(|dm_bookmark| {
+                derive_dm_bookmark_projection_mutation(
+                    owner,
+                    &dm_bookmark,
+                    published_at_ms,
+                    source_version,
+                )
+            })
+        }
+    };
+    match derived {
+        Ok(mutation) => Ok(Some(mutation)),
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node_name,
+                %error,
+                "stored bookmark item no longer derives a projection row; clearing it"
+            );
+            Ok(None)
+        }
+    }
 }
 
 async fn apply_projection_mutation_tx(

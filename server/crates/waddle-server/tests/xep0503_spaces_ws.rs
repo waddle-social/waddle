@@ -1,14 +1,23 @@
-//! XEP-0503 Spaces wire-conformance integration tests over WebSocket.
+//! XEP-0503 Spaces wire-conformance integration tests over WebSocket,
+//! including the identity profile for XEP-0402 room item ids.
 
 use waddle_ws_test_support as ws_common;
 
+use std::str::FromStr;
+use std::time::Duration;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
 use tokio::sync::Mutex;
+use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
+const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const USERNAME: &str = "admin";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -225,4 +234,468 @@ async fn room_disco_advertises_parent_space_metadata() {
         "expected MUC roominfo pubsub compatibility field: {info}"
     );
     let _ = admin.close().await;
+}
+
+fn is_bad_request_error(frame: &str) -> bool {
+    let Ok(response) = frame.parse::<Element>() else {
+        return false;
+    };
+    response.attr("type") == Some("error")
+        && response
+            .get_child("error", "jabber:client")
+            .is_some_and(|error| {
+                error
+                    .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                    .is_some()
+            })
+}
+
+fn space_publish(node: &str, item_id: &str) -> Element {
+    Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            Element::builder("publish", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(
+                    Element::builder("item", NS_PUBSUB)
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                        .append(
+                            Element::builder("conference", "urn:xmpp:bookmarks:1")
+                                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Chat")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn space_retract(node: &str, item_id: &str) -> Element {
+    Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            Element::builder("retract", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(
+                    Element::builder("item", NS_PUBSUB)
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+async fn space_items(admin: &mut WsXmppClient, id: &str, node: &str) -> String {
+    iq_get_to(
+        admin,
+        id,
+        "spaces.localhost",
+        Element::builder("pubsub", NS_PUBSUB)
+            .append(
+                Element::builder("items", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                    .build(),
+            )
+            .build(),
+    )
+    .await
+}
+
+/// Create a second Space node beside the seeded `general`.
+async fn create_space_node(admin: &mut WsXmppClient, node: &str) {
+    let response = iq_set_to(
+        admin,
+        &format!("create-{node}"),
+        "spaces.localhost",
+        Element::builder("pubsub", NS_PUBSUB)
+            .append(
+                Element::builder("create", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                    .build(),
+            )
+            .build(),
+    )
+    .await;
+    assert!(
+        is_result(&response),
+        "creating Space node {node} must succeed: {response}"
+    );
+}
+
+fn is_result(frame: &str) -> bool {
+    frame
+        .parse::<Element>()
+        .is_ok_and(|response| response.attr("type") == Some("result"))
+}
+
+fn item_ids(frame: &str) -> Vec<String> {
+    let response: Element = frame.parse().expect("items response XML");
+    response
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+        .map(|items| {
+            items
+                .children()
+                .filter_map(|item| item.attr("id").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Spellings of the seeded `chat@muc.localhost` that the `jid` parser
+/// would fold onto it. The item id is stored and matched as written, so
+/// each would otherwise key a second item for the same room.
+const NON_CANONICAL_CHAT_IDS: [&str; 3] = [
+    "Chat@muc.localhost",
+    "chat@MUC.localhost",
+    "chat@muc.localhost.",
+];
+
+#[tokio::test]
+async fn spaces_publish_refuses_a_non_canonical_room_item_id() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-publish-non-canonical").await;
+    // Publishing the room into another Space would move it there, so a
+    // folded id accepted on `second` would give `chat` a second parent.
+    create_space_node(&mut admin, "second").await;
+
+    for (index, item_id) in NON_CANONICAL_CHAT_IDS.iter().enumerate() {
+        let id = format!("spaces-publish-non-canonical-{index}");
+        let response = iq_set_to(
+            &mut admin,
+            &id,
+            "spaces.localhost",
+            space_publish("second", item_id),
+        )
+        .await;
+        assert!(
+            is_bad_request_error(&response),
+            "publishing {item_id:?} must be refused with <bad-request/>: {response}"
+        );
+    }
+
+    let second = space_items(&mut admin, "second-items-after-publish", "second").await;
+    assert!(
+        item_ids(&second).is_empty(),
+        "no item may be stored on the second Space: {second}"
+    );
+    let general = space_items(&mut admin, "general-items-after-publish", "general").await;
+    assert!(
+        item_ids(&general).contains(&"chat@muc.localhost".to_owned()),
+        "the canonical room item must remain on general: {general}"
+    );
+
+    // The channel keeps exactly one parent space.
+    let info = iq_get_to(
+        &mut admin,
+        "chat-info-after-publish",
+        "chat@muc.localhost",
+        Element::builder("query", "http://jabber.org/protocol/disco#info").build(),
+    )
+    .await;
+    assert!(
+        info.contains("xmpp:spaces.localhost?;node=general"),
+        "the room must keep its general parent: {info}"
+    );
+    assert!(
+        !info.contains("xmpp:spaces.localhost?;node=second"),
+        "the room must not name the second Space as a parent: {info}"
+    );
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn spaces_retract_refuses_a_non_canonical_room_item_id() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-retract-non-canonical").await;
+
+    for (index, item_id) in NON_CANONICAL_CHAT_IDS.iter().enumerate() {
+        let id = format!("spaces-retract-non-canonical-{index}");
+        let response = iq_set_to(
+            &mut admin,
+            &id,
+            "spaces.localhost",
+            space_retract("general", item_id),
+        )
+        .await;
+        assert!(
+            is_bad_request_error(&response),
+            "retracting {item_id:?}, which names no stored item, must be refused with <bad-request/>: {response}"
+        );
+    }
+
+    let items = space_items(&mut admin, "spaces-items-after-retract", "general").await;
+    assert!(
+        items.contains("chat@muc.localhost"),
+        "the canonical room item must remain: {items}"
+    );
+    let _ = admin.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Items stored under a non-canonical id. Earlier releases stored Space item
+// ids as written, so the store can hold `Chat@muc.localhost` on a Space
+// node, with the parent tuple its publish gave `chat` on that node. These
+// tests seed that state in a persistent SQLite file shared by the global
+// and PubSub stores.
+// ---------------------------------------------------------------------------
+
+/// A server whose global and PubSub stores are one SQLite file the test
+/// can seed, and a pool on that file.
+async fn persistent_server(directory: &tempfile::TempDir) -> (TestServer, SqlitePool) {
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("spaces.sqlite3").display()
+    );
+    let server = TestServer::start_persistent_with_extra_envs(
+        &url,
+        &[],
+        &[("WADDLE_XMPP_PUBSUB_DATABASE_URL", &url)],
+    );
+    let options = SqliteConnectOptions::from_str(&url)
+        .expect("SQLite URL")
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("seed pool");
+    (server, pool)
+}
+
+/// Store `item_id` on Space `node` as written, bypassing publish.
+async fn seed_space_item(pool: &SqlitePool, node: &str, item_id: &str) {
+    sqlx::query(
+        "INSERT INTO pubsub_items \
+         (owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms) \
+         VALUES ('spaces.localhost', ?, ?, ?, NULL, 0)",
+    )
+    .bind(node)
+    .bind(item_id)
+    .bind(String::from(
+        &Element::builder("conference", "urn:xmpp:bookmarks:1")
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Chat")
+            .build(),
+    ))
+    .execute(pool)
+    .await
+    .expect("seed Space item");
+}
+
+/// Give channel `chat` a parent tuple on Space `node`, as publishing a
+/// bookmark for it there did, by copying its seeded `general` tuple.
+async fn seed_chat_parent_tuple(pool: &SqlitePool, node: &str) {
+    let inserted = sqlx::query(
+        "INSERT INTO permission_tuples \
+         (id, object_type, object_id, relation, subject_type, subject_id, subject_relation) \
+         SELECT ?, object_type, object_id, relation, subject_type, ?, subject_relation \
+         FROM permission_tuples \
+         WHERE object_type = 'channel' AND object_id = 'chat' AND relation = 'parent' \
+           AND subject_type = 'space' AND subject_id = 'general'",
+    )
+    .bind(format!("seeded-chat-parent-{node}"))
+    .bind(node)
+    .execute(pool)
+    .await
+    .expect("seed parent tuple")
+    .rows_affected();
+    assert_eq!(
+        inserted, 1,
+        "chat must have its seeded general parent tuple"
+    );
+}
+
+async fn chat_parent_tuples(pool: &SqlitePool, node: &str) -> i64 {
+    sqlx::query(
+        "SELECT COUNT(*) FROM permission_tuples \
+         WHERE object_type = 'channel' AND object_id = 'chat' AND relation = 'parent' \
+           AND subject_type = 'space' AND subject_id = ?",
+    )
+    .bind(node)
+    .fetch_one(pool)
+    .await
+    .expect("count parent tuples")
+    .get(0)
+}
+
+async fn stored_space_items(pool: &SqlitePool, node: &str, item_id: &str) -> i64 {
+    sqlx::query(
+        "SELECT COUNT(*) FROM pubsub_items \
+         WHERE owner_jid = 'spaces.localhost' AND node_name = ? AND item_id = ?",
+    )
+    .bind(node)
+    .bind(item_id)
+    .fetch_one(pool)
+    .await
+    .expect("count Space items")
+    .get(0)
+}
+
+#[tokio::test]
+async fn spaces_retract_removes_a_stored_non_canonical_item_and_its_parent_grant() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-retract-stored-non-canonical").await;
+    create_space_node(&mut admin, "second").await;
+    seed_space_item(&pool, "second", "Chat@muc.localhost").await;
+    seed_chat_parent_tuple(&pool, "second").await;
+
+    let response = iq_set_to(
+        &mut admin,
+        "retract-stored-non-canonical",
+        "spaces.localhost",
+        space_retract("second", "Chat@muc.localhost"),
+    )
+    .await;
+    assert!(
+        is_result(&response),
+        "the stored non-canonical item must be retracted by its exact id: {response}"
+    );
+    assert_eq!(
+        stored_space_items(&pool, "second", "Chat@muc.localhost").await,
+        0
+    );
+    assert_eq!(
+        chat_parent_tuples(&pool, "second").await,
+        0,
+        "the parent grant the item held on the second Space is revoked"
+    );
+    assert_eq!(
+        chat_parent_tuples(&pool, "general").await,
+        1,
+        "the canonical parent grant on general remains"
+    );
+    let general = space_items(&mut admin, "general-items-after-stored-retract", "general").await;
+    assert!(
+        item_ids(&general).contains(&"chat@muc.localhost".to_owned()),
+        "the canonical room item on general remains: {general}"
+    );
+
+    // Another spelling names no stored item and is still refused.
+    let response = iq_set_to(
+        &mut admin,
+        "retract-unstored-non-canonical",
+        "spaces.localhost",
+        space_retract("second", "CHAT@muc.localhost"),
+    )
+    .await;
+    assert!(
+        is_bad_request_error(&response),
+        "a non-canonical id that names no stored item is refused: {response}"
+    );
+    let _ = admin.close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn spaces_retract_of_a_non_canonical_item_keeps_the_grant_a_canonical_item_holds() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-retract-beside-canonical").await;
+    // `general` holds `chat@muc.localhost` and its parent tuple already.
+    seed_space_item(&pool, "general", "Chat@muc.localhost").await;
+
+    let response = iq_set_to(
+        &mut admin,
+        "retract-beside-canonical",
+        "spaces.localhost",
+        space_retract("general", "Chat@muc.localhost"),
+    )
+    .await;
+    assert!(
+        is_result(&response),
+        "the stored non-canonical item must be retracted by its exact id: {response}"
+    );
+    assert_eq!(
+        stored_space_items(&pool, "general", "Chat@muc.localhost").await,
+        0
+    );
+    assert_eq!(
+        stored_space_items(&pool, "general", "chat@muc.localhost").await,
+        1
+    );
+    assert_eq!(
+        chat_parent_tuples(&pool, "general").await,
+        1,
+        "the canonical item still names chat, so its parent grant remains"
+    );
+    let _ = admin.close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn spaces_delete_does_not_destroy_a_room_only_a_non_canonical_item_names() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-delete-non-canonical").await;
+    create_space_node(&mut admin, "second").await;
+    // The state publishing `Chat@muc.localhost` into `second` left: the
+    // item, a parent tuple for `chat` on `second`, and `chat`'s link moved
+    // to `second`.
+    seed_space_item(&pool, "second", "Chat@muc.localhost").await;
+    seed_chat_parent_tuple(&pool, "second").await;
+    sqlx::query(
+        "INSERT OR REPLACE INTO channel_space_links \
+         (channel_jid, space_jid, space_node, created_at) \
+         VALUES ('chat@muc.localhost', 'second@spaces.localhost', 'second', 0)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed channel-space link");
+
+    let delete = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:waddle:admin:spaces:delete:0",
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(
+            DataForm::new(FormType::Submit)
+                .add_field(Field::form_type("urn:waddle:admin:spaces:delete:0"))
+                .add_field(Field::text_single("space_jid", "second@spaces.localhost"))
+                .add_field(Field::text_single("confirm", "yes"))
+                .to_element(),
+        )
+        .build();
+    let response = iq_set_to(&mut admin, "delete-second", DOMAIN, delete).await;
+    assert!(
+        is_result(&response),
+        "spaces:delete must succeed: {response}"
+    );
+
+    assert_eq!(
+        chat_parent_tuples(&pool, "second").await,
+        0,
+        "the parent grant on the deleted Space is gone"
+    );
+    assert_eq!(chat_parent_tuples(&pool, "general").await, 1);
+    let channels: i64 = sqlx::query("SELECT COUNT(*) FROM channels WHERE id = 'chat'")
+        .fetch_one(&pool)
+        .await
+        .expect("count channels")
+        .get(0);
+    assert_eq!(channels, 1, "the chat channel must not be destroyed");
+    let info = iq_get_to(
+        &mut admin,
+        "chat-info-after-delete",
+        "chat@muc.localhost",
+        Element::builder("query", "http://jabber.org/protocol/disco#info").build(),
+    )
+    .await;
+    assert!(
+        is_result(&info),
+        "the chat room must still exist after the delete: {info}"
+    );
+    let general = space_items(&mut admin, "general-items-after-delete", "general").await;
+    assert!(
+        item_ids(&general).contains(&"chat@muc.localhost".to_owned()),
+        "chat stays bookmarked in general: {general}"
+    );
+    let _ = admin.close().await;
+    pool.close().await;
 }

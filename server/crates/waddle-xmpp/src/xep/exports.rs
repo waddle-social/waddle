@@ -238,8 +238,8 @@ pub use super::xep0430::{
 };
 
 pub use super::xep0402::{
-    build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark, Bookmark,
-    BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
+    build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark,
+    parse_bookmark_item_id, Bookmark, BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
 };
 
 pub use super::xep_waddle_dm_bookmarks::{

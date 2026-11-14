@@ -4,8 +4,17 @@ use super::{
     warn, BareJid, Object, ObjectType, Permission, PubSubError, WebSocketState,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
+use waddle_xmpp::identity::CanonicalBareJid;
 
-fn extension_route_room_for_node(state: &WebSocketState, node: &str) -> Option<BareJid> {
+/// The room an extension route node names, from the first route whose
+/// pattern the node matches. `Some(Err(()))` when that room segment is not a
+/// canonical bare JID: the checks below run on the parsed room while the
+/// affiliation is written to the node as named, so a spelling the `jid`
+/// parser would fold (`Room@muc.example.com`) must not stand for the room.
+fn extension_route_room_for_node(
+    state: &WebSocketState,
+    node: &str,
+) -> Option<Result<BareJid, ()>> {
     state
         .deps
         .protocol
@@ -14,7 +23,11 @@ fn extension_route_room_for_node(state: &WebSocketState, node: &str) -> Option<B
         .iter()
         .find_map(|route| {
             extension_route_placeholder_value(route.state_node.as_str(), node, "room")
-                .and_then(|room| room.parse::<BareJid>().ok())
+        })
+        .map(|room| {
+            CanonicalBareJid::parse_exact(&room)
+                .map(CanonicalBareJid::into_bare_jid)
+                .map_err(|_| ())
         })
 }
 
@@ -61,8 +74,10 @@ pub(super) async fn handle_extension_route_items(
     request: PubSubItemsRead<'_>,
 ) -> Vec<String> {
     let node = request.node;
-    let Some(room_jid) = extension_route_room_for_node(state, node) else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    let room_jid = match extension_route_room_for_node(state, node) {
+        Some(Ok(room_jid)) => room_jid,
+        Some(Err(())) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))],
+        None => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
     };
     if room_jid.domain().as_str() != muc_domain {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];

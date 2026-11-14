@@ -26,6 +26,7 @@ use std::collections::HashSet;
 
 use kameo::actor::ActorRef;
 use tracing::warn;
+use waddle_xmpp::identity::{parse_bare_jid, CanonicalBareJid, CanonicalDomain};
 
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
@@ -35,19 +36,35 @@ use super::AuthError;
 #[cfg(test)]
 mod tests;
 
-/// The JID library's canonical (nodeprepped) form of an account name: the
-/// localpart every session, roster item and stanza carries for it. `None`
-/// when the name is no valid localpart. Native usernames keep the case they
-/// were registered with, so `Äda` is the account behind `äda@…`.
+/// The lookup key of an account name: its localpart as the JID library
+/// prepares it (Nodeprep). `None` when the name is no valid localpart.
+///
+/// Keys index the account stores and detect names that fold together, so a
+/// legacy native `Bob` keeps the key `bob` and blocks registering `bob`.
+/// They never resolve an input: lookups take the input exactly
+/// ([`exact_account_jid`]) and refuse a spelling preparation would change.
 pub(crate) fn canonical_localpart(name: &str) -> Option<jid::NodePart> {
     jid::NodePart::new(name).ok().map(Cow::into_owned)
 }
 
-/// The canonical bare JID of the account `name@domain`.
+/// The lookup key of the account `name@domain`: [`canonical_localpart`] at
+/// the domain's canonical form. See [`canonical_localpart`] for its use.
 pub(crate) fn canonical_account_jid(name: &str, domain: &str) -> Option<jid::BareJid> {
     let node = jid::NodePart::new(name).ok()?;
-    let domain = jid::DomainPart::new(domain).ok()?;
-    Some(jid::BareJid::from_parts(Some(&node), &domain))
+    let domain = CanonicalDomain::prepare(domain).ok()?;
+    Some(jid::BareJid::from_parts(
+        Some(&node),
+        domain.as_domain_ref(),
+    ))
+}
+
+/// The account address an input names under the identity profile: `name`
+/// exactly as given at the canonical `domain`. `None` when preparation would
+/// change either part, so a spelling such as `Alice` or `straße` is never
+/// folded onto the account keyed `alice` or `strasse`.
+pub(crate) fn exact_account_jid(name: &str, domain: &str) -> Option<CanonicalBareJid> {
+    let domain = CanonicalDomain::parse_exact(domain).ok()?;
+    CanonicalBareJid::from_parts(name, &domain).ok()
 }
 
 /// Startup pass before the node serves: give every account row written
@@ -249,28 +266,27 @@ const ACCOUNT_EXISTS_SQL: &str = "SELECT 1 FROM users WHERE localpart_key = ? \
 /// account through either the OIDC `users` table or the native `native_users`
 /// table.
 ///
-/// Both sides compare the JID library's canonical keys exactly, so a name
-/// matches whatever case or Unicode form it was registered with. `users` rows
-/// carry no `domain` column — OIDC accounts are always local to the server's
-/// own domain — so they are matched on the localpart alone; native accounts
-/// on their bare JID. Callers are expected to have already constrained
-/// `domain` to the local server domain (group-DM validation, for example,
-/// rejects non-local members before reaching here).
+/// The input is taken exactly under the identity profile: a localpart that
+/// preparation would change (`Alice`, `straße`) names no account. It is then
+/// compared with the stored lookup keys, so an account registered before the
+/// profile is found under the spelling its key records. `users` rows carry
+/// no `domain` column — OIDC accounts are always local to the server's own
+/// domain — so they are matched on the localpart alone; native accounts on
+/// their bare JID. Callers are expected to have already constrained `domain`
+/// to the local server domain (group-DM validation, for example, rejects
+/// non-local members before reaching here).
 pub async fn local_account_exists(
     actor: &ActorRef<DbActor>,
     localpart: &str,
     domain: &str,
 ) -> Result<bool, AuthError> {
-    let (Some(localpart), Some(jid)) = (
-        canonical_localpart(localpart),
-        canonical_account_jid(localpart, domain),
-    ) else {
+    let Some(jid) = exact_account_jid(localpart, domain) else {
         return Ok(false);
     };
     let row = actor
         .ask(DbQueryOne {
             sql: ACCOUNT_EXISTS_SQL.to_string(),
-            params: vec![localpart.as_str().into(), jid.as_str().into()],
+            params: vec![localpart.into(), jid.as_str().into()],
         })
         .await
         .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
@@ -296,6 +312,18 @@ pub async fn local_account_jid_exists(
 
 /// XEP-0055 directory entries from both account stores. Prefer OIDC profile
 /// data for a shared JID, and rank exact identities before the result limit.
+///
+/// A query is free text matched case-insensitively against names. A query
+/// that is a canonical account address at `domain` matches by its localpart;
+/// one that is not canonical stays free text and is never folded into an
+/// address. An entry is returned only under its stored name's canonical
+/// address; a row whose stored name preparation would change is left out
+/// rather than presented under another account's address.
+///
+/// Rows are one account only when their stored names are identical (an OIDC
+/// row and a native row for the same name). Names that differ only
+/// in case are different rows, so a legacy `Bob` never takes the place of
+/// the canonical `bob` before the non-canonical row is left out.
 pub(crate) async fn search_local_accounts(
     actor: &ActorRef<DbActor>,
     domain: &str,
@@ -303,8 +331,7 @@ pub(crate) async fn search_local_accounts(
     limit: usize,
 ) -> Result<Vec<waddle_xmpp::UserDirectoryEntry>, AuthError> {
     let query = query.trim();
-    let address = query
-        .parse::<jid::BareJid>()
+    let address = parse_bare_jid(query)
         .ok()
         .filter(|address| address.domain().as_str() == domain);
     let query = address
@@ -324,7 +351,7 @@ pub(crate) async fn search_local_accounts(
                     FROM native_users WHERE domain = ?
                 ), ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY LOWER(xmpp_localpart) ORDER BY source, username
+                        PARTITION BY xmpp_localpart ORDER BY source, username
                     ) AS position
                     FROM accounts
                 )
@@ -365,10 +392,14 @@ pub(crate) async fn search_local_accounts(
         let localpart = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
-        // Parse the stored localpart as a JID; username slug generation would
-        // change valid native names such as `alice+work` into another account.
-        let jid = jid::BareJid::new(&format!("{localpart}@{domain}"))
-            .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+        // Build the address from the stored localpart exactly; username slug
+        // generation would change valid native names such as `alice+work`
+        // into another account, and preparation would fold a legacy name
+        // such as `Bob` onto the account keyed `bob`.
+        let Some(jid) = exact_account_jid(&localpart, domain).map(CanonicalBareJid::into_bare_jid)
+        else {
+            continue;
+        };
         if !seen.insert(jid.clone()) {
             continue;
         }

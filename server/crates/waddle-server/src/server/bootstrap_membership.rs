@@ -1,6 +1,7 @@
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use tracing::{debug, info, warn};
+use waddle_xmpp::identity::{parse_localpart, IdentityError};
 
 use crate::db::actor::{DbActor, DbQuery};
 use crate::db::{row_value, ValueExt};
@@ -19,68 +20,89 @@ pub struct BootstrapMembershipConfig {
 }
 
 impl BootstrapMembershipConfig {
-    pub fn from_env() -> Self {
-        Self {
+    /// Load `WADDLE_SERVER_OWNER_LOCALPARTS` at startup. Every entry must be
+    /// a localpart already in the identity profile's canonical form
+    /// ([`parse_localpart`]); any other entry fails configuration load
+    /// instead of being folded onto another account.
+    pub fn try_from_env() -> Result<Self, OwnerLocalpartError> {
+        Ok(Self {
             server_id: DEPLOYMENT_SERVER_ID.to_string(),
             owner_localparts: parse_owner_localparts(
                 std::env::var(OWNER_ENV).unwrap_or_default().as_str(),
-            ),
-        }
+            )?,
+        })
+    }
+
+    /// The same configuration after startup has validated it with
+    /// [`BootstrapMembershipConfig::try_from_env`]. A list with an entry
+    /// outside the profile cannot reach a running server; were one present,
+    /// it would name no owner at all rather than fold an entry onto an
+    /// account.
+    pub fn from_env() -> Self {
+        Self::try_from_env().unwrap_or_else(|error| {
+            warn!(%error, "ignoring server-owner configuration outside the identity profile");
+            Self {
+                server_id: DEPLOYMENT_SERVER_ID.to_string(),
+                owner_localparts: Vec::new(),
+            }
+        })
     }
 
     #[cfg(test)]
     pub fn new(owner_localparts: Vec<String>) -> Self {
         Self {
             server_id: DEPLOYMENT_SERVER_ID.to_string(),
-            owner_localparts: owner_localparts
-                .into_iter()
-                .filter_map(|value| normalize_localpart(&value))
-                .collect(),
+            owner_localparts,
         }
     }
 
+    /// Whether the account with exactly this stored localpart is a
+    /// configured owner. The localpart is compared exactly: an account whose
+    /// name differs from an entry only in case is not an owner.
     pub fn is_owner(&self, localpart: &str) -> bool {
-        normalize_localpart(localpart).is_some_and(|localpart| {
-            self.owner_localparts
-                .iter()
-                .any(|owner| owner == &localpart)
-        })
+        self.owner_localparts.iter().any(|owner| owner == localpart)
     }
 
-    /// All server-owner localparts (already normalized and deduplicated).
+    /// All server-owner localparts, canonical and deduplicated.
     pub fn owner_localparts(&self) -> &[String] {
         &self.owner_localparts
     }
 }
 
-pub fn parse_owner_localparts(value: &str) -> Vec<String> {
-    let mut localparts = Vec::new();
-    for part in value.split([',', ' ', '\n', '\t']) {
-        let Some(localpart) = normalize_localpart(part) else {
-            continue;
-        };
-        if !localparts.iter().any(|existing| existing == &localpart) {
-            localparts.push(localpart);
-        }
-    }
-    localparts
+/// A `WADDLE_SERVER_OWNER_LOCALPARTS` entry outside the identity profile.
+/// The entry is named, since it is operator configuration, not account data
+/// read from a store.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "WADDLE_SERVER_OWNER_LOCALPARTS entry {entry:?} is not a localpart in canonical form \
+     (write the exact account name, without a domain): {reason}"
+)]
+pub struct OwnerLocalpartError {
+    pub entry: String,
+    pub reason: IdentityError,
 }
 
-fn normalize_localpart(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_matches('@');
-    if trimmed.is_empty() {
-        return None;
+/// Parse an owner list separated by commas, spaces, tabs or line breaks (LF
+/// or CRLF). Each entry must be a canonical localpart exactly as written;
+/// duplicates are removed.
+pub fn parse_owner_localparts(value: &str) -> Result<Vec<String>, OwnerLocalpartError> {
+    let mut localparts: Vec<String> = Vec::new();
+    for entry in owner_entries(value) {
+        parse_localpart(entry).map_err(|reason| OwnerLocalpartError {
+            entry: entry.to_owned(),
+            reason,
+        })?;
+        if !localparts.iter().any(|existing| existing == entry) {
+            localparts.push(entry.to_owned());
+        }
     }
-    let localpart = trimmed
-        .split('@')
-        .next()
-        .unwrap_or(trimmed)
-        .to_ascii_lowercase();
-    if localpart.is_empty() {
-        None
-    } else {
-        Some(localpart)
-    }
+    Ok(localparts)
+}
+
+fn owner_entries(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split([',', ' ', '\n', '\r', '\t'])
+        .filter(|entry| !entry.is_empty())
 }
 
 pub async fn provision_user_membership(
@@ -267,8 +289,26 @@ mod tests {
     fn parses_owner_localparts_from_env_style_list() {
         assert_eq!(
             parse_owner_localparts(" rawkode,icepuma\nrandax rawkode "),
-            vec!["rawkode", "icepuma", "randax"]
+            Ok(vec![
+                "rawkode".to_owned(),
+                "icepuma".to_owned(),
+                "randax".to_owned()
+            ])
         );
+        // A list written with CRLF line endings, as a Windows-edited env
+        // file or secret produces.
+        assert_eq!(
+            parse_owner_localparts("rawkode\r\nicepuma\r\n"),
+            Ok(vec!["rawkode".to_owned(), "icepuma".to_owned()])
+        );
+        for refused in [
+            "Rawkode",
+            "rawkode@waddle.social",
+            "@rawkode",
+            "stra\u{df}e",
+        ] {
+            assert!(parse_owner_localparts(refused).is_err(), "{refused}");
+        }
     }
 
     #[tokio::test]

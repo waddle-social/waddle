@@ -2,6 +2,7 @@ use super::frame::{ResponseBatch, ResponseFrame};
 use super::state::WsConnState;
 use super::stream_management::InlineResumeStep;
 use super::transport_xml::{sasl_failure_element, sasl_success_element};
+use crate::auth::directory::exact_account_jid;
 use crate::server::routes::auth_telemetry::{
     record_auth_failure, record_auth_success, AuthFailure,
 };
@@ -11,6 +12,7 @@ use crate::sm_authority::{
     InlineResumeFailed, InlineResumeOutcome, InlineSession,
 };
 use waddle_xmpp::auth::OAuthBearerParseError;
+use waddle_xmpp::identity::CanonicalBareJid;
 use waddle_xmpp::telemetry::attributes::AuthStage;
 use waddle_xmpp_core::xep0388_inline::{
     Sasl2InlineRequests, Sasl2InlineResults, SmInlineEnable, SmInlineFailed, SmInlineResumeResult,
@@ -133,8 +135,11 @@ pub(super) async fn handle_sasl_oauthbearer(
         .await
     {
         Ok(session) => {
-            let principal = match session.user_jid.parse::<BareJid>() {
-                Ok(principal) if principal.node().is_some() => principal,
+            // The account is bound to its stored identity exactly: the
+            // stored bare JID must be canonical, and the stored localpart at
+            // this domain must name that same JID without any folding.
+            let principal = match CanonicalBareJid::parse_exact(&session.user_jid) {
+                Ok(principal) if principal.localpart().is_some() => principal.into_bare_jid(),
                 _ => {
                     return oauth_failure(
                         sasl2,
@@ -433,19 +438,17 @@ pub(super) async fn handle_sasl_scram_response(
         }
     };
 
-    // Authentication successful - create session
-    let bare_jid_str = format!("{}@{}", scram.username(), domain);
-    let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
-        Ok(jid) => jid,
-        Err(_) => {
-            return ScramResponse {
-                element: scram_failure_counted(AuthFailure::ScramOther, None),
-                server_final: None,
-            };
-        }
+    // Authentication successful - create session. The credentials were
+    // found under exactly this username, so the bound JID is the account's
+    // canonical stored identity, never a folded spelling of it.
+    let Some(bare_jid) = exact_account_jid(scram.username(), domain).map(BareJid::from) else {
+        return ScramResponse {
+            element: scram_failure_counted(AuthFailure::ScramOther, None),
+            server_final: None,
+        };
     };
-
-    let bare_jid: BareJid = match bare_jid_str.parse() {
+    let bare_jid_str = bare_jid.to_string();
+    let full_jid: FullJid = match bare_jid.with_resource_str("pending") {
         Ok(jid) => jid,
         Err(_) => {
             return ScramResponse {

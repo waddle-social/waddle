@@ -726,17 +726,22 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
     let _ = alice.close().await;
 }
 
-/// An account registered as `Äda` is `äda@localhost` (RFC 6122 nodeprep folds
-/// non-ASCII case, which SQL `lower()` does not): adding and subscribing to
-/// that JID reach the account instead of being refused as a non-account.
+/// An account written before the identity profile as `Äda` holds the lookup
+/// key `äda@localhost`. Adding and subscribing to that canonical JID reach the
+/// account instead of being refused as a non-account, while the spelling
+/// `Äda@localhost`, which preparation would fold onto it, is refused as
+/// malformed and never reaches the roster. The account signs in only under
+/// its key's spelling.
 #[tokio::test]
 async fn contacts_match_accounts_on_their_canonical_localpart() {
+    let directory = tempfile::tempdir().expect("database directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("roster.sqlite3").display()
+    );
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
-    let ada_password = format!("ada-pass-{}", uuid::Uuid::new_v4());
-    let server = TestServer::start_with_extra_accounts(&[
-        ("alice", &alice_password),
-        ("Äda", &ada_password),
-    ]);
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&url, &[("alice", &alice_password)]);
     let mut alice = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
@@ -746,20 +751,47 @@ async fn contacts_match_accounts_on_their_canonical_localpart() {
     )
     .await
     .expect("alice connection");
+    // Registration now refuses `Äda`; write the row as an older node did,
+    // keyed and sharing alice's password material.
+    let pool = sqlx::SqlitePool::connect(&url)
+        .await
+        .expect("seed database");
+    sqlx::query("INSERT INTO native_users (username, domain, jid_key, password_hash, salt, iterations, stored_key, server_key) SELECT 'Äda', domain, 'äda@localhost', password_hash, salt, iterations, stored_key, server_key FROM native_users WHERE username = 'alice'")
+        .execute(&pool)
+        .await
+        .expect("legacy account");
+    pool.close().await;
+
+    assert!(
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "Äda", &alice_password, "folded")
+            .await
+            .is_err(),
+        "a spelling preparation would fold must not sign in"
+    );
     let mut ada = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
-        "Äda",
-        &ada_password,
+        "äda",
+        &alice_password,
         &format!("ada-{}", uuid::Uuid::new_v4()),
     )
     .await
-    .expect("Äda connection");
+    .expect("äda connection");
     let _initial = send_roster_get(&mut alice, "canonical-initial").await;
     let _ada_initial = send_roster_get(&mut ada, "canonical-ada-initial").await;
     ada.send(r#"<presence xmlns="jabber:client"/>"#)
         .await
-        .expect("Äda available");
+        .expect("äda available");
+
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="set" id="add-folded"><query xmlns="jabber:iq:roster"><item jid="Äda@localhost"/></query></iq>"#)
+        .await
+        .expect("send folded roster add");
+    let refused = alice
+        .recv_matching(|frame| frame.contains("add-folded"))
+        .await
+        .expect("folded roster add reply");
+    assert!(refused.contains("jid-malformed"), "{refused}");
 
     alice
         .send(r#"<iq xmlns="jabber:client" type="set" id="add-ada"><query xmlns="jabber:iq:roster"><item jid="äda@localhost"/></query></iq>"#)
@@ -783,7 +815,7 @@ async fn contacts_match_accounts_on_their_canonical_localpart() {
     let request = ada
         .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
-        .expect("Äda receives the subscription request");
+        .expect("äda receives the subscription request");
     assert!(request.contains("from='alice@localhost'"), "{request}");
 
     let _ = ada.close().await;

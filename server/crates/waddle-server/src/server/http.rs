@@ -1059,6 +1059,21 @@ async fn create_websocket_state(
     // `AppState` — both are built in `start_with_config` so admin V2
     // handlers and the WebSocket transport operate on the same handles.
     let xmpp_domain = auth_state.xmpp_domain.clone();
+    // Every bound account JID and served address is built from these domains,
+    // so each must already be in the identity profile's canonical form.
+    let account_domain = crate::auth::identity_profile::require_canonical_domains(
+        &xmpp_domain,
+        &[
+            xmpp_config.muc_domain.as_str(),
+            xmpp_config.spaces_jid.domain().as_str(),
+        ],
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "WADDLE_XMPP_DOMAIN, WADDLE_MUC_DOMAIN and WADDLE_SPACES_JID must be canonical domains \
+             (lowercase, no trailing dot, A-labels): {error}"
+        )
+    })?;
     // #757: `muc`/`spaces` must match the registry/component domains the rest
     // of the server is built from, honoring `WADDLE_MUC_DOMAIN` /
     // `WADDLE_SPACES_JID`, rather than re-deriving `muc.<domain>`.
@@ -1352,6 +1367,26 @@ async fn create_websocket_state(
         crate::auth::directory::reconcile_local_accounts(state.db_pool.global_actor())
             .await
             .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
+        // Report, without identifiers, the accounts the identity profile
+        // treats differently from before; nothing is changed.
+        match crate::auth::identity_profile::reconcile_identity_profile(
+            state.db_pool.global_actor(),
+            &account_domain,
+        )
+        .await
+        {
+            Ok(report) => crate::auth::identity_profile::log_identity_profile_report(&report),
+            Err(error) => warn!(%error, "identity profile reconciliation failed"),
+        }
+        match crate::auth::identity_profile::reconcile_bookmark_item_ids(
+            &pubsub_database_storage.database(),
+            &state.spaces_jid,
+        )
+        .await
+        {
+            Ok(report) => crate::auth::identity_profile::log_bookmark_item_report(&report),
+            Err(error) => warn!(%error, "bookmark item id reconciliation failed"),
+        }
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,

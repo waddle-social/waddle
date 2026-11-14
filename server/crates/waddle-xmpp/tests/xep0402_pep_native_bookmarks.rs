@@ -10,12 +10,14 @@
 //!   bounded max_items, never send-last),
 //! - the item-id-is-room-JID contract of `build_bookmark_item` (§3),
 //! - full-attribute parse/build round-trips and the typed
-//!   `BookmarkError` surface for malformed payloads.
+//!   `BookmarkError` surface for malformed payloads,
+//! - item ids held to the identity profile: only a room's canonical bare
+//!   JID text is accepted.
 
 use minidom::Element;
 use waddle_xmpp::xep::xep0402::{
-    build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark, Bookmark,
-    BookmarkError, NS_BOOKMARKS2, PEP_NODE,
+    build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark,
+    parse_bookmark_item_id, Bookmark, BookmarkError, NS_BOOKMARKS2, PEP_NODE,
 };
 use waddle_xmpp_core::pubsub::{
     AccessModel, NodeConfig, PublishModel, SendLastPublishedItem, PEP_BOOKMARK_MAX_ITEMS,
@@ -255,4 +257,34 @@ fn xep0402_parse_rejects_invalid_item_id_jid() {
         parse_bookmark("not a jid at all", &payload),
         Err(BookmarkError::InvalidJid(_))
     ));
+}
+
+#[test]
+fn xep0402_parse_refuses_item_ids_the_jid_parser_would_fold() {
+    // The item id is stored as written and keys later publishes and
+    // retracts of the same room, so it must already be the room's canonical
+    // bare JID under the identity profile. A spelling the `jid` parser would
+    // fold onto another room is refused rather than parsed as that room.
+    let payload: Element = "<conference xmlns='urn:xmpp:bookmarks:1'/>"
+        .parse()
+        .expect("valid xml");
+    for item_id in [
+        "Room@muc.example.com",
+        "ＲＯＯＭ@muc.example.com",
+        "room@MUC.example.com",
+        "room@muc.example.com.",
+        "room@bücher.example",
+        "room@muc.example.com/nick",
+    ] {
+        assert!(
+            matches!(
+                parse_bookmark(item_id, &payload),
+                Err(BookmarkError::InvalidJid(_))
+            ),
+            "{item_id:?}"
+        );
+        assert!(parse_bookmark_item_id(item_id).is_err(), "{item_id:?}");
+    }
+    let canonical = parse_bookmark_item_id("room@xn--bcher-kva.example").expect("canonical id");
+    assert_eq!(canonical.as_str(), "room@xn--bcher-kva.example");
 }

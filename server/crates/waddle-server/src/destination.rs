@@ -12,11 +12,11 @@
 //! IQ requests then receive the error from [`unroutable_iq_reply`] and IQ
 //! results and errors are dropped.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use jid::{BareJid, DomainPart, DomainRef, FullJid, Jid, NodePart, ResourcePart};
+use jid::{BareJid, DomainPart, DomainRef, FullJid, Jid};
+use waddle_xmpp::identity::{canonical_jid, CanonicalDomain, DomainKind};
 use waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo;
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::Stanza;
@@ -87,12 +87,12 @@ impl ServedDomains {
 
     /// Classify the `to` address of a client-originated stanza.
     ///
-    /// The address is first put in canonical form: one trailing label
-    /// separator is removed from its domainpart (RFC 7622 §3.2), and every
-    /// address carried by the result uses that form. Domainparts are otherwise
-    /// compared exactly as parsed: an internationalized domain written with
-    /// A-labels (`xn--…`) and the same domain written with U-labels are not
-    /// unified, so they can classify differently.
+    /// The address is first put in the identity profile's canonical form
+    /// (see [`canonical_address`]), and every address carried by the result
+    /// uses that form. An internationalized domain written with U-labels and
+    /// the same domain written with A-labels (`xn--…`) therefore classify
+    /// identically. The served domains must be canonical as well; startup
+    /// refuses a configured domain that is not.
     pub fn classify(&self, to: Option<&Jid>) -> Destination {
         let Some(address) = to else {
             return Destination::Missing;
@@ -205,22 +205,48 @@ impl RemoteDestination {
 
 /// Why an unserved domainpart cannot name a federation peer.
 ///
-/// RFC 7622 §3.2 permits both forms in an address but notes that IP-literal
-/// domainparts might not be accepted for server-to-server communication and
-/// that unqualified hostnames resolve only on a local network. A peer is
-/// discovered through DNS SRV records and authenticated by a DNS reference
-/// identity (RFC 6120 §13.7.2, RFC 9525), and neither form can satisfy both.
+/// The reasons follow the identity profile's domain classification
+/// ([`DomainKind`]); only a fully qualified DNS name can name a peer
+/// (ADR-0020 D3). RFC 7622 §3.2 permits IP literals and unqualified hostnames
+/// in an address but notes that IP-literal domainparts might not be accepted
+/// for server-to-server communication and that unqualified hostnames resolve
+/// only on a local network. A peer is discovered through DNS SRV records and
+/// authenticated by a DNS reference identity (RFC 6120 §13.7.2, RFC 9525),
+/// and none of these forms can satisfy both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InvalidDestination {
     /// An IPv4 address or bracketed IPv6 address.
     IpLiteral,
+    /// A name a resolver or URL parser reads as an IPv4 address, such as
+    /// `2130706433`, `0x7f.1` or `127.1` ([`DomainKind::NumericIpv4Form`]).
+    NumericIpv4Form,
     /// A single DNS label with no parent domain.
     UnqualifiedHost,
+    /// A domainpart the identity profile cannot prepare (IDNA2008 with STD3
+    /// rules), although the `jid` parser accepted it, such as one containing
+    /// `_`. Client stanzas never carry one, because the frame parser refuses
+    /// it first.
+    UnpreparableDomain,
 }
 
-/// `address` without a trailing label separator on its domainpart: the form
-/// RFC 7622 §3.2 requires before an address is compared or used. Every other
-/// address is returned unchanged, so applying it twice is harmless.
+impl InvalidDestination {
+    /// The reason a domain of `kind` cannot name a peer, or `None` for a
+    /// fully qualified DNS name.
+    pub fn for_kind(kind: DomainKind) -> Option<Self> {
+        match kind {
+            DomainKind::Dns => None,
+            DomainKind::SingleLabel => Some(Self::UnqualifiedHost),
+            DomainKind::NumericIpv4Form => Some(Self::NumericIpv4Form),
+            DomainKind::Ipv4 | DomainKind::Ipv6 => Some(Self::IpLiteral),
+        }
+    }
+}
+
+/// `address` in the identity profile's canonical form
+/// ([`waddle_xmpp::identity::canonical_jid`]): one trailing label separator
+/// removed from its domainpart, as RFC 7622 §3.2 requires before an address
+/// is compared or used, and an internationalized domain in A-label form.
+/// Applying it twice is harmless.
 ///
 /// [`ServedDomains::classify`] applies it before classifying. A caller that
 /// hands the classified stanza on applies it to the stanza's `to` as well, so
@@ -228,51 +254,24 @@ pub enum InvalidDestination {
 /// `node@domain.` and `node@domain` are one entity, and an exact text
 /// comparison against a served address must not tell them apart.
 ///
-/// The `jid` crate validates such a domainpart without the separator but keeps
-/// the original text, so `node@domain.` reports `domain.` as its domain, and in
-/// `node@domain./resource` the resourcepart accessor is offset by one byte.
-/// The parts are therefore re-read from the canonical text, splitting it the
-/// way the parser does (the first `/` starts the resourcepart, and an `@`
-/// before it ends the localpart), and the address is rebuilt from typed parts.
+/// Client stanzas reach the classifier already canonical, because the frame
+/// parser applies the profile to their decoded addresses and refuses
+/// spellings it would fold. An address that cannot be put in canonical form
+/// (a domain that IDNA2008 rejects although the `jid` parser accepted it) is
+/// returned unchanged; it matches no served domain and classifies as
+/// [`InvalidDestination::UnpreparableDomain`].
 pub fn canonical_address(address: &Jid) -> Jid {
-    let raw = address.as_str();
-    let (bare, resource) = match raw.split_once('/') {
-        Some((bare, resource)) => (bare, Some(resource)),
-        None => (raw, None),
-    };
-    let (node, domain) = match bare.split_once('@') {
-        Some((node, domain)) => (Some(node), domain),
-        None => (None, bare),
-    };
-    let Some(domain) = domain.strip_suffix('.') else {
-        return address.clone();
-    };
-    // Every part was accepted by the same checks when `address` was parsed,
-    // so rebuilding cannot fail; the original address is kept if it does.
-    jid_from_raw_parts(node, domain, resource).unwrap_or_else(|| address.clone())
+    canonical_jid(address).unwrap_or_else(|_| address.clone())
 }
 
-fn jid_from_raw_parts(node: Option<&str>, domain: &str, resource: Option<&str>) -> Option<Jid> {
-    let node = node.map(NodePart::new).transpose().ok()?;
-    let domain = DomainPart::new(domain).ok()?;
-    let resource = resource.map(ResourcePart::new).transpose().ok()?;
-    Some(Jid::from_parts(
-        node.as_deref(),
-        &domain,
-        resource.as_deref(),
-    ))
-}
-
+/// Classify an unserved domain with the identity profile's
+/// [`CanonicalDomain::kind`], the one classification admission, routing and
+/// discovery share.
 fn unroutable_domain(domain: &DomainRef) -> Option<InvalidDestination> {
-    let raw = domain.as_str();
-    let ipv6 = raw
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-        .is_some_and(|inner| inner.parse::<Ipv6Addr>().is_ok());
-    if ipv6 || raw.parse::<Ipv4Addr>().is_ok() {
-        return Some(InvalidDestination::IpLiteral);
+    match CanonicalDomain::from_domain(domain) {
+        Ok(domain) => InvalidDestination::for_kind(domain.kind()),
+        Err(_) => Some(InvalidDestination::UnpreparableDomain),
     }
-    (!raw.contains('.')).then_some(InvalidDestination::UnqualifiedHost)
 }
 
 /// Why a stanza addressed to an unserved domain was not routed.
@@ -312,10 +311,20 @@ impl UnroutableReason {
                 DefinedCondition::RemoteServerNotFound,
                 "IP-literal domains cannot be reached from this server.",
             ),
+            Self::InvalidDestination(InvalidDestination::NumericIpv4Form) => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "Numeric IPv4 domains cannot be reached from this server.",
+            ),
             Self::InvalidDestination(InvalidDestination::UnqualifiedHost) => (
                 ErrorType::Cancel,
                 DefinedCondition::RemoteServerNotFound,
                 "Unqualified domains cannot be reached from this server.",
+            ),
+            Self::InvalidDestination(InvalidDestination::UnpreparableDomain) => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "The domain is not a valid domain name.",
             ),
             Self::RouteTimedOut => (
                 ErrorType::Wait,

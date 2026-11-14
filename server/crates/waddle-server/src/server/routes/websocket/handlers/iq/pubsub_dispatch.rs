@@ -479,8 +479,30 @@ pub(super) async fn handle_pubsub_iq(
                 if node == waddle_xmpp::xep::xep0402::PEP_NODE
                     && !is_valid_xep0402_bookmark_item_id(&item_id)
                 {
-                    let error = build_pubsub_error(iq, PubSubError::InvalidJid);
-                    return vec![iq_to_xml(error)];
+                    // The store can hold bookmarks under an id that is not
+                    // canonical (`Room@muc.example.com`): earlier releases
+                    // stored ids as written. Such an item is retracted by
+                    // its exact id so its owner can remove it; any other
+                    // non-canonical id is refused.
+                    let item_filter = [item_id.clone()];
+                    match state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .get_items(&target_jid, &node, Some(1), &item_filter)
+                        .await
+                    {
+                        Ok(items) if !items.is_empty() => {}
+                        Ok(_) => {
+                            let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                            return vec![iq_to_xml(error)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub bookmark lookup before retract failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::InternalServerError);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
                 }
 
                 let result = state
@@ -634,10 +656,11 @@ fn validate_xep0402_bookmark_publish_request(
     Ok(())
 }
 
+/// A XEP-0402 item id must be a room's canonical bare JID with a localpart.
+/// The id is stored and matched as written, so a spelling the `jid` parser
+/// would fold is refused rather than stored as a second key for one room.
 fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
-    item_id
-        .parse::<BareJid>()
-        .is_ok_and(|jid| jid.node().is_some())
+    waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id).is_ok_and(|jid| jid.node().is_some())
 }
 
 fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSubError {
