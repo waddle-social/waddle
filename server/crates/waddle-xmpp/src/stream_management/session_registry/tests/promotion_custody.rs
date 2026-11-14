@@ -16,69 +16,6 @@ use crate::stream_management::{
 };
 
 #[tokio::test]
-async fn stale_off_map_capture_cannot_recreate_successor_completed_source() {
-    for rotate_original in [false, true] {
-        let storage = Arc::new(InMemorySmPersistence::new());
-        let claims = Arc::new(InProcessClaimStore::new());
-        let original = NodeIdentity::new("original", "first");
-        let identity = SharedNodeIdentity::new(original.clone());
-        let registry = InMemorySmSessionRegistry::new()
-            .with_persistence(storage.clone())
-            .with_claim_store(claims.clone(), identity.clone());
-        let mut session = realistic_test_session_for_jid(
-            "stale-off-map",
-            "alice@example.com/web".parse().unwrap(),
-        );
-        session.max_resume_time = Some(0);
-        let stream = SmSessionId::new(&session.stream_id);
-        registry.store_session(session).await.unwrap();
-        let capture = registry.drain_expired().await.unwrap().remove(0);
-        let expected = capture.promotion_custody.fence().unwrap().clone();
-        let entity = Entity::new(EntityType::SmSession, stream.as_str());
-
-        assert!(registry.forget_claim_locally(stream.as_str()).await);
-        claims
-            .release_exact(&entity, &original, expected.epoch())
-            .await
-            .unwrap();
-        let successor = InMemorySmSessionRegistry::new()
-            .with_persistence(storage.clone())
-            .with_claim_store(
-                claims.clone(),
-                SharedNodeIdentity::new(NodeIdentity::new("successor", "first")),
-            );
-        assert_eq!(successor.restore_from_persistence().await.unwrap(), 1);
-        let recovered = successor.drain_expired().await.unwrap();
-        assert_eq!(
-            recovered[0].unacked_stanzas.len(),
-            capture.unacked_stanzas.len()
-        );
-        assert!(successor.confirm_drained(stream.as_str()).await);
-        assert!(storage.get_session(&stream).await.unwrap().is_none());
-        if rotate_original {
-            identity
-                .rotate(NodeIdentity::new("original", "second"))
-                .await;
-        }
-
-        assert!(matches!(
-            registry.register_promotion_session(&capture).await,
-            Err(SmRegistryError::PromotionClaimLost(_))
-        ));
-        assert!(storage.get_session(&stream).await.unwrap().is_none());
-        assert!(storage.list_unacked(&stream).await.unwrap().is_empty());
-        assert!(claims.current_claim(&entity).await.unwrap().is_none());
-        assert!(registry.pending_promotions.read().unwrap().is_empty());
-        assert_eq!(
-            registry
-                .retain_pending_promotion_for_retry(capture)
-                .unwrap(),
-            PendingPromotionRetryRetention::NotTracked,
-        );
-    }
-}
-
-#[tokio::test]
 async fn pre_registration_clone_keeps_first_fence_after_source_completion() {
     let storage = Arc::new(InMemorySmPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
@@ -226,47 +163,6 @@ async fn stale_registered_capture_cannot_mutate_replacement_inventory() {
             .as_ref(),
         replacement.promotion_custody.fence()
     );
-}
-
-#[tokio::test]
-async fn ambiguous_fresh_capture_cannot_reacquire_after_successor_consumption() {
-    let storage = Arc::new(InMemorySmPersistence::new());
-    let claims = Arc::new(InProcessClaimStore::new());
-    let identity = NodeIdentity::new("original", "first");
-    let registry = InMemorySmSessionRegistry::new()
-        .with_persistence(storage.clone())
-        .with_claim_store(claims.clone(), SharedNodeIdentity::new(identity.clone()));
-    let mut capture = make_test_session("ambiguous-fresh-capture");
-    capture.max_resume_time = Some(0);
-    assert!(capture.promotion_custody.begin_first_claim(&identity));
-    let stream = SmSessionId::new(&capture.stream_id);
-    let entity = Entity::new(EntityType::SmSession, &capture.stream_id);
-    // Model a detach snapshot landing, followed by an acquisition whose
-    // response was cancelled before the exact epoch could be recorded.
-    storage
-        .store_session_atomic(
-            super::super::persistence_codec::detached_to_persisted(&capture).unwrap(),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    let epoch = claims.ensure_claimed(&entity, &identity).await.unwrap();
-    claims
-        .release_exact(&entity, &identity, epoch)
-        .await
-        .unwrap();
-    let successor = InMemorySmSessionRegistry::new()
-        .with_persistence(storage.clone())
-        .with_claim_store(
-            claims.clone(),
-            SharedNodeIdentity::new(NodeIdentity::new("successor", "first")),
-        );
-    assert_eq!(successor.restore_from_persistence().await.unwrap(), 1);
-    assert_eq!(successor.drain_expired().await.unwrap().len(), 1);
-    assert!(successor.confirm_drained(stream.as_str()).await);
-    assert!(registry.register_promotion_session(&capture).await.is_err());
-    assert!(claims.current_claim(&entity).await.unwrap().is_none());
-    assert!(storage.get_session(&stream).await.unwrap().is_none());
 }
 
 #[derive(Clone)]

@@ -700,7 +700,7 @@ impl InMemorySmSessionRegistry {
             out.extend(pending_epoch_failures.iter().cloned());
         }
         {
-            let pending_hydration = self.pending_reclaimed_hydrations.read().ok()?;
+            let pending_hydration = self.pending_reclaimed_settlements.read().ok()?;
             out.extend(
                 pending_hydration
                     .keys()
@@ -753,7 +753,7 @@ impl InMemorySmSessionRegistry {
             );
         }
         {
-            let hydrations = self.pending_reclaimed_hydrations.read().ok()?;
+            let hydrations = self.pending_reclaimed_settlements.read().ok()?;
             out.extend(
                 hydrations
                     .keys()
@@ -1350,7 +1350,7 @@ impl InMemorySmSessionRegistry {
             self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
             self.claim_fences.write(),
-            self.pending_reclaimed_hydrations.write(),
+            self.pending_reclaimed_settlements.write(),
         ) {
             let active_reclaimed_reservation = reclaimed_reservations.get(stream_id).copied();
             hydrations.retain(|(id, _, reservation), _| {
@@ -2554,8 +2554,8 @@ impl InMemorySmSessionRegistry {
         // ADR-0017 Phase 3 Slice 5: `ensure_claimed`, not a bare `acquire`.
         // Under the acquire-then-hydrate/acquire-on-detach invariant this
         // slice establishes (every entry in `sessions` is backed by a held
-        // `ClaimStore` claim — see `core.rs::restore_from_persistence` and
-        // `trait_impl.rs::store_session`), a resume attempt against a
+        // `ClaimStore` claim — see `trait_impl.rs::store_session`), a resume
+        // attempt against a
         // session THIS node already claimed (the overwhelmingly common case
         // — the node that hydrated/detached it is usually the one a
         // resuming client reconnects to) must self-reacquire idempotently
@@ -2766,8 +2766,7 @@ impl InMemorySmSessionRegistry {
     ///
     /// **ADR-0017 Phase 3 Slice 5 invariant**: an entry present in
     /// `sessions` is always backed by a held `ClaimStore` claim (see
-    /// `core.rs::restore_from_persistence` and
-    /// `trait_impl.rs::store_session`, which both acquire the claim before
+    /// `trait_impl.rs::store_session`, which acquires the claim before
     /// inserting). A session whose claim (not resume) attempt is merely
     /// aborted goes back into `sessions` here **still owned by this node**
     /// — its `ClaimStore` claim must therefore be KEPT, not released, or a
@@ -2812,9 +2811,7 @@ impl InMemorySmSessionRegistry {
     /// Acquire (or self-reacquire) `stream_id`'s `ClaimStore` claim and
     /// record the granted epoch, for a session newly entering `sessions`
     /// from a live detach (ADR-0017 Phase 3 Slice 5's acquire-on-detach
-    /// half of the acquire-then-hydrate/acquire-on-detach invariant —
-    /// `core.rs::restore_from_persistence` is the other half, for sessions
-    /// entering `sessions` at startup instead of at detach time).
+    /// invariant). Startup never inserts into `sessions`.
     ///
     /// Best-effort by design: a stream id is a freshly minted UUID per
     /// session (ADR-0017 element 8), so a genuine collision with another
@@ -2932,10 +2929,8 @@ impl InMemorySmSessionRegistry {
     /// in `claim_fences`). Best-effort: a `ClaimStore::release` failure is
     /// logged, never propagated — `release`'s own contract treats a losing
     /// epoch as a no-op, and this is the same "claim already gone" case.
-    /// `pub(super)`: `core.rs::restore_from_persistence` (ADR-0017 Phase 3
-    /// Slice 5) also releases an already-known epoch directly (a
-    /// just-claimed, never-hydrated poison-pill row), without going through
-    /// `claim_fences` first.
+    /// `pub(super)` so other registry modules can release an already-known
+    /// epoch directly, without going through `claim_fences` first.
     pub(super) async fn release_claim_store_entry_under(
         &self,
         stream_id: &str,
@@ -3086,11 +3081,8 @@ impl InMemorySmSessionRegistry {
         // in claimed_sessions and the caller can retry, or
         // release_claim to put it back. Without persist-first, a
         // successful in-memory completion + failed durable delete
-        // would leave an orphan row that
-        // `restore_from_persistence` would resurrect on next
-        // restart, exposing a stale `<resume previd='…'/>` for an
-        // already-live session (Codex P1 + Copilot + Qodo on PR
-        // #344).
+        // would leave an orphan row behind an already-live session
+        // (Codex P1 + Copilot + Qodo on PR #344).
         let exists = {
             let claimed = self
                 .claimed_sessions
@@ -3366,8 +3358,8 @@ impl InMemorySmSessionRegistry {
     /// promotes each returned session's unacked queue (XEP-0198 §5:
     /// the freshly-bound resource is a natural alt-resource target)
     /// and calls [`Self::confirm_drained`] on success. If the process
-    /// crashes before promotion, `restore_from_persistence`
-    /// rehydrates the rows and the SM-expiry janitor retries.
+    /// crashes before promotion, the owner phase's legacy drain moves
+    /// the rows to offline storage before the next serving process starts.
     pub async fn invalidate_sessions_for_jid(
         &self,
         jid: &FullJid,

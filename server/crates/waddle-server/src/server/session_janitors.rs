@@ -24,15 +24,9 @@ use crate::db::actor::DbExecute;
 use crate::metrics::LocalDepartureRetryOutcome;
 use crate::notification_outbox::NotificationDrainDeps;
 use crate::pending_delivery::PendingRecovery;
-use crate::server::dual_registration::MirrorUnregisterOutcome;
-#[cfg(feature = "clustering")]
-use crate::server::routes::interpret::OrderedRelayRouteOrigin;
-#[cfg(feature = "clustering")]
-use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 #[cfg(feature = "clustering")]
 use crate::server::routes::websocket::MembershipGenerationFilter;
 use crate::sm_promotion::PromotionBatchGuard;
-use crate::sm_promotion::PromotionScrubOutcome;
 use crate::sm_promotion::PromotionSessionGuard;
 use crate::sm_promotion::TerminalOverflowPromotionDeps;
 use std::collections::HashMap;
@@ -53,7 +47,9 @@ use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn, Instrument};
+#[cfg(feature = "clustering")]
+use tracing::error;
+use tracing::{debug, info, warn, Instrument};
 use waddle_xmpp::muc::room_actor::LeaveSessionSelector;
 
 use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
@@ -379,39 +375,6 @@ mod sm_expiry_tests {
     }
 
     #[tokio::test]
-    async fn expired_session_retires_ingress_after_successful_confirmation() {
-        let state = create_test_websocket_state().await;
-        let stream = waddle_xmpp::pending_delivery::SmSessionId::new("expiry-ingress");
-        state
-            .deps
-            .protocol
-            .ingress
-            .enroll_stream(&stream)
-            .await
-            .expect("enroll");
-        state
-            .deps
-            .protocol
-            .sm_session_registry
-            .store_session(expired_detached_session(
-                stream.as_str(),
-                full_jid("alice@example.com/web"),
-                OccupancySessionGeneration::mint(),
-            ))
-            .await
-            .expect("store expired session");
-        run_sm_expiry_sweep(&state).await;
-        assert!(state
-            .deps
-            .protocol
-            .ingress
-            .lookup_stream(&stream)
-            .await
-            .expect("lookup retired stream")
-            .is_none());
-    }
-
-    #[tokio::test]
     async fn sm_expiry_generation_keeps_a_same_full_jid_replacement_occupancy() {
         let state = create_test_websocket_state().await;
         let room_jid = room("sm-expiry-replacement");
@@ -449,36 +412,6 @@ mod sm_expiry_tests {
         assert!(
             state.deps.protocol.connection_registry.is_connected(&jid),
             "the replacement connection must remain registered"
-        );
-    }
-
-    #[tokio::test]
-    async fn sm_expiry_generation_without_replacement_removes_the_old_occupancy() {
-        let state = create_test_websocket_state().await;
-        let room_jid = room("sm-expiry-no-replacement");
-        let jid = full_jid("alice@example.com/web");
-        let generation = OccupancySessionGeneration::mint();
-
-        join_member_with_generation(state.as_ref(), &room_jid, &jid, "alice", generation).await;
-        state
-            .deps
-            .protocol
-            .sm_session_registry
-            .store_session(expired_detached_session(
-                "expired-no-replacement",
-                jid.clone(),
-                generation,
-            ))
-            .await
-            .expect("store detached session");
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        run_sm_expiry_sweep(&state).await;
-
-        let snapshot = snapshot_room(state.as_ref(), &room_jid).await;
-        assert!(
-            snapshot.room.find_occupant_by_real_jid(&jid).is_none(),
-            "without a replacement the expired detached session must be cleaned from the room"
         );
     }
 }
@@ -859,22 +792,13 @@ async fn clustered_ordinary_shutdown_is_not_critical() {
 /// One orphan-reaper sweep: first run the bounded stale-node watchdog that
 /// commits `expired = true` through `NodeLeaseStore::expire` for
 /// heartbeat-stale nodes, then scan for `sm_session` claims owned by a
-/// committed-stale node, steal what this node can, and targeted-hydrate
-/// exactly the entities this sweep just won
-/// (FIX 2, council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda) via
-/// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::hydrate_reclaimed`].
-///
-/// **Not `restore_from_persistence`**: that method is a startup-time-only,
-/// unscoped table scan (see its own doc comment) — re-running it here, on a
-/// server that is already serving live traffic, on every successful sweep
-/// would re-scan every row this node already holds on every tick and can
-/// observe a row a live session concurrently completes/re-claims mid-scan
-/// (the **live restore hazard** this fix closes). `hydrate_reclaimed`
-/// instead takes each entity's own stream-shard lock and re-checks
-/// in-memory absence before loading/inserting, so it is safe to call from a
-/// running server — it hydrates exactly (and only) the entities this sweep
-/// just reclaimed, without needing this function to duplicate the
-/// codec/expiry logic `hydrate_reclaimed` already owns.
+/// committed-stale node, steal what this node can, and settle exactly the
+/// entities this sweep just won via
+/// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::settle_reclaimed_claim`]:
+/// the durable authority records the loss of each session's owner, and the
+/// claim is released so whichever node resumes or expires the session takes
+/// a free claim. Settlement takes each entity's own stream-shard lock and
+/// never scans a table, so it is safe on a server already serving traffic.
 #[cfg(all(test, feature = "clustering"))]
 fn orphaned_sm_candidates_or_empty(
     result: Result<
@@ -1238,6 +1162,51 @@ async fn idle_room_registry_death_self_fences_the_node() {
         node_lifecycle.critical_failure(),
         Some(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated)
     );
+}
+
+/// A durable authority whose owner-loss record never returns, so an orphan
+/// reaper settlement hangs where it asks the authority.
+#[cfg(all(test, feature = "clustering"))]
+#[derive(Default)]
+struct HangingOwnerLoss {
+    record_started: tokio::sync::Notify,
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[async_trait::async_trait]
+impl waddle_xmpp::stream_management::DurableDetachedSessions for HangingOwnerLoss {
+    async fn detached_resources(
+        &self,
+        _registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+        _account: &jid::BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::DurableDetachedResource>,
+        waddle_xmpp::stream_management::SmRegistryError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn admit(
+        &self,
+        _registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+        _frame: waddle_xmpp::stream_management::DurableDetachedFrame<'_>,
+    ) -> Result<
+        waddle_xmpp::stream_management::DurableDetachedAdmission,
+        waddle_xmpp::stream_management::SmRegistryError,
+    > {
+        Ok(waddle_xmpp::stream_management::DurableDetachedAdmission::NoSession)
+    }
+
+    async fn record_owner_lost(
+        &self,
+        _registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
+        _claim: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+    ) -> Result<(), waddle_xmpp::stream_management::SmRegistryError> {
+        drop(tracing::info_span!("orphan.worker.hydration.test"));
+        self.record_started.notify_one();
+        std::future::pending().await
+    }
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -1656,29 +1625,29 @@ impl waddle_xmpp::ownership::ClaimStore for HangingExactReleaseStore {
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
-async fn hung_sm_hydration_does_not_block_completed_room_lane() {
+async fn hung_sm_settlement_does_not_block_completed_room_lane() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
 
-    let storage = Arc::new(HangingSmReadPersistence::default());
+    let authority = Arc::new(HangingOwnerLoss::default());
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
     let me = NodeIdentity::new("sweeper", "incarnation");
     let registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(storage.clone())
             .with_claim_store(claim_store.clone(), SharedNodeIdentity::new(me.clone())),
     );
+    assert!(registry.attach_durable_detached(authority.clone()));
     let entity = Entity::new(EntityType::SmSession, "hung-session");
     let epoch = claim_store.acquire(&entity, &me).await.expect("claim");
 
     // Production completes the bounded RoomActor lane before scheduling
-    // this detached SM hydration. A storage read that never returns must
+    // this SM settlement. An authority write that never returns must
     // therefore neither undo nor delay that room progress.
     let room_lane_completed = true;
     let reservation = registry
         .reserve_reclaimed_claim_capacity(&entity)
-        .expect("hung hydration reservation");
+        .expect("hung settlement reservation");
     let cancel = tokio_util::sync::CancellationToken::new();
     let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
     supervisor.workers.enqueue_hydration(
@@ -1687,9 +1656,9 @@ async fn hung_sm_hydration_does_not_block_completed_room_lane() {
         reservation,
     );
 
-    tokio::time::timeout(Duration::from_secs(1), storage.read_started.notified())
+    tokio::time::timeout(Duration::from_secs(1), authority.record_started.notified())
         .await
-        .expect("detached hydration should reach the deliberately hung SM read");
+        .expect("settlement should reach the deliberately hung owner-loss record");
     assert!(room_lane_completed);
     for index in 1..ORPHAN_WORK_QUEUE_CAPACITY {
         assert!(supervisor
@@ -1720,7 +1689,7 @@ async fn hung_sm_hydration_does_not_block_completed_room_lane() {
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
         .await
-        .expect("hung hydration worker must cancel and join");
+        .expect("hung settlement worker must cancel and join");
 }
 
 /// #1483 verify round: worker attempts run under their own short-lived
@@ -1773,19 +1742,19 @@ fn assert_linked_orphan_work_attempt(
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test(flavor = "current_thread")]
-async fn hydration_worker_attempts_link_to_the_enqueuing_sweep() {
+async fn settlement_worker_attempts_link_to_the_enqueuing_sweep() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
 
-    let storage = Arc::new(HangingSmReadPersistence::default());
+    let authority = Arc::new(HangingOwnerLoss::default());
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
     let me = NodeIdentity::new("sweeper", "trace-incarnation");
     let registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(storage.clone())
             .with_claim_store(claim_store.clone(), SharedNodeIdentity::new(me.clone())),
     );
+    assert!(registry.attach_durable_detached(authority.clone()));
     let entity = Entity::new(EntityType::SmSession, "traced-hydration");
     let epoch = claim_store.acquire(&entity, &me).await.expect("claim");
     let reservation = registry
@@ -1805,7 +1774,7 @@ async fn hydration_worker_attempts_link_to_the_enqueuing_sweep() {
         ))
         .is_accepted());
     drop(sweep);
-    tokio::time::timeout(Duration::from_secs(5), storage.read_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), authority.record_started.notified())
         .await
         .expect("hydration worker started");
     cancel.cancel();
@@ -2096,14 +2065,14 @@ async fn worker_restart_preserves_hung_sm_reservation_until_terminal_shutdown() 
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
 
-    let storage = Arc::new(HangingSmReadPersistence::default());
+    let authority = Arc::new(HangingOwnerLoss::default());
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
     let me = NodeIdentity::new("sweeper", "restart-incarnation");
     let registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(1)
-            .with_persistence(storage.clone())
             .with_claim_store(claim_store.clone(), SharedNodeIdentity::new(me.clone())),
     );
+    assert!(registry.attach_durable_detached(authority.clone()));
     let entity = Entity::new(EntityType::SmSession, "hung-across-restart");
     let replacement = Entity::new(EntityType::SmSession, "replacement-after-shutdown");
     let epoch = claim_store.acquire(&entity, &me).await.expect("claim");
@@ -2120,9 +2089,9 @@ async fn worker_restart_preserves_hung_sm_reservation_until_terminal_shutdown() 
             reservation,
         )
         .is_accepted());
-    tokio::time::timeout(Duration::from_secs(1), storage.read_started.notified())
+    tokio::time::timeout(Duration::from_secs(1), authority.record_started.notified())
         .await
-        .expect("first worker reaches the hung read");
+        .expect("first worker reaches the hung owner-loss record");
 
     let restarted = supervisor.restarted(registry.clone(), parent_cancel).await;
     assert!(
@@ -2140,7 +2109,7 @@ async fn worker_restart_preserves_hung_sm_reservation_until_terminal_shutdown() 
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
-async fn sm_rotation_before_hydration_worker_releases_the_exact_old_fence() {
+async fn sm_rotation_before_settlement_worker_releases_the_exact_old_fence() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -2197,12 +2166,12 @@ async fn sm_rotation_before_hydration_worker_releases_the_exact_old_fence() {
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test(start_paused = true)]
-async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
+async fn sm_rotation_between_settlement_retries_releases_the_exact_old_fence() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
 
-    let storage = Arc::new(HangingSmReadPersistence::default());
+    let authority = Arc::new(HangingOwnerLoss::default());
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
     let old_owner = NodeIdentity::new("sweeper", "old-incarnation");
     let new_owner = NodeIdentity::new("sweeper", "new-incarnation");
@@ -2214,9 +2183,9 @@ async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
         .expect("seed old claim");
     let registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(storage.clone())
             .with_claim_store(claim_store.clone(), identity.clone()),
     );
+    assert!(registry.attach_durable_detached(authority.clone()));
     let reservation = registry
         .reserve_reclaimed_claim_capacity(&entity)
         .expect("retry hydration reservation");
@@ -2231,7 +2200,7 @@ async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
         )
         .is_accepted());
 
-    storage.read_started.notified().await;
+    authority.record_started.notified().await;
     identity.rotate(new_owner).await;
     tokio::time::advance(ORPHAN_WORK_ATTEMPT_TIMEOUT).await;
     tokio::task::yield_now().await;
@@ -2951,8 +2920,24 @@ mod orphan_reaper_sweep_tests {
         );
     }
 
+    /// Wait until the orphan reaper's settlement worker has released the
+    /// claim it stole for `entity`.
+    async fn wait_for_released_claim(claim_store: &PostgresClaimStore, entity: &Entity) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while claim_store
+                .current_claim(entity)
+                .await
+                .expect("claim lookup")
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the settled claim is released");
+    }
     #[tokio::test]
-    async fn run_orphan_reaper_sweep_steals_hydrates_and_is_exactly_once_under_concurrency() {
+    async fn run_orphan_reaper_sweep_steals_and_settles_orphaned_sm_claims() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
@@ -3086,7 +3071,7 @@ mod orphan_reaper_sweep_tests {
             .await
             .expect("wire test room registry to clustering stores");
 
-        // ============ Leg 1: single-sweep steal + targeted hydrate ============
+        // ============ Leg 1: single-sweep steal + settlement ============
         let dead_owner = node_identity();
         register_and_backdate_dead_owner(&claim_store, &db, &dead_owner).await;
 
@@ -3104,22 +3089,15 @@ mod orphan_reaper_sweep_tests {
             expired_flag(&db, &dead_owner.node_id).await,
             "the stale-node watchdog must commit dead owner's clustering_nodes row expired"
         );
-        let reclaimed = claim_store
-            .current_claim(&entity)
-            .await
-            .expect("claim lookup")
-            .expect("reclaimed claim remains present");
+        assert_ne!(orphan_epoch.0, 0);
+        wait_for_released_claim(&claim_store, &entity).await;
         assert!(
-            reclaimed.owner == sweeper_identity && reclaimed.claim_epoch.0 > orphan_epoch.0,
-            "steal must land under the sweeping node at a fresh monotonic generation"
-        );
-        let hydrated = sm_session_registry
-            .peek_session(stream_id)
-            .await
-            .expect("peek_session call");
-        assert!(
-            hydrated.is_some(),
-            "targeted hydration must land the reclaimed session in memory"
+            sm_session_registry
+                .peek_session(stream_id)
+                .await
+                .expect("peek_session call")
+                .is_none(),
+            "settling a reclaimed claim never makes a registry session"
         );
 
         // ============ Leg 2: two concurrent sweeps, exactly-once steal ============
@@ -3146,34 +3124,11 @@ mod orphan_reaper_sweep_tests {
             expired_flag(&db, &dead_owner_2.node_id).await,
             "dead owner 2's clustering_nodes row must be committed-expired"
         );
-        let reclaimed_once = claim_store
-            .current_claim(&entity_2)
-            .await
-            .expect("claim lookup")
-            .expect("reclaimed claim remains present");
-        assert!(
-            reclaimed_once.owner == sweeper_identity
-                && reclaimed_once.claim_epoch.0 > orphan_epoch_2.0,
-            "exactly one concurrent sweep must win the observed-epoch CAS and leave the \
-             claim under the live sweeper at a fresh monotonic generation"
-        );
-        let hydrated_2 = sm_session_registry
-            .peek_session(stream_id_2)
-            .await
-            .expect("peek_session call");
-        assert!(
-            hydrated_2.is_some(),
-            "the winning sweep's targeted hydration must land session 2 in memory"
-        );
+        assert_ne!(orphan_epoch_2.0, 0);
+        wait_for_released_claim(&claim_store, &entity_2).await;
 
-        // Sanity: exactly the two legs' sessions are in memory — no
-        // duplicate or lost hydration across the concurrent pair.
-        let total = sm_session_registry.session_count().await;
-        assert_eq!(
-            total, 2,
-            "exactly one hydrated session per leg; no duplicates from the \
-             concurrent sweeps"
-        );
+        // Neither leg's settlement made a registry session.
+        assert_eq!(sm_session_registry.session_count().await, 0);
 
         // ============ Leg 3: durable RoomActor hydrate + ephemeral release ==========
         let dead_room_owner = node_identity();
@@ -7644,56 +7599,6 @@ mod graceful_shutdown_drain_tests {
     }
 
     #[tokio::test]
-    async fn sm_maintenance_promotes_nonexpired_sessions_without_current_occupancy_authority() {
-        for replaced in [false, true] {
-            let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
-            let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-            let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
-                sm_registry.clone(),
-                pending.clone(),
-            )
-            .await;
-            let jid: jid::FullJid = "romeo@example.com/legacy".parse().unwrap();
-            let recipient = jid.to_bare();
-            let mut session = detached_session("legacy-authority", jid.clone());
-            session.outbound_count = 1;
-            session.unacked_stanzas.push(DetachedUnackedStanza {
-                provenance: Default::default(),
-                ingress_receipts: Vec::new(),
-                sequence: 1,
-                stanza_xml: message_xml(&transient_message(&recipient, "recover now")),
-                original_receipt_at: chrono::Utc::now(),
-            });
-            assert!(!session.is_expired());
-            if replaced {
-                crate::occupancy_authority::publish(
-                    state.deps.app_state.db_pool.global(),
-                    &jid,
-                    waddle_xmpp_core::OccupancySessionGeneration::mint(),
-                )
-                .await
-                .unwrap();
-            }
-            sm_registry.store_session(session).await.unwrap();
-
-            run_sm_expiry_sweep(&state).await;
-
-            assert!(sm_registry
-                .peek_session("legacy-authority")
-                .await
-                .unwrap()
-                .is_none());
-            assert_eq!(pending.list(&recipient).await.unwrap().len(), 1);
-            run_sm_expiry_sweep(&state).await;
-            assert_eq!(
-                pending.list(&recipient).await.unwrap().len(),
-                1,
-                "promote once"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn sm_maintenance_preserves_nonexpired_current_occupancy_authority() {
         let registry = Arc::new(InMemorySmSessionRegistry::new());
         let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
@@ -8270,158 +8175,6 @@ mod graceful_shutdown_drain_tests {
                 .counter_sum("waddle.clustering.claims_released_on_drain", &[])
                 .unwrap_or(0),
             0
-        );
-    }
-
-    #[tokio::test]
-    async fn clustered_shutdown_parks_deferred_replay_and_restores_suffix_after_restart() {
-        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-        let persistence =
-            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
-        let claims = Arc::new(InProcessClaimStore::new());
-        let old = NodeIdentity::new("sm-node", "deferred-old");
-        let identity = SharedNodeIdentity::new(old.clone());
-        let registry = Arc::new(
-            InMemorySmSessionRegistry::new()
-                .with_persistence(persistence.clone())
-                .with_claim_store(claims.clone(), identity.clone()),
-        );
-        let state = create_test_websocket_state_with_clustering(
-            crate::clustering::ClusteringHandles {
-                claim_store: Some(claims.clone()),
-                node_identity: Some(identity),
-                ..Default::default()
-            },
-            registry.clone(),
-        )
-        .await;
-        let stream = SmSessionId::new("shutdown-deferred-iq");
-        let jid: jid::FullJid = "romeo@example.com/deferred".parse().unwrap();
-        let recipient = jid.to_bare();
-        let mut session = detached_session(stream.as_str(), jid.clone());
-        session.max_resume_time = Some(0);
-        session.outbound_count = 3;
-        let iq = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::empty_result(
-            jid.clone().into(),
-            "deferred-iq",
-        )));
-        let mut iq_xml = Vec::new();
-        iq.to_element().write_to(&mut iq_xml).unwrap();
-        let received_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-        for (sequence, stanza_xml) in [
-            (
-                1,
-                message_xml(&transient_message(&recipient, "promoted prefix")),
-            ),
-            (2, String::from_utf8(iq_xml).unwrap()),
-            (
-                3,
-                message_xml(&transient_message(&recipient, "retained suffix")),
-            ),
-        ] {
-            session.unacked_stanzas.push(DetachedUnackedStanza {
-                provenance: Default::default(),
-                ingress_receipts: Vec::new(),
-                sequence,
-                stanza_xml,
-                original_receipt_at: received_at,
-            });
-        }
-        registry.store_session(session).await.unwrap();
-        registry
-            .store_session(detached_session(
-                "shutdown-healthy-peer",
-                "juliet@example.com/healthy".parse().unwrap(),
-            ))
-            .await
-            .unwrap();
-        let pending = state.deps.protocol.pending_delivery_storage.clone();
-        let stop = tokio_util::sync::CancellationToken::new();
-        stop.cancel();
-        tokio::time::timeout(
-            Duration::from_secs(4),
-            run_graceful_shutdown_drain(
-                state.clone(),
-                stop,
-                Arc::new(Notify::new()),
-                tokio_util::sync::CancellationToken::new(),
-                drain_deadline(Duration::from_secs(8)),
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            ),
-        )
-        .await
-        .expect("policy deferral must let shutdown finish before the drain deadline");
-        assert_eq!(
-            metrics
-                .counter_sum("xmpp.sm.drain_timeout", &[])
-                .unwrap_or(0),
-            0,
-        );
-        assert!(persistence.get_session(&stream).await.unwrap().is_some());
-        assert!(persistence
-            .get_session(&SmSessionId::new("shutdown-healthy-peer"))
-            .await
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            persistence
-                .list_unacked(&stream)
-                .await
-                .unwrap()
-                .iter()
-                .map(|entry| entry.sequence)
-                .collect::<Vec<_>>(),
-            vec![2, 3],
-            "only the unpromoted suffix survives the drain",
-        );
-        assert_eq!(pending.list(&recipient).await.unwrap().len(), 1);
-        let entity = Entity::new(EntityType::SmSession, stream.as_str());
-        let claim = claims.current_claim(&entity).await.unwrap().unwrap();
-        assert_eq!(claim.owner, old, "parking retains claim authority");
-        // Model old-node expiry/reaping before successor startup. Restore
-        // must not hydrate a second owner while the old claim is live.
-        let successor = Arc::new(
-            InMemorySmSessionRegistry::new()
-                .with_persistence(persistence.clone())
-                .with_claim_store(
-                    claims.clone(),
-                    SharedNodeIdentity::new(NodeIdentity::new("sm-node", "deferred-new")),
-                ),
-        );
-        assert_eq!(successor.restore_from_persistence().await.unwrap(), 0);
-        claims
-            .release(&entity, &old, claim.claim_epoch)
-            .await
-            .unwrap();
-        assert_eq!(successor.restore_from_persistence().await.unwrap(), 1);
-        let restored = create_test_websocket_state_with_sm_registry_and_pending_storage(
-            successor,
-            pending.clone(),
-        )
-        .await;
-        run_sm_expiry_sweep(&restored).await;
-        assert!(persistence.get_session(&stream).await.unwrap().is_none());
-        let rows = pending.list(&recipient).await.unwrap();
-        assert!(rows
-            .iter()
-            .all(|row| row.original_receipt_at == received_at));
-        let bodies: Vec<_> = rows
-            .iter()
-            .map(|row| match &row.payload {
-                PendingPayload::Transient(message) => message
-                    .bodies
-                    .get(&xmpp_parsers::message::Lang::new())
-                    .expect("stored message body")
-                    .as_str(),
-                PendingPayload::Archived(_) => panic!("fixture has no archive reference"),
-            })
-            .collect();
-        assert_eq!(bodies, vec!["promoted prefix", "retained suffix"]);
-        run_sm_expiry_sweep(&restored).await;
-        assert_eq!(
-            pending.list(&recipient).await.unwrap().len(),
-            2,
-            "restart promotes the suffix without duplicating the prefix"
         );
     }
 

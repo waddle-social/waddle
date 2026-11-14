@@ -180,16 +180,12 @@ async fn partial_fanout_restart(fixture: IngressFixture) {
     delivery::execute(&fixture, &first, &connections, &sm).await;
     delivery::execute(&fixture, &second, &connections, &sm).await;
     assert_archive_matches_wire(&fixture, &sm, &phone).await;
-    drop(sm);
-
-    let sm = delivery::registry(&fixture).await;
-    assert_eq!(sm.restore_from_persistence().await.expect("restart SM"), 1);
     delivery::attach(&sm, &laptop).await;
     let second_retry = delivery::retry_decision(&fixture, &b).await;
     delivery::execute(&fixture, &second_retry, &connections, &sm).await;
     assert!(
         wire_ids(&sm, &laptop).await.is_empty(),
-        "restart must retain laptop's unfinished A barrier"
+        "a retry must retain laptop's unfinished A barrier"
     );
     let first_retry = delivery::retry_decision(&fixture, &a).await;
     delivery::execute(&fixture, &first_retry, &connections, &sm).await;

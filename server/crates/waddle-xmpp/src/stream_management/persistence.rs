@@ -730,17 +730,14 @@ pub trait SmPersistenceStorage: Send + Sync {
     }
 
     /// Enumerate every persisted session AND its unacked queue in a
-    /// single round-trip. Used by `restore_from_persistence` so cold
-    /// startup doesn't issue an N+1 (1 list_all_sessions + N
+    /// single round-trip, instead of an N+1 (1 list_all_sessions + N
     /// list_unacked).
     ///
     /// **Best-effort semantics**: a session whose unacked queue
     /// fails to decode (corrupted XML, invalid timestamp, etc.) is
     /// SKIPPED with a debug log; other sessions still appear in the
-    /// returned set. This mirrors the prior per-session try-catch
-    /// in `restore_from_persistence` so a single poison-pill row
-    /// can't brick cold startup. (Greptile/Copilot/Qodo P1 review
-    /// on PR #405.)
+    /// returned set, so a single poison-pill row cannot fail the whole
+    /// scan. (Greptile/Copilot/Qodo P1 review on PR #405.)
     ///
     /// Default impl falls back to the N+1 sequence so in-memory
     /// backends keep working without implementing a JOIN; the

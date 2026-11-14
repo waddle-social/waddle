@@ -22,7 +22,7 @@ use waddle_xmpp::Stanza;
 
 pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
     let [target, _, _] = detached_progress_support::resources();
-    let mut sm = detached_progress_support::registry(&fixture).await;
+    let sm = detached_progress_support::registry(&fixture).await;
     detached_progress_support::attach(&sm, &target).await;
     let mut submission = fixture.submission(Some("1778-xep0198"), "one durable allocation");
     submission.plan.sanitized_message.to = Some(target.clone().into());
@@ -133,16 +133,6 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
         let snapshot = detached_progress_support::queued(&sm, &target).await;
         assert_eq!(snapshot.outbound_count, 1);
         assert_eq!(snapshot.unacked_stanzas.len(), 1);
-        if sequence == 1 {
-            drop(sm);
-            sm = detached_progress_support::registry(&fixture).await;
-            assert_eq!(
-                sm.restore_from_persistence()
-                    .await
-                    .expect("restore receiver"),
-                1
-            );
-        }
     }
     let snapshot = detached_progress_support::queued(&sm, &target).await;
     let mut stream = StreamManagementState::new();

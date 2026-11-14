@@ -5,12 +5,11 @@ mod incremental_append;
 mod keyed_append;
 pub(super) mod promotion_custody;
 mod promotion_receipt_gc;
-mod startup_poison;
 
 use super::core::PendingClaimAcquisitionDisposition;
 use super::{
     tombstones, DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry,
-    PromotionCaptureCustody, ReclaimedHydrationOutcome, ResumableSessionProbe, SmClaimCompletion,
+    PromotionCaptureCustody, ReclaimedClaimSettlement, ResumableSessionProbe, SmClaimCompletion,
     SmRegistryError, SmSessionRegistry, TombstoneScrubbedSmEntry,
 };
 use std::time::{Duration, Instant};
@@ -581,41 +580,6 @@ fn ambiguous_reclaim_lookup_retains_its_reserved_capacity() {
 }
 
 #[test]
-fn stale_reclaim_completion_cannot_cancel_a_newer_same_stream_reservation() {
-    let registry = InMemorySmSessionRegistry::with_capacity(2);
-    let entity = crate::ownership::Entity::new(
-        crate::ownership::EntityType::SmSession,
-        "reclaim-reservation-generation",
-    );
-    let owner = crate::ownership::NodeIdentity::new("node-a", "incarnation-a");
-    let fence =
-        super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(1));
-    let first = registry
-        .reserve_reclaimed_claim_capacity(&entity)
-        .expect("first reservation");
-    assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence.clone(), first));
-    let second = registry
-        .reserve_reclaimed_claim_capacity(&entity)
-        .expect("newer reservation");
-
-    assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence.clone(), first));
-    registry.cancel_reclaimed_claim_capacity(&entity, first);
-    assert!(!registry
-        .transfer_reclaimed_claim_to_exact_release(&entity, &fence, first)
-        .expect("inspect stale transfer"));
-
-    assert_eq!(
-        registry
-            .reclaimed_claim_reservations
-            .read()
-            .expect("reclaimed reservations")
-            .get(&entity.id),
-        Some(&second),
-        "an older operation may only consume or cancel its own reservation token"
-    );
-}
-
-#[test]
 fn local_ownership_includes_ambiguous_and_in_flight_claim_admission() {
     let registry = InMemorySmSessionRegistry::with_capacity(4);
     let identity = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
@@ -659,7 +623,7 @@ async fn local_demotion_clears_confirmed_reclaim_retry_inventory() {
         .expect("reclaim reservation");
     assert!(registry.try_record_verified_reclaimed_fence(stream_id, fence.clone(), reservation));
     registry
-        .pending_reclaimed_hydrations
+        .pending_reclaimed_settlements
         .write()
         .unwrap()
         .insert(
@@ -679,7 +643,7 @@ async fn local_demotion_clears_confirmed_reclaim_retry_inventory() {
     registry.forget_claim_locally(stream_id).await;
 
     assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
-    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert_eq!(registry.pending_reclaimed_settlement_count(), 0);
     assert_eq!(registry.pending_claim_release_count(), 0);
     let replacement = crate::ownership::Entity::new(
         crate::ownership::EntityType::SmSession,
@@ -717,7 +681,7 @@ async fn local_demotion_preserves_ambiguous_reclaim_until_lookup_disproves_it() 
         .reserve_reclaimed_claim_capacity(&replacement)
         .is_none());
 
-    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert_eq!(registry.retry_pending_reclaimed_settlements(1).await, 1);
     assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
     assert!(registry
         .reserve_reclaimed_claim_capacity(&replacement)
@@ -741,7 +705,7 @@ async fn local_demotion_discards_hydration_from_an_older_reclaim_generation() {
         .expect("first reservation");
     assert!(registry.try_record_verified_reclaimed_fence(&entity.id, fence.clone(), first));
     registry
-        .pending_reclaimed_hydrations
+        .pending_reclaimed_settlements
         .write()
         .unwrap()
         .insert((entity.id.clone(), fence, first), entity.clone());
@@ -752,7 +716,7 @@ async fn local_demotion_discards_hydration_from_an_older_reclaim_generation() {
 
     registry.forget_claim_locally(&entity.id).await;
 
-    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert_eq!(registry.pending_reclaimed_settlement_count(), 0);
     assert_eq!(
         registry
             .reclaimed_claim_reservations
@@ -761,7 +725,7 @@ async fn local_demotion_discards_hydration_from_an_older_reclaim_generation() {
             .get(&entity.id),
         Some(&second)
     );
-    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert_eq!(registry.retry_pending_reclaimed_settlements(1).await, 1);
     assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
 }
 
@@ -911,7 +875,7 @@ async fn active_fence_readmission_publishes_a_demotion_safe_reservation() {
         .reserve_reclaimed_claim_capacity(&replacement)
         .is_none());
 
-    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
+    assert_eq!(registry.retry_pending_reclaimed_settlements(1).await, 1);
     assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
     assert!(registry
         .reserve_reclaimed_claim_capacity(&replacement)
@@ -1664,10 +1628,10 @@ async fn reclaimed_terminal_release_failure_retains_exact_retry() {
         .expect("reclaim reservation");
     assert_eq!(
         registry
-            .hydrate_reclaimed_typed(&entity, &fence, reservation)
+            .settle_reclaimed_claim(&entity, &fence, reservation)
             .await
             .expect("typed hydration"),
-        ReclaimedHydrationOutcome::MissingDurable
+        ReclaimedClaimSettlement::Release
     );
     assert!(registry
         .release_reclaimed_claim(&entity, &fence, reservation)
@@ -1762,10 +1726,10 @@ async fn self_fence_reclaim_reuses_full_old_incarnation_slot_when_liveness_is_po
     identity_handle.rotate(fresh_fence.owner().clone()).await;
     assert_eq!(
         registry
-            .hydrate_reclaimed_typed(&entity, &fresh_fence, reservation)
+            .settle_reclaimed_claim(&entity, &fresh_fence, reservation)
             .await
             .expect("verified self-fence hydration"),
-        ReclaimedHydrationOutcome::MissingDurable
+        ReclaimedClaimSettlement::Release
     );
     let poison_target = std::sync::Arc::clone(&registry);
     assert!(std::thread::spawn(move || {
@@ -3603,57 +3567,6 @@ async fn take_session_deletes_from_persistence() {
 }
 
 #[tokio::test]
-async fn restore_from_persistence_rebuilds_in_memory_view() {
-    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
-    // Pre-populate storage as if a previous server lifecycle had
-    // detached two sessions for distinct users. Using distinct
-    // JIDs is important: store_session evicts any prior detached
-    // session with the same JID (RFC-aligned: a fresh bind for
-    // a JID supersedes any older detached stream for that JID),
-    // and the durable mirror also deletes the evicted row, so
-    // two sessions with the same JID would resolve to one.
-    {
-        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-        registry
-            .store_session(realistic_test_session_for_jid(
-                "stream-1",
-                "alice@example.com/web".parse().unwrap(),
-            ))
-            .await
-            .unwrap();
-        registry
-            .store_session(realistic_test_session_for_jid(
-                "stream-2",
-                "bob@example.com/laptop".parse().unwrap(),
-            ))
-            .await
-            .unwrap();
-    }
-    // Simulate restart: brand-new registry, only persistence
-    // attached. The in-memory view starts empty.
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-    assert_eq!(registry.session_count().await, 0);
-
-    let hydrated = registry.restore_from_persistence().await.unwrap();
-    assert_eq!(hydrated, 2);
-    assert_eq!(registry.session_count().await, 2);
-
-    // Both sessions resumable post-restart.
-    let resumed = registry.take_session("stream-1").await.unwrap();
-    assert!(resumed.is_some());
-    let resumed = resumed.unwrap();
-    assert_eq!(resumed.unacked_stanzas.len(), 2);
-    assert!(resumed.carbons_enabled);
-    assert_eq!(resumed.presence_priority, 3);
-}
-
-#[tokio::test]
-async fn restore_is_noop_when_no_persistence_attached() {
-    let registry = InMemorySmSessionRegistry::new();
-    assert_eq!(registry.restore_from_persistence().await.unwrap(), 0);
-}
-
-#[tokio::test]
 async fn complete_claim_deletes_durable_session_on_resume() {
     // The real resume path is claim_session -> complete_claim,
     // not take_session. Without durable cleanup at the
@@ -4174,12 +4087,11 @@ fn realistic_dm_stanza_xml(from: &str, to: &str, id: &str, body: &str) -> String
 }
 
 #[tokio::test]
-async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
-    // Issue #1145: the tombstone scrub previously mutated memory only.
-    // A restart rehydrated the retracted stanza from sm_unacked and
-    // <resumed/> replayed it on the wire, defeating XEP-0424/0425
-    // retraction. The scrub must durably delete the matched
-    // (stream_id, sequence) rows too.
+async fn scrub_for_tombstone_deletes_durable_rows() {
+    // Issue #1145: a retracted stanza left in sm_unacked would still be
+    // promoted or replayed from storage, defeating XEP-0424/0425
+    // retraction. The scrub durably deletes the matched (stream_id,
+    // sequence) rows as well as the in-memory entry.
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
     let session = make_test_session_with_unacked(
@@ -4226,28 +4138,6 @@ async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
         vec![7],
         "only the non-retracted stanza's row may remain durably"
     );
-
-    // Restart simulation: a fresh registry over the same storage must
-    // not resurrect the retracted stanza into the replay queue.
-    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-    restarted.restore_from_persistence().await.unwrap();
-    let hydrated = restarted
-        .peek_session("stream-durable-tomb")
-        .await
-        .unwrap()
-        .expect("session survives restart");
-    assert_eq!(hydrated.unacked_stanzas.len(), 1);
-    assert!(
-        !hydrated
-            .unacked_stanzas
-            .iter()
-            .any(|entry| entry.stanza_xml.contains("secret")),
-        "retracted stanza must not be replayable after restart"
-    );
-    assert!(hydrated
-        .unacked_stanzas
-        .iter()
-        .any(|entry| entry.stanza_xml.contains("safe")));
 }
 
 #[tokio::test]
@@ -4288,170 +4178,6 @@ async fn invalidate_sessions_for_jid_preserves_rows_until_confirmed() {
     registry.confirm_drained("stream-stale").await;
     assert!(storage.get_session(&stale_id).await.unwrap().is_none());
     assert!(storage.list_unacked(&stale_id).await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn generation_invalidation_preserves_detached_and_claimed_successors() {
-    use super::super::persistence::InMemorySmPersistence;
-
-    // Both the displaced generation and its same-full-JID successor can be
-    // detached or held by a resume in progress. Only the selected generation
-    // transfers to promotion custody, regardless of which map contains it.
-    for old_claimed in [false, true] {
-        for successor_claimed in [false, true] {
-            let storage = std::sync::Arc::new(InMemorySmPersistence::new());
-            let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-            let jid: FullJid = "alice@example.com/generation-invalidation".parse().unwrap();
-            let old = realistic_test_session_for_jid("displaced", jid.clone());
-            let old_generation = old.occupancy_session;
-            let successor = realistic_test_session_for_jid("successor", jid.clone());
-            let successor_generation = successor.occupancy_session;
-            // Model snapshots persisted by different nodes then recovered
-            // together. Sequential local stores intentionally displace the
-            // previous full-JID session before invalidation can inspect it.
-            for session in [old, successor] {
-                InMemorySmSessionRegistry::new()
-                    .with_persistence(storage.clone())
-                    .store_session(session)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(registry.restore_from_persistence().await.unwrap(), 2);
-            if old_claimed {
-                registry.claim_session("displaced").await.unwrap().unwrap();
-            }
-            if successor_claimed {
-                registry.claim_session("successor").await.unwrap().unwrap();
-            }
-
-            let removed = registry
-                .invalidate_sessions_for_generation(&jid, old_generation)
-                .await
-                .unwrap();
-            assert_eq!(removed.len(), 1);
-            assert_eq!(removed[0].stream_id, "displaced");
-            assert_eq!(removed[0].occupancy_session, old_generation);
-            assert_eq!(removed[0].unacked_stanzas.len(), 2);
-            assert!(registry.claim_session("displaced").await.unwrap().is_none());
-            let old_id = crate::pending_delivery::SmSessionId::new("displaced");
-            let successor_id = crate::pending_delivery::SmSessionId::new("successor");
-            assert!(
-                storage.get_session(&old_id).await.unwrap().is_some(),
-                "promotion retains the old durable row until confirmed"
-            );
-            registry.confirm_drained("displaced").await;
-            assert!(storage.get_session(&old_id).await.unwrap().is_none());
-            let durable_successor = storage.get_session(&successor_id).await.unwrap().unwrap();
-            assert_eq!(durable_successor.occupancy_session, successor_generation);
-            assert_eq!(storage.list_unacked(&successor_id).await.unwrap().len(), 2);
-            if !successor_claimed {
-                registry.claim_session("successor").await.unwrap().unwrap();
-            }
-            let Some(SmClaimCompletion::Resumed(resumed)) =
-                registry.complete_claim("successor").await.unwrap()
-            else {
-                panic!("successor remains resumable");
-            };
-            assert_eq!(resumed.occupancy_session, successor_generation);
-            assert_eq!(resumed.unacked_stanzas.len(), 2);
-        }
-    }
-}
-
-#[tokio::test]
-async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
-    // Issue #1098: sessions whose resume window closed during the
-    // server's downtime must NOT be durably deleted at restore time —
-    // that silently discards their unacked queues. Instead they are
-    // hydrated (expired) so the SM-expiry janitor's next
-    // `drain_expired` pass runs the XEP-0198 §5 promote → confirm
-    // chain; durable rows survive until `confirm_drained`.
-    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
-
-    // Manually insert an already-expired session by writing
-    // directly to storage with a detached_at + duration in the
-    // past.
-    let now = chrono::Utc::now();
-    let expired = super::super::persistence::PersistedSession {
-        stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
-        user_id: "alice".to_string(),
-        jid: "alice@example.com/web".parse().unwrap(),
-        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-        inbound_count: 0,
-        outbound_count: 1,
-        last_acked: 0,
-        replay_gap_through: None,
-        max_resume_time: Some(60),
-        detached_at: now - chrono::Duration::seconds(120),
-        max_resume_duration: Duration::from_secs(60),
-        carbons_enabled: false,
-        roster_interested: false,
-        blocklist_interested: false,
-        presence_available: false,
-        presence_show: None,
-        presence_status: None,
-        presence_priority: 0,
-        presence_payloads: Vec::new(),
-    };
-    storage.upsert_session(expired).await.unwrap();
-    let mut queued =
-        xmpp_parsers::message::Message::new(Some("alice@example.com".parse::<jid::Jid>().unwrap()));
-    queued
-        .bodies
-        .insert(xmpp_parsers::message::Lang::new(), "missed".to_string());
-    storage
-        .append_unacked(super::super::persistence::PersistedUnackedStanza {
-            provenance: Default::default(),
-            ingress_receipts: Vec::new(),
-            stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
-            sequence: 1,
-            stanza: Box::new(Stanza::Message(queued)).into(),
-            original_receipt_at: now - chrono::Duration::seconds(130),
-        })
-        .await
-        .unwrap();
-
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-    let hydrated = registry.restore_from_persistence().await.unwrap();
-    assert_eq!(
-        hydrated, 1,
-        "expired session must be hydrated for the janitor"
-    );
-
-    // Expired sessions are never resumable on the wire.
-    assert!(registry
-        .peek_session("stream-expired")
-        .await
-        .unwrap()
-        .is_none());
-
-    // Durable rows survive restore — deletion happens only after the
-    // caller confirms successful promotion.
-    assert!(storage
-        .get_session(&crate::pending_delivery::SmSessionId::new("stream-expired"))
-        .await
-        .unwrap()
-        .is_some());
-
-    // The janitor's drain pass sees the session with its full queue.
-    let drained = registry.drain_expired().await.unwrap();
-    assert_eq!(drained.len(), 1);
-    assert_eq!(drained[0].stream_id, "stream-expired");
-    assert_eq!(drained[0].unacked_stanzas.len(), 1);
-    assert!(drained[0].unacked_stanzas[0].stanza_xml.contains("missed"));
-
-    // Only confirm_drained erases the durable rows.
-    registry.confirm_drained("stream-expired").await;
-    assert!(storage
-        .get_session(&crate::pending_delivery::SmSessionId::new("stream-expired"))
-        .await
-        .unwrap()
-        .is_none());
-    assert!(storage
-        .list_unacked(&crate::pending_delivery::SmSessionId::new("stream-expired"))
-        .await
-        .unwrap()
-        .is_empty());
 }
 
 /// Persistence wrapper that pauses inside `store_session_atomic` for
@@ -5485,11 +5211,11 @@ async fn already_present_reclaim_consumes_its_reservation_into_the_active_fence(
         .expect("reclaimed reservation");
 
     let outcome = registry
-        .hydrate_reclaimed_typed(&entity, &fence, reservation)
+        .settle_reclaimed_claim(&entity, &fence, reservation)
         .await
         .expect("already-present hydration");
 
-    assert_eq!(outcome, ReclaimedHydrationOutcome::AlreadyPresent);
+    assert_eq!(outcome, ReclaimedClaimSettlement::AlreadyPresent);
     assert!(!registry
         .reclaimed_claim_reservations
         .read()
@@ -5556,11 +5282,11 @@ async fn reclaimed_hydration_does_not_publish_over_a_pending_promotion() {
         .expect("reclaimed reservation");
 
     let outcome = registry
-        .hydrate_reclaimed_typed(&entity, &fence, reservation)
+        .settle_reclaimed_claim(&entity, &fence, reservation)
         .await
         .expect("reclaimed hydration");
 
-    assert_eq!(outcome, ReclaimedHydrationOutcome::AlreadyPresent);
+    assert_eq!(outcome, ReclaimedClaimSettlement::AlreadyPresent);
     assert!(!registry
         .sessions
         .read()
@@ -5621,48 +5347,6 @@ async fn concurrent_retry_drains_lease_a_promotion_exactly_once() {
             .collect::<Vec<_>>(),
         vec![stream_id]
     );
-}
-
-#[test]
-fn pending_promotion_blocks_cross_node_exact_repair_transfer() {
-    let registry = InMemorySmSessionRegistry::with_capacity(1);
-    let stream_id = "promoting-reclaimed";
-    let entity = crate::ownership::Entity::new(
-        crate::ownership::EntityType::SmSession,
-        stream_id.to_string(),
-    );
-    let reservation = registry
-        .reserve_reclaimed_claim_capacity(&entity)
-        .expect("reclaimed reservation");
-    let fence = super::super::persistence::SmClaimFence::new(
-        crate::ownership::NodeIdentity::local(),
-        crate::ownership::ClaimEpoch(7),
-    );
-    assert!(registry.try_record_verified_reclaimed_fence(stream_id, fence.clone(), reservation,));
-    registry
-        .pending_promotions
-        .write()
-        .expect("pending promotions")
-        .insert(
-            stream_id.to_string(),
-            (
-                make_test_jid(),
-                waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            ),
-        );
-
-    assert!(!registry
-        .transfer_reclaimed_claim_to_exact_release(&entity, &fence, reservation)
-        .expect("inspect repair transfer"));
-    assert_eq!(
-        registry
-            .claim_fences
-            .read()
-            .expect("claim fences")
-            .get(stream_id),
-        Some(&fence)
-    );
-    assert_eq!(registry.pending_claim_release_count(), 0);
 }
 
 #[tokio::test]
@@ -5841,8 +5525,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
     // in-memory maps. A stream that is off-map but still durable
     // (displaced mid-promotion, janitor-drained mid-promotion, or a
     // promotion-failure retry window) was unreachable — a retraction
-    // arriving in that window was resurrected at the next restart and
-    // promoted verbatim.
+    // arriving in that window was later promoted verbatim.
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
     let session = realistic_test_session_for_jid(
@@ -5897,36 +5580,16 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
         "durable-side sweep must scrub off-map streams' rows"
     );
 
-    // Restart-style read: the retracted stanza must be gone, the
-    // non-matching one preserved.
-    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-    assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
-    assert!(
-        restarted
-            .peek_session("stream-offmap")
-            .await
-            .unwrap()
-            .is_none(),
-        "promotion inventory must never reappear as a resumable stream"
-    );
-    let mut recovered = restarted
-        .drain_expired()
+    // The retracted stanza is gone from storage; the other one remains.
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-offmap");
+    let seqs: Vec<u32> = storage
+        .list_unacked(&stream_id)
         .await
-        .expect("recover promotion inventory");
-    assert_eq!(recovered.len(), 1);
-    let hydrated = recovered.remove(0);
-    assert_eq!(hydrated.unacked_stanzas.len(), 1);
-    assert!(
-        !hydrated
-            .unacked_stanzas
-            .iter()
-            .any(|entry| entry.stanza_xml.contains("secret")),
-        "retracted stanza must not survive the restart"
-    );
-    assert!(hydrated
-        .unacked_stanzas
+        .unwrap()
         .iter()
-        .any(|entry| entry.stanza_xml.contains("safe")));
+        .map(|row| row.sequence)
+        .collect();
+    assert_eq!(seqs, vec![7]);
 }
 
 #[tokio::test]
@@ -7119,18 +6782,14 @@ async fn take_session_of_a_claimed_copy_releases_its_claim() {
         .expect("taken claimed session's claim must have been released");
 }
 
-// --- FIX 2 (council-adjudicated, ADR-0017 Phase 3 Slice 5 corrigenda):
-// `hydrate_reclaimed` targeted-hydration tests -----------------------
+// --- Reclaimed-claim settlement tests -----------------------------------
 
 #[tokio::test]
-async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
-    // A targeted hydrate must never overwrite a live in-memory copy with a
-    // stale durable read — the absence-from-both-maps re-check, taken
-    // under the same stream-shard lock as every other mutator, is what
-    // prevents the orphan reaper (or the inline post-fence reclaim, FIX 4)
-    // from clobbering a session that is already resident, whether because
-    // a live detach beat it to the punch or because an overlapping sweep
-    // already reclaimed it.
+async fn settle_reclaimed_claim_skips_when_stream_id_already_present_in_memory() {
+    // Settling a reclaimed claim never releases the claim of a session that
+    // is already resident: the absence-from-both-maps re-check, taken under
+    // the same stream-shard lock as every other mutator, keeps the orphan
+    // reaper (or the inline post-fence reclaim) from releasing it.
     let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
     let me = crate::ownership::NodeIdentity::local();
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
@@ -7141,9 +6800,8 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
             crate::ownership::SharedNodeIdentity::new(me.clone()),
         );
 
-    // A decoy durable row for the SAME stream id: if `hydrate_reclaimed`
-    // wrongly bypassed the present-check, it would load and insert THIS,
-    // clobbering the sentinel below.
+    // A durable row for the same stream id, which the resident session's
+    // own lifecycle owns.
     storage
         .upsert_session(super::super::persistence::PersistedSession {
             stream_id: crate::pending_delivery::SmSessionId::new("stream-already-present"),
@@ -7185,13 +6843,13 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
     let reservation = registry
         .reserve_reclaimed_claim_capacity(&entity)
         .expect("reclaim reservation");
-    let hydrated = registry
-        .hydrate_reclaimed(&[(entity, fence, reservation)])
-        .await
-        .expect("hydrate_reclaimed");
     assert_eq!(
-        hydrated, 0,
-        "an already-present stream id must be skipped, not hydrated"
+        registry
+            .settle_reclaimed_claim(&entity, &fence, reservation)
+            .await
+            .expect("settle_reclaimed_claim"),
+        super::ReclaimedClaimSettlement::AlreadyPresent,
+        "an already-present stream id keeps its claim"
     );
 
     let unchanged = registry
@@ -7201,13 +6859,12 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
         .expect("session still present");
     assert_eq!(
         unchanged.outbound_count, 999,
-        "hydrate_reclaimed must not overwrite the already-present session with the \
-         durable (decoy) copy"
+        "settling a reclaimed claim leaves the already-present session untouched"
     );
 }
 
 #[tokio::test]
-async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
+async fn settle_reclaimed_claim_rejects_work_from_a_superseded_epoch() {
     let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
     let me = crate::ownership::NodeIdentity::local();
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
@@ -7259,11 +6916,11 @@ async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
         .reserve_reclaimed_claim_capacity(&entity)
         .expect("reclaim reservation");
     let outcome = registry
-        .hydrate_reclaimed_typed(&entity, &stale_fence, reservation)
+        .settle_reclaimed_claim(&entity, &stale_fence, reservation)
         .await
-        .expect("hydrate stale work");
+        .expect("settle stale work");
 
-    assert_eq!(outcome, super::ReclaimedHydrationOutcome::LostClaim);
+    assert_eq!(outcome, super::ReclaimedClaimSettlement::LostClaim);
     assert!(registry
         .peek_session("stream-stale-work")
         .await
@@ -7272,10 +6929,8 @@ async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
 }
 
 /// Persistence wrapper that pauses inside `get_session` for one designated
-/// stream id — lets the mid-flight race test below deterministically
-/// interleave a concurrent live-path mutator (`store_session`) with
-/// `hydrate_reclaimed`'s own in-flight reclaim of the SAME stream id, while
-/// `hydrate_reclaimed` still holds that stream's shard lock. Mirrors
+/// stream id, so a test can interleave a concurrent mutator with an
+/// operation that reads that stream's session row. Mirrors
 /// `GatedSnapshotPersistence` above, one method over.
 struct GatedGetSessionPersistence {
     inner: super::super::persistence::InMemorySmPersistence,
@@ -7649,138 +7304,40 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
 }
 
 #[tokio::test]
-async fn hydrate_reclaimed_quarantines_corrupt_persistence_before_terminal_outcome() {
-    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new("unused"));
+async fn transient_reclaimed_settlement_is_retained_and_retried() {
     let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
     let me = crate::ownership::NodeIdentity::local();
-    let entity = crate::ownership::Entity::new(
-        crate::ownership::EntityType::SmSession,
-        "stream-poison".to_string(),
-    );
-    storage
-        .inner
-        .upsert_session(super::super::persistence::PersistedSession {
-            stream_id: crate::pending_delivery::SmSessionId::new("stream-poison"),
-            user_id: "poison@example.com".to_string(),
-            jid: make_test_jid(),
-            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            inbound_count: 0,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            max_resume_time: Some(300),
-            detached_at: chrono::Utc::now(),
-            max_resume_duration: Duration::from_secs(300),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-        })
-        .await
-        .expect("seed poison row");
-    let epoch = claim_store
-        .acquire(&entity, &me)
-        .await
-        .expect("seed exact claim");
-    let registry = InMemorySmSessionRegistry::new()
-        .with_persistence(storage.clone())
-        .with_claim_store(
-            claim_store,
-            crate::ownership::SharedNodeIdentity::new(me.clone()),
-        );
-    storage
-        .corrupt
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-
-    let reservation = registry
-        .reserve_reclaimed_claim_capacity(&entity)
-        .expect("reclaim reservation");
-    let outcome = registry
-        .hydrate_reclaimed_typed(
-            &entity,
-            &super::super::persistence::SmClaimFence::new(me, epoch),
-            reservation,
-        )
-        .await
-        .expect("hydrate poison");
-
-    assert_eq!(outcome, super::ReclaimedHydrationOutcome::PoisonReleased);
-    assert!(storage
-        .quarantined
-        .load(std::sync::atomic::Ordering::SeqCst));
-    storage
-        .corrupt
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    assert!(storage
-        .inner
-        .get_session(&crate::pending_delivery::SmSessionId::new("stream-poison"))
-        .await
-        .expect("read after quarantine")
-        .is_none());
-}
-
-#[tokio::test]
-async fn transient_reclaimed_hydration_is_retained_and_retried() {
-    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new("unused"));
-    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
-    let me = crate::ownership::NodeIdentity::local();
-    let stream_id = "stream-transient-hydration";
+    let stream_id = "stream-transient-settlement";
     let entity = crate::ownership::Entity::new(
         crate::ownership::EntityType::SmSession,
         stream_id.to_string(),
     );
-    storage
-        .inner
-        .upsert_session(super::super::persistence::PersistedSession {
-            stream_id: crate::pending_delivery::SmSessionId::new(stream_id),
-            user_id: "retry@example.com".to_string(),
-            jid: make_test_jid(),
-            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            inbound_count: 0,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            max_resume_time: Some(300),
-            detached_at: chrono::Utc::now(),
-            max_resume_duration: Duration::from_secs(300),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-        })
-        .await
-        .expect("seed durable session");
     let epoch = claim_store
         .acquire(&entity, &me)
         .await
         .expect("seed exact claim");
     let fence = super::super::persistence::SmClaimFence::new(me.clone(), epoch);
-    let registry = InMemorySmSessionRegistry::with_capacity(1)
-        .with_persistence(storage.clone())
-        .with_claim_store(claim_store, crate::ownership::SharedNodeIdentity::new(me));
+    let registry = InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+        claim_store.clone(),
+        crate::ownership::SharedNodeIdentity::new(me),
+    );
+    let authority = std::sync::Arc::new(FailingOwnerLoss::default());
+    authority
+        .fail_once
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(registry.attach_durable_detached(authority.clone()));
     let reservation = registry
         .reserve_reclaimed_claim_capacity(&entity)
         .expect("reclaim reservation");
-    storage
-        .fail_get_once
-        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     assert_eq!(
         registry
-            .hydrate_reclaimed_typed(&entity, &fence, reservation)
+            .settle_reclaimed_claim(&entity, &fence, reservation)
             .await
-            .expect("first hydration"),
-        super::ReclaimedHydrationOutcome::TransientFailure
+            .expect("first settlement"),
+        super::ReclaimedClaimSettlement::TransientFailure
     );
-    assert_eq!(registry.pending_reclaimed_hydration_count(), 1);
+    assert_eq!(registry.pending_reclaimed_settlement_count(), 1);
     assert!(!registry
         .claim_fence_reservations
         .read()
@@ -7793,7 +7350,7 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
             .expect("claim fences")
             .get(stream_id),
         Some(&fence),
-        "verified hydration must atomically replace the reservation with a counted exact fence before transient storage I/O"
+        "verified settlement must atomically replace the reservation with a counted exact fence before the authority write"
     );
     let another =
         crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, "another-reclaim");
@@ -7801,16 +7358,69 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
         registry
             .reserve_reclaimed_claim_capacity(&another)
             .is_none(),
-        "transient hydration must retain and consume the sole bounded ownership slot"
+        "a transient settlement must retain and consume the sole bounded ownership slot"
     );
 
-    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
-    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
-    assert!(registry
-        .peek_session(stream_id)
-        .await
-        .expect("peek hydrated session")
-        .is_some());
+    assert_eq!(registry.retry_pending_reclaimed_settlements(1).await, 1);
+    assert_eq!(registry.pending_reclaimed_settlement_count(), 0);
+    assert_eq!(
+        authority.recorded.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the retry records the owner loss once"
+    );
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .is_none(),
+        "a settled reclaimed claim is released"
+    );
+}
+
+/// A durable authority whose owner-loss record fails once when armed.
+#[derive(Default)]
+struct FailingOwnerLoss {
+    fail_once: std::sync::atomic::AtomicBool,
+    recorded: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl super::DurableDetachedSessions for FailingOwnerLoss {
+    async fn detached_resources(
+        &self,
+        _registry: &InMemorySmSessionRegistry,
+        _account: &jid::BareJid,
+    ) -> Result<Vec<super::DurableDetachedResource>, SmRegistryError> {
+        Ok(Vec::new())
+    }
+
+    async fn admit(
+        &self,
+        _registry: &InMemorySmSessionRegistry,
+        _frame: super::DurableDetachedFrame<'_>,
+    ) -> Result<super::DurableDetachedAdmission, SmRegistryError> {
+        Ok(super::DurableDetachedAdmission::NoSession)
+    }
+
+    async fn record_owner_lost(
+        &self,
+        _registry: &InMemorySmSessionRegistry,
+        _session: &crate::pending_delivery::SmSessionId,
+        _claim: &super::super::persistence::SmClaimFence,
+    ) -> Result<(), SmRegistryError> {
+        if self
+            .fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SmRegistryError::Internal(
+                "authority unavailable".to_string(),
+            ));
+        }
+        self.recorded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -7839,14 +7449,14 @@ async fn cancelled_reclaimed_hydration_waiting_for_shard_remains_retryable() {
     let hydrating_fence = fence.clone();
     let hydration = tokio::spawn(async move {
         hydrating_registry
-            .hydrate_reclaimed_typed(&hydrating_entity, &hydrating_fence, reservation)
+            .settle_reclaimed_claim(&hydrating_entity, &hydrating_fence, reservation)
             .await
     });
     tokio::task::yield_now().await;
     hydration.abort();
     assert!(hydration.await.unwrap_err().is_cancelled());
 
-    assert_eq!(registry.pending_reclaimed_hydration_count(), 1);
+    assert_eq!(registry.pending_reclaimed_settlement_count(), 1);
     assert!(
         registry
             .reclaimed_claim_reservations
@@ -7857,148 +7467,9 @@ async fn cancelled_reclaimed_hydration_waiting_for_shard_remains_retryable() {
     );
     drop(blocker);
 
-    assert_eq!(registry.retry_pending_reclaimed_hydrations(1).await, 1);
-    assert_eq!(registry.pending_reclaimed_hydration_count(), 0);
+    assert_eq!(registry.retry_pending_reclaimed_settlements(1).await, 1);
+    assert_eq!(registry.pending_reclaimed_settlement_count(), 0);
     assert!(registry.locally_owned_claim_ids().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_same_stream() {
-    // FIX 2's mid-flight race: the orphan reaper's `hydrate_reclaimed` must
-    // never overlap a live session's own store/claim/take mutation of the
-    // SAME stream id in memory. The stream-shard lock it takes (like every
-    // other registry mutator) forces the two to strictly serialize instead
-    // of interleave, so there is never a moment with a "ghost" entry (the
-    // reaper's hydrated copy briefly coexisting with a fresher live one) or
-    // double residency (present under both `sessions` and
-    // `claimed_sessions` at once — this test does not construct double
-    // residency either, so the existing
-    // `take_session_of_a_claimed_copy_releases_its_claim` test's own
-    // "double residency is not constructible through the public API today"
-    // comment stays true; this test instead proves the LOCK is what
-    // prevents it from ever being observable under real concurrency).
-    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new("stream-mid-flight"));
-    let claim_store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
-    let me = crate::ownership::NodeIdentity::local();
-    let entity = crate::ownership::Entity::new(
-        crate::ownership::EntityType::SmSession,
-        "stream-mid-flight".to_string(),
-    );
-    let jid: FullJid = "race@example.com/reaper".parse().unwrap();
-
-    // Seed a durable row as if a dead node's claim had just been stolen by
-    // `me` (the orphan reaper's actual precondition): the row exists, and
-    // `me` already holds the `ClaimStore` entry, but nothing is in memory
-    // yet.
-    storage
-        .inner
-        .upsert_session(super::super::persistence::PersistedSession {
-            stream_id: crate::pending_delivery::SmSessionId::new("stream-mid-flight"),
-            user_id: "race@example.com".to_string(),
-            jid: jid.clone(),
-            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            inbound_count: 0,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            max_resume_time: Some(300),
-            detached_at: chrono::Utc::now(),
-            max_resume_duration: Duration::from_secs(300),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-        })
-        .await
-        .expect("seed durable row");
-    let epoch = claim_store
-        .acquire(&entity, &me)
-        .await
-        .expect("seed the claim as if steal_stale just won it");
-
-    let registry = std::sync::Arc::new(
-        InMemorySmSessionRegistry::new()
-            .with_persistence(storage.clone())
-            .with_claim_store(
-                claim_store.clone(),
-                crate::ownership::SharedNodeIdentity::new(me.clone()),
-            ),
-    );
-
-    // Arm the gate, then spawn `hydrate_reclaimed`: it takes the shard
-    // lock, passes its absence re-check (nothing in memory yet), confirms
-    // the claim, and pauses inside `get_session` — still holding the lock.
-    storage
-        .armed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let reservation = registry
-        .reserve_reclaimed_claim_capacity(&entity)
-        .expect("reclaim reservation");
-    let hydrate_registry = std::sync::Arc::clone(&registry);
-    let hydrate_entities = vec![(
-        entity,
-        super::super::persistence::SmClaimFence::new(me, epoch),
-        reservation,
-    )];
-    let hydrate =
-        tokio::spawn(async move { hydrate_registry.hydrate_reclaimed(&hydrate_entities).await });
-    storage.reached.notified().await;
-    storage
-        .armed
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-
-    // While `hydrate_reclaimed` is paused HOLDING the shard lock, a
-    // concurrent live mutator for the exact same stream id (standing in
-    // for "a live session completes/claims") must block rather than
-    // interleave: give it ample real-time opportunity to (wrongly)
-    // proceed if the lock were not actually held.
-    let live_registry = std::sync::Arc::clone(&registry);
-    let live_session = realistic_test_session_for_jid("stream-mid-flight", jid.clone());
-    let mut live_store =
-        tokio::spawn(async move { live_registry.store_session(live_session).await });
-    let raced_ahead = tokio::time::timeout(Duration::from_millis(50), &mut live_store).await;
-    assert!(
-        raced_ahead.is_err(),
-        "a concurrent store_session for the same stream id must block on the shard lock \
-         hydrate_reclaimed still holds, never interleave with it"
-    );
-
-    // Release the gate: `hydrate_reclaimed` finishes (inserts the row it
-    // legitimately owns) and drops the lock, unblocking the live mutator.
-    storage.proceed.notify_one();
-    let hydrated = hydrate
-        .await
-        .expect("hydrate_reclaimed task")
-        .expect("hydrate_reclaimed result");
-    assert_eq!(
-        hydrated, 1,
-        "hydrate_reclaimed must hydrate the row it legitimately owns"
-    );
-
-    let live_result = live_store
-        .await
-        .expect("live store_session task")
-        .expect("store_session result");
-    assert!(
-        live_result.is_empty(),
-        "no jid/stream collision to displace — same stream id, same jid"
-    );
-
-    // Exactly one in-memory copy for this stream id — no ghost, no double
-    // residency — and it reflects the live path's write (the last one to
-    // run), proving the two operations serialized rather than corrupted
-    // each other's state.
-    assert_eq!(registry.session_count().await, 1);
-    let final_session = registry
-        .peek_session("stream-mid-flight")
-        .await
-        .expect("peek")
-        .expect("exactly one copy present");
-    assert_eq!(final_session.jid, jid);
 }
 
 #[tokio::test]

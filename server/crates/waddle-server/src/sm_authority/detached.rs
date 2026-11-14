@@ -259,6 +259,46 @@ fn obligation_operation(session: SmSessionKey, key: &SmIngressAppendKey) -> SmOp
 
 #[async_trait::async_trait]
 impl DurableDetachedSessions for DurableDetachedRecipients {
+    async fn record_owner_lost(
+        &self,
+        _registry: &InMemorySmSessionRegistry,
+        session: &SmSessionId,
+        claim: &SmClaimFence,
+    ) -> Result<(), SmRegistryError> {
+        use super::{LifecycleError, LifecycleRejection};
+        // Only a durable session's stream id is a session key.
+        let Ok(key) = uuid::Uuid::parse_str(session.as_str()) else {
+            return Ok(());
+        };
+        let session = SmSessionKey::from_uuid(key);
+        let Some(record) = self
+            .store
+            .session(session)
+            .await
+            .map_err(storage_unavailable)?
+        else {
+            return Ok(());
+        };
+        match self
+            .store
+            .record_owner_lost(session, record.generation, claim, Utc::now())
+            .await
+        {
+            // A session that is already detached or ended has no owner to
+            // lose.
+            Ok(())
+            | Err(LifecycleError::Rejected(
+                LifecycleRejection::Transition(_) | LifecycleRejection::UnknownSession,
+            )) => Ok(()),
+            Err(error) => {
+                warn!(stream_id = %record::stream_id(session), %error, "durable SM owner loss could not be recorded");
+                Err(SmRegistryError::StorageUnavailable(
+                    StorageOutageCause::Backend,
+                ))
+            }
+        }
+    }
+
     async fn detached_resources(
         &self,
         _registry: &InMemorySmSessionRegistry,

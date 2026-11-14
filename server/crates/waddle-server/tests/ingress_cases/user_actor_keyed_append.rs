@@ -110,7 +110,7 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
         "append metadata must not alter the XMPP message"
     );
 
-    let mut sm = detached_progress_support::registry(&fixture).await;
+    let sm = detached_progress_support::registry(&fixture).await;
     detached_progress_support::attach(&sm, &target).await;
     for attempt in 0..2 {
         let result = sm
@@ -133,16 +133,6 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
         let snapshot = detached_progress_support::queued(&sm, &target).await;
         assert_eq!(snapshot.outbound_count, 1);
         assert_eq!(snapshot.unacked_stanzas.len(), 1);
-        if attempt == 0 {
-            drop(sm);
-            sm = detached_progress_support::registry(&fixture).await;
-            assert_eq!(
-                sm.restore_from_persistence()
-                    .await
-                    .expect("restore local replay"),
-                1
-            );
-        }
     }
     let snapshot = detached_progress_support::queued(&sm, &target).await;
     let mut resumed = StreamManagementState::new();

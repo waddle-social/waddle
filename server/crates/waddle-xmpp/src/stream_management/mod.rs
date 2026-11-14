@@ -55,16 +55,15 @@ pub use provenance::{
 pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
 pub use resume_checkpoint::{SmResumeCheckpointHandle, SmResumeRejection};
 pub use session_registry::{
-    CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
-    DetachedUnackedStanza, DurableDetachedAdmission, DurableDetachedFrame, DurableDetachedResource,
-    DurableDetachedSessions, ForeignSessionClaim, InMemorySmSessionRegistry, ObservedSessionClaim,
-    PendingPromotionRetryRetention, PromotionCaptureCustody, RecentTombstoneRecord,
-    ReclaimedClaimReservation, ReclaimedHydrationOutcome, RemoteResumeAskOutcome,
-    RemoteResumeAsker, ResumableSessionProbe, SessionClaimEvidence, SessionClaimTakeover,
-    ShutdownSmClaimLoss, ShutdownSmDrainBatch, SmClaimCompletion, SmRegistryError,
-    SmSessionRegistry, StealTicket, StorageOutageCause, StoredDetachedSession,
-    TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry, DEFAULT_MAX_SESSIONS,
-    TOMBSTONE_CLOCK_SKEW_SLACK,
+    DetachedPresenceState, DetachedSession, DetachedUnackedStanza, DurableDetachedAdmission,
+    DurableDetachedFrame, DurableDetachedResource, DurableDetachedSessions, ForeignSessionClaim,
+    InMemorySmSessionRegistry, ObservedSessionClaim, PendingPromotionRetryRetention,
+    PromotionCaptureCustody, RecentTombstoneRecord, ReclaimedClaimReservation,
+    ReclaimedClaimSettlement, RemoteResumeAskOutcome, RemoteResumeAsker, ResumableSessionProbe,
+    SessionClaimEvidence, SessionClaimTakeover, ShutdownSmClaimLoss, ShutdownSmDrainBatch,
+    SmClaimCompletion, SmRegistryError, SmSessionRegistry, StorageOutageCause,
+    StoredDetachedSession, TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry,
+    DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
 pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};
 pub use state::{DetachedSessionSnapshot, StreamManagementState};

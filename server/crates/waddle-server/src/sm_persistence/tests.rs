@@ -29,21 +29,6 @@ fn fixed_occupancy_session() -> waddle_xmpp_core::OccupancySessionGeneration {
     )
 }
 
-async fn stored_occupancy_session_text(
-    storage: &DatabaseSmPersistence,
-    stream_id: &SmSessionId,
-) -> Option<String> {
-    let mut rows = storage
-        .query(
-            "SELECT occupancy_session FROM sm_sessions WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .expect("query occupancy_session");
-    let row = rows.next().await.expect("row result").expect("row present");
-    row.get(0).expect("occupancy_session column")
-}
-
 fn fixture_session(stream_id: &str) -> PersistedSession {
     PersistedSession {
         stream_id: SmSessionId::new(stream_id),
@@ -725,71 +710,6 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
             .expect("load principal after snapshot refresh"),
         Some(principal),
         "principal must survive a detached-fanout snapshot refresh"
-    );
-}
-
-#[tokio::test]
-async fn null_occupancy_session_decodes_to_minted_generation_and_rewrites_non_null() {
-    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
-
-    let storage = DatabaseSmPersistence::open(None).await.unwrap();
-    let stream_id = SmSessionId::new("legacy-null-occupancy");
-    let mut session = fixture_session(stream_id.as_str());
-    session.detached_at = Utc::now();
-    let original_occupancy_session = session.occupancy_session;
-    storage
-        .store_session_atomic(session, Vec::new())
-        .await
-        .expect("persist session");
-    storage
-        .execute(
-            "UPDATE sm_sessions SET occupancy_session = NULL WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .expect("null legacy occupancy_session");
-
-    let registry = std::sync::Arc::new(
-        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::new(storage.clone())),
-    );
-    assert_eq!(
-        registry
-            .restore_from_persistence()
-            .await
-            .expect("hydrate restored session"),
-        1
-    );
-    let hydrated = registry
-        .peek_session(stream_id.as_str())
-        .await
-        .expect("peek hydrated session")
-        .expect("hydrated detached session");
-    let minted_occupancy_session = hydrated.occupancy_session;
-    assert_ne!(
-        minted_occupancy_session, original_occupancy_session,
-        "NULL must mint a fresh typed occupancy generation at decode time"
-    );
-
-    assert!(
-        registry
-            .record_outbound_for_detached_stream(
-                stream_id.as_str(),
-                &Stanza::Message(xmpp_parsers::message::Message::new(Some(
-                    "alice@example.com/web".parse().expect("recipient JID"),
-                ))),
-                fixed_time(),
-            )
-            .await
-            .expect("persist detached refresh"),
-        "detached refresh must mutate and write the row back"
-    );
-
-    let stored = stored_occupancy_session_text(&storage, &stream_id).await;
-    let expected = minted_occupancy_session.to_string();
-    assert_eq!(
-        stored,
-        Some(expected),
-        "the next persistence write must rewrite a concrete non-NULL occupancy_session"
     );
 }
 

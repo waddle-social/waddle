@@ -2135,10 +2135,10 @@ async fn create_sm_session_registry(
     // ADR-0017 Phase 3 Slice 5: wire the SAME `ClaimStore`/live-identity
     // pair `clustering::start_if_enabled` constructed (never a second,
     // independent store) into the session registry's own claim
-    // bookkeeping — without this, `claim_session`/`restore_from_persistence`
+    // bookkeeping — without this, `claim_session` and reclaimed-claim settlement
     // silently stay on the single-node `InProcessClaimStore` default even
     // with clustering enabled and the fenced `SmPersistenceStorage` wired
-    // in above, defeating acquire-then-hydrate entirely. A `None` pair
+    // in above. A `None` pair
     // (clustering disabled, non-Postgres, or a build without the
     // `clustering` feature) leaves today's single-node default untouched.
     // The registry's own single-node default is already an
@@ -2161,28 +2161,6 @@ async fn create_sm_session_registry(
         );
         sm_session_registry = sm_session_registry.with_remote_resume_asker(Arc::new(asker));
     }
-    // The durable authority keeps its sessions' snapshots and retained frames
-    // in the relations this registry restores from. Its sessions are not
-    // hydrated here: the authority alone resumes, expires and releases them.
-    let durable_stream_ids = match state.durable_sm() {
-        Some(store) => store
-            .stream_ids()
-            .await?
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
-        None => std::collections::HashSet::new(),
-    };
-    if let Err(error) = sm_session_registry
-        .restore_from_persistence_except(&durable_stream_ids)
-        .await
-    {
-        warn!(
-            error = %error,
-            "restore_from_persistence failed at startup; continuing with empty \
-             in-memory SM session view. XEP-0198 resume will return <failed/> \
-             until storage health is restored."
-        );
-    }
     let sm_session_registry = Arc::new(sm_session_registry);
     // Under the durable selector a detached session lives in the authority,
     // not in this registry's maps; its detached readers and appenders reach
@@ -2204,9 +2182,6 @@ async fn create_sm_session_registry(
     #[cfg(feature = "clustering")]
     if let Some(local_claims) = &clustering.local_claims {
         local_claims.wire(Arc::clone(&sm_session_registry));
-        if let Some(store) = state.durable_sm() {
-            local_claims.wire_durable_sm(crate::sm_authority::DurableSmStore::clone(store));
-        }
     }
     Ok(sm_session_registry)
 }

@@ -85,9 +85,6 @@ use codec::{
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod startup_poison_tests;
-
 mod implementation;
 pub use implementation::open_for_cluster_mode_with_lineage;
 pub use implementation::DatabaseSmPersistence;

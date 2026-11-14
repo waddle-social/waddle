@@ -459,6 +459,39 @@ durable session. `tests/xep0198_durable_ws.rs`
 checks that through enable, delivery, acknowledgement, detach, resume,
 replacement, close, a non-resumable stream and a restart.
 
+The registry's restore and hydration half is deleted with it. Startup no
+longer rebuilds registry sessions from `sm_sessions`: the owner phase (or the
+store's opening) has drained every row without a durable record, and every
+remaining row belongs to the authority. The registry's cross-node steal and
+hydrate (`prepare_cross_node_resume`, `finish_cross_node_steal`) is gone; only
+`RemoteResumeAsker`, which the durable claim move uses to ask a live owner to
+detach, remains of it. The SM expiry janitor no longer drains or promotes
+registry sessions; durable sessions expire in `run_durable_sm_sweep`, and the
+janitor keeps retrying the registry's retained claim work and the ingress
+custody and retirement queues.
+
+A reclaimed SM-session claim (the orphan reaper's steal from a dead node, the
+inline reclaim of this node's own superseded identity, or a retained
+uncertain CAS that resolves to this node) is settled, not hydrated:
+`InMemorySmSessionRegistry::settle_reclaimed_claim` re-proves the exact
+claim under the stream's shard lock, asks the durable authority to record
+the loss of the session's owner (`DurableDetachedSessions::record_owner_lost`,
+which moves an attached session to detached and does nothing for a session
+it does not hold or one already detached or ended), and the caller releases
+the exact claim, so whichever node resumes or expires the session takes a
+free claim. A failed authority write keeps the work in the registry's pending
+inventory for the janitor's retry. The orphan reaper and the inline reclaim
+both take this one path, and neither reads a session row.
+
+Still present, because they are not yet separable: the registry's legacy
+`DetachedSession` maps, their persistence writers (the persistence codec,
+`PostgresFencedSmPersistence`'s session writers), legacy promotion and the
+graceful-shutdown drain of registry sessions. Under the durable authority no
+registry session is ever created, so they write nothing, but
+`SmPersistenceStorage` also carries the ingress custody and acknowledgement
+journal the durable path uses, and the ingress recovery tests still seed
+registry-held detached sessions as their detached sink.
+
 ## Schema and the epoch guard
 
 On PostgreSQL, migration V1034 creates `sm_durable_sessions` and

@@ -1,16 +1,10 @@
 //! XEP-0198 wrapping counter behavior for detached-session persistence.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
 use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
-use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage};
-use waddle_xmpp::stream_management::{
-    DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmSessionRegistry,
-    StreamManagementState, DEFAULT_MAX_UNACKED_QUEUE_SIZE,
-};
+use waddle_xmpp::stream_management::{DetachedSession, StreamManagementState};
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Id, Message};
@@ -161,81 +155,6 @@ fn explicit_detached_sequences_advance_sort_deduplicate_and_reject_stale_inputs(
     assert_eq!(session.outbound_count, before_stale.outbound_count);
     assert_eq!(session.unacked_stanzas, before_stale.unacked_stanzas);
     assert_eq!(session.replay_gap_through, before_stale.replay_gap_through);
-}
-
-#[tokio::test]
-async fn persistence_hydration_and_followup_eviction_stay_in_wrap_order() {
-    let last_acked = u32::MAX - 500;
-    let mut session = detached_session(
-        last_acked,
-        last_acked.wrapping_add(DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32),
-    );
-    let stanza_xml = message_xml("wrapped");
-    let expected: Vec<u32> = (1..=DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32)
-        .map(|offset| last_acked.wrapping_add(offset))
-        .collect();
-    session.unacked_stanzas = expected
-        .iter()
-        .rev()
-        .map(|sequence| DetachedUnackedStanza {
-            provenance: Default::default(),
-            ingress_receipts: Vec::new(),
-            sequence: *sequence,
-            stanza_xml: stanza_xml.clone(),
-            original_receipt_at: Utc::now(),
-        })
-        .collect();
-
-    let persistence: Arc<dyn SmPersistenceStorage> = Arc::new(InMemorySmPersistence::new());
-    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
-    registry
-        .store_session(session)
-        .await
-        .expect("store session");
-
-    let stream_id = SmSessionId::new("wrap-sequences");
-    let stored = persistence
-        .list_unacked(&stream_id)
-        .await
-        .expect("list stored stanzas");
-    assert_eq!(
-        stored
-            .iter()
-            .map(|entry| entry.sequence)
-            .collect::<Vec<_>>(),
-        expected
-    );
-
-    drop(registry);
-    let restored_registry =
-        InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
-    assert_eq!(
-        restored_registry
-            .restore_from_persistence()
-            .await
-            .expect("restore session"),
-        1
-    );
-    let mut restored = restored_registry
-        .claim_session("wrap-sequences")
-        .await
-        .expect("claim restored session")
-        .expect("restored session exists");
-    assert_eq!(sequence_numbers(&restored), expected);
-    assert_eq!(
-        restored.stanzas_to_resend(last_acked).len(),
-        DEFAULT_MAX_UNACKED_QUEUE_SIZE
-    );
-
-    let newest = last_acked.wrapping_add(DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1);
-    restored.record_detached_outbound_at(newest, &message_stanza("wrapped"), Utc::now());
-    assert_eq!(
-        restored.unacked_stanzas.len(),
-        DEFAULT_MAX_UNACKED_QUEUE_SIZE
-    );
-    assert_eq!(restored.replay_gap_through, Some(expected[0]));
-    assert_eq!(sequence_numbers(&restored)[0], expected[1]);
-    assert_eq!(sequence_numbers(&restored).last(), Some(&newest));
 }
 
 #[test]

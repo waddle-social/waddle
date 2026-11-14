@@ -105,7 +105,7 @@ impl ConnectedPeerCount {
 /// then, [`start_if_enabled`](super::start_if_enabled) wires
 /// [`NoLocallyClaimedEntities`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReclaimedHydrationHandoff {
+pub enum ReclaimedSettlementHandoff {
     Accepted,
     NotAccepted,
 }
@@ -205,20 +205,19 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// outstanding intent.
     async fn health_check(&self, entity: &Entity) -> bool;
 
-    /// Targeted-hydration hook for FIX 4's inline post-fence reclaim
-    /// (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated): given
-    /// entities this node's re-registration retry just re-won via
-    /// `steal_stale` (paired with the epoch the steal returned), hydrate
-    /// them into whatever local state this implementation backs.
+    /// Settlement hook for FIX 4's inline post-fence reclaim (ADR-0017
+    /// Phase 3 Slice 5 corrigenda): given entities this node's
+    /// re-registration retry just re-won via `steal_stale` (paired with the
+    /// epoch the steal returned), settle each claim with whatever local
+    /// state this implementation backs.
     ///
-    /// Implementations MUST honor the same discipline
-    /// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::hydrate_reclaimed`]
-    /// documents — never a table scan, never a blind insert — since this
-    /// is called from a node that is already back to serving live traffic
-    /// by the time it runs. Default no-op, mirroring [`Self::demote`]'s
-    /// own no-op default: correct for [`NoLocallyClaimedEntities`], which
-    /// owns nothing to hydrate.
-    async fn hydrate_reclaimed(
+    /// Implementations follow
+    /// [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::settle_reclaimed_claim`]:
+    /// per entity, under its own lock, never a table scan, since this is
+    /// called from a node that is already back to serving live traffic.
+    /// Default no-op, mirroring [`Self::demote`]'s own no-op default:
+    /// correct for [`NoLocallyClaimedEntities`], which owns nothing.
+    async fn settle_reclaimed(
         &self,
         entities: &[(
             Entity,
@@ -226,9 +225,9 @@ pub trait LocallyClaimedEntities: Send + Sync {
             ClaimEpoch,
             waddle_xmpp::stream_management::ReclaimedClaimReservation,
         )],
-    ) -> ReclaimedHydrationHandoff {
+    ) -> ReclaimedSettlementHandoff {
         let _ = entities;
-        ReclaimedHydrationHandoff::NotAccepted
+        ReclaimedSettlementHandoff::NotAccepted
     }
 
     /// Reserve bounded local responsibility before inline self-fence reclaim
@@ -632,7 +631,7 @@ async fn reclaim_own_expired_claims<L>(
         {
             Ok(new_epoch) => {
                 let handoff = local_claims
-                    .hydrate_reclaimed(&[(
+                    .settle_reclaimed(&[(
                         candidate.entity,
                         fresh.clone(),
                         new_epoch,
@@ -644,7 +643,7 @@ async fn reclaim_own_expired_claims<L>(
                 // has returned; cancellation anywhere between the committed
                 // steal and publication then falls back to a read-only owner
                 // lookup instead of forgetting the fresh-owned claim.
-                if handoff == ReclaimedHydrationHandoff::Accepted {
+                if handoff == ReclaimedSettlementHandoff::Accepted {
                     reservation.transfer();
                 }
             }
@@ -3143,7 +3142,7 @@ mod tests {
         healthy: Arc<AtomicBool>,
         demoted: Arc<std::sync::Mutex<Vec<Entity>>>,
         exact_demoted_owners: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
-        /// Every entity ever passed to `hydrate_reclaimed`, in call order —
+        /// Every entity ever passed to `settle_reclaimed`, in call order —
         /// lets FIX 4(b)'s inline-post-fence-reclaim test assert the
         /// targeted-hydration hook actually fires. Defaults are wired via
         /// `FakeLocalClaims::unhydrated()` for tests that don't care.
@@ -3180,7 +3179,7 @@ mod tests {
             self.healthy.load(Ordering::SeqCst)
         }
 
-        async fn hydrate_reclaimed(
+        async fn settle_reclaimed(
             &self,
             entities: &[(
                 Entity,
@@ -3188,7 +3187,7 @@ mod tests {
                 ClaimEpoch,
                 waddle_xmpp::stream_management::ReclaimedClaimReservation,
             )],
-        ) -> ReclaimedHydrationHandoff {
+        ) -> ReclaimedSettlementHandoff {
             if let Some(live_identity) = &self.live_identity_at_hydration {
                 let current = live_identity.current();
                 if entities.iter().any(|(_, owner, _, _)| *owner != current) {
@@ -3200,7 +3199,7 @@ mod tests {
                     .iter()
                     .map(|(entity, _owner, _epoch, _reservation)| entity.clone()),
             );
-            ReclaimedHydrationHandoff::Accepted
+            ReclaimedSettlementHandoff::Accepted
         }
 
         fn reserve_reclaimed_claim_capacity(
@@ -3349,7 +3348,7 @@ mod tests {
             true
         }
 
-        async fn hydrate_reclaimed(
+        async fn settle_reclaimed(
             &self,
             _entities: &[(
                 Entity,
@@ -3357,7 +3356,7 @@ mod tests {
                 ClaimEpoch,
                 waddle_xmpp::stream_management::ReclaimedClaimReservation,
             )],
-        ) -> ReclaimedHydrationHandoff {
+        ) -> ReclaimedSettlementHandoff {
             self.hydration_started.notify_one();
             std::future::pending().await
         }
@@ -3408,7 +3407,7 @@ mod tests {
                 })
         }
 
-        async fn hydrate_reclaimed(
+        async fn settle_reclaimed(
             &self,
             entities: &[(
                 Entity,
@@ -3416,12 +3415,12 @@ mod tests {
                 ClaimEpoch,
                 waddle_xmpp::stream_management::ReclaimedClaimReservation,
             )],
-        ) -> ReclaimedHydrationHandoff {
+        ) -> ReclaimedSettlementHandoff {
             self.hydrated
                 .lock()
                 .expect("lock")
                 .extend(entities.iter().map(|(entity, _, _, _)| entity.clone()));
-            ReclaimedHydrationHandoff::Accepted
+            ReclaimedSettlementHandoff::Accepted
         }
     }
 

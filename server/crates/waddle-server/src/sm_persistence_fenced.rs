@@ -116,16 +116,9 @@
 //! path, so a cell never survives past the `ClaimStore` claim it caches the
 //! epoch for.
 //!
-//! **Interim bootstrapping gap, now closed (Slice 5)**: prior to this
-//! slice, nothing in production called `SmPersistenceStorage` methods
-//! against a genuinely claim-scoped session — `restore_from_persistence`
-//! hydrated unscoped, and no orphan reaper existed. Both now acquire a real
-//! `ClaimStore` claim before hydrating (`session_registry/core.rs`'s
-//! acquire-then-hydrate, `server/session_janitors.rs`'s orphan reaper), so
-//! a session that outlives a process restart is correctly re-claimed under
-//! the restarted process's fresh node identity via `ensure_claimed`'s
-//! self-reacquire path once that same node's own restore/reaper pass claims
-//! it — see those modules' doc comments for the full lifecycle.
+//! Startup never rebuilds registry sessions from these rows: the durable
+//! stream-management authority alone resumes sessions, and the owner phase
+//! drains the rows it does not hold before the first serving process.
 
 use crate::db::Rows;
 use std::collections::HashSet;

@@ -157,8 +157,9 @@ pub async fn retry_decision(
     decision
 }
 
-/// A process restart must preserve both the SM append and its ingress progress;
-/// XEP-0198 retransmission never authorizes a second append to the finished stream.
+/// A retried delivery keeps both the SM append and its committed ingress
+/// progress; XEP-0198 retransmission never authorizes a second append to the
+/// finished stream.
 pub async fn restart_and_retry(fixture: IngressFixture) {
     let [a, b, _] = resources();
     let connections = ConnectionRegistry::new();
@@ -172,15 +173,6 @@ pub async fn restart_and_retry(fixture: IngressFixture) {
     execute(&fixture, &first, &connections, &sm).await;
     assert_pending(&fixture, 1, 0).await;
     assert_eq!(queued(&sm, &a).await.unacked_stanzas.len(), 1);
-    drop(sm);
-
-    let sm = registry(&fixture).await;
-    assert_eq!(
-        sm.restore_from_persistence()
-            .await
-            .expect("restore SM on restart"),
-        1
-    );
     attach(&sm, &b).await;
     // The authenticated digest is unchanged; today's provisional routed stanza
     // can drift independently and must never replace the committed envelope.

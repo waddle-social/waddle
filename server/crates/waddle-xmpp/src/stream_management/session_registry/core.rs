@@ -20,9 +20,7 @@ use crate::ownership::{
     SharedNodeIdentity,
 };
 
-use super::persistence_codec::{
-    detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
-};
+use super::persistence_codec::{detached_to_persisted, parse_xml_to_persisted_unacked};
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,9 +116,9 @@ pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_
 ///
 /// When `persistence` is `Some`, every `store_session` /
 /// `take_session` / `cleanup_expired` mutation also writes to the
-/// durable backend; on startup, [`Self::restore_from_persistence`]
-/// rebuilds the in-memory view so an XEP-0198 `<resume previd='…'/>`
-/// finds sessions that detached before the most recent restart.
+/// durable backend. Startup never rebuilds the in-memory view from those
+/// rows: the durable stream-management authority alone resumes sessions,
+/// and the owner phase drains rows it does not hold before serving.
 ///
 /// Custom Debug skips the persistence handle (the
 /// [`SmPersistenceStorage`] trait does not require `Debug`) and the
@@ -217,13 +215,13 @@ pub struct InMemorySmSessionRegistry {
     /// row. Kept out of `sessions` until a read-only reconciliation proves
     /// the same owner+epoch or terminalizes the stale local lifecycle.
     pub(super) pending_epoch_failure_reconciliations: RwLock<HashSet<String>>,
-    /// Exact reclaimed-session hydration work that has not yet reached a
+    /// Exact reclaimed-claim settlement work that has not yet reached a
     /// terminal outcome. This registry-owned inventory is the common safety
     /// net for both the supervised orphan reaper and the one-shot inline
-    /// self-fence path: once a node wins a claim, a transient durable read or
+    /// self-fence path: once a node wins a claim, a transient authority write or
     /// an identity rotation must not leave that live-owned claim invisible to
     /// every future orphan scan.
-    pub(super) pending_reclaimed_hydrations: RwLock<
+    pub(super) pending_reclaimed_settlements: RwLock<
         HashMap<
             (
                 String,
@@ -248,10 +246,9 @@ pub struct InMemorySmSessionRegistry {
     pub(super) reclaimed_claim_reservations: RwLock<HashMap<String, ReclaimedClaimReservation>>,
     next_reclaimed_claim_reservation: AtomicU64,
     /// ADR-0017 Phase 3 Slice 6: the cross-node "ask the live owner to
-    /// detach" bridge for the XEP-0198 resume path's live-handshake branch.
-    /// `None` for single-node/non-clustering deployments (the cross-node
-    /// resume fallback then never has anything to ask — see
-    /// `cross_node_resume::attempt_cross_node_resume`'s doc comment).
+    /// detach" bridge the durable claim move uses. `None` for
+    /// single-node/non-clustering deployments, which have no other owner to
+    /// ask.
     /// Production wiring injects a `waddle-server`-side adapter over
     /// `RelayHandle` via [`Self::with_remote_resume_asker`].
     pub(super) remote_resume: Option<Arc<dyn super::cross_node_resume::RemoteResumeAsker>>,
@@ -327,90 +324,6 @@ impl InMemorySmSessionRegistry {
                 (entity.id.clone(), owner.clone(), reservation),
                 entity.clone(),
             );
-        }
-    }
-
-    /// Convert matching reclaimed/active responsibility into terminal exact
-    /// release for the cross-node repair path. The caller must hold this
-    /// stream's shard through this conversion and local-lifecycle removal.
-    pub(super) fn transfer_reclaimed_claim_to_exact_release(
-        &self,
-        entity: &Entity,
-        fence: &super::super::persistence::SmClaimFence,
-        reservation: ReclaimedClaimReservation,
-    ) -> Result<bool, SmRegistryError> {
-        let key = (entity.id.clone(), fence.clone());
-        let (
-            Ok(sessions),
-            Ok(claimed),
-            Ok(promotions),
-            Ok(reservations),
-            Ok(mut reclaimed),
-            Ok(mut pending),
-            Ok(mut fences),
-        ) = (
-            self.sessions.read(),
-            self.claimed_sessions.read(),
-            self.pending_promotions.read(),
-            self.claim_fence_reservations.read(),
-            self.reclaimed_claim_reservations.write(),
-            self.pending_claim_releases.write(),
-            self.claim_fences.write(),
-        )
-        else {
-            return Err(SmRegistryError::Internal(
-                "cross-node repair could not inspect exact-release bookkeeping".to_string(),
-            ));
-        };
-        let promotion_pending = promotions.contains_key(&entity.id);
-        let stream_live = sessions.contains_key(&entity.id)
-            || claimed.contains_key(&entity.id)
-            || promotion_pending;
-        let matching_reservation = reclaimed.get(&entity.id) == Some(&reservation);
-        let matching_active_fence = fences.get(&entity.id) == Some(fence);
-        let matching_pending_release = pending.contains(&key);
-        let conflicting_generic_reservation = reservations.contains(&entity.id);
-        let conflicting_reservation = reclaimed
-            .get(&entity.id)
-            .is_some_and(|current| current != &reservation);
-        let conflicting_active_fence = fences
-            .get(&entity.id)
-            .is_some_and(|current| current != fence);
-        let pending_only =
-            matching_pending_release && !matching_reservation && !matching_active_fence;
-        if promotion_pending
-            || conflicting_generic_reservation
-            || conflicting_reservation
-            || conflicting_active_fence
-            || (pending_only && stream_live)
-            || (!matching_reservation && !matching_active_fence && !matching_pending_release)
-        {
-            return Ok(false);
-        }
-        if matching_reservation {
-            reclaimed.remove(&entity.id);
-        }
-        if matching_active_fence {
-            fences.remove(&entity.id);
-        }
-        pending.insert(key);
-        drop(fences);
-        drop(pending);
-        drop(reclaimed);
-        self.clear_pending_reclaimed_hydration(entity, fence, reservation);
-        if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
-            pending.remove(&(entity.id.clone(), fence.owner().clone(), reservation));
-        }
-        Ok(true)
-    }
-
-    pub(super) fn complete_terminal_claim_release(
-        &self,
-        stream_id: &str,
-        fence: &super::super::persistence::SmClaimFence,
-    ) {
-        if let Ok(mut pending) = self.pending_claim_releases.write() {
-            pending.remove(&(stream_id.to_string(), fence.clone()));
         }
     }
 
@@ -509,14 +422,14 @@ impl InMemorySmSessionRegistry {
     }
 
     fn reserve_claim_fence_capacity_up_to(&self, stream_id: &str, capacity: usize) -> bool {
-        // Reclaimed hydration and ambiguous-lookup inventories are already
+        // Reclaimed settlement and ambiguous-lookup inventories are already
         // represented here: every reclaim reserves before its ownership CAS,
         // then either retains that reservation while the epoch is unknown or
         // consumes it into `claim_fences` once the exact fence is known.
         // `try_record_verified_reclaimed_fence` removes the reservation and
         // inserts that fence while holding all three inventory write locks in
         // one non-awaiting critical section; no transient/cancellation window
-        // can leave only `pending_reclaimed_hydrations` behind.
+        // can leave only `pending_reclaimed_settlements` behind.
         // Counting those retry maps separately would double-charge the same
         // ownership responsibility and reject usable capacity.
         let (Ok(mut reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
@@ -788,7 +701,7 @@ impl InMemorySmSessionRegistry {
             || reclaimed.contains_key(stream_id);
         if represented_other && !represented_exact {
             // Direction cannot be inferred from numeric epochs across node
-            // incarnations. Only the verified-hydration path may replace a
+            // incarnations. Only the verified-settlement path may replace a
             // same-stream generation.
             return false;
         }
@@ -893,7 +806,7 @@ impl InMemorySmSessionRegistry {
             pending_promotion_retries: RwLock::new(HashMap::new()),
             pending_resume_claim_custody: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
-            pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
+            pending_reclaimed_settlements: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
             reclaimed_claim_reservations: RwLock::new(HashMap::new()),
@@ -924,7 +837,7 @@ impl InMemorySmSessionRegistry {
             pending_promotion_retries: RwLock::new(HashMap::new()),
             pending_resume_claim_custody: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
-            pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
+            pending_reclaimed_settlements: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
             claim_fence_reservations: RwLock::new(HashSet::new()),
             reclaimed_claim_reservations: RwLock::new(HashMap::new()),
@@ -1034,9 +947,7 @@ impl InMemorySmSessionRegistry {
     /// [`Self::with_claim_store`]. Production wiring
     /// (`server/http.rs::create_sm_session_registry`) sets this alongside
     /// the claim store whenever clustering is enabled; single-node builds
-    /// leave it `None`, so `cross_node_resume::attempt_cross_node_resume`'s
-    /// live-handshake branch never has anything to ask (byte-identical
-    /// single-node behavior).
+    /// leave it `None`, since there is no other node to ask.
     pub fn with_remote_resume_asker(
         mut self,
         asker: Arc<dyn super::cross_node_resume::RemoteResumeAsker>,
@@ -1045,390 +956,44 @@ impl InMemorySmSessionRegistry {
         self
     }
 
-    /// Rebuild the in-memory view from the attached durable store.
-    /// Called on server startup before any traffic is accepted, so
-    /// an XEP-0198 `<resume previd='…'/>` for a session that
-    /// detached before restart still succeeds.
+    /// Settle an SM-session claim this node reclaimed from a lost owner:
+    /// the orphan reaper's steal of a dead node's claim, the inline reclaim
+    /// in `self_fence::run_node_lease` of this node's own superseded
+    /// identity, or a retained uncertain CAS that resolved to this node.
     ///
-    /// **Startup-time operation only (FIX 2, council-adjudicated ADR-0017
-    /// Phase 3 Slice 5 corrigenda)**: this method's unfenced, unscoped
-    /// `list_all_sessions_with_unacked` table scan is safe only because
-    /// nothing else can plausibly be racing it for a stream id it has not
-    /// yet reached — this runs once, before any traffic is accepted. It
-    /// MUST NOT be re-run against a live, already-serving registry (the
-    /// orphan reaper previously re-ran it after every successful steal,
-    /// which re-scans every row this node already holds on every sweep and
-    /// — worse — can observe a row a live session concurrently
-    /// completes/re-claims mid-scan). [`Self::hydrate_reclaimed`] is the
-    /// live-safe alternative for exactly that case: given the specific
-    /// entities a caller just proved ownership of (via `steal_stale` or an
-    /// equivalent CAS), it hydrates only those, under each one's own
-    /// stream-shard lock, with a fresh in-memory absence re-check — never a
-    /// table scan, never a blind insert.
+    /// The registry never holds such a session: the durable authority keeps
+    /// every resumable session, so settling a reclaimed claim records the
+    /// loss of its owner with that authority (when one is attached and holds
+    /// the session) and hands the exact claim back for release, so whichever
+    /// node resumes or expires the session takes a free claim.
     ///
-    /// **ADR-0017 Phase 3 Slice 5 — acquire-then-hydrate** (element 9,
-    /// quoted verbatim: *"hydrates only sessions whose claim this node
-    /// holds or can acquire at startup ... it never performs unscoped
-    /// full-table hydration"*): the read below (`list_all_sessions_with_unacked`)
-    /// is still a full, unfenced table scan — it has to be, there is no
-    /// other way to discover which stream ids exist — but every row is now
-    /// gated on a per-entity [`ClaimStore::ensure_claimed`] call before it
-    /// is allowed into `self.sessions`. A row this node successfully claims
-    /// (a fresh claim on a single-node/first-ever-restore deployment, or a
-    /// self-reacquire of this exact node's own pre-restart claim once
-    /// `ensure_claimed`'s self-match fires under the *same* `node_id` — see
-    /// that method's doc comment) is hydrated; a row genuinely claimed by
-    /// a different, still-live node is skipped — that node already has it
-    /// in memory (or will, on its own restore pass), and this node MUST NOT
-    /// also hydrate a copy (the exact double-ownership hazard this slice
-    /// closes). A row whose owner has died is left unclaimed here (a
-    /// concurrent restore/steal never matches this node's identity, so it
-    /// stays `AlreadyClaimed` against the dead owner until that owner's
-    /// `clustering_nodes` row is provably stale) — the **orphan reaper**
-    /// (`server::session_janitors::spawn_orphan_reaper_janitor`) is the
-    /// mechanism that reclaims those, not this startup pass, since a
-    /// dead-owner determination requires the owner-stale predicate this
-    /// unfenced per-row read does not evaluate.
-    ///
-    /// **Restart-time expired-row deletion (element 9/element 4)**: this
-    /// slice does *not* add an unscoped delete-on-restore step. Code
-    /// research for this slice found no existing unscoped delete to
-    /// claim-scope here — issue #1098 deliberately *hydrates* expired
-    /// sessions rather than deleting them at restore time, specifically so
-    /// their unacked queues still run the Q6 promote → confirm chain
-    /// instead of being silently discarded. Deleting a claimed session
-    /// eagerly here, before that chain runs, would re-introduce exactly
-    /// the data-loss bug #1098 fixed. Once a row is hydrated under this
-    /// node's claim, the (now itself claim-scoped, see
-    /// `server::session_janitors::spawn_sm_expiry_janitor`) SM-expiry
-    /// janitor's `drain_expired`/promote/`confirm_drained` chain is the
-    /// deletion path for decodable expired sessions; its writes already run
-    /// under the row-locked fenced epoch via `PostgresFencedSmPersistence`. Recorded as
-    /// deviation 28 (plan doc; corrected from an earlier "deviation 27"
-    /// citation — see the plan's Slice 5 "Design addition (major fix 6)"
-    /// paragraph, amended in place to point at 28) — the plan's
-    /// major-fix-6 premise of an existing unscoped restore-time delete
-    /// does not match this codebase's actual state.
-    ///
-    /// **Per-row stream-shard-lock discipline (FIX 2)**: each row's
-    /// eventual in-memory insert takes that row's own stream-shard lock —
-    /// the same lock every other registry mutator (`store_session`,
-    /// `take_session`, `claim_session`, …) takes before touching
-    /// `sessions`/`claimed_sessions` — and re-checks the stream id is
-    /// absent from BOTH maps immediately before inserting. This is cheap
-    /// safety for this method's startup-time role (see above): at true
-    /// cold start nothing else can have raced ahead, but the same
-    /// discipline the live-only [`Self::hydrate_reclaimed`] needs is applied
-    /// here too rather than special-cased away, so a row this node's own
-    /// Slice-4 lazy first-fenced-write path (or a live detach) already
-    /// raced into memory ahead of this scan reaching the same row is
-    /// skipped rather than overwritten with a stale durable read.
-    ///
-    /// Returns the number of sessions hydrated. No-op when no
-    /// persistence is attached.
-    pub async fn restore_from_persistence(&self) -> Result<usize, SmRegistryError> {
-        self.restore_from_persistence_except(&HashSet::new()).await
-    }
-
-    /// [`Self::restore_from_persistence`], leaving the sessions in `excluded`
-    /// untouched: neither hydrated nor quarantined. They belong to another
-    /// authority that keeps its own rows in the same relations.
-    pub async fn restore_from_persistence_except(
-        &self,
-        excluded: &HashSet<SmSessionId>,
-    ) -> Result<usize, SmRegistryError> {
-        let Some(storage) = &self.persistence else {
-            return Ok(0);
-        };
-        let now = chrono::Utc::now();
-        // Single round-trip — replaces an N+1 (1 list_all_sessions +
-        // N list_unacked) with a single SELECT … LEFT JOIN sm_unacked
-        // on backends that override (libSQL/Postgres). In-memory
-        // backends fall back to the trait-default N+1 path. Issue
-        // #209 PR #405. This read is unfenced/unscoped by necessity (see
-        // this method's doc comment) — the per-row `ensure_claimed` call
-        // below is what scopes which rows this node is actually allowed to
-        // hydrate.
-        let mut stored = storage
-            .list_all_sessions_with_unacked()
-            .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        stored.retain(|(session, _)| !excluded.contains(&session.stream_id));
-        // Bulk readers deliberately omit corrupt headers and queues. Discover
-        // those IDs independently so poison cannot survive every cold start,
-        // while healthy sessions retain the bulk read's constant round trips.
-        let bulk_ids = stored
-            .iter()
-            .map(|(session, _)| session.stream_id.clone())
-            .collect::<HashSet<_>>();
-        let mut targeted = storage
-            .list_all_session_ids()
-            .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))?
-            .into_iter()
-            .filter(|id| !bulk_ids.contains(id) && !excluded.contains(id))
-            .collect::<Vec<_>>();
-        let mut hydrated = 0usize;
-        let mut expired = 0usize;
-        let mut bad_rows = 0usize;
-        let mut foreign_claims = 0usize;
-        let mut already_present = 0usize;
-        // Read once per call, not once per row: `restore_from_persistence`
-        // only ever runs at startup, well before this node could have
-        // self-fenced and re-registered under a fresh identity, but reading
-        // through `.current()` here (rather than caching a snapshot for the
-        // whole call) keeps this consistent with every other call site's
-        // discipline of never holding a stale identity across an `.await`.
-        let mut prepared = Vec::with_capacity(stored.len());
-        for (persisted, unacked) in stored {
-            let session = match persisted_to_detached(&persisted, &unacked) {
-                Ok(session) => session,
-                Err(error) => {
-                    debug!(
-                        stream_id = %persisted.stream_id,
-                        %error,
-                        "restore_from_persistence: row decode failed; scheduling fenced quarantine"
-                    );
-                    targeted.push(persisted.stream_id.clone());
-                    continue;
-                }
-            };
-            prepared.push((persisted, session));
-        }
-        // Clean omitted poison before healthy rows fill the ownership inventory.
-        // Omitted or undecodable rows use the existing reclaimed lifecycle:
-        // reserve before acquiring ownership, retain transient failures for the
-        // maintenance retry, and settle ACK custody before exact quarantine.
-        for session_id in targeted {
-            let entity = Entity::new(EntityType::SmSession, session_id.as_str().to_string());
-            let Some(reservation) = self.reserve_reclaimed_claim_capacity(&entity) else {
-                debug!(stream_id = %session_id, "restore_from_persistence: no capacity for omitted session");
-                continue;
-            };
-            let identity = self.node_identity.current();
-            // Record intent before the ownership await so cancellation can be
-            // repaired by the same read-only lookup as an uncertain backend error.
-            self.defer_uncertain_reclaimed_claim(&entity, &identity, reservation);
-            let claimed = self.claim_store.ensure_claimed(&entity, &identity).await;
-            if matches!(
-                &claimed,
-                Ok(_)
-                    | Err(ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining)
-            ) {
-                if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
-                    pending.remove(&(entity.id.clone(), identity.clone(), reservation));
-                }
-            }
-            let epoch = match claimed {
-                Ok(epoch) => epoch,
-                Err(ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining) => {
-                    self.cancel_reclaimed_claim_capacity(&entity, reservation);
-                    foreign_claims += 1;
-                    continue;
-                }
-                Err(error) => {
-                    // A backend error can arrive after ownership committed.
-                    // Keep admission until the read-only claim lookup resolves it.
-                    debug!(stream_id = %session_id, %error, "restore_from_persistence: retaining uncertain omitted-session claim");
-                    continue;
-                }
-            };
-            let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
-            let outcome = self
-                .hydrate_reclaimed_typed(&entity, &fence, reservation)
-                .await?;
-            match outcome {
-                ReclaimedHydrationOutcome::Hydrated => hydrated += 1,
-                ReclaimedHydrationOutcome::AlreadyPresent => already_present += 1,
-                ReclaimedHydrationOutcome::PoisonReleased => bad_rows += 1,
-                ReclaimedHydrationOutcome::LostClaim => foreign_claims += 1,
-                ReclaimedHydrationOutcome::MissingDurable
-                | ReclaimedHydrationOutcome::StaleIdentity
-                | ReclaimedHydrationOutcome::TransientFailure => {}
-            }
-            if matches!(
-                outcome,
-                ReclaimedHydrationOutcome::PoisonReleased
-                    | ReclaimedHydrationOutcome::MissingDurable
-                    | ReclaimedHydrationOutcome::StaleIdentity
-            ) {
-                // Failed release retains the exact fence for the normal retry.
-                let _ = self
-                    .release_reclaimed_claim(&entity, &fence, reservation)
-                    .await;
-            }
-        }
-        for (persisted, mut session) in prepared {
-            let identity = self.node_identity.current();
-            let entity = Entity::new(
-                EntityType::SmSession,
-                persisted.stream_id.as_str().to_string(),
-            );
-            let epoch = match self.claim_store.ensure_claimed(&entity, &identity).await {
-                Ok(epoch) => epoch,
-                Err(ClaimError::AlreadyClaimed) => {
-                    // Another (live) node already holds this entity's
-                    // claim — never hydrate a second in-memory copy. The
-                    // orphan reaper, not this pass, is what reclaims a row
-                    // whose owner has actually died.
-                    foreign_claims += 1;
-                    continue;
-                }
-                Err(error) => {
-                    // A transient backend failure: skip this row rather
-                    // than failing the whole restore pass. It is retried
-                    // on this node's next restart, or reclaimed by the
-                    // orphan reaper if its owner (this node, under a
-                    // now-superseded identity) is later found stale.
-                    debug!(
-                        stream_id = %persisted.stream_id,
-                        %error,
-                        "restore_from_persistence: ClaimStore ensure_claimed failed; \
-                         skipping this row for this pass"
-                    );
-                    continue;
-                }
-            };
-            // Expired-during-downtime sessions (detached_at +
-            // max_resume_duration <= now) are hydrated too (issue
-            // #1098): deleting their rows here would silently discard
-            // their unacked queues, violating XEP-0198 §5 ("treat
-            // unacknowledged stanzas … like stanzas to an unavailable
-            // resource"). They are not resumable on the wire —
-            // peek/take/claim all gate on `is_expired()` — and the
-            // SM-expiry janitor's next `drain_expired` pass runs the
-            // promote → confirm chain, which is what finally deletes
-            // the durable rows via `confirm_drained`.
-            let expires_at = persisted.detached_at
-                + chrono::Duration::from_std(persisted.max_resume_duration)
-                    .unwrap_or(chrono::Duration::seconds(0));
-            if expires_at <= now {
-                expired += 1;
-            }
-            session.promotion_custody = super::PromotionCaptureCustody::claimed(
-                super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
-            );
-            if self.node_identity.current() != identity {
-                self.release_claim_store_entry_under(
-                    persisted.stream_id.as_str(),
-                    super::super::persistence::SmClaimFence::new(identity, epoch),
-                )
-                .await;
-                continue;
-            }
-            // FIX 2: per-row stream-shard-lock discipline (see this
-            // method's doc comment) — take this row's own shard lock and
-            // re-check both maps immediately before inserting, rather than
-            // batching every hydrated row into one insert pass after the
-            // loop (the previous shape, which held no lock at all across
-            // the whole scan).
-            let stream_id = session.stream_id.clone();
-            let stream_lock = self.stream_lock(&stream_id)?;
-            let _stream_guard = stream_lock.lock().await;
-            let present = {
-                let sessions = self
-                    .sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                let claimed = self
-                    .claimed_sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
-            };
-            if present {
-                already_present += 1;
-                continue;
-            }
-            {
-                let mut sessions = self
-                    .sessions
-                    .write()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.insert(stream_id.clone(), session);
-            }
-            if let Ok(mut claim_fences) = self.claim_fences.write() {
-                claim_fences.insert(
-                    stream_id,
-                    super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
-                );
-            }
-            hydrated += 1;
-        }
-        debug!(
-            hydrated,
-            expired,
-            bad_rows,
-            foreign_claims,
-            already_present,
-            "restored detached SM sessions from persistence"
-        );
-        Ok(hydrated)
-    }
-
-    /// Targeted hydration for freshly-reclaimed SM-session claims (FIX 2,
-    /// council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda) — the
-    /// live-safe counterpart to [`Self::restore_from_persistence`] (a
-    /// startup-time-only, whole-table operation; see its doc comment).
-    /// Callers: the orphan reaper janitor, after a successful
-    /// `steal_stale(OwnerStale)` for one or more entities
-    /// (`server::session_janitors::run_orphan_reaper_sweep`), and the
-    /// inline post-fence reclaim in `self_fence::run_node_lease` (FIX 4),
-    /// after this node's own just-superseded identity's claims are stolen
-    /// back under the freshly re-registered identity. Neither caller may
-    /// re-run `restore_from_persistence` — the server is already serving
-    /// live traffic, and an unscoped table scan racing a live session that
-    /// completes/re-claims mid-scan is exactly the **live restore hazard**
-    /// this method exists to close.
-    ///
-    /// Per entity, under that entity's own stream-shard lock (never a
-    /// table scan, never a blind insert):
-    /// 1. Entities whose type is not `SmSession` are skipped (logged) —
-    ///    this registry only ever hydrates SM-session claims.
-    /// 2. Re-checks the stream id is absent from BOTH `sessions` and
-    ///    `claimed_sessions` — if either already holds it (a live session
-    ///    completed, another concurrent hydration already landed it, or
-    ///    this entity was reclaimed more than once across overlapping
-    ///    sweeps), skip: never overwrite a live in-memory copy with a
-    ///    stale durable read.
-    /// 3. Re-confirms this node still holds the claim via a bounded
-    ///    `ClaimStore::ensure_claimed` self-reacquire (FIX 5 — bounded
-    ///    because this call runs under the stream-shard lock; see
-    ///    [`CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`]'s doc comment for the
-    ///    shard-fan-in rationale) — a defensive re-check rather than
-    ///    trusting the caller-supplied epoch blindly, since the caller's
-    ///    `steal_stale` may have committed some time before this call
-    ///    actually reaches this entity's turn in a batch.
-    /// 4. Loads the durable row (`get_session` + `list_unacked`); a
-    ///    missing row (already promoted/deleted by a concurrent sweep) is
-    ///    a no-op, not an error.
-    /// 5. Inserts into `sessions`, recording the epoch `ensure_claimed`
-    ///    confirmed in step 3.
-    ///
-    /// Returns the number of entities actually hydrated — entities skipped
-    /// by steps 1-4 are not counted and do not produce an `Err`, mirroring
-    /// `restore_from_persistence`'s best-effort, skip-and-continue
-    /// semantics for individual rows.
-    pub async fn hydrate_reclaimed_typed(
+    /// Under the entity's stream-shard lock this re-checks that the stream
+    /// is not held by a local session, and re-proves the caller's exact
+    /// claim epoch with a bounded `ClaimStore::ensure_claimed` before the
+    /// owner loss is recorded. [`ReclaimedClaimSettlement::Release`] tells
+    /// the caller to release the exact claim with
+    /// [`Self::release_reclaimed_claim`]; a transient failure keeps the work
+    /// in the pending inventory for [`Self::retry_pending_reclaimed_settlements`].
+    pub async fn settle_reclaimed_claim(
         &self,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
-    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+    ) -> Result<ReclaimedClaimSettlement, SmRegistryError> {
         if entity.entity_type != EntityType::SmSession {
-            return Ok(ReclaimedHydrationOutcome::LostClaim);
+            return Ok(ReclaimedClaimSettlement::LostClaim);
         }
-        if !self.try_record_pending_reclaimed_hydration(entity, caller_fence, reservation)? {
-            self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
-            return Ok(ReclaimedHydrationOutcome::LostClaim);
+        if !self.try_record_pending_reclaimed_settlement(entity, caller_fence, reservation)? {
+            self.clear_pending_reclaimed_settlement(entity, caller_fence, reservation);
+            return Ok(ReclaimedClaimSettlement::LostClaim);
         }
         let stream_lock = self.stream_lock(&entity.id)?;
         let _stream_guard = stream_lock.lock().await;
-        self.hydrate_reclaimed_typed_locked(entity, caller_fence, reservation)
+        self.settle_reclaimed_claim_locked(entity, caller_fence, reservation)
             .await
     }
 
-    fn try_record_pending_reclaimed_hydration(
+    fn try_record_pending_reclaimed_settlement(
         &self,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
@@ -1444,7 +1009,7 @@ impl InMemorySmSessionRegistry {
             self.claim_fences
                 .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?,
-            self.pending_reclaimed_hydrations
+            self.pending_reclaimed_settlements
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?,
         );
@@ -1460,14 +1025,14 @@ impl InMemorySmSessionRegistry {
         Ok(represented)
     }
 
-    async fn hydrate_reclaimed_typed_locked(
+    async fn settle_reclaimed_claim_locked(
         &self,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
-    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+    ) -> Result<ReclaimedClaimSettlement, SmRegistryError> {
         let pending = self
-            .pending_reclaimed_hydrations
+            .pending_reclaimed_settlements
             .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
             .contains_key(&(entity.id.clone(), caller_fence.clone(), reservation));
@@ -1489,49 +1054,47 @@ impl InMemorySmSessionRegistry {
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
                 .contains(&(entity.id.clone(), caller_fence.clone()));
         if !pending || !represented {
-            self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
-            return Ok(ReclaimedHydrationOutcome::LostClaim);
+            self.clear_pending_reclaimed_settlement(entity, caller_fence, reservation);
+            return Ok(ReclaimedClaimSettlement::LostClaim);
         }
 
         let outcome = self
-            .hydrate_reclaimed_once(entity, caller_fence, reservation)
+            .settle_reclaimed_claim_once(entity, caller_fence, reservation)
             .await?;
         if matches!(
             outcome,
-            ReclaimedHydrationOutcome::Hydrated
-                | ReclaimedHydrationOutcome::AlreadyPresent
-                | ReclaimedHydrationOutcome::LostClaim
+            ReclaimedClaimSettlement::AlreadyPresent | ReclaimedClaimSettlement::LostClaim
         ) {
-            self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
+            self.clear_pending_reclaimed_settlement(entity, caller_fence, reservation);
         }
-        if outcome == ReclaimedHydrationOutcome::LostClaim {
+        if outcome == ReclaimedClaimSettlement::LostClaim {
             self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
         }
         Ok(outcome)
     }
 
-    fn clear_pending_reclaimed_hydration(
+    fn clear_pending_reclaimed_settlement(
         &self,
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
     ) {
-        if let Ok(mut pending) = self.pending_reclaimed_hydrations.write() {
+        if let Ok(mut pending) = self.pending_reclaimed_settlements.write() {
             pending.remove(&(entity.id.clone(), fence.clone(), reservation));
         }
     }
 
-    async fn hydrate_reclaimed_once(
+    async fn settle_reclaimed_claim_once(
         &self,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
-    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+    ) -> Result<ReclaimedClaimSettlement, SmRegistryError> {
         if entity.entity_type != EntityType::SmSession {
-            return Ok(ReclaimedHydrationOutcome::LostClaim);
+            return Ok(ReclaimedClaimSettlement::LostClaim);
         }
         if self.node_identity.current() != *caller_fence.owner() {
-            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+            return Ok(ReclaimedClaimSettlement::StaleIdentity);
         }
         let stream_id = entity.id.clone();
 
@@ -1561,23 +1124,22 @@ impl InMemorySmSessionRegistry {
             .await
             {
                 Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
-                Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
-                Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
-                Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
+                Ok(Ok(true)) => return Ok(ReclaimedClaimSettlement::StaleIdentity),
+                Ok(Ok(_)) => return Ok(ReclaimedClaimSettlement::LostClaim),
+                Ok(Err(_)) | Err(_) => return Ok(ReclaimedClaimSettlement::TransientFailure),
             }
             if !self.try_record_verified_reclaimed_fence(
                 &stream_id,
                 caller_fence.clone(),
                 reservation,
             ) {
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                return Ok(ReclaimedClaimSettlement::TransientFailure);
             }
             debug!(
                 stream_id = %stream_id,
-                "hydrate_reclaimed: already present in-memory (live session, or already \
-                 hydrated by an overlapping sweep); skipping"
+                "settle_reclaimed_claim: a local session holds the stream; skipping"
             );
-            return Ok(ReclaimedHydrationOutcome::AlreadyPresent);
+            return Ok(ReclaimedClaimSettlement::AlreadyPresent);
         }
 
         // FIX 5: bounded — see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s
@@ -1599,28 +1161,28 @@ impl InMemorySmSessionRegistry {
                 debug!(
                     stream_id = %stream_id,
                     %error,
-                    "hydrate_reclaimed: ClaimStore ensure_claimed self-reacquire failed \
+                    "settle_reclaimed_claim: ClaimStore ensure_claimed self-reacquire failed \
                      (claim lost again since the caller's steal_stale); skipping"
                 );
-                return Ok(ReclaimedHydrationOutcome::LostClaim);
+                return Ok(ReclaimedClaimSettlement::LostClaim);
             }
             Ok(Err(error)) => {
                 tracing::warn!(
                     stream_id = %stream_id,
                     %error,
-                    "hydrate_reclaimed: ClaimStore ensure_claimed could not verify the \
+                    "settle_reclaimed_claim: ClaimStore ensure_claimed could not verify the \
                      already-won claim; retaining reclaimed responsibility for repair"
                 );
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                return Ok(ReclaimedClaimSettlement::TransientFailure);
             }
             Err(_timeout) => {
                 tracing::warn!(
                     stream_id = %stream_id,
                     timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                    "hydrate_reclaimed: ClaimStore ensure_claimed timed out while holding \
+                    "settle_reclaimed_claim: ClaimStore ensure_claimed timed out while holding \
                      this stream's shard lock; skipping this entity for this pass"
                 );
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                return Ok(ReclaimedClaimSettlement::TransientFailure);
             }
         };
         if epoch != caller_fence.epoch() {
@@ -1628,225 +1190,49 @@ impl InMemorySmSessionRegistry {
                 stream_id = %stream_id,
                 expected_epoch = caller_fence.epoch().0,
                 actual_epoch = epoch.0,
-                "hydrate_reclaimed: caller work belongs to a superseded claim epoch"
+                "settle_reclaimed_claim: caller work belongs to a superseded claim epoch"
             );
-            return Ok(ReclaimedHydrationOutcome::LostClaim);
+            return Ok(ReclaimedClaimSettlement::LostClaim);
         }
         if !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone(), reservation)
         {
-            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+            return Ok(ReclaimedClaimSettlement::TransientFailure);
         }
-        let Some(storage) = &self.persistence else {
-            return Ok(ReclaimedHydrationOutcome::MissingDurable);
-        };
-
-        let session_id = SmSessionId::new(stream_id.clone());
-        let persisted = match storage.get_session(&session_id).await {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                debug!(
-                    stream_id = %stream_id,
-                    "hydrate_reclaimed: no durable row (already promoted/deleted by a \
-                     concurrent sweep); skipping"
-                );
-                return Ok(ReclaimedHydrationOutcome::MissingDurable);
-            }
-            Err(super::super::persistence::SmPersistenceError::Corrupt {
-                stream_id: corrupt_stream,
-                detail,
-            }) if corrupt_stream == session_id => {
-                debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable session row");
-                return self
-                    .quarantine_reclaimed_poison(
-                        storage.as_ref(),
-                        entity,
-                        caller_fence,
-                        &session_id,
-                    )
-                    .await;
-            }
-            Err(error) => {
-                debug!(
-                    stream_id = %stream_id,
-                    %error,
-                    "hydrate_reclaimed: get_session failed; skipping this entity for this pass"
-                );
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
-            }
-        };
-        let unacked = match storage.list_unacked(&session_id).await {
-            Ok(rows) => rows,
-            Err(super::super::persistence::SmPersistenceError::Corrupt {
-                stream_id: corrupt_stream,
-                detail,
-            }) if corrupt_stream == session_id => {
-                debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable unacked row");
-                return self
-                    .quarantine_reclaimed_poison(
-                        storage.as_ref(),
-                        entity,
-                        caller_fence,
-                        &session_id,
-                    )
-                    .await;
-            }
-            Err(error) => {
-                debug!(
-                    stream_id = %stream_id,
-                    %error,
-                    "hydrate_reclaimed: list_unacked failed; skipping this entity for this pass"
-                );
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
-            }
-        };
-        let mut session = match persisted_to_detached(&persisted, &unacked) {
-            Ok(session) => session,
-            Err(error) => {
-                debug!(
-                    stream_id = %stream_id,
-                    %error,
-                    "hydrate_reclaimed: row decode failed (poison pill); skipping"
-                );
-                return self
-                    .quarantine_reclaimed_poison(
-                        storage.as_ref(),
-                        entity,
-                        caller_fence,
-                        &session_id,
-                    )
-                    .await;
-            }
-        };
-        session.promotion_custody = super::PromotionCaptureCustody::claimed(caller_fence.clone());
-        // Every persistence read above is an await point. Re-prove both the
-        // node incarnation and exact claim epoch immediately before the
-        // synchronous in-memory publication.
-        if self.node_identity.current() != *caller_fence.owner() {
-            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
-        }
-        match tokio::time::timeout(
-            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-            self.claim_store
-                .fence(entity, caller_fence.owner(), caller_fence.epoch()),
-        )
-        .await
-        {
-            Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
-            Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
-            Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
-            Ok(Err(error)) => {
-                debug!(stream_id = %stream_id, %error, "hydrate_reclaimed: final exact fence failed");
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
-            }
-            Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
-        }
-        let Some(_identity_guard) = self
-            .node_identity
-            .guard_if_current(caller_fence.owner())
-            .await
-        else {
-            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
-        };
-        {
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            sessions.insert(stream_id.clone(), session);
-        }
-        if let Ok(mut claim_fences) = self.claim_fences.write() {
-            claim_fences.insert(stream_id, caller_fence.clone());
-        }
-        Ok(ReclaimedHydrationOutcome::Hydrated)
-    }
-
-    async fn quarantine_reclaimed_poison(
-        &self,
-        storage: &dyn super::super::persistence::SmPersistenceStorage,
-        entity: &Entity,
-        caller_fence: &super::super::persistence::SmClaimFence,
-        session_id: &SmSessionId,
-    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
-        // Poisoned headers/queues cannot produce a DetachedSession. Settle by
-        // immutable stream identity and fence before the guarded source delete.
-        if let Err(error) = self
-            .settle_acknowledgements_locked(
-                session_id,
-                caller_fence,
-                self.pending_delivery_storage.as_deref(),
+        // The durable authority moves the session to detached under the
+        // claim just proven; it is then free to resume or expire there.
+        // Bounded like every other call made under the shard lock.
+        if let Some(durable) = self.durable_detached.get() {
+            let session_id = SmSessionId::new(stream_id.clone());
+            match tokio::time::timeout(
+                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                durable.record_owner_lost(self, &session_id, caller_fence),
             )
             .await
-        {
-            if self.node_identity.current() != *caller_fence.owner() {
-                return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        %error,
+                        "settle_reclaimed_claim: durable owner loss could not be recorded; retaining the claim for retry"
+                    );
+                    return Ok(ReclaimedClaimSettlement::TransientFailure);
+                }
+                Err(_) => return Ok(ReclaimedClaimSettlement::TransientFailure),
             }
-            return Ok(match error {
-                SmRegistryError::PromotionClaimLost(_) => ReclaimedHydrationOutcome::LostClaim,
-                _ => ReclaimedHydrationOutcome::TransientFailure,
-            });
         }
         if self.node_identity.current() != *caller_fence.owner() {
-            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+            return Ok(ReclaimedClaimSettlement::StaleIdentity);
         }
-        match tokio::time::timeout(
-            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-            self.claim_store
-                .fence(entity, caller_fence.owner(), caller_fence.epoch()),
-        )
-        .await
-        {
-            Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
-            Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
-            Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
-            Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
-        }
-        // The clustered implementation binds `caller_fence` into the same
-        // transaction that removes both durable tables. Thus stale work can
-        // neither quarantine a newer epoch nor report terminal success
-        // before the poison state is actually gone.
-        match storage.quarantine_session(session_id, caller_fence).await {
-            Ok(()) => Ok(ReclaimedHydrationOutcome::PoisonReleased),
-            Err(super::super::persistence::SmPersistenceError::NotOwner { .. }) => {
-                Ok(ReclaimedHydrationOutcome::LostClaim)
-            }
-            Err(error) => {
-                debug!(
-                    stream_id = %session_id,
-                    %error,
-                    "hydrate_reclaimed: poison quarantine failed; retaining exact claim for retry"
-                );
-                Ok(ReclaimedHydrationOutcome::TransientFailure)
-            }
-        }
-    }
-
-    pub async fn hydrate_reclaimed(
-        &self,
-        entities: &[(
-            Entity,
-            super::super::persistence::SmClaimFence,
-            ReclaimedClaimReservation,
-        )],
-    ) -> Result<usize, SmRegistryError> {
-        let mut hydrated = 0usize;
-        for (entity, fence, reservation) in entities {
-            if self
-                .hydrate_reclaimed_typed(entity, fence, *reservation)
-                .await?
-                == ReclaimedHydrationOutcome::Hydrated
-            {
-                hydrated += 1;
-            }
-        }
-        Ok(hydrated)
+        Ok(ReclaimedClaimSettlement::Release)
     }
 
     /// Retry bounded reclaimed-session work retained by
-    /// [`Self::hydrate_reclaimed_typed`]. A live node's won claim is no
+    /// [`Self::settle_reclaimed_claim`]. A live node's won claim is no
     /// longer discoverable by the orphan scan, so this inventory — not a
-    /// future scan — owns retry until hydration succeeds, ownership is
+    /// future scan — owns retry until the owner loss is recorded, ownership is
     /// disproved, or terminal cleanup completes.
-    pub async fn retry_pending_reclaimed_hydrations(&self, limit: usize) -> usize {
+    pub async fn retry_pending_reclaimed_settlements(&self, limit: usize) -> usize {
         let lookups = self
             .pending_reclaimed_claim_lookups
             .read()
@@ -1892,19 +1278,17 @@ impl InMemorySmSessionRegistry {
                 let fence =
                     super::super::persistence::SmClaimFence::new(owner, snapshot.claim_epoch);
                 let outcome = if self
-                    .try_record_pending_reclaimed_hydration(&entity, &fence, reservation)
+                    .try_record_pending_reclaimed_settlement(&entity, &fence, reservation)
                     .unwrap_or(false)
                 {
-                    self.hydrate_reclaimed_typed_locked(&entity, &fence, reservation)
+                    self.settle_reclaimed_claim_locked(&entity, &fence, reservation)
                         .await
                 } else {
-                    Ok(ReclaimedHydrationOutcome::LostClaim)
+                    Ok(ReclaimedClaimSettlement::LostClaim)
                 };
                 let terminal = matches!(
                     outcome,
-                    Ok(ReclaimedHydrationOutcome::MissingDurable
-                        | ReclaimedHydrationOutcome::PoisonReleased
-                        | ReclaimedHydrationOutcome::StaleIdentity)
+                    Ok(ReclaimedClaimSettlement::Release | ReclaimedClaimSettlement::StaleIdentity)
                 );
                 drop(stream_guard);
                 if terminal {
@@ -1921,7 +1305,7 @@ impl InMemorySmSessionRegistry {
         }
         let remaining = limit.saturating_sub(attempted);
         let pending = self
-            .pending_reclaimed_hydrations
+            .pending_reclaimed_settlements
             .read()
             .map(|pending| {
                 pending
@@ -1936,23 +1320,18 @@ impl InMemorySmSessionRegistry {
         for (entity, fence, reservation) in pending {
             attempted += 1;
             match self
-                .hydrate_reclaimed_typed(&entity, &fence, reservation)
+                .settle_reclaimed_claim(&entity, &fence, reservation)
                 .await
             {
-                Ok(
-                    ReclaimedHydrationOutcome::MissingDurable
-                    | ReclaimedHydrationOutcome::PoisonReleased
-                    | ReclaimedHydrationOutcome::StaleIdentity,
-                ) => {
+                Ok(ReclaimedClaimSettlement::Release | ReclaimedClaimSettlement::StaleIdentity) => {
                     let _ = self
                         .release_reclaimed_claim(&entity, &fence, reservation)
                         .await;
                 }
                 Ok(
-                    ReclaimedHydrationOutcome::Hydrated
-                    | ReclaimedHydrationOutcome::AlreadyPresent
-                    | ReclaimedHydrationOutcome::LostClaim
-                    | ReclaimedHydrationOutcome::TransientFailure,
+                    ReclaimedClaimSettlement::AlreadyPresent
+                    | ReclaimedClaimSettlement::LostClaim
+                    | ReclaimedClaimSettlement::TransientFailure,
                 )
                 | Err(_) => {}
             }
@@ -1961,8 +1340,8 @@ impl InMemorySmSessionRegistry {
     }
 
     #[cfg(test)]
-    pub(super) fn pending_reclaimed_hydration_count(&self) -> usize {
-        self.pending_reclaimed_hydrations
+    pub(super) fn pending_reclaimed_settlement_count(&self) -> usize {
+        self.pending_reclaimed_settlements
             .read()
             .map_or(0, |pending| pending.len())
     }
@@ -1979,7 +1358,7 @@ impl InMemorySmSessionRegistry {
             Some(true) => {
                 // Responsibility transferred back to the live local session.
                 // Never let terminal cleanup release its claim.
-                self.clear_pending_reclaimed_hydration(entity, fence, reservation);
+                self.clear_pending_reclaimed_settlement(entity, fence, reservation);
                 self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
                 return Ok(ExactReleaseOutcome::NotOwned);
             }
@@ -2043,12 +1422,12 @@ impl InMemorySmSessionRegistry {
             let session_id = SmSessionId::new(entity.id.clone());
             storage.evict_claim_cache(&session_id, fence);
         }
-        self.clear_pending_reclaimed_hydration(entity, fence, reservation);
+        self.clear_pending_reclaimed_settlement(entity, fence, reservation);
         Ok(outcome)
     }
 
-    /// Resolve an ownership CAS whose result was dropped without ever
-    /// hydrating the session locally. This is the terminal self-fence path:
+    /// Resolve an ownership CAS whose result was dropped before the claim
+    /// was settled. This is the terminal self-fence path:
     /// a read-only claim lookup discovers whether `attempted_owner` won, and
     /// an exact release retires only that observed generation. Until that
     /// generation is observed, the CAS may still commit after the lookup, so
@@ -2099,14 +1478,21 @@ impl InMemorySmSessionRegistry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReclaimedHydrationOutcome {
-    Hydrated,
+/// What [`InMemorySmSessionRegistry::settle_reclaimed_claim`] decided about
+/// a reclaimed SM-session claim.
+pub enum ReclaimedClaimSettlement {
+    /// A local session holds the stream; its own lifecycle keeps the claim.
     AlreadyPresent,
-    MissingDurable,
+    /// The owner loss is recorded (or no authority holds the session): the
+    /// caller releases the exact claim.
+    Release,
+    /// The claim moved to a newer epoch or owner; nothing is left to settle.
     LostClaim,
+    /// This node's identity changed since the claim was won; the caller
+    /// releases the exact claim it still names.
     StaleIdentity,
+    /// The claim or the authority could not be read; the work is retried.
     TransientFailure,
-    PoisonReleased,
 }
 
 impl InMemorySmSessionRegistry {
@@ -2115,7 +1501,7 @@ impl InMemorySmSessionRegistry {
     /// adopt a "persist-first" ordering — refuse to mutate the
     /// in-memory map when the durable delete failed, so a transient
     /// storage hiccup doesn't leave an orphaned `sm_sessions` row
-    /// that `restore_from_persistence` would resurrect on restart.
+    /// behind.
     /// (Codex P1 + Copilot + Qodo on PR #344: best-effort silent
     /// swallow allowed durable orphans whenever the in-memory state
     /// had already moved on.)
