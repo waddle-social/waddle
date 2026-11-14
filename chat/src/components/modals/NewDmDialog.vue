@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Loader2, X } from "lucide-vue-next";
+import { X } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { btn, iconbtn, waddle } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
+import { formClasses as f } from "@/components/modals/form-classes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import type { UserSearchResult } from "@/lib/chat-types";
 
@@ -53,72 +57,61 @@ function handleSubmit() {
   emit("submit", recipient.jid);
   open.value = false;
 }
+const results_ = css({ display: "flex", flexDirection: "column", gap: "0.5", maxHeight: "16rem", overflowY: "auto", mx: "-2" });
 </script>
 
 <template>
   <AppDialog v-model:open="open" labelled-by="new-dm-title">
-    <div class="chat-dialog-header">
-      <h2 id="new-dm-title" class="type-dialog-title">New message</h2>
-      <button
-        class="chat-icon-button hover:bg-muted"
-        type="button"
-        aria-label="Close new message dialog"
-        @click="open = false"
-      >
-        <X class="w-4 h-4 text-muted-foreground" />
+    <div :class="dialogParts.head">
+      <h2 id="new-dm-title">New message</h2>
+      <button :class="iconbtn()" type="button" aria-label="Close new message dialog" @click="open = false">
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <form id="new-dm-form" class="chat-field-stack chat-dialog-body" @submit.prevent="handleSubmit">
-      <label for="new-dm-recipient" class="type-section-label text-muted-foreground">
-        Username or account address
-      </label>
-      <input
-        id="new-dm-recipient"
-        v-model="query"
-        class="chat-field-control type-field"
-        placeholder="Search for an account"
-        autocomplete="off"
-        autofocus
-      />
-      <div v-if="results.length" class="flex max-h-64 flex-col gap-1 overflow-auto" aria-label="Account search results">
+    <form id="new-dm-form" :class="dialogParts.body" @submit.prevent="handleSubmit">
+      <div :class="f.field">
+        <label for="new-dm-recipient" :class="f.label">Username or account address</label>
+        <input
+          id="new-dm-recipient"
+          v-model="query"
+          :class="f.input"
+          placeholder="Search for an account"
+          autocomplete="off"
+          autofocus
+        />
+      </div>
+      <div v-if="results.length" :class="results_" aria-label="Account search results">
         <button
           v-for="user in results"
           :key="user.jid"
-          class="chat-list-row flex min-h-12 w-full items-center gap-2.5 border p-2 text-left hover:bg-muted"
-          :class="selectedJid === user.jid ? 'border-primary bg-primary/8' : 'border-border bg-muted/40'"
+          :class="f.pickRow"
           type="button"
           :aria-pressed="selectedJid === user.jid"
           @click="selectedJid = user.jid"
         >
           <UserAvatar :name="user.display_name || user.username" :jid="user.jid" size="sm" />
-          <span class="min-w-0 flex-1">
-            <span class="type-control block truncate">{{ user.display_name || user.username }}</span>
-            <span class="type-caption block truncate text-muted-foreground">{{ user.jid }}</span>
+          <span :class="f.rowText">
+            <span :class="f.rowName">{{ user.display_name || user.username }}</span>
+            <span :class="f.rowSub">{{ user.jid }}</span>
           </span>
         </button>
       </div>
-      <div class="type-caption text-muted-foreground" role="status">
-        <span v-if="isSearching" class="flex items-center gap-1.5">
-          <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+      <div :class="f.status" role="status">
+        <template v-if="isSearching">
+          <span :class="waddle()" aria-hidden="true"><i /><i /><i /></span>
           Searching…
-        </span>
+        </template>
         <span v-else-if="searchError">{{ searchError }}</span>
         <span v-else-if="query.trim() && !results.length">No accounts found in the directory.</span>
         <span v-else-if="results.length">Select the account you want to message.</span>
       </div>
     </form>
 
-    <div class="chat-dialog-footer">
+    <div :class="dialogParts.foot">
+      <button :class="btn()" type="button" @click="open = false">Cancel</button>
       <button
-        class="chat-action-button chat-action-button--secondary type-control"
-        type="button"
-        @click="open = false"
-      >
-        Cancel
-      </button>
-      <button
-        class="chat-action-button chat-action-button--primary type-control disabled:opacity-40"
+        :class="btn({ variant: 'primary' })"
         type="submit"
         form="new-dm-form"
         :disabled="!selectedJid || isSearching"

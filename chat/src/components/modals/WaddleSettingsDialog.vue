@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { Lock, Globe, X } from "lucide-vue-next";
+import { btn, iconbtn, option } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
+import { formClasses as f } from "@/components/modals/form-classes";
 import type { CommunityFormData } from "@/lib/chat-ui";
 import type { SpaceSummary } from "@/lib/chat-types";
 
@@ -21,97 +24,69 @@ const emit = defineEmits<{
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="chat-dialog-header">
-      <h2 class="type-dialog-title">Waddle settings</h2>
-      <button
-        class="chat-icon-button hover:bg-muted"
-        type="button"
-        aria-label="Close waddle settings dialog"
-        @click="open = false"
-      >
-        <X class="w-4 h-4 text-muted-foreground" />
+    <div :class="dialogParts.head">
+      <h2>Community settings</h2>
+      <button :class="iconbtn()" type="button" aria-label="Close waddle settings dialog" @click="open = false">
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <div class="chat-dialog-stack chat-dialog-body">
-      <div class="chat-field-stack">
-        <label for="waddle-settings-name" class="type-section-label text-muted-foreground">
-          Waddle name
-        </label>
+    <div :class="dialogParts.body">
+      <div :class="f.field">
+        <label for="waddle-settings-name" :class="f.label">Name</label>
         <input
           id="waddle-settings-name"
           :value="form.name"
-          class="chat-field-control type-field"
+          :class="f.input"
           @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
         />
       </div>
 
-      <div class="chat-field-stack">
-        <label for="waddle-settings-description" class="type-section-label text-muted-foreground">
-          Description
-        </label>
+      <div :class="f.field">
+        <label for="waddle-settings-description" :class="f.label">Description</label>
         <textarea
           id="waddle-settings-description"
           :value="form.description"
-          class="chat-field-control chat-textarea-control type-field"
+          :class="f.textarea"
+          rows="2"
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
       </div>
 
-      <div class="chat-field-stack">
-        <label class="type-section-label text-muted-foreground">
-          Privacy
-        </label>
-        <div class="flex gap-1.5">
+      <div :class="f.field" role="group" aria-labelledby="waddle-settings-privacy">
+        <span id="waddle-settings-privacy" :class="f.label">Privacy</span>
+        <div :class="f.options">
           <button
             type="button"
-            class="type-control chat-action-button flex-1 border"
-            :class="!form.is_public ? 'border-primary bg-primary/5 text-foreground' : 'border-border hover:bg-muted'"
+            :class="option()"
             :aria-pressed="!form.is_public"
             @click="$emit('update:form', { ...form, is_public: false })"
           >
-            <Lock class="w-3.5 h-3.5" />
-            Private
+            <span :class="f.optionTitle"><Lock aria-hidden="true" />Private</span>
           </button>
           <button
             type="button"
-            class="type-control chat-action-button flex-1 border"
-            :class="form.is_public ? 'border-primary bg-primary/5 text-foreground' : 'border-border hover:bg-muted'"
+            :class="option()"
             :aria-pressed="form.is_public"
             @click="$emit('update:form', { ...form, is_public: true })"
           >
-            <Globe class="w-3.5 h-3.5" />
-            Public
+            <span :class="f.optionTitle"><Globe aria-hidden="true" />Public</span>
           </button>
         </div>
       </div>
     </div>
 
-    <div class="chat-dialog-footer flex-col sm:flex-row sm:items-center sm:justify-between">
+    <div :class="[dialogParts.foot, f.footSplit]">
+      <button :class="f.dangerOutline" type="button" @click="emit('delete')">Delete community</button>
+      <button :class="btn()" type="button" @click="open = false">Cancel</button>
       <button
-        class="chat-action-button type-control text-left text-destructive-text hover:bg-destructive/10 sm:text-center"
+        :class="btn({ variant: 'primary' })"
         type="button"
-        @click="emit('delete')"
+        :disabled="isSubmitting || !form.name.trim()"
+        @click="emit('save')"
       >
-        Delete waddle
+        {{ isSubmitting ? "Saving…" : "Save" }}
       </button>
-      <div class="flex justify-end gap-2">
-        <button
-          class="chat-action-button chat-action-button--secondary type-control flex-1 sm:flex-none"
-          type="button"
-          @click="open = false"
-        >
-          Cancel
-        </button>
-        <button
-          class="chat-action-button chat-action-button--primary type-control flex-1 disabled:opacity-40 sm:flex-none"
-          type="button"
-          :disabled="isSubmitting || !form.name.trim()"
-          @click="emit('save')"
-        >
-          {{ isSubmitting ? "Saving…" : "Save changes" }}
-        </button>
-      </div>
     </div>
   </AppDialog>
 </template>

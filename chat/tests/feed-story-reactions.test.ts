@@ -61,11 +61,11 @@ describe("Community feed story reactions", () => {
 
     const thumbChip = html.match(/<button[^>]*React with 👍[\s\S]*?<\/button>/)?.[0] ?? "";
     expect(thumbChip).toContain('aria-pressed="true"');
-    expect(thumbChip).toMatch(/type-numeric[^>]*>\s*2\s*</);
+    expect(thumbChip).toMatch(/wd-chip__n[^>]*>\s*2\s*</);
 
     const heartChip = html.match(/<button[^>]*React with ❤️[\s\S]*?<\/button>/)?.[0] ?? "";
     expect(heartChip).toContain('aria-pressed="false"');
-    expect(heartChip).toMatch(/type-numeric[^>]*>\s*1\s*</);
+    expect(heartChip).toMatch(/wd-chip__n[^>]*>\s*1\s*</);
   });
 
   test("shows the react affordance on the viewer's own story (self-react parity)", async () => {

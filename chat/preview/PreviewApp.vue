@@ -15,6 +15,10 @@ import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
 import { seedInbox } from "./inbox-preview";
 import { seedSettings } from "./settings-preview";
 import { seedAdmin } from "./admin-preview";
+import { seedEvents } from "./seed-events";
+import { seedFeed } from "./seed-feed";
+import { seedPeople } from "./seed-people";
+import NotifyPreview from "./NotifyPreview.vue";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
@@ -82,6 +86,10 @@ function seed(c: ChatAppController) {
   if (ROOM_SCREENS.includes(screen)) seedRoom(c);
   if (screen === "room-pick") c.ui.activePage.value = "chat";
   if (screen.startsWith("dm")) seedDm(c);
+  // Community pages (events-*, feed-*, members-*, rooms-*, dialog-*): each seeder ignores other screens.
+  seedEvents(c, screen);
+  seedFeed(c, screen);
+  seedPeople(c, screen);
   if (screen === "jump") c.ui.showQuickSwitcher.value = true;
   if (screen === "drawer-nav") c.ui.showMobileNav.value = true;
   if (screen === "drawer-details") c.ui.showMobileDetails.value = true;
@@ -212,5 +220,6 @@ watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: tru
     <IncomingCallToast />
     <OutgoingCallToast />
     <CallErrorToast />
+    <NotifyPreview v-if="screen === 'notify' && appController" :store="appController.notifySettings" />
   </AppShell>
 </template>
