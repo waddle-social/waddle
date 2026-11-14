@@ -96,9 +96,28 @@ fn spicedb_schema_writes_are_decided_by_the_version_marker() {
         contents.contains("self.schema_marker_state().await"),
         "schema writes must be decided by the schema-version marker relationship",
     );
-    assert!(
-        !contents.contains(".read_schema("),
+    // `ReadSchema` can serve a cached schema after a direct datastore reset,
+    // so it may only add a refusal (an unfinished newer upgrade), never
+    // decide that a schema write is skipped or made.
+    assert_eq!(
+        contents.matches(".read_schema(").count(),
+        1,
         "schema writes must not be decided by read_schema; SpiceDB can serve cached schema after direct datastore resets",
+    );
+    let read = contents
+        .find(".read_schema(")
+        .expect("one read_schema call");
+    let reader = contents[..read]
+        .rfind("async fn ")
+        .map(|start| &contents[start..read])
+        .expect("read_schema inside a function");
+    assert!(
+        reader.starts_with("async fn refuse_unfinished_newer_upgrade("),
+        "read_schema may only feed the unfinished-upgrade refusal",
+    );
+    assert!(
+        contents[read..].contains("unfinished_upgrade_refusal(&stored_schema"),
+        "the stored schema may only be classified for the unfinished-upgrade refusal",
     );
     assert!(
         !contents.contains("current.trim() == schema.trim()"),

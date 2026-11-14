@@ -4,7 +4,7 @@
 //! definitions the guard requires to be empty. The `live_spicedb_` tests run
 //! the production backend against a disposable SpiceDB: an empty store is
 //! marked, a store holding legacy relationships or another codec's marker is
-//! refused (another codec's marker before the schema is rewritten), a marked
+//! refused (both before the schema is rewritten), a marked
 //! store is accepted, and racing replicas that write grants as soon as they
 //! pass write one marker and all start.
 #![cfg(feature = "test-support")]
@@ -219,17 +219,18 @@ impl LiveSpiceDb {
             insecure: true,
         });
         let live = Self { config, client };
-        // Drop any codec or schema-version marker an earlier test left, so
-        // that writing the schema is neither refused nor skipped. On a fresh
-        // SpiceDB the definitions do not exist yet and the deletes fail; that
-        // is the state wanted.
-        for marker in [
+        // Drop any codec or schema-version marker, and any relationship, an
+        // earlier test left, so that writing the schema is neither refused
+        // nor skipped. A definition the stored schema lacks, or every
+        // definition on a fresh SpiceDB, makes its delete fail; that is the
+        // state wanted.
+        for definition in guarded_resource_definitions().chain([
             AUTHZ_CODEC_MARKER_DEFINITION,
             AUTHZ_SCHEMA_MARKER_DEFINITION,
-        ] {
+        ]) {
             let _ = live
                 .client
-                .delete_relationships(RelationshipFilter::new(marker))
+                .delete_relationships(RelationshipFilter::new(definition))
                 .await;
         }
         // Write the built-in schema through the production path, then empty
@@ -369,12 +370,14 @@ async fn live_spicedb_refuses_an_unmarked_store_with_legacy_rows() {
     )
     .await;
 
-    assert_eq!(
-        guard(&live.actor().await).await,
-        Err(AuthzIncarnationError::UnmarkedStoreNotEmpty {
-            resource_type: "channel"
-        })
-    );
+    // A restarting replica refuses before rewriting the schema, and the
+    // guard refuses on its own as well.
+    let replica = live.actor().await;
+    let refusal = AuthzIncarnationError::UnmarkedStoreNotEmpty {
+        resource_type: "channel",
+    };
+    assert_eq!(ensure_schema(&replica).await, Err(refusal));
+    assert_eq!(guard(&replica).await, Err(refusal));
     assert!(live.marker_rows().await.is_empty(), "store was marked");
 }
 

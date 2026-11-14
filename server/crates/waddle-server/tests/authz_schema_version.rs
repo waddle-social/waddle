@@ -2,13 +2,16 @@
 //! built-in schema.
 //!
 //! The offline tests pin the marker, its classification, the schema text of
-//! the current version and the text written while an older store is upgraded.
-//! The `live_spicedb_` tests run the production backend against a disposable
-//! SpiceDB: an unversioned store is installed and recorded, a restart at the
-//! same version does not rewrite the schema, a newer or unrecognised marker is
-//! refused without overwriting the schema, SpiceDB itself refuses schema writes
-//! that would drop the marker, a store the codec guard refuses gains no
-//! version marker, and racing replicas record one marker and all start.
+//! the current version, the text written while an older store is upgraded,
+//! and the scan of a stored schema for version relations newer than the
+//! marker. The `live_spicedb_` tests run the production backend against a
+//! disposable SpiceDB: an unversioned store is installed and recorded, a
+//! restart at the same version does not rewrite the schema, a newer or
+//! unrecognised marker is refused without overwriting the schema, an upgrade
+//! a later release left unfinished is refused without overwriting its schema,
+//! SpiceDB itself refuses schema writes that would drop the marker, a store
+//! the codec guard refuses keeps its schema and gains no version marker, and
+//! racing replicas record one marker and all start.
 //!
 //! An upgrade from an older recorded version cannot be exercised live while
 //! the current version is the first: no older marker can exist.
@@ -26,9 +29,10 @@ use tokio::sync::Mutex;
 use waddle_server::config::SpiceDbConfig;
 use waddle_server::permissions::{
     authz_schema_retaining_version, authz_schema_version_relation, builtin_authz_schema,
-    classify_schema_markers, guarded_resource_definitions, parse_authz_schema_version_relation,
-    AuthzIncarnationError, AuthzSchemaVersionError, EnsureAuthzCodecIncarnation, EnsureSchema,
-    PermissionActor, PermissionError, RecordAuthzSchemaVersion, SchemaMarkerRow, SchemaMarkerState,
+    classify_schema_markers, declared_authz_schema_versions, guarded_resource_definitions,
+    parse_authz_schema_version_relation, unfinished_upgrade_refusal, AuthzIncarnationError,
+    AuthzSchemaVersionError, EnsureAuthzCodecIncarnation, EnsureSchema, PermissionActor,
+    PermissionError, RecordAuthzSchemaVersion, SchemaMarkerRow, SchemaMarkerState,
     AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID,
     AUTHZ_SCHEMA_MARKER_READ_LIMIT, AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION_RELATION_PREFIX,
 };
@@ -73,6 +77,25 @@ fn schema_before_versioning(schema: &str) -> String {
         }
     }
     assert!(!text.contains(AUTHZ_SCHEMA_MARKER_DEFINITION));
+    text
+}
+
+/// `schema` without the codec marker and schema-version marker definitions:
+/// the schema of a release built before the ID codec guard.
+fn schema_before_codec_guard(schema: &str) -> String {
+    let header = format!("definition {AUTHZ_CODEC_MARKER_DEFINITION} {{");
+    let mut text = String::new();
+    let mut inside = false;
+    for line in schema_before_versioning(schema).split_inclusive('\n') {
+        if line.trim() == header {
+            inside = true;
+        } else if inside {
+            inside = line.trim() != "}";
+        } else {
+            text.push_str(line);
+        }
+    }
+    assert!(!text.contains(AUTHZ_CODEC_MARKER_DEFINITION));
     text
 }
 
@@ -270,6 +293,111 @@ fn upgrade_schema_keeps_the_older_marker_relation_beside_the_current_one() {
 }
 
 #[test]
+fn stored_schema_declares_the_marker_relations_of_its_marker_definition() {
+    let schema = builtin_authz_schema();
+    assert_eq!(
+        declared_authz_schema_versions(schema),
+        vec![AUTHZ_SCHEMA_VERSION]
+    );
+    let upgrade = authz_schema_retaining_version(
+        &schema_of_later_release(AUTHZ_SCHEMA_VERSION + 1),
+        AUTHZ_SCHEMA_VERSION + 1,
+        AUTHZ_SCHEMA_VERSION,
+    )
+    .expect("upgrade text");
+    assert_eq!(
+        declared_authz_schema_versions(&upgrade),
+        vec![AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION + 1]
+    );
+    assert!(declared_authz_schema_versions(&schema_before_versioning(schema)).is_empty());
+    assert!(declared_authz_schema_versions("").is_empty());
+
+    // The stored schema comes back from `ReadSchema` in SpiceDB's own layout,
+    // so the scan depends on tokens only, not on lines or indentation.
+    let compact = "definition user {}\ndefinition waddle_authz_schema {\n\trelation \
+                   version_3: waddle_authz_schema\n\trelation version_12:waddle_authz_schema }";
+    assert_eq!(declared_authz_schema_versions(compact), vec![3, 12]);
+    let one_line = "definition waddle_authz_schema{relation version_2:waddle_authz_schema}";
+    assert_eq!(declared_authz_schema_versions(one_line), vec![2]);
+
+    // Only relations of the marker definition count, and only canonical
+    // version spellings; comments and other definitions are ignored.
+    let noisy = "/** relation version_90: waddle_authz_schema */\n\
+                 definition channel {\n  relation version_91: user\n}\n\
+                 definition waddle_authz_schema {\n\
+                 // relation version_92: waddle_authz_schema\n\
+                 /* relation version_93: waddle_authz_schema */\n\
+                 relation version_01: waddle_authz_schema\n\
+                 relation spare: waddle_authz_schema\n\
+                 relation version_4: waddle_authz_schema\n\
+                 permission version_94 = version_4\n\
+                 }\n\
+                 definition other_waddle_authz_schema {\n  relation version_95: user\n}";
+    assert_eq!(declared_authz_schema_versions(noisy), vec![4]);
+    // An unterminated comment hides the rest of the text.
+    assert!(declared_authz_schema_versions(
+        "/* definition waddle_authz_schema { relation version_5: waddle_authz_schema }"
+    )
+    .is_empty());
+}
+
+#[test]
+fn only_a_declared_version_newer_than_this_server_is_an_unfinished_upgrade() {
+    let supported = 2;
+    let declaring = |versions: &[u32]| {
+        let relations: String = versions
+            .iter()
+            .map(|version| format!("  {}\n", declaration(*version)))
+            .collect();
+        format!("definition {AUTHZ_SCHEMA_MARKER_DEFINITION} {{\n{relations}}}\n")
+    };
+
+    // A later release wrote its upgrade schema over a store recorded at this
+    // version, or at an older one, and stopped before recording its own.
+    assert_eq!(
+        unfinished_upgrade_refusal(&declaring(&[2, 3]), 2, supported),
+        Some(AuthzSchemaVersionError::UnfinishedNewerUpgrade {
+            declared: 3,
+            recorded: 2,
+            supported
+        })
+    );
+    assert_eq!(
+        unfinished_upgrade_refusal(&declaring(&[1, 5]), 1, supported),
+        Some(AuthzSchemaVersionError::UnfinishedNewerUpgrade {
+            declared: 5,
+            recorded: 1,
+            supported
+        })
+    );
+    // This server's own schema, its own upgrade schema, an older schema, a
+    // stale relation from an interrupted earlier upgrade, or no marker
+    // definition at all are not.
+    for (schema, recorded) in [
+        (declaring(&[2]), 2),
+        (declaring(&[1, 2]), 1),
+        (declaring(&[1]), 1),
+        (declaring(&[1, 2]), 2),
+        (String::new(), 2),
+        (schema_before_versioning(builtin_authz_schema()), 2),
+    ] {
+        assert_eq!(
+            unfinished_upgrade_refusal(&schema, recorded, supported),
+            None,
+            "{schema}"
+        );
+    }
+    assert_eq!(
+        unfinished_upgrade_refusal(
+            builtin_authz_schema(),
+            AUTHZ_SCHEMA_VERSION,
+            AUTHZ_SCHEMA_VERSION
+        ),
+        None
+    );
+}
+
+#[test]
 fn codec_guard_ignores_the_schema_version_marker() {
     let guarded: Vec<&str> = guarded_resource_definitions().collect();
     assert!(!guarded.contains(&AUTHZ_SCHEMA_MARKER_DEFINITION));
@@ -286,6 +414,11 @@ fn refusals_name_versions_only() {
         },
         AuthzSchemaVersionError::UnrecognisedMarker,
         AuthzSchemaVersionError::Contended,
+        AuthzSchemaVersionError::UnfinishedNewerUpgrade {
+            declared: 3,
+            recorded: 2,
+            supported: 2,
+        },
         AuthzSchemaVersionError::BuiltinSchemaUnversioned,
     ] {
         let message = PermissionError::from(error).to_string();
@@ -306,6 +439,20 @@ fn refusals_name_versions_only() {
     assert!(AuthzSchemaVersionError::UnrecognisedMarker
         .to_string()
         .contains("docs/operations/authz-schema-versions.md"));
+    let unfinished = AuthzSchemaVersionError::UnfinishedNewerUpgrade {
+        declared: 3,
+        recorded: 1,
+        supported: 2,
+    }
+    .to_string();
+    for expected in [
+        "declares version 3",
+        "version 2 of this server",
+        "records version 1",
+        "docs/operations/authz-schema-versions.md",
+    ] {
+        assert!(unfinished.contains(expected), "{unfinished}");
+    }
 }
 
 // Live tests share one SpiceDB and each replaces its whole content, so they
@@ -337,17 +484,17 @@ impl LiveSpiceDb {
             insecure: true,
         });
         let live = Self { config, client };
-        // Drop the markers an earlier test left, so that the schema is written
-        // rather than refused or left as it is. On a fresh SpiceDB the
-        // definitions do not exist yet and the deletes fail; that is the
-        // state wanted.
-        for marker in [
+        // Drop the markers and relationships an earlier test left, so that
+        // the schema is written rather than refused or left as it is. A
+        // definition the stored schema lacks, or every definition on a fresh
+        // SpiceDB, makes its delete fail; that is the state wanted.
+        for definition in guarded_resource_definitions().chain([
             AUTHZ_CODEC_MARKER_DEFINITION,
             AUTHZ_SCHEMA_MARKER_DEFINITION,
-        ] {
+        ]) {
             let _ = live
                 .client
-                .delete_relationships(RelationshipFilter::new(marker))
+                .delete_relationships(RelationshipFilter::new(definition))
                 .await;
         }
         schema_outcome(live.actor().await.ask(EnsureSchema).await).expect("built-in schema");
@@ -413,9 +560,10 @@ impl LiveSpiceDb {
             .expect("raw write");
     }
 
-    /// Record `version` as a later release would: write its upgrade schema,
-    /// replace the marker, then write its own schema.
-    async fn record_as_later_release(&self, version: u32) {
+    /// Step 1 of a later release's upgrade from this version to `version`:
+    /// write its schema with this version's marker relation kept beside its
+    /// own.
+    async fn begin_upgrade_as_later_release(&self, version: u32) {
         let upgrade = authz_schema_retaining_version(
             &schema_of_later_release(version),
             version,
@@ -426,6 +574,12 @@ impl LiveSpiceDb {
             .write_schema(upgrade)
             .await
             .expect("later release upgrade schema");
+    }
+
+    /// Record `version` as a later release would: write its upgrade schema,
+    /// replace the marker, then write its own schema.
+    async fn record_as_later_release(&self, version: u32) {
+        self.begin_upgrade_as_later_release(version).await;
         self.client
             .write_relationships(vec![
                 RelationshipUpdate::delete(marker(AUTHZ_SCHEMA_VERSION)),
@@ -500,11 +654,16 @@ async fn live_spicedb_restart_at_the_same_version_leaves_the_schema() {
     let live = LiveSpiceDb::connect().await;
     start(&live.actor().await).await.expect("unversioned store");
 
-    // A distinguishable schema that keeps this version's marker valid: the
-    // built-in schema with one more, empty, marker relation.
-    let distinguishable =
-        authz_schema_retaining_version(builtin_authz_schema(), AUTHZ_SCHEMA_VERSION, 99)
-            .expect("distinguishable schema");
+    // A distinguishable schema that keeps this version's marker valid and
+    // declares no other version: the built-in schema with one more, empty,
+    // relation in the marker definition.
+    let spare = format!("relation spare_marker: {AUTHZ_SCHEMA_MARKER_DEFINITION}");
+    let distinguishable = builtin_authz_schema().replacen(
+        &declaration(AUTHZ_SCHEMA_VERSION),
+        &format!("{}\n  {spare}", declaration(AUTHZ_SCHEMA_VERSION)),
+        1,
+    );
+    assert_ne!(distinguishable, builtin_authz_schema());
     live.client
         .write_schema(distinguishable)
         .await
@@ -512,7 +671,7 @@ async fn live_spicedb_restart_at_the_same_version_leaves_the_schema() {
 
     start(&live.actor().await).await.expect("recorded store");
     assert!(
-        live.stored_schema().await.contains(&declaration(99)),
+        live.stored_schema().await.contains(&spare),
         "a replica at the recorded version rewrote the schema"
     );
     assert_eq!(
@@ -623,32 +782,114 @@ async fn live_spicedb_refuses_an_unrecognised_marker() {
 
 #[tokio::test]
 #[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
-async fn live_spicedb_codec_refusal_leaves_no_version_marker() {
+async fn live_spicedb_codec_refusal_leaves_the_legacy_schema_untouched() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
-    // A ban written by the replaced ID encoding.
+    // A store of a release before the ID codec guard: its schema lacks both
+    // marker definitions and it holds a ban in the replaced ID encoding.
+    let legacy_schema = schema_before_codec_guard(builtin_authz_schema());
+    live.client
+        .write_schema(legacy_schema.clone())
+        .await
+        .expect("legacy schema");
     live.write_raw(
         ("channel", "v2_c2t5"),
         "outcast",
         ("user", "alice|example=com"),
     )
     .await;
+    let legacy_text = live.stored_schema().await;
 
+    // Startup stops before writing the schema: replicas of the legacy release
+    // still running keep their own policy, and its schema write at their
+    // next start does not flap with this release's.
     let replica = live.actor().await;
-    schema_outcome(replica.ask(EnsureSchema).await).expect("schema of an unversioned store");
-    match replica.ask(EnsureAuthzCodecIncarnation).await {
+    match replica.ask(EnsureSchema).await {
         Err(SendError::HandlerError(PermissionError::AuthzIncarnation(
-            AuthzIncarnationError::UnmarkedStoreNotEmpty { .. },
+            AuthzIncarnationError::UnmarkedStoreNotEmpty {
+                resource_type: "channel",
+            },
         ))) => {}
-        other => panic!("codec guard should refuse a legacy store: {other:?}"),
+        other => panic!("a populated legacy store should be refused before its schema: {other:?}"),
     }
-    // Startup stops at the codec refusal, so no version is recorded and the
-    // release that wrote the store can still write its schema.
-    assert!(live.marker_rows().await.is_empty());
+    let stored = live.stored_schema().await;
+    assert_eq!(
+        stored, legacy_text,
+        "the refused store's schema was rewritten"
+    );
+    assert!(!stored.contains(AUTHZ_SCHEMA_MARKER_DEFINITION), "{stored}");
+    assert!(!stored.contains(AUTHZ_CODEC_MARKER_DEFINITION), "{stored}");
+    assert!(declared_authz_schema_versions(&stored).is_empty());
+
+    // The legacy release can still write its schema.
     live.client
-        .write_schema(schema_before_versioning(builtin_authz_schema()))
+        .write_schema(legacy_schema)
         .await
-        .expect("schema of a release before versioning");
+        .expect("schema of a release before the codec guard");
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+async fn live_spicedb_refuses_an_unfinished_newer_upgrade_without_overwriting_it() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = LiveSpiceDb::connect().await;
+    start(&live.actor().await).await.expect("unversioned store");
+    let newer = AUTHZ_SCHEMA_VERSION + 1;
+    // A later release wrote its schema in step 1 of its upgrade and stopped
+    // before recording its version: the marker still records this version.
+    live.begin_upgrade_as_later_release(newer).await;
+    assert_eq!(
+        live.marker_rows().await,
+        vec![SchemaMarkerRow::for_version(AUTHZ_SCHEMA_VERSION)]
+    );
+
+    // A replica of this release refuses at both steps instead of serving
+    // under the later schema, and writes nothing.
+    let replica = live.actor().await;
+    let refusal = AuthzSchemaVersionError::UnfinishedNewerUpgrade {
+        declared: newer,
+        recorded: AUTHZ_SCHEMA_VERSION,
+        supported: AUTHZ_SCHEMA_VERSION,
+    };
+    assert_eq!(
+        schema_outcome(replica.ask(EnsureSchema).await),
+        Err(refusal)
+    );
+    assert_eq!(
+        schema_outcome(replica.ask(RecordAuthzSchemaVersion).await),
+        Err(refusal)
+    );
+    let stored = live.stored_schema().await;
+    assert_eq!(
+        declared_authz_schema_versions(&stored),
+        vec![AUTHZ_SCHEMA_VERSION, newer],
+        "{stored}"
+    );
+    assert_eq!(
+        live.marker_rows().await,
+        vec![SchemaMarkerRow::for_version(AUTHZ_SCHEMA_VERSION)]
+    );
+
+    // Once the later release finishes the upgrade, the refusal is the
+    // ordinary one for a newer version.
+    live.client
+        .write_relationships(vec![
+            RelationshipUpdate::delete(marker(AUTHZ_SCHEMA_VERSION)),
+            RelationshipUpdate::create(marker(newer)),
+        ])
+        .await
+        .expect("later release marker");
+    live.client
+        .write_schema(schema_of_later_release(newer))
+        .await
+        .expect("later release schema");
+    assert_eq!(
+        schema_outcome(live.actor().await.ask(EnsureSchema).await),
+        Err(AuthzSchemaVersionError::Newer {
+            stored: newer,
+            supported: AUTHZ_SCHEMA_VERSION,
+        })
+    );
 }
 
 #[tokio::test]

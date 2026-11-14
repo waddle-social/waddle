@@ -26,9 +26,10 @@ pub use authz_incarnation::{
 };
 pub use authz_schema_version::{
     authz_schema_retaining_version, authz_schema_version_relation, builtin_authz_schema,
-    classify_schema_markers, parse_authz_schema_version_relation, AuthzSchemaVersionError,
-    SchemaMarkerRow, SchemaMarkerState, AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID,
-    AUTHZ_SCHEMA_MARKER_READ_LIMIT, AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION_RELATION_PREFIX,
+    classify_schema_markers, declared_authz_schema_versions, parse_authz_schema_version_relation,
+    unfinished_upgrade_refusal, AuthzSchemaVersionError, SchemaMarkerRow, SchemaMarkerState,
+    AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID, AUTHZ_SCHEMA_MARKER_READ_LIMIT,
+    AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION_RELATION_PREFIX,
 };
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};

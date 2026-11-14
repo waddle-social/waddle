@@ -16,10 +16,10 @@ use jid::BareJid;
 use kameo::actor::Spawn;
 use waddle_server::config::SpiceDbConfig;
 use waddle_server::permissions::{
-    decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, CheckPermission,
-    DeleteTuple, EncodedObjectId, EncodedSubjectId, EnsureSchema, ListRelations, ListSubjects,
-    LookupResources, LookupSubjects, Object, ObjectType, Permission, PermissionActor,
-    PermissionError, Relation, Subject, SubjectType, Tuple, WriteTuple,
+    decode_object, decode_subject, guarded_resource_definitions, AuthzIdError, AuthzOpaqueId,
+    AuthzUserJid, CheckPermission, DeleteTuple, EncodedObjectId, EncodedSubjectId, EnsureSchema,
+    ListRelations, ListSubjects, LookupResources, LookupSubjects, Object, ObjectType, Permission,
+    PermissionActor, PermissionError, Relation, Subject, SubjectType, Tuple, WriteTuple,
     AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_ID_WIRE_PREFIX, AUTHZ_SCHEMA_MARKER_DEFINITION,
     MAX_AUTHZ_ID_BYTES, MAX_AUTHZ_WIRE_BYTES,
 };
@@ -530,21 +530,22 @@ async fn live_spicedb_keeps_legacy_colliding_identities_distinct() {
         std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
     let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
         .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
-    // Writing the schema is refused while another codec's marker, or a newer
-    // schema-version marker, is stored, which the guard tests sharing this
-    // SpiceDB can leave behind. On a fresh SpiceDB the marker definitions do
-    // not exist and the deletes fail; that is the state wanted.
+    // Writing the schema is refused while another codec's marker, a newer
+    // schema-version marker, or relationships without a codec marker are
+    // stored, which the other live tests sharing this SpiceDB leave behind.
+    // A definition the stored schema lacks, or every definition on a fresh
+    // SpiceDB, makes its delete fail; that is the state wanted.
     let raw = prescience::Client::builder(&endpoint, &preshared_key)
         .insecure(true)
         .build()
         .await
         .expect("raw SpiceDB client");
-    for marker in [
+    for definition in guarded_resource_definitions().chain([
         AUTHZ_CODEC_MARKER_DEFINITION,
         AUTHZ_SCHEMA_MARKER_DEFINITION,
-    ] {
+    ]) {
         let _ = raw
-            .delete_relationships(prescience::RelationshipFilter::new(marker))
+            .delete_relationships(prescience::RelationshipFilter::new(definition))
             .await;
     }
     let mut config = ServerConfig::test_homeserver();

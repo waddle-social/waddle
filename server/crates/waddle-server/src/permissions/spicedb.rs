@@ -19,8 +19,9 @@ use super::authz_incarnation::{
 };
 use super::authz_schema_version::{
     authz_schema_retaining_version, authz_schema_version_relation, classify_schema_markers,
-    AuthzSchemaVersionError, SchemaMarkerRow, SchemaMarkerState, AUTHZ_SCHEMA_MARKER_DEFINITION,
-    AUTHZ_SCHEMA_MARKER_ID, AUTHZ_SCHEMA_MARKER_READ_LIMIT, AUTHZ_SCHEMA_VERSION,
+    unfinished_upgrade_refusal, AuthzSchemaVersionError, SchemaMarkerRow, SchemaMarkerState,
+    AUTHZ_SCHEMA_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_ID, AUTHZ_SCHEMA_MARKER_READ_LIMIT,
+    AUTHZ_SCHEMA_VERSION,
 };
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -42,26 +43,41 @@ impl SpiceDbPermissionBackend {
     }
 
     /// Install or upgrade the built-in schema, whose version is
-    /// [`AUTHZ_SCHEMA_VERSION`]. A store already marked for another ID codec
-    /// is refused first, so this build never rewrites the schema of a store
-    /// that belongs to a different codec version. A store recorded at this
-    /// schema version is left as it is, and one recorded at a newer or
-    /// unrecognised version is refused without writing. See
+    /// [`AUTHZ_SCHEMA_VERSION`]. A store the codec guard would refuse, because
+    /// it is marked for another ID codec or holds relationships without a
+    /// codec marker, is refused first, so this build never rewrites the
+    /// schema of a store written by a different codec version. A store
+    /// recorded at this schema version is left as it is, and one recorded at
+    /// a newer or unrecognised version, or holding an unfinished upgrade to a
+    /// newer version, is refused without writing. See
     /// `permissions::authz_schema_version` for the protocol.
     pub async fn ensure_schema(&self, schema: &str) -> Result<(), PermissionError> {
-        if self.codec_marker_state_before_schema().await? == CodecMarkerState::Incompatible {
-            return Err(refuse(AuthzIncarnationError::IncompatibleMarker));
+        match self.codec_marker_state_before_schema().await? {
+            CodecMarkerState::Current => {}
+            CodecMarkerState::Incompatible => {
+                return Err(refuse(AuthzIncarnationError::IncompatibleMarker))
+            }
+            CodecMarkerState::Absent => {
+                self.scan_unmarked_store(SchemaStage::BeforeWrite).await?;
+            }
         }
         let text = match self.schema_marker_state().await? {
-            SchemaMarkerState::Current => return Ok(()),
+            SchemaMarkerState::Current => {
+                return self
+                    .refuse_unfinished_newer_upgrade(AUTHZ_SCHEMA_VERSION)
+                    .await
+            }
             SchemaMarkerState::Absent => Cow::Borrowed(schema),
-            SchemaMarkerState::Older(stored) => Cow::Owned(
-                authz_schema_retaining_version(schema, AUTHZ_SCHEMA_VERSION, stored).ok_or(
-                    PermissionError::AuthzSchemaVersion(
-                        AuthzSchemaVersionError::BuiltinSchemaUnversioned,
-                    ),
-                )?,
-            ),
+            SchemaMarkerState::Older(stored) => {
+                self.refuse_unfinished_newer_upgrade(stored).await?;
+                Cow::Owned(
+                    authz_schema_retaining_version(schema, AUTHZ_SCHEMA_VERSION, stored).ok_or(
+                        PermissionError::AuthzSchemaVersion(
+                            AuthzSchemaVersionError::BuiltinSchemaUnversioned,
+                        ),
+                    )?,
+                )
+            }
             SchemaMarkerState::Newer(stored) => return Err(refuse_newer_schema(stored)),
             SchemaMarkerState::Unrecognised => {
                 return Err(refuse_schema(AuthzSchemaVersionError::UnrecognisedMarker))
@@ -74,7 +90,10 @@ impl SpiceDbPermissionBackend {
     /// the store. See `permissions::authz_schema_version` for the protocol.
     pub async fn record_schema_version(&self, schema: &str) -> Result<(), PermissionError> {
         match self.schema_marker_state().await? {
-            SchemaMarkerState::Current => Ok(()),
+            SchemaMarkerState::Current => {
+                self.refuse_unfinished_newer_upgrade(AUTHZ_SCHEMA_VERSION)
+                    .await
+            }
             SchemaMarkerState::Absent => {
                 let created = self
                     .client
@@ -112,7 +131,10 @@ impl SpiceDbPermissionBackend {
                 if let Err(error) = replaced {
                     self.decide_after_marker_conflict(error).await?;
                 }
-                // Drop the older marker relation, which now holds nothing.
+                // Drop the older marker relation, which now holds nothing,
+                // unless a later release has meanwhile begun its own upgrade.
+                self.refuse_unfinished_newer_upgrade(AUTHZ_SCHEMA_VERSION)
+                    .await?;
                 self.write_schema_or_decide(schema).await?;
                 tracing::info!(
                     from_schema_version = stored,
@@ -142,6 +164,20 @@ impl SpiceDbPermissionBackend {
                 None => Err(map_spicedb_error(error)),
             },
             Err(_) => Err(map_spicedb_error(error)),
+        }
+    }
+
+    /// Refuse a store whose stored schema declares a version newer than this
+    /// build's, while its marker records `recorded`, at most this build's
+    /// version: a later release wrote its schema and has not recorded its
+    /// version. `ReadSchema` can serve a cached schema after a direct
+    /// datastore reset, so this read only ever adds a refusal; it never
+    /// decides that a schema write may be skipped.
+    async fn refuse_unfinished_newer_upgrade(&self, recorded: u32) -> Result<(), PermissionError> {
+        let (stored_schema, _) = self.client.read_schema().await.map_err(map_spicedb_error)?;
+        match unfinished_upgrade_refusal(&stored_schema, recorded, AUTHZ_SCHEMA_VERSION) {
+            Some(refusal) => Err(refuse_schema(refusal)),
+            None => Ok(()),
         }
     }
 
@@ -211,7 +247,7 @@ impl SpiceDbPermissionBackend {
             }
             CodecMarkerState::Absent => {}
         }
-        if self.scan_unmarked_store().await? == UnmarkedScan::MarkedMeanwhile {
+        if self.scan_unmarked_store(SchemaStage::Written).await? == UnmarkedScan::MarkedMeanwhile {
             return Ok(());
         }
 
@@ -246,10 +282,12 @@ impl SpiceDbPermissionBackend {
                     CodecMarkerState::Incompatible => {
                         Err(refuse(AuthzIncarnationError::IncompatibleMarker))
                     }
-                    CodecMarkerState::Absent => match self.scan_unmarked_store().await? {
-                        UnmarkedScan::MarkedMeanwhile => Ok(()),
-                        UnmarkedScan::Empty => Err(refuse(AuthzIncarnationError::Contended)),
-                    },
+                    CodecMarkerState::Absent => {
+                        match self.scan_unmarked_store(SchemaStage::Written).await? {
+                            UnmarkedScan::MarkedMeanwhile => Ok(()),
+                            UnmarkedScan::Empty => Err(refuse(AuthzIncarnationError::Contended)),
+                        }
+                    }
                 }
             }
             Err(error) => Err(map_spicedb_error(error)),
@@ -311,11 +349,25 @@ impl SpiceDbPermissionBackend {
     /// replica that saw no marker can scan after another replica marked the
     /// empty store and started writing grants. Such a store is valid for this
     /// codec and is accepted.
-    async fn scan_unmarked_store(&self) -> Result<UnmarkedScan, PermissionError> {
-        let Some(definition) = self.first_populated_definition().await? else {
+    ///
+    /// Before the built-in schema is written, the stored schema may lack some
+    /// Waddle definitions or the marker definition, or there may be no schema
+    /// at all; a definition that does not exist holds nothing. That scan
+    /// refuses a populated legacy store without touching its schema. It
+    /// cannot accept a store on its own: [`Self::ensure_codec_incarnation`]
+    /// scans again, strictly, once the schema is written.
+    async fn scan_unmarked_store(
+        &self,
+        stage: SchemaStage,
+    ) -> Result<UnmarkedScan, PermissionError> {
+        let Some(definition) = self.first_populated_definition(stage).await? else {
             return Ok(UnmarkedScan::Empty);
         };
-        match self.codec_marker_state().await? {
+        let state = match stage {
+            SchemaStage::BeforeWrite => self.codec_marker_state_before_schema().await?,
+            SchemaStage::Written => self.codec_marker_state().await?,
+        };
+        match state {
             CodecMarkerState::Current => Ok(UnmarkedScan::MarkedMeanwhile),
             CodecMarkerState::Incompatible => {
                 Err(refuse(AuthzIncarnationError::IncompatibleMarker))
@@ -327,23 +379,41 @@ impl SpiceDbPermissionBackend {
     }
 
     /// The first Waddle definition that holds a relationship. One row per
-    /// definition is enough to decide, so each read is bounded to one.
-    async fn first_populated_definition(&self) -> Result<Option<&'static str>, PermissionError> {
+    /// definition is enough to decide, so each read is bounded to one. Before
+    /// the schema is written, a definition the stored schema lacks is read as
+    /// empty.
+    async fn first_populated_definition(
+        &self,
+        stage: SchemaStage,
+    ) -> Result<Option<&'static str>, PermissionError> {
         for definition in guarded_resource_definitions() {
-            let mut stream = self
-                .client
-                .read_relationships(RelationshipFilter::new(definition))
-                .consistency(Consistency::FullyConsistent)
-                .limit(1)
-                .send()
-                .await
-                .map_err(map_spicedb_error)?;
-            if let Some(item) = stream.next().await {
-                item.map_err(map_spicedb_error)?;
-                return Ok(Some(definition));
+            match self.definition_holds_relationships(definition).await {
+                Ok(true) => return Ok(Some(definition)),
+                Ok(false) => {}
+                Err(error)
+                    if stage == SchemaStage::BeforeWrite
+                        && is_unknown_definition(&error, definition) => {}
+                Err(error) => return Err(map_spicedb_error(error)),
             }
         }
         Ok(None)
+    }
+
+    async fn definition_holds_relationships(
+        &self,
+        definition: &str,
+    ) -> Result<bool, prescience::Error> {
+        let mut stream = self
+            .client
+            .read_relationships(RelationshipFilter::new(definition))
+            .consistency(Consistency::FullyConsistent)
+            .limit(1)
+            .send()
+            .await?;
+        match stream.next().await {
+            Some(item) => item.map(|_| true),
+            None => Ok(false),
+        }
     }
 
     pub async fn check(
@@ -629,6 +699,16 @@ fn map_spicedb_error(error: prescience::Error) -> PermissionError {
     }
 }
 
+/// Whether the built-in schema has been written in this start, which decides
+/// how a read of a definition the stored schema lacks is treated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemaStage {
+    /// Before `EnsureSchema` writes: the stored schema may be older or absent.
+    BeforeWrite,
+    /// After: every guarded definition exists.
+    Written,
+}
+
 /// Outcome of [`SpiceDbPermissionBackend::scan_unmarked_store`] when the
 /// store is not refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -642,9 +722,10 @@ enum UnmarkedScan {
 /// Whether SpiceDB rejected a read because `definition` is not in the
 /// schema. SpiceDB reports this with the `ERROR_REASON_UNKNOWN_DEFINITION`
 /// reason; the message form is also recognised for servers that omit error
-/// details. Neither mistake accepts a store: a store read as unmarked is still
-/// decided by the guard after the schema is written, and a missed match only
-/// fails startup.
+/// details. Neither mistake accepts a store: a store read as unmarked, or a
+/// definition read as empty before the schema is written, is still decided by
+/// the strict scan of the guard after the schema is written, and a missed
+/// match only fails startup.
 fn is_unknown_definition(error: &prescience::Error, definition: &str) -> bool {
     let prescience::Error::Status {
         message, details, ..

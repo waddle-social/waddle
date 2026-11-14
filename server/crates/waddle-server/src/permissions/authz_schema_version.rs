@@ -14,42 +14,74 @@
 //! whose relation name carries the version. The built-in schema of version N
 //! declares only the relation `version_N` in `waddle_authz_schema`. SpiceDB
 //! refuses a schema write that would remove a relation or definition that
-//! still holds relationships, so once the marker exists:
+//! still holds relationships, so once the marker exists, no binary whose
+//! schema lacks `version_N` can overwrite the schema, even one that predates
+//! this fence or ignores the marker: binaries before versioning lack the whole
+//! `waddle_authz_schema` definition, and other versions lack the relation.
 //!
-//! - no binary whose schema lacks `version_N` can overwrite the schema, even
-//!   one that predates this fence or ignores the marker: binaries before
-//!   versioning lack the whole `waddle_authz_schema` definition, and other
-//!   versions lack the relation;
-//! - the marker can only be created against a stored schema that declares
-//!   its relation, so it cannot claim a version that the stored schema is
-//!   not.
+//! What the marker does not establish is that the stored schema is exactly
+//! version N. SpiceDB only guarantees that the stored schema declares
+//! `version_N`. While a store recorded at N is upgraded to M, step 1 below
+//! stores the schema of M, which declares both relations, and the marker
+//! still records N until step 3. In that window, and indefinitely if the
+//! upgrade is interrupted there, the store serves the policy of M under a
+//! marker of N. Two further checks narrow what that means:
 //!
-//! Relationships are read fully consistently from the datastore, while
-//! `ReadSchema` can serve a cached schema after a direct datastore reset; the
-//! version is therefore never decided by comparing schema text.
+//! - a replica that reads a marker of its own or an older version also reads
+//!   the stored schema, and refuses to start if the marker definition there
+//!   declares a version relation newer than its own
+//!   ([`AuthzSchemaVersionError::UnfinishedNewerUpgrade`]). A replica of N
+//!   therefore does not start into an unfinished upgrade to M, and does not
+//!   write its own schema over it;
+//! - the stored schema is read with `ReadSchema`, which can serve a cached
+//!   schema after a direct datastore reset. It is used only to add that
+//!   refusal: a stale read can refuse a store spuriously or miss an
+//!   unfinished upgrade, but it never causes a schema write.
+//!
+//! Not guaranteed:
+//!
+//! - replicas of N that are already running, or whose check ran before step 1
+//!   of the upgrade, keep serving, under the schema of M from the moment it is
+//!   written: SpiceDB evaluates permissions centrally;
+//! - a store without a marker is not checked against its stored schema, so
+//!   the operator-authorised downgrade (delete the marker, start the older
+//!   release) works. As a consequence, when a newer release installs its
+//!   schema into an unversioned store and stops before recording its version,
+//!   an older release that starts next replaces that schema with its own and
+//!   records its own version; the newer release upgrades it again when it
+//!   next starts.
+//!
+//! The version itself is read from the marker relationship, which is read
+//! fully consistently from the datastore, and never by comparing schema text.
 //!
 //! The startup order is:
 //!
-//! 1. Before the schema is written (`EnsureSchema`, after the codec marker
-//!    pre-check of `permissions::authz_incarnation`), read the marker:
-//!    - this version: proceed without writing the schema;
+//! 1. Before the schema is written (`EnsureSchema`), the codec guard of
+//!    `permissions::authz_incarnation` refuses a store marked for another
+//!    codec, or an unmarked store that already holds Waddle relationships.
+//!    Then read the marker:
+//!    - this version: refuse an unfinished newer upgrade, otherwise proceed
+//!      without writing the schema;
 //!    - none: write the built-in schema;
-//!    - an older version M: write the built-in schema that also keeps
-//!      `version_M`, so the stored marker stays valid until it is replaced;
+//!    - an older version M: refuse an unfinished newer upgrade, otherwise
+//!      write the built-in schema that also keeps `version_M`, so the stored
+//!      marker stays valid until it is replaced;
 //!    - a newer version, or anything else: refuse without writing.
 //! 2. The codec guard binds or refuses the store (`EnsureAuthzCodecIncarnation`).
 //! 3. Record the version (`RecordAuthzSchemaVersion`): read the marker again;
 //!    create it if there is none, with a precondition that the marker
 //!    definition is still empty; replace an older marker in one write with a
-//!    precondition that it still exists, then write the built-in schema again
-//!    to drop the older relation. If the precondition fails, decide again from
-//!    what is stored. If that last schema write fails, the older relation
-//!    stays declared until the next upgrade; it holds nothing and no
-//!    permission refers to it.
+//!    precondition that it still exists, then, unless the stored schema now
+//!    declares a newer version, write the built-in schema again to drop the
+//!    older relation. If the precondition fails, decide again from what is
+//!    stored. If that last schema write fails, the older relation stays
+//!    declared until the next upgrade; it holds nothing and no permission
+//!    refers to it.
 //!
 //! The marker is recorded only after the codec guard accepts the store, so a
 //! store the codec guard refuses gains no relationship and the release that
-//! wrote it can still start against it.
+//! wrote it can still start against it. A store the codec guard already
+//! refuses in step 1 does not have its schema written either.
 //!
 //! Marker IDs are fixed ASCII and bypass the authorization ID codec, and the
 //! marker definition is not one of the definitions the codec guard requires
@@ -125,6 +157,18 @@ pub enum AuthzSchemaVersionError {
          decide again"
     )]
     Contended,
+    #[error(
+        "authorization store schema declares version {declared}, newer than version \
+         {supported} of this server, while its marker records version {recorded}; a later \
+         release began an upgrade that did not finish and this server does not serve under \
+         it; start that release to finish the upgrade; see \
+         docs/operations/authz-schema-versions.md"
+    )]
+    UnfinishedNewerUpgrade {
+        declared: u32,
+        recorded: u32,
+        supported: u32,
+    },
     #[error("the built-in authorization schema does not declare its own version relation")]
     BuiltinSchemaUnversioned,
 }
@@ -230,4 +274,99 @@ pub fn authz_schema_retaining_version(schema: &str, current: u32, retained: u32)
         text.push_str(line);
     }
     (found == 1).then_some(text)
+}
+
+/// The versions whose marker relations the marker definition of
+/// `schema_text` declares, in ascending order without duplicates. Relations
+/// of the marker definition that are not the canonical spelling of a version,
+/// and relations of other definitions, are ignored, as are comments. Text
+/// without a marker definition declares none.
+///
+/// The text is the stored schema as `ReadSchema` returns it, so the scan
+/// relies only on the schema language's tokens, not on the layout of the
+/// built-in schema.
+pub fn declared_authz_schema_versions(schema_text: &str) -> Vec<u32> {
+    let tokens = schema_tokens(schema_text);
+    let mut versions = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let opens_marker_definition = tokens[index] == "definition"
+            && tokens.get(index + 1) == Some(&AUTHZ_SCHEMA_MARKER_DEFINITION)
+            && tokens.get(index + 2) == Some(&"{");
+        if !opens_marker_definition {
+            index += 1;
+            continue;
+        }
+        index += 3;
+        let mut depth = 1usize;
+        while index < tokens.len() && depth > 0 {
+            match tokens[index] {
+                "{" => depth += 1,
+                "}" => depth -= 1,
+                "relation" if depth == 1 => {
+                    if let Some(version) = tokens
+                        .get(index + 1)
+                        .and_then(|name| parse_authz_schema_version_relation(name))
+                    {
+                        versions.push(version);
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+    versions.sort_unstable();
+    versions.dedup();
+    versions
+}
+
+/// The refusal for a store whose marker records `recorded`, not newer than
+/// `supported`, while its stored schema declares a newer version than
+/// `supported`: a later release wrote its schema in step 1 of an upgrade and
+/// has not recorded its version.
+pub fn unfinished_upgrade_refusal(
+    stored_schema: &str,
+    recorded: u32,
+    supported: u32,
+) -> Option<AuthzSchemaVersionError> {
+    let declared = declared_authz_schema_versions(stored_schema)
+        .last()
+        .copied()?;
+    (declared > supported).then_some(AuthzSchemaVersionError::UnfinishedNewerUpgrade {
+        declared,
+        recorded,
+        supported,
+    })
+}
+
+/// The identifier and punctuation tokens of schema text, without comments.
+/// Identifiers keep `_` and the `/` of prefixed type names; every other
+/// non-space character is a token of its own.
+fn schema_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        let Some(first) = rest.chars().next() else {
+            return tokens;
+        };
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = after.split_once('\n').map_or("", |(_, next)| next);
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, next)| next);
+            continue;
+        }
+        let is_identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '/';
+        let length = if is_identifier(first) {
+            rest.find(|c: char| !is_identifier(c)).unwrap_or(rest.len())
+        } else {
+            first.len_utf8()
+        };
+        let (token, next) = rest.split_at(length);
+        tokens.push(token);
+        rest = next;
+    }
 }

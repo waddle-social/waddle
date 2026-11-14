@@ -9,6 +9,9 @@
 //! subtract the channel's `outcast` explicitly, so a banned author loses them
 //! while the room's moderators can still remove the author's messages.
 //!
+//! Lifting a ban, by deleting the `outcast` relation, restores what the
+//! subject's other relations grant.
+//!
 //! The offline tests pin the built-in SpiceDB schema and the local backend's
 //! mirror of it. The `local_backend_` tests evaluate the matrix with the local
 //! test backend over an in-memory database; a local tuple store establishes
@@ -25,9 +28,10 @@ use tokio::sync::Mutex;
 use waddle_server::config::SpiceDbConfig;
 use waddle_server::db::{Database, MigrationRunner};
 use waddle_server::permissions::{
-    builtin_authz_schema, CheckPermission, ComputedPermission, EnsureSchema, Object, ObjectType,
-    Permission, PermissionActor, PermissionSchema, Relation, Subject, SubjectType, Tuple,
-    WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_SCHEMA_MARKER_DEFINITION,
+    builtin_authz_schema, guarded_resource_definitions, CheckPermission, ComputedPermission,
+    DeleteTuple, EnsureSchema, Object, ObjectType, Permission, PermissionActor, PermissionSchema,
+    Relation, Subject, SubjectType, Tuple, WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION,
+    AUTHZ_SCHEMA_MARKER_DEFINITION,
 };
 use waddle_server::ServerConfig;
 
@@ -168,6 +172,20 @@ async fn write(
         })
         .await
         .unwrap_or_else(|error| panic!("write {object}#{relation}: {error:?}"));
+}
+
+async fn delete(
+    actor: &ActorRef<PermissionActor>,
+    object: &Object,
+    relation: &str,
+    subject: Subject,
+) {
+    actor
+        .ask(DeleteTuple {
+            tuple: Tuple::new(object.clone(), Relation::new(relation), subject),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("delete {object}#{relation}: {error:?}"));
 }
 
 async fn allowed(
@@ -323,6 +341,69 @@ async fn banned_moderator_cannot_delete_others_messages(actor: &ActorRef<Permiss
     assert!(allowed(actor, &author, &Permission::Delete, &message).await);
 }
 
+/// Lifting a ban restores exactly what the subject's other relations grant:
+/// the outcast relation subtracts, it does not revoke the grants beside it.
+/// Covers a direct channel grant, a parent Space grant and an author's own
+/// message permissions.
+async fn removing_outcast_restores_access(actor: &ActorRef<PermissionActor>) {
+    let tag = unique_tag();
+    let space = Object::new(ObjectType::Space, format!("space-unban-{tag}"));
+    let channel = Object::new(ObjectType::Channel, format!("room-unban-{tag}"));
+    let message = Object::new(ObjectType::Message, format!("message-unban-{tag}"));
+    let member = Subject::user(format!("member-unban-{tag}@example.org"));
+    let space_admin = Subject::user(format!("space-admin-unban-{tag}@example.org"));
+    write(actor, &channel, "parent", parent(&space)).await;
+    write(actor, &channel, "member", member.clone()).await;
+    write(actor, &space, "admin", space_admin.clone()).await;
+    write(actor, &message, "channel", channel_of(&channel)).await;
+    write(actor, &message, "author", member.clone()).await;
+
+    let member_channel = [Permission::SendMessage, Permission::Read, Permission::View];
+    let admin_channel = [Permission::Manage, Permission::Moderate, Permission::Delete];
+    let member_message = [
+        Permission::Edit,
+        Permission::Delete,
+        Permission::Read,
+        Permission::React,
+    ];
+
+    write(actor, &channel, "outcast", member.clone()).await;
+    write(actor, &channel, "outcast", space_admin.clone()).await;
+    for permission in channel_permissions() {
+        assert!(!allowed(actor, &member, &permission, &channel).await);
+        assert!(!allowed(actor, &space_admin, &permission, &channel).await);
+    }
+    for permission in &member_message {
+        assert!(!allowed(actor, &member, permission, &message).await);
+    }
+
+    delete(actor, &channel, "outcast", member.clone()).await;
+    delete(actor, &channel, "outcast", space_admin.clone()).await;
+    for permission in &member_channel {
+        assert!(
+            allowed(actor, &member, permission, &channel).await,
+            "unbanned member should hold channel {}",
+            permission.as_str()
+        );
+    }
+    for permission in &admin_channel {
+        assert!(
+            allowed(actor, &space_admin, permission, &channel).await,
+            "unbanned Space admin should hold channel {}",
+            permission.as_str()
+        );
+    }
+    for permission in &member_message {
+        assert!(
+            allowed(actor, &member, permission, &message).await,
+            "unbanned author should hold message {}",
+            permission.as_str()
+        );
+    }
+    // Lifting the ban grants nothing the other relations do not.
+    assert!(!allowed(actor, &member, &Permission::Manage, &channel).await);
+}
+
 async fn local_backend() -> ActorRef<PermissionActor> {
     let db = Database::in_memory("channel-outcast-precedence")
         .await
@@ -356,10 +437,15 @@ async fn local_backend_banned_moderator_cannot_delete_others_messages() {
     banned_moderator_cannot_delete_others_messages(&local_backend().await).await;
 }
 
+#[tokio::test]
+async fn local_backend_removing_outcast_restores_access() {
+    removing_outcast_restores_access(&local_backend().await).await;
+}
+
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which
 // empty it, so they run one at a time: this lock serializes them within the
 // binary, and the nextest group serializes them across binaries. Each test
-// uses identifiers of its own and does not empty the store.
+// uses identifiers of its own and empties the store before it starts.
 static LIVE_SPICEDB: Mutex<()> = Mutex::const_new(());
 
 /// The production backend against the disposable SpiceDB, with the built-in
@@ -375,15 +461,16 @@ async fn live_backend() -> ActorRef<PermissionActor> {
         .await
         .expect("raw SpiceDB client");
     // Without a schema-version marker, `EnsureSchema` installs this build's
-    // schema whatever an earlier test left; without a foreign codec marker it
-    // is not refused. On a fresh SpiceDB the definitions do not exist and the
-    // deletes fail; that is the state wanted.
-    for marker in [
+    // schema whatever an earlier test left; without a foreign codec marker,
+    // or relationships stored without a codec marker, it is not refused. A
+    // definition the stored schema lacks, or every definition on a fresh
+    // SpiceDB, makes its delete fail; that is the state wanted.
+    for definition in guarded_resource_definitions().chain([
         AUTHZ_CODEC_MARKER_DEFINITION,
         AUTHZ_SCHEMA_MARKER_DEFINITION,
-    ] {
+    ]) {
         let _ = raw
-            .delete_relationships(RelationshipFilter::new(marker))
+            .delete_relationships(RelationshipFilter::new(definition))
             .await;
     }
     let mut config = ServerConfig::test_homeserver();
@@ -427,4 +514,11 @@ async fn live_spicedb_outcast_author_loses_edit_and_delete() {
 async fn live_spicedb_banned_moderator_cannot_delete_others_messages() {
     let _serial = LIVE_SPICEDB.lock().await;
     banned_moderator_cannot_delete_others_messages(&live_backend().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+async fn live_spicedb_removing_outcast_restores_access() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    removing_outcast_restores_access(&live_backend().await).await;
 }

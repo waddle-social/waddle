@@ -14,6 +14,10 @@
 //! Before the built-in schema is written, the marker is read: a store marked
 //! for another codec is refused without rewriting its schema. A store whose
 //! schema lacks the marker definition, or has no schema yet, has no marker.
+//! A store without a marker is scanned as described below, reading a Waddle
+//! definition that its stored schema lacks as empty; if it holds any Waddle
+//! relationship and still has no marker, it is refused, again without
+//! rewriting its schema, so the release that wrote it keeps its own schema.
 //! After the schema is written and before serving:
 //!
 //! - the marker names this codec: proceed;
