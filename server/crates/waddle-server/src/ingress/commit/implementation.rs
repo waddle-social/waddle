@@ -469,6 +469,16 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         super::super::commit_room::HostGrantAcceptance::Unmanaged
         | super::super::commit_room::HostGrantAcceptance::Admitted { .. } => None,
     };
+    // From here on a managed room's acceptance works on its plan as reduced
+    // to the admitted audience: what is recorded, sealed and returned for
+    // execution names no principal the scope's policy does not admit.
+    let submission = match &host_grants {
+        super::super::commit_room::HostGrantAcceptance::Admitted { submission, .. } => {
+            submission.as_ref()
+        }
+        super::super::commit_room::HostGrantAcceptance::Unmanaged
+        | super::super::commit_room::HostGrantAcceptance::Refused(_) => submission,
+    };
     // A recorded denial is authority: any retransmission that resolves to it
     // re-emits the committed reply, whatever today's policy would decide.
     let mut plan = if alias == AliasOutcomeClass::Existing
@@ -820,10 +830,16 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     } else {
         sealed_manifest
     };
-    if let (Some(manifest), super::super::commit_room::HostGrantAcceptance::Admitted { audience }) =
-        (&sealed_manifest, &host_grants)
+    if let (
+        Some(manifest),
+        super::super::commit_room::HostGrantAcceptance::Admitted { audience, .. },
+    ) = (&sealed_manifest, &host_grants)
     {
-        super::super::commit_room::assert_admitted_children(manifest, audience)?;
+        super::super::commit_room::assert_admitted_children(
+            manifest,
+            submission.principal.bare_jid(),
+            audience,
+        )?;
     }
     if let Some(manifest) = &sealed_manifest {
         intents = manifest.recorded_intents().to_vec();

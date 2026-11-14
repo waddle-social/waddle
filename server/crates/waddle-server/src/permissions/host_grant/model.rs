@@ -344,7 +344,9 @@ pub struct SetAffiliation {
     pub affiliation: RoomAffiliation,
 }
 
-/// Close a scope for good. Its key is not enrolled again.
+/// Close a scope for good. Its key is not enrolled again. Like enrollment
+/// it is an operator act: the transaction stamps the lifecycle ledger, which
+/// the runtime role cannot update.
 #[derive(Clone, Debug)]
 pub struct RetireScope {
     pub operation: GrantOperationId,

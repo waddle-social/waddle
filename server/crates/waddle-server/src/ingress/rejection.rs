@@ -107,9 +107,8 @@ pub(super) fn host_grant_refusal_class(
         HostGrantRefusal::Denied(AdmissionDenial::SenderNotAdmitted) => {
             IngressDecisionClass::AuthorizationDenied
         }
-        HostGrantRefusal::Denied(
-            AdmissionDenial::AudienceNotAdmitted | AdmissionDenial::ScopeClosed,
-        )
+        HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed)
+        | HostGrantRefusal::AuthorityUnavailable
         | HostGrantRefusal::UnsupportedAcceptance => IngressDecisionClass::PolicyDenied,
     }
 }
@@ -118,12 +117,16 @@ pub(super) fn host_grant_refusal_class(
 /// an error to the sender and no other work. The caller commits it as an
 /// ordinary denial, so nothing the stanza asked for is accepted.
 ///
-/// - The sender holds no grant that allows the send: `forbidden`.
-/// - The room still seats a recipient whose grant no longer allows reading:
-///   `recipient-unavailable`, type `wait`. The room's occupancy has not
-///   caught up with a revoke.
-/// - The scope admits nothing, or the transaction cannot seal a manifest for
-///   the room: `service-unavailable`.
+/// - The sender holds no grant that allows the send: `forbidden`, type
+///   `auth`.
+/// - The scope admits nothing, this replica has not verified its privileges
+///   on the grant store, or the acceptance is not one a managed room takes:
+///   `service-unavailable`, type `cancel`.
+///
+/// A committed denial owns the stanza's origin identity: a retransmission
+/// resolves to it and is answered with the same error whatever has changed
+/// since. No refusal is therefore of type `wait`, which would invite the
+/// retry that can never succeed.
 pub(super) fn host_grant_refused_plan(
     plan: &IngressPlan,
     sender: &jid::FullJid,
@@ -135,11 +138,8 @@ pub(super) fn host_grant_refused_plan(
         HostGrantRefusal::Denied(AdmissionDenial::SenderNotAdmitted) => {
             (FrozenStanzaErrorType::Auth, StanzaErrorCondition::Forbidden)
         }
-        HostGrantRefusal::Denied(AdmissionDenial::AudienceNotAdmitted) => (
-            FrozenStanzaErrorType::Wait,
-            StanzaErrorCondition::RecipientUnavailable,
-        ),
         HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed)
+        | HostGrantRefusal::AuthorityUnavailable
         | HostGrantRefusal::UnsupportedAcceptance => (
             FrozenStanzaErrorType::Cancel,
             StanzaErrorCondition::ServiceUnavailable,

@@ -5,6 +5,11 @@
 //! the ingress fixture's sender (`romeo@example.com`) and `alice@example.com`
 //! are members. Identifiers carry a per-fixture tag, so suites that share a
 //! SpiceDB do not meet in it.
+//!
+//! The fixture's database login owns the schema, so it cannot pass the
+//! runtime-privilege check a server runs at startup. The fixture attaches
+//! the ingress unit of work without that check; the check itself is covered
+//! by the cases that create a restricted role.
 
 use jid::{BareJid, FullJid};
 use uuid::Uuid;
@@ -16,9 +21,11 @@ use waddle_server::ingress::{
 use waddle_server::ingress_uow::CanonicalMessageRepository;
 use waddle_server::permissions::host_grant::{
     Activation, BootstrapGrant, EnrollScope, GrantGeneration, GrantOperationId, GrantSubject,
-    HostGrantError, HostGrantStore, IssuancePolicy, ManagedRoom, MutationReceipt, RoomAffiliation,
-    ScopeKey, ScopeLifecycleId, ScopeState, SetAffiliation,
+    HostGrantAttachment, HostGrantError, HostGrantStore, IssuancePolicy, ManagedRoom,
+    MutationReceipt, RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState, ServedAccountDomains,
+    SetAffiliation,
 };
+use waddle_server::test_support::activate_host_grant_marker;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
@@ -54,6 +61,11 @@ fn domain(name: &str) -> CanonicalDomain {
     CanonicalDomain::parse_exact(name).expect("canonical domain")
 }
 
+/// The account domains the fixture deployment serves.
+pub fn served() -> ServedAccountDomains {
+    ServedAccountDomains::new([domain("example.com")])
+}
+
 /// The deployment's own domains and the given trusted homes.
 pub fn issuance_policy(trusted_homes: &[&str]) -> IssuancePolicy {
     IssuancePolicy::new(
@@ -86,6 +98,9 @@ impl GrantFixture {
     /// provide PostgreSQL and does not require it.
     pub async fn enrolled(label: &str) -> Option<Self> {
         let ingress = IngressFixture::postgres(label).await?;
+        assert!(ingress
+            .uow
+            .attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
         let store = HostGrantStore::open(ingress.db.clone()).expect("host-grant store");
         let policy = issuance_policy(&[]);
         let scope = enroll(&store, &policy).await;
@@ -164,8 +179,7 @@ impl GrantFixture {
             .projection_plan(scope.lifecycle)
             .await
             .expect("projection plan");
-        self.store
-            .activate(plan.marker())
+        activate_host_grant_marker(&self.store, plan.marker())
             .await
             .expect("activation")
     }

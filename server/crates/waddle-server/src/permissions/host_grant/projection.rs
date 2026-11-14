@@ -36,6 +36,10 @@ use super::model::{
 /// Deadline of each projection RPC.
 pub const HOST_GRANT_PROJECTION_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Deadline of one whole observation: the marker read and the family reads
+/// of every managed room.
+pub const HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// One canonical grant row as it is projected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedGrant {
@@ -155,6 +159,8 @@ pub enum ProjectionRefusal {
     IncarnationMismatch,
     #[error("the projection does not fit one bounded write request")]
     TooLarge,
+    #[error("the projection names a room or a subject's grant in a room more than once")]
+    Repeated,
 }
 
 impl ProjectionIntent {
@@ -177,6 +183,24 @@ impl ProjectionIntent {
             return Err(ProjectionRefusal::GenerationRegression);
         }
         Ok(())
+    }
+
+    /// Refuse an intent that names a room, or one subject's grant in a room,
+    /// more than once. A write states each relationship in exactly one
+    /// update; SpiceDB rejects a request that updates a relationship twice,
+    /// and a rejected request would be read as an unknown outcome.
+    pub fn check_distinct(&self) -> Result<(), ProjectionRefusal> {
+        let channels: BTreeSet<&str> = self.channels.iter().map(String::as_str).collect();
+        let grants: BTreeSet<(&str, &str)> = self
+            .grants
+            .iter()
+            .map(|grant| (grant.channel_id.as_str(), grant.subject.as_str()))
+            .collect();
+        if channels.len() == self.channels.len() && grants.len() == self.grants.len() {
+            Ok(())
+        } else {
+            Err(ProjectionRefusal::Repeated)
+        }
     }
 }
 

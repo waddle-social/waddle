@@ -4,10 +4,15 @@
 //! mutation and its linearisation on the scope's generation, the difference
 //! between a recorded and an effective grant, exact retries and identity
 //! reuse, revalidation of the initiator under the scope's guard, issuance to
-//! remote accounts under a supplied trusted-home set, exhaustion, readback of
-//! an unacknowledged commit, and the runtime role's capabilities.
+//! remote accounts under a supplied trusted-home set and what a stored
+//! privileged grant of a remote account is honoured as, exhaustion, readback
+//! of an unacknowledged commit, and the runtime role's capabilities,
+//! including the owner-phase operations it cannot run.
 //!
-//! They need PostgreSQL only. Where a case needs effective grants, the
+//! They need PostgreSQL only, and the login must be a superuser: one case
+//! creates a role and connects as it, which a login with `CREATEROLE` alone
+//! cannot arrange for a database it does not own since PostgreSQL 16. Where
+//! a case needs effective grants, the
 //! fixture activates the scope itself in place of a verified projection; the
 //! projection, its marker and its recovery are covered against SpiceDB in
 //! `host_grant_projection.rs`, and admission inside the acceptance
@@ -19,19 +24,24 @@ mod ingress_support;
 
 use std::time::Duration;
 
-use host_grant_support::{bare, issuance_policy, subject, GrantFixture, OWNER, PEER, SENDER};
+use host_grant_support::{
+    bare, issuance_policy, served, subject, GrantFixture, OWNER, PEER, SENDER,
+};
 use jid::Jid;
 use uuid::Uuid;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::permissions::host_grant::{
-    affiliation_allows, with_host_grant_commit_fault, Activation, AdmissionState, BootstrapGrant,
-    ClosedReason, EnrollScope, GrantGeneration, GrantOperationId, GrantSubject, GrantSubjectError,
-    HostGrantAction, HostGrantCommitFault, HostGrantError, HostGrantStore, IssuanceBasis,
-    IssuancePolicy, IssuanceRefusal, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome,
-    RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId, HOST_GRANT_POLICY_VERSION,
+    affiliation_allows, grant_allows, honoured_affiliation, with_host_grant_commit_fault,
+    Activation, AdmissionState, BootstrapGrant, ClosedReason, EnrollScope, GrantGeneration,
+    GrantOperationId, GrantSubject, GrantSubjectError, HostGrantAction, HostGrantAttachment,
+    HostGrantCommitFault, HostGrantError, HostGrantStore, IssuanceBasis, IssuancePolicy,
+    IssuanceRefusal, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome, ProjectedGrant,
+    ProjectionIntent, ProjectionMarker, ProjectionRefusal, RetireScope, RoomAffiliation, ScopeKey,
+    ScopeLifecycleId, ServedAccountDomains, SubjectHome, HOST_GRANT_POLICY_VERSION,
     HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
-use waddle_server::permissions::{Object, ObjectType};
+use waddle_server::permissions::{Object, ObjectType, PermissionError};
+use waddle_server::test_support::activate_host_grant_marker;
 use waddle_xmpp::identity::CanonicalDomain;
 
 const CAROL: &str = "carol@example.com";
@@ -39,7 +49,7 @@ const CAROL: &str = "carol@example.com";
 async fn admitted(fixture: &GrantFixture, account: &str, action: HostGrantAction) -> bool {
     fixture
         .store
-        .candidate_admission(&fixture.scope.room, &subject(account), action)
+        .candidate_admission(&fixture.scope.room, &subject(account), action, &served())
         .await
         .expect("candidate admission")
         .admitted
@@ -183,7 +193,7 @@ async fn enrollment_is_recorded_once_and_admits_nothing_until_activated() {
     assert_eq!(
         fixture
             .store
-            .pending_scopes()
+            .pending_scopes(None)
             .await
             .expect("pending scopes"),
         vec![fixture.scope.lifecycle]
@@ -218,7 +228,7 @@ async fn enrollment_is_recorded_once_and_admits_nothing_until_activated() {
     assert_eq!(state.projected_generation, Some(GrantGeneration::FIRST));
     assert!(fixture
         .store
-        .pending_scopes()
+        .pending_scopes(None)
         .await
         .expect("pending scopes")
         .is_empty());
@@ -799,11 +809,18 @@ async fn a_privileged_grant_to_a_remote_account_needs_a_trusted_home() {
             )
             .expect("scope key"),
             rooms: vec![ManagedRoom::new(room.clone()).expect("managed room")],
-            bootstrap: vec![BootstrapGrant {
-                room,
-                subject: subject("owner@trusted.example"),
-                affiliation: RoomAffiliation::Owner,
-            }],
+            bootstrap: vec![
+                BootstrapGrant {
+                    room: room.clone(),
+                    subject: subject(OWNER),
+                    affiliation: RoomAffiliation::Owner,
+                },
+                BootstrapGrant {
+                    room,
+                    subject: subject("owner@trusted.example"),
+                    affiliation: RoomAffiliation::Owner,
+                },
+            ],
         }
     };
     let refused = bootstrap(ScopeLifecycleId::generate());
@@ -829,6 +846,131 @@ async fn a_privileged_grant_to_a_remote_account_needs_a_trusted_home() {
         .await
         .expect("read scope")
         .is_some());
+    // A room whose only owner is a remote account would have nobody who
+    // can administer it: a remote owner's grant is not honoured as one.
+    let mut remote_only = bootstrap(ScopeLifecycleId::generate());
+    remote_only.bootstrap.remove(0);
+    assert!(matches!(
+        fixture.store.enroll_scope(&remote_only, &trusting).await,
+        Err(HostGrantError::LastOwner)
+    ));
+    fixture.close().await;
+}
+
+#[test]
+fn a_privileged_grant_is_honoured_only_for_a_served_account() {
+    for affiliation in RoomAffiliation::ALL {
+        assert_eq!(
+            honoured_affiliation(affiliation, SubjectHome::Served),
+            affiliation
+        );
+        let remote = honoured_affiliation(affiliation, SubjectHome::Remote);
+        match affiliation {
+            RoomAffiliation::Owner | RoomAffiliation::Admin => {
+                assert_eq!(remote, RoomAffiliation::None);
+            }
+            other => assert_eq!(remote, other),
+        }
+        // What is not honoured contributes nothing, member-level access
+        // included; a recorded ban denies whatever the effective column says.
+        for action in HostGrantAction::ALL {
+            assert_eq!(
+                grant_allows(affiliation, affiliation, SubjectHome::Remote, action),
+                affiliation == RoomAffiliation::Member
+                    && affiliation_allows(RoomAffiliation::Member, action),
+                "{affiliation:?} {action:?}"
+            );
+            assert!(!grant_allows(
+                RoomAffiliation::Outcast,
+                affiliation,
+                SubjectHome::Served,
+                action
+            ));
+        }
+    }
+    let served = ServedAccountDomains::new([
+        CanonicalDomain::parse_exact("example.com").expect("canonical domain")
+    ]);
+    assert_eq!(served.home_of(&bare(OWNER)), SubjectHome::Served);
+    // Domains match exactly: neither a subdomain nor a parent is served.
+    for remote in [
+        "owner@sub.example.com",
+        "owner@com",
+        "owner@trusted.example",
+    ] {
+        assert_eq!(
+            served.home_of(&bare(remote)),
+            SubjectHome::Remote,
+            "{remote}"
+        );
+    }
+    assert_eq!(
+        ServedAccountDomains::default().home_of(&bare(OWNER)),
+        SubjectHome::Remote
+    );
+}
+
+#[tokio::test]
+async fn a_remote_privileged_grant_authorizes_no_change_and_keeps_no_room_administered() {
+    let Some(fixture) = GrantFixture::active("hg_remote_initiator").await else {
+        return;
+    };
+    let trusting = issuance_policy(&["trusted.example"]);
+    let remote_owner = "owner@trusted.example";
+    let command = fixture
+        .command(OWNER, remote_owner, RoomAffiliation::Owner)
+        .await;
+    fixture
+        .store
+        .set_affiliation(&command, &trusting)
+        .await
+        .expect("trusted-home owner grant");
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Activated
+    );
+    assert_eq!(
+        fixture.affiliations(remote_owner).await,
+        Some((RoomAffiliation::Owner, RoomAffiliation::Owner))
+    );
+
+    // The remote owner's standing is recorded and effective, and it
+    // authorizes nothing: not a member grant, not a revoke, not a ban.
+    let generation = fixture.generation().await;
+    for (target, affiliation) in [
+        (CAROL, RoomAffiliation::Member),
+        (PEER, RoomAffiliation::None),
+        (SENDER, RoomAffiliation::Outcast),
+        (OWNER, RoomAffiliation::Member),
+    ] {
+        let command = fixture.command(remote_owner, target, affiliation).await;
+        assert!(
+            matches!(
+                fixture.store.set_affiliation(&command, &trusting).await,
+                Err(HostGrantError::InitiatorNotAuthorized)
+            ),
+            "{target} {affiliation:?}"
+        );
+    }
+    assert_eq!(fixture.generation().await, generation);
+    assert_eq!(fixture.affiliations(CAROL).await, None);
+
+    // It does not count as the owner a room must keep either: the last
+    // served owner cannot step down while only the remote owner remains.
+    let step_down = fixture.command(OWNER, OWNER, RoomAffiliation::Member).await;
+    assert!(matches!(
+        fixture.store.set_affiliation(&step_down, &trusting).await,
+        Err(HostGrantError::LastOwner)
+    ));
+    // The served owner still changes the remote owner's standing.
+    let demotion = fixture
+        .command(OWNER, remote_owner, RoomAffiliation::Member)
+        .await;
+    fixture
+        .store
+        .set_affiliation(&demotion, &trusting)
+        .await
+        .expect("demote the remote owner");
     fixture.close().await;
 }
 
@@ -862,6 +1004,13 @@ async fn generation_exhaustion_closes_the_scope_and_no_identity_is_reused() {
 
     // The next operation finds no working generation: the scope is closed at
     // the terminal generation and the change is not made.
+    let digest_before_exhaustion = fixture
+        .store
+        .recorded_marker(fixture.scope.lifecycle, GrantGeneration::FIRST)
+        .await
+        .expect("journal")
+        .expect("enrollment marker")
+        .digest;
     let exhausting = fixture.command(OWNER, PEER, RoomAffiliation::None).await;
     assert!(matches!(
         fixture
@@ -895,6 +1044,10 @@ async fn generation_exhaustion_closes_the_scope_and_no_identity_is_reused() {
     };
     assert_eq!(record.kind, OperationKind::Exhaust);
     assert_eq!(record.generation, GrantGeneration::TERMINAL);
+    // The change it asked for was not made, so the digest it records is the
+    // digest of the grant rows as they stand: the one the scope's last
+    // working operation recorded, not that of the revoke it intended.
+    assert_eq!(record.projection_digest, digest_before_exhaustion);
 
     // Its exact retry repeats the outcome; nothing reopens the scope.
     assert!(matches!(
@@ -942,7 +1095,12 @@ async fn generation_exhaustion_closes_the_scope_and_no_identity_is_reused() {
     assert!(
         !fixture
             .store
-            .candidate_admission(&other.room, &subject(SENDER), HostGrantAction::Read)
+            .candidate_admission(
+                &other.room,
+                &subject(SENDER),
+                HostGrantAction::Read,
+                &served()
+            )
             .await
             .expect("candidate admission")
             .admitted
@@ -965,7 +1123,7 @@ async fn generation_exhaustion_closes_the_scope_and_no_identity_is_reused() {
         .expect("journal")
         .expect("enrollment marker");
     assert!(matches!(
-        fixture.store.activate(&marker).await,
+        activate_host_grant_marker(&fixture.store, &marker).await,
         Err(HostGrantError::ScopeRetired)
     ));
     for (lifecycle, node) in [
@@ -1260,13 +1418,25 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         .await
         .expect("runtime connection");
 
-    // The role matches the profile; the owner's own login does not.
+    // The role matches the profile; the owner's own login does not. The
+    // check a replica runs when it starts yields an attachment for the one
+    // and none for the other.
     runtime
         .verify_runtime_privileges()
         .await
         .expect("restricted runtime role");
     assert!(matches!(
         fixture.store.verify_runtime_privileges().await,
+        Err(HostGrantError::UnsafeRuntimePrivileges {
+            component: "runtime role"
+        })
+    ));
+    let attachment = HostGrantAttachment::verify(&runtime, served())
+        .await
+        .expect("attachment of the restricted runtime role");
+    assert_eq!(attachment.served(), &served());
+    assert!(matches!(
+        HostGrantAttachment::verify(&fixture.store, served()).await,
         Err(HostGrantError::UnsafeRuntimePrivileges {
             component: "runtime role"
         })
@@ -1286,7 +1456,9 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         .await
         .expect("runtime plan");
     assert_eq!(
-        runtime.activate(plan.marker()).await.expect("activation"),
+        activate_host_grant_marker(&runtime, plan.marker())
+            .await
+            .expect("activation"),
         Activation::Activated
     );
     assert!(
@@ -1294,7 +1466,8 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             .candidate_admission(
                 &fixture.scope.room,
                 &subject(CAROL),
-                HostGrantAction::SendMessage
+                HostGrantAction::SendMessage,
+                &served()
             )
             .await
             .expect("runtime read")
@@ -1316,7 +1489,7 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
     };
     assert!(matches!(
         runtime.enroll_scope(&enrollment, &fixture.policy).await,
-        Err(HostGrantError::Database(_))
+        Err(HostGrantError::OwnerPhaseRequired)
     ));
     assert!(fixture
         .store
@@ -1324,6 +1497,43 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         .await
         .expect("read scope")
         .is_none());
+
+    // It cannot retire a scope: retirement stamps the lifecycle ledger,
+    // which the role only reads. Nothing changes, and the owner's login
+    // retires the same scope with the same command.
+    let other = fixture.enroll_another().await;
+    let before = fixture.state(&other).await;
+    let retirement = RetireScope {
+        operation: GrantOperationId::generate(),
+        lifecycle: other.lifecycle,
+        expected_generation: before.generation,
+    };
+    assert!(matches!(
+        runtime.retire_scope(&retirement).await,
+        Err(HostGrantError::OwnerPhaseRequired)
+    ));
+    assert_eq!(fixture.state(&other).await, before);
+    assert!(matches!(
+        fixture
+            .store
+            .operation_outcome(retirement.operation)
+            .await
+            .expect("readback"),
+        OperationOutcome::Absent
+    ));
+    let MutationReceipt::Recorded(retired) = fixture
+        .store
+        .retire_scope(&retirement)
+        .await
+        .expect("owner-phase retirement")
+    else {
+        panic!("a first retirement is recorded");
+    };
+    assert_eq!(retired.kind, OperationKind::Retire);
+    assert_eq!(
+        fixture.state(&other).await.closed_reason,
+        Some(ClosedReason::Retired)
+    );
 
     // It cannot delete or truncate any host-grant row, rewrite the journal,
     // change a room binding, or change the authority incarnation.
@@ -1339,6 +1549,7 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         "TRUNCATE host_grants".to_owned(),
         "DELETE FROM host_grant_scope_lifecycles".to_owned(),
         "UPDATE host_grant_scope_lifecycles SET space_node = 'renamed'".to_owned(),
+        "UPDATE host_grant_scope_lifecycles SET retired_at_ms = 0".to_owned(),
         format!(
             "INSERT INTO host_grant_scope_lifecycles (lifecycle_id, service_jid, space_node, \
              enrolled_at_ms) VALUES ('{}', 'spaces.example.com', 'forged', 0)",
@@ -1388,4 +1599,269 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         .expect("drop the runtime role");
     cluster.close().await;
     admin.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_submissions_of_one_enrollment_record_it_once() {
+    let Some(fixture) = GrantFixture::active("hg_enroll_race").await else {
+        return;
+    };
+    let room = bare(&format!(
+        "raced-{}@muc.example.com",
+        Uuid::new_v4().simple()
+    ));
+    let enrollment = EnrollScope {
+        operation: GrantOperationId::generate(),
+        lifecycle: ScopeLifecycleId::generate(),
+        key: ScopeKey::new(
+            bare("spaces.example.com"),
+            format!("raced-{}", Uuid::new_v4().simple()),
+        )
+        .expect("scope key"),
+        rooms: vec![ManagedRoom::new(room.clone()).expect("managed room")],
+        bootstrap: vec![BootstrapGrant {
+            room,
+            subject: subject(OWNER),
+            affiliation: RoomAffiliation::Owner,
+        }],
+    };
+    // The submissions meet at the lifecycle key. Whichever commits first is
+    // recorded; every other one is its exact retry, not a conflict.
+    let submissions: Vec<_> = (0..6)
+        .map(|_| {
+            let store = fixture.store.clone();
+            let policy = fixture.policy.clone();
+            let enrollment = enrollment.clone();
+            tokio::spawn(async move { store.enroll_scope(&enrollment, &policy).await })
+        })
+        .collect();
+    let mut recorded = Vec::new();
+    let mut replayed = Vec::new();
+    for submission in submissions {
+        match submission
+            .await
+            .expect("enrollment task")
+            .expect("enrollment")
+        {
+            MutationReceipt::Recorded(record) => recorded.push(record),
+            MutationReceipt::Replayed(record) => replayed.push(record),
+        }
+    }
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(replayed.len(), 5);
+    assert!(replayed.iter().all(|record| record == &recorded[0]));
+
+    // The same identity with other input is a conflict, also when it loses
+    // the race instead of arriving afterwards.
+    let mut changed = enrollment.clone();
+    changed.lifecycle = ScopeLifecycleId::generate();
+    changed.key =
+        ScopeKey::new(bare("spaces.example.com"), "another-raced-space").expect("scope key");
+    assert!(matches!(
+        fixture.store.enroll_scope(&changed, &fixture.policy).await,
+        Err(HostGrantError::OperationConflict)
+    ));
+    assert!(fixture
+        .store
+        .scope(changed.lifecycle)
+        .await
+        .expect("read scope")
+        .is_none());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_recovery_pass_pages_through_every_pending_scope() {
+    let Some(fixture) = GrantFixture::enrolled("hg_pending_pages").await else {
+        return;
+    };
+    // Three scopes whose first projection is pending.
+    let mut pending = vec![fixture.scope.lifecycle];
+    for _ in 0..2 {
+        pending.push(fixture.enroll_another().await.lifecycle);
+    }
+    pending.sort_by_key(|lifecycle| lifecycle.to_storage());
+    assert_eq!(
+        fixture
+            .store
+            .pending_scopes(None)
+            .await
+            .expect("first page"),
+        pending
+    );
+    // A page starts after the scope the previous page ended with, so a scope
+    // that stays pending is passed and the ones behind it are still listed.
+    assert_eq!(
+        fixture
+            .store
+            .pending_scopes(Some(pending[0]))
+            .await
+            .expect("page after the first scope"),
+        pending[1..].to_vec()
+    );
+    assert!(fixture
+        .store
+        .pending_scopes(Some(pending[2]))
+        .await
+        .expect("page after the last scope")
+        .is_empty());
+
+    // An activated scope leaves the listing; the others keep their order.
+    let plan = fixture
+        .store
+        .projection_plan(pending[1])
+        .await
+        .expect("projection plan");
+    assert_eq!(
+        activate_host_grant_marker(&fixture.store, plan.marker())
+            .await
+            .expect("activation"),
+        Activation::Activated
+    );
+    assert_eq!(
+        fixture
+            .store
+            .pending_scopes(None)
+            .await
+            .expect("pending scopes"),
+        vec![pending[0], pending[2]]
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn the_lookup_behind_a_legacy_write_is_bounded() {
+    let Some(fixture) = GrantFixture::active("hg_enrolled_lookup").await else {
+        return;
+    };
+    let channel = Object::new(ObjectType::Channel, fixture.scope.channel_id.as_str());
+    assert!(fixture
+        .store
+        .enrolled_object(&channel)
+        .await
+        .expect("enrolled object"));
+
+    // A session holds the room bindings exclusively and does not finish.
+    let blocker = sqlx::PgPool::connect(fixture.ingress.db.database_url())
+        .await
+        .expect("blocking connection");
+    let mut held = blocker.begin().await.expect("blocking transaction");
+    sqlx::query("LOCK TABLE host_grant_rooms IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .expect("hold the room bindings");
+
+    // The lookup gives up within its bound and reports that it could not
+    // decide, which the permission actor turns into a refused write.
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        fixture.store.enrolled_object(&channel).await,
+        Err(HostGrantError::Busy)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    held.rollback().await.expect("release the room bindings");
+    assert!(fixture
+        .store
+        .enrolled_object(&channel)
+        .await
+        .expect("enrolled object"));
+    blocker.close().await;
+    fixture.close().await;
+}
+
+#[test]
+fn an_error_names_its_kind_and_quotes_nothing_it_wraps() {
+    // A wrapped failure can quote stored values; the error's own message and
+    // its kind never do.
+    let wrapped = HostGrantError::ProjectionStore(PermissionError::SpiceDbError(
+        "channel room-1@muc.example.com for owner@example.com".to_owned(),
+    ));
+    assert_eq!(wrapped.kind(), "projection_store");
+    let message = wrapped.to_string();
+    assert!(!message.contains("example.com"), "{message}");
+    assert!(std::error::Error::source(&wrapped).is_some());
+
+    for (error, kind) in [
+        (HostGrantError::Busy, "busy"),
+        (
+            HostGrantError::CommitOutcomeUnknown,
+            "commit_outcome_unknown",
+        ),
+        (HostGrantError::OwnerPhaseRequired, "owner_phase_required"),
+        (HostGrantError::ScopeRetired, "scope_retired"),
+        (
+            HostGrantError::UnsafeRuntimePrivileges {
+                component: "host_grants",
+            },
+            "unsafe_runtime_privileges",
+        ),
+        (
+            HostGrantError::Issuance(IssuanceRefusal::UntrustedHome),
+            "issuance",
+        ),
+        (
+            HostGrantError::Projection(ProjectionRefusal::Repeated),
+            "projection_refused",
+        ),
+    ] {
+        assert_eq!(error.kind(), kind);
+        assert!(!error.to_string().contains('@'), "{error}");
+    }
+}
+
+#[test]
+fn a_projection_states_each_room_and_each_grant_once() {
+    let lifecycle = ScopeLifecycleId::generate();
+    let stamp = format!(
+        "{}_1_{}_{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple(),
+        "0".repeat(64)
+    );
+    let marker = ProjectionMarker::parse(lifecycle, &stamp).expect("canonical stamp");
+    let grant = |channel: &str, account: &str, affiliation| ProjectedGrant {
+        channel_id: channel.to_owned(),
+        subject: subject(account),
+        affiliation,
+    };
+    let intent = |channels: &[&str], grants: Vec<ProjectedGrant>| ProjectionIntent {
+        marker: marker.clone(),
+        channels: channels
+            .iter()
+            .map(|channel| (*channel).to_owned())
+            .collect(),
+        grants,
+    };
+
+    // One subject in two rooms and two subjects in one room are distinct.
+    intent(
+        &["room-a", "room-b"],
+        vec![
+            grant("room-a", OWNER, RoomAffiliation::Owner),
+            grant("room-b", OWNER, RoomAffiliation::Member),
+            grant("room-a", PEER, RoomAffiliation::Member),
+        ],
+    )
+    .check_distinct()
+    .expect("distinct rooms and grants");
+
+    // A subject's grant stated twice for one room would update the same
+    // relationships twice in one request, whatever the two affiliations
+    // are; so would a room named twice.
+    assert_eq!(
+        intent(
+            &["room-a"],
+            vec![
+                grant("room-a", OWNER, RoomAffiliation::Owner),
+                grant("room-a", OWNER, RoomAffiliation::Outcast),
+            ],
+        )
+        .check_distinct(),
+        Err(ProjectionRefusal::Repeated)
+    );
+    assert_eq!(
+        intent(&["room-a", "room-a"], Vec::new()).check_distinct(),
+        Err(ProjectionRefusal::Repeated)
+    );
 }

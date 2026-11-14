@@ -14,13 +14,17 @@ use crate::permissions::PermissionError;
 /// Every variant except [`Self::CommitOutcomeUnknown`] and
 /// [`Self::ScopeExhausted`] means the call changed nothing.
 /// `CommitOutcomeUnknown` is resolved by reading the operation back under
-/// its identity, never by assuming a rollback. No variant carries a JID, a
-/// room or a Space identifier.
+/// its identity, never by assuming a rollback.
+///
+/// No variant carries a JID, a room or a Space identifier, and neither does
+/// any variant's own message: a wrapped database or projection-store failure
+/// is reachable only as the error's source, whose text may quote stored
+/// values. Log [`Self::kind`], not the source chain.
 #[derive(Debug, Error)]
 pub enum HostGrantError {
     #[error("the host-grant authority requires PostgreSQL")]
     PostgresRequired,
-    #[error(transparent)]
+    #[error("a statement of the host-grant store failed")]
     Database(#[from] DatabaseError),
     #[error("the host-grant transaction's lock and statement bounds could not be installed")]
     BoundsUnproven,
@@ -28,12 +32,21 @@ pub enum HostGrantError {
     EpochUnproven(#[source] IngressSubstrateError),
     #[error("a lock or statement bound expired before the host-grant transaction committed")]
     Busy,
+    /// The commit was not acknowledged, or the task that owns the
+    /// transaction ended without reporting. Either way the transaction may
+    /// have committed.
     #[error(
         "the host-grant commit was not acknowledged; read the operation back under its identity"
     )]
     CommitOutcomeUnknown,
-    #[error("the task that owns the host-grant transaction did not finish")]
-    OwnerTaskFailed,
+    /// PostgreSQL refused a statement for the role that ran it. Enrollment
+    /// and retirement write the lifecycle ledger, which the runtime role
+    /// only reads, so this is what either returns on a runtime handle.
+    #[error(
+        "PostgreSQL refused a statement of the operation for this role; enrollment and \
+         retirement run in the owner phase"
+    )]
+    OwnerPhaseRequired,
     #[error("a stored host-grant row has an invalid {field}")]
     CorruptRow { field: &'static str },
     #[error("the runtime role or its privileges are unsafe at {component}")]
@@ -84,7 +97,7 @@ pub enum HostGrantError {
     Issuance(#[from] IssuanceRefusal),
     #[error(transparent)]
     Projection(#[from] ProjectionRefusal),
-    #[error("the projection store did not answer: {0}")]
+    #[error("the projection store gave no acknowledged answer")]
     ProjectionStore(#[source] PermissionError),
 }
 
@@ -100,12 +113,63 @@ impl From<GuardedStoreWriterError> for HostGrantError {
 
 impl HostGrantError {
     /// Classify a failure of a statement before the commit: an expired lock
-    /// or statement bound is [`Self::Busy`], and nothing was changed.
+    /// or statement bound is [`Self::Busy`], a statement the role may not
+    /// run is [`Self::OwnerPhaseRequired`], and nothing was changed.
     pub(crate) fn from_database(error: DatabaseError) -> Self {
         if crate::ingress_uow::is_database_timeout(&error) {
             Self::Busy
+        } else if insufficient_privilege(&error) {
+            Self::OwnerPhaseRequired
         } else {
             Self::Database(error)
         }
     }
+
+    /// A stable name of the failure for logs and metrics. It names the
+    /// variant and nothing the variant wraps, so it never holds a JID, a
+    /// room, a Space or an operation identifier.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::PostgresRequired => "postgres_required",
+            Self::Database(_) => "database",
+            Self::BoundsUnproven => "bounds_unproven",
+            Self::EpochUnproven(_) => "epoch_unproven",
+            Self::Busy => "busy",
+            Self::CommitOutcomeUnknown => "commit_outcome_unknown",
+            Self::OwnerPhaseRequired => "owner_phase_required",
+            Self::CorruptRow { .. } => "corrupt_row",
+            Self::UnsafeRuntimePrivileges { .. } => "unsafe_runtime_privileges",
+            Self::UnexpectedExecutableSchema { .. } => "unexpected_executable_schema",
+            Self::InvalidTimeoutSetting { .. } => "invalid_timeout_setting",
+            Self::InvalidScopeKey => "invalid_scope_key",
+            Self::UnmanagedRoom => "unmanaged_room",
+            Self::InvalidEnrollment => "invalid_enrollment",
+            Self::ScopeAlreadyEnrolled => "scope_already_enrolled",
+            Self::RoomAlreadyBound => "room_already_bound",
+            Self::UnknownScope => "unknown_scope",
+            Self::UnknownRoom => "unknown_room",
+            Self::StaleGeneration { .. } => "stale_generation",
+            Self::OperationConflict => "operation_conflict",
+            Self::InitiatorNotAuthorized => "initiator_not_authorized",
+            Self::LastOwner => "last_owner",
+            Self::ScopeRetired => "scope_retired",
+            Self::ScopeExhausted => "scope_exhausted",
+            Self::GrantLimit => "grant_limit",
+            Self::IncarnationChanged => "incarnation_changed",
+            Self::PolicyVersionUnsupported => "policy_version_unsupported",
+            Self::Subject(_) => "subject",
+            Self::Issuance(_) => "issuance",
+            Self::Projection(_) => "projection_refused",
+            Self::ProjectionStore(_) => "projection_store",
+        }
+    }
+}
+
+/// PostgreSQL refused the statement for the role that ran it.
+fn insufficient_privilege(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Internal(sqlx::Error::Database(error))
+            if error.code().as_deref() == Some("42501")
+    )
 }

@@ -7,8 +7,9 @@
 //! projection is verified and activated, recovery by another replica after
 //! the first one stopped at each stage, a lost and a never-sent projection
 //! write, a delayed writer that cannot apply an older grant after a newer
-//! revoke, projection states that are never written over, and the refusal
-//! of legacy tuple writes for an enrolled scope.
+//! revoke, projection states that are never written over, the refusal of
+//! legacy tuple writes for an enrolled scope, and a projection read that
+//! does not answer while the permission actor keeps serving.
 //!
 //! The cases are `#[ignore]`d like the other `live_spicedb_` suites: they
 //! need `WADDLE_TEST_SPICEDB_ENDPOINT`, `WADDLE_TEST_SPICEDB_PRESHARED_KEY`
@@ -28,7 +29,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use host_grant_support::{
-    bare, issuance_policy, refusal, room_submission, subject, GrantFixture, OWNER, PEER,
+    bare, issuance_policy, refusal, room_submission, served, subject, GrantFixture, OWNER, PEER,
     PEER_RESOURCE, SENDER,
 };
 use kameo::actor::{ActorRef, Spawn};
@@ -56,6 +57,7 @@ use waddle_server::permissions::{
     WriteHostGrantProjection, WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION,
     AUTHZ_SCHEMA_MARKER_DEFINITION,
 };
+use waddle_server::test_support::activate_host_grant_marker;
 use waddle_server::ServerConfig;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
@@ -221,11 +223,14 @@ impl Live {
     }
 
     /// Replace whatever markers the lifecycle holds by `stamps`, verbatim.
+    /// One request states a relationship once: a marker that stays is
+    /// touched and not deleted as well.
     async fn set_stamps(&self, stamps: &[String]) {
         let mut updates: Vec<RelationshipUpdate> = self
             .stamps()
             .await
             .iter()
+            .filter(|held| !stamps.contains(held))
             .map(|stamp| RelationshipUpdate::delete(self.marker_relationship(stamp)))
             .collect();
         updates.extend(
@@ -278,7 +283,7 @@ async fn spicedb_allows(
 async fn sql_admits(fixture: &GrantFixture, account: &str, action: HostGrantAction) -> bool {
     fixture
         .store
-        .candidate_admission(&fixture.scope.room, &subject(account), action)
+        .candidate_admission(&fixture.scope.room, &subject(account), action, &served())
         .await
         .expect("candidate admission")
         .admitted
@@ -744,9 +749,7 @@ async fn live_spicedb_a_delayed_grant_cannot_follow_a_newer_revoke() {
     );
     // The delayed activation is for an operation that is no longer current.
     assert_eq!(
-        stale
-            .store()
-            .activate(grant_plan.marker())
+        activate_host_grant_marker(stale.store(), grant_plan.marker())
             .await
             .expect("delayed activation"),
         Activation::Superseded
@@ -1098,6 +1101,203 @@ async fn live_spicedb_legacy_writes_are_refused_for_an_enrolled_scope_after_a_re
     live.close().await;
 }
 
+/// A TCP relay in front of the disposable SpiceDB that can stop forwarding,
+/// so that a request sent through it stays unanswered until its deadline.
+struct StallableRelay {
+    endpoint: String,
+    stalled: Arc<std::sync::atomic::AtomicBool>,
+    accept: tokio::task::JoinHandle<()>,
+}
+
+impl StallableRelay {
+    async fn start(upstream_endpoint: &str) -> Self {
+        let upstream = upstream_endpoint
+            .strip_prefix("http://")
+            .expect("the disposable SpiceDB endpoint is a plaintext http:// URL")
+            .trim_end_matches('/')
+            .to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let endpoint = format!("http://{}", listener.local_addr().expect("relay address"));
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let accept = tokio::spawn({
+            let stalled = Arc::clone(&stalled);
+            async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else {
+                        continue;
+                    };
+                    let (client_read, client_write) = client.into_split();
+                    let (server_read, server_write) = server.into_split();
+                    tokio::spawn(Self::forward(
+                        client_read,
+                        server_write,
+                        Arc::clone(&stalled),
+                    ));
+                    tokio::spawn(Self::forward(
+                        server_read,
+                        client_write,
+                        Arc::clone(&stalled),
+                    ));
+                }
+            }
+        });
+        Self {
+            endpoint,
+            stalled,
+            accept,
+        }
+    }
+
+    /// Copy one direction of a connection, holding what was read for as
+    /// long as the relay is stalled.
+    async fn forward(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        stalled: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buffer = vec![0_u8; 16 * 1024];
+        loop {
+            let read = match from.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => read,
+            };
+            // The flag is the condition; the interval only spaces the polls.
+            while stalled.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if to.write_all(&buffer[..read]).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    fn stall(&self, stalled: bool) {
+        self.stalled
+            .store(stalled, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for StallableRelay {
+    fn drop(&mut self) {
+        self.accept.abort();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_a_projection_read_that_does_not_answer_does_not_hold_the_permission_actor() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_projection_stall").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    // The first projection, through an actor that reaches SpiceDB directly.
+    live.replica()
+        .await
+        .reconcile(lifecycle)
+        .await
+        .expect("first pass");
+
+    // A replica whose permission actor reaches SpiceDB through the relay.
+    let (endpoint, preshared_key) = disposable_spicedb_env();
+    let relay = StallableRelay::start(&endpoint).await;
+    let mut config = ServerConfig::test_homeserver();
+    config.spicedb = Some(SpiceDbConfig {
+        endpoint: relay.endpoint.clone(),
+        preshared_key,
+        insecure: true,
+    });
+    let backend = PermissionActor::from_server_config(&config)
+        .await
+        .expect("SpiceDB backend through the relay");
+    let actor = PermissionActor::spawn(backend.with_host_grant_store(live.fixture.store.clone()));
+    let authority = HostGrantAuthority::new(
+        live.fixture.store.clone(),
+        actor.clone(),
+        live.fixture.policy.clone(),
+    );
+    let plan = authority
+        .store()
+        .projection_plan(lifecycle)
+        .await
+        .expect("plan");
+    let observation = authority
+        .observe(&plan)
+        .await
+        .expect("observation through the relay");
+    assert!(HostGrantAuthority::verified(&plan, &observation));
+
+    // SpiceDB stops answering. An observation is now in flight until its
+    // read deadline.
+    relay.stall(true);
+    let stalled = tokio::spawn({
+        let authority = authority.clone();
+        let plan = plan.clone();
+        async move { authority.observe(&plan).await }
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(!stalled.is_finished());
+
+    // The actor answers what it can decide without SpiceDB meanwhile: a
+    // legacy write to the scope's channel is refused from PostgreSQL. It
+    // does not wait for the observation, whose reads run outside the
+    // actor's mailbox turn.
+    let started = std::time::Instant::now();
+    let refused = actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                live.channel(),
+                Relation::new("member"),
+                Subject::user(CAROL),
+            ),
+        })
+        .await;
+    assert!(matches!(
+        refused,
+        Err(SendError::HandlerError(
+            PermissionError::HostGrantScopeEnrolled
+        ))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!stalled.is_finished());
+
+    // The observation ends at its deadline with an unknown outcome, and a
+    // pass reports the projection as unknown without changing anything.
+    assert!(matches!(
+        stalled.await.expect("observation task"),
+        Err(HostGrantError::ProjectionStore(_))
+    ));
+    live.fixture
+        .set(OWNER, CAROL, RoomAffiliation::Member)
+        .await
+        .expect("grant");
+    assert_eq!(
+        authority.reconcile(lifecycle).await.expect("stalled pass"),
+        Reconciliation::ProjectionUnknown
+    );
+    assert!(!sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
+
+    // With SpiceDB answering again the next pass activates the grant.
+    relay.stall(false);
+    let generation = live.fixture.generation().await;
+    let mut outcome = authority.reconcile(lifecycle).await.expect("pass");
+    // Requests the stalled passes left in flight may still be draining; a
+    // pass that meets them reports the projection as unknown and the next
+    // one starts over.
+    for _ in 0..20 {
+        if outcome != Reconciliation::ProjectionUnknown {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        outcome = authority.reconcile(lifecycle).await.expect("pass");
+    }
+    assert_eq!(outcome, Reconciliation::Activated(generation));
+    assert!(sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
+    drop(relay);
+    live.close().await;
+}
+
 /// Run this test binary's replica entry as a separate process serving the
 /// fixture's scope, and wait for it to exit.
 async fn replica_process(live: &Live, role: &str, vars: &[(&str, String)]) -> std::process::Output {
@@ -1208,9 +1408,7 @@ async fn live_spicedb_replica_process_entry() {
                 }
                 if stage >= 3 {
                     assert_eq!(
-                        authority
-                            .store()
-                            .activate(plan.marker())
+                        activate_host_grant_marker(authority.store(), plan.marker())
                             .await
                             .expect("activation"),
                         Activation::Activated

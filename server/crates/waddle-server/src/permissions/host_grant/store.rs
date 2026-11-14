@@ -13,6 +13,11 @@
 //! Each mutation runs on a task of its own: a caller that stops waiting
 //! does not abandon the transaction, which resolves either way and is found
 //! again by its operation identity.
+//!
+//! Enrollment and retirement are owner-phase operations. Both write the
+//! lifecycle ledger, which the runtime role may only read, so PostgreSQL
+//! refuses either on a runtime handle and the store reports
+//! [`HostGrantError::OwnerPhaseRequired`].
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -21,8 +26,9 @@ use std::time::Duration;
 use chrono::Utc;
 use jid::BareJid;
 
+use super::authority::VerifiedProjection;
 use super::error::HostGrantError;
-use super::issuance::{IssuanceBasis, IssuancePolicy};
+use super::issuance::{IssuanceBasis, IssuancePolicy, ServedAccountDomains, SubjectHome};
 use super::marker::ProjectionMarker;
 use super::model::{
     AdmissionState, AuthorityIncarnation, CandidateAdmission, ClosedReason, EnrollScope,
@@ -31,19 +37,26 @@ use super::model::{
     RoomAffiliation, ScopeLifecycleId, ScopeState, SetAffiliation, HOST_GRANT_POLICY_VERSION,
     HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
 };
-use super::policy::{affiliation_allows, initiator_may_change, HostGrantAction};
+use super::policy::{grant_allows, honoured_affiliation, initiator_may_change, HostGrantAction};
 use super::projection::{projection_digest, ProjectedGrant, ProjectionIntent, ProjectionPlan};
 use crate::db::read_only_timeout::{bound_postgres_waits, ReadOnlyTimeoutError};
 use crate::db::{Database, DatabaseDriver, Row, Transaction};
-use crate::ingress_substrate::{begin_guarded_store_writer, EnteredTransaction};
+use crate::ingress_substrate::{
+    begin_guarded_store_writer, set_local_transaction_timeouts, EnteredTransaction,
+};
 use crate::permissions::{Object, ObjectType};
 
 /// Longest a store transaction waits for a row lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest any one statement of a store transaction runs.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Most scopes one recovery pass lists.
-const PENDING_SCOPE_LIMIT: i64 = 256;
+/// Most scopes one page of a recovery pass lists.
+const PENDING_SCOPE_PAGE: i64 = 256;
+/// Longest the lookup behind a legacy permission write waits for a lock, and
+/// longest it runs. The lookup reads one indexed row and takes no row lock;
+/// the bounds keep a stalled database from holding the permission actor.
+const ENROLLED_LOOKUP_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+const ENROLLED_LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const SCOPE_COLUMNS: &str = "lifecycle_id, authority_incarnation, policy_version, generation, \
      operation_id, projected_generation, admission_state, closed_reason";
@@ -167,9 +180,12 @@ impl HostGrantStore {
     /// grants, closed until the first projection is verified and activated.
     ///
     /// Every bootstrap grant passes `policy`, so a privileged or moderator
-    /// grant to a remote JID is refused unless its home is a trusted home.
-    /// The transaction inserts into relations the runtime role may only
-    /// read, so it succeeds only on the owner's handle.
+    /// grant to a remote JID is refused unless its home is a trusted home,
+    /// and every room starts with an owner of a served account domain.
+    ///
+    /// Owner phase only: the transaction inserts into relations the runtime
+    /// role may only read. On a runtime handle it is refused with
+    /// [`HostGrantError::OwnerPhaseRequired`] and changes nothing.
     pub async fn enroll_scope(
         &self,
         command: &EnrollScope,
@@ -195,13 +211,24 @@ impl HostGrantStore {
         policy: &IssuancePolicy,
     ) -> Result<MutationReceipt, HostGrantError> {
         let basis = policy.check(&command.subject, command.affiliation)?;
+        let served = policy.served_account_domains().clone();
         let store = self.clone();
         let command = command.clone();
         let mode = commit_mode();
-        own(async move { store.set_affiliation_owned(&command, basis, mode).await }).await
+        own(async move {
+            store
+                .set_affiliation_owned(&command, basis, &served, mode)
+                .await
+        })
+        .await
     }
 
     /// Close a scope for good. Its grants stop admitting at the commit.
+    ///
+    /// Owner phase only: retirement stamps the scope's row of the lifecycle
+    /// ledger, which the runtime role may only read. On a runtime handle it
+    /// is refused with [`HostGrantError::OwnerPhaseRequired`] and changes
+    /// nothing.
     pub async fn retire_scope(
         &self,
         command: &RetireScope,
@@ -250,17 +277,25 @@ impl HostGrantStore {
         Ok(grants)
     }
 
-    /// The scopes that hold an operation whose projection is not yet
-    /// verified and activated, oldest update first.
-    pub async fn pending_scopes(&self) -> Result<Vec<ScopeLifecycleId>, HostGrantError> {
+    /// One page of the scopes that hold an operation whose projection is
+    /// not yet verified and activated, in lifecycle order, starting after
+    /// `after`. A caller that follows the pages to an empty one has seen
+    /// every pending scope, so a scope that stays pending (a contradiction,
+    /// an unreachable projection) never hides another.
+    pub async fn pending_scopes(
+        &self,
+        after: Option<ScopeLifecycleId>,
+    ) -> Result<Vec<ScopeLifecycleId>, HostGrantError> {
+        let after = after.map_or_else(String::new, ScopeLifecycleId::to_storage);
         let mut tx = self.begin_read().await?;
         let mut rows = tx
             .query(
                 "SELECT lifecycle_id FROM host_grant_scopes \
                  WHERE projected_generation < generation \
                    AND (closed_reason IS NULL OR closed_reason = 'enrolled') \
-                 ORDER BY updated_at_ms, lifecycle_id LIMIT ?",
-                crate::db_params![PENDING_SCOPE_LIMIT],
+                   AND lifecycle_id > ? \
+                 ORDER BY lifecycle_id LIMIT ?",
+                crate::db_params![after, PENDING_SCOPE_PAGE],
             )
             .await?;
         let mut scopes = Vec::new();
@@ -276,13 +311,15 @@ impl HostGrantStore {
     }
 
     /// Read the policy state for one subject and action outside any
-    /// acceptance transaction. The answer is a candidate: it holds no lock
-    /// and acceptance decides again.
+    /// acceptance transaction, honouring grants as admission does for a
+    /// deployment that serves `served`. The answer is a candidate: it holds
+    /// no lock and acceptance decides again.
     pub async fn candidate_admission(
         &self,
         room: &BareJid,
         subject: &GrantSubject,
         action: HostGrantAction,
+        served: &ServedAccountDomains,
     ) -> Result<CandidateAdmission, HostGrantError> {
         let mut tx = self.begin_read().await?;
         let mut rows = tx
@@ -325,7 +362,7 @@ impl HostGrantStore {
         tx.rollback().await?;
         let admitted = scope_admits(&scope, current)
             && held.is_some_and(|(recorded, effective)| {
-                recorded != RoomAffiliation::Outcast && affiliation_allows(effective, action)
+                grant_allows(recorded, effective, served.home_of(subject.jid()), action)
             });
         Ok(CandidateAdmission {
             admitted,
@@ -352,9 +389,24 @@ impl HostGrantStore {
                 return Ok(false)
             }
         };
-        let connection = self.db.guard().await?;
-        let mut rows = connection.query(sql, crate::db_params![id]).await?;
-        Ok(rows.next().await?.is_some())
+        let mut tx = self.db.begin().await?;
+        if !set_local_transaction_timeouts(
+            &mut tx,
+            ENROLLED_LOOKUP_LOCK_TIMEOUT,
+            ENROLLED_LOOKUP_STATEMENT_TIMEOUT,
+        )
+        .await?
+        {
+            return Err(HostGrantError::BoundsUnproven);
+        }
+        let mut rows = tx
+            .query(sql, crate::db_params![id])
+            .await
+            .map_err(HostGrantError::from_database)?;
+        let enrolled = rows.next().await?.is_some();
+        drop(rows);
+        tx.rollback().await?;
+        Ok(enrolled)
     }
 
     /// The canonical state a reconciliation projects, read in one snapshot.
@@ -446,16 +498,30 @@ impl HostGrantStore {
     /// Make the grants of a verified projection effective, if the operation
     /// it projected is still the scope's current one.
     ///
-    /// The comparison covers the lifecycle, the authority incarnation, the
+    /// The witness is what verification produces after it read the
+    /// projection back and found exactly the canonical intent
+    /// (`HostGrantAuthority`); nothing else can ask for an activation. The
+    /// comparison covers the lifecycle, the authority incarnation, the
     /// generation, the operation and the policy version, under the scope's
     /// guard. An activation prepared for an operation that has since been
     /// superseded changes nothing.
-    pub async fn activate(&self, marker: &ProjectionMarker) -> Result<Activation, HostGrantError> {
+    pub(crate) async fn activate(
+        &self,
+        verified: &VerifiedProjection,
+    ) -> Result<Activation, HostGrantError> {
         let store = self.clone();
-        let marker = marker.clone();
+        let marker = verified.marker().clone();
         own(async move { store.activate_owned(&marker).await }).await
     }
 
+    /// Enroll, and answer a conflict with what the journal holds by then.
+    ///
+    /// An enrollment has no guard to wait on before its first insert: a
+    /// concurrent submission of the same operation meets the first one at a
+    /// unique key instead, after the first committed. The journal is read
+    /// again at that point, so an exact retry returns the recorded outcome
+    /// and the same identity with other input is a conflict, whichever of
+    /// the two submissions reached the key first.
     async fn enroll_owned(
         &self,
         command: &EnrollScope,
@@ -463,6 +529,31 @@ impl HostGrantStore {
         mode: CommitMode,
     ) -> Result<MutationReceipt, HostGrantError> {
         let fingerprint = command.fingerprint();
+        match self.enroll_once(command, bases, &fingerprint, mode).await {
+            Err(
+                conflict @ (HostGrantError::ScopeAlreadyEnrolled
+                | HostGrantError::RoomAlreadyBound
+                | HostGrantError::Database(_)),
+            ) => {
+                let mut tx = self.begin_read().await?;
+                let recorded = load_operation(&mut tx, command.operation).await?;
+                tx.rollback().await?;
+                match recorded {
+                    Some(recorded) => recorded.replay(&fingerprint),
+                    None => Err(conflict),
+                }
+            }
+            outcome => outcome,
+        }
+    }
+
+    async fn enroll_once(
+        &self,
+        command: &EnrollScope,
+        bases: &[IssuanceBasis],
+        fingerprint: &str,
+        mode: CommitMode,
+    ) -> Result<MutationReceipt, HostGrantError> {
         let lifecycle = command.lifecycle.to_storage();
         let operation = command.operation.to_storage();
         let now = Utc::now().timestamp_millis();
@@ -472,7 +563,7 @@ impl HostGrantStore {
             .map_err(statement_failure)?
         {
             tx.rollback().await?;
-            return recorded.replay(&fingerprint);
+            return recorded.replay(fingerprint);
         }
         let incarnation = load_incarnation(&mut tx).await.map_err(statement_failure)?;
         let inserted = tx
@@ -585,7 +676,7 @@ impl HostGrantStore {
             authority_incarnation: incarnation,
             projection_digest: digest,
         };
-        insert_operation(&mut tx, &record, &fingerprint, None, now).await?;
+        insert_operation(&mut tx, &record, fingerprint, None, now).await?;
         commit(tx, mode).await?;
         Ok(MutationReceipt::Recorded(record))
     }
@@ -594,6 +685,7 @@ impl HostGrantStore {
         &self,
         command: &SetAffiliation,
         basis: IssuanceBasis,
+        served: &ServedAccountDomains,
         mode: CommitMode,
     ) -> Result<MutationReceipt, HostGrantError> {
         let fingerprint = command.fingerprint();
@@ -639,24 +731,38 @@ impl HostGrantStore {
             let held = in_room(&command.subject);
             let recorded = held.map_or(RoomAffiliation::None, |grant| grant.affiliation);
             let effective = held.map_or(RoomAffiliation::None, |grant| grant.effective_affiliation);
-            // The initiator's standing is what is effective now, under the
-            // guard: a grant that was revoked, demoted or never activated
-            // authorizes nothing, whatever the initiator saw earlier.
+            // The initiator's standing is what is effective and honoured
+            // now, under the guard: a grant that was revoked, demoted or
+            // never activated authorizes nothing, whatever the initiator saw
+            // earlier, and neither does a privileged grant of an account
+            // this deployment does not serve.
             let initiator = in_room(&command.initiator)
                 .filter(|grant| grant.affiliation != RoomAffiliation::Outcast)
-                .map_or(RoomAffiliation::None, |grant| grant.effective_affiliation);
+                .map_or(RoomAffiliation::None, |grant| {
+                    honoured_affiliation(
+                        grant.effective_affiliation,
+                        served.home_of(grant.subject.jid()),
+                    )
+                });
             if !initiator_may_change(initiator, recorded.max(effective), command.affiliation) {
                 return Err(HostGrantError::InitiatorNotAuthorized);
             }
-            // The room keeps an owner whose standing is effective: an owner
-            // that is recorded and still waits for its projection cannot yet
-            // administer the room.
-            let owner = RoomAffiliation::Owner;
+            // The room keeps an owner who can administer it: one whose
+            // standing is recorded, effective and honoured. An owner that
+            // still waits for its projection cannot yet administer the room,
+            // and an owner of an account this deployment does not serve is
+            // not honoured as one.
+            let administers = |grant: &GrantRow| {
+                grant.affiliation == RoomAffiliation::Owner
+                    && grant.effective_affiliation == RoomAffiliation::Owner
+                    && served.home_of(grant.subject.jid()) == SubjectHome::Served
+            };
             let other_owners = grants
                 .iter()
                 .filter(|grant| grant.room == command.room && grant.subject != command.subject)
-                .any(|grant| grant.affiliation == owner && grant.effective_affiliation == owner);
-            let stays_owner = command.affiliation == owner && effective == owner;
+                .any(administers);
+            let stays_owner =
+                command.affiliation == RoomAffiliation::Owner && held.is_some_and(administers);
             if !other_owners && !stays_owner {
                 return Err(HostGrantError::LastOwner);
             }
@@ -688,7 +794,7 @@ impl HostGrantStore {
         };
         let Some(generation) = scope.generation.next() else {
             return self
-                .exhaust(tx, &scope, command.operation, &fingerprint, digest, mode)
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
                 .await;
         };
         // A reduction takes effect with this commit. An increase keeps the
@@ -787,12 +893,27 @@ impl HostGrantStore {
             tx.rollback().await?;
             return Err(refusal);
         }
-        let digest = current_digest(&mut tx, &scope).await?;
+        // The retirement stamp on the lifecycle ledger is what makes this an
+        // owner-phase operation: the runtime role cannot update the ledger,
+        // so PostgreSQL refuses the statement on a runtime handle before the
+        // scope's state is touched.
+        let stamped = tx
+            .execute(
+                "UPDATE host_grant_scope_lifecycles SET retired_at_ms = ? \
+                 WHERE lifecycle_id = ? AND retired_at_ms IS NULL",
+                crate::db_params![now, scope.lifecycle.to_storage()],
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+        if stamped != 1 {
+            return Err(corrupt("lifecycle retirement"));
+        }
         let Some(generation) = scope.generation.next() else {
             return self
-                .exhaust(tx, &scope, command.operation, &fingerprint, digest, mode)
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
                 .await;
         };
+        let digest = current_digest(&mut tx, &scope).await?;
         let updated = tx
             .execute(
                 "UPDATE host_grant_scopes SET generation = ?, operation_id = ?, \
@@ -827,17 +948,18 @@ impl HostGrantStore {
     /// Close a scope whose next operation has no working generation left.
     /// The scope moves to the terminal generation, closed, and the command
     /// that met the limit is recorded as the operation that exhausted it;
-    /// the change it asked for is not made.
+    /// the change it asked for is not made. The recorded digest is therefore
+    /// that of the grant rows as they stand, whatever the command intended.
     async fn exhaust(
         &self,
         mut tx: EnteredTransaction<'_>,
         scope: &ScopeState,
         operation: GrantOperationId,
         fingerprint: &str,
-        digest: ProjectionDigest,
         mode: CommitMode,
     ) -> Result<MutationReceipt, HostGrantError> {
         let now = Utc::now().timestamp_millis();
+        let digest = current_digest(&mut tx, scope).await?;
         let updated = tx
             .execute(
                 "UPDATE host_grant_scopes SET generation = ?, operation_id = ?, \
@@ -929,12 +1051,16 @@ impl HostGrantStore {
 
 /// Run a transaction on a task of its own, so that a caller that stops
 /// waiting does not abandon it.
+///
+/// A task that ends without reporting (it panicked, or the runtime stopped
+/// it) may have committed before it did, so its outcome is unknown, like an
+/// unacknowledged commit: the caller reads the operation back.
 async fn own<T: Send + 'static>(
     work: impl Future<Output = Result<T, HostGrantError>> + Send + 'static,
 ) -> Result<T, HostGrantError> {
     tokio::spawn(work)
         .await
-        .map_err(|_| HostGrantError::OwnerTaskFailed)?
+        .map_err(|_| HostGrantError::CommitOutcomeUnknown)?
 }
 
 /// End a mutation's transaction. A commit that is not acknowledged is
@@ -1005,12 +1131,14 @@ fn validate_enrollment(
         }
         bases.push(policy.check(&grant.subject, grant.affiliation)?);
     }
-    // Every room starts with an owner: no later operation can add the first.
+    // Every room starts with an owner who can administer it, one of a
+    // served account domain: no later operation can add the first.
     for room in &command.rooms {
-        let owned = command
-            .bootstrap
-            .iter()
-            .any(|grant| &grant.room == room.room() && grant.affiliation == RoomAffiliation::Owner);
+        let owned = command.bootstrap.iter().zip(&bases).any(|(grant, basis)| {
+            &grant.room == room.room()
+                && grant.affiliation == RoomAffiliation::Owner
+                && *basis == IssuanceBasis::Local
+        });
         if !owned {
             return Err(HostGrantError::LastOwner);
         }

@@ -39,7 +39,9 @@ pub enum IngressUowError {
     ExtensionRemoteRoomUnsupported,
     #[error("room snapshot generation is stale")]
     RoomGenerationStale,
-    #[error("a sealed room manifest names a recipient the host-grant authority did not admit")]
+    #[error(
+        "a sealed room manifest holds work outside the audience the host-grant authority admitted"
+    )]
     HostGrantAudienceUnproven,
     #[error("ingress frontier is stale")]
     IngressFrontierStale,

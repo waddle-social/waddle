@@ -16,7 +16,14 @@
 //!   need what `SendMessage` needs and an outcast author loses both.
 //! - No explicit affiliation confers `Delete`: the schema grants channel
 //!   deletion through the parent Space only.
+//! - An owner or admin grant is honoured only for an account of a domain
+//!   this deployment serves (ADR-0020 D8). For any other account it
+//!   contributes nothing: neither `moderate` nor the `read` and
+//!   `send_message` the table would derive from it. Honouring such a grant
+//!   for a trusted home needs the authentication strength of the stream the
+//!   principal arrived on, which this boundary does not see.
 
+use super::issuance::SubjectHome;
 use super::model::RoomAffiliation;
 
 /// An action the policy protects.
@@ -61,7 +68,31 @@ pub fn affiliation_allows(affiliation: RoomAffiliation, action: HostGrantAction)
     }
 }
 
-/// Whether an initiator whose effective affiliation is `initiator` may
+/// The standing an effective affiliation is honoured as for a subject homed
+/// at `home`. A privileged or moderator standing of an account this
+/// deployment does not serve is honoured as no standing at all.
+pub fn honoured_affiliation(effective: RoomAffiliation, home: SubjectHome) -> RoomAffiliation {
+    if home == SubjectHome::Remote && effective.confers_privilege_or_moderation() {
+        RoomAffiliation::None
+    } else {
+        effective
+    }
+}
+
+/// Whether a subject whose grant row holds `recorded` and `effective`, and
+/// whose account is homed at `home`, may perform `action`. A recorded
+/// `Outcast` denies every action whatever the effective column holds.
+pub fn grant_allows(
+    recorded: RoomAffiliation,
+    effective: RoomAffiliation,
+    home: SubjectHome,
+    action: HostGrantAction,
+) -> bool {
+    recorded != RoomAffiliation::Outcast
+        && affiliation_allows(honoured_affiliation(effective, home), action)
+}
+
+/// Whether an initiator whose honoured affiliation is `initiator` may
 /// change a subject's affiliation from `current` to `requested`.
 ///
 /// Only an owner grants or removes owner and admin standing; an owner or an

@@ -19,8 +19,16 @@
 //!    - anything else (a malformed marker, another incarnation, a generation
 //!      the journal does not hold or that is not older): nothing is written;
 //! 4. reads the projection back at the marker's revision and compares the
-//!    affiliation family with the canonical rows exactly;
-//! 5. activates the exact operation in PostgreSQL.
+//!    affiliation family with the canonical rows exactly, which yields the
+//!    [`VerifiedProjection`] witness;
+//! 5. activates the exact operation in PostgreSQL, which accepts nothing
+//!    but that witness.
+//!
+//! The pass reads PostgreSQL before SpiceDB, so another replica can record
+//! and project a newer operation in between. A marker that is not older
+//! than the plan is therefore compared with the canonical state again: the
+//! pass reports a contradiction only if the canonical state is still the
+//! one it read, and [`Reconciliation::Superseded`] otherwise.
 //!
 //! A pass never repeats a write whose precondition failed and never writes
 //! an intent older than the marker it observes: a writer that lost a race
@@ -86,6 +94,43 @@ pub enum Reconciliation {
     /// have been applied; the next pass reads the marker to find out.
     ProjectionUnknown,
     Contradiction(ProjectionContradiction),
+}
+
+/// Evidence that a scope's projection was read back and holds exactly the
+/// canonical intent of one operation: its marker, and the affiliation family
+/// of its rooms equal to the canonical grant rows.
+///
+/// Verification is the only code that constructs it, and
+/// `HostGrantStore::activate` accepts nothing else, so an increase of access
+/// cannot become effective without a projection that was read back.
+#[derive(Debug)]
+pub struct VerifiedProjection {
+    marker: ProjectionMarker,
+}
+
+impl VerifiedProjection {
+    /// The witness for `plan`, if `observation` shows exactly its intent.
+    fn of(plan: &ProjectionPlan, observation: &ProjectionObservation) -> Option<Self> {
+        let exact = observation.marker == MarkerObservation::Present(plan.marker().clone())
+            && !observation.malformed_family
+            && observation.relationships == plan.intent.expected_relationships();
+        exact.then(|| Self {
+            marker: plan.marker().clone(),
+        })
+    }
+
+    /// The marker of the operation whose projection was verified.
+    pub(crate) fn marker(&self) -> &ProjectionMarker {
+        &self.marker
+    }
+
+    /// A witness for `marker` without a projection behind it, for fixtures
+    /// of suites that exercise the canonical store without SpiceDB and for
+    /// cases that replay a delayed activation.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn without_projection_for_test(marker: ProjectionMarker) -> Self {
+        Self { marker }
+    }
 }
 
 /// The canonical store together with its projection and issuance policy.
@@ -165,9 +210,7 @@ impl HostGrantAuthority {
 
     /// Whether `observation` shows exactly `plan`'s intent.
     pub fn verified(plan: &ProjectionPlan, observation: &ProjectionObservation) -> bool {
-        observation.marker == MarkerObservation::Present(plan.marker().clone())
-            && !observation.malformed_family
-            && observation.relationships == plan.intent.expected_relationships()
+        VerifiedProjection::of(plan, observation).is_some()
     }
 
     /// One reconciliation pass for a scope. See the module documentation.
@@ -205,9 +248,15 @@ impl HostGrantAuthority {
                     ));
                 }
                 if marker.generation >= generation {
-                    return Ok(Reconciliation::Contradiction(
-                        ProjectionContradiction::AheadOfCanonical,
-                    ));
+                    // The marker was read after the plan. If the canonical
+                    // state has moved on since, the marker may be the newer
+                    // operation's and this pass's plan is the stale one.
+                    let current = self.store.projection_plan(lifecycle).await?;
+                    return Ok(if current.marker() == plan.marker() {
+                        Reconciliation::Contradiction(ProjectionContradiction::AheadOfCanonical)
+                    } else {
+                        Reconciliation::Superseded
+                    });
                 }
                 let recorded = self
                     .store
@@ -249,13 +298,26 @@ impl HostGrantAuthority {
     /// Reconcile every scope that holds a recorded operation whose
     /// projection is not yet activated: the pass a replica runs when it
     /// starts, and whenever it wants pending grants to progress.
+    ///
+    /// The pass follows the pending scopes page by page to the end, so a
+    /// scope that cannot progress (a contradiction, a projection that does
+    /// not answer) is visited once per pass and never keeps a later scope
+    /// from being reconciled.
     pub async fn recover_pending(
         &self,
     ) -> Result<Vec<(ScopeLifecycleId, Result<Reconciliation, HostGrantError>)>, HostGrantError>
     {
         let mut outcomes = Vec::new();
-        for lifecycle in self.store.pending_scopes().await? {
-            outcomes.push((lifecycle, self.reconcile(lifecycle).await));
+        let mut after = None;
+        loop {
+            let page = self.store.pending_scopes(after).await?;
+            let Some(last) = page.last().copied() else {
+                break;
+            };
+            for lifecycle in page {
+                outcomes.push((lifecycle, self.reconcile(lifecycle).await));
+            }
+            after = Some(last);
         }
         Ok(outcomes)
     }
@@ -275,7 +337,7 @@ impl HostGrantAuthority {
                 Err(_) => return Ok(Reconciliation::ProjectionUnknown),
             },
         };
-        if !Self::verified(plan, &observation) {
+        let Some(verified) = VerifiedProjection::of(plan, &observation) else {
             return Ok(match observation.marker {
                 MarkerObservation::Present(ref marker) if marker == plan.marker() => {
                     Reconciliation::Contradiction(ProjectionContradiction::ContentMismatch)
@@ -288,8 +350,8 @@ impl HostGrantAuthority {
                     Reconciliation::Superseded
                 }
             });
-        }
-        Ok(match self.store.activate(plan.marker()).await? {
+        };
+        Ok(match self.store.activate(&verified).await? {
             Activation::Activated => Reconciliation::Activated(plan.marker().generation),
             Activation::AlreadyActive => Reconciliation::AlreadyActive(plan.marker().generation),
             Activation::Superseded => Reconciliation::Superseded,

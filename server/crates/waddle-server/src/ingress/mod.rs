@@ -34,6 +34,7 @@ mod execute_uow;
 pub(crate) use execute_uow::ambiguous_offline_pending_id;
 mod frame_receipt_retry;
 pub(crate) mod gc;
+mod host_grant_plan;
 pub mod identity;
 mod invitation_authority;
 pub(crate) mod live_delivery;

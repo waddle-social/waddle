@@ -16,7 +16,7 @@ use crate::ingress_substrate::{
 };
 use crate::permissions::host_grant::{
     admit_room_acceptance, managing_scope, AdmissionRelations, ManagingScope, RoomAcceptance,
-    RoomAdmission,
+    RoomAdmission, RoomManagement,
 };
 
 /// Repository for the host-grant policy state an acceptance reads.
@@ -24,7 +24,8 @@ use crate::permissions::host_grant::{
 pub(crate) struct HostGrantAdmissionRepository;
 
 impl HostGrantAdmissionRepository {
-    /// The enrolled scope that manages `room`, if any.
+    /// The enrolled scope that manages `room`, if any, looked up by the
+    /// room's canonical address.
     ///
     /// SQLite holds no canonical grant store, so no room is managed there. A
     /// PostgreSQL schema that was built without the migration catalog holds
@@ -34,11 +35,11 @@ impl HostGrantAdmissionRepository {
     pub(crate) async fn managing_scope(
         transaction: &mut IngressUowTransaction<'_>,
         room: &BareJid,
-    ) -> Result<Option<ManagingScope>, IngressUowError> {
+    ) -> Result<RoomManagement, IngressUowError> {
         let present = Arc::clone(&transaction.host_grant_relations);
         let (tx, prepared) = transaction.prepared_parts();
         if tx.driver() != DatabaseDriver::Postgres {
-            return Ok(None);
+            return Ok(RoomManagement::Unmanaged);
         }
         if prepared.is_none() && !present.load(Ordering::Acquire) {
             let mut rows = tx
@@ -53,7 +54,7 @@ impl HostGrantAdmissionRepository {
             };
             drop(rows);
             if !found {
-                return Ok(None);
+                return Ok(RoomManagement::Unmanaged);
             }
             present.store(true, Ordering::Release);
         }

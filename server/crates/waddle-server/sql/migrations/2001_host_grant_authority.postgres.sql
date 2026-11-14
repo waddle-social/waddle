@@ -20,14 +20,18 @@ CREATE TABLE host_grant_authority (
 INSERT INTO host_grant_authority (singleton, incarnation)
 VALUES (true, replace(gen_random_uuid()::text, '-', ''));
 
--- One row per scope lifecycle, never updated or deleted. A scope key holds
--- one lifecycle: a lifecycle identity is never reused and a key is never
--- enrolled twice.
+-- One row per scope lifecycle, never deleted. A scope key holds one
+-- lifecycle: a lifecycle identity is never reused and a key is never
+-- enrolled twice. The row is written twice at most, both times by the schema
+-- owner: when the scope is enrolled, and when it is retired, which stamps
+-- `retired_at_ms`. The runtime role only reads the table, so it can neither
+-- enroll nor retire a scope.
 CREATE TABLE host_grant_scope_lifecycles (
     lifecycle_id TEXT PRIMARY KEY,
     service_jid TEXT NOT NULL,
     space_node TEXT NOT NULL,
     enrolled_at_ms BIGINT NOT NULL,
+    retired_at_ms BIGINT,
     CONSTRAINT host_grant_scope_lifecycles_id CHECK (lifecycle_id ~ '^[0-9a-f]{32}$'),
     CONSTRAINT host_grant_scope_lifecycles_key UNIQUE (service_jid, space_node)
 );

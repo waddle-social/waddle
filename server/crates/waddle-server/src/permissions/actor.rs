@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::host_grant::{
     HostGrantStore, ProjectionIntent, ProjectionMarker, ProjectionObservation, ProjectionWrite,
-    ScopeLifecycleId,
+    ScopeLifecycleId, HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT,
 };
 use super::schema::SPICEDB_SCHEMA;
 use super::spicedb::SpiceDbPermissionBackend;
@@ -164,7 +164,7 @@ impl PermissionActor {
                 Ok(true) => return Err(PermissionError::HostGrantScopeEnrolled),
                 Err(error) => {
                     tracing::warn!(
-                        %error,
+                        kind = error.kind(),
                         "Refusing a permission write: the host-grant authority could not be read"
                     );
                     return Err(PermissionError::HostGrantAuthorityUnavailable);
@@ -174,34 +174,12 @@ impl PermissionActor {
         Ok(())
     }
 
-    async fn observe_host_grant_projection(
-        &self,
-        msg: &ObserveHostGrantProjection,
-    ) -> Result<ProjectionObservation, PermissionError> {
+    /// The backend a host-grant projection is read from and written to.
+    /// The local backend is not a projection target: it establishes neither
+    /// SpiceDB nor cross-store behaviour.
+    fn host_grant_projection_backend(&self) -> Result<SpiceDbPermissionBackend, PermissionError> {
         match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend
-                    .observe_host_grant_projection(msg.lifecycle, &msg.channels)
-                    .await
-            }
-            // The local backend is not a projection target: it establishes
-            // neither SpiceDB nor cross-store behaviour.
-            PermissionActorBackend::Local { .. } => {
-                Err(PermissionError::UnsupportedOperation("local"))
-            }
-        }
-    }
-
-    async fn write_host_grant_projection(
-        &self,
-        msg: &WriteHostGrantProjection,
-    ) -> Result<ProjectionWrite, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend
-                    .write_host_grant_projection(msg.previous.as_ref(), &msg.intent)
-                    .await
-            }
+            PermissionActorBackend::SpiceDb(backend) => Ok(backend.as_ref().clone()),
             PermissionActorBackend::Local { .. } => {
                 Err(PermissionError::UnsupportedOperation("local"))
             }
@@ -588,15 +566,32 @@ pub struct ObserveHostGrantProjection {
     pub channels: Vec<String>,
 }
 
+/// The projection RPCs run on a task of their own, not in the actor's
+/// mailbox turn: one observation is up to 33 reads, and permission checks
+/// and tuple writes queued behind it must not wait for them. The whole
+/// observation is bounded as well as each of its reads.
 impl kameo::message::Message<ObserveHostGrantProjection> for PermissionActor {
-    type Reply = Result<ProjectionObservation, PermissionError>;
+    type Reply = kameo::reply::DelegatedReply<Result<ProjectionObservation, PermissionError>>;
 
     async fn handle(
         &mut self,
         msg: ObserveHostGrantProjection,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.observe_host_grant_projection(&msg).await
+        let backend = self.host_grant_projection_backend();
+        ctx.spawn(async move {
+            let backend = backend?;
+            tokio::time::timeout(
+                HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT,
+                backend.observe_host_grant_projection(msg.lifecycle, &msg.channels),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(PermissionError::SpiceDbError(
+                    "the projection observation exceeded its bound".to_owned(),
+                ))
+            })
+        })
     }
 }
 
@@ -609,17 +604,24 @@ pub struct WriteHostGrantProjection {
     pub intent: ProjectionIntent,
 }
 
+/// Runs on a task of its own, like the observation: the write is one RPC
+/// with its own deadline, and the mailbox does not wait for it. The backend
+/// that accepts a projection keeps no permission cache, so there is none to
+/// invalidate.
 impl kameo::message::Message<WriteHostGrantProjection> for PermissionActor {
-    type Reply = Result<ProjectionWrite, PermissionError>;
+    type Reply = kameo::reply::DelegatedReply<Result<ProjectionWrite, PermissionError>>;
 
     async fn handle(
         &mut self,
         msg: WriteHostGrantProjection,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let outcome = self.write_host_grant_projection(&msg).await;
-        self.clear_cache().await;
-        outcome
+        let backend = self.host_grant_projection_backend();
+        ctx.spawn(async move {
+            backend?
+                .write_host_grant_projection(msg.previous.as_ref(), &msg.intent)
+                .await
+        })
     }
 }
 

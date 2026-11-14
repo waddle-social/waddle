@@ -97,6 +97,18 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Let this authority admit rooms that enrolled host-grant scopes
+    /// manage: the replica verified its runtime role's privileges on the
+    /// grant store. Without an attachment every acceptance for such a room
+    /// is refused. The first attachment stays; the answer is whether this
+    /// call set it.
+    pub fn attach_host_grants(
+        &self,
+        attachment: crate::permissions::host_grant::HostGrantAttachment,
+    ) -> bool {
+        self.uow.attach_host_grants(attachment)
+    }
+
     pub(crate) fn bind_receipt_fatal_fence(
         &self,
         fatal_fence: CancellationToken,

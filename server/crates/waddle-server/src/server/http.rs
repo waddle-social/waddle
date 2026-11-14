@@ -886,6 +886,41 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     Ok(router)
 }
 
+/// Let the ingress authority admit rooms that enrolled host-grant scopes
+/// manage, if this replica's runtime role holds exactly the grant store's
+/// privileges.
+///
+/// The check runs before the WebSocket state exists, so no acceptance
+/// precedes it. A role that does not match the profile leaves the authority
+/// unattached: every acceptance for a managed room is then refused with a
+/// committed stanza error, and rooms that no scope manages are unaffected.
+/// The failure is logged by its kind only. SQLite holds no canonical grant
+/// store and no enrolled scope, so there is nothing to attach.
+async fn attach_host_grant_store(
+    ingress: &IngressAuthority,
+    state: &AppState,
+    account_domain: waddle_xmpp::identity::CanonicalDomain,
+) {
+    use crate::permissions::host_grant::{
+        HostGrantAttachment, HostGrantStore, ServedAccountDomains,
+    };
+    let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
+        return;
+    };
+    match HostGrantAttachment::verify(&store, ServedAccountDomains::new([account_domain])).await {
+        Ok(attachment) => {
+            ingress.attach_host_grants(attachment);
+        }
+        Err(error) => {
+            tracing::error!(
+                kind = error.kind(),
+                "The runtime role's privileges on the host-grant store are not verified; \
+                 rooms of enrolled scopes are unavailable on this replica"
+            );
+        }
+    }
+}
+
 async fn open_ingress_authority(
     config: &ServerConfig,
     state: &AppState,
@@ -1618,6 +1653,7 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks = ProviderDispatchTracker::new();
     let ingress = open_ingress_authority(server_config, &state).await?;
+    attach_host_grant_store(&ingress, &state, account_domain.clone()).await;
     let websocket_state = Arc::new(WebSocketState {
         #[cfg(feature = "test-support")]
         sasl2_test_capability: false,

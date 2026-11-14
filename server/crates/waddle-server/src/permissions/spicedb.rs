@@ -774,6 +774,7 @@ impl SpiceDbPermissionBackend {
         intent: &ProjectionIntent,
     ) -> Result<ProjectionWrite, PermissionError> {
         intent.check_replaces(previous)?;
+        intent.check_distinct()?;
         let mut preconditions = Vec::new();
         let mut updates = Vec::new();
         match previous {

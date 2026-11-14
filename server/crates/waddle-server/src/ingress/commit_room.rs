@@ -66,9 +66,12 @@ pub(super) async fn assert_snapshot_coordinates(
 pub(super) enum HostGrantAcceptance {
     /// No enrolled scope manages the room; its existing admission applies.
     Unmanaged,
-    /// The sender and these recipients are admitted under the scope's
-    /// canonical policy state, whose guard this transaction now holds.
+    /// The sender is admitted under the scope's canonical policy state,
+    /// whose guard this transaction now holds. `submission` carries the plan
+    /// reduced to `audience`, the admitted principals it names; the
+    /// acceptance records, seals and executes that plan and nothing else.
     Admitted {
+        submission: Box<IngressSubmission>,
         audience: Vec<jid::BareJid>,
     },
     Refused(HostGrantRefusal),
@@ -78,8 +81,13 @@ pub(super) enum HostGrantAcceptance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostGrantRefusal {
     Denied(crate::permissions::host_grant::AdmissionDenial),
-    /// The transaction cannot seal a manifest for the room. A managed room
-    /// accepts nothing through an acceptance that freezes no children.
+    /// This replica has not verified its runtime role's privileges on the
+    /// host-grant store, so it treats every enrolled scope as unavailable.
+    AuthorityUnavailable,
+    /// The acceptance is not one a managed room takes: the transaction
+    /// cannot seal a manifest for the room, the plan holds work that is
+    /// neither the room's own nor addressed to a principal, or the room's
+    /// address is not in canonical form.
     UnsupportedAcceptance,
 }
 
@@ -89,15 +97,21 @@ pub(super) enum HostGrantRefusal {
 /// ownership claims and before anything it accepts is recorded: the scope's
 /// guard is taken shared and held until the transaction ends, so a revoke
 /// either committed before this read or waits for this transaction. The
-/// sender needs `send_message` and every recipient the plan would freeze
-/// needs `read`.
+/// sender needs `send_message`, or the stanza is refused. Every other
+/// principal the plan names needs `read`: the plan is reduced to those who
+/// hold it (`host_grant_plan`), so a principal who does not is delivered,
+/// projected and notified nothing, and does not keep the stanza from the
+/// admitted audience.
 pub(super) async fn admit_host_grants(
     tx: &mut IngressUowTransaction<'_>,
     submission: &IngressSubmission,
     can_seal: bool,
 ) -> Result<HostGrantAcceptance, IngressUowError> {
+    use super::host_grant_plan::{named_principals, reduce_to_audience};
     use crate::ingress_uow::HostGrantAdmissionRepository;
-    use crate::permissions::host_grant::{HostGrantAction, RoomAcceptance, RoomAdmission};
+    use crate::permissions::host_grant::{
+        HostGrantAction, RoomAcceptance, RoomAdmission, RoomManagement,
+    };
     use crate::server::routes::interpret::effects::RoomExecutionPath;
     let RoomExecutionPath::Local {
         room,
@@ -107,88 +121,77 @@ pub(super) async fn admit_host_grants(
     else {
         return Ok(HostGrantAcceptance::Unmanaged);
     };
+    let refused = |refusal| Ok(HostGrantAcceptance::Refused(refusal));
     // An unmanaged room costs one indexed lookup and nothing else.
-    let Some(scope) = HostGrantAdmissionRepository::managing_scope(tx, room).await? else {
-        return Ok(HostGrantAcceptance::Unmanaged);
+    let scope = match HostGrantAdmissionRepository::managing_scope(tx, room).await? {
+        RoomManagement::Unmanaged => return Ok(HostGrantAcceptance::Unmanaged),
+        RoomManagement::NotCanonical => return refused(HostGrantRefusal::UnsupportedAcceptance),
+        RoomManagement::Managed(scope) => scope,
     };
-    let audience = frozen_recipients(&submission.plan.intents);
+    let Some(attachment) = tx.host_grant_attachment() else {
+        return refused(HostGrantRefusal::AuthorityUnavailable);
+    };
+    let sender = submission.principal.bare_jid();
+    // A plan that cannot be classified is refused only after the sender was
+    // decided, so a sender who is not admitted learns nothing but that.
+    let named = named_principals(&submission.plan, room, sender);
     let admission = HostGrantAdmissionRepository::admit_room_acceptance(
         tx,
         &scope,
         &RoomAcceptance {
             room,
-            sender: submission.principal.bare_jid(),
+            sender,
             action: HostGrantAction::SendMessage,
-            audience: &audience,
+            audience: named.as_deref().unwrap_or_default(),
+            served: attachment.served(),
         },
     )
     .await?;
-    Ok(match admission {
-        RoomAdmission::Denied(denial) => {
-            HostGrantAcceptance::Refused(HostGrantRefusal::Denied(denial))
-        }
-        RoomAdmission::Admitted(_) if !can_seal || manifest_snapshot.is_none() => {
-            HostGrantAcceptance::Refused(HostGrantRefusal::UnsupportedAcceptance)
-        }
-        RoomAdmission::Admitted(_) => {
-            super::commit::commit_hooks::after_host_grant_admission().await;
-            HostGrantAcceptance::Admitted { audience }
-        }
+    let audience = match admission {
+        RoomAdmission::Denied(denial) => return refused(HostGrantRefusal::Denied(denial)),
+        RoomAdmission::Admitted { audience, .. } => audience,
+    };
+    if named.is_err() || !can_seal || manifest_snapshot.is_none() {
+        return refused(HostGrantRefusal::UnsupportedAcceptance);
+    }
+    let Ok(plan) = reduce_to_audience(&submission.plan, room, sender, &audience) else {
+        return refused(HostGrantRefusal::UnsupportedAcceptance);
+    };
+    super::commit::commit_hooks::after_host_grant_admission().await;
+    Ok(HostGrantAcceptance::Admitted {
+        submission: Box::new(IngressSubmission {
+            plan,
+            ..submission.clone()
+        }),
+        audience,
     })
 }
 
-/// The bare JID of every recipient a manifest sealed from `intents` would
-/// freeze a child for.
-fn frozen_recipients(intents: &[waddle_xmpp::ingress::IngressEffectIntent]) -> Vec<jid::BareJid> {
-    use waddle_xmpp::ingress::IngressEffectIntent;
-    let mut seen = std::collections::HashSet::new();
-    let mut recipients: Vec<jid::BareJid> = Vec::new();
-    let mut add = |target: &jid::FullJid| {
-        let bare = target.to_bare();
-        if seen.insert(bare.clone()) {
-            recipients.push(bare);
-        }
-    };
-    for intent in intents {
-        match intent {
-            IngressEffectIntent::RouteDirect { fanout, .. } => fanout.iter().for_each(&mut add),
-            IngressEffectIntent::RouteMucGroupchat {
-                occupants,
-                reflection,
-                ..
-            } => {
-                occupants.iter().for_each(&mut add);
-                add(reflection);
-            }
-            IngressEffectIntent::RouteMucSystemBroadcast { occupants, .. } => {
-                occupants.iter().for_each(&mut add);
-            }
-            IngressEffectIntent::Carbons {
-                carbon_recipients, ..
-            } => carbon_recipients.iter().for_each(&mut add),
-            IngressEffectIntent::RouteOccupantPm { recipient, .. }
-            | IngressEffectIntent::CallSignal { recipient, .. }
-            | IngressEffectIntent::ErrorReply { recipient, .. } => add(recipient),
-            _ => {}
-        }
-    }
-    recipients
-}
-
-/// Every child a freshly sealed manifest froze must name a recipient that
-/// was admitted. A child outside the admitted audience fails the
-/// transaction: nothing is accepted for it.
+/// What a freshly sealed manifest froze for a managed room must lie within
+/// the admitted audience: every child that names a recipient names an
+/// admitted one, and every recorded intent is one the reduced plan could
+/// hold. Anything else fails the transaction, so nothing is accepted for
+/// it. The reduction of the plan makes this hold; the check is what keeps a
+/// later change of the commit path from widening a sealed audience
+/// unnoticed.
 pub(super) fn assert_admitted_children(
     manifest: &super::FrozenRoomManifest,
+    sender: &jid::BareJid,
     audience: &[jid::BareJid],
 ) -> Result<(), IngressUowError> {
-    let admitted = manifest.children.iter().all(|child| {
+    let children = manifest.children.iter().all(|child| {
         child
             .target
             .as_ref()
             .is_none_or(|target| audience.contains(&target.to_bare()))
     });
-    if admitted {
+    let intents = super::host_grant_plan::intents_within_audience(
+        manifest.recorded_intents(),
+        &manifest.room,
+        sender,
+        audience,
+    );
+    if children && intents {
         Ok(())
     } else {
         Err(IngressUowError::HostGrantAudienceUnproven)

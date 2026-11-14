@@ -9,10 +9,52 @@
 //! already holds more. This check reads the same profile back from the
 //! catalog on a runtime handle; later privilege changes by the owner are not
 //! observed.
+//!
+//! A replica runs the check when it starts and keeps the result as a
+//! [`HostGrantAttachment`]. An acceptance transaction admits a managed room
+//! only on a replica that holds one, so a replica whose runtime role does
+//! not match the profile treats every enrolled scope as unavailable.
 
 use super::error::HostGrantError;
+use super::issuance::ServedAccountDomains;
+use super::store::HostGrantStore;
 use crate::db::read_only_timeout::{bound_postgres_waits, ReadOnlyTimeoutError};
 use crate::db::{runtime_store_acl, Database, DatabaseDriver, Transaction};
+
+/// What a replica established about its host-grant store when it started:
+/// its runtime role holds exactly the store's privileges. It also carries
+/// the account domains the replica serves, which admission honours
+/// privileged grants for.
+///
+/// The value exists only after the check passed, and an acceptance
+/// transaction admits a managed room only when its unit of work holds one.
+#[derive(Clone, Debug)]
+pub struct HostGrantAttachment {
+    served: ServedAccountDomains,
+}
+
+impl HostGrantAttachment {
+    /// Verify the role of `store`'s handle against the runtime profile.
+    pub async fn verify(
+        store: &HostGrantStore,
+        served: ServedAccountDomains,
+    ) -> Result<Self, HostGrantError> {
+        store.verify_runtime_privileges().await?;
+        Ok(Self { served })
+    }
+
+    /// An attachment without the privilege check, for suites whose database
+    /// login owns the schema it tests.
+    #[cfg(feature = "test-support")]
+    pub fn unverified_for_test(served: ServedAccountDomains) -> Self {
+        Self { served }
+    }
+
+    /// The account domains this replica serves.
+    pub fn served(&self) -> &ServedAccountDomains {
+        &self.served
+    }
+}
 
 /// Every host-grant relation, locked before the catalog is read.
 const RELATIONS: [&str; 7] = [

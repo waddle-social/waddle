@@ -2,15 +2,21 @@
 //! scope (ADR-0020 D5, first slice).
 //!
 //! A managed members-only room accepts a fresh groupchat only when the
-//! canonical PostgreSQL policy state admits the sender and every seated
-//! recipient, and the decision is made inside the acceptance transaction,
-//! under the scope's guard. A refused stanza is answered with a committed
-//! stanza error from the room to the sender: `forbidden` when the sender
-//! holds no grant that allows the send, `recipient-unavailable` while the
-//! room still seats someone whose grant no longer allows reading, and
-//! `service-unavailable` when the scope admits nothing or no manifest can be
-//! sealed. Rooms that no scope manages, and SQLite deployments, keep their
-//! existing admission.
+//! canonical PostgreSQL policy state admits the sender, and the decision is
+//! made inside the acceptance transaction, under the scope's guard. The
+//! acceptance is reduced to the admitted audience: whoever the plan names
+//! and the policy does not admit is frozen no child, and does not keep the
+//! stanza from the others. A refused stanza is answered with a committed
+//! stanza error from the room to the sender: `forbidden` (type `auth`) when
+//! the sender holds no grant that allows the send, and `service-unavailable`
+//! (type `cancel`) when the scope admits nothing, the replica has not
+//! verified its privileges on the grant store, or the acceptance is not one
+//! a managed room takes. Rooms that no scope manages, and SQLite
+//! deployments, keep their existing admission.
+//!
+//! The plans here are built by hand around the room route; the plans the
+//! room planner itself produces are covered in
+//! `xep0045_host_grant_audience.rs`.
 //!
 //! These cases run the production commit path against PostgreSQL. SpiceDB is
 //! not involved in admission, and the cases that need to show so use the
@@ -26,8 +32,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use host_grant_support::{
-    bare, refusal, room_submission, sealed_manifest, subject, GrantFixture, OWNER, PEER,
-    PEER_RESOURCE, SENDER,
+    bare, issuance_policy, refusal, room_submission, sealed_manifest, served, subject,
+    GrantFixture, OWNER, PEER, PEER_RESOURCE, SENDER,
 };
 use ingress_support::IngressFixture;
 use kameo::actor::Spawn;
@@ -36,22 +42,21 @@ use tokio::sync::Notify;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::ingress::commit::commit_submission;
 use waddle_server::ingress::effects::ExternalEffect;
-use waddle_server::ingress::{IngressDecisionClass, RoomExecutionPath};
+use waddle_server::ingress::{IngressDecision, IngressDecisionClass, RoomExecutionPath};
 use waddle_server::permissions::host_grant::{
-    Activation, GrantOperationId, HostGrantAction, HostGrantAuthority, HostGrantError,
-    HostGrantStore, MutationReceipt, Reconciliation, RetireScope, RoomAffiliation,
+    Activation, GrantOperationId, HostGrantAction, HostGrantAttachment, HostGrantAuthority,
+    HostGrantError, HostGrantStore, MutationReceipt, Reconciliation, RetireScope, RoomAffiliation,
 };
 use waddle_server::permissions::{
     DeleteTuple, Object, ObjectType, PermissionActor, PermissionError, Relation,
     ReplaceExclusiveRelation, Subject, SubjectType, SwapExclusiveRelation, Tuple, WriteTuple,
 };
 use waddle_server::test_support::with_host_grant_admission_gate;
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 const FORBIDDEN: (ErrorType, DefinedCondition) = (ErrorType::Auth, DefinedCondition::Forbidden);
-const RECIPIENT_UNAVAILABLE: (ErrorType, DefinedCondition) =
-    (ErrorType::Wait, DefinedCondition::RecipientUnavailable);
 const SERVICE_UNAVAILABLE: (ErrorType, DefinedCondition) =
     (ErrorType::Cancel, DefinedCondition::ServiceUnavailable);
 
@@ -61,6 +66,29 @@ async fn observer(fixture: &GrantFixture) -> sqlx::PgPool {
     sqlx::PgPool::connect(fixture.ingress.db.database_url())
         .await
         .expect("observer connection")
+}
+
+/// The accounts a decision's sealed manifest froze a child for, sorted. An
+/// accepted room stanza always seals one.
+async fn frozen_accounts(fixture: &GrantFixture, decision: &IngressDecision) -> Vec<String> {
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    let manifest = fixture
+        .manifest(decision.message_key.expect("key"))
+        .await
+        .expect("sealed manifest");
+    let mut accounts: Vec<String> = manifest
+        .children
+        .iter()
+        .filter_map(|child| {
+            child
+                .target
+                .as_ref()
+                .map(|target| target.to_bare().to_string())
+        })
+        .collect();
+    accounts.sort();
+    accounts.dedup();
+    accounts
 }
 
 /// Wait until some backend of this database waits for a lock another
@@ -167,6 +195,7 @@ async fn a_revoke_committed_after_a_candidate_read_is_seen_by_acceptance() {
             &fixture.scope.room,
             &subject(SENDER),
             HostGrantAction::SendMessage,
+            &served(),
         )
         .await
         .expect("candidate admission");
@@ -224,20 +253,38 @@ async fn a_recipient_whose_grant_no_longer_allows_reading_is_never_frozen() {
         .await
         .expect("revoke the peer");
 
-    // The room still seats the revoked peer: the stanza is refused whole,
-    // so no child is frozen for the peer and none for anyone else.
+    // The room still seats the revoked peer. The stanza is accepted for the
+    // admitted audience, which is the sender alone: no child is frozen for
+    // the peer, and the route the acceptance recorded does not name it.
     let seated = fixture.room_submission("peer-still-seated", "who reads this?");
     let decision = commit_submission(&fixture.ingress.uow, &seated, 1)
         .await
-        .expect("committed refusal");
-    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
-    assert_eq!(refusal(&decision), RECIPIENT_UNAVAILABLE);
-    assert!(fixture
+        .expect("accepted for the admitted audience");
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![SENDER.to_owned()]
+    );
+    let manifest = fixture
         .manifest(decision.message_key.expect("key"))
         .await
-        .is_none());
+        .expect("sealed manifest");
+    for intent in manifest.recorded_intents() {
+        let IngressEffectIntent::RouteMucGroupchat { occupants, .. } = intent else {
+            continue;
+        };
+        assert_eq!(occupants, &vec![seated.sender.clone()]);
+    }
+    // A retransmission replays that acceptance; it does not widen it.
+    let replay = commit_submission(&fixture.ingress.uow, &seated, 1)
+        .await
+        .expect("replayed acceptance");
+    assert_eq!(replay.message_key, decision.message_key);
+    assert_eq!(
+        fixture.manifest(decision.message_key.expect("key")).await,
+        Some(manifest)
+    );
 
-    // Once the room no longer seats the peer, the sender is admitted.
+    // Without the peer seated the outcome is the same.
     let unseated = room_submission(
         &fixture.ingress,
         &fixture.scope.room,
@@ -248,11 +295,10 @@ async fn a_recipient_whose_grant_no_longer_allows_reading_is_never_frozen() {
     let decision = commit_submission(&fixture.ingress.uow, &unseated, 1)
         .await
         .expect("admitted groupchat");
-    assert_eq!(decision.class, IngressDecisionClass::Accepted);
-    assert!(fixture
-        .manifest(decision.message_key.expect("key"))
-        .await
-        .is_some());
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![SENDER.to_owned()]
+    );
     fixture.close().await;
 }
 
@@ -449,7 +495,8 @@ async fn a_stalled_scope_fails_closed_within_bounds_and_other_rooms_progress() {
             .candidate_admission(
                 &fixture.scope.room,
                 &subject(SENDER),
-                HostGrantAction::SendMessage
+                HostGrantAction::SendMessage,
+                &served()
             )
             .await
             .expect("candidate admission")
@@ -527,8 +574,11 @@ async fn admission_does_not_depend_on_the_projection() {
     );
     let decision = commit_submission(&fixture.ingress.uow, &with_carol, 1)
         .await
-        .expect("committed refusal");
-    assert_eq!(refusal(&decision), RECIPIENT_UNAVAILABLE);
+        .expect("accepted for the admitted audience");
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![PEER.to_owned(), SENDER.to_owned()]
+    );
 
     // Grants that were effective keep admitting meanwhile.
     let members = fixture.room_submission("effective-grants", "still admitted");
@@ -543,8 +593,11 @@ async fn admission_does_not_depend_on_the_projection() {
     let after_revoke = fixture.room_submission("revoked-peer", "the peer was revoked");
     let decision = commit_submission(&fixture.ingress.uow, &after_revoke, 1)
         .await
-        .expect("committed refusal");
-    assert_eq!(refusal(&decision), RECIPIENT_UNAVAILABLE);
+        .expect("accepted for the admitted audience");
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![SENDER.to_owned()]
+    );
 
     // A backlog of unprojected operations holds nothing up: mutations
     // commit, admission continues, and each pass reports the projection as
@@ -632,9 +685,11 @@ async fn negative_overrides_win_over_alternate_grants_and_room_occupancy() {
     );
     let decision = commit_submission(&fixture.ingress.uow, &with_stranger, 1)
         .await
-        .expect("committed refusal");
-    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
-    assert_eq!(refusal(&decision), RECIPIENT_UNAVAILABLE);
+        .expect("accepted for the admitted audience");
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![PEER.to_owned(), SENDER.to_owned()]
+    );
 
     // A banned recipient stays banned although it was an admin and other
     // stores still call it an owner.
@@ -654,8 +709,11 @@ async fn negative_overrides_win_over_alternate_grants_and_room_occupancy() {
     let banned_peer = fixture.room_submission("banned-recipient", "not for the outcast");
     let decision = commit_submission(&fixture.ingress.uow, &banned_peer, 1)
         .await
-        .expect("committed refusal");
-    assert_eq!(refusal(&decision), RECIPIENT_UNAVAILABLE);
+        .expect("accepted for the admitted audience");
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![SENDER.to_owned()]
+    );
 
     // A banned sender is refused every send, which is how a correction or a
     // retraction of its own message would travel as well.
@@ -668,7 +726,7 @@ async fn negative_overrides_win_over_alternate_grants_and_room_occupancy() {
         assert!(
             !fixture
                 .store
-                .candidate_admission(&fixture.scope.room, &subject(SENDER), action)
+                .candidate_admission(&fixture.scope.room, &subject(SENDER), action, &served())
                 .await
                 .expect("candidate admission")
                 .admitted,
@@ -895,7 +953,8 @@ async fn a_restart_keeps_legacy_routes_refused_and_restores_no_grant() {
             .candidate_admission(
                 &fixture.scope.room,
                 &subject(SENDER),
-                HostGrantAction::SendMessage
+                HostGrantAction::SendMessage,
+                &served()
             )
             .await
             .expect("candidate admission")
@@ -918,5 +977,275 @@ async fn a_restart_keeps_legacy_routes_refused_and_restores_no_grant() {
     drop(unguarded);
     drop(restarted_store);
     drop(restarted_db);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_replica_admits_a_managed_room_only_after_it_verified_its_privileges() {
+    let Some(fixture) = GrantFixture::active("hg_unattached").await else {
+        return;
+    };
+    // A replica whose startup check did not pass holds no attachment. It
+    // treats the enrolled scope as unavailable, for members too.
+    let replica = fixture.ingress.authority().await;
+    let refused = fixture.room_submission("unverified-replica", "not admitted here");
+    let decision = replica.commit(&refused).await;
+    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
+    assert_eq!(refusal(&decision), SERVICE_UNAVAILABLE);
+    assert!(fixture
+        .manifest(decision.message_key.expect("key"))
+        .await
+        .is_none());
+
+    // A room no scope manages is not affected.
+    let unmanaged = room_submission(
+        &fixture.ingress,
+        &bare("open@muc.example.com"),
+        "unverified-unmanaged",
+        "local traffic",
+        &[PEER_RESOURCE],
+    );
+    assert_eq!(
+        replica.commit(&unmanaged).await.class,
+        IngressDecisionClass::Accepted
+    );
+
+    // The schema owner's login is not the restricted runtime role, so the
+    // check a server runs when it starts yields no attachment for it.
+    assert!(matches!(
+        HostGrantAttachment::verify(&fixture.store, served()).await,
+        Err(HostGrantError::UnsafeRuntimePrivileges { .. })
+    ));
+
+    // Once the replica holds an attachment, a new stanza is admitted. The
+    // attachment is set once.
+    assert!(replica.attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
+    assert!(!replica.attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
+    let admitted = fixture.room_submission("verified-replica", "admitted now");
+    assert_eq!(
+        replica.commit(&admitted).await.class,
+        IngressDecisionClass::Accepted
+    );
+    // The earlier refusal is a recorded outcome: its retransmission is
+    // answered with the same error.
+    let replay = replica.commit(&refused).await;
+    assert_eq!(replay.class, IngressDecisionClass::ExistingCommitted);
+    assert_eq!(refusal(&replay), SERVICE_UNAVAILABLE);
+    assert!(replica.drain_and_join(Duration::from_secs(5)).await);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_privileged_grant_of_a_remote_account_contributes_nothing_at_admission() {
+    let Some(fixture) = GrantFixture::active("hg_remote_privileged").await else {
+        return;
+    };
+    let trusting = issuance_policy(&["trusted.example"]);
+    let remote_admin = "admin@trusted.example";
+    let remote_member = "guest@remote.example";
+    // Issuance records an admin grant for a trusted home and a member grant
+    // for any home; both are activated.
+    for (account, affiliation) in [
+        (remote_admin, RoomAffiliation::Admin),
+        (remote_member, RoomAffiliation::Member),
+    ] {
+        let command = fixture.command(OWNER, account, affiliation).await;
+        fixture
+            .store
+            .set_affiliation(&command, &trusting)
+            .await
+            .expect("remote grant");
+        assert_eq!(
+            fixture.activate_current(&fixture.scope).await,
+            Activation::Activated
+        );
+        assert_eq!(
+            fixture.affiliations(account).await,
+            Some((affiliation, affiliation))
+        );
+    }
+
+    // The stored admin grant is honoured as no grant: it confers neither
+    // moderation nor the member-level read and send the table derives from
+    // it. The member-level grant of a remote account is honoured.
+    for action in HostGrantAction::ALL {
+        assert!(
+            !fixture
+                .store
+                .candidate_admission(
+                    &fixture.scope.room,
+                    &subject(remote_admin),
+                    action,
+                    &served()
+                )
+                .await
+                .expect("candidate admission")
+                .admitted,
+            "{action:?}"
+        );
+    }
+    for (action, admitted) in [
+        (HostGrantAction::Read, true),
+        (HostGrantAction::SendMessage, true),
+        (HostGrantAction::Moderate, false),
+    ] {
+        assert_eq!(
+            fixture
+                .store
+                .candidate_admission(
+                    &fixture.scope.room,
+                    &subject(remote_member),
+                    action,
+                    &served()
+                )
+                .await
+                .expect("candidate admission")
+                .admitted,
+            admitted,
+            "{action:?}"
+        );
+    }
+
+    // Acceptance decides the same under the guard: the remote admin is
+    // frozen no child, the remote member is.
+    let seated = room_submission(
+        &fixture.ingress,
+        &fixture.scope.room,
+        "remote-occupants",
+        "who is admitted?",
+        &[
+            PEER_RESOURCE,
+            "admin@trusted.example/desk",
+            "guest@remote.example/phone",
+        ],
+    );
+    let decision = commit_submission(&fixture.ingress.uow, &seated, 1)
+        .await
+        .expect("accepted for the admitted audience");
+    assert_eq!(
+        frozen_accounts(&fixture, &decision).await,
+        vec![PEER.to_owned(), remote_member.to_owned(), SENDER.to_owned()]
+    );
+
+    // A deployment that serves no account domain honours no privileged
+    // grant at all, the room owner's included.
+    let nowhere = waddle_server::permissions::host_grant::ServedAccountDomains::default();
+    assert!(
+        !fixture
+            .store
+            .candidate_admission(
+                &fixture.scope.room,
+                &subject(OWNER),
+                HostGrantAction::Read,
+                &nowhere
+            )
+            .await
+            .expect("candidate admission")
+            .admitted
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_managed_room_refuses_work_it_cannot_account_for() {
+    let Some(fixture) = GrantFixture::active("hg_unclassified").await else {
+        return;
+    };
+    // A plan that carries an occupant private message beside the room
+    // route: work that is neither the room's own nor a copy of the
+    // groupchat for a principal. The whole stanza is refused.
+    let mut private = fixture.room_submission("unclassified-intent", "with a private copy");
+    private
+        .plan
+        .intents
+        .push(IngressEffectIntent::RouteOccupantPm {
+            recipient: PEER_RESOURCE.parse().expect("recipient"),
+            sender: private.sender.clone(),
+        });
+    let decision = commit_submission(&fixture.ingress.uow, &private, 1)
+        .await
+        .expect("committed refusal");
+    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
+    assert_eq!(refusal(&decision), SERVICE_UNAVAILABLE);
+    assert!(fixture
+        .manifest(decision.message_key.expect("key"))
+        .await
+        .is_none());
+    assert_eq!(fixture.ingress.count("mam_messages").await, 0);
+
+    // Work for another archive than the room's is refused too.
+    let mut foreign = fixture.room_submission("foreign-archive", "tombstoned elsewhere");
+    foreign
+        .plan
+        .intents
+        .push(IngressEffectIntent::RetractionTombstone {
+            mutation: waddle_xmpp::ingress::RetractionTombstoneMutation {
+                archive: bare(PEER),
+                target_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    "foreign-target",
+                    bare(PEER).into(),
+                ),
+                retraction_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    "foreign-retraction",
+                    bare(PEER).into(),
+                ),
+            },
+        });
+    let decision = commit_submission(&fixture.ingress.uow, &foreign, 1)
+        .await
+        .expect("committed refusal");
+    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
+    assert_eq!(refusal(&decision), SERVICE_UNAVAILABLE);
+
+    // A sender who is not admitted learns only that, whatever the plan
+    // holds.
+    fixture
+        .set(OWNER, SENDER, RoomAffiliation::None)
+        .await
+        .expect("revoke the sender");
+    let mut both = fixture.room_submission("unclassified-and-revoked", "refused as forbidden");
+    both.plan
+        .intents
+        .push(IngressEffectIntent::RouteOccupantPm {
+            recipient: PEER_RESOURCE.parse().expect("recipient"),
+            sender: both.sender.clone(),
+        });
+    let decision = commit_submission(&fixture.ingress.uow, &both, 1)
+        .await
+        .expect("committed refusal");
+    assert_eq!(decision.class, IngressDecisionClass::AuthorizationDenied);
+    assert_eq!(refusal(&decision), FORBIDDEN);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_room_address_that_is_not_canonical_is_refused_on_postgresql() {
+    let Some(fixture) = GrantFixture::active("hg_noncanonical_room").await else {
+        return;
+    };
+    // The managed room under a spelling the identity profile does not
+    // accept: the rooted form of its domain. Room bindings are keyed by the
+    // canonical address, so this spelling cannot be looked up, and it is
+    // refused rather than treated as a room no scope manages.
+    let rooted: jid::BareJid = format!("{}.", fixture.scope.room)
+        .parse()
+        .expect("rooted room address");
+    assert_ne!(rooted, fixture.scope.room);
+    let submission = room_submission(
+        &fixture.ingress,
+        &rooted,
+        "rooted-room",
+        "another spelling",
+        &[PEER_RESOURCE],
+    );
+    let decision = commit_submission(&fixture.ingress.uow, &submission, 1)
+        .await
+        .expect("committed refusal");
+    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
+    assert_eq!(refusal(&decision), SERVICE_UNAVAILABLE);
+    assert!(fixture
+        .manifest(decision.message_key.expect("key"))
+        .await
+        .is_none());
     fixture.close().await;
 }

@@ -332,8 +332,9 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("xmpp_auth_codes", READ_INSERT_DELETE),
     ("permission_tuples", READ_WRITE),
     // Host-grant authority (ADR-0020 D5). The owner phase alone enrolls a
-    // scope and binds its rooms, so the incarnation, the lifecycle ledger and
-    // the room bindings are read-only to the runtime. The runtime row-locks
+    // scope, binds its rooms and retires it, so the incarnation, the
+    // lifecycle ledger and the room bindings are read-only to the runtime;
+    // retirement stamps the ledger. The runtime row-locks
     // and updates a scope's state, inserts and updates grant rows (a revoke
     // is a row, never a delete), and appends to the operation journal, which
     // it can neither rewrite nor delete. The store's attachment verifies

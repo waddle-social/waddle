@@ -213,8 +213,6 @@ pub use crate::server::routes::websocket::muc_invites::{
     claim_invite, list_invites, record_invite_at, InviteStorageError, OutstandingInvite,
     RecordOutcome,
 };
-/// The production `/ws` RFC 7395 router, so suites can serve a test state
-/// over a real loopback WebSocket and drive the live connection loop.
 /// Hold an ingress acceptance transaction that the host-grant authority
 /// admitted, with the scope's guard held, until `proceed` is notified.
 /// `entered` is notified when the transaction reaches the gate.
@@ -227,6 +225,35 @@ pub async fn with_host_grant_admission_gate<F: std::future::Future>(
         .await
 }
 
+/// Activate the operation `marker` names as a verified projection would,
+/// without a projection behind it. Activation otherwise accepts only the
+/// witness that verification of a SpiceDB projection produces; suites that
+/// exercise the canonical store and SQL admission without SpiceDB, and
+/// cases that replay a delayed activation, use this instead.
+///
+/// # Errors
+/// Returns the store's refusal or failure, as `HostGrantStore::activate`.
+pub async fn activate_host_grant_marker(
+    store: &crate::permissions::host_grant::HostGrantStore,
+    marker: &crate::permissions::host_grant::ProjectionMarker,
+) -> Result<
+    crate::permissions::host_grant::Activation,
+    crate::permissions::host_grant::HostGrantError,
+> {
+    store
+        .activate(
+            &crate::permissions::host_grant::VerifiedProjection::without_projection_for_test(
+                marker.clone(),
+            ),
+        )
+        .await
+}
+
+/// The production source a room actor hydrates its durable audience from:
+/// the channel and parent Space membership the permission store holds.
+pub use crate::server::durable_membership::PermissionDurableMembershipSource;
+/// The production `/ws` RFC 7395 router, so suites can serve a test state
+/// over a real loopback WebSocket and drive the live connection loop.
 pub use crate::server::routes::websocket::router;
 pub use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
 pub use crate::server::routes::websocket::test_state::{

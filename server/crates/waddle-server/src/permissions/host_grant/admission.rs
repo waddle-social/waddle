@@ -11,20 +11,26 @@
 //!
 //! A room that no scope manages is not this authority's concern and keeps
 //! its existing admission. A managed room is admitted only when its scope is
-//! active under the current authority incarnation and policy version, the
-//! sender's effective affiliation allows the action, and every recipient's
-//! effective affiliation allows `Read`. A subject whose recorded affiliation
-//! is `outcast` is refused whatever else is stored.
+//! active under the current authority incarnation and policy version and the
+//! sender's honoured affiliation allows the action. The decision also names
+//! the audience: of the principals the acceptance would deliver to, project
+//! for or notify, those whose honoured affiliation allows `Read`. The caller
+//! accepts nothing for anyone else. A subject whose recorded affiliation is
+//! `outcast` is refused whatever else is stored, and an owner or admin grant
+//! of an account this deployment does not serve is honoured as no grant
+//! (`policy::honoured_affiliation`).
 
 use std::collections::BTreeMap;
 
 use jid::BareJid;
+use waddle_xmpp::identity::CanonicalBareJid;
 
+use super::issuance::ServedAccountDomains;
 use super::model::{
     AuthorityIncarnation, GrantGeneration, GrantOperationId, RoomAffiliation, ScopeLifecycleId,
     HOST_GRANT_POLICY_VERSION,
 };
-use super::policy::{affiliation_allows, HostGrantAction};
+use super::policy::{grant_allows, HostGrantAction};
 use crate::db::{DatabaseError, Transaction};
 
 /// The relations admission reads, as the acceptance transaction names them.
@@ -43,8 +49,11 @@ pub struct RoomAcceptance<'a> {
     pub sender: &'a BareJid,
     /// The action the sender performs.
     pub action: HostGrantAction,
-    /// The bare JID of every recipient the acceptance freezes.
+    /// The bare JID of every principal the acceptance names as a recipient:
+    /// whoever it would deliver to, project an inbox row for or notify.
     pub audience: &'a [BareJid],
+    /// The account domains this deployment serves.
+    pub served: &'a ServedAccountDomains,
 }
 
 /// The canonical state an admission was decided under. It is valid for the
@@ -63,16 +72,20 @@ pub enum AdmissionDenial {
     /// The scope is not active under the current incarnation and policy
     /// version, or its stored state cannot be read as valid.
     ScopeClosed,
-    /// The sender's effective affiliation does not allow the action.
+    /// The sender's honoured affiliation does not allow the action.
     SenderNotAdmitted,
-    /// A recipient's effective affiliation does not allow `Read`.
-    AudienceNotAdmitted,
 }
 
 /// The decision for the acceptance of a managed room.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoomAdmission {
-    Admitted(AdmissionWitness),
+    /// The sender is admitted. `audience` holds the named principals whose
+    /// honoured affiliation allows `Read`, in the order they were named;
+    /// nothing may be accepted for a principal outside it.
+    Admitted {
+        witness: AdmissionWitness,
+        audience: Vec<BareJid>,
+    },
     Denied(AdmissionDenial),
 }
 
@@ -81,14 +94,28 @@ pub(crate) struct ManagingScope {
     lifecycle: String,
 }
 
+/// What the room bindings hold for a room address.
+pub(crate) enum RoomManagement {
+    /// No scope manages the room.
+    Unmanaged,
+    Managed(ManagingScope),
+    /// The address is not in the identity profile's canonical form. Room
+    /// bindings are keyed by the canonical form, so whether a scope manages
+    /// the room this address reaches cannot be decided from it.
+    NotCanonical,
+}
+
 /// Find the scope that manages `room`, if any. A room binding is immutable,
 /// so the lookup takes no lock; a room without one is not this authority's
-/// concern.
+/// concern. The lookup is made by the canonical address only.
 pub(crate) async fn managing_scope(
     tx: &mut Transaction<'_>,
     relations: &AdmissionRelations,
     room: &BareJid,
-) -> Result<Option<ManagingScope>, DatabaseError> {
+) -> Result<RoomManagement, DatabaseError> {
+    let Ok(room) = CanonicalBareJid::new(room.clone()) else {
+        return Ok(RoomManagement::NotCanonical);
+    };
     let mut rows = tx
         .query(
             &format!(
@@ -99,10 +126,10 @@ pub(crate) async fn managing_scope(
         )
         .await?;
     match rows.next().await? {
-        Some(row) => Ok(Some(ManagingScope {
+        Some(row) => Ok(RoomManagement::Managed(ManagingScope {
             lifecycle: row.get(0)?,
         })),
-        None => Ok(None),
+        None => Ok(RoomManagement::Unmanaged),
     }
 }
 
@@ -190,23 +217,30 @@ pub(crate) async fn admit_room_acceptance(
     let allows = |subject: &BareJid, action: HostGrantAction| {
         held.get(subject.as_str())
             .is_some_and(|(recorded, effective)| {
-                *recorded != RoomAffiliation::Outcast && affiliation_allows(*effective, action)
+                grant_allows(
+                    *recorded,
+                    *effective,
+                    acceptance.served.home_of(subject),
+                    action,
+                )
             })
     };
     if !allows(acceptance.sender, acceptance.action) {
         return Ok(RoomAdmission::Denied(AdmissionDenial::SenderNotAdmitted));
     }
-    if !acceptance
+    let audience = acceptance
         .audience
         .iter()
-        .all(|recipient| allows(recipient, HostGrantAction::Read))
-    {
-        return Ok(RoomAdmission::Denied(AdmissionDenial::AudienceNotAdmitted));
-    }
-    Ok(RoomAdmission::Admitted(AdmissionWitness {
-        lifecycle,
-        incarnation,
-        generation,
-        operation,
-    }))
+        .filter(|recipient| allows(recipient, HostGrantAction::Read))
+        .cloned()
+        .collect();
+    Ok(RoomAdmission::Admitted {
+        witness: AdmissionWitness {
+            lifecycle,
+            incarnation,
+            generation,
+            operation,
+        },
+        audience,
+    })
 }
