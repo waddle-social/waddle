@@ -267,6 +267,7 @@ export function useWaddleDirectory(
       spacesServiceJid.value = topology.services?.spaces ?? null;
       const discoveredSpaces = topology.spaces.map((space) => ({
         id: space.id,
+        ...(space.serviceJid ? { serviceJid: space.serviceJid } : {}),
         name: space.name,
         role: space.role ?? null,
       }) satisfies SpaceSummary);

@@ -3,10 +3,21 @@
 // render a "new messages" divider. This is a local UX concern distinct from
 // XEP-0333 <displayed/> receipts, which communicate *other users'* read state.
 
+import { qualifiedRoomKey } from "@/lib/xmpp/qualified-identity";
+
 const PREFIX = "waddle.chat.last-seen";
 
-export function roomKey(channelId: string): string {
-  return `${PREFIX}.room.${channelId}`;
+// Room anchors used to be keyed by the room's local id, which two rooms on
+// different services can share. They are keyed by canonical room JID under a
+// versioned prefix; legacy entries cannot be attributed to a room and are
+// discarded.
+const LEGACY_ROOM_PREFIX = `${PREFIX}.room.`;
+const ROOM_PREFIX = `${PREFIX}.v2.room.`;
+
+/** Storage key for a room's last-seen anchor, or `""` without a room address. */
+export function roomKey(roomJid: string): string {
+  const room = qualifiedRoomKey(roomJid);
+  return room ? `${ROOM_PREFIX}${room}` : "";
 }
 
 export function dmKey(peerConversationJid: string): string {
@@ -36,16 +47,36 @@ type MdsDisplayedStore = {
   pending: MdsDisplayedState[];
 };
 
+const purgedStorages = new WeakSet<Storage>();
+
 function storage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage;
+    const s = window.localStorage;
+    purgeLegacyRoomKeys(s);
+    return s;
   } catch {
     return null;
   }
 }
 
+function purgeLegacyRoomKeys(s: Storage): void {
+  if (purgedStorages.has(s)) return;
+  purgedStorages.add(s);
+  try {
+    const stale: string[] = [];
+    for (let i = 0; i < s.length; i++) {
+      const key = s.key(i);
+      if (key?.startsWith(LEGACY_ROOM_PREFIX)) stale.push(key);
+    }
+    for (const key of stale) s.removeItem(key);
+  } catch {
+    // Storage disabled; there is nothing to purge.
+  }
+}
+
 export function setLastSeen(key: string, messageId: string): void {
+  if (!key) return;
   const s = storage();
   if (!s) return;
   try {
@@ -57,6 +88,7 @@ export function setLastSeen(key: string, messageId: string): void {
 }
 
 function getLastSeen(key: string): string | null {
+  if (!key) return null;
   const s = storage();
   if (!s) return null;
   try {

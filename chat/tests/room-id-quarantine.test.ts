@@ -481,15 +481,19 @@ test("quarantine prevents delayed last-seen writes without changing other rooms"
 		activeChannelId: ref(null),
 		currentChannel: ref(null),
 		messages: ref([]),
+		roomJidForChannel: (id) =>
+			f.client.isRoomIdAmbiguous(id)
+				? null
+				: ({ general: a, other } as Record<string, string>)[id] ?? null,
 	});
 	f.client.rememberRoomJidForChannel("general", a);
 	markers.persistLastSeen("general", "before-conflict");
-	expect(localStorage.getItem(roomKey("general"))).toBe("before-conflict");
+	expect(localStorage.getItem(roomKey(a))).toBe("before-conflict");
 	expect(() => f.client.rememberRoomJidForChannel("general", b)).toThrow(
 		AmbiguousRoomIdError,
 	);
 	markers.persistLastSeen("general", "delayed-after-conflict");
-	expect(localStorage.getItem(roomKey("general"))).toBe("before-conflict");
+	expect(localStorage.getItem(roomKey(a))).toBe("before-conflict");
 	markers.persistLastSeen("other", "unaffected");
-	expect(localStorage.getItem(roomKey("other"))).toBe("unaffected");
+	expect(localStorage.getItem(roomKey(other))).toBe("unaffected");
 });
