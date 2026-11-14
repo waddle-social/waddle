@@ -1,7 +1,8 @@
 //! Startup validation of the CRLs of a private-CA profile.
 //!
 //! The profile accepts only complete, direct CRLs: one per configured CA,
-//! signed by that CA, current at load time. webpki, which checks revocation
+//! signed by that CA, current at load time, and valid for at most
+//! [`super::limits::MAX_CRL_VALIDITY_SECS`] from thisUpdate to nextUpdate. webpki, which checks revocation
 //! while it builds a path, discards `thisUpdate`, consults the first CRL
 //! whose issuer matches and ignores expiry unless told otherwise, so those
 //! properties are established here before a CRL is handed to it.
@@ -14,7 +15,7 @@ use x509_parser::revocation_list::CertificateRevocationList;
 
 use super::der::{crl_entry_count, single, Reader, SEQUENCE};
 use super::error::TrustErrorKind;
-use super::limits::{MAX_CRL_DER_BYTES, MAX_CRL_ENTRIES};
+use super::limits::{MAX_CRL_DER_BYTES, MAX_CRL_ENTRIES, MAX_CRL_VALIDITY_SECS};
 use super::signature::{verify_signed_by, SignatureFailure};
 
 /// id-ce-cRLNumber, 2.5.29.20.
@@ -108,6 +109,12 @@ pub(super) fn load_crl(
         .ok_or(TrustErrorKind::CrlMissingNextUpdate)?;
     if next_update <= this_update {
         return Err(TrustErrorKind::CrlTimestampsReversed);
+    }
+    // A CRL announces when its successor is due; one that may stand for
+    // longer than the profile accepts leaves revocations unseen for too
+    // long, however current it is today.
+    if next_update.saturating_sub(this_update) > MAX_CRL_VALIDITY_SECS {
+        return Err(TrustErrorKind::CrlValidityTooLong);
     }
     if now < this_update {
         return Err(TrustErrorKind::CrlNotYetValid);

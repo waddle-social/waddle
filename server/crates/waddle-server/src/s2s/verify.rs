@@ -10,8 +10,11 @@
 //!   and current CRLs, and otherwise [`PublicRoots`].
 //! - [`PeerVerifier`]: the per-connection rustls verifier for both TLS
 //!   roles. It verifies the peer's chain under the profile of the stream's
-//!   source domain and matches DNS-ID, SRV-ID and XmppAddr identifiers
-//!   against that domain in the identity profile's canonical form.
+//!   source domain and matches the certificate's identifiers against that
+//!   domain in the identity profile's canonical form: DNS-IDs on every
+//!   profile, SRV-IDs and XmppAddrs on a private-CA profile only. Once the
+//!   handshake has completed, [`PeerVerifier::established`] yields the
+//!   evidence for that connection.
 //! - [`initiating_config`] and [`receiving_config`]: the TLS profile, with
 //!   resumption, tickets and early data off.
 //! - [`VerifierWorkers`]: bounded workers on which a connection processes

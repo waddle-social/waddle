@@ -13,6 +13,7 @@ use webpki::EndEntityCert;
 
 use super::error::{TrustError, TrustErrorKind, VerifyError};
 use super::facts::{IdentifierError, SrvName, XmppIdentifiers};
+use super::trust::TrustProfileKind;
 
 /// The SRV service label of server-to-server streams (RFC 6120 §13.7.1.2.1).
 /// It carries no `_tcp` label (RFC 4985 §2), and direct TLS (XEP-0368) uses
@@ -68,29 +69,39 @@ pub enum MatchedIdentifier {
     /// A dNSName entry, exact or with a wildcard as its whole left-most
     /// label.
     DnsId,
-    /// An `_xmpp-server` SRVName entry (RFC 4985).
+    /// An `_xmpp-server` SRVName entry (RFC 4985). Matched on a private-CA
+    /// profile only.
     SrvId,
-    /// An `id-on-xmppAddr` entry (RFC 6120 §13.7.1.4).
+    /// An `id-on-xmppAddr` entry (RFC 6120 §13.7.1.4). Matched on a
+    /// private-CA profile only.
     XmppAddr,
 }
 
 /// Match the end-entity certificate against the reference identity.
 ///
 /// `end_entity` must be the certificate webpki verified, and `identifiers`
-/// the XMPP identifiers read from the same bytes. `name_constrained` tells
-/// whether any CA in the verified path carries a nameConstraints extension.
-/// webpki applies dNSName constraints to dNSName entries only, and nothing
-/// applies RFC 4985 SRVName constraints, so under a constrained path the
-/// SRV-ID and XmppAddr forms are not matched: an issuer limited to one DNS
-/// subtree could otherwise name any domain through them.
+/// the XMPP identifiers read from the same bytes.
+///
+/// On the public-WebPKI profile only DNS-IDs are matched. The TLS Baseline
+/// Requirements do not let a publicly trusted CA issue an `otherName`
+/// entry, so no public CA has validated an SRV-ID or XmppAddr, and an entry
+/// of either form in a public certificate proves nothing.
+///
+/// `name_constrained` tells whether any CA in the verified path carries a
+/// nameConstraints extension. webpki applies dNSName constraints to dNSName
+/// entries only, and nothing applies RFC 4985 SRVName constraints, so under
+/// a constrained path the SRV-ID and XmppAddr forms are not matched on a
+/// private-CA profile either: an issuer limited to one DNS subtree could
+/// otherwise name any domain through them.
 pub(super) fn match_reference(
     reference: &ReferenceIdentity,
     end_entity: &EndEntityCert<'_>,
     identifiers: &Result<XmppIdentifiers, IdentifierError>,
+    profile: TrustProfileKind,
     name_constrained: bool,
 ) -> Result<MatchedIdentifier, VerifyError> {
-    // An invalid XMPP identifier fails the certificate even when a DNS-ID
-    // would match.
+    // An invalid XMPP identifier fails the certificate on either profile,
+    // even when a DNS-ID would match.
     let identifiers = match identifiers {
         Ok(identifiers) => identifiers,
         Err(IdentifierError::Malformed) => return Err(VerifyError::MalformedIdentifier),
@@ -107,7 +118,7 @@ pub(super) fn match_reference(
         Err(error) => return Err(VerifyError::Path(error)),
     }
 
-    if name_constrained {
+    if profile == TrustProfileKind::PublicWebPki || name_constrained {
         return Err(VerifyError::IdentityMismatch);
     }
     if identifiers

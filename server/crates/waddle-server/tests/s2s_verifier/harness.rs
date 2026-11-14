@@ -25,6 +25,8 @@ pub const HOME_A: &str = "home-a.test";
 pub const HOME_B: &str = "home-b.test";
 /// A component domain of [`HOME_A`].
 pub const MUC_A: &str = "muc.home-a.test";
+/// A domain two labels below [`HOME_A`].
+pub const DEEP_A: &str = "a.muc.home-a.test";
 /// A well-behaved third domain.
 pub const PEER: &str = "peer.test";
 /// An internationalized domain in A-label form; its U-label form is
@@ -33,7 +35,7 @@ pub const IDN_A_LABEL: &str = "xn--bcher-kva.test";
 /// The U-label form of [`IDN_A_LABEL`].
 pub const IDN_U_LABEL: &str = "bücher.test";
 /// The domains a [`Fixture`] accepts its issuer's certificates for.
-pub const FIXTURE_DOMAINS: &[&str] = &[HOME_A, HOME_B, MUC_A, PEER, IDN_A_LABEL];
+pub const FIXTURE_DOMAINS: &[&str] = &[HOME_A, HOME_B, MUC_A, DEEP_A, PEER, IDN_A_LABEL];
 
 /// A clock that always tells the same time.
 #[derive(Debug)]
@@ -206,6 +208,18 @@ impl Attempt {
     /// What the receiving endpoint learned about the initiating server.
     pub fn of_initiator(&self) -> Verification {
         self.receiving.verification()
+    }
+
+    /// The evidence about the receiving server that the initiating
+    /// endpoint's completed connection carries.
+    pub fn receiver_established(&self) -> Option<VerifiedPeer> {
+        self.initiating.established(&self.handshake.client)
+    }
+
+    /// The evidence about the initiating server that the receiving
+    /// endpoint's completed connection carries.
+    pub fn initiator_established(&self) -> Option<VerifiedPeer> {
+        self.receiving.established(&self.handshake.server)
     }
 }
 
@@ -466,4 +480,37 @@ impl Fixture {
         let as_initiator = attempt(&self.inventory, (reference, &presented), (PEER, &peer));
         [as_receiver.of_receiver(), as_initiator.of_initiator()]
     }
+
+    /// The evidence about `reference` that completed connections carry when
+    /// the credential `issue` returns is presented in each TLS role, as in
+    /// [`Fixture::in_both_roles`]. Both handshakes must complete.
+    pub fn established_in_both_roles(
+        &self,
+        reference: &str,
+        issue: impl Fn(&Authority) -> Credential,
+    ) -> [VerifiedPeer; 2] {
+        let peer = self.issuer.issue_for(&[PEER]);
+        let presented = issue(&self.issuer);
+        let as_receiver = attempt(&self.inventory, (PEER, &peer), (reference, &presented));
+        let presented = issue(&self.issuer);
+        let as_initiator = attempt(&self.inventory, (reference, &presented), (PEER, &peer));
+        [
+            completed(&as_receiver, self.kind).receiver_established(),
+            completed(&as_initiator, self.kind).initiator_established(),
+        ]
+        .map(|evidence| evidence.expect("a completed handshake establishes the peer"))
+    }
+}
+
+/// `attempt`, which must have completed.
+fn completed(attempt: &Attempt, kind: TrustProfileKind) -> &Attempt {
+    assert!(
+        attempt.handshake.completed(),
+        "{kind:?} profile: client {:?}, server {:?}, receiver {:?}, initiator {:?}",
+        attempt.handshake.client_error,
+        attempt.handshake.server_error,
+        attempt.of_receiver(),
+        attempt.of_initiator(),
+    );
+    attempt
 }

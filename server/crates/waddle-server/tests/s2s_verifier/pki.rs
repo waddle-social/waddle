@@ -27,12 +27,17 @@ pub struct Day(pub i32, pub u8, pub u8);
 pub const CA_FROM: Day = Day(2030, 1, 1);
 /// The day test CAs expire.
 pub const CA_UNTIL: Day = Day(2031, 1, 1);
-/// The first day test end-entity certificates and CRLs are valid.
+/// The first day test end-entity certificates are valid.
 pub const VALID_FROM: Day = Day(2030, 6, 1);
 /// The verification time of most cases.
 pub const NOW: Day = Day(2030, 6, 15);
-/// The day test end-entity certificates and CRLs expire.
+/// The day test end-entity certificates expire.
 pub const VALID_UNTIL: Day = Day(2030, 7, 1);
+/// The thisUpdate of current test CRLs.
+pub const CRL_THIS_UPDATE: Day = Day(2030, 6, 12);
+/// The nextUpdate of current test CRLs: seven days after their thisUpdate,
+/// the longest interval a private-CA profile accepts.
+pub const CRL_NEXT_UPDATE: Day = Day(2030, 6, 19);
 
 const INTEGER: u8 = 0x02;
 const BIT_STRING: u8 = 0x03;
@@ -225,8 +230,8 @@ impl CrlSpec {
     /// A complete CRL that is current at [`NOW`] and revokes nothing.
     pub fn current() -> Self {
         Self {
-            this_update: VALID_FROM,
-            next_update: Some(VALID_UNTIL),
+            this_update: CRL_THIS_UPDATE,
+            next_update: Some(CRL_NEXT_UPDATE),
             revoked: Vec::new(),
             extensions: Vec::new(),
             authority_key_identifier: None,

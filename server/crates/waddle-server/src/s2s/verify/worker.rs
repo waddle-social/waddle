@@ -9,8 +9,9 @@
 //!
 //! - A job starts only after it holds a permit, so at most
 //!   [`VerifierWorkers::limit`] jobs execute at once and no job is ever
-//!   queued. A bounded number of callers may wait for a permit; beyond that
-//!   a request is refused immediately.
+//!   queued. A caller that finds a free worker starts at once; otherwise a
+//!   bounded number of callers may wait for a permit, and beyond that a
+//!   request is refused immediately.
 //! - The worker keeps its permit until the job has finished executing. A
 //!   connection that times out can drop its [`Completion`] and close its
 //!   socket, which discards the late result, but that neither stops the job
@@ -47,17 +48,35 @@ pub struct VerifierWorkers {
     max_waiting: usize,
 }
 
+// The default limit is within what the runtime's semaphore can count.
+const _: () = assert!(VERIFIER_WORKERS <= VerifierWorkers::MAX_LIMIT);
+
 impl Default for VerifierWorkers {
     fn default() -> Self {
-        Self::new(VERIFIER_WORKERS, VERIFIER_WAITERS)
+        Self::build(VERIFIER_WORKERS, VERIFIER_WAITERS)
     }
 }
 
 impl VerifierWorkers {
+    /// The largest `limit` [`VerifierWorkers::new`] accepts: the most
+    /// permits a Tokio semaphore can hold.
+    pub const MAX_LIMIT: usize = Semaphore::MAX_PERMITS;
+
     /// Workers that execute at most `limit` jobs at once and let at most
     /// `max_waiting` callers wait for one. A `limit` of zero is raised to
-    /// one.
-    pub fn new(limit: usize, max_waiting: usize) -> Self {
+    /// one, and one above [`VerifierWorkers::MAX_LIMIT`] is refused. With a
+    /// `max_waiting` of zero, [`VerifierWorkers::run`] starts a job when a
+    /// worker is free and refuses it otherwise, like
+    /// [`VerifierWorkers::try_run`].
+    pub fn new(limit: usize, max_waiting: usize) -> Result<Self, WorkerError> {
+        if limit > Self::MAX_LIMIT {
+            return Err(WorkerError::LimitTooLarge);
+        }
+        Ok(Self::build(limit, max_waiting))
+    }
+
+    /// `limit` must not exceed [`VerifierWorkers::MAX_LIMIT`].
+    fn build(limit: usize, max_waiting: usize) -> Self {
         let limit = limit.max(1);
         Self {
             permits: Arc::new(Semaphore::new(limit)),
@@ -97,15 +116,23 @@ impl VerifierWorkers {
 
     /// Run `job` on a worker, waiting for one to become free.
     ///
-    /// The wait has no deadline of its own: the caller bounds it with the
-    /// connection's handshake deadline, and dropping this future gives up
-    /// the place in line. When [`VerifierWorkers::new`]'s `max_waiting`
-    /// callers are already waiting, the request is refused instead.
+    /// A free worker takes the job at once, without the caller counting as
+    /// waiting. Otherwise the caller waits, unless [`VerifierWorkers::new`]'s
+    /// `max_waiting` callers are already waiting, in which case the request
+    /// is refused. The wait has no deadline of its own: the caller bounds it
+    /// with the connection's handshake deadline, and dropping this future
+    /// gives up the place in line.
     pub async fn run<T, F>(&self, job: F) -> Result<Completion<T>, WorkerError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        // A permit is free only when nobody is waiting for one, because the
+        // semaphore hands a released permit to the first waiter; taking it
+        // here therefore jumps no queue.
+        if let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() {
+            return start(permit, job);
+        }
         let _waiter = Waiter::enter(&self.waiting, self.max_waiting)?;
         let permit = Arc::clone(&self.permits)
             .acquire_owned()

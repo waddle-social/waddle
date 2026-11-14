@@ -1,14 +1,16 @@
 //! Matrix row "DNS/service identity". Positive exact-name matches are
 //! recorded separately from negative ones: a certificate authenticates only
 //! the reference identity of the stream it is presented on, whatever other
-//! names it carries.
+//! names it carries. A positive match is asserted on the evidence of a
+//! completed handshake. SRV-IDs and XmppAddrs are matched on a private-CA
+//! profile only.
 
 use rcgen::{CertificateParams, DnType};
-use waddle_server::s2s::verify::{MatchedIdentifier, Verification, VerifyError};
+use waddle_server::s2s::verify::{MatchedIdentifier, TrustProfileKind, Verification, VerifyError};
 use waddle_xmpp::identity::CanonicalDomain;
 
 use crate::harness::{
-    attempt, domain, refused, verified, Fixture, HOME_A, HOME_B, IDN_A_LABEL, IDN_U_LABEL, MUC_A,
+    attempt, domain, refused, Fixture, DEEP_A, HOME_A, HOME_B, IDN_A_LABEL, IDN_U_LABEL, MUC_A,
     PEER,
 };
 use crate::pki::{
@@ -29,6 +31,21 @@ fn leaf_with_san(issuer: &Authority, entries: &[Vec<u8>]) -> Credential {
     issuer.issue(params)
 }
 
+/// Assert that completed handshakes authenticate `reference` in both roles
+/// through `expected` with the certificate `issue` returns, in `fixture`.
+fn assert_established(
+    fixture: &Fixture,
+    reference: &str,
+    expected: MatchedIdentifier,
+    issue: impl Fn(&Authority) -> Credential,
+) {
+    for peer in fixture.established_in_both_roles(reference, &issue) {
+        assert_eq!(peer.matched_identifier(), expected, "{:?}", fixture.kind);
+        assert_eq!(peer.domain(), &domain(reference), "{:?}", fixture.kind);
+        assert_eq!(peer.profile(), fixture.kind);
+    }
+}
+
 /// Assert that `reference` is authenticated in both roles through
 /// `expected` by the certificate `issue` returns, in both trust profiles.
 fn assert_matches(
@@ -37,11 +54,23 @@ fn assert_matches(
     issue: impl Fn(&Authority) -> Credential,
 ) {
     for fixture in Fixture::both() {
-        for verification in fixture.in_both_roles(reference, &issue) {
-            let peer = verified(verification);
-            assert_eq!(peer.matched_identifier(), expected, "{:?}", fixture.kind);
-            assert_eq!(peer.domain(), &domain(reference), "{:?}", fixture.kind);
-        }
+        assert_established(&fixture, reference, expected, &issue);
+    }
+}
+
+/// Assert that the certificate `issue` returns authenticates `reference`
+/// through `expected` on a private-CA profile, and is refused for lack of
+/// a matching identifier on the public-WebPKI profile, in both roles.
+fn assert_matches_on_private_ca_only(
+    reference: &str,
+    expected: MatchedIdentifier,
+    issue: impl Fn(&Authority) -> Credential,
+) {
+    assert_established(&Fixture::private(), reference, expected, &issue);
+    let public = Fixture::public();
+    assert_eq!(public.kind, TrustProfileKind::PublicWebPki);
+    for verification in public.in_both_roles(reference, &issue) {
+        assert_eq!(refused(verification), VerifyError::IdentityMismatch);
     }
 }
 
@@ -90,24 +119,43 @@ fn a_certificate_with_several_names_matches_the_one_that_is_the_reference() {
 }
 
 #[test]
-fn an_srv_id_alone_matches() {
-    assert_matches(HOME_A, MatchedIdentifier::SrvId, |issuer| {
+fn an_srv_id_alone_matches_on_a_private_ca_profile_only() {
+    assert_matches_on_private_ca_only(HOME_A, MatchedIdentifier::SrvId, |issuer| {
         leaf_with_san(issuer, &[san_srv("_xmpp-server.home-a.test")])
     });
 }
 
 #[test]
 fn an_srv_id_matches_without_regard_to_ascii_case() {
-    assert_matches(HOME_A, MatchedIdentifier::SrvId, |issuer| {
+    assert_matches_on_private_ca_only(HOME_A, MatchedIdentifier::SrvId, |issuer| {
         leaf_with_san(issuer, &[san_srv("_XMPP-Server.Home-A.Test")])
     });
 }
 
 #[test]
-fn an_xmpp_addr_alone_matches() {
-    assert_matches(HOME_A, MatchedIdentifier::XmppAddr, |issuer| {
+fn an_xmpp_addr_alone_matches_on_a_private_ca_profile_only() {
+    assert_matches_on_private_ca_only(HOME_A, MatchedIdentifier::XmppAddr, |issuer| {
         leaf_with_san(issuer, &[san_xmpp_addr(HOME_A)])
     });
+}
+
+#[test]
+fn a_public_certificate_with_srv_ids_and_xmpp_addrs_matches_through_its_dns_id() {
+    assert_established(
+        &Fixture::public(),
+        HOME_A,
+        MatchedIdentifier::DnsId,
+        |issuer| {
+            leaf_with_san(
+                issuer,
+                &[
+                    san_srv("_xmpp-server.home-a.test"),
+                    san_xmpp_addr(HOME_A),
+                    san_dns(HOME_A),
+                ],
+            )
+        },
+    );
 }
 
 #[test]
@@ -150,8 +198,7 @@ fn u_label_and_a_label_references_match_the_same_names() {
         // the same stream.
         for reference in [IDN_U_LABEL, IDN_A_LABEL] {
             let fixture = Fixture::private();
-            for verification in fixture.in_both_roles(reference, issue) {
-                let peer = verified(verification);
+            for peer in fixture.established_in_both_roles(reference, issue) {
                 assert_eq!(peer.matched_identifier(), expected);
                 assert_eq!(peer.domain().as_str(), IDN_A_LABEL);
             }
@@ -184,7 +231,13 @@ fn an_alias_in_the_certificate_never_becomes_the_authenticated_domain() {
     // Presented for home-a.test, the certificate authenticates home-a.test
     // and nothing else.
     let stream = attempt(&fixture.inventory, (HOME_A, &with_alias), (PEER, &peer));
-    assert_eq!(verified(stream.of_initiator()).domain(), &domain(HOME_A));
+    assert_eq!(
+        stream
+            .initiator_established()
+            .expect("a completed handshake")
+            .domain(),
+        &domain(HOME_A)
+    );
 
     // A certificate that lacks the stream's source domain is refused even
     // though the inventory serves every name it carries.
@@ -252,6 +305,24 @@ fn a_wildcard_does_not_match_its_parent_or_more_than_one_label() {
     });
     assert_refused(MUC_A, VerifyError::IdentityMismatch, |issuer| {
         issuer.issue_for(&["*.test"])
+    });
+    // `*.home-a.test` stands for muc.home-a.test, never for the two labels
+    // of a.muc.home-a.test.
+    assert_refused(DEEP_A, VerifyError::IdentityMismatch, |issuer| {
+        issuer.issue_for(&["*.home-a.test"])
+    });
+    assert_matches(DEEP_A, MatchedIdentifier::DnsId, |issuer| {
+        issuer.issue_for(&["*.muc.home-a.test"])
+    });
+}
+
+#[test]
+fn a_presented_dns_id_with_a_trailing_dot_does_not_match() {
+    assert_refused(HOME_A, VerifyError::IdentityMismatch, |issuer| {
+        leaf_with_san(issuer, &[san_dns("home-a.test.")])
+    });
+    assert_refused(MUC_A, VerifyError::IdentityMismatch, |issuer| {
+        leaf_with_san(issuer, &[san_dns("*.home-a.test.")])
     });
 }
 
@@ -367,7 +438,7 @@ fn a_repeated_xmpp_identifier_fails_the_certificate() {
 
 #[test]
 fn distinct_srv_ids_for_several_domains_are_not_duplicates() {
-    assert_matches(HOME_A, MatchedIdentifier::SrvId, |issuer| {
+    assert_matches_on_private_ca_only(HOME_A, MatchedIdentifier::SrvId, |issuer| {
         leaf_with_san(
             issuer,
             &[

@@ -105,6 +105,17 @@ impl PrivateCaProfile {
         for (item, certificate, is_anchor) in anchors.chain(intermediates) {
             let facts =
                 read_authority(certificate, now).map_err(|kind| TrustError::at(kind, item))?;
+            // webpki applies the extended key usage of the intermediates in
+            // a path but not of its trust anchor. An anchor that carries the
+            // extension must therefore admit both TLS roles here, which
+            // means serverAuth: a profile serves either role.
+            if is_anchor
+                && facts
+                    .extended_key_usage
+                    .is_some_and(|usage| !usage.server_auth)
+            {
+                return Err(TrustError::at(TrustErrorKind::AnchorExtendedKeyUsage, item));
+            }
             // Subjects are unique within a profile, also across a CA
             // rotation: with two CAs of one name, which CRL applies would
             // depend on the order of the files.

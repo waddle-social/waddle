@@ -1,6 +1,7 @@
 //! Matrix row "Constraints": DNS name constraints are enforced, a CA or
-//! path with an SRVName/otherName constraint is refused outright, and no
-//! retry drops a constraint or promotes an intermediate to a root.
+//! path with an SRVName/otherName constraint is refused outright, SRV-IDs and
+//! XmppAddrs are not matched under a name-constrained path, and no retry
+//! drops a constraint or promotes an intermediate to a root.
 
 use rcgen::{GeneralSubtree, NameConstraints};
 use waddle_server::s2s::verify::{
@@ -12,8 +13,8 @@ use crate::harness::{
     HOME_A, HOME_B, PEER,
 };
 use crate::pki::{
-    ca_params, leaf_params, other_name_constraint, san_extension, san_srv, unix, Authority,
-    Credential, NOW,
+    ca_params, leaf_params, other_name_constraint, san_extension, san_srv, san_xmpp_addr, unix,
+    Authority, Credential, NOW,
 };
 
 /// A CA under `root` that may issue only for `permitted` and never for
@@ -33,12 +34,19 @@ fn constrained_intermediate(root: &Authority, permitted: &[&str], excluded: &[&s
     root.intermediate_with(params)
 }
 
-fn srv_only_leaf(issuer: &Authority, srv_name: &str) -> Credential {
+/// A leaf whose subjectAltName holds exactly `entry`.
+fn leaf_naming(issuer: &Authority, entry: Vec<u8>) -> Credential {
     let mut params = leaf_params(&[]);
-    params
-        .custom_extensions
-        .push(san_extension(&[san_srv(srv_name)]));
+    params.custom_extensions.push(san_extension(&[entry]));
     issuer.issue(params)
+}
+
+fn srv_only_leaf(issuer: &Authority, srv_name: &str) -> Credential {
+    leaf_naming(issuer, san_srv(srv_name))
+}
+
+fn xmpp_addr_only_leaf(issuer: &Authority, addr: &str) -> Credential {
+    leaf_naming(issuer, san_xmpp_addr(addr))
 }
 
 #[test]
@@ -100,43 +108,107 @@ fn an_excluded_dns_subtree_is_enforced() {
     );
 }
 
+/// SRV-IDs and XmppAddrs are matched on a private-CA profile only, so that
+/// is where a name-constrained path must keep them from matching.
 #[test]
-fn an_srv_id_is_not_matched_under_a_name_constrained_path() {
-    let root = Authority::root("Substituted Public Root");
-    let inventory = public_inventory(&[&root]);
+fn an_srv_id_or_xmpp_addr_is_not_matched_under_a_name_constrained_path() {
+    let root = Authority::root("Private Test Root");
+    let public = Authority::root("Unrelated Public Root");
     let intermediate = constrained_intermediate(&root, &[HOME_A], &[]);
+    let inventory = private_inventory(
+        &[&public],
+        private_profile(&[&root], &[&intermediate]),
+        &[HOME_A, HOME_B, PEER],
+    );
     let peer = root.issue_for(&[PEER]);
 
     // The issuer is limited to home-a.test by a dNSName constraint, which
-    // does not cover the SRVName form: an SRV-ID for any domain passes
-    // webpki's constraint check. It must not authenticate home-b.test.
-    let escaping =
-        srv_only_leaf(&intermediate, "_xmpp-server.home-b.test").presenting(&[intermediate.der()]);
-    let stream = attempt(&inventory, (HOME_B, &escaping), (PEER, &peer));
-    assert_eq!(
-        refused(stream.of_initiator()),
-        VerifyError::IdentityMismatch
-    );
-    let stream = attempt(&inventory, (PEER, &peer), (HOME_B, &escaping));
-    assert_eq!(refused(stream.of_receiver()), VerifyError::IdentityMismatch);
+    // does not cover the otherName form: an SRV-ID or XmppAddr for any
+    // domain passes webpki's constraint check. It must not authenticate
+    // home-b.test.
+    let escaping = [
+        srv_only_leaf(&intermediate, "_xmpp-server.home-b.test"),
+        xmpp_addr_only_leaf(&intermediate, HOME_B),
+    ];
+    for leaf in &escaping {
+        let stream = attempt(&inventory, (HOME_B, leaf), (PEER, &peer));
+        assert_eq!(
+            refused(stream.of_initiator()),
+            VerifyError::IdentityMismatch
+        );
+        let stream = attempt(&inventory, (PEER, &peer), (HOME_B, leaf));
+        assert_eq!(refused(stream.of_receiver()), VerifyError::IdentityMismatch);
+    }
 
-    // Nor is an SRV-ID honoured inside the permitted subtree: the
-    // verifier does not implement SRVName constraints at all.
-    let inside =
-        srv_only_leaf(&intermediate, "_xmpp-server.home-a.test").presenting(&[intermediate.der()]);
-    let stream = attempt(&inventory, (HOME_A, &inside), (PEER, &peer));
-    assert_eq!(
-        refused(stream.of_initiator()),
-        VerifyError::IdentityMismatch
-    );
+    // Nor is either honoured inside the permitted subtree: the verifier
+    // does not implement SRVName constraints at all.
+    let inside = [
+        srv_only_leaf(&intermediate, "_xmpp-server.home-a.test"),
+        xmpp_addr_only_leaf(&intermediate, HOME_A),
+    ];
+    for leaf in &inside {
+        let stream = attempt(&inventory, (HOME_A, leaf), (PEER, &peer));
+        assert_eq!(
+            refused(stream.of_initiator()),
+            VerifyError::IdentityMismatch
+        );
+    }
 
-    // The same SRV-ID under an unconstrained issuer matches.
-    let unconstrained = srv_only_leaf(&root, "_xmpp-server.home-a.test");
-    let stream = attempt(&inventory, (HOME_A, &unconstrained), (PEER, &peer));
-    assert_eq!(
-        verified(stream.of_initiator()).matched_identifier(),
-        MatchedIdentifier::SrvId
+    // The same identifiers under the unconstrained root match.
+    let unconstrained = [
+        (
+            srv_only_leaf(&root, "_xmpp-server.home-a.test"),
+            MatchedIdentifier::SrvId,
+        ),
+        (
+            xmpp_addr_only_leaf(&root, HOME_A),
+            MatchedIdentifier::XmppAddr,
+        ),
+    ];
+    for (leaf, expected) in &unconstrained {
+        let stream = attempt(&inventory, (HOME_A, leaf), (PEER, &peer));
+        assert_eq!(
+            stream
+                .initiator_established()
+                .expect("a completed handshake")
+                .matched_identifier(),
+            *expected
+        );
+    }
+}
+
+#[test]
+fn a_name_constrained_private_ca_anchor_keeps_srv_ids_and_xmpp_addrs_from_matching() {
+    let mut params = ca_params("Constrained Private Root");
+    params.name_constraints = Some(NameConstraints {
+        permitted_subtrees: vec![
+            GeneralSubtree::DnsName(HOME_A.to_owned()),
+            GeneralSubtree::DnsName(PEER.to_owned()),
+        ],
+        excluded_subtrees: Vec::new(),
+    });
+    let root = Authority::root_with(params);
+    let public = Authority::root("Unrelated Public Root");
+    let inventory = private_inventory(&[&public], private_profile(&[&root], &[]), &[HOME_A, PEER]);
+    let peer = root.issue_for(&[PEER]);
+
+    let stream = attempt(
+        &inventory,
+        (HOME_A, &root.issue_for(&[HOME_A])),
+        (PEER, &peer),
     );
+    assert!(stream.initiator_established().is_some());
+
+    for leaf in [
+        srv_only_leaf(&root, "_xmpp-server.home-a.test"),
+        xmpp_addr_only_leaf(&root, HOME_A),
+    ] {
+        let stream = attempt(&inventory, (HOME_A, &leaf), (PEER, &peer));
+        assert_eq!(
+            refused(stream.of_initiator()),
+            VerifyError::IdentityMismatch
+        );
+    }
 }
 
 #[test]
@@ -205,16 +277,37 @@ fn a_public_root_with_an_other_name_constraint_is_refused() {
         .custom_extensions
         .push(other_name_constraint("_xmpp-server.home-a.test"));
     let root = Authority::root_with(params);
-    let inventory = public_inventory(&[&root]);
-    let peer = root.issue_for(&[PEER]);
+    // The other endpoint's certificate chains to a second, unconstrained
+    // root. Were it issued under the constrained root, the initiating
+    // endpoint would refuse the receiving server's certificate and abort
+    // the handshake before the receiving endpoint saw the initiating
+    // server's certificate at all.
+    let unconstrained = Authority::root("Substituted Public Root");
+    let inventory = public_inventory(&[&root, &unconstrained]);
+    let peer = unconstrained.issue_for(&[PEER]);
     let home_a = root.issue_for(&[HOME_A]);
 
     let stream = attempt(&inventory, (HOME_A, &home_a), (PEER, &peer));
-
+    assert!(!stream.handshake.completed());
     assert_eq!(
         refused(stream.of_initiator()),
         VerifyError::UnsupportedNameConstraint
     );
+    assert!(stream.initiator_established().is_none());
+
+    let stream = attempt(&inventory, (PEER, &peer), (HOME_A, &home_a));
+    assert!(!stream.handshake.completed());
+    assert_eq!(
+        refused(stream.of_receiver()),
+        VerifyError::UnsupportedNameConstraint
+    );
+
+    // The same chain verifies when the root carries no such constraint.
+    let plain = Authority::root("Plain Public Root");
+    let inventory = public_inventory(&[&plain, &unconstrained]);
+    let home_a = plain.issue_for(&[HOME_A]);
+    let stream = attempt(&inventory, (HOME_A, &home_a), (PEER, &peer));
+    assert!(stream.initiator_established().is_some());
 }
 
 #[test]

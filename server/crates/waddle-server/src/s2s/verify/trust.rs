@@ -8,7 +8,7 @@
 //! certificate fails for every other domain, and no second profile is tried
 //! after a rejection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -109,6 +109,7 @@ impl TrustProfile {
 }
 
 /// Counts describing a loaded [`TrustInventory`], for the startup log.
+/// They contain no domain or certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrustInventorySummary {
     pub public_roots: usize,
@@ -120,6 +121,36 @@ pub struct TrustInventorySummary {
     pub private_crls: usize,
     /// The first instant at which a private-CA profile expires.
     pub earliest_private_expiry: Option<UnixTime>,
+    /// Peer domains that use the public-WebPKI profile although a domain
+    /// they are within uses a private-CA profile, such as
+    /// `muc.example.org` when only `example.org` is configured. A profile
+    /// covers exactly the domain it is configured for, so such a domain is
+    /// verified against the public roots; a non-zero count usually means a
+    /// component domain was left out of the configuration.
+    pub public_subdomains_of_private: usize,
+}
+
+impl TrustInventorySummary {
+    /// Write the summary to the startup log. Only counts are logged; a
+    /// non-zero [`Self::public_subdomains_of_private`] is logged as a
+    /// warning.
+    pub fn log(&self) {
+        tracing::info!(
+            public_roots = self.public_roots,
+            private_domains = self.private_domains,
+            private_profiles = self.private_profiles,
+            private_ca_certificates = self.private_ca_certificates,
+            private_crls = self.private_crls,
+            earliest_private_expiry_unix = ?self.earliest_private_expiry.map(|expiry| expiry.as_secs()),
+            "s2s trust inventory loaded"
+        );
+        if self.public_subdomains_of_private > 0 {
+            tracing::warn!(
+                count = self.public_subdomains_of_private,
+                "s2s peer domains use the public-WebPKI profile although an enclosing domain uses a private-CA profile"
+            );
+        }
+    }
 }
 
 /// All trust material of a process, loaded and validated before S2S starts.
@@ -141,7 +172,8 @@ impl TrustInventory {
 
     /// Give `domain` the private-CA `profile`. The match is exact: a
     /// subdomain of `domain` keeps the public-WebPKI profile unless it is
-    /// configured itself. Several domains may share one profile.
+    /// configured itself, and [`TrustInventory::summary`] counts the peer
+    /// domains left that way. Several domains may share one profile.
     pub fn configure_private_ca(
         &mut self,
         domain: CanonicalDomain,
@@ -165,8 +197,22 @@ impl TrustInventory {
         }
     }
 
-    /// Counts for the startup log. They contain no domain or certificate.
-    pub fn summary(&self) -> TrustInventorySummary {
+    /// Counts for the startup log. `peer_domains` are the remote domains the
+    /// deployment expects to federate with, such as the admission
+    /// allowlist; they are used only to count those that fall under a
+    /// private-CA domain without being on a private-CA profile themselves.
+    pub fn summary<'a>(
+        &self,
+        peer_domains: impl IntoIterator<Item = &'a CanonicalDomain>,
+    ) -> TrustInventorySummary {
+        let public_subdomains_of_private = peer_domains
+            .into_iter()
+            .filter(|domain| {
+                !self.private.contains_key(*domain)
+                    && self.private.keys().any(|private| domain.is_within(private))
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
         let mut profiles: Vec<&Arc<PrivateCaProfile>> = Vec::new();
         for profile in self.private.values() {
             if !profiles.iter().any(|known| Arc::ptr_eq(known, profile)) {
@@ -183,6 +229,7 @@ impl TrustInventory {
                 .sum(),
             private_crls: profiles.iter().map(|profile| profile.crl_count()).sum(),
             earliest_private_expiry: profiles.iter().map(|profile| profile.expires_at()).min(),
+            public_subdomains_of_private,
         }
     }
 }

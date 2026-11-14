@@ -12,13 +12,13 @@ use std::time::Duration;
 
 use rustls::{ClientConnection, Connection, ServerConnection};
 use tokio::time::timeout;
-use waddle_server::s2s::verify::limits::VERIFIER_WORKERS;
+use waddle_server::s2s::verify::limits::{VERIFIER_WAITERS, VERIFIER_WORKERS};
 use waddle_server::s2s::verify::{
     initiating_config, receiving_config, Completion, OutboundTransport, VerifierWorkers,
     WorkerError, WorkerLost,
 };
 
-use crate::harness::{domain, settings, verified, verifier, Fixture, HOME_A, HOME_B};
+use crate::harness::{domain, settings, verifier, Fixture, HOME_A, HOME_B};
 use crate::pki::NOW;
 
 const PATIENCE: Duration = Duration::from_secs(60);
@@ -46,7 +46,7 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
 
 #[tokio::test]
 async fn occupied_workers_refuse_further_jobs_until_one_finishes() {
-    let workers = VerifierWorkers::new(VERIFIER_WORKERS, 0);
+    let workers = VerifierWorkers::new(VERIFIER_WORKERS, 0).expect("a worker limit");
     assert_eq!(workers.limit(), 4);
     assert_eq!(workers.available(), 4);
     let mut jobs: Vec<_> = (0..4).map(|value| blocked_job(&workers, value)).collect();
@@ -73,8 +73,42 @@ async fn occupied_workers_refuse_further_jobs_until_one_finishes() {
 }
 
 #[tokio::test]
+async fn a_caller_that_may_not_wait_still_gets_a_free_worker() {
+    let workers = VerifierWorkers::new(1, 0).expect("a worker limit");
+
+    // A free worker takes the job although nobody may wait.
+    let first = workers.run(|| 1).await.expect("a free worker");
+    assert_eq!(within(first).await, Ok(1));
+
+    // An occupied one refuses it.
+    let (release, completion) = blocked_job(&workers, 2);
+    assert_eq!(workers.run(|| 3).await.err(), Some(WorkerError::Saturated));
+    assert_eq!(workers.waiting(), 0);
+    release.send(()).expect("the job is waiting");
+    assert_eq!(within(completion).await, Ok(2));
+}
+
+#[test]
+fn a_worker_limit_the_runtime_cannot_count_is_refused() {
+    assert_eq!(
+        VerifierWorkers::new(VerifierWorkers::MAX_LIMIT + 1, 0).err(),
+        Some(WorkerError::LimitTooLarge)
+    );
+    assert_eq!(
+        VerifierWorkers::new(usize::MAX, VERIFIER_WAITERS).err(),
+        Some(WorkerError::LimitTooLarge)
+    );
+    // A limit of zero is raised to one.
+    assert_eq!(
+        VerifierWorkers::new(0, 0).expect("a worker limit").limit(),
+        1
+    );
+    assert_eq!(VerifierWorkers::default().limit(), VERIFIER_WORKERS);
+}
+
+#[tokio::test]
 async fn a_cancelled_job_keeps_its_worker_until_it_has_finished() {
-    let workers = VerifierWorkers::new(VERIFIER_WORKERS, 1);
+    let workers = VerifierWorkers::new(VERIFIER_WORKERS, 1).expect("a worker limit");
     let mut jobs: Vec<_> = (0..4).map(|value| blocked_job(&workers, value)).collect();
 
     // The connection gives up: it drops the completion and would close its
@@ -120,7 +154,7 @@ async fn a_cancelled_job_keeps_its_worker_until_it_has_finished() {
 
 #[tokio::test]
 async fn only_a_bounded_number_of_callers_may_wait_for_a_worker() {
-    let workers = VerifierWorkers::new(1, 1);
+    let workers = VerifierWorkers::new(1, 1).expect("a worker limit");
     let (release, completion) = blocked_job(&workers, 1);
 
     let first_waiter = {
@@ -150,7 +184,7 @@ async fn only_a_bounded_number_of_callers_may_wait_for_a_worker() {
 
 #[tokio::test]
 async fn a_caller_that_stops_waiting_gives_up_its_place() {
-    let workers = VerifierWorkers::new(1, 1);
+    let workers = VerifierWorkers::new(1, 1).expect("a worker limit");
     let (release, completion) = blocked_job(&workers, 1);
 
     let waiter = {
@@ -177,7 +211,7 @@ async fn a_caller_that_stops_waiting_gives_up_its_place() {
 
 #[tokio::test]
 async fn a_job_that_panics_frees_its_worker() {
-    let workers = VerifierWorkers::new(1, 0);
+    let workers = VerifierWorkers::new(1, 0).expect("a worker limit");
 
     let completion = workers
         .try_run(|| -> usize { panic!("a failing job") })
@@ -285,10 +319,19 @@ async fn a_handshake_is_processed_on_verifier_workers() {
     assert!(!client.is_handshaking());
     assert!(!server.is_handshaking());
     assert_eq!(
-        verified(initiating.verification()).domain(),
+        initiating
+            .established(&client)
+            .expect("the initiating connection's evidence")
+            .domain(),
         &domain(HOME_B)
     );
-    assert_eq!(verified(receiving.verification()).domain(), &domain(HOME_A));
+    assert_eq!(
+        receiving
+            .established(&server)
+            .expect("the receiving connection's evidence")
+            .domain(),
+        &domain(HOME_A)
+    );
     // Every step, and with it both certificate verifications, ran on a
     // worker thread, not on the test's runtime thread.
     assert!(threads

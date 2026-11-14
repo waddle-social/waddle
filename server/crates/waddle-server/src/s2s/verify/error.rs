@@ -1,7 +1,11 @@
 //! Typed failures of the S2S certificate verifier.
 //!
-//! The errors name the check that failed and carry no certificate bytes,
-//! names or addresses. A peer only ever learns the TLS alert that
+//! The errors name the check that failed. A [`VerifyError::Path`] failure
+//! keeps webpki's error, whose `Display` and `Debug` output can include
+//! values taken from the peer's certificates, such as extended key usage
+//! OIDs or a signature algorithm identifier. Logs therefore record
+//! [`VerifyError::code`], which is a fixed string, and never format a
+//! [`VerifyError`] itself. A peer only ever learns the TLS alert that
 //! [`VerifyError::into_rustls`] maps a failure to.
 
 use std::fmt;
@@ -89,6 +93,11 @@ pub enum VerifyError {
     /// connection.
     #[error("the verifier was already used for a connection")]
     VerifierReused,
+    /// The peer's handshake signature does not verify under the key of the
+    /// certificate whose chain was verified, or it was presented for a
+    /// certificate this verifier has not verified.
+    #[error("the handshake signature does not prove possession of the verified certificate")]
+    HandshakeSignature,
 }
 
 impl VerifyError {
@@ -117,6 +126,7 @@ impl VerifyError {
             Self::IdentityMismatch => "identity_mismatch",
             Self::ReferenceMismatch => "reference_mismatch",
             Self::VerifierReused => "verifier_reused",
+            Self::HandshakeSignature => "handshake_signature",
         }
     }
 
@@ -141,6 +151,7 @@ impl VerifyError {
             | Self::ExtendedKeyUsage
             | Self::IssuerUsage => CertificateError::InvalidPurpose,
             Self::IdentityMismatch => CertificateError::NotValidForName,
+            Self::HandshakeSignature => CertificateError::BadSignature,
             Self::ValidityTooLong
             | Self::UnsupportedNameConstraint
             | Self::ReferenceMismatch
@@ -228,6 +239,8 @@ pub enum TrustErrorKind {
     CertSignUsage,
     #[error("the CA certificate may not sign CRLs")]
     CrlSignUsage,
+    #[error("the trust anchor's extended key usage does not include serverAuth")]
+    AnchorExtendedKeyUsage,
     #[error("the certificate is not valid yet")]
     NotYetValid,
     #[error("the certificate has expired")]
@@ -278,6 +291,8 @@ pub enum TrustErrorKind {
     CrlMissingNextUpdate,
     #[error("the CRL's nextUpdate is not after its thisUpdate")]
     CrlTimestampsReversed,
+    #[error("the CRL's nextUpdate is further after its thisUpdate than the profile accepts")]
+    CrlValidityTooLong,
     #[error("the CRL is not valid yet")]
     CrlNotYetValid,
     #[error("the CRL has expired")]
@@ -352,7 +367,7 @@ pub enum TlsConfigError {
     Credentials(rustls::Error),
 }
 
-/// A verifier worker could not take a job.
+/// Verifier workers could not be set up or could not take a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum WorkerError {
     /// Every worker is occupied and no further caller may wait.
@@ -361,6 +376,9 @@ pub enum WorkerError {
     /// The operating system refused a worker thread.
     #[error("a verifier worker thread could not be started")]
     Spawn,
+    /// More workers were requested than [`super::VerifierWorkers::MAX_LIMIT`].
+    #[error("more verifier workers were requested than the runtime can count")]
+    LimitTooLarge,
 }
 
 /// A worker ended without delivering its job's result.

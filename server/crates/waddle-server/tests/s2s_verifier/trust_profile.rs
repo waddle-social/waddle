@@ -11,9 +11,9 @@ use waddle_xmpp::identity::CanonicalDomain;
 
 use crate::harness::{
     attempt, domain, private_inventory, private_profile, refused, settings, verified, verifier,
-    HOME_A, HOME_B, MUC_A,
+    DEEP_A, HOME_A, HOME_B, MUC_A,
 };
-use crate::pki::{unix, Authority, CA_UNTIL, NOW, VALID_UNTIL};
+use crate::pki::{unix, Authority, CA_UNTIL, CRL_NEXT_UPDATE, NOW};
 
 /// [`HOME_A`] uses a private-CA profile and every other domain the
 /// substituted public roots.
@@ -201,7 +201,7 @@ fn the_inventory_summary_counts_material_without_naming_it() {
         &[HOME_A, HOME_B],
     );
 
-    let summary = inventory.summary();
+    let summary = inventory.summary([]);
 
     assert_eq!(summary.public_roots, 1);
     assert_eq!(summary.private_domains, 2);
@@ -209,8 +209,52 @@ fn the_inventory_summary_counts_material_without_naming_it() {
     assert_eq!(summary.private_ca_certificates, 2);
     assert_eq!(summary.private_crls, 2);
     // The CRLs expire before the CA certificates do.
-    assert_eq!(summary.earliest_private_expiry, Some(unix(VALID_UNTIL)));
-    assert!(unix(VALID_UNTIL) < unix(CA_UNTIL));
+    assert_eq!(summary.earliest_private_expiry, Some(unix(CRL_NEXT_UPDATE)));
+    assert!(unix(CRL_NEXT_UPDATE) < unix(CA_UNTIL));
+    assert_eq!(summary.public_subdomains_of_private, 0);
+    summary.log();
+}
+
+#[test]
+fn the_summary_counts_peer_subdomains_left_on_the_public_profile() {
+    let mixed = mixed();
+    // home-a.test has a private-CA profile; its component domains do not.
+    let peers = [
+        domain(HOME_A),
+        domain(MUC_A),
+        domain(DEEP_A),
+        domain(MUC_A),
+        domain(HOME_B),
+        domain("muc.home-b.test"),
+        domain("xhome-a.test"),
+    ];
+
+    let summary = mixed.inventory.summary(&peers);
+
+    // muc.home-a.test and a.muc.home-a.test, each counted once.
+    assert_eq!(summary.public_subdomains_of_private, 2);
+    assert_eq!(summary.private_domains, 1);
+    // The count is for the log only; the profiles stay exact.
+    assert_eq!(
+        mixed.inventory.profile_for(&domain(MUC_A)).kind(),
+        TrustProfileKind::PublicWebPki
+    );
+    summary.log();
+
+    // Once the component domain is configured, it is no longer counted.
+    let mut inventory = private_inventory(
+        &[&mixed.public],
+        private_profile(&[&mixed.private], &[]),
+        &[HOME_A, MUC_A],
+    );
+    assert_eq!(inventory.summary(&peers).public_subdomains_of_private, 1);
+    inventory
+        .configure_private_ca(
+            domain(DEEP_A),
+            Arc::new(private_profile(&[&mixed.private], &[])),
+        )
+        .expect("a third private-CA domain");
+    assert_eq!(inventory.summary(&peers).public_subdomains_of_private, 0);
 }
 
 #[test]

@@ -1,24 +1,25 @@
 //! Matrix rows "TLS versions" and "Resumption in configuration": the
-//! profile negotiates TLS 1.3 and admits TLS 1.2, refuses older versions,
-//! keeps handshake signature verification in both versions, and never
-//! resumes a session, issues a ticket or accepts early data.
+//! profile negotiates TLS 1.3 and admits TLS 1.2 with the extended master
+//! secret only, refuses older versions, keeps handshake signature
+//! verification in both versions, and never resumes a session, issues a
+//! ticket or accepts early data.
 
 use std::sync::Arc;
 
 use rustls::server::ServerConnection;
 use rustls::version::TLS12;
 use rustls::{
-    ClientConnection, HandshakeKind, PeerIncompatible, ProtocolVersion, SupportedProtocolVersion,
+    CertificateError, ClientConnection, HandshakeKind, PeerIncompatible, ProtocolVersion,
+    SupportedProtocolVersion,
 };
 use waddle_server::s2s::verify::{
     initiating_config, receiving_config, OutboundTransport, TlsConfigError, Verification,
-    VerifyError, DIRECT_TLS_ALPN, TLS_PROTOCOL_VERSIONS,
+    DIRECT_TLS_ALPN, TLS_PROTOCOL_VERSIONS,
 };
 
 use crate::harness::{
-    attempt, connect, domain, drive, raw_client_config, raw_server_config, refused,
-    resuming_client_config, resuming_server_config, settings, verified, verifier, Fixture, HOME_A,
-    HOME_B,
+    attempt, connect, domain, drive, raw_client_config, raw_server_config, resuming_client_config,
+    resuming_server_config, settings, verifier, Fixture, HOME_A, HOME_B,
 };
 use crate::pki::NOW;
 
@@ -67,7 +68,13 @@ fn a_tls12_only_peer_is_admitted_and_verified_in_both_roles() {
         handshake.server.protocol_version(),
         Some(ProtocolVersion::TLSv1_2)
     );
-    assert_eq!(verified(receiving.verification()).domain(), &domain(HOME_A));
+    assert_eq!(
+        receiving
+            .established(&handshake.server)
+            .expect("the receiving connection's evidence")
+            .domain(),
+        &domain(HOME_A)
+    );
 
     // A TLS 1.2 receiving server.
     let initiating = verifier(&fixture.inventory, HOME_B, NOW);
@@ -89,7 +96,10 @@ fn a_tls12_only_peer_is_admitted_and_verified_in_both_roles() {
         Some(ProtocolVersion::TLSv1_2)
     );
     assert_eq!(
-        verified(initiating.verification()).domain(),
+        initiating
+            .established(&handshake.client)
+            .expect("the initiating connection's evidence")
+            .domain(),
         &domain(HOME_B)
     );
 }
@@ -143,6 +153,125 @@ fn a_tls11_client_hello_is_refused_before_any_certificate_is_read() {
         rustls::Error::PeerIncompatible(PeerIncompatible::Tls12NotOffered)
     );
     assert_eq!(receiving.verification(), Verification::Pending);
+}
+
+/// Wrap a handshake message of `kind` in a TLS 1.2 handshake record.
+fn handshake_record(kind: u8, body: &[u8]) -> Vec<u8> {
+    let body_length = u32::try_from(body.len()).expect("a short handshake message");
+    let [_, high, middle, low] = body_length.to_be_bytes();
+    let mut message = vec![kind, high, middle, low];
+    message.extend_from_slice(body);
+    let record_length = u16::try_from(message.len()).expect("a short record");
+    let mut record = vec![0x16, 0x03, 0x03];
+    record.extend_from_slice(&record_length.to_be_bytes());
+    record.extend_from_slice(&message);
+    record
+}
+
+/// A TLS 1.2 ClientHello without the extended_master_secret extension:
+/// legacy version 0x0303 and no supported_versions extension, one ECDHE
+/// suite the receiving configuration supports, and the groups, point
+/// formats and signature algorithms it needs.
+fn tls12_client_hello_without_ems() -> Vec<u8> {
+    let mut hello = Vec::new();
+    hello.extend_from_slice(&[0x03, 0x03]);
+    hello.extend_from_slice(&[0x5a; 32]);
+    // An empty session_id.
+    hello.push(0x00);
+    // cipher_suites: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256.
+    hello.extend_from_slice(&[0x00, 0x02, 0xc0, 0x2b]);
+    // compression_methods: null.
+    hello.extend_from_slice(&[0x01, 0x00]);
+    let extensions: &[u8] = &[
+        // supported_groups: x25519, secp256r1.
+        0x00, 0x0a, 0x00, 0x06, 0x00, 0x04, 0x00, 0x1d, 0x00, 0x17,
+        // ec_point_formats: uncompressed.
+        0x00, 0x0b, 0x00, 0x02, 0x01, 0x00,
+        // signature_algorithms: ecdsa_secp256r1_sha256.
+        0x00, 0x0d, 0x00, 0x04, 0x00, 0x02, 0x04, 0x03,
+    ];
+    let length = u16::try_from(extensions.len()).expect("short extensions");
+    hello.extend_from_slice(&length.to_be_bytes());
+    hello.extend_from_slice(extensions);
+    handshake_record(0x01, &hello)
+}
+
+/// A TLS 1.2 ServerHello without the extended_master_secret extension. Its
+/// random carries no downgrade marker, and its session_id is empty, so the
+/// client has nothing else to object to.
+fn tls12_server_hello_without_ems() -> Vec<u8> {
+    let mut hello = Vec::new();
+    hello.extend_from_slice(&[0x03, 0x03]);
+    hello.extend_from_slice(&[0x5a; 32]);
+    hello.push(0x00);
+    // cipher_suite: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256.
+    hello.extend_from_slice(&[0xc0, 0x2b]);
+    // compression_method: null.
+    hello.push(0x00);
+    // An empty extensions block.
+    hello.extend_from_slice(&[0x00, 0x00]);
+    handshake_record(0x02, &hello)
+}
+
+#[test]
+fn a_receiving_configuration_refuses_a_tls12_client_without_extended_master_secret() {
+    let fixture = Fixture::private();
+    let home_b = fixture.issuer.issue_for(&[HOME_B]);
+    let receiving = verifier(&fixture.inventory, HOME_A, NOW);
+    let config = receiving_config(
+        &settings(NOW),
+        home_b.certified_key(),
+        Arc::clone(&receiving),
+    )
+    .expect("a receiving configuration");
+    let mut server = ServerConnection::new(Arc::new(config)).expect("a receiving connection");
+
+    let hello = tls12_client_hello_without_ems();
+    server
+        .read_tls(&mut &hello[..])
+        .expect("read the ClientHello");
+    let error = server
+        .process_new_packets()
+        .expect_err("TLS 1.2 without the extended master secret");
+
+    assert_eq!(
+        error,
+        rustls::Error::PeerIncompatible(PeerIncompatible::ExtendedMasterSecretExtensionRequired)
+    );
+    assert_eq!(receiving.verification(), Verification::Pending);
+}
+
+#[test]
+fn an_initiating_configuration_refuses_a_tls12_server_without_extended_master_secret() {
+    let fixture = Fixture::private();
+    let home_a = fixture.issuer.issue_for(&[HOME_A]);
+    let initiating = verifier(&fixture.inventory, HOME_B, NOW);
+    let config = initiating_config(
+        &settings(NOW),
+        home_a.certified_key(),
+        Arc::clone(&initiating),
+        OutboundTransport::StartTls,
+    )
+    .expect("an initiating configuration");
+    let mut client = ClientConnection::new(Arc::new(config), initiating.reference().server_name())
+        .expect("an initiating connection");
+    // The ClientHello is discarded; the ServerHello answers it.
+    let mut sent = Vec::new();
+    client.write_tls(&mut sent).expect("write the ClientHello");
+
+    let hello = tls12_server_hello_without_ems();
+    client
+        .read_tls(&mut &hello[..])
+        .expect("read the ServerHello");
+    let error = client
+        .process_new_packets()
+        .expect_err("TLS 1.2 without the extended master secret");
+
+    assert_eq!(
+        error,
+        rustls::Error::PeerIncompatible(PeerIncompatible::ExtendedMasterSecretExtensionRequired)
+    );
+    assert_eq!(initiating.verification(), Verification::Pending);
 }
 
 #[test]
@@ -226,7 +355,10 @@ fn a_direct_tls_connection_offers_the_xmpp_server_protocol() {
     assert!(handshake.completed());
     assert_eq!(handshake.client.alpn_protocol(), Some(DIRECT_TLS_ALPN));
     assert_eq!(
-        verified(initiating.verification()).domain(),
+        initiating
+            .established(&handshake.client)
+            .expect("the initiating connection's evidence")
+            .domain(),
         &domain(HOME_B)
     );
 }
@@ -323,15 +455,22 @@ fn receiving_configuration_never_resumes(versions: &'static [&'static SupportedP
     let first = connection();
     assert!(first.completed());
     assert_eq!(first.server.handshake_kind(), Some(HandshakeKind::Full));
-    assert_eq!(verified(receiving.verification()).domain(), &domain(HOME_A));
+    let evidence = receiving
+        .established(&first.server)
+        .expect("the first connection's evidence");
+    assert_eq!(evidence.domain(), &domain(HOME_A));
 
     let second = connection();
     assert!(!second.completed());
     assert_ne!(second.server.handshake_kind(), Some(HandshakeKind::Resumed));
-    assert_eq!(
-        refused(receiving.verification()),
-        VerifyError::VerifierReused
-    );
+    assert_eq!(second.server_error, Some(reused()));
+    assert!(receiving.established(&second.server).is_none());
+    assert_eq!(receiving.verification(), Verification::Verified(evidence));
+}
+
+/// The error a verifier ends a second connection's handshake with.
+fn reused() -> rustls::Error {
+    rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
 }
 
 #[test]
@@ -376,18 +515,17 @@ fn an_initiating_configuration_never_resumes_a_session() {
     let first = connection();
     assert!(first.completed());
     assert_eq!(first.client.handshake_kind(), Some(HandshakeKind::Full));
-    assert_eq!(
-        verified(initiating.verification()).domain(),
-        &domain(HOME_B)
-    );
+    let evidence = initiating
+        .established(&first.client)
+        .expect("the first connection's evidence");
+    assert_eq!(evidence.domain(), &domain(HOME_B));
 
     let second = connection();
     assert!(!second.completed());
     assert_ne!(second.client.handshake_kind(), Some(HandshakeKind::Resumed));
-    assert_eq!(
-        refused(initiating.verification()),
-        VerifyError::VerifierReused
-    );
+    assert_eq!(second.client_error, Some(reused()));
+    assert!(initiating.established(&second.client).is_none());
+    assert_eq!(initiating.verification(), Verification::Verified(evidence));
 }
 
 /// Every connection gets its own configuration and verifier, so a second
@@ -411,7 +549,19 @@ fn every_stream_verifies_the_peer_again() {
             stream.handshake.server.handshake_kind(),
             Some(HandshakeKind::Full)
         );
-        assert_eq!(verified(stream.of_receiver()).domain(), &domain(HOME_B));
-        assert_eq!(verified(stream.of_initiator()).domain(), &domain(HOME_A));
+        assert_eq!(
+            stream
+                .receiver_established()
+                .expect("the initiating connection's evidence")
+                .domain(),
+            &domain(HOME_B)
+        );
+        assert_eq!(
+            stream
+                .initiator_established()
+                .expect("the receiving connection's evidence")
+                .domain(),
+            &domain(HOME_A)
+        );
     }
 }

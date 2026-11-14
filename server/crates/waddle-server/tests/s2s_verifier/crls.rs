@@ -1,12 +1,15 @@
 //! Matrix row "CRLs": an empty or missing bundle, an unknown issuer, a bad
-//! signature, missing, future, expired or reversed timestamps, missing
-//! chain coverage, a revoked leaf or intermediate, duplicate clean and
-//! revoking CRLs in both orders, delta, indirect and distribution-point
-//! variants and unsupported critical extensions each fail closed; valid
-//! complete chain coverage passes.
+//! signature, missing, future, expired or reversed timestamps, a validity
+//! interval longer than the profile accepts, missing chain coverage, a
+//! revoked leaf or intermediate, duplicate clean and revoking CRLs in both
+//! orders, delta, indirect and distribution-point variants and unsupported
+//! critical extensions each fail closed; valid complete chain coverage
+//! passes.
 
 use rustls::pki_types::{CertificateDer, CertificateRevocationListDer};
-use waddle_server::s2s::verify::limits::{MAX_CRL_ENTRIES, MAX_PROFILE_CRLS};
+use waddle_server::s2s::verify::limits::{
+    DAY_SECS, MAX_CRL_ENTRIES, MAX_CRL_VALIDITY_SECS, MAX_PROFILE_CRLS,
+};
 use waddle_server::s2s::verify::{
     PrivateCaMaterial, PrivateCaProfile, TrustError, TrustErrorKind, TrustItem, VerifyError,
 };
@@ -17,8 +20,8 @@ use crate::harness::{
 use crate::pki::{
     corrupt_crl_signature, delta_crl_indicator, indirect_distribution_point, leaf_params,
     oversized_extension, unix, unknown_critical_crl_extension,
-    user_certificates_distribution_point, valid_between, Authority, CrlSpec, Day, NOW, VALID_FROM,
-    VALID_UNTIL,
+    user_certificates_distribution_point, valid_between, Authority, CrlSpec, Day, CRL_NEXT_UPDATE,
+    CRL_THIS_UPDATE, NOW, VALID_FROM,
 };
 
 fn load(material: &PrivateCaMaterial) -> Result<PrivateCaProfile, TrustError> {
@@ -159,7 +162,7 @@ fn a_crl_without_next_update_is_refused() {
 fn a_crl_from_the_future_is_refused() {
     assert_crl_refused(
         &CrlSpec {
-            this_update: Day(2030, 6, 20),
+            this_update: Day(2030, 6, 16),
             ..CrlSpec::current()
         },
         TrustErrorKind::CrlNotYetValid,
@@ -170,7 +173,7 @@ fn a_crl_from_the_future_is_refused() {
 fn an_expired_crl_is_refused() {
     assert_crl_refused(
         &CrlSpec {
-            this_update: Day(2030, 5, 1),
+            this_update: Day(2030, 6, 5),
             next_update: Some(Day(2030, 6, 10)),
             ..CrlSpec::current()
         },
@@ -204,6 +207,36 @@ fn a_crl_whose_timestamps_are_reversed_is_refused() {
         },
         TrustErrorKind::CrlTimestampsReversed,
     );
+}
+
+#[test]
+fn a_crl_valid_for_longer_than_the_ceiling_is_refused() {
+    assert_eq!(MAX_CRL_VALIDITY_SECS, 7 * DAY_SECS);
+    let root = Authority::root("Private Test Root");
+
+    // Seven days from thisUpdate to nextUpdate is the longest accepted.
+    let at_ceiling = CrlSpec {
+        this_update: Day(2030, 6, 10),
+        next_update: Some(Day(2030, 6, 17)),
+        ..CrlSpec::current()
+    };
+    load(&with_crls(&root, vec![root.crl(&at_ceiling)])).expect("a CRL at the ceiling");
+
+    // One day more is refused, however current the CRL is.
+    for spec in [
+        CrlSpec {
+            this_update: Day(2030, 6, 10),
+            next_update: Some(Day(2030, 6, 18)),
+            ..CrlSpec::current()
+        },
+        CrlSpec {
+            this_update: Day(2030, 6, 1),
+            next_update: Some(Day(2030, 7, 1)),
+            ..CrlSpec::current()
+        },
+    ] {
+        assert_crl_refused(&spec, TrustErrorKind::CrlValidityTooLong);
+    }
 }
 
 #[test]
@@ -367,7 +400,7 @@ fn complete_chain_coverage_passes_in_both_roles() {
     })
     .expect("complete CRL coverage");
     assert_eq!(profile.crl_count(), 2);
-    assert_eq!(profile.expires_at(), unix(VALID_UNTIL));
+    assert_eq!(profile.expires_at(), unix(CRL_NEXT_UPDATE));
     let inventory = private_inventory(&[&public], profile, &[HOME_A, HOME_B]);
     let home_a = intermediate.issue_for(&[HOME_A]);
     let mut long_lived = leaf_params(&[HOME_B]);
@@ -376,13 +409,21 @@ fn complete_chain_coverage_passes_in_both_roles() {
 
     let stream = attempt(&inventory, (HOME_A, &home_a), (HOME_B, &home_b));
 
-    assert!(stream.handshake.completed());
-    let receiver = verified(stream.of_receiver());
+    let receiver = stream
+        .receiver_established()
+        .expect("a completed handshake");
     assert_eq!(receiver.domain().as_str(), HOME_B);
     // The evidence ends when the CRLs do, which is before this certificate
     // expires.
-    assert_eq!(receiver.expires_at(), unix(VALID_UNTIL));
-    assert_eq!(verified(stream.of_initiator()).domain().as_str(), HOME_A);
+    assert_eq!(receiver.expires_at(), unix(CRL_NEXT_UPDATE));
+    assert_eq!(
+        stream
+            .initiator_established()
+            .expect("a completed handshake")
+            .domain()
+            .as_str(),
+        HOME_A
+    );
 }
 
 #[test]
@@ -442,16 +483,16 @@ fn crl_validity_is_evaluated_at_the_supplied_time() {
     let algorithms = settings(NOW).algorithms();
     let load_at = |day: Day| PrivateCaProfile::load(&material, &algorithms, unix(day));
 
-    assert!(load_at(VALID_FROM).is_ok());
+    assert!(load_at(CRL_THIS_UPDATE).is_ok());
     assert!(load_at(NOW).is_ok());
     assert_eq!(
-        load_at(Day(2030, 5, 31))
+        load_at(Day(2030, 6, 11))
             .expect_err("before thisUpdate")
             .kind(),
         TrustErrorKind::CrlNotYetValid
     );
     assert_eq!(
-        load_at(VALID_UNTIL).expect_err("at nextUpdate").kind(),
+        load_at(CRL_NEXT_UPDATE).expect_err("at nextUpdate").kind(),
         TrustErrorKind::CrlExpired
     );
     assert_eq!(

@@ -15,7 +15,7 @@ use waddle_server::s2s::verify::{
 use crate::harness::settings;
 use crate::pki::{
     ca_params, corrupt_signature, unix, unknown_critical_extension, valid_between, Authority, Day,
-    CA_FROM, CA_UNTIL, NOW, VALID_FROM, VALID_UNTIL,
+    CA_FROM, CA_UNTIL, CRL_NEXT_UPDATE, CRL_THIS_UPDATE, NOW,
 };
 
 fn load(material: &PrivateCaMaterial) -> Result<PrivateCaProfile, TrustError> {
@@ -58,11 +58,11 @@ fn a_root_an_intermediate_and_their_crls_load() {
     assert_eq!(profile.crl_count(), 2);
     // The profile is current from the CRLs' thisUpdate to their nextUpdate,
     // which lies inside the CA certificates' validity.
-    assert_eq!(profile.expires_at(), unix(VALID_UNTIL));
-    assert!(profile.is_current(unix(VALID_FROM)));
+    assert_eq!(profile.expires_at(), unix(CRL_NEXT_UPDATE));
+    assert!(profile.is_current(unix(CRL_THIS_UPDATE)));
     assert!(profile.is_current(unix(NOW)));
-    assert!(!profile.is_current(unix(VALID_UNTIL)));
-    assert!(!profile.is_current(unix(Day(2030, 5, 31))));
+    assert!(!profile.is_current(unix(CRL_NEXT_UPDATE)));
+    assert!(!profile.is_current(unix(Day(2030, 6, 11))));
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn more_ca_certificates_than_the_ceiling_are_refused() {
 fn the_ca_validity_window_is_part_of_the_profile() {
     // The anchor expires before the CRLs do, so it bounds the profile.
     let mut params = ca_params("Short Lived Root");
-    valid_between(&mut params, CA_FROM, Day(2030, 6, 20));
+    valid_between(&mut params, CA_FROM, Day(2030, 6, 17));
     let root = Authority::root_with(params);
 
     let profile = load(&material(
@@ -446,8 +446,9 @@ fn the_ca_validity_window_is_part_of_the_profile() {
     ))
     .expect("a profile that is valid today");
 
-    assert_eq!(profile.expires_at(), unix(Day(2030, 6, 20)));
+    assert_eq!(profile.expires_at(), unix(Day(2030, 6, 17)));
+    assert!(profile.expires_at() < unix(CRL_NEXT_UPDATE));
     assert!(profile.expires_at() < unix(CA_UNTIL));
     assert!(profile.is_current(unix(NOW)));
-    assert!(!profile.is_current(unix(Day(2030, 6, 20))));
+    assert!(!profile.is_current(unix(Day(2030, 6, 17))));
 }

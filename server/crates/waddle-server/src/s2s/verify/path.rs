@@ -26,7 +26,7 @@ use super::error::VerifyError;
 use super::facts::{CertificateFacts, FactsError};
 use super::identity::{match_reference, MatchedIdentifier, ReferenceIdentity};
 use super::inventory::{unix_seconds, unix_time};
-use super::limits::{MAX_CHAIN_CERTIFICATES, MAX_CHAIN_DER_BYTES, MAX_PUBLIC_LEAF_VALIDITY_SECS};
+use super::limits::{max_public_leaf_validity_secs, MAX_CHAIN_CERTIFICATES, MAX_CHAIN_DER_BYTES};
 use super::trust::{TrustProfile, TrustProfileKind};
 
 /// id-kp-serverAuth, 1.3.6.1.5.5.7.3.1.
@@ -40,21 +40,33 @@ const CLIENT_AUTH: KeyPurposeId<'static> =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CertificateRole {
     /// Presented by the initiating server, which is the TLS client. Its
-    /// extended key usage must include serverAuth or clientAuth: public CAs
-    /// no longer issue clientAuth, so a serverAuth-only certificate is
-    /// accepted here, which departs from RFC 5280 §4.2.1.12 (ADR-0020 D2).
+    /// extended key usage must include serverAuth; on a private-CA profile
+    /// clientAuth also suffices. Public CAs no longer issue clientAuth, so a
+    /// serverAuth-only certificate is accepted here, which departs from
+    /// RFC 5280 §4.2.1.12 (ADR-0020 D2). On the public-WebPKI profile a
+    /// clientAuth-only certificate is refused: a publicly trusted CA attests
+    /// a domain name only through a serverAuth certificate.
     TlsClient,
     /// Presented by the receiving server, which is the TLS server. Its
     /// extended key usage must include serverAuth.
     TlsServer,
 }
 
+impl CertificateRole {
+    /// Whether an extended key usage of `client_auth` alone admits a
+    /// certificate in this role under `profile`.
+    fn accepts_client_auth(self, profile: TrustProfileKind) -> bool {
+        self == Self::TlsClient && profile == TrustProfileKind::PrivateCa
+    }
+}
+
 /// What a completed certificate verification established.
 ///
 /// It proves that the peer holds a certificate for [`VerifiedPeer::domain`]
-/// under that domain's trust profile, once the TLS handshake that carried
-/// it has also completed. It is not an authorization: admission and SASL
-/// EXTERNAL are decided by the connection owner.
+/// under that domain's trust profile once the TLS handshake that carried it
+/// has completed, which [`super::PeerVerifier::established`] checks. It is
+/// not an authorization: admission and SASL EXTERNAL are decided by the
+/// connection owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPeer {
     domain: CanonicalDomain,
@@ -114,11 +126,18 @@ impl VerifiedPeer {
     }
 }
 
-/// The extended key usage webpki applies to every certificate of a path. A
-/// certificate without the extension passes here, as RFC 5280 allows for CA
-/// certificates; the end-entity certificate must carry it, which
-/// [`check_leaf`] enforces.
-struct RoleUsage(CertificateRole);
+/// The extended key usage webpki applies to the end-entity certificate
+/// and every intermediate of a path: serverAuth, or on a private-CA profile
+/// in the initiating role also clientAuth. anyExtendedKeyUsage alone
+/// satisfies neither. A certificate without the extension passes here, as
+/// RFC 5280 allows for CA certificates; the end-entity certificate must
+/// carry it, which [`check_leaf`] enforces. webpki does not apply a trust
+/// anchor's extended key usage; a private-CA profile checks its anchors when
+/// it is loaded.
+struct RoleUsage {
+    role: CertificateRole,
+    profile: TrustProfileKind,
+}
 
 impl ExtendedKeyUsageValidator for RoleUsage {
     fn validate(&self, purposes: KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
@@ -126,7 +145,7 @@ impl ExtendedKeyUsageValidator for RoleUsage {
         for purpose in purposes {
             let purpose = purpose?;
             if purpose == SERVER_AUTH
-                || (self.0 == CertificateRole::TlsClient && purpose == CLIENT_AUTH)
+                || (purpose == CLIENT_AUTH && self.role.accepts_client_auth(self.profile))
             {
                 return Ok(());
             }
@@ -225,8 +244,10 @@ pub(super) fn verify_chain(
 
     let certificate = EndEntityCert::try_from(end_entity).map_err(VerifyError::Path)?;
     // webpki offers each candidate path that verified up to a trust anchor.
-    // A candidate that breaks the issuer profile is refused, and webpki
-    // looks for another; the path it returns has therefore passed.
+    // A candidate that breaks the issuer profile is refused as an unknown
+    // issuer, and webpki looks for another; the path it returns has
+    // therefore passed. When no path passes, webpki reports the most
+    // specific failure among all candidates.
     let policy_failure: RefCell<Option<VerifyError>> = RefCell::new(None);
     let selected: Cell<Option<PathFacts>> = Cell::new(None);
     let check_path = |path: &VerifiedPath<'_>| -> Result<(), webpki::Error> {
@@ -246,22 +267,33 @@ pub(super) fn verify_chain(
         anchors,
         intermediates,
         now,
-        RoleUsage(role),
+        RoleUsage {
+            role,
+            profile: profile.kind(),
+        },
         revocation,
         Some(&check_path),
     ) {
         Ok(_) => selected
             .get()
             .ok_or(VerifyError::Path(webpki::Error::UnknownIssuer))?,
-        Err(error) => {
-            return Err(policy_failure.take().unwrap_or(VerifyError::Path(error)));
+        // An unknown issuer is also what a refused candidate reports, so the
+        // issuer-profile failure behind it is the better explanation. Any
+        // other error, such as a revoked certificate or an exhausted search
+        // budget, outranked the refused candidates and is reported as is.
+        Err(webpki::Error::UnknownIssuer) => {
+            return Err(policy_failure
+                .take()
+                .unwrap_or(VerifyError::Path(webpki::Error::UnknownIssuer)));
         }
+        Err(error) => return Err(VerifyError::Path(error)),
     };
 
     let matched = match_reference(
         reference,
         &certificate,
         &leaf.identifiers,
+        profile.kind(),
         path.name_constrained,
     )?;
 
@@ -310,15 +342,12 @@ fn check_leaf(
     let usage = leaf
         .extended_key_usage
         .ok_or(VerifyError::MissingExtendedKeyUsage)?;
-    let permitted = match role {
-        CertificateRole::TlsServer => usage.server_auth,
-        CertificateRole::TlsClient => usage.server_auth || usage.client_auth,
-    };
-    if !permitted {
+    if !usage.server_auth && !(usage.client_auth && role.accepts_client_auth(profile)) {
         return Err(VerifyError::ExtendedKeyUsage);
     }
     if profile == TrustProfileKind::PublicWebPki
-        && leaf.not_after.saturating_sub(leaf.not_before) > MAX_PUBLIC_LEAF_VALIDITY_SECS
+        && leaf.not_after.saturating_sub(leaf.not_before)
+            > max_public_leaf_validity_secs(leaf.not_before)
     {
         return Err(VerifyError::ValidityTooLong);
     }

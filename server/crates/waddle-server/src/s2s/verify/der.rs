@@ -115,7 +115,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Read the next element and require its tag.
-    pub(super) fn expect(&mut self, tag: u8) -> Result<Tlv<'a>, DerError> {
+    pub(super) fn read_tagged(&mut self, tag: u8) -> Result<Tlv<'a>, DerError> {
         let element = self.read()?;
         if element.tag == tag {
             Ok(element)
@@ -138,7 +138,7 @@ impl<'a> Reader<'a> {
 /// nothing after it.
 pub(super) fn single(input: &[u8], tag: u8) -> Result<&[u8], DerError> {
     let mut reader = Reader::new(input);
-    let element = reader.expect(tag)?;
+    let element = reader.read_tagged(tag)?;
     reader.finish()?;
     Ok(element.contents)
 }
@@ -170,9 +170,9 @@ pub(super) struct SignedObject<'a> {
 /// Split `SEQUENCE { tbs, signatureAlgorithm, signatureValue }`.
 pub(super) fn signed_object(der: &[u8]) -> Result<SignedObject<'_>, DerError> {
     let mut outer = Reader::new(single(der, SEQUENCE)?);
-    let signed = outer.expect(SEQUENCE)?;
-    let algorithm = outer.expect(SEQUENCE)?;
-    let signature = outer.expect(BIT_STRING)?;
+    let signed = outer.read_tagged(SEQUENCE)?;
+    let algorithm = outer.read_tagged(SEQUENCE)?;
+    let signature = outer.read_tagged(BIT_STRING)?;
     outer.finish()?;
     // A signature is a whole number of octets: no unused bits.
     let (&unused_bits, signature) = signature.contents.split_first().ok_or(DerError)?;
@@ -202,10 +202,10 @@ pub(super) fn certificate_shape(der: &[u8]) -> Result<CertificateShape, DerError
     if tbs.peek_tag() == Some(CONTEXT_0) {
         tbs.read()?;
     }
-    tbs.expect(INTEGER)?;
+    tbs.read_tagged(INTEGER)?;
     // signature, issuer, validity, subject, subjectPublicKeyInfo.
     for _ in 0..5 {
-        tbs.expect(SEQUENCE)?;
+        tbs.read_tagged(SEQUENCE)?;
     }
     // issuerUniqueID and subjectUniqueID.
     while matches!(
@@ -218,18 +218,18 @@ pub(super) fn certificate_shape(der: &[u8]) -> Result<CertificateShape, DerError
     if tbs.is_empty() {
         return Ok(shape);
     }
-    let wrapper = tbs.expect(CONTEXT_3)?;
+    let wrapper = tbs.read_tagged(CONTEXT_3)?;
     tbs.finish()?;
     let mut extensions = Reader::new(single(wrapper.contents, SEQUENCE)?);
     while !extensions.is_empty() {
-        let extension = extensions.expect(SEQUENCE)?;
+        let extension = extensions.read_tagged(SEQUENCE)?;
         shape.extensions = shape.extensions.saturating_add(1);
         let mut fields = Reader::new(extension.contents);
-        let identifier = fields.expect(OID)?;
+        let identifier = fields.read_tagged(OID)?;
         if fields.peek_tag() == Some(BOOLEAN) {
             fields.read()?;
         }
-        let value = fields.expect(OCTET_STRING)?;
+        let value = fields.read_tagged(OCTET_STRING)?;
         fields.finish()?;
         if identifier.contents == OID_SUBJECT_ALT_NAME {
             let names = count_elements(single(value.contents, SEQUENCE)?)?;
@@ -267,7 +267,7 @@ pub(super) fn name_constraint_forms(contents: &[u8]) -> Result<NameConstraintFor
         }
         let mut subtrees = Reader::new(list.contents);
         while !subtrees.is_empty() {
-            let subtree = subtrees.expect(SEQUENCE)?;
+            let subtree = subtrees.read_tagged(SEQUENCE)?;
             let base = Reader::new(subtree.contents).read()?;
             forms.subtrees = forms.subtrees.saturating_add(1);
             // GeneralName is a CHOICE of context-specific tags; otherName
@@ -300,8 +300,8 @@ pub(super) fn crl_entry_count(der: &[u8]) -> Result<usize, DerError> {
         tbs.read()?;
     }
     // signature and issuer.
-    tbs.expect(SEQUENCE)?;
-    tbs.expect(SEQUENCE)?;
+    tbs.read_tagged(SEQUENCE)?;
+    tbs.read_tagged(SEQUENCE)?;
     // thisUpdate, then the optional nextUpdate.
     let this_update = tbs.read()?;
     if this_update.tag != UTC_TIME && this_update.tag != GENERALIZED_TIME {
