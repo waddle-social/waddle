@@ -83,6 +83,7 @@ impl BoundReach {
         detached: false,
     };
     /// A binding this node hosts, then the detached session.
+    #[cfg(feature = "clustering")]
     pub(crate) const LOCAL: Self = Self {
         remote: false,
         detached: true,

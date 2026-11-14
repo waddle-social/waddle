@@ -200,6 +200,7 @@ async fn blocked_by(pool: &PgPool, waiting_pid: i32, blocker_pid: i32) {
     .expect("expected PostgreSQL wait edge");
 }
 
+#[cfg(feature = "test-support")]
 async fn wait_for_application(pool: &PgPool, application: &str, blocker_pid: i32) -> i32 {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

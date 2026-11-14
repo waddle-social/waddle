@@ -146,7 +146,12 @@ mod archive_groupchat_event;
 mod archive_lookup;
 mod bot;
 mod bound_delivery;
-pub(crate) use bound_delivery::{deliver_to_bound_resource, deliver_to_local_binding, BoundReach};
+pub(crate) use bound_delivery::{deliver_to_bound_resource, BoundReach};
+// The cluster route bridge hands relayed stanzas to a local binding through
+// this entry point; single-node builds reach it only through
+// `deliver_to_bound_resource`.
+#[cfg(any(feature = "clustering", test))]
+pub(crate) use bound_delivery::deliver_to_local_binding;
 pub(crate) mod carbons;
 mod deps;
 pub mod effects;

@@ -468,6 +468,8 @@ pub(in super::super) async fn decide_direct(
         Ok(resource) => OrderedRelayRecipient::FullJid(resource),
         Err(account) => OrderedRelayRecipient::BareJid(account),
     };
+    // Only the acceptance seams, built for tests, read the stanza here.
+    #[cfg(feature = "test-support")]
     let stanza = payload_stanza(&request.payload);
     #[cfg(feature = "test-support")]
     crate::clustering::acceptance_seams::hold_owner_request(
