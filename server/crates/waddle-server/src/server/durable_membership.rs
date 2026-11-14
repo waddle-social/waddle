@@ -15,7 +15,9 @@ use tracing::warn;
 use waddle_xmpp::muc::affiliation::{DurableMembershipFuture, DurableMembershipSource};
 use waddle_xmpp::XmppError;
 
-use crate::permissions::host_grant::{HostGrantAction, HostGrantGate, RoomBinding, RoomGate};
+use crate::permissions::host_grant::{
+    Enrollment, HostGrantAction, HostGrantGate, RoomBinding, RoomGate,
+};
 use crate::permissions::{
     ListSubjects, Object, ObjectType, PermissionActor, Relation, Subject, SubjectType,
 };
@@ -100,6 +102,13 @@ fn subject_bare_jid(subject: &Subject) -> Option<BareJid> {
 }
 
 impl DurableMembershipSource for PermissionDurableMembershipSource {
+    /// A room the replica's enrolled set names, or whose enrollment it
+    /// cannot tell yet, is bound members-only: its binding's access model.
+    fn binds_members_only(&self, room_jid: &BareJid) -> bool {
+        self.host_grants.store().is_some()
+            && self.host_grants.enrolled().room(room_jid) != Enrollment::Unmanaged
+    }
+
     fn list_durable_member_jids(
         &self,
         waddle_id: &str,

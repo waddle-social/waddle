@@ -54,7 +54,9 @@ const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const PENDING_SCOPE_PAGE: i64 = 256;
 /// Longest the lookup behind a legacy permission write waits for a lock, and
 /// longest it runs. The lookup reads one indexed row and takes no row lock;
-/// the bounds keep a stalled database from holding the permission actor.
+/// the bounds keep a stalled database from holding the permission actor. A
+/// managed room's decision on an interactive surface reads under the same
+/// bounds ([`HostGrantStore::begin_interactive_read`]).
 const ENROLLED_LOOKUP_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const ENROLLED_LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -185,6 +187,29 @@ impl HostGrantStore {
 
     async fn begin_write(&self) -> Result<EnteredTransaction<'_>, HostGrantError> {
         Ok(begin_guarded_store_writer(&self.db, LOCK_TIMEOUT, STATEMENT_TIMEOUT).await?)
+    }
+
+    /// A read-only snapshot for a decision a request waits on: the same
+    /// isolation as [`Self::begin_read`], with the bounds of the legacy
+    /// write refusal (500 ms for a lock, 1 s for a statement) instead of the
+    /// background bounds.
+    pub(super) async fn begin_interactive_read(&self) -> Result<Transaction<'_>, HostGrantError> {
+        let mut tx = self.db.begin().await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            (),
+        )
+        .await?;
+        if !set_local_transaction_timeouts(
+            &mut tx,
+            ENROLLED_LOOKUP_LOCK_TIMEOUT,
+            ENROLLED_LOOKUP_STATEMENT_TIMEOUT,
+        )
+        .await?
+        {
+            return Err(HostGrantError::BoundsUnproven);
+        }
+        Ok(tx)
     }
 
     /// A bounded read-only snapshot.

@@ -39,4 +39,14 @@ pub trait DurableMembershipSource: Send + Sync {
         waddle_id: &str,
         channel_id: &str,
     ) -> DurableMembershipFuture<'_>;
+
+    /// Whether the room at `room_jid` is bound members-only: its admission
+    /// belongs to an authority outside the room actor that admits members
+    /// only, so the actor spawned for it keeps a members-only configuration
+    /// whatever its creation spec, durable state or a configuration change
+    /// says. Answered without waiting; a source without such an authority
+    /// answers `false`.
+    fn binds_members_only(&self, _room_jid: &BareJid) -> bool {
+        false
+    }
 }

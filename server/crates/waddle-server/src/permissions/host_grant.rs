@@ -31,6 +31,9 @@
 //!   same canonical grants and the same policy. Legacy reads of a managed
 //!   room's authorization objects through the permission actor answer
 //!   nothing.
+//! - Whether an object is enrolled at all is answered from the replica's
+//!   in-memory enrolled set ([`EnrolledScopes`]), refreshed in the
+//!   background, so rooms no scope manages never wait on PostgreSQL.
 //!
 //! The decisions behind the lock order, the store capabilities and the
 //! marker protocol are recorded in
@@ -40,6 +43,7 @@
 
 mod admission;
 mod authority;
+mod enrolled;
 mod error;
 mod gate;
 mod issuance;
@@ -47,6 +51,7 @@ mod marker;
 mod model;
 mod policy;
 mod projection;
+mod rate_limited;
 mod runtime_attach;
 mod standing;
 mod store;
@@ -58,6 +63,7 @@ pub use admission::{AdmissionDenial, AdmissionWitness, RoomAcceptance, RoomAdmis
 pub use authority::{
     HostGrantAuthority, ProjectionContradiction, Reconciliation, VerifiedProjection,
 };
+pub use enrolled::{EnrolledScopes, EnrolledSet, Enrollment, ENROLLED_SET_REFRESH_INTERVAL};
 pub use error::HostGrantError;
 pub use gate::{HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate};
 pub use issuance::{
@@ -80,6 +86,7 @@ pub use projection::{
     ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite,
     HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
 };
+pub(crate) use rate_limited::RateLimitedWarning;
 pub use runtime_attach::HostGrantAttachment;
 pub use standing::{RoomBinding, RoomGrants, RoomLookup};
 #[cfg(feature = "test-support")]

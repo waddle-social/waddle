@@ -10,14 +10,18 @@
 //! ordered against its effect (see the "Writer fence and sink contracts"
 //! section of `server/docs/planning/host-grant-authority-2047.md`).
 //!
+//! The surfaces read a room's grants only for a room the replica's enrolled
+//! set names ([`super::EnrolledScopes`]), which this module also loads.
+//!
 //! A database whose schema holds no host-grant relation holds no enrolled
 //! scope, so every room is unmanaged there.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use jid::BareJid;
 use waddle_xmpp::identity::CanonicalBareJid;
 
+use super::enrolled::EnrolledSet;
 use super::error::HostGrantError;
 use super::issuance::ServedAccountDomains;
 use super::model::{GrantGeneration, RoomAffiliation, ScopeLifecycleId};
@@ -104,6 +108,14 @@ impl RoomGrants {
             .collect()
     }
 
+    /// The affiliation recorded for `subject`: what the room's
+    /// administration last set, whether or not it is effective yet.
+    pub fn recorded_affiliation(&self, subject: &BareJid) -> RoomAffiliation {
+        self.grants
+            .get(subject.as_str())
+            .map_or(RoomAffiliation::None, |(recorded, _)| *recorded)
+    }
+
     /// The subjects whose recorded affiliation is `affiliation`, in
     /// canonical order. A recorded increase that is not yet effective is
     /// listed; this is the room's list as administered, not as admitted.
@@ -126,23 +138,37 @@ impl RoomGrants {
 
 impl HostGrantStore {
     /// The canonical grants of the room `binding` names, read in one bounded
-    /// snapshot that takes no lock.
+    /// snapshot that takes no lock, under the interactive bounds (500 ms for
+    /// a lock, 1 s for a statement).
+    ///
+    /// Whether a scope manages the room is decided before the address's
+    /// form: an address that is not canonical is [`RoomLookup::NotCanonical`]
+    /// only when its canonical form is bound to a room. One that is bound to
+    /// none, or that has no canonical form, names no managed room.
     pub async fn room_grants(
         &self,
         binding: RoomBinding<'_>,
     ) -> Result<RoomLookup, HostGrantError> {
         let canonical_room;
+        let mut not_canonical = false;
         let (column, key) = match binding {
             RoomBinding::Room(room) => {
-                let Ok(room) = CanonicalBareJid::new(room.clone()) else {
-                    return Ok(RoomLookup::NotCanonical);
+                let canonical = match CanonicalBareJid::new(room.clone()) {
+                    Ok(canonical) => canonical,
+                    Err(_) => match CanonicalBareJid::canonicalize(room) {
+                        Ok(canonical) => {
+                            not_canonical = true;
+                            canonical
+                        }
+                        Err(_) => return Ok(RoomLookup::Unmanaged),
+                    },
                 };
-                canonical_room = room.into_bare_jid();
+                canonical_room = canonical.into_bare_jid();
                 ("room_jid", canonical_room.as_str())
             }
             RoomBinding::Channel(channel) => ("channel_id", channel),
         };
-        let mut tx = self.begin_read().await?;
+        let mut tx = self.begin_interactive_read().await?;
         if !relations_present(&mut tx).await? {
             tx.rollback().await?;
             return Ok(RoomLookup::Unmanaged);
@@ -161,6 +187,11 @@ impl HostGrantStore {
             tx.rollback().await?;
             return Ok(RoomLookup::Unmanaged);
         };
+        if not_canonical {
+            drop(rows);
+            tx.rollback().await?;
+            return Ok(RoomLookup::NotCanonical);
+        }
         let room: BareJid = row
             .get::<String>(0)?
             .parse()
@@ -202,67 +233,45 @@ impl HostGrantStore {
         }))
     }
 
-    /// Which of `channel_ids` are the authorization objects of rooms that
-    /// enrolled scopes manage. A retired scope's rooms count: retirement
-    /// does not hand a room back to the legacy stores.
-    pub async fn enrolled_channels(
-        &self,
-        channel_ids: &[&str],
-    ) -> Result<BTreeSet<String>, HostGrantError> {
-        let mut enrolled = BTreeSet::new();
-        if channel_ids.is_empty() {
-            return Ok(enrolled);
-        }
+    /// Every object enrolled scopes manage, retired scopes included: a
+    /// retired scope does not hand its rooms back to the legacy stores. One
+    /// background snapshot ([`super::EnrolledScopes`] calls it); `None` when
+    /// the schema holds no host-grant relation.
+    pub async fn enrolled_set(&self) -> Result<Option<EnrolledSet>, HostGrantError> {
         let mut tx = self.begin_read().await?;
         if !relations_present(&mut tx).await? {
             tx.rollback().await?;
-            return Ok(enrolled);
+            return Ok(None);
         }
-        for chunk in channel_ids.chunks(ENROLLED_CHANNEL_CHUNK) {
-            let placeholders = vec!["?"; chunk.len()].join(", ");
-            let mut rows = tx
-                .query(
-                    &format!(
-                        "SELECT channel_id FROM host_grant_rooms \
-                         WHERE channel_id IN ({placeholders})"
-                    ),
-                    chunk
-                        .iter()
-                        .map(|id| crate::db::Value::from(*id))
-                        .collect::<Vec<_>>(),
-                )
-                .await?;
-            while let Some(row) = rows.next().await? {
-                enrolled.insert(row.get::<String>(0)?);
-            }
-        }
-        tx.rollback().await?;
-        Ok(enrolled)
-    }
-
-    /// Whether `node` is the Space node of an enrolled scope, retired or
-    /// not.
-    pub async fn enrolled_space_node(&self, node: &str) -> Result<bool, HostGrantError> {
-        let mut tx = self.begin_read().await?;
-        if !relations_present(&mut tx).await? {
-            tx.rollback().await?;
-            return Ok(false);
-        }
+        let mut set = EnrolledSet::default();
         let mut rows = tx
             .query(
-                "SELECT 1 FROM host_grant_scope_lifecycles WHERE space_node = ? LIMIT 1",
-                crate::db_params![node],
+                "SELECT lifecycle_id, space_node FROM host_grant_scope_lifecycles",
+                (),
             )
             .await?;
-        let enrolled = rows.next().await?.is_some();
+        while let Some(row) = rows.next().await? {
+            let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                .ok_or(corrupt("lifecycle_id"))?;
+            set.insert_scope(lifecycle, row.get::<String>(1)?);
+        }
+        drop(rows);
+        let mut rows = tx
+            .query(
+                "SELECT room_jid, channel_id, lifecycle_id FROM host_grant_rooms",
+                (),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(2)?)
+                .ok_or(corrupt("lifecycle_id"))?;
+            set.insert_room(lifecycle, row.get::<String>(0)?, row.get::<String>(1)?);
+        }
         drop(rows);
         tx.rollback().await?;
-        Ok(enrolled)
+        Ok(Some(set))
     }
 }
-
-/// Most channel identifiers one statement of [`HostGrantStore::enrolled_channels`] binds.
-const ENROLLED_CHANNEL_CHUNK: usize = 256;
 
 /// Whether the schema holds the host-grant relations. A schema built
 /// without the migration catalog holds none and so no enrolled scope.

@@ -21,6 +21,14 @@ use super::{ensure_fixed_test_account, fixed_test_account_enabled};
 use super::{resolve_server_owner_jids, AppState, AppStateDeps};
 use super::{select_websocket_mam_storage, start_http_server, HttpServerDeps, MamStartupStorage};
 
+/// Longest startup waits for the first load of the host-grant enrolled set.
+/// The load is retried every second meanwhile; a replica that cannot load
+/// it exits, like one whose database is unreachable, so the orchestrator's
+/// restart backoff retries a full startup instead of serving rooms whose
+/// management it cannot tell.
+const HOST_GRANT_ENROLLED_SET_STARTUP_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestrictedStartupError {
     #[error("the restricted runtime attaches its own notification outbox; an owner-prepared handle was supplied")]
@@ -183,12 +191,35 @@ pub async fn start_with_config_and_owner_outbox(
     };
     // PostgreSQL holds the canonical grants of enrolled host-grant scopes.
     // Legacy tuple writes to their objects are refused from that store, so
-    // the refusal survives a restart; SQLite holds no such scope.
-    let permission_actor_impl =
-        match crate::permissions::host_grant::HostGrantStore::open((*global_db).clone()) {
-            Ok(store) => permission_actor_impl.with_host_grant_store(store),
-            Err(_) => permission_actor_impl,
-        };
+    // the refusal survives a restart; SQLite holds no such scope. Legacy
+    // reads and the host-grant gate decide whether an object is enrolled
+    // from one in-memory enrolled set, which the replica loads before it
+    // serves and refreshes in the background.
+    let host_grant_store =
+        crate::permissions::host_grant::HostGrantStore::open((*global_db).clone()).ok();
+    let host_grants = match &host_grant_store {
+        Some(store) => {
+            let enrolled = crate::permissions::host_grant::EnrolledScopes::watch(store.clone());
+            if !enrolled
+                .wait_loaded(HOST_GRANT_ENROLLED_SET_STARTUP_WAIT)
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "the host-grant enrolled set could not be loaded; refusing to serve until it is"
+                ));
+            }
+            crate::permissions::host_grant::HostGrantGate::with_enrolled_scopes(
+                store.clone(),
+                enrolled,
+            )
+        }
+        None => crate::permissions::host_grant::HostGrantGate::default(),
+    };
+    let permission_actor_impl = match &host_grant_store {
+        Some(store) => permission_actor_impl
+            .with_host_grant_authority(store.clone(), host_grants.enrolled().clone()),
+        None => permission_actor_impl,
+    };
     info!(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"
@@ -261,9 +292,9 @@ pub async fn start_with_config_and_owner_outbox(
     // members keep receiving inbox rows / notification candidates
     // across deploys and actor respawns.
     // Rooms that enrolled host-grant scopes manage hydrate from their
-    // canonical grants instead. The gate is the one the server state holds,
-    // so the attachment verified at startup reaches both.
-    let host_grants = crate::permissions::host_grant::HostGrantGate::new((*global_db).clone());
+    // canonical grants instead, and their actors keep a members-only
+    // configuration. The gate is the one the server state holds, so the
+    // attachment verified at startup reaches both.
     let durable_membership_source: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> =
         Arc::new(
             durable_membership::PermissionDurableMembershipSource::new(permission_actor.clone())

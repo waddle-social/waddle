@@ -1015,6 +1015,80 @@ pub async fn websocket_state_with_ingress(
     build_websocket_state_with_ingress(db_pool, move || std::future::ready(Some(ingress))).await
 }
 
+/// Build a WebSocket state over a caller-owned PostgreSQL pool and ingress
+/// authority whose authorization is wired as a PostgreSQL deployment's: the
+/// permission actor is fenced by the global database's host-grant store,
+/// the actor and the state's host-grant gate share one enrolled set, and the
+/// WebSocket routes use the app state's room registry, whose room actors
+/// take the members-only binding of managed rooms.
+///
+/// The enrolled set is loaded in the background; a suite that enrolls a
+/// scope after building the state calls `host_grants.enrolled().refresh()`
+/// instead of waiting for the next refresh interval.
+///
+/// # Panics
+/// Panics if the pool is not PostgreSQL, or if fixture construction fails.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_host_grant_fence(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+) -> Arc<WebSocketState> {
+    use crate::permissions::host_grant::{EnrolledScopes, HostGrantGate, HostGrantStore};
+    use kameo::actor::Spawn;
+    let database = db_pool.global().clone();
+    let store =
+        HostGrantStore::open(database.clone()).expect("the host-grant fence needs PostgreSQL");
+    let enrolled = EnrolledScopes::watch(store.clone());
+    let permission_actor = crate::permissions::PermissionActor::spawn(
+        crate::permissions::PermissionActor::new_for_tests(Arc::new(database.clone()))
+            .with_host_grant_authority(store.clone(), enrolled.clone()),
+    );
+    let host_grants = HostGrantGate::with_enrolled_scopes(store, enrolled);
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    let membership: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> = Arc::new(
+        crate::server::durable_membership::PermissionDurableMembershipSource::new(
+            permission_actor.clone(),
+        )
+        .with_host_grants(host_grants.clone()),
+    );
+    app_state.room_registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
+        waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            crate::config::test_occupant_id_secret(),
+        )
+        .with_server_hats(app_state.server_hats.clone())
+        .with_membership_source(membership),
+    );
+    app_state.permission_actor = permission_actor;
+    app_state.host_grants = host_grants;
+    let pending_delivery_storage = Arc::new(
+        DatabasePendingDeliveryStorage::from_database(
+            database.clone(),
+            waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+        )
+        .await
+        .expect("database-backed pending delivery test storage"),
+    );
+    let notification_settings_projection =
+        Arc::new(NotificationSettingsProjectionStore::new(database.clone()));
+    NotificationOutboxStore::try_new(database)
+        .await
+        .expect("notification outbox test schema");
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            pending_delivery_storage: Some(pending_delivery_storage),
+            notification_settings_projection: Some(notification_settings_projection),
+            share_app_room_registry: true,
+            ..Default::default()
+        },
+        move || std::future::ready(Some(ingress)),
+    )
+    .await
+}
+
 /// Build all fixture schemas before creating an authority that starts maintenance.
 ///
 /// `start_ingress` runs only after the WebSocket state's final schema constructor
