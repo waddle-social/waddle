@@ -118,7 +118,6 @@
   --chat-reaction-popover-width: min(22rem, calc(100vw - 2rem));
   --chat-profile-menu-width: 18rem;
   --chat-account-menu-width: 14rem;
-  --chat-thread-action-indent: calc(var(--chat-message-avatar-size) + var(--space-sm));
   --chat-touch-action-space: 3.25rem;
   --chat-message-header-height: 1.125rem;
   --chat-message-body-gap: var(--space-2xs);

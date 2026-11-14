@@ -249,7 +249,7 @@ describe("ThreadPanel desktop sub-thread action", () => {
     const replyCard = sourceBlockAfter(
       threadPanelSource,
       'v-if="activeEntry.root && timelineRowKey(message) === timelineRowKey(activeEntry.root)"',
-      '<div class="relative group/thread-child">',
+      '<div :class="childClass">',
       '<div v-if="replyChildHasNestedThread(message)"',
     );
     expect(replyCard).toContain(':thread-action-thread-id="replyChildThreadId(message)"');
@@ -257,7 +257,7 @@ describe("ThreadPanel desktop sub-thread action", () => {
 
     const childThreadAction = sourceBlock(
       threadPanelSource,
-      '<div v-if="replyChildHasNestedThread(message)" class="chat-thread-actions">',
+      '<div v-if="replyChildHasNestedThread(message)" :class="subThreadRowClass">',
       "</button>",
     );
     expect(childThreadAction).toContain('@click="onOpenThreadFromCard(replyChildThreadId(message))"');
