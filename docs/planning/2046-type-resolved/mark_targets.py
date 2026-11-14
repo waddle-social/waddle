@@ -20,8 +20,24 @@ import subprocess
 import sys
 
 
-SOURCE_COMMIT = "3ae674c121c06b44934c915ecc0ef469dca54833"
+SOURCE_COMMIT = "4219bdd71af9fb0116c82a5c33ab1ed98eecc35d"
 MARKER = "W2046|"
+# Recompute intentionally when the pinned source or reviewed target scope changes.
+# This makes a mutually truncated manifest and patched tree fail closed.
+MANIFEST_SHA256 = "3818d887b776f9ca5fa22c51aea0b5b0fc1ca02ba29ff55e6b5d24d9dc15df5c"
+HANDLERS_SHA256 = "7dc13ab0a37126e9f751852823e8458d8a30335492fd2fab52e8859387a3652f"
+HANDLER_ACTORS = ("UserActor", "UserRegistryActor", "RelayActor")
+HANDLER_FIELDS = ("source_commit", "path", "line", "column", "actor", "message", "sha256_before", "cfg_test_classification", "review_status")
+
+
+def manifest_fingerprint(rows: list[dict[str, str]]) -> str:
+    ordered = sorted(rows, key=lambda row: (row["file"], int(row["line"]), row["tag"]))
+    return hashlib.sha256(json.dumps(ordered, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def handlers_fingerprint(rows: list[dict[str, str]]) -> str:
+    ordered = sorted(rows, key=lambda row: (row["path"], int(row["line"]), int(row["column"])))
+    return hashlib.sha256(json.dumps(ordered, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def strip_code(text: str) -> str:
@@ -88,11 +104,13 @@ def item_end(code: str, start: int) -> int:
                 elif code[i] == "}":
                     depth -= 1
                 i += 1
+            if depth:
+                raise ValueError("unterminated Rust item")
             return i
         elif c == ";" and parens == 0:
             return i + 1
         i += 1
-    return len(code)
+    raise ValueError("unterminated Rust item")
 
 
 def line_start(text: str, offset: int) -> int:
@@ -127,9 +145,10 @@ def add_struct_targets(root: pathlib.Path, targets: list[dict[str, str]], rel: s
     path = root / rel
     text = read_source(path)
     code = strip_code(text)
-    m = re.search(r"\b(?:struct|enum)\s+" + re.escape(name) + r"\b", code)
-    if not m:
-        raise ValueError(f"missing {name} in {rel}")
+    matches = list(re.finditer(r"\b(?:struct|enum)\s+" + re.escape(name) + r"\b", code))
+    if len(matches) != 1:
+        raise ValueError(f"expected one {name} in {rel}, found {len(matches)}")
+    m = matches[0]
     if mark_type:
         add_target(targets, pathlib.Path(rel), text, m.start(), f"{tag}::TYPE", "type")
     if fields:
@@ -201,15 +220,160 @@ def add_named_type_family(root: pathlib.Path, targets: list[dict[str, str]], rel
         raise ValueError(f"no type declarations matched {name_pattern} in {rel}")
 
 
+def handler_candidate_pattern(actor: str) -> re.Pattern[str]:
+    actor_path = r"(?:[A-Za-z_][A-Za-z0-9_]*::)*" + re.escape(actor)
+    return re.compile(r"\bimpl\b[^{};]*\bMessage\s*<[^{};]*\bfor\s+" + actor_path + r"\b[^{};]*\{")
+
+
+def impl_header(code: str, start: int) -> str:
+    """Read an impl header, including nested const-generic braces, not its body."""
+    stack: list[str] = []
+    pairs = {"(": ")", "[": "]", "<": ">"}
+    index = start + len("impl")
+    while index < len(code):
+        char = code[index]
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char == "{" and stack:
+            stack.append("}")
+        elif char == "{" or (char == ";" and not stack):
+            return code[start:index + 1]
+        elif stack and char == stack[-1] and not (char == ">" and index and code[index - 1] == "-"):
+            stack.pop()
+        elif char == "}" and not stack:
+            break
+        index += 1
+    return code[start:index]
+
+
+def discover_message_handlers(root: pathlib.Path, rel: str, actor: str) -> list[dict[str, str]]:
+    """List explicit Message<T> implementations; trait impl methods cannot be marked.
+
+    These lexical candidates are for manual review, not compiler or reachability
+    evidence. Reject unsupported Message impl headers instead of skipping them.
+    """
+    text = read_source(root / rel)
+    code = strip_code(text)
+    header_re = re.compile(
+        r"\bimpl\s+(?:[A-Za-z_][A-Za-z0-9_]*::)*Message\s*<\s*"
+        r"(?P<message>[A-Za-z_][A-Za-z0-9_:]*)\s*>\s*for\s+"
+        + r"(?:[A-Za-z_][A-Za-z0-9_]*::)*" + re.escape(actor) + r"\s*\{"
+    )
+    # A broad scan catches headers the narrow parser cannot describe, including
+    # new generic forms, instead of silently omitting them.
+    candidates = list(handler_candidate_pattern(actor).finditer(code))
+    matches = list(header_re.finditer(code))
+    if {m.start() for m in candidates} != {m.start() for m in matches}:
+        raise ValueError(f"unsupported Message implementation header for {actor} in {rel}")
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    result: list[dict[str, str]] = []
+    for match in matches:
+        end = item_end(code, match.start())
+        body = code[match.end():end]
+        handlers = list(re.finditer(r"(?m)^[ \t]*(?:(?:async|unsafe|const)\s+)*fn\s+(handle)\b", body))
+        if len(handlers) != 1:
+            raise ValueError(f"expected one handle method for {actor} Message<{match.group('message')}> in {rel}")
+        offset = match.end() + handlers[0].start(1)
+        result.append({
+            "source_commit": SOURCE_COMMIT,
+            "path": rel,
+            "line": str(text.count("\n", 0, offset) + 1),
+            "column": str(offset - line_start(text, offset) + 1),
+            "actor": actor,
+            "message": match.group("message"),
+            "sha256_before": digest,
+            "cfg_test_classification": "manual-review-required",
+            "review_status": "manual-review-required",
+        })
+    if not result:
+        raise ValueError(f"no Message handlers for {actor} in {rel}")
+    return result
+
+
+def discover_scoped_handlers(root: pathlib.Path) -> list[dict[str, str]]:
+    """Scan all Rust files for explicit Message impls of the three named actors.
+
+    This remains lexical: aliases, macro-generated impls, cfg selection and
+    compiled or runtime reachability require separate review.
+    """
+    base = root / "server/crates"
+    if not base.is_dir():
+        raise ValueError("server/crates is missing")
+    patterns = {actor: handler_candidate_pattern(actor) for actor in HANDLER_ACTORS}
+    results: list[dict[str, str]] = []
+    for path in sorted(base.rglob("*.rs")):
+        if path.is_symlink() or not path.resolve().is_relative_to(base.resolve()):
+            raise ValueError(f"cannot scan symlinked or escaping Rust source: {path}")
+        code = strip_code(read_source(path))
+        found_actors: set[str] = set()
+        for match in re.finditer(r"\bimpl\b", code):
+            header = impl_header(code, match.start())
+            if not re.search(r"\bMessage\s*<", header):
+                continue
+            for actor, pattern in patterns.items():
+                actor_path = r"(?:[A-Za-z_][A-Za-z0-9_]*::)*" + re.escape(actor)
+                if re.search(r"\bfor\s+" + actor_path + r"\b", header):
+                    if not pattern.match(code, match.start()):
+                        raise ValueError(f"unsupported Message implementation header for {actor} in {path}")
+                    found_actors.add(actor)
+        for actor in sorted(found_actors):
+            results.extend(discover_message_handlers(root, path.relative_to(root).as_posix(), actor))
+    if not results:
+        raise ValueError("no scoped Message handlers found")
+    return results
+
+
+def validate_discovered_handlers(handlers: list[dict[str, str]]) -> None:
+    keys = [(row["path"], row["line"], row["column"]) for row in handlers]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate handler declarations")
+    if handlers_fingerprint(handlers) != HANDLERS_SHA256:
+        raise ValueError("discovered handlers differ from the reviewed fingerprint")
+    required = {"RegisterConnection", "RegisterConnectionIfOwnerOrAbsent", "UnregisterConnection", "UnregisterConnectionAndReportEmpty"}
+    found = {row["message"] for row in handlers if row["actor"] == "UserActor"}
+    if missing := required - found:
+        raise ValueError(f"missing required UserActor handlers: {sorted(missing)}")
+
+
+def write_handlers(path: pathlib.Path, handlers: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=HANDLER_FIELDS, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(sorted(handlers, key=lambda r: (r["path"], int(r["line"]), int(r["column"]))))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=pathlib.Path, required=True, help="clean disposable source worktree at the pinned commit")
-    parser.add_argument("--manifest", type=pathlib.Path, required=True, help="TSV path outside server/crates in the disposable worktree")
+    parser.add_argument("--manifest", type=pathlib.Path, help="TSV path outside server/crates in the disposable worktree")
+    parser.add_argument("--handlers", type=pathlib.Path, required=True, help="TSV path for lexical Message handler review candidates")
+    parser.add_argument("--handlers-only", action="store_true", help="write lexical candidates from a source-equivalent checkout without modifying Rust files")
     args = parser.parse_args()
     root = args.root.resolve()
+    handlers_path = args.handlers.resolve()
+    if args.handlers_only:
+        if args.manifest is not None or handlers_path.is_relative_to(root / "server/crates"):
+            raise SystemExit("handler output must be outside server/crates; omit --manifest with --handlers-only")
+        result = subprocess.run(["git", "-C", str(root), "diff", "--quiet", SOURCE_COMMIT, "HEAD", "--", "server/crates"])
+        status = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all", "--", "server/crates"], text=True)
+        if result.returncode != 0 or status:
+            raise SystemExit("handler discovery requires a clean server/crates tree matching the pinned source commit")
+        handlers = discover_scoped_handlers(root)
+        validate_discovered_handlers(handlers)
+        write_handlers(handlers_path, handlers)
+        print(json.dumps({"source_commit": SOURCE_COMMIT, "handlers": len(handlers), "handler_scope": "lexical Message impls of named actors across server/crates; cfg and reachability require review", "handler_manifest": str(handlers_path)}, sort_keys=True))
+        return
+    if args.manifest is None:
+        raise SystemExit("--manifest is required unless --handlers-only is used")
+    manifest_path = args.manifest.resolve()
+    if manifest_path == handlers_path or any(
+        path.is_relative_to(root / "server/crates") for path in (manifest_path, handlers_path)
+    ):
+        raise SystemExit("manifest and handler outputs must be distinct and outside server/crates")
     source_checkout = pathlib.Path(__file__).resolve().parents[3]
     if root == source_checkout:
-        raise SystemExit("refusing to annotate the #2286 source checkout")
+        raise SystemExit("refusing to annotate the checkout containing the injector")
     head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if head != SOURCE_COMMIT:
         raise SystemExit(f"expected disposable tree at {SOURCE_COMMIT}, found {head}")
@@ -256,16 +420,23 @@ def main() -> None:
         add_impl_targets(root, targets, cr + "actor_outbound.rs", type_name, tag)
 
     user_actor_files = [xm + "registry/user_actor.rs", xm + "registry/user_actor/implementation.rs", xm + "registry/user_actor/delivery.rs"]
+    handlers = discover_scoped_handlers(root)
+    validate_discovered_handlers(handlers)
+
     add_struct_targets(root, targets, xm + "registry/user_actor/implementation.rs", "UserActor", "UAF")
     for rel in user_actor_files:
         add_impl_targets(root, targets, rel, "UserActor", "UA")
-        # Public actor messages are separately marked to capture typed senders.
-        add_named_type_family(root, targets, rel, r"^(?:Register|Unregister|TrySend|GetConnection|.*Resource.*)$", "UAMSG")
+        # Mark message types and fields, not the trait implementation methods.
+        names = [row["message"] for row in handlers if row["actor"] == "UserActor" and row["path"] == rel]
+        pattern = r"^(?:.*Resource.*|" + "|".join(map(re.escape, names)) + r")$"
+        add_named_type_family(root, targets, rel, pattern, "UAMSG")
 
     add_struct_targets(root, targets, xm + "registry/user_registry.rs", "UserRegistryActor", "URF")
     add_struct_targets(root, targets, xm + "registry/user_registry.rs", "UserEntry", "URE")
     add_impl_targets(root, targets, xm + "registry/user_registry.rs", "UserRegistryActor", "UR")
-    add_named_type_family(root, targets, xm + "registry/user_registry.rs", r"(?:UserResource|Resource|Claim)", "URMSG")
+    names = [row["message"] for row in handlers if row["actor"] == "UserRegistryActor"]
+    pattern = r"^(?:.*(?:UserResource|Resource|Claim).*|" + "|".join(map(re.escape, names)) + r")$"
+    add_named_type_family(root, targets, xm + "registry/user_registry.rs", pattern, "URMSG")
 
     add_free_targets(root, targets, sv + "server/dual_registration.rs", {"mirror_register", "mirror_register_outcome", "mirror_unregister"}, "DUAL")
     add_free_targets(root, targets, sv + "server/routes/interpret/room_dispatch.rs", {"dispatch_to_room", "capture_delivered_remote_room_route"}, "ROOM")
@@ -306,6 +477,7 @@ def main() -> None:
         raise SystemExit(f"marker tags must map one-to-one to declarations: collisions={len(collisions)} duplicate_tags={duplicates}")
 
     manifest_rows: list[dict[str, str]] = []
+    updates: dict[pathlib.Path, str] = {}
     for rel, entries in sorted(by_file.items()):
         path = root / rel
         original = read_source(path)
@@ -324,14 +496,21 @@ def main() -> None:
             updated = updated[:offset] + marker + updated[offset:]
             for item in items:
                 manifest_rows.append({"file": rel, "line": item["line"], "column": item["column"], "tag": item["tag"], "kind": item["kind"], "sha256_before": digest})
+        updates[path] = updated
+
+    fingerprint = manifest_fingerprint(manifest_rows)
+    if fingerprint != MANIFEST_SHA256:
+        raise SystemExit(f"discovered target manifest differs from the reviewed fingerprint: {fingerprint}")
+    for path, updated in updates.items():
         path.write_bytes(updated.encode("utf-8"))
 
-    args.manifest.parent.mkdir(parents=True, exist_ok=True)
-    with args.manifest.open("w", encoding="utf-8", newline="") as f:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["file", "line", "column", "tag", "kind", "sha256_before"], delimiter="\t", lineterminator="\n")
         writer.writeheader()
         writer.writerows(sorted(manifest_rows, key=lambda r: (r["file"], int(r["line"]), r["tag"])))
-    print(json.dumps({"source_commit": head, "targets": len(manifest_rows), "files": len(by_file), "manifest": str(args.manifest.resolve())}, sort_keys=True))
+    write_handlers(handlers_path, handlers)
+    print(json.dumps({"source_commit": head, "targets": len(manifest_rows), "files": len(by_file), "handlers": len(handlers), "handler_scope": "lexical Message impls of named actors across server/crates; cfg and reachability require review", "manifest": str(manifest_path), "handler_manifest": str(handlers_path)}, sort_keys=True))
 
 
 if __name__ == "__main__":

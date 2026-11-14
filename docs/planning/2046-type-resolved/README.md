@@ -1,5 +1,29 @@
 # #2046 type-resolved connection inventory
 
+The current production and partial test-support captures at `4219bdd71` are
+documented in [`capture-4219bdd`](capture-4219bdd/README.md). The
+[independent edge discovery](independent-edge-discovery-4219.md) identifies
+additional paths and explicitly remains partial. The support-only library
+references have grouped source notes for [actor](support-actor-review-4219.md)
+and [endpoint](support-endpoint-review-4219.md) paths, plus a grouped
+[supervised-I/O test-target review](supervised-io-review-4219.md). Separate
+site ledgers and validators cover the 352 support-only keys in each library
+profile and the 105 keys from that one supervised-I/O target. The partial
+[support-overlap plan](support-overlap-review-plan-4219.md) identifies feature-
+dependent contexts at shared production sites. The validators check supplied
+evidence, not semantic truth or test execution. Other
+test-target captures and reviews, profile-specific production-site semantics,
+and exhaustive indirect discovery remain open; none of these captures proves
+runtime behavior.
+
+The previous production capture remains in
+[`capture-5763923`](capture-5763923/README.md), with its pinned checkpoint
+scripts needed for reproduction. The historical results and commands below
+describe the earlier #2286 pass and require the scripts from its pinned commit.
+The current scripts target `4219bdd71` and require a separate handler output.
+
+## Historical #2286 pass
+
 Compiler inventory target: `main@3ae674c121c06b44934c915ecc0ef469dca54833`.
 Current-main review target: `4b1fd1f348393337c827fb98ac4dea64f0f9dcf3` (#2287).
 All 56 unique files in the marker manifest and selected P3 edge review are
