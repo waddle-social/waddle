@@ -17,13 +17,13 @@ rollout and narrows the codec's user subjects to the same canonical form.
 | --- | --- | --- |
 | Stanza `to`/`from`, payload `jid` attributes, MUC invitation and decline `to`/`from`, and data-form fields typed `jid-single`/`jid-multi` | case, width and compatibility forms folded by the JID parser | refused with `<jid-malformed/>`; a trailing dot is removed and a U-label domain becomes its A-label form |
 | MUC nicknames and other resourceparts in stanza addresses | Resourceprep (NFKC) folded fullwidth and compatibility characters, ligatures and code points mapped to nothing (`room@muc/ｎｉｃｋ` joined as `nick`) | the whole stanza is refused with `<jid-malformed/>`; a client must use the nickname exactly as it is to appear |
-| Stanzas to numeric IPv4 domains (`2130706433`, `0x7f.1`, `127.1`) | classified as remote or unqualified domains | classified as numeric IPv4 forms, never routable; requests are answered `<remote-server-not-found/>` as for IP literals and single-label names |
+| Stanzas to numeric IPv4 domains (`2130706433`, `0x7f.1`, `127.1`) | classified as remote or unqualified domains | classified as numeric IPv4 forms, never routable; IQ requests are answered `<remote-server-not-found/>` as for IP literals and single-label names. Messages and presence to these domains are not classified: like stanzas to any other domain this server does not serve, a message with no local recipient is dropped without an error reply |
 | XEP-0198 handled count | a stanza refused at parsing was not counted, so a client replayed it after resumption and later acknowledgements named the wrong stanza | every well-formed stanza refused at parsing counts as handled |
 | RFC 7395 `<open from>` | folded | a non-canonical hint closes the stream with `invalid-from` |
 | SCRAM username | `ALICE` signed in as `alice` | only the exact canonical name signs in |
 | OAUTHBEARER | the stored localpart was re-slugged and lowercased | the stored bare JID and localpart must name the account exactly; authzid must be canonical |
 | Resource binding | `ｗｅｂ` bound as `web` | `<bad-request/>` |
-| New accounts (fixed accounts, OIDC; XEP-0077 registration exists only in test builds) | any valid localpart; OIDC slugs kept Unicode letters | 1–64 bytes of `a-z`, `0-9`, `.`, `_`, `-`, `+`; OIDC slugs transliterate Latin letters (`José` → `jose`, `Øyvind` → `oyvind`) and drop other characters; a name with nothing left falls back to the email local part, then to `ext_<provider>_<digest>` |
+| New accounts (fixed accounts, OIDC; XEP-0077 registration exists only in test builds) | any valid localpart; OIDC slugs kept Unicode letters | 1–64 bytes of `a-z`, `0-9`, `.`, `_`, `-`, `+`; OIDC slugs transliterate Latin letters (`José` → `jose`, `Øyvind` → `oyvind`) and drop other characters. The name is taken from the first source whose slug keeps a character: the `preferred_username` claim, then the claim the provider's `username_claim` names (for example `login` for GitHub), then the local part of the email claim, then `ext_<provider>_<digest>` |
 | Admin ad-hoc commands (`group-dm:create`, `channels:set-affiliation`, `channels:kick`, `spaces:set-role`, push operator commands) | JID fields folded by the parser | a JID that is not canonical is refused: `<jid-malformed/>` for a field submitted with type `jid-single` or `jid-multi`, `<bad-request/>` for one submitted without a type |
 | Account lookups (roster, presence, group DMs, XEP-0055) | the input was folded before the key lookup | the input is taken exactly; a non-canonical spelling names no account |
 | XEP-0055 results | stored names folded into addresses | rows whose stored name is not canonical are left out; a legacy `Bob` row does not hide the canonical `bob` |
@@ -53,10 +53,13 @@ identifiers, either `every local account is inside the identity profile` or
   backfill keys them within five minutes; until then they are not found.
 - `key_mismatch`: a recorded key that is not the stored name's key. Lookups
   resolve the row under another name; investigate before activation.
-- `folded_collision`: two or more accounts whose names fold to one address,
-  across the OIDC and native stores. At most one of them holds the address.
-  An OIDC row and a native row with the identical name are one account (a
-  native SCRAM sign-in writes the OIDC row) and are not reported.
+- `folded_collision`: two or more accounts that claim one address across
+  the OIDC and native stores, either because their names fold to it or
+  because an identity provider provisioned an OIDC account (a `users` row
+  with an `auth_identities` row) under a native account's exact name. At
+  most one of them holds the address. A native account and an OIDC row with
+  its exact name that no identity provider provisioned (a `users` row with
+  no `auth_identities` row) are one account and are not reported.
 - `foreign_domain`: native rows for another domain; not accounts of this
   deployment.
 
@@ -81,6 +84,13 @@ domains, which are this profile's canonical domain form.
    canonical domains` at startup, or a `WADDLE_SERVER_OWNER_LOCALPARTS
    entry` error. Owner entries are bare localparts exactly as the accounts
    are named (`rawkode`, not `Rawkode` or `rawkode@waddle.social`).
+   Provision each owner account before enabling identity provider sign-up:
+   an OIDC name is transliterated into the account profile, so a sign-up
+   whose name transliterates to an owner entry (`Rawködé` → `rawkode`) can
+   take that name first if the owner account does not exist yet. OIDC
+   provisioning checks only the OIDC store, so an owner that is a native
+   account is reported as `folded_collision` if an identity provider later
+   provisions its name.
 2. Run `waddle-identity-audit` against the account database of the running
    release and decide, for every `non_canonical_spelling` OIDC account, how
    its owner will continue (this release does not rename accounts). Record

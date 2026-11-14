@@ -97,8 +97,13 @@ is never rewritten to the dotted quad a resolver would read.
 These domainparts are syntactically valid, so they parse: a client stanza
 addressed to `bob@0x7f.1` is not refused with `<jid-malformed/>`. Destination
 classification (`destination.rs`) maps each refused kind to an
-`InvalidDestination` and answers a request with `<remote-server-not-found/>`,
-as D3 requires. `DomainKind::names_federation_peer` is the predicate that
+`InvalidDestination` and answers an IQ request (`get` or `set`) with
+`<remote-server-not-found/>`, as D3 requires. Only IQs are classified there.
+Messages and presence to such a domain take the path of any other domain
+this server does not serve while S2S is off: a message with no local
+recipient is dropped without an error reply (`route_to_connection`), and no
+error reply is added for presence. Answering them with
+`<remote-server-not-found/>` is left to S2S routing (W5a). `DomainKind::names_federation_peer` is the predicate that
 admission (W4c), discovery (W4d) and S2S routing (W5a) use; none of them
 re-derive the classification from text. Configured served domains may be of
 any kind (`localhost` is the default account domain).
@@ -227,6 +232,8 @@ fold.
 | XEP-0055 search | query | a canonical account address matches by localpart; anything else stays free text and is never parsed into an address. Rows are merged only when their stored names are identical, so a legacy `Bob` row never hides the canonical `bob` | — |
 | Mediated invitations and declines (`handlers/message/muc_invite.rs`, `muc_direct.rs`) | invitee `to`, declined inviter `to` | `parse_bare_jid` / `parse_jid` exactly; a non-canonical value names no invitee or inviter | the frame parser has already answered `<jid-malformed/>` |
 | Ad-hoc admin commands (`admin/channels.rs`, `admin/spaces.rs`, `admin/push.rs`) | `member_jids`, `member_jid`, `occupant_jid`, `channel_jid`, `room_jid`, `space_jid`, `owner`, including fields submitted without a `type` | `DataForm::bare_jid` / `bare_jids` (`parse_bare_jid` after trimming whitespace) or `parse_bare_jid` | `<bad-request/>`, as for any invalid field value |
+| XEP-0402 bookmark item ids (`xep::xep0402::parse_bookmark`; PEP bookmark publish and retract in `handlers/iq/pubsub_dispatch.rs`; XEP-0503 Spaces publish and retract in `handlers/iq/spaces_publish.rs`, `spaces_retract.rs`; the notification-settings projection) and Waddle DM-bookmark item ids (`xep::xep_waddle_dm_bookmarks::parse_dm_bookmark`) | `<item id>`, a room or contact bare JID with a localpart | `CanonicalBareJid::parse_exact`: the id must already be the canonical text, so the stored item id, the channel-space link and the channel's parent grant all name one room | `<bad-request/>` on publish and retract; a stored item whose id is not canonical is not read as a bookmark |
+| Extension PubSub nodes with a `{room}` segment (`handlers/iq/extension_route_items.rs`, `server/extension_commands/pubsub.rs`) | the room segment of the node name | `CanonicalBareJid::parse_exact`, so the channel whose permissions are checked is the room the node names before a requester is made a member of that node or an extension writes to it | `<bad-request/>` on items retrieval; the extension publish is denied |
 | `WADDLE_SERVER_OWNER_LOCALPARTS` (`server/bootstrap_membership.rs`) | entries | each a canonical localpart exactly as written; owner checks compare the stored localpart exactly | startup fails |
 | Authorization codec (`permissions/authz_id.rs`) | user subjects | `AuthzUserJid` additionally requires `CanonicalBareJid` | `UserJidNotCanonical` |
 | Destination classifier (`destination.rs`) | parsed `to` | `canonical_address` = `canonical_jid`; served domains are canonical | — |
@@ -268,7 +275,7 @@ consequences:
 | `outside_account_profile` | canonical, but not in the ASCII account profile (for example `josé`) | keeps signing in; no new account can be provisioned with such a name |
 | `missing_key` | no lookup key | missed by lookups and sign-in until the periodic backfill keys it |
 | `key_mismatch` | the recorded key is not the stored name's key | lookups resolve the row under another name |
-| `folded_collision` | two or more accounts' stored names fold to one address, across both stores; rows with identical stored names (an OIDC row and the native account whose SCRAM sign-in wrote it) are one account | at most one can hold the address |
+| `folded_collision` | two or more accounts claim one address across both stores: their stored names fold to it, or an identity provider provisioned an OIDC account (a `users` row with an `auth_identities` row) under a native account's exact name. A native account and an OIDC row with its exact name and no `auth_identities` row are one account | at most one can hold the address |
 | `foreign_domain` | a native row for another domain | not an account of this deployment |
 
 Accounts outside the account profile are kept rather than locked out: their
@@ -308,16 +315,29 @@ or migrating accounts is not part of this profile.
   versioned migration of stored names; this profile neither claims nor blocks
   it. Validity disagreements with strict peers on non-ASCII names remain.
 - Nested identities the C2S frame parser does not check, none of which a
-  handler uses as an identity today:
+  handler uses as an identity:
   - `to` and `from` of messages inside XEP-0297 `<forwarded/>` (carbons,
     MAM results and client forwards);
   - XEP-0033 `<address/>` entries that carry a `uri` instead of a `jid`;
-  - XEP-0402 bookmark item ids, which are room JIDs;
   - XEP-0166 Jingle `initiator` and `responder` attributes;
   - data-form fields submitted without a `type` attribute, for example
     XEP-0313 `with`. Ad-hoc admin commands parse theirs exactly (see the
     table); any new handler that reads an untyped field as an address must
     use `DataForm::bare_jid` or `parse_jid`.
+- Addresses carried in attributes other than `jid` or in element text, which
+  handlers parse with the folding `jid` parser and use for an authorization
+  check. XEP-0402 bookmark item ids and extension route node room segments
+  reach a grant and are parsed exactly (see the table). The others do not
+  reach a grant: each authorizes against the folded address, which the `jid`
+  parser treats as the same entity, and writes no grant, affiliation or
+  membership keyed by the raw text.
+  - XEP-0272 Muji `<muji room>` (`xep/xep0272.rs`): selects the room whose
+    membership gates a Jingle session and the SFU registry the participant
+    joins; no grant.
+  - The link-preview lookup `<scope>` (`handlers/iq/link_preview_lookup.rs`):
+    a read authorization for the preview; no grant.
+  - XEP-0372 mention reference `uri` and XEP-0513 mention `uri`: select the
+    notification and room inbox audience of a message; no grant.
 - UTS #46 mapping follows the Unicode version of the linked `idna` release;
   changing `idna`, `stringprep` or `jid` changes the accepted set and needs a
   profile version change.
@@ -329,8 +349,14 @@ or migrating accounts is not part of this profile.
   evidence tool.
 - Provisioning checks for an existing account per store: native
   registration consults `native_users`, OIDC provisioning `users`. A native
-  name and an OIDC name that fold to one address can still both be
-  provisioned; the startup report lists them as `folded_collision`.
+  name and an OIDC name that fold to one address, or are identical, can
+  still both be provisioned; the startup report lists them as
+  `folded_collision` when the OIDC row has an `auth_identities` row. An OIDC
+  row with no `auth_identities` row is taken to mirror the native account of
+  the same name. The only current production path that leaves such a row is
+  OIDC provisioning that fails between its `users` and `auth_identities`
+  writes, which are not one transaction; an identical-name collision with
+  that row is not reported.
 
 ## Verification
 
@@ -346,14 +372,23 @@ Written with this slice and run in the verification phase:
   typed data-form fields, `DataForm::bare_jid`, and the OAUTHBEARER authzid.
 - `crates/waddle-server/tests/identity_profile_accounts.rs`: canonical
   configured domains, account-profile provisioning, fixed-account
-  validation, OIDC name transliteration, admin command addresses, exact SCRAM
-  and directory lookup against legacy rows, and the reconciliation report.
+  validation before the reset deletes anything, OIDC name transliteration,
+  admin command addresses, exact SCRAM and directory lookup against legacy
+  rows, and the reconciliation report, including an identity-provider
+  account under a native account's exact name.
 - `crates/waddle-server/tests/identity_profile_ws.rs`: SCRAM login with
   non-canonical usernames, bind with a non-canonical resourcepart,
   `<jid-malformed/>` replies including invitations and typed command fields,
   `<remote-server-not-found/>` for refused peer domain forms, trailing-dot
-  canonicalization and directory search with a legacy twin, through the
-  production WebSocket server.
+  canonicalization, `<bad-request/>` for non-canonical XEP-0402 PEP bookmark
+  item ids on publish and retract, and directory search with a legacy twin,
+  through the production WebSocket server.
+- `crates/waddle-server/tests/xep0503_spaces_ws.rs`: Spaces publish and
+  retract refuse non-canonical room item ids, and the room keeps one parent
+  space.
+- `crates/waddle-xmpp/tests/xep0402_pep_native_bookmarks.rs`:
+  `parse_bookmark` and `parse_bookmark_item_id` refuse item ids the `jid`
+  parser would fold.
 - `crates/waddle-server/tests/xep0198_refused_stanza_ack_ws.rs`: stanzas
   refused at parsing count toward the XEP-0198 handled count; non-stanza
   input does not.
