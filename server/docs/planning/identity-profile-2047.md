@@ -232,7 +232,7 @@ fold.
 | XEP-0055 search | query | a canonical account address matches by localpart; anything else stays free text and is never parsed into an address. Rows are merged only when their stored names are identical, so a legacy `Bob` row never hides the canonical `bob` | — |
 | Mediated invitations and declines (`handlers/message/muc_invite.rs`, `muc_direct.rs`) | invitee `to`, declined inviter `to` | `parse_bare_jid` / `parse_jid` exactly; a non-canonical value names no invitee or inviter | the frame parser has already answered `<jid-malformed/>` |
 | Ad-hoc admin commands (`admin/channels.rs`, `admin/spaces.rs`, `admin/push.rs`) | `member_jids`, `member_jid`, `occupant_jid`, `channel_jid`, `room_jid`, `space_jid`, `owner`, including fields submitted without a `type` | `DataForm::bare_jid` / `bare_jids` (`parse_bare_jid` after trimming whitespace) or `parse_bare_jid` | `<bad-request/>`, as for any invalid field value |
-| XEP-0402 bookmark item ids (`xep::xep0402::parse_bookmark`; PEP bookmark publish and retract in `handlers/iq/pubsub_dispatch.rs`; XEP-0503 Spaces publish and retract in `handlers/iq/spaces_publish.rs`, `spaces_retract.rs`; the notification-settings projection) and Waddle DM-bookmark item ids (`xep::xep_waddle_dm_bookmarks::parse_dm_bookmark`) | `<item id>`, a room or contact bare JID with a localpart | `CanonicalBareJid::parse_exact`: the id must already be the canonical text, so the stored item id, the channel-space link and the channel's parent grant all name one room | `<bad-request/>` on publish and retract; a stored item whose id is not canonical is not read as a bookmark |
+| XEP-0402 bookmark item ids (`xep::xep0402::parse_bookmark`; PEP bookmark publish and retract in `handlers/iq/pubsub_dispatch.rs`; XEP-0503 Spaces publish and retract in `handlers/iq/spaces_publish.rs`, `spaces_retract.rs`; the notification-settings projection) and Waddle DM-bookmark item ids (`xep::xep_waddle_dm_bookmarks::parse_dm_bookmark`) | `<item id>`, a room or contact bare JID with a localpart | `CanonicalBareJid::parse_exact`: the id must already be the canonical text, so the stored item id, the channel-space link and the channel's parent grant all name one room | `<bad-request/>` on publish, and on retract unless an item with exactly that id is stored. A stored item whose id is not canonical is not read as a bookmark; retracting it removes the parent grant or notification setting it fed unless an item under the canonical id still holds it, and `spaces:delete` removes it without destroying the room it folds to (Decision 6) |
 | Extension PubSub nodes with a `{room}` segment (`handlers/iq/extension_route_items.rs`, `server/extension_commands/pubsub.rs`) | the room segment of the node name | `CanonicalBareJid::parse_exact`, so the channel whose permissions are checked is the room the node names before a requester is made a member of that node or an extension writes to it | `<bad-request/>` on items retrieval; the extension publish is denied |
 | `WADDLE_SERVER_OWNER_LOCALPARTS` (`server/bootstrap_membership.rs`) | entries | each a canonical localpart exactly as written; owner checks compare the stored localpart exactly | startup fails |
 | Authorization codec (`permissions/authz_id.rs`) | user subjects | `AuthzUserJid` additionally requires `CanonicalBareJid` | `UserJidNotCanonical` |
@@ -277,6 +277,22 @@ consequences:
 | `key_mismatch` | the recorded key is not the stored name's key | lookups resolve the row under another name |
 | `folded_collision` | two or more accounts claim one address across both stores: their stored names fold to it, or an identity provider provisioned an OIDC account (a `users` row with an `auth_identities` row) under a native account's exact name. A native account and an OIDC row with its exact name and no `auth_identities` row are one account | at most one can hold the address |
 | `foreign_domain` | a native row for another domain | not an account of this deployment |
+
+Bookmark items are keyed the same way. Space items, XEP-0402 PEP bookmarks
+and Waddle DM bookmarks stored before the profile can carry an id that is
+not canonical (`Room@muc.example.com`); each still holds the parent grant or
+notification setting its publish gave the room or contact the `jid` parser
+folds it to. `reconcile_bookmark_item_ids` counts them per carrier and
+startup logs the counts without identifiers. Publishing to such an id is
+refused, so the only way to change one is to retract it by its exact stored
+id, which the Spaces and PEP retract handlers accept for stored items only.
+A Spaces retract of such an item removes the channel's parent tuple on the
+node only when no item under the room's canonical id remains there, so a
+retract never removes a grant another item still names. The projection row
+of a retracted PEP or DM item is derived again from the canonical item when
+one remains, and deleted otherwise. `spaces:delete` removes such an item
+with its parent tuple and a link to the deleted Space, and destroys the
+room only when an item under its canonical id is on that Space too.
 
 Accounts outside the account profile are kept rather than locked out: their
 names are Nodeprep fixed points, so no two of them fold together, and S2S is
@@ -374,18 +390,27 @@ Written with this slice and run in the verification phase:
   configured domains, account-profile provisioning, fixed-account
   validation before the reset deletes anything, OIDC name transliteration,
   admin command addresses, exact SCRAM and directory lookup against legacy
-  rows, and the reconciliation report, including an identity-provider
-  account under a native account's exact name.
+  rows, and the reconciliation reports, including an identity-provider
+  account under a native account's exact name and bookmark items with
+  non-canonical ids per carrier.
 - `crates/waddle-server/tests/identity_profile_ws.rs`: SCRAM login with
   non-canonical usernames, bind with a non-canonical resourcepart,
   `<jid-malformed/>` replies including invitations and typed command fields,
   `<remote-server-not-found/>` for refused peer domain forms, trailing-dot
   canonicalization, `<bad-request/>` for non-canonical XEP-0402 PEP bookmark
-  item ids on publish and retract, and directory search with a legacy twin,
-  through the production WebSocket server.
-- `crates/waddle-server/tests/xep0503_spaces_ws.rs`: Spaces publish and
-  retract refuse non-canonical room item ids, and the room keeps one parent
-  space.
+  item ids on publish and retract, retract of a stored non-canonical
+  bookmark with its notification setting cleared or derived again from the
+  canonical bookmark, and directory search with a legacy twin, through the
+  production WebSocket server.
+- `crates/waddle-server/tests/xep0503_spaces_ws.rs`: Spaces publish into a
+  second Space and retract refuse non-canonical room item ids, and the room
+  keeps one parent space; a stored non-canonical item is retracted with its
+  parent tuple while the canonical parent remains, keeps the tuple when the
+  canonical item is on the same node, and `spaces:delete` of its Space does
+  not destroy the room.
+- `crates/waddle-server/tests/xep0492_dm_bookmarks_ws.rs`: retracting a
+  non-canonical DM bookmark keeps the canonical item's projection row, and
+  clears the row when it is the only item.
 - `crates/waddle-xmpp/tests/xep0402_pep_native_bookmarks.rs`:
   `parse_bookmark` and `parse_bookmark_item_id` refuse item ids the `jid`
   parser would fold.

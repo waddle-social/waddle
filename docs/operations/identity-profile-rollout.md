@@ -29,6 +29,7 @@ rollout and narrows the codec's user subjects to the same canonical form.
 | XEP-0055 results | stored names folded into addresses | rows whose stored name is not canonical are left out; a legacy `Bob` row does not hide the canonical `bob` |
 | Configured domains | any JID-valid spelling | `WADDLE_XMPP_DOMAIN`, `WADDLE_MUC_DOMAIN` and `WADDLE_SPACES_JID` must be written lowercase, without a trailing dot and in A-label form, or configuration load or startup fails |
 | `WADDLE_SERVER_OWNER_LOCALPARTS` | entries lowercased; `@name` and `name@domain` accepted | each entry must be the exact canonical localpart (no `@`, no domain), or startup fails; an account is an owner only when its stored name equals an entry exactly |
+| Bookmark item ids: XEP-0503 Space items, XEP-0402 PEP bookmarks (`urn:xmpp:bookmarks:1`) and Waddle DM bookmarks (`urn:waddle:dm-bookmarks:0`) | stored as written; the parser folded the id to the room or contact (`Room@muc.example.com` named `room@muc.example.com`) | publishing an id that is not canonical is refused with `<bad-request/>`, including a remote room on an internationalized domain written in U-label form (`room@bücher.example`): clients must store such a bookmark under the A-label form (`room@xn--bcher-kva.example`). A retract with a non-canonical id is accepted only when an item with exactly that id is stored, so existing items can be removed (see below) |
 
 Nothing is written to the account stores by this release beyond what it
 already wrote; there is no migration and no schema change.
@@ -75,6 +76,43 @@ correspond to these categories: `changed_by_current_parser` and
 ways: it excludes `+`, which this profile allows, and it flags A-label
 domains, which are this profile's canonical domain form.
 
+## Stored bookmark items with non-canonical ids
+
+Bookmark items stored before this release can have ids that are not
+canonical. Each still holds what its publish gave it: a Space item gives the
+channel its id folds to (`Room@muc.example.com` folds to
+`room@muc.example.com`) a parent grant on that Space, so the Space's admins
+administer the channel, and a PEP or DM bookmark feeds its owner's
+notification setting for the folded room or contact. Publishing to that id
+is now refused, so these items are not updated in place.
+
+At startup each replica reads the PubSub store and logs, without item ids or
+owners, either `every stored bookmark item id is canonical` or `stored
+bookmark items with non-canonical ids` with a count per carrier: `spaces`,
+`pep_bookmarks` and `dm_bookmarks`.
+
+To clear them, retract each item by its exact stored id:
+
+- A Space item: an owner of that Space, or an account allowed to create
+  Spaces, sends a XEP-0060 retract to the Spaces service for that node and
+  id. The channel's parent grant on
+  that Space and its channel-space link to it are removed with the item,
+  unless an item under the room's canonical id is on the same node, which
+  keeps the grant. `spaces:delete` of a Space holding such an item removes
+  the item, its parent grant and a link to that Space, but destroys the
+  channel only when an item under the room's canonical id is on that Space
+  too; a channel only a non-canonical item names survives the delete and
+  can be removed with `channels:delete` if it belongs to that Space.
+- A PEP or DM bookmark: its owner retracts it from `urn:xmpp:bookmarks:1` or
+  `urn:waddle:dm-bookmarks:0` by its exact id. The notification setting it
+  fed is cleared, or, when a bookmark under the canonical id remains,
+  derived again from that bookmark. Clients that kept a non-canonical
+  spelling should republish the bookmark under the canonical id.
+
+Before enabling remote identities or grants, the `spaces` count must be zero
+or each remaining Space item accepted: a remaining item keeps its parent
+grant.
+
 ## Procedure
 
 1. Before the window, confirm the configured domains and owner entries are
@@ -103,7 +141,9 @@ domains, which are this profile's canonical domain form.
 4. After the rollout, compare each replica's startup counts with step 2. The
    counts are the same on every replica of one database.
 5. Before enabling remote identities or grants (S2S routing, grant
-   authority), resolve or explicitly accept every account the report lists.
+   authority), resolve or explicitly accept every account the report lists,
+   and clear or explicitly accept every bookmark item the bookmark report
+   counts.
 
 ## Rollback
 
