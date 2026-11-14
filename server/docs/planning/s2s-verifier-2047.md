@@ -2,44 +2,64 @@
 
 ## Status and relationship to the transport proposal
 
-Proposed amendment to the open B2 gate in
-[the handshake design](s2s-handshake-2047.md), stacked on PR #2074 at
-`bbf076dc4f9e5ef449ccd4cc0072b3b5682d74f9`. This selects a candidate verifier
-construction and records observed library behavior. It contains no runtime
-implementation and does not complete B2. Independent architecture review,
-standards-profile resolution, parser validation and executable transport evidence
-remain required. The identity, grant/effect-fence and separate production
-activation gates in [ADR-0020](../adrs/0020-independent-community-federation.md)
-are unchanged.
+Amendment to the B2 gate in [the handshake design](s2s-handshake-2047.md),
+stacked on PR #2074 at `bbf076dc4f9e5ef449ccd4cc0072b3b5682d74f9`. This selects
+a candidate verifier construction and records observed library behavior. It
+contains no runtime implementation and does not complete B2, which is gate G2
+of [ADR-0020](../adrs/0020-independent-community-federation.md). The verifier
+slice decides the remaining B2 items, records them here and has them
+independently reviewed before it merges into the integration branch.
+Standards-profile resolution (gate G1), parser validation and executable
+transport evidence remain required; under ADR-0020 D9 the executable evidence
+comes from the verifier's focused tests, which run when its slice completes,
+and from the verification phase. The identity, grant/effect-fence and separate
+production activation gates in ADR-0020 are unchanged.
 
-**Amended by [ADR-0020](../adrs/0020-independent-community-federation.md)
-decision D2 (accepted 2026-11-13).** Where this document conflicts with D2,
+**Amended by ADR-0020 decision D2.** Where this document conflicts with D2,
 D2 controls:
 
 - A leaf whose extended key usage is serverAuth only is accepted in both TLS
-  roles. This supersedes the explicit role EKU that pipeline step 3 requires
-  of the initiating peer's certificate; the stock client verifier's rejection
-  of such a leaf in the probe table is library behavior, not policy. Public
-  CAs such as Let's Encrypt no longer issue clientAuth certificates.
-- `open` mode adds a public-WebPKI trust profile beside the per-peer
-  private-CA profile described here. The complete-CRL and fail-closed
-  freshness rules below remain the profile for configured private CAs; they
-  are not applied as hard checks to public chains, whose revocation handling
-  is selected and reviewed with the implementation. A profile is selected by
-  configuration, never as a fallback after another profile rejects a chain.
-- In `open` mode the inbound reference domain is the stream source admitted
-  under D1, not a configured pair. On inbound direct TLS (XEP-0368) that
-  domain arrives in the stream header after the handshake, so the identity
-  match on that path completes before SASL EXTERNAL success rather than inside
-  the TLS verifier callback.
+  roles, in every trust profile and admission mode. This supersedes the
+  explicit clientAuth usage that pipeline step 3 requires of the initiating
+  peer's certificate: the initiating role accepts a leaf whose EKU includes
+  serverAuth or clientAuth, and the receiving role still requires serverAuth.
+  The stock client verifier's rejection of a serverAuth-only leaf in the probe
+  table is library behavior, not policy. Let's Encrypt stopped issuing
+  certificates with the clientAuth usage on 2026-07-08
+  ([announcement](https://letsencrypt.org/2025/05/14/ending-tls-client-authentication/)).
+  Accepting a serverAuth-only leaf from a TLS client departs from RFC 5280
+  section 4.2.1.12; ADR-0020 records it as a deviation.
+- The trust profile is chosen per domain, independently of the admission mode.
+  Public WebPKI is the default for every domain. The per-peer private-CA
+  profile described here applies to a domain only when the operator configures
+  it for that domain; a public-CA chain then fails for that domain, and a
+  private-CA chain fails for any domain on the public profile. The
+  complete-CRL and fail-closed freshness rules below belong to the private-CA
+  profile and are not applied as hard checks to public chains. The verifier
+  slice selects and has reviewed the public profile's root store, its update
+  policy and its revocation handling (gate G2). A profile is selected from
+  configuration before the handshake, never as a fallback after another
+  profile rejects a chain.
+- Inbound streams use STARTTLS only, and the initial, pre-TLS stream header
+  must carry `from`. The inbound reference domain is that domain, admitted
+  under D1 before the handshake, so the profile and reference identity are
+  known inside the TLS verifier callback in every mode; a peer that omits it
+  is refused before TLS. Inbound direct TLS (XEP-0368) is deferred until a
+  two-stage verification design is reviewed. On outbound streams, including
+  direct TLS to `_xmpps-server` targets, the reference domain is the stream
+  `to` domain as before.
+- The public-WebPKI profile is tested in the verifier suite with a
+  substituted test root set. Validation against the real public root store is
+  evidence for the activation decision (gate G22), not for the native harness.
 
 The remaining construction, limits and evidence requirements are unchanged,
 and B2 remains open.
 
-Scope remains two native Waddle processes, loopback endpoints and `.test`
-domains. Application dispatch, grants, delivery custody, DNS discovery, public
-CA issuance and production network exposure remain outside this slice. The
-candidate accepts the exact configured stream domain pair, never any identity
+The executable fixture remains two native Waddle processes, loopback endpoints
+and `.test` domains configured with the private-CA profile. Application
+dispatch, grants, delivery custody, DNS discovery, public CA issuance and
+production network exposure remain outside the verifier. The candidate
+authenticates exactly the stream's admitted domain pair, never any identity
 merely because it shares a certificate, parent domain or issuing CA.
 
 ## Locked libraries and actual API boundaries
@@ -77,9 +97,11 @@ The candidate must therefore add policy checks, not just enable these builders.
 
 One private, per-connection adapter owns the prepared reference domain, exact
 pair authorization and immutable trust snapshot. It implements the two rustls
-verifier traits with the same policy core. Select the peer snapshot from the
-already configured pair; no global-root fallback, peer-supplied endpoint name,
-HTTP metadata or post-verification identity substitution is allowed.
+verifier traits with the same policy core. Select the reference domain's
+configured profile before the handshake: the peer snapshot for a private-CA
+domain, otherwise the public-WebPKI profile (ADR-0020 D2). No fallback to
+another root set, peer-supplied endpoint name, HTTP metadata or
+post-verification identity substitution is allowed.
 
 1. Before verification, reject chains exceeding eight certificates or 64 KiB
    total DER, malformed DER/trailing data, excessive extensions or unsupported
@@ -99,7 +121,7 @@ HTTP metadata or post-verification identity substitution is allowed.
    this is a restricted issuance policy, not a claim that XMPP universally
    requires both EKUs. Every candidate path must satisfy the same policy.
    Under ADR-0020 D2, a serverAuth-only leaf satisfies the role check in both
-   roles.
+   roles, as a recorded deviation from RFC 5280 section 4.2.1.12.
 4. Match the authenticated leaf's XMPP reference identity as specified below.
    Produce the certificate-verification assertion only after chain, revocation,
    profile and identity checks all pass. A match in a failed chain must never
@@ -342,7 +364,8 @@ No skipped dependency counts as a pass.
 | --- | --- |
 | Signed path and TLS ownership | Correct mTLS both directions; wrong CA, missing certificate, invalid certificate signature and forged CertificateVerify must fail. A valid name with invalid chain/signature must never authenticate EXTERNAL. |
 | Roles/profile | Missing/wrong EKU, missing digitalSignature, CA-as-leaf, invalid issuer usages, unknown critical extensions, trailing DER and excessive certificate count/bytes fail at the defined stage. A serverAuth-only leaf authenticates in both roles. |
-| DNS/service identity | Wrong account/component domain, SAN alias outside the pair, CN-only leaf, SRV-only valid identity, wrong `_xmpp-server` service, inserted `_tcp`, malformed OtherName DER/IA5String and duplicate applicable entries. Record positive exact-name matches and negative pair authorization separately. |
+| Trust profile | A public-CA chain for a domain configured with a private-CA profile fails; a private-CA chain for a domain on the public-WebPKI profile fails; no second profile is tried after a rejection; an inbound initial header without a pre-TLS `from` is refused before TLS; no inbound direct-TLS listener exists. |
+| DNS/service identity | Wrong account/component domain, SAN alias outside the pair, CN-only leaf, SRV-only valid identity, wrong `_xmpp-server` service, inserted `_tcp`, malformed OtherName DER/IA5String and duplicate applicable entries. A certificate naming only a DNS-derived SRV target, not the source domain, fails. Record positive exact-name matches and negative pair authorization separately. |
 | Constraints | Enforced DNS constraints and explicitly rejected SRVName/OtherName-constrained CA/path; no retry that drops constraints or promotes an intermediate to a root. |
 | Root/inventory | Expired/not-yet-valid/non-CA/bad-self-signature anchor, duplicate subject/different key, unknown intermediate, cycle, unsupported algorithm and invalid inventory path fail startup; root metadata deadline closes live streams. |
 | CRLs | Empty/missing bundle, unknown issuer, bad signature, missing/future/expired/reversed timestamps, missing chain coverage, revoked leaf/intermediate, duplicate clean/revoking CRLs in both orders, delta/indirect/IDP variants and unsupported critical extensions fail closed. Valid complete chain coverage passes. |
@@ -350,13 +373,17 @@ No skipped dependency counts as a pass.
 | Resource/cancellation | Oversized DER/name/extension/CRL inventories; worst permitted path search; four occupied verifier workers plus new connections; cancellation during verification; late completion; slow socket and drain. Assert bounded allocations, no permit reuse before completion, finite worker release and local WSS progress within the fixture deadline. |
 | Resumption | Attempt tickets, early data and fresh connections after restart; assert certificate/CRL/name/pair checks actually rerun and EXTERNAL cannot reuse an old principal. |
 
-Before closing B2, record the exact implementation commit, library feature set,
-commands, positive and negative results, time/memory measurements and independent
-review at that head. Until then, unresolved items are: B1's reference-identity
-matrix; the adapter and startup inventory/CRL construction; cryptographic algorithm
-intersection; parser/CRL-count ceilings; cancellation/drain/resource proofs; and
-real two-process authentication evidence. No transport implementation is approved
-by this document alone.
+B2's design items are recorded here and independently reviewed before the
+verifier slice merges into the integration branch. Its evidence records the
+exact implementation commit, library feature set, commands, positive and
+negative results and time/memory measurements, first when the verifier's
+focused tests run at slice completion (ADR-0020 D9) and again in verification;
+the implementation head is reviewed in the close-out review. Until then,
+unresolved items are: B1's reference-identity matrix; the adapter and startup
+inventory/CRL construction; the public-WebPKI root store and revocation
+handling; cryptographic algorithm intersection; parser/CRL-count ceilings;
+cancellation/drain/resource proofs; and real two-process authentication
+evidence. This document alone approves no transport implementation.
 
 ## Standards references
 

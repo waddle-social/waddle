@@ -2,32 +2,56 @@
 
 ## Status and scope
 
-Proposed, for independent architecture review. This document selects a candidate
-first transport slice under [ADR-0020](../adrs/0020-independent-community-federation.md)
-and [the delivery plan](../../../docs/planning/federation-2047.md). It does not
-approve F0, resolve the identity or grant-authority gates, implement transport,
-authorize protected dispatch, or authorize production activation. Blocking
-questions below must be resolved before transport implementation. Changes to
-ADR-0020, including the separate authority work in PR #2067, remain separate.
+Design for the S2S transport under
+[ADR-0020](../adrs/0020-independent-community-federation.md) and
+[the delivery plan](../../../docs/planning/federation-2047.md). ADR-0020 settles
+part of it, as amended below, and its remaining blocking decisions B1–B4 are the
+ADR's gates G1–G4. Under the ADR's gate semantics, the slice that implements an
+open decision decides it, records it in this document and has it independently
+reviewed before that slice merges into the integration branch; the executable
+evidence is discharged in the verification phase. This document implements
+nothing and does not authorize protected dispatch or production activation.
+[Status after ADR-0020](#status-after-adr-0020) records what the ADR settled
+and which slice owns each remaining item.
 
-**Amended by ADR-0020 decisions D1–D3 (accepted 2026-11-13).** Where this
-document conflicts with them, they control:
+**Amended by ADR-0020 decisions D1–D3 and D9.** Where this document conflicts
+with them, they control:
 
 - Peer admission uses the `closed`, `allowlist` and `open` modes of D1. The
-  explicit pair configuration below remains the fixture profile; the
-  configuration for the D1 modes is defined with the connection manager.
+  explicit pair configuration below remains the fixture profile. The
+  connection manager defines the configuration for the D1 modes, including how
+  an admission change reaches every replica and closes the streams of a domain
+  that is no longer admitted (gate G7).
+- A leaf whose extended key usage is serverAuth only is accepted in both TLS
+  roles, in every trust profile and admission mode (see
+  [the verifier design](s2s-verifier-2047.md)).
+- The trust profile is chosen per domain. Public WebPKI is the default for
+  every domain in every mode; an operator may instead configure a domain with a
+  private-CA profile, which is the explicit-anchor profile described below, and
+  a public-CA certificate then fails for that domain. This supersedes the rule
+  below that only the selected peer's explicit trust anchors are used, except
+  for domains configured with a private-CA profile.
+- Inbound streams use STARTTLS only, and the initial, pre-TLS stream header
+  must carry `from`, so the profile and reference identity are fixed before the
+  handshake; a peer that omits it is refused before TLS. Inbound direct TLS
+  (XEP-0368) is deferred until a two-stage verification design is reviewed, so
+  the `s2s` listener accepts STARTTLS only. Outbound streams may use direct TLS
+  for `_xmpps-server` targets.
 - Inbound XEP-0220 dialback is permitted under D2's restricted policy, and
-  Waddle implements the outbound dialback roles. This supersedes the statement
-  below that the profile has no dialback.
-- `open` mode uses a public-WebPKI trust profile and accepts serverAuth-only
-  certificates in both roles (see [the verifier design](s2s-verifier-2047.md)).
-  This supersedes, for that mode, the rule below that only the selected peer's
-  explicit trust anchors are used.
-- DNS discovery follows D3 and still never authorizes a peer.
+  Waddle will implement the outbound dialback roles. This supersedes the
+  statement below that the profile has no dialback; multiplexing further
+  domains onto a stream remains excluded. `VerifiedPeerStream` records the
+  stream's authentication strength, `pkix` or `dialback`, which travels into
+  the remote principal and the protected-effect admission witness.
+- DNS discovery follows D3, including the blocked address classes checked on
+  every DNS-derived address. DNS never supplies a reference identity.
+- Tests are written with the transport slices and executed in the
+  verification phase, except the verifier's focused tests, which run when its
+  slice completes (D9).
 
-The loopback and `.test` restriction on enabled listeners and endpoints stays
-until a reviewed change removes it. [Status after ADR-0020](#status-after-adr-0020)
-records which blocking decisions the ADR settled and which remain open.
+The loopback and `.test` restriction on enabled listeners, endpoints and
+domains stays until the discovery slice lifts it through a reviewed change
+(gate G6). The native harness keeps loopback endpoints and `.test` domains.
 
 The slice establishes and tears down authenticated, directional domain streams
 between two native Waddle processes on isolated test domains. It accepts no
@@ -48,7 +72,7 @@ Inspected main `e8a3a3d12e0febd811a09551258629a7348742cb`:
 | [`server/http.rs`](../../crates/waddle-server/src/server/http.rs) | Uses `axum::serve`; this listener does not terminate S2S TLS. Leave HTTP/C2S serving unchanged. |
 | [`server/acme.rs`](../../crates/waddle-server/src/server/acme.rs) | Requests the account-domain certificate and exposes HTTP-01 challenge handling. This is not an S2S certificate provisioning/verification implementation. |
 | [`protocol/frame.rs`](../../crates/waddle-xmpp/src/protocol/frame.rs) | Parses complete C2S WebSocket frames with `jabber:client`. Do not feed incremental S2S bytes through this classifier or inject a client namespace. |
-| [`iq/dispatch.rs`](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/dispatch.rs) | Consumes results/errors before generic forwarding. Do not reuse it as a remote dispatcher. |
+| [`iq/dispatch.rs`](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/dispatch.rs) | C2S IQ dispatcher. At main `f77c03814` it forwards results and errors addressed to a local full JID (#2070) and otherwise consumes or ignores them. Do not reuse it as a remote dispatcher. |
 | [`route_to_connection/implementation.rs`](../../crates/waddle-server/src/server/routes/interpret/route_to_connection/implementation.rs) | Foreign bare-JID routing is not federation delivery. Leave it outside this slice. |
 
 Proposed new `waddle-server::s2s` owns TCP, rustls configuration, certificate
@@ -88,7 +112,8 @@ when true, `WADDLE_S2S_CONFIG_FILE` naming an operator-owned TOML file. The futu
 release build keeps this disabled by default; absence of a file does not enable
 anything. Disabled mode performs no S2S binds, peer dials or credential reads.
 The first implementation rejects enabled non-loopback listeners/endpoints and
-non-`.test` domains. Removing that restriction is a separately reviewed scope.
+non-`.test` domains. Removing that restriction is a separately reviewed scope,
+owned by the discovery slice (ADR-0020 gate G6).
 
 The file has these mandatory, typed fields; unknown fields fail validation:
 
@@ -113,7 +138,8 @@ independently authenticated connection. A stream authenticated from
 `home-a.test` cannot carry `muc.home-a.test` traffic even when both names occur
 in its certificate. Components need their own pairs. There is no XEP-0288,
 dialback, multiplexed domain authentication or arbitrary relay. ADR-0020 D2
-later admits restricted dialback; see the status amendment.
+admits restricted dialback, one domain pair per stream; see the amendment
+above.
 
 The configured endpoint selects the socket only. It never replaces the remote
 destination domain as the certificate reference identity or TLS SNI. The fixture
@@ -148,8 +174,9 @@ reference identity is the claimed stream `from` domain, which must also select
 an allowed inbound pair. Verify certificate path, signatures, current validity,
 constraints/key usage, applicable EKUs and revocation before accepting identity.
 Use only the selected peer's explicit trust anchors, never a fallback system
-root store; ADR-0020 D2 adds a separately selected public-WebPKI profile for
-`open` mode. Verify SAN service identity against the reference domain, not the
+root store. Under ADR-0020 D2 this is the private-CA profile configured for a
+domain; every other domain uses the public-WebPKI profile, selected before the
+handshake. Verify SAN service identity against the reference domain, not the
 endpoint IP, SNI alone, subject Common Name or any certificate-supplied redirect.
 
 DNS-ID and `_xmpp-server` SRV-ID verification coverage must be demonstrated;
@@ -270,7 +297,7 @@ cases.
 | Global/pre-auth capacity unavailable before a safe stream | Close TCP immediately. |
 | Malformed XML / forbidden DTD or entity declarations | `not-well-formed` / `restricted-xml` stream error, then close. |
 | Wrong stream/content namespace or unsupported stream version | `invalid-namespace` / `unsupported-version`, then close. |
-| Missing/invalid domain-only stream header address | `bad-format`, then close; mandatory pre-TLS `from` is an explicit restricted-profile policy, subject to B1. |
+| Missing/invalid domain-only stream header address | `bad-format`, then close. A mandatory pre-TLS `from` is ADR-0020 D2 policy; the exact error for its absence is part of B1. |
 | Header recipient not served or not the selected destination | `host-unknown`, then close. |
 | Source pair not allowed, or source identity changes | `invalid-from`, then close. |
 | Application stanza before completed authentication | `not-authorized`, then close. |
@@ -298,7 +325,10 @@ reply, so no reverse application stream is needed for this slice.
 
 These are proposed fixture-profile ceilings, enforced as hard maxima. They are
 not measured capacity claims. A future increase needs review and new exhaustion
-evidence. Counters/permits are released on every parse error, timeout and task
+evidence. They size the two-process fixture and are not the resource model for
+ADR-0020's `open` mode, in which the number of peers is attacker-controlled;
+the connection manager defines global caps on peers, sockets, handshakes and
+per-peer state with an eviction and backoff policy (gate G7). Counters/permits are released on every parse error, timeout and task
 cancellation; no unbounded spawned-task or logging queue is allowed.
 
 | Resource | Ceiling / deadline |
@@ -332,40 +362,48 @@ waiting for a remote peer. The two-process tests must prove unrelated C2S progre
 
 ## Blocking architecture decisions
 
-| ID | Required resolution before implementation |
+| ID | Required resolution |
 | --- | --- |
 | B1: standards profile | Record RFC 6120/7590/7622/9325/9525 updates and errata disposition; reconcile TLS 1.3-only restriction, DNS-ID/SRV-ID/XmppAddr treatment, IDNA/preparation, remaining SASL conformance and exact malformed-header/error behavior. The authzid precedence and replacement/abort rules above resolve those specific review findings; other B1 questions remain open. Identify intentional pilot restrictions without claiming general compliance. |
 | B2: concrete TLS verifier | Select exact rustls/webpki/parser versions and APIs; prove server certificate identity verification in both TLS roles, SRV-ID support, EKU/chain constraints, signed CRL coverage/freshness and enforceable pre-verification memory/CPU limits. No permissive custom verifier or unchecked fallback. |
 | B3: codec and boundary | Select streaming parser/version and prove namespace inheritance, UTF-8 segmentation, element/attribute/depth accounting and STARTTLS/SASL restart buffer ownership with executable adversarial cases. |
-| B4: independent review | An independent reviewer must challenge this exact design/head and its resolved B1-B3 evidence. Unresolved blocking findings pause transport implementation. |
+| B4: independent review | An independent reviewer challenges this design with its B1–B3 decisions recorded, and any B1–B3 evidence then available. Unresolved blocking findings pause the merge of the connection manager, the first slice that accepts sockets, into the integration branch. This reviews the design; the implementation head is reviewed in the close-out review (ADR-0020 gate G19). |
 
-These are blocking decisions, not work deferred behind an allegedly ready
-implementation. F1 identity encoding and F3 authority/effect fencing remain
-separate blockers for remote grants and protected dispatch even if B1-B4 pass.
-No two-process handshake result relaxes those gates or the production window and
-runbook requirement. Remote IQ correlation, delivery custody/deduplication,
-ordering, unknown outcomes and recipient-set preservation require later slices.
+These remain blocking decisions; an implementation that compiles waives none of
+them. Under ADR-0020's gate semantics, each is decided by its owning slice and
+reviewed before that slice merges into the integration branch. The executable
+proofs that B2 and B3 call for are evidence: under D9 they run with the
+verifier's focused tests when its slice completes and in the verification
+phase, rather than before the code is written. The authorization ID codec
+(gate G9), the identity profile (G10) and the host-grant fence (G11–G17) remain
+separate gates for remote grants and protected dispatch even if B1–B4 pass.
+No two-process handshake result relaxes those gates or the production window
+and runbook requirement. Remote IQ correlation, delivery custody/deduplication,
+ordering, unknown outcomes and recipient-set preservation belong to S2S
+routing (G8).
 
 ### Status after ADR-0020
 
 ADR-0020's accepted decisions settle part of B1 and B2. Nothing in this table
-is implemented or proven; every remaining item is still a blocking
-implementation gate.
+is implemented or proven. Slice names refer to
+[the delivery plan](../../../docs/planning/federation-2047.md), whose gate
+table also names the verification step for each item.
 
-| ID | Decided by ADR-0020 | Remaining implementation gate |
+| ID | Settled by ADR-0020 | Remaining items, owner and gate |
 | --- | --- | --- |
-| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; inbound dialback policy and outbound dialback roles. D3: discovery, the source domain as the only reference identity, DNS never authorizes. D1: admission modes. | Updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix; IDNA and address preparation; remaining SASL conformance; malformed-header and error behavior; dialback wire profile, including which certificate outcomes count as an active failure. |
-| B2 | D2: a public-WebPKI profile for `open` mode that accepts serverAuth-only EKU; hard CRL checks only for configured private CAs. | Concrete verifier for both profiles; revocation handling for public chains; algorithm intersection; parser and CRL ceilings; cancellation and resource proofs; two-process evidence. |
-| B3 | Nothing. | Unchanged. |
-| B4 | Nothing; accepting the ADR is not a review of an implementation. | Independent review of the implementation head and its B1–B3 evidence. |
+| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; per-domain trust profiles; inbound STARTTLS only, with a mandatory pre-TLS `from`; inbound dialback policy and outbound dialback roles; one domain pair per stream. D3: discovery, the source domain as the only reference identity, blocked address classes, lookup failure versus absence. D1: admission modes. | Verifier slice (W4b): updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix; IDNA and preparation of reference identities. Codec slice (W4a): malformed-header and stream-error behavior, including the error for a missing pre-TLS `from`; remaining SASL conformance. Dialback slice (W4d): dialback wire profile and the classification of active certificate failures (gate G5). Gate G1. |
+| B2 | D2: per-domain profiles with public WebPKI by default; serverAuth-only EKU accepted; hard CRL checks only for configured private CAs. | Verifier slice (W4b): concrete verifier for both profiles; revocation handling for public chains; algorithm intersection; parser and CRL ceilings; cancellation and resource bounds. Evidence: the verifier's focused tests when the slice completes, then two-process evidence in verification. Gate G2. |
+| B3 | Nothing. | Codec slice (W4a), unchanged; evidence in verification. Gate G3. |
+| B4 | Nothing; accepting the ADR is not this review. | Independent review of this design with its recorded B1–B3 decisions, before the connection manager (W4c) merges into the integration branch. Gate G4. |
 
 ## Acceptance evidence required of the future implementation
 
 Native Rust suites include dedicated XEP-0178 parser/negotiation coverage and a
 real two-Waddle-process lane. No Docker, shared deployment database/secret,
 accept-all TLS verifier or mocked transport is acceptable. Reuse lifecycle ideas
-from [the native grant-fence fixture](../../experiments/grant-fence/src/fixture.rs),
-not its authorization experiment as proof of federation correctness.
+from [the native experiment fixture](../../experiments/native-fixture/src/fixture.rs),
+but do not treat the authorization experiments built on it as proof of
+federation correctness.
 [The existing WebSocket TestServer](../../crates/waddle-ws-test-support/src/lib.rs)
 forces fixed-account provisioning and `ws://`; it is not F5 acceptance as-is.
 The new two-process fixture must use independent production SpiceDB authorities,
