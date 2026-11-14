@@ -35,11 +35,15 @@ use kameo::actor::ActorRef;
 use tokio::sync::mpsc::Receiver;
 use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
 use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+use waddle_server::ingress::effects::room::{DurableRoomEffect, ExternalRoomEffect};
+use waddle_server::ingress::effects::{DurableEffect, Effect, ExternalEffect, PlannedEffect};
 use waddle_server::ingress::execute::execute_effects;
 use waddle_server::ingress::{
     ImmediateSink, IngressAuthority, IngressDecision, IngressDecisionClass, IngressSubmission,
     RecoveryEnvironment,
 };
+use waddle_server::notification_outbox::NotificationCandidate;
 use waddle_server::permissions::host_grant::{Activation, RoomAffiliation};
 use waddle_server::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
 use waddle_server::test_support::{
@@ -513,5 +517,143 @@ async fn a_stale_online_occupant_gets_no_copy_and_does_not_block_the_members() {
         assert!(received_bodies(&mut stale).is_empty());
         assert_eq!(fixture.stored_for(STALE).await, [0; 6]);
     }
+    fixture.close().await;
+}
+
+/// How a test rewrites one principal nested in the planned work for an
+/// admitted account, leaving the principal the work itself names alone.
+#[derive(Clone, Copy, Debug)]
+enum NestedPrincipal {
+    /// The recovery item an inbox row carries.
+    InboxRecovery,
+    /// The recipient of a notification candidate.
+    CandidateRecipient,
+    /// The recovery item a notification candidate carries.
+    CandidateRecovery,
+    /// The route an inbox push is recorded under.
+    PushReceipt,
+}
+
+impl NestedPrincipal {
+    /// Name `other` in place of `owner` in the first planned effect of
+    /// `owner` that carries this nested principal. The answer is whether
+    /// such an effect was found.
+    fn rewrite(self, plan: &mut [PlannedEffect], owner: &BareJid, other: &BareJid) -> bool {
+        plan.iter_mut()
+            .any(|planned| self.rewrite_effect(&mut planned.effect, owner, other))
+    }
+
+    fn rewrite_effect(self, effect: &mut Effect, owner: &BareJid, other: &BareJid) -> bool {
+        match (self, effect) {
+            (
+                Self::InboxRecovery,
+                Effect::Durable(DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
+                    owner: named,
+                    recovery: Some(recovery),
+                    ..
+                })),
+            ) if named == owner => {
+                recovery.key.recipient = other.clone();
+                true
+            }
+            (
+                Self::CandidateRecipient,
+                Effect::External(ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate {
+                    owner: named,
+                    candidate: Some(candidate),
+                    ..
+                })),
+            ) if named == owner => {
+                **candidate = NotificationCandidate::groupchat(
+                    other.clone(),
+                    candidate.conversation_jid().clone(),
+                    candidate.sender_jid().clone(),
+                    candidate.thread_id().clone(),
+                    candidate.archive_stanza_id().clone(),
+                    candidate.class(),
+                )
+                .expect("candidate for another recipient");
+                true
+            }
+            (
+                Self::CandidateRecovery,
+                Effect::External(ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate {
+                    owner: named,
+                    recovery: Some(recovery),
+                    ..
+                })),
+            ) if named == owner => {
+                recovery.key.recipient = other.clone();
+                true
+            }
+            (
+                Self::PushReceipt,
+                Effect::External(ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+                    owner: named,
+                    receipt: Some(receipt),
+                    ..
+                })),
+            ) if named == owner => match receipt.as_mut() {
+                IngressEffectIntent::RouteDirect { recipient, .. } => {
+                    *recipient = other.clone();
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+#[tokio::test]
+async fn work_for_a_member_that_nests_another_principal_refuses_the_stanza() {
+    let Some(fixture) = ManagedRoomFixture::start("hg_audience_nested").await else {
+        return;
+    };
+    // The planner plans for the offline peer, an admitted member, an inbox
+    // row with its recovery item, the push of that row, and a notification
+    // candidate with its own recovery item. Each kind of work is kept or
+    // dropped by the principal it names, so a principal nested in it that
+    // is not that principal would be carried past the audience. Such work
+    // is not one a managed room accounts for: the stanza is refused, even
+    // when the nested principal is itself admitted.
+    let peer = bare(PEER);
+    for (round, other) in [bare(REVOKED), bare(SENDER)].iter().enumerate() {
+        for nested in [
+            NestedPrincipal::InboxRecovery,
+            NestedPrincipal::CandidateRecipient,
+            NestedPrincipal::CandidateRecovery,
+            NestedPrincipal::PushReceipt,
+        ] {
+            let mut submission = fixture
+                .plan(&format!("nested-{nested:?}-{round}"), "for the peer only")
+                .await;
+            assert!(
+                nested.rewrite(&mut submission.plan.plan, &peer, other),
+                "the room planner planned no {nested:?} for the peer: {:?}",
+                submission.plan.plan
+            );
+            let decision = fixture.commit(&submission).await;
+            assert_eq!(
+                decision.class,
+                IngressDecisionClass::PolicyDenied,
+                "{nested:?} naming {other}"
+            );
+            assert!(fixture
+                .grants
+                .manifest(decision.message_key.expect("key"))
+                .await
+                .is_none());
+        }
+    }
+    assert_eq!(fixture.stored_for(PEER).await, [0; 6]);
+    assert_eq!(fixture.stored_for(REVOKED).await, [0; 6]);
+
+    // The same plan as the planner produced it is accepted for the peer.
+    let submission = fixture.plan("nested-unchanged", "for the peer").await;
+    let decision = fixture.commit(&submission).await;
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    fixture.execute(&decision).await;
+    assert!(fixture.rows_for("inbox_entries", "user_jid", PEER).await > 0);
     fixture.close().await;
 }

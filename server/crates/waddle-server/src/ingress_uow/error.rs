@@ -40,7 +40,8 @@ pub enum IngressUowError {
     #[error("room snapshot generation is stale")]
     RoomGenerationStale,
     #[error(
-        "a sealed room manifest holds work outside the audience the host-grant authority admitted"
+        "an admitted room acceptance sealed no manifest, or its manifest holds work outside \
+         the audience the host-grant authority admitted"
     )]
     HostGrantAudienceUnproven,
     #[error("ingress frontier is stale")]

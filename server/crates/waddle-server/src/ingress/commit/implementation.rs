@@ -830,13 +830,13 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     } else {
         sealed_manifest
     };
-    if let (
-        Some(manifest),
-        super::super::commit_room::HostGrantAcceptance::Admitted { audience, .. },
-    ) = (&sealed_manifest, &host_grants)
+    // A managed room accepts nothing through an acceptance that freezes no
+    // children. A decision committed as a rejection accepts nothing at all.
+    if let (None, super::super::commit_room::HostGrantAcceptance::Admitted { audience, .. }) =
+        (&rejection, &host_grants)
     {
         super::super::commit_room::assert_admitted_children(
-            manifest,
+            sealed_manifest.as_ref(),
             submission.principal.bare_jid(),
             audience,
         )?;

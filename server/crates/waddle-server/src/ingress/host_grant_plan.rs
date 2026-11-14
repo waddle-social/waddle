@@ -15,7 +15,11 @@
 //!   retraction tombstone, link-preview references) is kept;
 //! - work that names a principal (a route, an inbox row, a notification, a
 //!   push, a recovery item) is kept for an admitted principal and dropped
-//!   for anyone else, together with the effects that would carry it out;
+//!   for anyone else, together with the effects that would carry it out.
+//!   An effect is kept or dropped by the principal it names, so every
+//!   principal nested in it (a notification candidate's recipient, a
+//!   recovery item's recipient, the route a push is recorded under) must be
+//!   that same principal;
 //! - work this module does not classify as one of the above refuses the
 //!   whole stanza. A managed room accepts nothing it cannot account for.
 //!
@@ -37,7 +41,9 @@ use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
 use crate::server::routes::interpret::effects::direct::{
     DurableDirectEffect, ExternalDirectEffect,
 };
-use crate::server::routes::interpret::effects::room::{DurableRoomEffect, ExternalRoomEffect};
+use crate::server::routes::interpret::effects::room::{
+    DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
+};
 use crate::server::routes::interpret::effects::{
     DurableEffect, Effect, ExternalEffect, IngressPlan, PlannedEffect, ProjectionRef,
 };
@@ -399,8 +405,15 @@ fn reduce_durable(
         DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat { room, .. }) => {
             of_room(effect, room, reduction)
         }
-        DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox { owner, entry, .. }) => {
-            if entry.partner != *reduction.room {
+        DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
+            owner,
+            entry,
+            recovery,
+            ..
+        }) => {
+            if entry.partner != *reduction.room
+                || !recovery_for(recovery.as_ref(), owner, reduction)
+            {
                 return Err(Unclassified);
             }
             for_principal(effect, owner, reduction)
@@ -440,7 +453,20 @@ fn reduce_external(
                 }
                 for_principal(effect, owner, reduction)
             }
-            ExternalDirectEffect::PushInboxUpdate { owner, .. } => {
+            ExternalDirectEffect::PushInboxUpdate { owner, receipt, .. } => {
+                // The receipt is the route the push is recorded under: a
+                // copy for the owner's own resources.
+                let receipt_for_owner = receipt.as_deref().is_none_or(|receipt| {
+                    matches!(
+                        receipt,
+                        IngressEffectIntent::RouteDirect { recipient, fanout, .. }
+                            if recipient == owner
+                                && fanout.iter().all(|resource| resource.to_bare() == *owner)
+                    )
+                });
+                if !receipt_for_owner {
+                    return Err(Unclassified);
+                }
                 for_principal(effect, owner, reduction)
             }
             ExternalDirectEffect::LinkPreviewRefs { mutations }
@@ -461,8 +487,21 @@ fn reduce_external(
             ExternalDirectEffect::DmCallThreadState { .. } => Err(Unclassified),
         },
         ExternalEffect::Room(room_effect) => match room_effect {
-            ExternalRoomEffect::NotificationCandidate { owner, room, .. } => {
-                if room != reduction.room {
+            ExternalRoomEffect::NotificationCandidate {
+                owner,
+                room,
+                candidate,
+                recovery,
+                ..
+            } => {
+                let candidate_for_owner = candidate.as_deref().is_none_or(|candidate| {
+                    candidate.recipient_bare_jid() == owner
+                        && candidate.conversation_jid() == reduction.room
+                });
+                if room != reduction.room
+                    || !candidate_for_owner
+                    || !recovery_for(recovery.as_ref(), owner, reduction)
+                {
                     return Err(Unclassified);
                 }
                 for_principal(effect, owner, reduction)
@@ -488,6 +527,20 @@ fn reduce_external(
         | ExternalEffect::InviteLedger(_)
         | ExternalEffect::DmPinMutation(_) => Err(Unclassified),
     }
+}
+
+/// Whether a notification recovery item an effect carries, if any, is the
+/// item of `owner` in the reduction's room. An effect is kept or dropped by
+/// its owner, so a nested principal that is not the owner would escape the
+/// audience; such an effect is not classified.
+fn recovery_for(
+    recovery: Option<&PlannedGroupchatNotificationRecovery>,
+    owner: &BareJid,
+    reduction: &Reduction<'_>,
+) -> bool {
+    recovery.is_none_or(|recovery| {
+        recovery.key.recipient == *owner && recovery.key.room == *reduction.room
+    })
 }
 
 fn reduce_delivery(

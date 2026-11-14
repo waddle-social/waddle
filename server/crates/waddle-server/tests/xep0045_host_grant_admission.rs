@@ -784,6 +784,26 @@ async fn a_managed_room_accepts_nothing_without_an_admitted_manifest() {
         .await
         .is_none());
 
+    // Nor is one whose plan holds no route of the room to stamp a manifest
+    // with: the planner records that route only when it routed the
+    // groupchat to a connection, as it does not for a sender relayed from
+    // another node when no occupant is connected here.
+    let mut unrouted = fixture.room_submission("no-room-route", "nobody routed");
+    unrouted
+        .plan
+        .intents
+        .retain(|intent| !matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }));
+    let decision = commit_submission(&fixture.ingress.uow, &unrouted, 1)
+        .await
+        .expect("committed refusal");
+    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
+    assert_eq!(refusal(&decision), SERVICE_UNAVAILABLE);
+    assert!(fixture
+        .manifest(decision.message_key.expect("key"))
+        .await
+        .is_none());
+    assert_eq!(fixture.ingress.count("mam_messages").await, 0);
+
     // A retired scope does not hand its room back to unmanaged admission.
     let generation = fixture.generation().await;
     fixture
