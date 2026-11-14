@@ -11,6 +11,11 @@ use crate::config::SpiceDbConfig;
 
 use super::actor::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
 use super::authz_id::{decode_object, decode_subject, EncodedObjectId, EncodedSubjectId};
+use super::authz_incarnation::{
+    classify_codec_markers, guarded_resource_definitions, AuthzIncarnationError, CodecMarkerRow,
+    CodecMarkerState, AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID,
+    AUTHZ_CODEC_MARKER_READ_LIMIT, AUTHZ_CODEC_MARKER_RELATION, AUTHZ_CODEC_VERSION,
+};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
 };
@@ -35,6 +40,107 @@ impl SpiceDbPermissionBackend {
             .write_schema(schema)
             .await
             .map_err(map_spicedb_error)?;
+        Ok(())
+    }
+
+    /// Bind this store to the current ID codec, or refuse it. See
+    /// `permissions::authz_incarnation` for the protocol and its rationale.
+    pub async fn ensure_codec_incarnation(&self) -> Result<(), PermissionError> {
+        match self.codec_marker_state().await? {
+            CodecMarkerState::Current => return Ok(()),
+            CodecMarkerState::Incompatible => {
+                return Err(refuse(AuthzIncarnationError::IncompatibleMarker))
+            }
+            CodecMarkerState::Absent => {}
+        }
+        self.refuse_unmarked_relationships().await?;
+
+        // Create the marker only if the store is still exactly as scanned.
+        let preconditions = guarded_resource_definitions()
+            .chain(std::iter::once(AUTHZ_CODEC_MARKER_DEFINITION))
+            .map(|definition| Precondition::must_not_exist(RelationshipFilter::new(definition)))
+            .collect();
+        match self
+            .client
+            .write_relationships(vec![RelationshipUpdate::create(codec_marker()?)])
+            .preconditions(preconditions)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    codec = AUTHZ_CODEC_VERSION,
+                    "Marked empty authorization store for the current ID codec"
+                );
+                Ok(())
+            }
+            Err(prescience::Error::Status { code, .. })
+                if matches!(
+                    format!("{code:?}").as_str(),
+                    "FailedPrecondition" | "AlreadyExists"
+                ) =>
+            {
+                // Another replica marked the store first, or relationships
+                // appeared after the scan. Decide again from what is stored.
+                match self.codec_marker_state().await? {
+                    CodecMarkerState::Current => Ok(()),
+                    CodecMarkerState::Incompatible => {
+                        Err(refuse(AuthzIncarnationError::IncompatibleMarker))
+                    }
+                    CodecMarkerState::Absent => {
+                        self.refuse_unmarked_relationships().await?;
+                        Err(refuse(AuthzIncarnationError::Contended))
+                    }
+                }
+            }
+            Err(error) => Err(map_spicedb_error(error)),
+        }
+    }
+
+    async fn codec_marker_state(&self) -> Result<CodecMarkerState, PermissionError> {
+        let mut stream = self
+            .client
+            .read_relationships(RelationshipFilter::new(AUTHZ_CODEC_MARKER_DEFINITION))
+            .consistency(Consistency::FullyConsistent)
+            .limit(AUTHZ_CODEC_MARKER_READ_LIMIT)
+            .send()
+            .await
+            .map_err(map_spicedb_error)?;
+        let mut rows = Vec::new();
+        while let Some(item) = stream.next().await {
+            let relationship = item.map_err(map_spicedb_error)?.relationship;
+            rows.push(CodecMarkerRow {
+                resource_id: relationship.resource.object_id().to_string(),
+                relation: relationship.relation,
+                subject_type: relationship.subject.object().object_type().to_string(),
+                subject_id: relationship.subject.object().object_id().to_string(),
+                subject_relation: relationship
+                    .subject
+                    .optional_relation()
+                    .map(ToString::to_string),
+            });
+        }
+        Ok(classify_codec_markers(&rows))
+    }
+
+    /// Refuse a store that holds any Waddle relationship. One row per
+    /// definition is enough to decide, so each read is bounded to one.
+    async fn refuse_unmarked_relationships(&self) -> Result<(), PermissionError> {
+        for definition in guarded_resource_definitions() {
+            let mut stream = self
+                .client
+                .read_relationships(RelationshipFilter::new(definition))
+                .consistency(Consistency::FullyConsistent)
+                .limit(1)
+                .send()
+                .await
+                .map_err(map_spicedb_error)?;
+            if let Some(item) = stream.next().await {
+                item.map_err(map_spicedb_error)?;
+                return Err(refuse(AuthzIncarnationError::UnmarkedStoreNotEmpty {
+                    resource_type: definition,
+                }));
+            }
+        }
         Ok(())
     }
 
@@ -319,6 +425,32 @@ fn map_spicedb_error(error: prescience::Error) -> PermissionError {
         },
         other => PermissionError::SpiceDbError(other.to_string()),
     }
+}
+
+/// Log a refusal without identifiers and return it as a permission error.
+fn refuse(error: AuthzIncarnationError) -> PermissionError {
+    tracing::error!(
+        reason = %error,
+        codec = AUTHZ_CODEC_VERSION,
+        "Refusing the authorization store: it is not bound to the current ID codec"
+    );
+    error.into()
+}
+
+/// `waddle_authz_codec:incarnation#codec@waddle_authz_codec:v2`. Fixed IDs,
+/// deliberately not encoded: every codec version must be able to read it.
+fn codec_marker() -> Result<Relationship, PermissionError> {
+    let resource = ObjectReference::new(AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_MARKER_ID)
+        .map_err(|e| PermissionError::InvalidObject(e.to_string()))?;
+    let version = ObjectReference::new(AUTHZ_CODEC_MARKER_DEFINITION, AUTHZ_CODEC_VERSION)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    let subject = SubjectReference::new(version, None::<String>)
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    Ok(Relationship::new(
+        resource,
+        AUTHZ_CODEC_MARKER_RELATION,
+        subject,
+    ))
 }
 
 pub(crate) fn object_reference(object: &Object) -> Result<ObjectReference, PermissionError> {

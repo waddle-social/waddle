@@ -1,11 +1,12 @@
 # Authorization ID codec experiment
 
-This isolated, unpublished crate is a testable codec contract for issue #2047.
-It has its own workspace and lockfile, no production consumer, no network or
-storage client, and no activation path. The production SpiceDB backend now uses
-the same `v2_` encoding from `waddle-server`'s `permissions::authz_id` module,
-with its own integration tests in `crates/waddle-server/tests/authz_id_codec.rs`;
-this crate remains only as the original isolated contract.
+This isolated, unpublished crate is the original, testable codec contract for
+issue #2047. The crate itself has its own workspace and lockfile, no network or
+storage client, and no consumer. The contract below now has one production
+consumer: `waddle-server`'s SpiceDB backend encodes every ID with the same `v2_`
+encoding through `permissions::authz_id`, tested in
+`crates/waddle-server/tests/authz_id_codec.rs`. That backend is activated only
+behind the startup guard described under "Authority and activation gate".
 
 ## Contract
 
@@ -56,16 +57,36 @@ can produce strings beginning with `v2_`, so the prefix does **not** prevent
 collisions with legacy tuples. An unknown legacy grant can collide with a new
 encoded object ID even when all new IDs are injective among themselves.
 
-Any future consumer requires a separately provisioned, isolated permission store
-with explicit ownership and startup verification, plus a reviewed policy for
-grant reconstruction from trustworthy authority. It also requires an authoritative
-principal canonicalization contract consistent with account lookup and identity
-resolution; treating this JID parser's equality as that contract is insufficient.
-Canonicalization must be established before choosing stored principal keys and
-must not be invented independently inside this codec. Existing ambiguous encoded
-tuples must not be mechanically decoded into new grants. No legacy read fallback,
-dual read, global replacement, migration, or store routing is implemented here.
-These gates are unresolved; this experiment does not close issue #2047.
+The production consumer's startup verification is the codec-incarnation guard
+in `waddle-server`'s `permissions::authz_incarnation`, run after the schema is
+written and before the server serves anything. It binds a SpiceDB store to this
+encoding with a marker relationship,
+`waddle_authz_codec:incarnation#codec@waddle_authz_codec:v2`:
+
+- marker present for `v2`: the server starts;
+- marker absent: the guard reads one relationship of every other definition in
+  the built-in schema; if any exists, the server refuses to start, otherwise it
+  creates the marker with preconditions that those definitions and the marker
+  definition are still empty, so racing replicas write it once;
+- marker present with any other content: the server refuses to start.
+
+The guard proves only that the store held no Waddle relationships when it was
+marked. It neither migrates nor reconstructs grants: a store written by the
+replaced encoding must be emptied, or rebuilt from authoritative data, before
+this server can use it. Existing ambiguous encoded tuples must not be
+mechanically decoded into new grants, and there is no legacy read fallback,
+dual read or store routing. The guard covers the SpiceDB backend only; the
+local test backend stores identifiers unencoded in its own tables. Live tests
+for the guard are in `crates/waddle-server/tests/authz_codec_incarnation.rs`.
+
+Still unresolved: a reviewed policy for reconstructing grants from trustworthy
+authority (any migration of an existing store), and an authoritative principal
+canonicalization contract consistent with account lookup and identity
+resolution; treating this JID parser's equality as that contract is
+insufficient. Canonicalization must be established before choosing stored
+principal keys and must not be invented independently inside this codec. The
+workspace pins `jid` exactly because the accepted user-ID set depends on it.
+These gates do not close issue #2047.
 
 The codec is pure and deterministic: a failed validation returns a typed error
 before any external effect. There are no claims, locks, retries, fences, or
@@ -87,4 +108,7 @@ delimiter preservation, validated user boundaries, unresolved domain aliases,
 malformed/alternate wire
 representations, byte limits, randomized injectivity, and roundtrips. These
 establish the local codec contract; they do not establish live SpiceDB acceptance,
-store isolation, migration safety, or production authorization correctness.
+store isolation, migration safety, or production authorization correctness. The
+production consumer's live SpiceDB tests are `#[ignore]`d and need a disposable
+SpiceDB named by `WADDLE_TEST_SPICEDB_ENDPOINT` and
+`WADDLE_TEST_SPICEDB_PRESHARED_KEY`.

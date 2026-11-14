@@ -5,8 +5,8 @@ use tracing::{debug, info, warn};
 use crate::db::actor::{DbActor, DbQuery};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::{
-    CheckPermission, Object, ObjectType, Permission, PermissionActor, PermissionError, Relation,
-    Subject, Tuple, WriteTuple,
+    AuthzIdError, AuthzUserJid, CheckPermission, Object, ObjectType, Permission, PermissionActor,
+    PermissionError, Relation, Subject, Tuple, WriteTuple,
 };
 
 pub const DEPLOYMENT_SERVER_ID: &str = "deployment";
@@ -179,6 +179,7 @@ pub async fn reconcile_existing_accounts(
         .await
         .map_err(|err| format!("failed listing users for membership bootstrap: {err}"))?;
 
+    let mut skipped = 0_u64;
     for row in users {
         let user_jid = row_value(&row, 0)
             .and_then(ValueExt::as_string)
@@ -186,7 +187,16 @@ pub async fn reconcile_existing_accounts(
         let localpart = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|err| format!("failed decoding user localpart: {err}"))?;
-        reconcile_user_membership(permission_actor, config, &user_jid, &localpart).await?;
+        let subject = match AuthzUserJid::parse_exact(&user_jid) {
+            Ok(subject) => subject,
+            Err(error) => {
+                skipped += 1;
+                warn_unrepresentable_account("users", error);
+                continue;
+            }
+        };
+        reconcile_user_membership(permission_actor, config, subject.jid().as_str(), &localpart)
+            .await?;
     }
 
     let native_users = db_actor
@@ -204,12 +214,35 @@ pub async fn reconcile_existing_accounts(
         let domain = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|err| format!("failed decoding native domain: {err}"))?;
-        let user_jid = format!("{username}@{domain}");
-        reconcile_user_membership(permission_actor, config, &user_jid, &username).await?;
+        let subject = match AuthzUserJid::from_account_parts(&username, &domain) {
+            Ok(subject) => subject,
+            Err(error) => {
+                skipped += 1;
+                warn_unrepresentable_account("native_users", error);
+                continue;
+            }
+        };
+        reconcile_user_membership(permission_actor, config, subject.jid().as_str(), &username)
+            .await?;
     }
 
-    info!("Reconciled bootstrap memberships for existing accounts");
+    info!(
+        skipped_accounts = skipped,
+        "Reconciled bootstrap memberships for existing accounts"
+    );
     Ok(())
+}
+
+/// An account whose address cannot be an authorization subject (for example
+/// a stored username that the JID parser would rewrite) gets no bootstrap
+/// membership. It is skipped so that the remaining accounts are still
+/// reconciled; the log names the table and the reason, not the account.
+fn warn_unrepresentable_account(table: &'static str, error: AuthzIdError) {
+    warn!(
+        table,
+        reason = %error,
+        "Skipping bootstrap membership for an account whose address is not a valid authorization subject"
+    );
 }
 
 pub async fn reconcile_existing_accounts_or_warn(

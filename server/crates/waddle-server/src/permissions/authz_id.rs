@@ -17,7 +17,9 @@
 //!   `e\u{301}` and `é` are different identifiers. User subjects must
 //!   additionally be bare account JIDs that the `jid` parser leaves
 //!   byte-for-byte unchanged (see [`AuthzUserJid`]), so a spelling that the
-//!   parser would rewrite is rejected rather than silently aliased.
+//!   parser would rewrite is rejected rather than silently aliased. That
+//!   acceptance set is defined by the `jid` parser, so the workspace pins it
+//!   to an exact version: changing the parser is a codec version change.
 //! - Length: at most [`MAX_AUTHZ_ID_BYTES`] source bytes, which encode to at
 //!   most 1023 wire bytes. Longer identifiers, including some valid JIDs, are
 //!   unsupported and rejected.
@@ -27,13 +29,20 @@
 //!   never inferred from a legacy ID.
 //! - Every wire ID begins with `v2_`, so a source ID of `*` can never become
 //!   SpiceDB's subject wildcard.
+//! - Injectivity holds on the wire and carries through to stored
+//!   relationships only because the datastore compares object IDs byte for
+//!   byte. SpiceDB's PostgreSQL datastore keeps them in character columns
+//!   compared under PostgreSQL's deterministic collation, where equality is
+//!   byte equality; a datastore that compared IDs case-insensitively would
+//!   alias base64url payloads that differ only in letter case.
 //!
 //! The codec separates encoded identifiers from each other but cannot separate
 //! them from relationships written by an earlier encoding: any legacy ID that
-//! happens to start with `v2_` is indistinguishable from a new one. The SpiceDB
-//! namespace must therefore be empty when this encoding is first deployed,
-//! or be rebuilt from authoritative data; existing relationships are never
-//! decoded to reconstruct grants.
+//! happens to start with `v2_` is indistinguishable from a new one (the legacy
+//! channel ID `v2_c2t5` is the wire ID of `sky`). A store is therefore bound
+//! to this encoding by the startup guard in `authz_incarnation`, which marks
+//! only a store proven empty of Waddle relationships and refuses any other.
+//! Existing relationships are never decoded to reconstruct grants.
 //!
 //! Canonical encoding establishes uniqueness over accepted source spellings,
 //! not over logical principals: `a@example.org` and `a@example.org.` are both
@@ -45,7 +54,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jid::BareJid;
+use jid::{BareJid, DomainPart, NodePart};
 use thiserror::Error;
 
 use super::tuple::{Object, ObjectType, Subject, SubjectType};
@@ -105,6 +114,21 @@ impl AuthzUserJid {
             return Err(AuthzIdError::UserJidChangedByParser);
         }
         Self::new(jid)
+    }
+
+    /// Build the subject of a local account from its stored username and
+    /// domain. Each part must already be in the form the `jid` parser
+    /// produces, so a stored username that the parser would rewrite (for
+    /// example one with upper-case letters) is rejected instead of naming a
+    /// different account.
+    pub fn from_account_parts(username: &str, domain: &str) -> Result<Self, AuthzIdError> {
+        let node = NodePart::new(username).map_err(|_| AuthzIdError::InvalidUserJid)?;
+        let host = DomainPart::new(domain).map_err(|_| AuthzIdError::InvalidUserJid)?;
+        if node.as_str() != username || host.as_str() != domain {
+            return Err(AuthzIdError::UserJidChangedByParser);
+        }
+        // Re-parse so the result is exactly what `from_wire` accepts back.
+        Self::parse_exact(BareJid::from_parts(Some(&node), &host).as_str())
     }
 
     /// Decode a SpiceDB subject ID, with no legacy fallback.
