@@ -726,16 +726,50 @@ mod tests {
     struct AlertMetricContract {
         name: String,
         unit: String,
+        kind: AlertMetricKind,
         prometheus_name: String,
     }
 
+    /// The exported instrument kind; a counter's Prometheus name gains `_total`.
+    #[derive(serde::Deserialize, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    enum AlertMetricKind {
+        Gauge,
+        Counter,
+    }
+
+    /// Records the alerted `waddle.clustering.*` instruments that
+    /// `waddle-xmpp` owns: keypair-slot lease outcomes and the ownership
+    /// fence checks made through [`waddle_xmpp::ownership::ObservedClaimStore`].
+    async fn record_xmpp_clustering_instruments() {
+        use waddle_xmpp::ownership::{
+            ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, ObservedClaimStore,
+        };
+        use waddle_xmpp::telemetry::attributes::KeypairLeaseOutcome;
+
+        waddle_xmpp::telemetry::authority::record_keypair_lease(KeypairLeaseOutcome::FencingLost);
+        let store = ObservedClaimStore::new(InProcessClaimStore::new());
+        let owner = NodeIdentity::new("contract-owner", "epoch-a");
+        let entity = Entity::new(EntityType::SmSession, "alert-metric-contract");
+        let epoch = store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("an unclaimed entity is claimed");
+        assert!(store
+            .fence(&entity, &owner, epoch)
+            .await
+            .expect("the owner's fence check completes"));
+    }
+
     /// Every clustering instrument an alert reads is exported under the
-    /// pinned OTel name and unit, so renaming the instrument or changing
-    /// its unit (which changes the translated Prometheus suffix) fails here.
+    /// pinned OTel name, unit and kind, so renaming the instrument or
+    /// changing its unit or kind (which changes the translated Prometheus
+    /// suffix) fails here.
     #[tokio::test]
     async fn alerted_clustering_instruments_export_their_contract_name_and_unit() {
         let guard = test_support::acquire().await;
         record_every_instrument();
+        record_xmpp_clustering_instruments().await;
 
         let contracts: Vec<AlertMetricContract> =
             serde_json::from_str(include_str!("alert_metric_contract.json"))
@@ -752,6 +786,14 @@ mod tests {
                 guard.metric_unit(&contract.name).as_deref(),
                 Some(contract.unit.as_str()),
                 "alerted instrument {} changed unit; its Prometheus name {} \
+                 and the alert rules reading it must change together",
+                contract.name,
+                contract.prometheus_name
+            );
+            assert_eq!(
+                guard.counter_sum(&contract.name, &[]).is_some(),
+                contract.kind == AlertMetricKind::Counter,
+                "alerted instrument {} changed kind; its Prometheus name {} \
                  and the alert rules reading it must change together",
                 contract.name,
                 contract.prometheus_name

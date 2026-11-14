@@ -104,6 +104,25 @@ keep answering after the text renderer's deletion. Notes:
   sums). Verify against live series before relying on a new alias;
   see the ClusterHeartbeat runbook for the same caveat.
 
+## Authority alerts
+
+The `waddle-authority-*` groups in `mimir/waddle-reliability.yaml` alert on
+the authority, custody and transport-progress metrics
+(`server/crates/waddle-xmpp/src/telemetry/authority.rs`); the runbook is
+`docs/runbooks/node-recovery-and-drain.md`. `tests/authority.test.yaml`
+evaluates them. Notes:
+
+- Several recorders they read (I/O pumps, connection actors, ordered relay,
+  remote dispatch, stream-management enable) have no call site yet; see
+  the metrics reference. Their alerts are threshold alerts, so they stay
+  quiet rather than firing on a missing series, and cannot fire until the
+  recorders are wired.
+- The two missing-series alerts read series that are exported from startup:
+  `AuthoritySeriesMissing` the zero-registered ingress entry counter, and
+  `DestroyCompletionSnapshotMissing` the destroy-completion janitor's gauge.
+- `FencingRejectionSpike` and `SmResumeFailureRate` thresholds are not
+  measured; tighten them from production data.
+
 ## Ingress alert regression tests
 
 `tests/ingress.test.yaml` evaluates the checked-in rules with synthetic series
@@ -139,7 +158,8 @@ performed. Check the actual Grafana/Mimir series again after deployment.
 
 The same contract covers the clustering instruments the alert rules read,
 from `server/crates/waddle-server/src/clustering/alert_metric_contract.json`:
-each `(name, unit)` must translate to exactly its `prometheus_name`, and no
+each `(name, unit, kind)` must translate to exactly its `prometheus_name`
+(a counter gains `_total`), and no
 spelling listed in `unexported_rule_spellings` may appear. A unit test in
 `clustering/metrics.rs` binds that fixture to the exported instruments, and
 `tests/push_otlp_contract.py` checks the Prometheus-parsed selectors of every

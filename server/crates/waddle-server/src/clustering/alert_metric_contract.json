@@ -2,9 +2,28 @@
   {
     "name": "waddle.clustering.node_heartbeat_age",
     "unit": "ms",
+    "kind": "gauge",
     "prometheus_name": "waddle_clustering_node_heartbeat_age_milliseconds",
     "alerts": ["ClusterHeartbeatStale", "ClusterHeartbeatMissing"],
     "unexported_rule_spellings": ["waddle_clustering_node_heartbeat_age"],
     "value": 1500
+  },
+  {
+    "name": "waddle.clustering.keypair_lease.outcomes",
+    "unit": "{operation}",
+    "kind": "counter",
+    "prometheus_name": "waddle_clustering_keypair_lease_outcomes_total",
+    "alerts": ["KeypairLeaseFencingLost"],
+    "unexported_rule_spellings": [],
+    "value": 2
+  },
+  {
+    "name": "waddle.clustering.fence.results",
+    "unit": "{check}",
+    "kind": "counter",
+    "prometheus_name": "waddle_clustering_fence_results_total",
+    "alerts": ["FencingRejectionSpike"],
+    "unexported_rule_spellings": [],
+    "value": 3
   }
 ]
