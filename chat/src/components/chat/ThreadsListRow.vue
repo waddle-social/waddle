@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Phone, Video } from "lucide-vue-next";
-import { button, count, tag } from "styled-system/recipes";
+import { badge, btn, tag } from "styled-system/recipes";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
@@ -23,9 +23,9 @@ const emit = defineEmits<{
   joinCall: [entry: WasmThreadEntry, media: CallMedia];
 }>();
 
-const channelTagClass = tag({ tone: "neutral" });
-const unreadCountClass = count();
-const markReadClass = button({ variant: "quiet", size: "sm" });
+const channelTagClass = tag();
+const unreadCountClass = badge();
+const markReadClass = btn({ size: "sm" });
 
 // A MUC call-thread row shares the one live-state composable and the one
 // Join path with the in-channel anchor card and the call banner, so the

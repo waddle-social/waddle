@@ -1,5 +1,6 @@
 /**
- * Huddle design tokens: the raw values behind `panda.config.ts`.
+ * Huddle design tokens: the raw values chat's Panda config used before the
+ * Polar Huddle preset (@waddle/design). Frozen here as the Android source.
  *
  * Kept free of imports so tools other than Panda can read them:
  * `scripts/generate-design-tokens.mjs` emits Android's `WaddleTokens.kt`

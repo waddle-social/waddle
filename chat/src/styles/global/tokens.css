@@ -1,79 +1,74 @@
 :root {
-  /* Huddle: night is the canonical theme. Daylight is opt-in via
-   * data-theme="light" (see preferences/theme.ts). The legacy token
-   * names below are kept so every existing .chat-* surface and Tailwind
-   * utility adopts the new palette; new work uses Panda tokens
-   * (panda.config.ts) and these bridge onto the same values. */
-  color-scheme: dark;
-  --background: light-dark(#f2f6f7, #0b1219);
-  --foreground: light-dark(#0f1a24, #e8eef2);
+  /* Legacy token names, aliased onto the Polar Huddle semantic tokens from
+   * @waddle/design (Panda `--colors-*` variables). Every not-yet-migrated
+   * `.chat-*` sheet and Tailwind utility (`bg-background`, `text-primary`,
+   * …) follows the theme through these. New work uses Panda tokens
+   * directly; delete this bridge with Tailwind. The theme itself is
+   * `data-theme="night|daylight"` (see panda.config.ts). */
+  --background: var(--colors-bg);
+  --foreground: var(--colors-fg);
   /* Theme-independent night ground: live surfaces (the call stage,
    * toasts) stay night-coloured in daylight. */
-  --night-ground: #0b1219;
-  --night-foreground: #e8eef2;
-  --card: light-dark(#ffffff, #121f2b);
-  --card-foreground: var(--foreground);
-  --popover: light-dark(#ffffff, #121f2b);
-  --popover-foreground: var(--foreground);
-  /* Kept in oklch: scripts/generate-design-tokens.mjs parses this one
-   * token to emit the Apple and website accents. #0b7a6f / #6fd3c7. */
-  --primary: light-dark(oklch(0.522 0.090 183.8), oklch(0.803 0.096 185.3));
-  --primary-foreground: light-dark(#ffffff, #0b1219);
-  --secondary: light-dark(#e9eff1, #1a2a3a);
-  --secondary-foreground: var(--foreground);
-  --muted: light-dark(#e9eff1, #1a2a3a);
-  --muted-foreground: light-dark(#4a5966, #9fb0bd);
-  --accent: var(--primary);
-  --accent-foreground: var(--primary-foreground);
-  /* `--destructive` is the fill (white on it is 4.55:1); readable error
-   * copy uses `--destructive-text`, the Panda `danger.text` pair. */
-  --destructive: #d1434b;
-  --destructive-foreground: #ffffff;
-  --destructive-text: light-dark(#b8353d, #ff8b90);
-  --border: light-dark(#d9e2e6, #26384a);
-  --input: light-dark(#d9e2e6, #26384a);
-  --ring: var(--primary);
-  --sidebar: light-dark(#ffffff, #0f1a24);
-  --sidebar-foreground: var(--foreground);
-  --sidebar-primary: var(--primary);
-  --sidebar-primary-foreground: var(--primary-foreground);
-  --sidebar-accent: light-dark(#d6f3ef, #1a2a3a);
-  --sidebar-accent-foreground: var(--foreground);
-  --sidebar-border: var(--border);
-  --sidebar-muted: light-dark(#4a5966, #9fb0bd);
-  --surface: light-dark(#ffffff, #121f2b);
-  --surface-strong: light-dark(#ffffff, #1a2a3a);
-  --glow: light-dark(rgba(11, 122, 111, 0.18), rgba(111, 211, 199, 0.22));
-  --glow-strong: light-dark(rgba(11, 122, 111, 0.3), rgba(111, 211, 199, 0.45));
-  --rail: light-dark(#ffffff, #0f1a24);
-  --rail-foreground: light-dark(#4a5966, #9fb0bd);
-  --rail-active: var(--foreground);
-  --rail-hover: light-dark(#e9eff1, #1a2a3a);
-  --success: light-dark(#1f9d55, #3ddc84);
-  --success-foreground: light-dark(#1f6b3f, #3ddc84);
-  --warning: light-dark(#d97706, #f2b036);
-  --warning-foreground: light-dark(#8a4d06, #f2b036);
-  /* Live: what is happening right now (huddles, speakers, mentions). */
-  --live: light-dark(#ff7f21, #ffa057);
-  --live-foreground: #0b1219;
-  --live-text: light-dark(#b04a06, #ffa057);
-  --glow-live: light-dark(rgba(255, 127, 33, 0.35), rgba(255, 160, 87, 0.55));
-  --gold: #e9b44c;
-  --gold-text: light-dark(#8a5a0a, #e9b44c);
-  --moss: light-dark(#2f6b3f, #7fc98f);
+  --night-ground: #060f19;
+  --night-foreground: var(--colors-ice-100);
+  --card: var(--colors-surface);
+  --card-foreground: var(--colors-fg);
+  --popover: var(--colors-surface);
+  --popover-foreground: var(--colors-fg);
+  --primary: var(--colors-action);
+  --primary-foreground: var(--colors-action-fg);
+  --secondary: var(--colors-surface-2);
+  --secondary-foreground: var(--colors-fg);
+  --muted: var(--colors-surface-2);
+  --muted-foreground: var(--colors-fg-muted);
+  --accent: var(--colors-action);
+  --accent-foreground: var(--colors-action-fg);
+  --destructive: var(--colors-danger);
+  --destructive-foreground: var(--colors-danger-fg);
+  --destructive-text: var(--colors-danger-text);
+  --border: var(--colors-border-soft);
+  --input: var(--colors-border-strong);
+  --ring: var(--colors-focus);
+  --sidebar: var(--colors-bg-rail);
+  --sidebar-foreground: var(--colors-fg);
+  --sidebar-primary: var(--colors-action);
+  --sidebar-primary-foreground: var(--colors-action-fg);
+  --sidebar-accent: var(--colors-state-selected);
+  --sidebar-accent-foreground: var(--colors-fg);
+  --sidebar-border: var(--colors-border-soft);
+  --sidebar-muted: var(--colors-fg-muted);
+  --surface: var(--colors-surface);
+  --surface-strong: var(--colors-surface-2);
+  --glow: color-mix(in srgb, var(--colors-action) 20%, transparent);
+  --glow-strong: color-mix(in srgb, var(--colors-action) 40%, transparent);
+  --rail: var(--colors-bg-rail);
+  --rail-foreground: var(--colors-fg-muted);
+  --rail-active: var(--colors-fg);
+  --rail-hover: var(--colors-state-hover);
+  --success: var(--colors-success);
+  --success-foreground: var(--colors-success-text);
+  --warning: var(--colors-warning);
+  --warning-foreground: var(--colors-warning-text);
+  /* Live: what is happening right now (huddles, speakers). */
+  --live: var(--colors-live);
+  --live-foreground: var(--colors-live-fg);
+  --live-text: var(--colors-live-text);
+  --glow-live: color-mix(in srgb, var(--colors-live) 45%, transparent);
+  --gold: var(--colors-gold);
+  --gold-text: var(--colors-gold-text);
+  --moss: var(--colors-success-text);
   --ambient-veil: transparent;
   --ambient-shadow: transparent;
-  --rich-code-bg: light-dark(#e9eff1, #070c12);
-  --rich-code-border: light-dark(#d9e2e6, #26384a);
-  --rich-code-foreground: light-dark(#0f1a24, #c9d4dc);
-  --rich-quote-border: light-dark(rgba(11, 122, 111, 0.5), rgba(111, 211, 199, 0.5));
-  --rich-quote-foreground: light-dark(#4a5966, #9fb0bd);
-  --rich-link: light-dark(#0b7a6f, #6fd3c7);
-  /* System fonts only: Waddle ships no font files. Display and UI share the
-     platform face; headings differ by weight and size. */
-  --font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
-  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
-  --font-code: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
+  --rich-code-bg: var(--colors-surface-code);
+  --rich-code-border: var(--colors-border-soft);
+  --rich-code-foreground: var(--colors-fg);
+  --rich-quote-border: var(--colors-border-strong);
+  --rich-quote-foreground: var(--colors-fg-muted);
+  --rich-link: var(--colors-info-text);
+  /* Fonts come from the Astro Fonts API (`--font-display`, `--font-body`,
+   * `--font-mono`); these are the legacy aliases. */
+  --font-ui: var(--font-body);
+  --font-code: var(--font-mono);
   --space-2xs: 0.25rem;
   --space-xs: 0.5rem;
   --space-sm: 0.75rem;
@@ -83,12 +78,12 @@
   --space-2xl: 3rem;
   --space-3xl: 4rem;
   --space-4xl: 6rem;
-  --radius-xs: 0.375rem;
-  --radius-sm: 0.5rem;
-  --radius-md: 0.625rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 0.875rem;
-  --radius-pill: 999px;
+  --radius-xs: var(--radii-tag);
+  --radius-sm: var(--radii-sm);
+  --radius-md: var(--radii-control);
+  --radius-lg: var(--radii-control);
+  --radius-xl: var(--radii-panel);
+  --radius-pill: var(--radii-pill);
   --control-xs: 1.75rem;
   --control-sm: 2rem;
   --control-md: 2.25rem;
@@ -163,17 +158,13 @@
   --chat-composer-input-radius: var(--radius-lg);
   --chat-composer-input-control-radius: calc(var(--chat-composer-input-radius) - var(--space-2xs));
   --shadow-pane: none;
-  --shadow-elevated: 0 16px 40px rgba(0, 0, 0, 0.45);
-  --shadow-floating: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-elevated: var(--shadows-elev-2);
+  --shadow-floating: var(--shadows-overlay);
   --z-sticky: 10;
   --z-floating: 20;
   --z-popover: 50;
   --z-modal: 60;
   --z-lightbox: 70;
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
 }
 
 @theme inline {

@@ -2,12 +2,12 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { AlertCircle, X } from "lucide-vue-next";
-import { toast as toastRecipe } from "styled-system/recipes";
+import { toastClasses } from "@/ui/part-classes";
 import { $callState, $lastCallError, clearLastCallError } from "@/lib/calls/call-store";
 
 // Styled like every other toast (opaque ink); the danger border marks
 // it as a failure.
-const cls = toastRecipe();
+const cls = toastClasses;
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);

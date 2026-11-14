@@ -14,22 +14,110 @@ export enum PagehideSmAckEnqueueOutcome {
     WriteFailed = 5,
 }
 
+/**
+ * Browser XMPP client that owns callbacks and an asynchronously driven WebSocket session.
+ */
 export class WaddleClient {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Fetch a channel's persistent affiliations, optionally filtered by tier.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsAffiliationsArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_affiliations(args: any): Promise<any>;
+    /**
+     * Create a channel with optional topic, parent space, and visibility policy.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsCreateArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_create(args: any): Promise<any>;
+    /**
+     * Destroy a channel's MUC room; resolves to `true` after acknowledgement.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsDeleteArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_delete(args: any): Promise<any>;
+    /**
+     * Remove an occupant from a channel by setting their room role to none.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsKickArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_kick(args: any): Promise<any>;
+    /**
+     * List channels with optional space filtering and pagination.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsListArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_list(args: any): Promise<any>;
+    /**
+     * Fetch the live occupant snapshot of a channel.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsOccupantsArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_occupants(args: any): Promise<any>;
+    /**
+     * Set a channel member's persistent MUC affiliation.
+     *
+     * `args` has the shape of
+     * `waddle_xmpp_client::admin_commands::AdminChannelsSetAffiliationArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_set_affiliation(args: any): Promise<any>;
+    /**
+     * Update a channel's name, topic, or visibility policy.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsUpdateArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_channels_update(args: any): Promise<any>;
+    /**
+     * Create a space with a name and optional description or icon.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesCreateArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_spaces_create(args: any): Promise<any>;
+    /**
+     * Delete a space and its channels; resolves to `true` after acknowledgement.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesDeleteArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_spaces_delete(args: any): Promise<any>;
+    /**
+     * List spaces with optional prefix filtering and pagination.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesListArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_spaces_list(args: any): Promise<any>;
+    /**
+     * List a space's roster members with pagination.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesMembersArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_spaces_members(args: any): Promise<any>;
+    /**
+     * Set a space member's role to owner, admin, member, or none.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesSetRoleArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_spaces_set_role(args: any): Promise<any>;
+    /**
+     * Update an existing space's name, description, or icon.
+     *
+     * `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesUpdateArgs`.
+     * The Promise rejects malformed arguments, refused commands, or invalid replies.
+     */
     admin_spaces_update(args: any): Promise<any>;
     /**
      * Call the `urn:waddle:admin:users:list:0` ad-hoc command
@@ -40,7 +128,18 @@ export class WaddleClient {
      * owner" and falls back to the empty-state screen.
      */
     admin_users_list(prefix?: string | null, page_size?: number | null, after_cursor?: string | null): Promise<any>;
+    /**
+     * Cancel a pending IQ by its stanza ID; rejects an invalid ID or a failed
+     * cancellation command.
+     */
     cancel_raw_iq(id: string): Promise<any>;
+    /**
+     * Open the configured WebSocket and start the connection driver; rejects invalid
+     * configuration or an already active client.
+     *
+     * The Promise resolves after startup. Session readiness is reported by the lifecycle
+     * callbacks.
+     */
     connect(): Promise<any>;
     /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
@@ -58,8 +157,20 @@ export class WaddleClient {
      * ALL push nodes at the service for this user.
      */
     disable_push_notifications(service_jid: string, node?: string | null): Promise<any>;
+    /**
+     * Close the active connection through the driver; the Promise resolves after the
+     * disconnect command completes.
+     */
     disconnect(): Promise<any>;
+    /**
+     * Discover extension routes for `user_jid`, defaulting to the configured account,
+     * and resolve to route objects.
+     */
     discover_extension_routes(user_jid?: string | null): Promise<any>;
+    /**
+     * Discover an HTTP upload service on the account domain; resolves to its JID or
+     * `null` when none is advertised.
+     */
     discover_upload_service(): Promise<any>;
     /**
      * XEP-0357 §5 `<enable/>` IQ. No provider credentials — those
@@ -79,6 +190,10 @@ export class WaddleClient {
      * enforces publish authorisation via XEP-0060 affiliations;
      * callers without Publisher access receive a Forbidden stanza
      * error which surfaces as a rejected Promise.
+     *
+     * # Panics
+     * Panics if the feed builder fails to retain the publication timestamp set
+     * immediately before publishing; this indicates a broken internal builder invariant.
      */
     feed_publish(spaces_jid: string, entry: any): Promise<any>;
     /**
@@ -107,6 +222,10 @@ export class WaddleClient {
      * client reaches this one on the next session-ready re-fetch.
      */
     fetch_dm_bookmarks(): Promise<any>;
+    /**
+     * Fetch up to `max` messages exchanged with a peer before the optional cursor,
+     * defaulting to the latest page.
+     */
     fetch_dm_history(peer_jid: string, max: number, before_id?: string | null): Promise<any>;
     /**
      * Fetch a DM thread's archived replies from the account archive,
@@ -117,7 +236,14 @@ export class WaddleClient {
      * replies via RSM (XEP-0059).
      */
     fetch_dm_history_by_thread(peer_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
+    /**
+     * Fetch the peer's messages from the personal archive using a `WaddleMamPageParam` object.
+     */
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
+    /**
+     * Fetch at most 100 items from a route's state node after substituting `room_jid`
+     * for `{room}`.
+     */
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
     /**
      * XEP-0215 §3.2: fetch the external services (TURN/STUN) the user's own
@@ -145,9 +271,23 @@ export class WaddleClient {
      * call (no node yet) is normal and not an error.
      */
     fetch_mds_displayed(): Promise<any>;
+    /**
+     * Fetch an unfiltered personal archive page using a `WaddleMamPageParam` object.
+     */
     fetch_personal_history_page(max: number, page_param: any): Promise<any>;
+    /**
+     * Fetch up to `max` room archive messages before the optional cursor; no cursor
+     * selects the latest page.
+     */
     fetch_room_history(room_jid: string, max: number, before_id?: string | null): Promise<any>;
+    /**
+     * Fetch up to `max` room archive entries for a thread; no `before_id` selects the latest page.
+     */
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
+    /**
+     * Fetch a room archive page using a `WaddleMamPageParam` object; malformed paging
+     * input rejects the Promise.
+     */
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;
     /**
      * Waddle-specific MAM stanza-id filter — fetch a batch of messages from
@@ -197,6 +337,10 @@ export class WaddleClient {
      * plumbing and lands in a separate PR.
      */
     fetch_user_bookmarks(): Promise<any>;
+    /**
+     * Fetch a user's mood, activity, and tune; unavailable individual PEP values are
+     * returned as absent.
+     */
     fetch_user_pep_profile(jid: string): Promise<any>;
     /**
      * Fetch the Push Service's currently-active VAPID public key + kid
@@ -216,9 +360,14 @@ export class WaddleClient {
      * later and less diagnosable).
      */
     fetch_vapid_public_key(service_jid: string): Promise<any>;
+    /**
+     * Resolve to the peer's vCard4 properties, or `null` when no vCard4 item is present.
+     */
     fetch_vcard4(jid: string): Promise<any>;
-    resume_state(): any;
-    resume_state_handle(): WaddleResumeState | undefined;
+    /**
+     * Resolve to the server's software identity, or `null` if querying it fails or
+     * yields no version payload.
+     */
     get_server_version(): Promise<any>;
     /**
      * `true` iff the authenticated user is the community owner — i.e.
@@ -238,6 +387,9 @@ export class WaddleClient {
      * [`waddle_xmpp_client::messaging::build_muc_join_presence`].
      */
     join_room(room_jid: string, nick: string): Promise<any>;
+    /**
+     * Send unavailable presence to `room_jid/nick` and leave the room.
+     */
     leave_room(room_jid: string, nick: string): Promise<any>;
     /**
      * The extension bots that have posted in the room: `[{ jid, name }]`
@@ -246,9 +398,23 @@ export class WaddleClient {
      * them; a requester who may not enter the room gets `[]`.
      */
     list_room_bots(room_jid: string): Promise<any>;
+    /**
+     * Fetch persistent room members with the requested affiliation; rejects unsupported
+     * affiliation names.
+     */
     list_room_members(room_jid: string, affiliation: string): Promise<any>;
+    /**
+     * Resolve to the account's roster contacts, including subscription states and groups.
+     */
     list_roster_contacts(): Promise<any>;
+    /**
+     * Mark a conversation, or its selected thread, read through the server inbox command.
+     */
     mark_inbox_read(partner_jid: string, thread_id?: string | null): Promise<any>;
+    /**
+     * Create a disconnected client owning a copy of the supplied configuration.
+     * Register callbacks before calling `connect` to observe session readiness.
+     */
     constructor(config: WaddleConfig);
     /**
      * Publish a 1:1 DM pin request.
@@ -262,6 +428,10 @@ export class WaddleClient {
      * reply via the inbound message stream.
      */
     pin_message(room_jid: string, target_stanza_id: string): Promise<any>;
+    /**
+     * Publish a `WaddleActivityOpts` object to PEP; rejects invalid activity names or
+     * failed publication.
+     */
     publish_activity(activity_json: any): Promise<any>;
     /**
      * XEP-0490 §3 publish to `urn:xmpp:mds:displayed:0`. `chat_id` is
@@ -273,8 +443,19 @@ export class WaddleClient {
      * publish-options as preconditions.
      */
     publish_mds_displayed(chat_id: string, stanza_id: string, stanza_id_by: string): Promise<any>;
+    /**
+     * Publish a `WaddleMoodOpts` object to the account's mood PEP node; rejects invalid
+     * input or a failed publish.
+     */
     publish_mood(mood_json: any): Promise<any>;
+    /**
+     * Publish a `WaddleTuneOpts` object to PEP; rejects malformed options or failed publication.
+     */
     publish_tune(tune_json: any): Promise<any>;
+    /**
+     * Publish a `WaddleVCard4` object on the account's vCard4 PEP node; omitted
+     * properties are excluded.
+     */
     publish_vcard4(vcard_json: any): Promise<any>;
     /**
      * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
@@ -299,15 +480,60 @@ export class WaddleClient {
      * pagehide. The Rust runtime produces the typed `<r/>` control element.
      */
     request_stream_management_ack(): Promise<any>;
+    /**
+     * Allocate an HTTP upload slot for a filename, byte size, and MIME type; resolves to
+     * `WaddleUploadSlot`.
+     */
     request_upload_slot(service_jid: string, filename: string, size: bigint, content_type: string): Promise<any>;
+    /**
+     * Return a persistence-ready resume snapshot, or `null` when unavailable or not serializable.
+     * The camelCase object includes counters, resumption eligibility, the server's
+     * optional maximum interval, and timestamped unhandled outbound entries.
+     * Persist snapshots promptly, especially after the synchronous pagehide handoff.
+     */
+    resume_state(): any;
+    /**
+     * Clone the current resume snapshot into an opaque handle, or return no handle when
+     * unavailable.
+     */
+    resume_state_handle(): WaddleResumeState | undefined;
+    /**
+     * Retract the account's current activity PEP item.
+     */
     retract_activity(): Promise<any>;
+    /**
+     * Retract the account's current mood PEP item; resolves after the server acknowledges it.
+     */
     retract_mood(): Promise<any>;
+    /**
+     * Retract the account's current tune PEP item.
+     */
     retract_tune(): Promise<any>;
+    /**
+     * Search the personal archive for messages exchanged with a peer, resolving to a
+     * `WaddleMamPage`.
+     */
     search_dm_history(peer_jid: string, query: string, max: number): Promise<any>;
+    /**
+     * Search the room archive for `query`, resolving to a `WaddleMamPage` of at most
+     * `max` matches.
+     */
     search_room_history(room_jid: string, query: string, max: number): Promise<any>;
+    /**
+     * Search the server's user directory and resolve to matching `WaddleUserSearchResult` objects.
+     */
     search_users(query: string): Promise<any>;
+    /**
+     * Send the XEP-0353 finish bookend for a completed call to the peer's full JID.
+     */
     send_call_finish(peer_full_jid: string, sid_str: string): Promise<any>;
+    /**
+     * Finish the old call while identifying the new session to which it migrated.
+     */
     send_call_finish_migrated(peer_full_jid: string, old_sid_str: string, new_sid_str: string): Promise<any>;
+    /**
+     * Send an XEP-0353 proceed signal to a full peer JID; rejects an invalid JID or failed send.
+     */
     send_call_proceed(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a JMI `<propose/>` to the peer's bare JID (XEP-0353
@@ -315,7 +541,13 @@ export class WaddleClient {
      * connected resource until one of them proceeds/rejects.
      */
     send_call_propose(peer_bare_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
+    /**
+     * Reject the identified call proposal at the proposing peer's full JID.
+     */
     send_call_reject(peer_full_jid: string, sid_str: string): Promise<any>;
+    /**
+     * Reject a simultaneous proposal with the XEP-0353 tie-break marker.
+     */
     send_call_reject_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a JMI `<retract/>` to the peer's bare JID (XEP-0353 §3).
@@ -327,6 +559,9 @@ export class WaddleClient {
      * resource-targeted variant is `send_call_retract_tie_break`.
      */
     send_call_retract(peer_bare_jid: string, sid_str: string): Promise<any>;
+    /**
+     * Retract a simultaneous proposal with the XEP-0353 tie-break marker.
+     */
     send_call_retract_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a JMI `<ringing/>` to the caller's bare JID (XEP-0353
@@ -348,14 +583,48 @@ export class WaddleClient {
      * validates the authenticated session matches it.
      */
     send_call_session_initiate(peer_full_jid: string, initiator_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
+    /**
+     * Terminate a DM Jingle session; rejects unknown reason tokens, invalid full JIDs,
+     * or failed IQs.
+     */
     send_call_session_terminate(peer_full_jid: string, sid_str: string, reason?: string | null): Promise<any>;
+    /**
+     * Terminate a DM Jingle session and resolve to a typed success, orphaned-session, or
+     * stanza-error outcome.
+     */
     send_call_session_terminate_with_outcome(peer_full_jid: string, sid_str: string, reason?: string | null): Promise<any>;
+    /**
+     * Send a direct message using `WaddleSendOptions`; resolve to
+     * `WaddleSendMessageOutcome` for validation and delivery results.
+     */
     send_chat_message(peer_jid: string, body: string, options: any): Promise<any>;
+    /**
+     * Send an XEP-0085 chat state with optional thread context; rejects unsupported
+     * chat-state tokens.
+     */
     send_chat_state(to: string, msg_type: string, state: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
+    /**
+     * Send replacement body text for an earlier message using `WaddleSendOptions` for
+     * its annotations.
+     */
     send_correction(to: string, msg_type: string, body: string, replaces_id: string, options: any): Promise<any>;
+    /**
+     * Send an XEP-0333 displayed marker for the message ID with optional thread context.
+     */
     send_displayed(to: string, msg_type: string, message_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
+    /**
+     * Send a room message using `WaddleSendOptions`; resolve to
+     * `WaddleSendMessageOutcome` for validation and delivery results.
+     */
     send_groupchat_message(room_jid: string, body: string, options: any): Promise<any>;
+    /**
+     * Send an ephemeral emoji reaction for a call; rejects invalid recipients, session
+     * IDs, or emoji values.
+     */
     send_in_call_reaction(to: string, msg_type: string, sid: string, emoji: string): Promise<any>;
+    /**
+     * Request moderator removal of a message, including an optional explanation.
+     */
     send_moderation(to: string, msg_type: string, target_id: string, reason?: string | null): Promise<any>;
     /**
      * Send a Jingle `session-terminate` IQ to hang up. `reason` is
@@ -433,8 +702,19 @@ export class WaddleClient {
      * caps advertisement.
      */
     send_presence(status?: string | null, show?: string | null, idle_since?: string | null): Promise<any>;
+    /**
+     * Parse and send an IQ XML document, resolving to the response XML; rejects invalid
+     * XML or a failed IQ.
+     */
     send_raw_iq(xml: string): Promise<any>;
+    /**
+     * Replace this sender's reactions on a message with `emojis`, retaining optional
+     * thread context.
+     */
     send_reaction(to: string, msg_type: string, target_id: string, emojis: string[], thread_id?: string | null, thread_parent?: string | null): Promise<any>;
+    /**
+     * Request retraction of the selected message with optional thread context.
+     */
     send_retraction(to: string, msg_type: string, retracts_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     /**
      * Set the per-DM XEP-0492 notification mode for one direct-chat
@@ -448,13 +728,13 @@ export class WaddleClient {
      * * Fetch existing DM items (first-publish `item-not-found` →
      *   empty); find the one whose id == `dmJid` and read its hosted
      *   `<notify/>` via [`read_dm_bookmark_notify`].
-     * * Merge the new mode via [`merge_notify`] (the single §3-conformant
+     * * Merge the new mode via `merge_notify` (the single §3-conformant
      *   core shared with the MUC carrier — foreign `<advanced/>` and
      *   identity-scoped siblings preserved verbatim; rich opt-in (#719)
      *   toggled).
      * * The node is sparse / override-only: if the merged `<notify/>`
      *   collapses to the §3 direct-chat default (`always`, no opt-in, no
-     *   foreign `<advanced/>`) per [`dm_notify_is_default`], RETRACT the
+     *   foreign `<advanced/>`) per `dm_notify_is_default`, RETRACT the
      *   item and resolve to `Removed` instead of publishing. Otherwise
      *   publish and resolve to `Ok` with the surfaced item — the chat
      *   reconciles without a refetch.
@@ -472,14 +752,23 @@ export class WaddleClient {
      * Register a callback for inbound XMPP-native call events
      * (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
      * carrying a `urn:waddle:transports:livekit:0` transport).
-     * The callback receives a [`WaddleCallEvent`]-shaped object
+     * The callback receives a [`crate::WaddleCallEvent`]-shaped object
      * with a `kind` discriminator and optional `media` / `join` /
      * `reason` fields. See `messaging::call::parse_call_event` on
      * the Rust side for the typed input.
      */
     set_on_call(cb: Function): void;
+    /**
+     * Replace the zero-argument callback fired when a fresh authenticated session becomes ready.
+     */
     set_on_connected(cb: Function): void;
+    /**
+     * Replace the zero-argument callback fired when the active connection closes.
+     */
     set_on_disconnected(cb: Function): void;
+    /**
+     * Replace the callback receiving human-readable connection and stream error descriptions.
+     */
     set_on_error(cb: Function): void;
     /**
      * XEP-0490 §3.2 PEP event handler. Invoked once per displayed
@@ -487,14 +776,26 @@ export class WaddleClient {
      * event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
      */
     set_on_mds_displayed(cb: Function): void;
+    /**
+     * Replace the callback receiving live messages and inbox pushes as `WaddleMessage` objects.
+     */
     set_on_message(cb: Function): void;
+    /**
+     * Replace the callback receiving outbound message IDs acknowledged by stream management.
+     */
     set_on_message_delivery_acked(cb: Function): void;
+    /**
+     * Replace the callback receiving message IDs that stream management could not deliver.
+     */
     set_on_message_delivery_failed(cb: Function): void;
     /**
      * Receive a parsed message rejection separately from incoming content.
      * The callback must correlate its stanza ID and sender with an outbound send.
      */
     set_on_message_rejected(cb: Function): void;
+    /**
+     * Replace the callback receiving each parsed `WaddlePresence` object.
+     */
     set_on_presence(cb: Function): void;
     /**
      * Generic XEP-0060 pubsub event handler. Invoked once per
@@ -502,12 +803,20 @@ export class WaddleClient {
      * value.
      */
     set_on_pubsub_event(cb: Function): void;
+    /**
+     * Replace the callback receiving `fresh` for a new session or `resumed` after stream
+     * resumption.
+     */
     set_on_session_lifecycle(cb: Function): void;
     /**
      * Register closed, bounded XEP-0198 lifecycle outcomes. The callback
      * deliberately receives no stanza XML, stream identifiers, or counters.
      */
     set_on_stream_management(cb: Function): void;
+    /**
+     * Set a user's persistent room affiliation; rejects invalid affiliation names or
+     * failed admin IQs.
+     */
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
     /**
      * Set the per-chat XEP-0492 notification mode for one room by
@@ -523,7 +832,7 @@ export class WaddleClient {
      * * Find the item whose id matches `room_jid`; if missing,
      *   construct a fresh item with the given `name` (or `None`).
      * * Replace the fallback `<notify/>` child via
-     *   [`merge_notify_into_extensions`] — foreign `<advanced/>`
+     *   `merge_notify_into_extensions` — foreign `<advanced/>`
      *   children and identity-scoped siblings written by other
      *   clients are preserved verbatim (XEP-0492 §3). The same call
      *   toggles the Waddle rich XEP-0357 push-summary opt-in
@@ -561,6 +870,10 @@ export class WaddleClient {
      * Publish a new story. `media_url` is required by XEP-0501; `body`
      * is optional text content attached to that media. `expiry_hours`
      * defaults to 24.
+     *
+     * # Panics
+     * Panics if `expiry_hours` cannot be represented as a Chrono duration, or if the
+     * story builder fails to retain the expiry set before publishing.
      */
     stories_publish(community_jid: string, input: any): Promise<any>;
     /**
@@ -584,7 +897,14 @@ export class WaddleClient {
      * subscriber JID is derived from the bound session JID (bare).
      */
     subscribe_mds_displayed(): Promise<any>;
+    /**
+     * Request a presence subscription from `peer_jid`; resolves after the stanza is sent.
+     */
     subscribe_to_presence(peer_jid: string): Promise<any>;
+    /**
+     * Resolve to whether account discovery advertises the publish-options feature
+     * required for displayed-state publication.
+     */
     supports_mds_publish_options(): Promise<any>;
     /**
      * Pagehide-only XEP-0198 acknowledgement handoff. This synchronously
@@ -615,7 +935,7 @@ export class WaddleClient {
      *   first, awaits the room's echo, then re-emits with contents
      *   declared.
      * - `in_call`: a plain JS object `{ handRaised, muted }`
-     *   ([`InCallPresenceFlags`]) appended as an `<in-call
+     *   (`InCallPresenceFlags`) appended as an `<in-call
      *   xmlns='urn:waddle:in-call:0'>` presence child *alongside*
      *   `<muji/>` (#1029 raised hand / #1030 mute), one marker child per
      *   set flag. This is the FFI in-call "set method": the caller
@@ -663,28 +983,112 @@ export class WaddleClient {
     xcal_rsvp(community_jid: string, master_uid: string, self_localpart: string, self_jid: string, partstat: string): Promise<any>;
 }
 
+/**
+ * Connection credentials and optional stream-resumption state for a browser client.
+ *
+ * `server_url` is the XMPP WebSocket endpoint. `jid` is the account address,
+ * `access_token` authenticates using OAUTHBEARER, and `resource` identifies
+ * the bound client resource. Creating a configuration does not open a socket.
+ */
 export class WaddleConfig {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Configure the WebSocket URL, account JID, OAuth access token, and resource;
+     * validation occurs on connect.
+     */
     constructor(server_url: string, jid: string, access_token: string, resource: string);
     /**
      * Restore a durable message/presence retry tail after a previous stream
      * explicitly declined XEP-0198. It must never issue `<resume/>`.
+     *
+     * `previd` is the previous server-issued stream ID. `inbound_h` counts
+     * handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+     * `entries` is an ordered array of `{ xml, sentAt, rejected }` objects;
+     * timestamps use RFC 3339 and XML must be a message, presence, or IQ
+     * in the client namespace. Failed validation preserves the existing state.
+     *
+     * # Errors
+     * Returns a JavaScript error for an empty or whitespace-only stream ID, malformed
+     * entry objects, invalid XML or RFC 3339 timestamps, or entries that are not
+     * countable client stanzas.
      */
     with_fresh_stream_retry_state_entries(previd: string, inbound_h: number, outbound_h: number, entries: any): void;
     /**
      * Attach the full JID the server bound for the session to the resume
      * state already configured through one of the `with_resume_state*`
      * methods.
+     *
+     * A resumed session keeps that JID, whose resource the server may have
+     * chosen. Without it the resumed session is reported under the
+     * configured resource. A retry tail that will not be resumed carries no
+     * bound JID, so the call leaves it unchanged.
+     *
+     * # Errors
+     * Returns a JavaScript error, leaving the configuration unchanged, when
+     * no resume state is configured or `bound_jid` is not a full JID.
      */
     with_resume_bound_jid(bound_jid: string): void;
+    /**
+     * Replace the configured resume state with a stream ID and handled-stanza counters.
+     *
+     * `previd` is the previous server-issued stream ID. `inbound_h` counts
+     * handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+     *
+     * # Errors
+     * Returns a JavaScript error when the previous stream ID is empty or whitespace-only.
+     */
     with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
+    /**
+     * Restore resume counters and the persisted unhandled outbound stanza queue.
+     *
+     * `previd` is the previous server-issued stream ID. `inbound_h` counts
+     * handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+     * `entries` is an ordered array of `{ xml, sentAt, rejected }` objects;
+     * timestamps use RFC 3339 and XML must be a message, presence, or IQ
+     * in the client namespace. Failed validation preserves the existing state.
+     *
+     * # Errors
+     * Returns a JavaScript error for an empty or whitespace-only stream ID, malformed
+     * entry objects, invalid XML or RFC 3339 timestamps, or entries that are not
+     * countable client stanzas.
+     */
     with_resume_state_entries(previd: string, inbound_h: number, outbound_h: number, entries: any): void;
+    /**
+     * Restore the persisted outbound queue together with counters and a resumption
+     * interval in seconds.
+     *
+     * `previd` is the previous server-issued stream ID. `inbound_h` counts
+     * handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+     * `entries` is an ordered array of `{ xml, sentAt, rejected }` objects;
+     * timestamps use RFC 3339 and XML must be a message, presence, or IQ
+     * in the client namespace. Failed validation preserves the existing state.
+     *
+     * # Errors
+     * Returns a JavaScript error for an empty or whitespace-only stream ID, malformed
+     * entry objects, invalid XML or RFC 3339 timestamps, or entries that are not
+     * countable client stanzas.
+     */
     with_resume_state_entries_with_max(previd: string, inbound_h: number, outbound_h: number, entries: any, max_resume_seconds: number): void;
+    /**
+     * Copy an opaque resume snapshot into this configuration for the next connection.
+     */
     with_resume_state_handle(state: WaddleResumeState): void;
+    /**
+     * Restore resume counters and the server's maximum resumption interval in seconds.
+     *
+     * `previd` is the previous server-issued stream ID. `inbound_h` counts
+     * handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+     *
+     * # Errors
+     * Returns a JavaScript error when the previous stream ID is empty or whitespace-only.
+     */
     with_resume_state_with_max(previd: string, inbound_h: number, outbound_h: number, max_resume_seconds: number): void;
 }
 
+/**
+ * Opaque cloneable stream-resumption snapshot for passing between client configurations.
+ */
 export class WaddleResumeState {
     private constructor();
     free(): void;

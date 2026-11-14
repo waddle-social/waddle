@@ -2,7 +2,8 @@ import { fileURLToPath } from "node:url";
 import { format } from "node:util";
 import { defineConfig } from "astro/config";
 import cloudflare from "@astrojs/cloudflare";
-import pandacss from "@pandacss/postcss";
+import pandacss from "@pandacss/vite";
+import { waddleFonts } from "@waddle/design/astro-fonts";
 import faroUploader from "@grafana/faro-rollup-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
@@ -131,6 +132,8 @@ function isClientOutput(outputOptions) {
 export default defineConfig({
   compressHTML: true,
   output: "server",
+  // Polar Huddle families (self-hosted from Fontsource at build time).
+  fonts: waddleFonts,
   adapter: cloudflare(),
 
   server: {
@@ -157,16 +160,10 @@ export default defineConfig({
         },
       },
     },
-    // Panda CSS runs as a PostCSS plugin (there is no Vite plugin on the
-    // 1.x line). It is registered inline rather than via postcss.config
-    // because Vite's config loader hands the plugin's ESM namespace object
-    // to PostCSS instead of the factory, which fails the build.
-    css: {
-      postcss: {
-        plugins: [pandacss()],
-      },
-    },
     plugins: [
+      // Panda first: it appends its generated CSS to global.css (the file
+      // declaring the pd_* layers) before Tailwind compiles that file.
+      pandacss(),
       tailwindcss(),
       // Serve the DTLN (@workadventure/noise-suppression) AudioWorklet module
       // and its bundled LiteRT/model assets from our own origin — the #914 AI

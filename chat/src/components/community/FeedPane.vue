@@ -24,7 +24,7 @@ import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { FeedEntry, FeedPostInput, FeedSourceKind, Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import { safeExternalUrl } from "@/lib/chat-ui";
-import { button, kicker } from "styled-system/recipes";
+import { btn, kicker } from "styled-system/recipes";
 
 const SOURCE_ICONS = {
   mood: Smile,
@@ -59,7 +59,7 @@ const SOURCE_ACCENT: Record<FeedSourceKind, { chip: string; rail: string }> = {
 };
 
 const kickerClass = kicker();
-const refreshButtonClass = button({ variant: "quiet", size: "sm" });
+const refreshButtonClass = btn({ size: "sm" });
 const CHIP_CLASS = "inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[11px] uppercase leading-none tracking-[0.08em]";
 const PILL_BASE = "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] font-semibold transition-colors";
 const PILL_IDLE = "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground";

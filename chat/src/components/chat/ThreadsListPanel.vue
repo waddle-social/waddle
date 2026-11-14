@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
-import { button, kicker } from "styled-system/recipes";
+import { btn, kicker } from "styled-system/recipes";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { CallMedia } from "@/lib/calls/types";
@@ -45,7 +45,7 @@ const emit = defineEmits<{
 }>();
 
 const kickerClass = kicker();
-const loadMoreClass = button({ variant: "quiet", size: "sm" });
+const loadMoreClass = btn({ size: "sm" });
 
 // Filter pills: a plain hairline pill at rest, teal-filled when pressed.
 const PILL_BASE = "inline-flex h-8 items-center rounded-full border px-3 text-[13px] font-semibold transition-colors";

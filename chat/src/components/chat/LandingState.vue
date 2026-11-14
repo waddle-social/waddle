@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { button } from "styled-system/recipes";
+import { btn } from "styled-system/recipes";
 
-const actionButtonClass = button({ variant: "primary", size: "lg" });
+const actionButtonClass = btn({ variant: "primary", size: "lg" });
 
 defineProps<{
   title: string;

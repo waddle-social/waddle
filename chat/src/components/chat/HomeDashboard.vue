@@ -12,7 +12,8 @@ import {
   PhoneOutgoing,
   Video,
 } from "lucide-vue-next";
-import { button, card, count, kicker } from "styled-system/recipes";
+import { badge, btn, kicker } from "styled-system/recipes";
+import { cardClasses, liveKicker } from "@/ui/part-classes";
 import type { ChannelSummary } from "@/lib/chat-types";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
@@ -97,18 +98,18 @@ const emit = defineEmits<{
 }>();
 
 // Recipe classes (Panda). Computed once; the variants are static.
-const liveCard = card({ tone: "live" });
-const warningCard = card({ tone: "warning" });
-const actionCard = card({ tone: "active" });
-const roomCard = card({ tone: "quiet" });
+const liveCard = cardClasses("live");
+const warningCard = cardClasses("warning");
+const actionCard = cardClasses("active");
+const roomCard = cardClasses("quiet");
 const kickerClass = kicker();
-const liveKickerClass = kicker({ tone: "live" });
-const countClass = count();
-const joinButtonClass = button({ variant: "live", size: "sm" });
-const enterButtonClass = button({ variant: "quiet", size: "sm" });
-const openPillClass = button({ variant: "secondary", size: "sm" });
-const leaveButtonClass = button({ variant: "danger", size: "sm" });
-const heroCtaClass = button({ variant: "primary", size: "md" });
+const liveKickerClass = liveKicker;
+const countClass = badge();
+const joinButtonClass = btn({ variant: "live", size: "sm" });
+const enterButtonClass = btn({ size: "sm" });
+const openPillClass = btn({ size: "sm" });
+const leaveButtonClass = btn({ variant: "danger", size: "sm" });
+const heroCtaClass = btn({ variant: "primary" });
 
 const HAPPENING_NOW_LIMIT = 3;
 

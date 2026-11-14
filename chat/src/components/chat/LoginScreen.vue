@@ -2,9 +2,9 @@
 import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { ChevronDown, ChevronUp } from "lucide-vue-next";
 import type { AuthProvider } from "@/lib/server-auth";
-import { button, kicker } from "styled-system/recipes";
+import { btn, kicker } from "styled-system/recipes";
 
-const signInButtonClass = button({ variant: "primary", size: "lg" });
+const signInButtonClass = btn({ variant: "primary", size: "lg" });
 const kickerClass = kicker();
 
 const props = defineProps<{

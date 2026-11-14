@@ -1,4 +1,5 @@
 ---
+import { Font } from "astro:assets";
 import { ClientRouter } from "astro:transitions";
 import { env } from "cloudflare:workers";
 import AppShell from "@/components/AppShell.vue";
@@ -26,7 +27,10 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#0b1219" />
+    <meta name="theme-color" content="#060f19" />
+    <Font cssVariable="--font-display" preload />
+    <Font cssVariable="--font-body" preload />
+    <Font cssVariable="--font-mono" />
     <!-- Published here so the (bundled, static) Faro bootstrap script
          below can read the Worker-runtime `SERVER_BASE_URL` without
          hoisting it through Vite `define` — that would require the
@@ -38,8 +42,8 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <script is:inline>
       (function () {
         try {
-          if (localStorage.getItem("waddle:theme") === "light") {
-            document.documentElement.setAttribute("data-theme", "light");
+          if (localStorage.getItem("waddle:theme") === "daylight") {
+            document.documentElement.setAttribute("data-theme", "daylight");
           }
         } catch (e) {}
       })();
@@ -66,7 +70,7 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     </script>
     <ClientRouter />
   </head>
-  <body class="bg-background text-foreground font-sans antialiased">
+  <body>
     <XmppProvider client:only="vue" transition:persist serverBaseUrl={serverBaseUrl ?? ""} />
     <AppShell client:only="vue" transition:persist>
       <slot />

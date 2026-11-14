@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video, X } from "lucide-vue-next";
-import { toast as toastRecipe } from "styled-system/recipes";
+import { toastClasses } from "@/ui/part-classes";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
@@ -10,7 +10,7 @@ import { connectionStore } from "@/lib/connection-store";
 
 // Styled like every other toast (opaque ink, night-coloured in daylight).
 // Ringing out is live (ember border); "call ended" is a neutral notice.
-const cls = toastRecipe();
+const cls = toastClasses;
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);

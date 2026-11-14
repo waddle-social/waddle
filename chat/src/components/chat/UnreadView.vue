@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { Hash, ListTree, Menu, RefreshCw } from "lucide-vue-next";
-import { button, count } from "styled-system/recipes";
+import { badge, btn } from "styled-system/recipes";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { InboxState } from "@/services/inbox";
@@ -27,8 +27,8 @@ const { groups, isLoading, error, refresh } = useUnreadOverview({
   inboxState: computed(() => props.inboxState),
 });
 
-const countClass = count();
-const refreshButtonClass = button({ variant: "quiet", size: "sm" });
+const countClass = badge();
+const refreshButtonClass = btn({ size: "sm" });
 
 const hasGroups = computed(() => groups.value.length > 0);
 const isRefreshingInbox = ref(false);

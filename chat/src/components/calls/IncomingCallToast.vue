@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video } from "lucide-vue-next";
-import { toast as toastRecipe } from "styled-system/recipes";
+import { toastClasses } from "@/ui/part-classes";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
@@ -11,7 +11,7 @@ import { connectionStore } from "@/lib/connection-store";
 // Styled like every other toast (opaque ink, night-coloured in daylight);
 // the ember border marks it as live. It is not on the generic toaster
 // because it is persistent and derived from `$callState`.
-const cls = toastRecipe();
+const cls = toastClasses;
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);

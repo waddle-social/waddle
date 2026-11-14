@@ -39,7 +39,8 @@ import {
 } from "@/lib/xmpp-client";
 import { useCalendarFeedCopy } from "@/lib/use-calendar-feed-copy";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
-import { button, card, kicker } from "styled-system/recipes";
+import { btn, kicker } from "styled-system/recipes";
+import { cardClasses, liveKicker } from "@/ui/part-classes";
 
 interface EventsPaneProps {
   events: readonly CommunityEvent[];
@@ -101,13 +102,13 @@ const selfAttendeeUri = computed(() => {
 
 // ─── Recipe classes ───────────────────────────────────────────────────────────
 
-const liveCard = card({ tone: "live" });
-const quietCard = card({ tone: "quiet" });
+const liveCard = cardClasses("live");
+const quietCard = cardClasses("quiet");
 const kickerClass = kicker();
-const liveKickerClass = kicker({ tone: "live" });
-const primaryButtonClass = button({ variant: "primary", size: "sm" });
-const quietButtonClass = button({ variant: "quiet", size: "sm" });
-const dangerButtonClass = button({ variant: "danger", size: "sm" });
+const liveKickerClass = liveKicker;
+const primaryButtonClass = btn({ variant: "primary", size: "sm" });
+const quietButtonClass = btn({ size: "sm" });
+const dangerButtonClass = btn({ variant: "danger", size: "sm" });
 
 // Pill toggles: hairline at rest, teal when pressed.
 const PILL_BASE = "inline-flex h-8 items-center gap-1 rounded-full border px-3 text-[13px] font-semibold transition-colors";
