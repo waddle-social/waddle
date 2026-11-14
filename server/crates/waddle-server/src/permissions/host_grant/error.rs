@@ -99,6 +99,11 @@ pub enum HostGrantError {
     Projection(#[from] ProjectionRefusal),
     #[error("the projection store gave no acknowledged answer")]
     ProjectionStore(#[source] PermissionError),
+    /// The host-grant relations are missing from a schema that held them.
+    /// Migrations only add them, so this is never read as "no scope is
+    /// enrolled".
+    #[error("the host-grant relations are missing from a schema that held them")]
+    RelationsMissing,
 }
 
 impl From<GuardedStoreWriterError> for HostGrantError {
@@ -161,6 +166,7 @@ impl HostGrantError {
             Self::Issuance(_) => "issuance",
             Self::Projection(_) => "projection_refused",
             Self::ProjectionStore(_) => "projection_store",
+            Self::RelationsMissing => "relations_missing",
         }
     }
 }

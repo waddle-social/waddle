@@ -13,7 +13,8 @@
 //!   canonical grants, which it reads from PostgreSQL and fails closed on;
 //! - an object outside the set is unmanaged and keeps its legacy checks,
 //!   even while PostgreSQL cannot be read: a failed refresh keeps the last
-//!   set it loaded;
+//!   set it loaded, and so does a refresh that finds the host-grant
+//!   relations gone after a load;
 //! - until the first load succeeds nothing is known, and every object of a
 //!   kind a scope can enroll (a channel, a room address, a Space node) is
 //!   undecided and fails closed. Startup waits for that first load before
@@ -319,12 +320,20 @@ impl EnrolledScopes {
     }
 }
 
+/// Reload the set into `state`. A schema that held the host-grant relations
+/// and no longer does is a failed reload, which keeps the set loaded before:
+/// migrations only add the relations, so their absence after a load is never
+/// read as "no scope is enrolled", which would hand every managed room back
+/// to the legacy stores.
 async fn load_into(
     store: &HostGrantStore,
     state: &watch::Sender<EnrolledState>,
 ) -> Result<(), HostGrantError> {
     let loaded = match store.enrolled_set().await? {
         Some(set) => EnrolledState::Loaded(Arc::new(set)),
+        None if matches!(*state.borrow(), EnrolledState::Loaded(_)) => {
+            return Err(HostGrantError::RelationsMissing);
+        }
         None => EnrolledState::RelationsAbsent,
     };
     state.send_replace(loaded);
