@@ -204,7 +204,9 @@ fn the_public_leaf_validity_ceiling_steps_down_on_the_ballot_dates() {
         (at(Day(2026, 3, 15)), 200),
         (at(Day(2027, 3, 15)) - 1, 200),
         (at(Day(2027, 3, 15)), 100),
-        (at(Day(2035, 1, 1)), 100),
+        (at(Day(2029, 3, 15)) - 1, 100),
+        (at(Day(2029, 3, 15)), 47),
+        (at(Day(2035, 1, 1)), 47),
         (i64::MIN, 398),
     ];
     for (not_before, days) in cases {
@@ -229,10 +231,13 @@ fn a_public_leaf_is_held_to_the_validity_ceiling_of_its_not_before() {
         (Day(2026, 3, 15), 200, Day(2026, 4, 15)),
         (Day(2027, 3, 14), 200, Day(2027, 4, 14)),
         (Day(2027, 3, 15), 100, Day(2027, 4, 15)),
-        (Day(2030, 6, 1), 100, NOW),
+        (Day(2029, 3, 14), 100, Day(2029, 4, 14)),
+        (Day(2029, 3, 15), 47, Day(2029, 4, 1)),
+        (Day(2030, 6, 1), 47, NOW),
     ];
     for (from, days, day) in steps {
-        let peer = leaf_valid_for(&root, PEER, from, 90);
+        // Within every step, so only the certificate under test varies.
+        let peer = leaf_valid_for(&root, PEER, from, 40);
 
         let within = leaf_valid_for(&root, HOME_A, from, days);
         let as_receiver = attempt_at(&inventory, (PEER, &peer), (HOME_A, &within), day);

@@ -289,6 +289,48 @@ fn a_client_auth_only_private_intermediate_issues_for_initiating_servers_only() 
 }
 
 #[test]
+fn a_private_ca_intermediate_whose_extended_key_usage_admits_neither_role_is_refused_at_startup() {
+    let refused_usages = [
+        vec![ExtendedKeyUsagePurpose::Any],
+        vec![ExtendedKeyUsagePurpose::EmailProtection],
+        vec![
+            ExtendedKeyUsagePurpose::EmailProtection,
+            ExtendedKeyUsagePurpose::Any,
+        ],
+    ];
+    for usages in refused_usages {
+        let root = Authority::root("Private Root");
+        let intermediate = intermediate_with_extended_usages(&root, usages);
+        let material = PrivateCaMaterial {
+            anchors: vec![root.der()],
+            intermediates: vec![intermediate.der()],
+            crls: vec![root.clean_crl(), intermediate.clean_crl()],
+        };
+
+        let error = PrivateCaProfile::load(&material, &settings(NOW).algorithms(), unix(NOW))
+            .expect_err("an intermediate that admits neither role");
+
+        assert_eq!(error.kind(), TrustErrorKind::IntermediateExtendedKeyUsage);
+        assert_eq!(error.item(), Some(TrustItem::Intermediate(0)));
+    }
+
+    // serverAuth admits both roles and clientAuth the initiating role.
+    for usages in [
+        vec![ExtendedKeyUsagePurpose::ServerAuth],
+        vec![ExtendedKeyUsagePurpose::ClientAuth],
+    ] {
+        let root = Authority::root("Private Root");
+        let intermediate = intermediate_with_extended_usages(&root, usages);
+        let material = PrivateCaMaterial {
+            anchors: vec![root.der()],
+            intermediates: vec![intermediate.der()],
+            crls: vec![root.clean_crl(), intermediate.clean_crl()],
+        };
+        assert!(PrivateCaProfile::load(&material, &settings(NOW).algorithms(), unix(NOW)).is_ok());
+    }
+}
+
+#[test]
 fn a_private_ca_anchor_whose_extended_key_usage_lacks_server_auth_is_refused_at_startup() {
     let refused_usages = [
         vec![ExtendedKeyUsagePurpose::ClientAuth],

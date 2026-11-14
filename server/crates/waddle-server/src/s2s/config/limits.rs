@@ -1,0 +1,258 @@
+//! The connection manager's resource model: global caps, per-peer limits,
+//! rates and deadlines (ADR-0020 gate G7).
+//!
+//! Every value has a default and a ceiling. The defaults are the ceilings,
+//! except for the established-stream idle timeout and the connection age,
+//! which an operator may raise up to their ceilings. Configuration can only
+//! lower a cap or a deadline below its ceiling, never raise it beyond, so a
+//! configuration file cannot weaken the bounds recorded in
+//! `server/docs/planning/s2s-connection-manager-2047.md`.
+
+use std::time::Duration;
+
+use waddle_xmpp::s2s::CodecLimits;
+
+/// Largest S2S configuration file read, in bytes.
+pub const MAX_CONFIG_FILE_BYTES: u64 = 64 * 1024;
+
+/// Largest certificate, key or CRL file read, in bytes.
+pub const MAX_MATERIAL_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Largest total of configuration and material bytes read for one snapshot.
+pub const MAX_TOTAL_MATERIAL_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Most local domains one snapshot serves.
+pub const MAX_LOCAL_DOMAINS: usize = 16;
+
+/// Most entries in one admission list.
+pub const MAX_LIST_ENTRIES: usize = 1024;
+
+/// Most configured endpoints for one remote domain.
+pub const MAX_ENDPOINTS_PER_DOMAIN: usize = 4;
+
+/// Most domains with configured endpoints.
+pub const MAX_ENDPOINT_DOMAINS: usize = 256;
+
+/// Most private-CA profiles in one snapshot.
+pub const MAX_PRIVATE_CA_PROFILES: usize = 32;
+
+/// Most files one private-CA profile names, anchors, intermediates and CRLs
+/// together.
+pub const MAX_PROFILE_FILES: usize = 24;
+
+/// A token bucket: `per_second` tokens accrue each second up to `burst`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub per_second: u32,
+    pub burst: u32,
+}
+
+/// Caps and rates. See the module documentation for how configuration may
+/// change them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Open S2S sockets in every stage and both directions.
+    pub max_sockets: usize,
+    /// Open inbound sockets.
+    pub max_inbound_sockets: usize,
+    /// Open outbound sockets.
+    pub max_outbound_sockets: usize,
+    /// Inbound sockets that have not completed authentication.
+    pub max_unauthenticated: usize,
+    /// Unauthenticated inbound sockets from one source address.
+    pub max_unauthenticated_per_address: usize,
+    /// TLS handshakes in progress on inbound connections. Each direction
+    /// has its own verifier workers of this size, so inbound handshakes
+    /// cannot starve outbound ones or the reverse.
+    pub max_inbound_handshakes: usize,
+    /// TLS handshakes in progress on outbound connections.
+    pub max_outbound_handshakes: usize,
+    /// Established streams, both directions.
+    pub max_streams: usize,
+    /// Remote domains with at least one established stream.
+    pub max_peers: usize,
+    /// Streams negotiating for one remote domain at once, both directions.
+    pub max_negotiating_per_peer: usize,
+    /// New inbound connections, all sources together.
+    pub accept_rate: RateLimit,
+    /// New inbound connections from one source address.
+    pub accept_rate_per_address: RateLimit,
+    /// Source addresses whose rate and socket counts are tracked; a new
+    /// address is refused while the table is full.
+    pub max_tracked_addresses: usize,
+    /// Outbound attempts in progress at once, each to a distinct remote
+    /// domain.
+    pub max_dialing: usize,
+    /// Remote domains whose outbound backoff is remembered. While every
+    /// entry is still backing off, an attempt to a further domain is
+    /// refused, which caps the destinations local users can make this
+    /// server dial.
+    pub max_backoff_destinations: usize,
+    /// Bytes read from one socket per second, with its burst. A peer over
+    /// its rate is read more slowly; the connection is not closed for it.
+    pub input_rate_per_socket: RateLimit,
+    /// Bytes read from all S2S sockets together per second, with its burst.
+    pub input_rate_global: RateLimit,
+}
+
+impl ResourceLimits {
+    /// The ceilings, which are also the defaults.
+    pub const CEILING: Self = Self {
+        max_sockets: 32,
+        max_inbound_sockets: 16,
+        max_outbound_sockets: 16,
+        max_unauthenticated: 8,
+        max_unauthenticated_per_address: 4,
+        max_inbound_handshakes: 4,
+        max_outbound_handshakes: 2,
+        max_streams: 32,
+        max_peers: 16,
+        max_negotiating_per_peer: 2,
+        accept_rate: RateLimit {
+            per_second: 8,
+            burst: 8,
+        },
+        accept_rate_per_address: RateLimit {
+            per_second: 2,
+            burst: 4,
+        },
+        max_tracked_addresses: 256,
+        max_dialing: 8,
+        max_backoff_destinations: 256,
+        input_rate_per_socket: RateLimit {
+            per_second: 64 * 1024,
+            burst: 128 * 1024,
+        },
+        input_rate_global: RateLimit {
+            per_second: 512 * 1024,
+            burst: 1024 * 1024,
+        },
+    };
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self::CEILING
+    }
+}
+
+/// Deadlines. A negotiation deadline never restarts on partial input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadlines {
+    /// TCP connect of an outbound attempt, per endpoint.
+    pub connect: Duration,
+    /// Each negotiation stage: the initial header, the TLS handshake and
+    /// each expected stream restart.
+    pub stage: Duration,
+    /// The SASL phase, from the post-TLS stream header; never renewed by
+    /// replacement or aborted exchanges.
+    pub sasl: Duration,
+    /// Everything from TCP accept or connect to the established stream.
+    pub negotiation: Duration,
+    /// An unfinished first-level element on an established stream.
+    pub incomplete_element: Duration,
+    /// An established stream with no input.
+    pub idle: Duration,
+    /// The longest an established stream lives, whatever its certificate
+    /// allows.
+    pub max_age: Duration,
+    /// Writing one batch of output, and the terminal error and close.
+    pub write: Duration,
+    /// Draining streams at shutdown before the remaining tasks are aborted.
+    pub drain: Duration,
+    /// How long an established stream must have been idle before it can be
+    /// evicted for a new one.
+    pub eviction_idle: Duration,
+    /// The shortest time between two replacements of the stream of one
+    /// directional pair. A new authenticated stream replaces the existing
+    /// one, which closes with `conflict`, unless the pair's stream was
+    /// replaced more recently than this; the new stream is then refused
+    /// with `conflict` instead, so two peers cannot make a pair flap.
+    pub replacement_interval: Duration,
+    /// Wait after the first failed outbound attempt to a domain.
+    pub backoff_initial: Duration,
+    /// Longest wait between outbound attempts to a domain.
+    pub backoff_max: Duration,
+}
+
+impl Deadlines {
+    /// The defaults.
+    pub const DEFAULT: Self = Self {
+        connect: Duration::from_secs(5),
+        stage: Duration::from_secs(5),
+        sasl: Duration::from_secs(5),
+        negotiation: Duration::from_secs(20),
+        incomplete_element: Duration::from_secs(5),
+        idle: Duration::from_secs(300),
+        max_age: Duration::from_secs(3600),
+        write: Duration::from_secs(1),
+        drain: Duration::from_secs(5),
+        eviction_idle: Duration::from_secs(30),
+        replacement_interval: Duration::from_secs(30),
+        backoff_initial: Duration::from_secs(1),
+        backoff_max: Duration::from_secs(300),
+    };
+
+    /// The ceilings. Only `idle` and `max_age` exceed their defaults; the
+    /// eviction idle time and backoff are floors in spirit, so their
+    /// ceilings bound how long an operator can make a peer wait.
+    pub const CEILING: Self = Self {
+        connect: Duration::from_secs(5),
+        stage: Duration::from_secs(5),
+        sasl: Duration::from_secs(5),
+        negotiation: Duration::from_secs(20),
+        incomplete_element: Duration::from_secs(5),
+        idle: Duration::from_secs(3600),
+        max_age: Duration::from_secs(24 * 3600),
+        write: Duration::from_secs(1),
+        drain: Duration::from_secs(5),
+        eviction_idle: Duration::from_secs(3600),
+        replacement_interval: Duration::from_secs(3600),
+        backoff_initial: Duration::from_secs(60),
+        backoff_max: Duration::from_secs(3600),
+    };
+}
+
+impl Default for Deadlines {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The S2S codec's ceilings (ADR-0020 gate G7).
+///
+/// Before SASL succeeds the decoder runs in its pre-authentication mode, so
+/// no first-level element exceeds `max_control_element_bytes` (8 KiB) and
+/// nothing but negotiation elements is decoded. The larger values apply
+/// only to an authenticated stream. They are sized for the largest stanzas
+/// federation is expected to carry: a `disco#items` result listing about
+/// 2,000 rooms and a MUC affiliation list of about 2,000 members. Each such
+/// item is one element with two or three attributes and usually under
+/// 150 bytes, so 2,000 of them are about 300 KiB of markup, 2,000 elements
+/// and under 300 KiB of attributes.
+///
+/// Resident decoder memory per authenticated connection, by the codec's
+/// own accounting (`CodecLimits` documentation): the 768 KiB input
+/// buffer, the 1.5 MiB tree-string ceiling (up to twice that in capacity),
+/// and node structure of about 130 bytes per element plus about 1.1 KiB per
+/// element with attributes, about 4.9 MiB at 4,096 elements. The worst case
+/// is therefore about 9 MiB for a peer that keeps one maximal stanza
+/// unfinished, and about 300 MiB across the 32 established streams the
+/// stream cap allows. This is an analysis, not a measurement; the
+/// verification phase measures it.
+pub const STREAM_CODEC_LIMITS: CodecLimits = CodecLimits {
+    max_header_bytes: 8 * 1024,
+    max_stanza_bytes: 512 * 1024,
+    max_control_element_bytes: 8 * 1024,
+    max_depth: 32,
+    max_attributes_per_element: 32,
+    max_attribute_bytes_per_stanza: 384 * 1024,
+    max_elements_per_stanza: 4096,
+    // A stanza at the ceiling plus one 16 KiB read, with room to spare:
+    // the decoder accepts a push of at most `max_buffered_bytes -
+    // max_stanza_bytes`.
+    max_buffered_bytes: 768 * 1024,
+    max_token_bytes: 8 * 1024,
+    max_namespace_bytes: 1024,
+    max_tree_bytes_per_stanza: 1536 * 1024,
+};

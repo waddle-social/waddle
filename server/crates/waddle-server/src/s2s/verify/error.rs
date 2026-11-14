@@ -241,6 +241,8 @@ pub enum TrustErrorKind {
     CrlSignUsage,
     #[error("the trust anchor's extended key usage does not include serverAuth")]
     AnchorExtendedKeyUsage,
+    #[error("the intermediate's extended key usage admits neither TLS role")]
+    IntermediateExtendedKeyUsage,
     #[error("the certificate is not valid yet")]
     NotYetValid,
     #[error("the certificate has expired")]
