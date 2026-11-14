@@ -48,7 +48,15 @@ waddle-extensions = { path = "../waddle-extensions" }
 
 # Graceful restart (Ecdysis pattern)
 waddle-ecdysis = { path = "../waddle-ecdysis" }
-jid = { workspace = true }
+# Pinned exactly, here rather than in the workspace table so that crates
+# shared with other workspaces keep the ordinary `0.12` requirement. Cargo
+# unifies the workspace on this version. The set of user IDs the SpiceDB
+# authorization codec accepts is "bare JIDs this parser leaves unchanged"
+# (`permissions::authz_id`), so changing that set is a codec version change.
+# The set also depends on `jid`'s own dependencies `stringprep` and `idna`,
+# which only Cargo.lock fixes: a lockfile update of `jid`, `stringprep` or
+# `idna` is a codec-affecting change, never a routine dependency update.
+jid = { version = "=0.12.2", features = ["serde"] }
 dashmap = { workspace = true, features = ["raw-api"] }
 minidom = { workspace = true }
 

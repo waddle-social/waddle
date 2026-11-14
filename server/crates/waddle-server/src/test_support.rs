@@ -29,6 +29,8 @@ pub use shared_correctness::{
     SharedPendingResolverFixture,
 };
 #[cfg(feature = "test-support")]
+pub mod spicedb_wire;
+#[cfg(feature = "test-support")]
 pub mod supervised_io;
 
 use crate::db::DatabasePool;

@@ -2,16 +2,18 @@ use super::{
     bad_request_iq_error, build_admin_result, build_admin_set_result, build_iq_error_xml_typed,
     build_iq_error_xml_with_payload, build_role_result, build_xmpp_error_response,
     conflict_iq_error, forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error,
-    iq_to_xml, is_role_change_query, item_not_found_iq_error, not_allowed_iq_error,
-    not_authorized_iq_error, parse_admin_query, response_batch_from_inline_room_effect_frames,
-    stanza_to_xml, warn, AdminItem, Affiliation, ApplyAdminItems, BareJid, FullJid,
-    GetAdminContext, GetSnapshot, Jid, Object, ObjectType, Relation, ResponseBatch, Stanza,
-    Subject, WebSocketState,
+    iq_to_xml, is_role_change_query, item_not_found_iq_error, jid_malformed_iq_error,
+    not_allowed_iq_error, not_authorized_iq_error, parse_admin_query,
+    response_batch_from_inline_room_effect_frames, stanza_to_xml, warn, AdminItem, Affiliation,
+    ApplyAdminItems, BareJid, FullJid, GetAdminContext, GetSnapshot, Jid, Object, ObjectType,
+    Relation, ResponseBatch, Stanza, Subject, WebSocketState,
 };
 use crate::admin::channels::{
     acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
 };
-use crate::permissions::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
+use crate::permissions::{
+    AuthzUserJid, ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation,
+};
 use crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary;
 use crate::room_effect_outbox::RoomEffectOutboxError;
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
@@ -82,6 +84,22 @@ fn can_change_affiliation(
             matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
         }
     }
+}
+
+/// A managed channel stores every affiliation as an authorization
+/// relationship whose subject must be a bare account JID within the codec
+/// limits. Checked for the whole batch before any state changes, so a
+/// domain-only or oversized target is a client error (`jid-malformed`), not a
+/// failed write halfway through the batch. Unmanaged rooms keep affiliations
+/// in room state only and accept any bare JID.
+fn managed_affiliation_targets_are_accounts(
+    room_jid: &BareJid,
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> bool {
+    waddle_xmpp::parse_managed_room_jid(room_jid).is_none()
+        || affiliation_updates
+            .iter()
+            .all(|(jid, _)| AuthzUserJid::new(jid.clone()).is_ok())
 }
 
 pub(in crate::server::routes::websocket::handlers) async fn persist_managed_channel_affiliation(
@@ -1254,6 +1272,15 @@ pub(super) async fn handle_muc_admin_iq(
             .filter_map(|item| item.jid.clone().zip(item.affiliation))
             .collect()
     };
+    if !managed_affiliation_targets_are_accounts(&room_jid, &affiliation_updates) {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            jid_malformed_iq_error("Channel affiliations require a bare account JID."),
+        )]
+        .into();
+    }
     let pre_apply_snapshot = if is_role_change_query(&items) || !affiliation_updates.is_empty() {
         match room_actor
             .ask(GetSnapshot)
