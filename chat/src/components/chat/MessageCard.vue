@@ -537,6 +537,24 @@ const c = {
   deletedBubble: css({ px: "3.5", py: "2", borderRadius: "bubble", border: "1px dashed {colors.border}", fontSize: "sm" }),
   pinEvent: css({ fontSize: "sm", fontStyle: "italic", color: "fg.muted", "& > span": { ml: "2", fontStyle: "normal" } }),
   timeInline: css({ textStyle: "timestamp", color: "fg.muted", fontVariantNumeric: "tabular-nums" }),
+  callEndedRow: css({ display: "flex", justifyContent: "center", py: "2", px: "4" }),
+  callEndedPill: css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1.5",
+    px: "3",
+    py: "1",
+    borderRadius: "pill",
+    border: "1px solid {colors.border.soft}",
+    bg: "surface",
+    color: "fg.muted",
+    font: "500 13px/1.4 {fonts.body}",
+    cursor: "pointer",
+    "& svg": { width: "14px", height: "14px" },
+    _hover: { color: "fg" },
+    _disabled: { cursor: "default", _hover: { color: "fg.muted" } },
+    _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+  }),
   callFallback: css({
     display: "inline-flex",
     alignItems: "center",
@@ -751,6 +769,27 @@ watch(bubbleEl, (row, previous) => {
       :invoke-extension-action="invokeExtensionAction"
     />
   </template>
+
+  <!-- Huddle-DM: a finished call in a direct message is a centred pill row. -->
+  <div
+    v-else-if="message.callThread && !hideCallAnchorCard && bubble && callAnchorCardState?.status !== 'live'"
+    :data-message-id="message.id"
+    :data-message-row-key="timelineRowKey(message)"
+    :data-message-created-at="message.createdAt"
+    :class="c.callEndedRow"
+  >
+    <button
+      type="button"
+      :class="c.callEndedPill"
+      :disabled="!callThreadId"
+      @click="openCallThreadAnchor"
+    >
+      <PhoneCall aria-hidden="true" />
+      <span>{{ callThreadLabel }}</span>
+      <span aria-hidden="true">·</span>
+      <time :datetime="message.createdAt">{{ formatTimelineTimeOfDay(message.createdAt) }}</time>
+    </button>
+  </div>
 
   <div
     v-else-if="message.callThread && !hideCallAnchorCard"

@@ -92,6 +92,41 @@ function seed(c: ChatAppController) {
     $xmppStatus.set({ state: "online", detail: "" });
   }
   if (screen.startsWith("huddle-") || screen.startsWith("call-")) seedCallPreview(c, screen);
+  if (["huddle-room", "huddle-live", "huddle-expanded"].includes(screen)) seedHuddleThread(c);
+  if (screen === "call-ended") seedEndedCall(c);
+}
+
+// A live #design huddle anchor with replies on its thread (Huddle-Join, HuddlePanel).
+function seedHuddleThread(c: ChatAppController) {
+  void c.selectChannel("design").then(() => {
+    const started = new Date(Date.now() - 12 * 60_000).toISOString();
+    c.messaging.messages.value = [
+      msg("h0", "kim", 40, "Mockups for the huddle panel are in the design file."),
+      msg("h1", "linus", 12, "linus started a huddle", {
+        threadId: "pv-design-thread",
+        callThread: { kind: "muc", sid: "pv-design", media: ["audio", "video"], initiator: "linus", started },
+      }),
+      msg("h2", "grace", 9, "Apple build is uploading, ten minutes.", { threadId: "pv-design-thread" }),
+      msg("h3", "ken", 7, "Checklist is in docs/release.md", { threadId: "pv-design-thread" }),
+      msg("h4", "kim", 3, "Sharing my screen in a sec."),
+    ];
+  });
+}
+
+// Huddle-DM: a declined call sits in the direct-message timeline as a pill row.
+function seedEndedCall(c: ChatAppController) {
+  void c.selectDm("linus@waddle.test").then(() => {
+    const d = c.dmMessaging;
+    d.isLoadingMessages.value = false;
+    d.messages.value = [
+      msg("e1", "linus", 30, "Got a minute for the release notes?"),
+      msg("e2", "ada", 20, "linus started a call", {
+        threadId: "pv-end",
+        callThread: { kind: "dm", sid: "pv-end", media: ["audio"], initiator: "ada", outcome: "declined" },
+      }),
+      msg("e3", "linus", 18, "Sorry, on the train. Text is fine."),
+    ];
+  });
 }
 
 const ROOM_SCREENS = ["room", "room-pinned", "room-loading", "room-quiet", "room-forum", "room-unavailable"];
