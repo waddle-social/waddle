@@ -1,6 +1,7 @@
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.ResolvedComponentResult
 import org.gradle.api.artifacts.result.ResolvedDependencyResult
+import java.net.URI
 
 plugins {
     alias(libs.plugins.android.application)
@@ -39,6 +40,17 @@ android {
         val serverUrl = (project.findProperty("waddleServerUrl") as String?)
             ?: "https://xmpp.waddle.social"
         buildConfigField("String", "WADDLE_SERVER_URL", "\"$serverUrl\"")
+
+        // Optional GIF proxy base URL, independent of the auth server.
+        val gifProxyUrl = (project.findProperty("waddleGifProxyUrl") as String?)?.trim().orEmpty()
+        if (gifProxyUrl.isNotEmpty()) {
+            val uri = runCatching { URI(gifProxyUrl) }.getOrNull()
+            require(uri != null && uri.scheme == "https" && uri.host != null &&
+                (uri.port == -1 || uri.port in 1..65535) &&
+                uri.userInfo == null && uri.query == null && uri.fragment == null
+            ) { "waddleGifProxyUrl must be a valid HTTPS URL without credentials, query, or fragment" }
+        }
+        buildConfigField("String", "WADDLE_GIF_PROXY_URL", "\"$gifProxyUrl\"")
     }
 
     buildFeatures {
