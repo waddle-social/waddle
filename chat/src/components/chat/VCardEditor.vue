@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref, watch } from "vue";
-import { IdCard } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { feedbackClass, settingsClasses as sc, type FeedbackTone } from "@/components/chat/settings-classes";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import {
   draftFromProfile,
@@ -15,18 +16,14 @@ const props = defineProps<{
   selfJid: string;
 }>();
 
-type FeedbackTone = "muted" | "success" | "error";
-
 interface VCardFeedback {
   tone: FeedbackTone;
   message: string;
 }
 
-const fieldLabelClass = "type-section-label text-muted-foreground/75";
-const fieldClass = "chat-field-control type-field disabled:opacity-50";
-const textareaClass = "chat-field-control chat-textarea-control type-field disabled:opacity-50";
-const primaryButtonClass = "chat-action-button chat-action-button--primary type-control disabled:opacity-40";
-const secondaryButtonClass = "chat-action-button chat-action-button--secondary type-control disabled:opacity-40";
+const headClass = css({ display: "flex", alignItems: "center", gap: "14px" });
+const growClass = css({ flex: 1, minWidth: 0 });
+const formClass = css({ display: "flex", flexDirection: "column", gap: "4" });
 
 const draft = reactive<VCard4Draft>(draftFromProfile(null));
 const loading = ref(false);
@@ -192,50 +189,25 @@ function revertDraft() {
     message: "Reverted to the last saved profile.",
   };
 }
-
-function feedbackClass(tone: FeedbackTone): string {
-  switch (tone) {
-    case "success":
-      return "text-emerald-700 dark:text-emerald-300";
-    case "error":
-      return "text-destructive-text";
-    default:
-      return "text-muted-foreground";
-  }
-}
 </script>
 
 <template>
-  <section class="chat-section-card glass-panel">
-    <div class="flex items-start gap-3 pb-4">
-      <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-        <IdCard class="h-4 w-4" />
-      </div>
-      <div class="chat-settings-copy max-w-2xl">
-        <p class="type-section-label text-muted-foreground/70">XEP-0292</p>
-        <h2 class="type-pane-title">Profile (vCard4)</h2>
-        <p class="type-caption text-muted-foreground">
-          Public profile published over your <code>urn:xmpp:vcard4</code> PEP node.
-          Visible to anyone who can read your profile.
-        </p>
+  <section :class="sc.card" aria-labelledby="vcard4-title">
+    <div :class="headClass">
+      <slot name="avatar" />
+      <div :class="[sc.cardHead, growClass]">
+        <h2 id="vcard4-title" :class="sc.heading">Profile</h2>
+        <p :class="sc.caption">Anyone who can see your profile sees this. Published to your vCard4 profile (XEP-0292).</p>
       </div>
     </div>
 
-    <p
-      v-if="!xmppClient"
-      class="type-caption mb-4 rounded-lg border border-border/70 bg-muted/50 px-3 py-2 text-muted-foreground"
-      role="status"
-    >
-      Reconnect before loading or publishing your profile.
-    </p>
-
-    <form class="chat-settings-form" @submit.prevent="saveProfile">
-      <div class="grid gap-3 sm:grid-cols-2">
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Full name</span>
+    <form :class="formClass" @submit.prevent="saveProfile">
+      <div :class="sc.grid">
+        <label :class="sc.label">
+          Full name
           <input
             v-model="draft.fullName"
-            :class="fieldClass"
+            :class="sc.input"
             :disabled="loading || saving"
             data-testid="vcard4-fn"
             maxlength="160"
@@ -244,11 +216,11 @@ function feedbackClass(tone: FeedbackTone): string {
           />
         </label>
 
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Nickname</span>
+        <label :class="sc.label">
+          Nickname
           <input
             v-model="draft.nickname"
-            :class="fieldClass"
+            :class="sc.input"
             :disabled="loading || saving"
             data-testid="vcard4-nickname"
             maxlength="80"
@@ -257,11 +229,11 @@ function feedbackClass(tone: FeedbackTone): string {
           />
         </label>
 
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Pronouns</span>
+        <label :class="sc.label">
+          Pronouns
           <input
             v-model="draft.pronouns"
-            :class="fieldClass"
+            :class="sc.input"
             :disabled="loading || saving"
             data-testid="vcard4-pronouns"
             maxlength="48"
@@ -270,24 +242,24 @@ function feedbackClass(tone: FeedbackTone): string {
           />
         </label>
 
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">URL</span>
+        <label :class="sc.label">
+          Website
           <input
             v-model="draft.url"
-            :class="fieldClass"
+            :class="sc.input"
             :disabled="loading || saving"
             data-testid="vcard4-url"
             maxlength="240"
-            placeholder="https://romeo.example.com"
+            placeholder="https://"
             type="url"
           />
         </label>
 
-        <label class="grid gap-1.5 sm:col-span-2">
-          <span :class="fieldLabelClass">Bio</span>
+        <label :class="[sc.label, sc.wide]">
+          Bio
           <textarea
             v-model="draft.note"
-            :class="textareaClass"
+            :class="sc.textarea"
             :disabled="loading || saving"
             data-testid="vcard4-note"
             maxlength="500"
@@ -297,10 +269,10 @@ function feedbackClass(tone: FeedbackTone): string {
         </label>
       </div>
 
-      <div class="flex flex-wrap items-center gap-2 pt-3">
+      <div :class="sc.actions">
         <button
           type="submit"
-          :class="primaryButtonClass"
+          :class="sc.primary"
           :disabled="loading || saving || !xmppClient || !profileLoaded"
           data-testid="vcard4-save"
         >
@@ -308,7 +280,7 @@ function feedbackClass(tone: FeedbackTone): string {
         </button>
         <button
           type="button"
-          :class="secondaryButtonClass"
+          :class="sc.secondary"
           :disabled="loading || saving || !xmppClient"
           data-testid="vcard4-revert"
           @click="revertDraft"
@@ -316,7 +288,6 @@ function feedbackClass(tone: FeedbackTone): string {
           Revert
         </button>
         <p
-          class="type-caption"
           :class="feedbackClass(feedback.tone)"
           aria-live="polite"
           data-testid="vcard4-feedback"

@@ -403,8 +403,7 @@
 
 .chat-dialog-stack,
 .chat-field-stack,
-.chat-panel-stack,
-.chat-settings-copy {
+.chat-panel-stack {
   display: flex;
   flex-direction: column;
 }
@@ -415,10 +414,6 @@
 
 .chat-field-stack {
   gap: var(--space-xs);
-}
-
-.chat-settings-copy {
-  gap: var(--space-2xs);
 }
 
 .chat-panel-stack {

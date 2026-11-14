@@ -1,29 +1,36 @@
 <script setup lang="ts">
+import { css } from "styled-system/css";
+import { toggle } from "styled-system/recipes";
 import { useReadReceiptPreference } from "@/preferences/read-receipts";
 
 const { mode, setReadReceiptPreference } = useReadReceiptPreference();
 
-function onToggle(event: Event) {
-  const checked = event.target instanceof HTMLInputElement
-    ? event.target.checked
-    : false;
-  setReadReceiptPreference(checked ? "send" : "suppress");
+const rowClass = css({ display: "flex", alignItems: "center", gap: "3" });
+const copyClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "0.5", fontSize: "15px" });
+const captionClass = css({ textStyle: "caption", color: "fg.muted" });
+const switchClass = toggle();
+
+function onToggle() {
+  setReadReceiptPreference(mode.value === "send" ? "suppress" : "send");
 }
 </script>
 
 <template>
-  <label class="flex items-start justify-between gap-4 rounded-lg border border-border bg-muted/30 px-3 py-3">
-    <span class="grid gap-1">
-      <span class="type-control text-foreground">Send read receipts</span>
-      <span class="type-meta text-muted-foreground">
-        Share XEP-0333 displayed markers with message senders.
+  <div :class="rowClass">
+    <span :class="copyClass">
+      <span id="read-receipts-title">Send read receipts</span>
+      <span id="read-receipts-description" :class="captionClass">
+        Let people see when you've read their messages (XEP-0333).
       </span>
     </span>
-    <input
-      class="mt-1 h-4 w-4 accent-primary"
-      type="checkbox"
-      :checked="mode === 'send'"
-      @change="onToggle"
+    <button
+      type="button"
+      role="switch"
+      :class="switchClass"
+      :aria-checked="mode === 'send'"
+      aria-labelledby="read-receipts-title"
+      aria-describedby="read-receipts-description"
+      @click="onToggle"
     />
-  </label>
+  </div>
 </template>

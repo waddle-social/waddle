@@ -1,26 +1,4 @@
 @layer components {
-.chat-settings-form {
-  display: grid;
-  gap: var(--space-md);
-}
-
-.chat-settings-field-row {
-  display: grid;
-  gap: var(--space-sm);
-}
-
-@media (min-width: 40rem) {
-  .chat-settings-field-row {
-    grid-template-columns: minmax(0, var(--chat-settings-label-width)) 1fr;
-  }
-}
-
-@media (min-width: 64rem) {
-  .chat-settings-form {
-    grid-template-columns: minmax(0, var(--chat-settings-label-width)) 1fr;
-  }
-}
-
 .z-sticky {
   z-index: var(--z-sticky);
 }

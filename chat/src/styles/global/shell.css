@@ -12,10 +12,6 @@
   color: var(--foreground);
 }
 
-.chat-mobile-header {
-  min-height: var(--chat-mobile-header-height);
-}
-
 .chat-workspace {
   display: flex;
   min-width: 0;

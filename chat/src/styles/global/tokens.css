@@ -107,7 +107,6 @@
   --leading-control: 1.35;
   --leading-body: 1.5;
   --leading-message: 1.5;
-  --chat-mobile-header-height: 3.5rem;
   --chat-sidebar-width: clamp(16.5rem, 18vw, 19rem);
   --chat-header-height: 3.5rem;
   --chat-content-inline: clamp(1rem, 2vw, 2rem);
@@ -116,9 +115,7 @@
   --chat-readable-measure: 72ch;
   --chat-thread-width: clamp(22rem, 32vw, 30rem);
   --chat-drawer-width: min(88vw, 22rem);
-  --chat-profile-drawer-width: min(88vw, 20rem);
   --chat-reaction-popover-width: min(22rem, calc(100vw - 2rem));
-  --chat-settings-label-width: 13rem;
   --chat-profile-menu-width: 18rem;
   --chat-account-menu-width: 14rem;
   --chat-channel-thread-indent: 1.75rem;
