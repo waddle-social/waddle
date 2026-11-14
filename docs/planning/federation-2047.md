@@ -244,8 +244,8 @@ creates them. Step numbers refer to the verification phase below.
 | G2 Concrete verifier | W4b | Verifier design | W4b merge | W4b set on completion (D9); steps 2 and 6 |
 | G3 Codec and restart buffers | W4a | Handshake design | W4a merge; the decisions are already recorded there and are reviewed before that merge | Step 2 |
 | G4 Transport design review | Independent reviewer, on the recorded G1–G3 decisions | Handshake design | W4c merge | Review only |
-| G5 Dialback profile, active failures and residual risk | W4d | `server/docs/planning/s2s-dialback-2047.md` | W4d merge; enabling inbound dialback | Steps 2 (XEP-0220 suite with XEP-0185 keys), 6 and 7 |
-| G6 Discovery profile, addressing and the loopback and `.test` restriction | W4d, using W5i's domain classification | `server/docs/planning/s2s-discovery-2047.md` | W4d merge | Step 2 (XEP-0368 stub-resolver suite, including lookups without a resolver search list); step 6 for configured endpoints, refused domain forms and redirects |
+| G5 Dialback profile, active failures and residual risk | W4d | [Dialback design](../../server/docs/planning/s2s-dialback-2047.md) | W4d merge; enabling inbound dialback | Steps 2 (XEP-0220 suite with XEP-0185 keys), 6 and 7 |
+| G6 Discovery profile, addressing and the loopback and `.test` restriction | W4d, using W5i's domain classification | [Discovery design](../../server/docs/planning/s2s-discovery-2047.md) | W4d merge | Step 2 (XEP-0368 stub-resolver suite, including lookups without a resolver search list); step 6 for configured endpoints, refused domain forms and redirects |
 | G7 Admission configuration and resource model | W4c | `server/docs/planning/s2s-connection-manager-2047.md` | W4c merge | Steps 6 and 8 |
 | G8 Federated handoff contract | W5a | `server/docs/planning/s2s-routing-2047.md` | W5a merge | Steps 6, 7 and 8 |
 | G9 Authorization ID codec | W1 | [Host-grant design](../../server/docs/planning/host-grant-authority-2047.md); W1's cutover runbook | W1 merge | Steps 2 and 4 |

@@ -68,13 +68,15 @@ wiring in `server/lifecycle.rs`.
   mechanism, if one is added, closes such streams with `policy-violation`
   and is reviewed under G7 again. Files changed on disk change nothing
   until restart.
-- Until the discovery slice lifts it (gate G6), every configured domain
-  must be within `.test` and the listener and every endpoint must be
-  loopback addresses; peer admission refuses any domain outside `.test` as
-  well. Denylist entries are the exception: they only refuse, so they may
-  name any DNS domain and an operator can pre-provision real domains.
+- Under the default `peer_scope = "test"`, every configured domain must be
+  within `.test` and the listener and every endpoint must be loopback
+  addresses; peer admission refuses any domain outside `.test` as well.
+  Denylist entries are the exception: they only refuse, so they may name
+  any DNS domain and an operator can pre-provision real domains.
   Admission checks the denylist before the `.test` restriction, so its
   refusal does not change when the restriction is lifted.
+  `peer_scope = "public"` lifts the restriction (gate G6; see
+  [the discovery design](s2s-discovery-2047.md#the-peer-scope-lifting-the-loopback-and-test-restriction)).
 - The ring crypto provider is pinned for every S2S rustls configuration
   instead of the process default, so the TLS stack and the verifier's
   algorithm set cannot diverge.
@@ -96,8 +98,8 @@ wiring in `server/lifecycle.rs`.
 - A local domain is never admitted as a remote peer.
 - The dialback list and the trusted-home list never admit a domain:
   `permits_dialback` and `is_trusted_home` both require the domain to be
-  admitted first. Dialback is not implemented in this release; the list is
-  validated and kept for the dialback slice. An entry of either list that
+  admitted first. Inbound dialback also needs `dialback.inbound`
+  ([the dialback design](s2s-dialback-2047.md)). An entry of either list that
   the admission mode never admits (every entry in `closed` mode, one
   missing from the allowlist in `allowlist` mode) has no effect; the
   snapshot loads and a warning names the setting and the entry's position.
@@ -139,17 +141,22 @@ wiring in `server/lifecycle.rs`.
   is no inbound direct TLS. The pre-TLS header must
   carry `from` (`bad-format` otherwise); the admitted pair fixes the
   reference identity and trust profile before the handshake.
-- **Outbound** dials only configured endpoints through the
-  `EndpointResolver` trait, which the discovery slice implements, with
-  STARTTLS only: XEP-0368 direct TLS is deferred to the discovery slice with
-  `_xmpps-server` discovery (owner decision). Endpoints are tried in order
-  until one accepts the TCP connection; any failure after that, including a
-  received `see-other-host`, ends the attempt. A redirect is never followed.
+- **Outbound** dials the endpoints the `EndpointResolver` returns: the
+  configured endpoints of the domain, or, when `[discovery]` is enabled
+  and none is configured, DNS discovery, with STARTTLS or XEP-0368 direct
+  TLS as each endpoint says
+  ([the discovery design](s2s-discovery-2047.md)). Endpoints are tried in
+  order until one accepts the TCP connection, a DNS-derived address
+  checked against the blocked address classes immediately before; any
+  failure after that, including a received `see-other-host`, ends the
+  attempt. A redirect is never followed.
 - Both directions authenticate with certificate verification and SASL
-  EXTERNAL. `PeerVerifier::established` on the completed connection is the
-  only evidence used; the certificate is checked again for currency before
-  EXTERNAL succeeds on an inbound stream and at establishment on an outbound
-  one. A clock that cannot tell the time denies authorization.
+  EXTERNAL, or, where `[dialback]` enables it, XEP-0220 dialback over TLS
+  ([the dialback design](s2s-dialback-2047.md)). `PeerVerifier::established`
+  on the completed connection is the only certificate evidence used; the
+  certificate is checked again for currency before EXTERNAL succeeds on an
+  inbound stream and at establishment on an outbound one. A clock that
+  cannot tell the time denies authorization.
 - **Registration.** A stream joins the registry, where it can replace a
   pair's stream or evict another, only when the post-SASL stream header
   completes negotiation, in both directions; a peer that stops after SASL
@@ -164,9 +171,10 @@ wiring in `server/lifecycle.rs`.
 - **`VerifiedPeerStream`** is constructed only by the connection manager
   and carries the connection id, direction, local and remote canonical
   domains (hence the verified directional pair), authentication strength
-  (`pkix`; `dialback` is reserved for the dialback slice), trust-profile
-  kind, matched identifier kind, TLS version and cipher suite, leaf
-  certificate digest, evidence expiry and configuration generation.
+  (`pkix` or `dialback`), TLS version and cipher suite, configuration
+  generation and, where the peer presented a verified certificate, its
+  trust-profile kind, matched identifier kind, digest and evidence expiry;
+  an inbound dialback stream without a certificate has none of the four.
 - **Stanzas.** An established inbound stream hands each stanza that passes
   the codec's address checks to a `StanzaSink`. The codec reads a stanza's
   `to` and `from` with the identity profile's parser, not JID preparation,
@@ -211,7 +219,7 @@ below the per-socket one. The values are bounds, not measured capacity.
 
 | Resource | Value | On exhaustion |
 | --- | --- | --- |
-| Open sockets, all stages | 32 (16 inbound, 16 outbound) | Inbound: only a socket every other accept limit admits can find the inbound cap full. Then the established inbound stream without traffic the longest is evicted if it has had none for the eviction idle time (30 s), and the new socket takes its place under the same lock; otherwise the socket is closed at accept, no byte read. A stream outside the reserve is evicted first; in `open` mode a new socket, whose peer is unknown at accept, never evicts a reserved peer's stream. Outbound: the same with outbound streams, where an attempt to a reserved peer may evict a reserved peer's stream when no other can be evicted; otherwise the attempt fails, no backoff. |
+| Open sockets, all stages | 32 (16 inbound, 16 outbound) | Inbound: only a socket every other accept limit admits can find the inbound cap full. Then the established inbound stream without traffic the longest is evicted if it has had none for the eviction idle time (30 s), and the new socket takes its place under the same lock; otherwise the socket is closed at accept, no byte read. A stream outside the reserve is evicted first; in `open` mode a new socket, whose peer is unknown at accept, never evicts a reserved peer's stream. Outbound: the same with outbound streams, but only once the attempt's own TCP connection is open (G6), and an attempt to a reserved peer may evict a reserved peer's stream when no other can be evicted; otherwise the attempt fails, no backoff. A dialback verification connection never evicts. |
 | Unauthenticated inbound sockets | 8 globally, 2 per source address (ceiling 4) | Closed at accept. |
 | Tracked source addresses | 256, idle entries expire after 60 s | A new address is closed at accept while full. |
 | Accept rate | 8/s burst 8 globally; 2/s burst 4 per address | Closed at accept. Every per-address limit is checked before a global token is spent, so a source over its own limits cannot drain the allowance others share. |
@@ -221,7 +229,8 @@ below the per-socket one. The values are bounds, not measured capacity.
 | Peers (remote domains with an established stream) | 12, below each direction's socket cap. In `open` mode, 9 for peers that are neither allowlisted nor trusted homes | Evict every stream of the peer whose latest traffic is oldest if none of its streams has had traffic for the eviction idle time, as for streams, and a peer outside the reserve only a peer outside it; otherwise refuse with `resource-constraint`. |
 | Negotiating streams per remote domain | 3 in each direction (ceiling 4), counted separately | An inbound connection counts only once TLS has verified the remote domain, and is closed with `resource-constraint` if the domain's inbound budget is full. Outbound: the attempt fails. |
 | Outbound attempts in progress | 8, one per directional pair | `ConnectError::Busy` or `InProgress`. |
-| Outbound backoff | Failing remote domains only; 1 s doubling to 300 s; 256 entries | A domain without an entry is never refused. When the table is full, a new failure replaces the entry updated longest ago among those whose wait has passed, or else the entry updated longest ago. |
+| New outbound connections | 4/s burst 8, attempts and dialback verification connections together | `ConnectError::RateLimited`; a verification connection answers a dialback error. No backoff. |
+| Outbound backoff | Failing remote domains only; 1 s doubling to 300 s; 256 entries | A domain without an entry is never refused. An entry is kept until its wait has passed: when the table is full, a new failure replaces the entry updated longest ago among those whose wait has passed, and is not recorded when every entry is still waiting (G6). |
 | Input rate | 64 KiB/s burst 128 KiB per socket; 512 KiB/s burst 1 MiB globally; each at least 32 KiB/s | Reads pause (backpressure); the connection is not closed for its rate. Deadlines still bound a throttled negotiation; the incomplete-element deadline adds back the time reads waited for the rates (see [Deadlines](#deadlines)). |
 | Output | rustls buffer limit 64 KiB per connection; each batch written within the 1 s write deadline | Close. |
 
@@ -240,10 +249,10 @@ NAT can put many peers behind one address, and a source with more address
 space than a /64 can spread across prefixes. One address can hold at most
 two of the four inbound handshakes, but two addresses can hold all four,
 and four addresses every unauthenticated socket, delaying every other
-peer's new connections until their stage deadlines close them. While S2S is
-limited to loopback endpoints and `.test` domains (before gate G6) both are
-accepted; they are decided again with discovery (G6) and at activation
-(G20).
+peer's new connections until their stage deadlines close them. Both are
+accepted; G6 kept the per-address limits for the public peer scope
+([discovery design](s2s-discovery-2047.md#connection-manager-follow-ups-decided-here-g6)),
+and activation (G20) decides them again.
 
 **Traffic and eviction.** Traffic is a first-level element or stream header
 received, or anything sent; whitespace keepalives are not traffic. They
@@ -268,15 +277,15 @@ and trusted-home peers in `open` mode:
   (16), so busy streams of peers outside the reserve and unauthenticated
   sockets can fill every inbound socket and keep a reserved peer from
   connecting inbound until one of them ends or goes quiet; the reserved
-  peer's own outbound streams are unaffected. This is accepted with the
-  per-address limits while S2S is limited to loopback and `.test` (before
-  G6), and decided again at G6 and G20, either by resizing the defaults so
-  the general share and the unauthenticated cap fit the inbound socket cap
-  or by reserving inbound sockets.
+  peer's own outbound streams are unaffected. G6 recorded this (NB1) and
+  left it open: `allowlist`, the default mode, is unaffected, and it is
+  decided with the switch of the default to `open` and at G20, either by
+  resizing the defaults so the general share and the unauthenticated cap
+  fit the inbound socket cap or by reserving inbound sockets.
 - A certificate with a wildcard name, or with many names, authenticates
   one remote domain per name it covers, and each is a separate peer. One
   such certificate can therefore fill the general share of the peer and
-  stream caps by itself in `open` mode. Accepted before G6; G20 and the
+  stream caps by itself in `open` mode. Accepted; G20 and the
   peer-identity slice (W12) decide whether peers are grouped by
   certificate or by registrable domain for these caps.
 
@@ -299,17 +308,12 @@ established stream and takes the pair's dial slot under one lock, and an
 attempt registers its stream before it gives up the slot, so two requests
 for one pair never dial twice.
 
-Two limits of this design are recorded for discovery (G6), when local
-users' requests can reach arbitrary domains:
-
-- **Backoff flush.** Failures to more distinct domains than the table holds
-  (256) replace the entries of failing domains that are still waiting, so
-  a sender who can make this server dial many failing domains can flush a
-  domain's backoff and have it dialled again before its wait ends.
-- **No global dial rate.** Only the number of attempts in progress (8) is
-  capped; there is no rate on new outbound attempts across all domains, so
-  attempts that fail quickly can follow one another without pause, each to
-  a domain without a backoff entry.
+The discovery slice (G6) closed the two limits this design recorded for
+the time local users' requests can reach arbitrary domains: failures to
+many domains can no longer flush a waiting backoff entry, and a global
+dial rate bounds new outbound connections. A DNS lookup failure and a
+domain whose every address is blocked back off like a failed connection.
+See [the discovery design](s2s-discovery-2047.md#connection-manager-follow-ups-decided-here-g6).
 
 ## Deadlines
 
@@ -318,6 +322,7 @@ users' requests can reach arbitrary domains:
 | TCP connect, per endpoint | 5 s | — |
 | Each negotiation stage: initial header, TLS handshake, each expected restart | 5 s | No |
 | SASL phase, from the post-TLS header | 5 s | No, nor by replaced or aborted exchanges |
+| Dialback exchange: verifying an inbound key, or awaiting the result of an outbound one | 15 s (`dialback_timeout_ms`), within the whole negotiation | No |
 | Whole negotiation, from accept or connect | 20 s | No |
 | Unfinished first-level element on an established stream | 5 s of time the server is willing to read; time reads wait for the input rates is added back, up to 30 s for the element in all | No; completing an element restarts it for the next one |
 | Established-stream idle | 300 s (ceiling 3,600 s) | Yes, by anything received or sent, whitespace keepalives included |
@@ -399,22 +404,26 @@ and 8.
 ## Telemetry
 
 Metrics, through the telemetry macros, with attributes from the allowlist
-only (`S2sDirection`, `S2sOutcome`, `S2sResource`, `S2sTransport`) and never
-a domain, address, JID or stream id: `waddle.s2s.connections` (ended
-connections by direction and outcome), `waddle.s2s.capacity.refusals` (by
-direction and resource), `waddle.s2s.established` (by direction and
-transport), `waddle.s2s.negotiation.duration` (milliseconds, by direction)
-and the `waddle.s2s.streams` gauge (by direction). Logs carry the connection
+only (`S2sDirection`, `S2sOutcome`, `S2sResource`, `S2sTransport`,
+`S2sStrength`, `S2sDialbackRole`, `S2sDialbackResult`, `S2sDiscovery`) and
+never a domain, address, JID or stream id: `waddle.s2s.connections` (ended
+connections by direction and outcome, including dialback refusals and
+completed verification connections), `waddle.s2s.capacity.refusals` (by
+direction and resource, including the dial rate), `waddle.s2s.established`
+(by direction, transport and strength), `waddle.s2s.negotiation.duration`
+(milliseconds, by direction), the `waddle.s2s.streams` gauge (by
+direction), `waddle.s2s.dialback` (by role and result) and
+`waddle.s2s.discovery` (by endpoint source). Logs carry the connection
 id, codes and counts; certificate failures log `VerifyError::code` only.
 
 ## Follow-ups
 
-- The discovery slice: `_xmpps-server` direct TLS dialling, DNS discovery
-  behind `EndpointResolver`, and lifting the loopback and `.test`
-  restriction (G6), with the per-address limits decided again.
-- The dialback slice: the `dialback` strength, the dialback list's use, and
-  its own decision whether an absent client certificate may reach dialback
-  (the receiving TLS configuration requires one today).
+- Done in the discovery and dialback slice (W4d): `_xmpps-server` direct
+  TLS dialling, DNS discovery behind `EndpointResolver`, the peer scope
+  that lifts the loopback and `.test` restriction, the per-address limits
+  decided again ([discovery design](s2s-discovery-2047.md)); the `dialback`
+  strength, the dialback list's use and when an absent client certificate
+  may reach dialback ([dialback design](s2s-dialback-2047.md)).
 - Routing: replace `RefuseAllStanzas`, carry the stream's strength and
   trust-profile kind into the remote principal, and address stanzas to
   peers in U-labels as stream headers already are.
@@ -428,6 +437,8 @@ id, codes and counts; certificate failures log `VerifyError::code` only.
 - Measurement: the time a stanza at the 512 KiB ceiling takes when many
   streams share an exhausted global input rate, against the 30-second
   bound on one element.
-- Discovery (G6) and activation (G20): the socket-layer reserve, handshake
-  monopolisation by a few source addresses, backoff flush, a global dial
-  rate and wildcard-certificate peers, recorded above.
+- Activation (G20) and the switch of the default mode to `open` (D1): the
+  socket-layer reserve (NB1, recorded in the discovery design), handshake
+  monopolisation by a few source addresses and wildcard-certificate peers,
+  recorded above. Backoff flush and the global dial rate were settled at
+  G6.

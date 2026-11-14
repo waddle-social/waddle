@@ -582,9 +582,14 @@ the identity profile's address parser (`identity::parse_jid`), also without
 JID preparation, compared with the stream's pair, and handed on rewritten
 in canonical form.
 
-**Direct TLS.** Outbound XEP-0368 direct TLS is deferred to the discovery
-slice (W4d), which brings `_xmpps-server` targets. The connection manager
-dials STARTTLS only, and the codec has no direct-TLS entry point.
+**Direct TLS.** Outbound XEP-0368 direct TLS was deferred to the discovery
+slice (W4d), which brings `_xmpps-server` targets. It adds a direct-TLS
+entry to the initiating machine (`TlsEntry::DirectTls`): the first step
+is the TLS handshake, with no plaintext header and no `<starttls/>`, the
+Server Name Indication is the remote domain and the `xmpp-server` ALPN
+protocol is offered; everything after TLS is unchanged, including the
+refusal of a STARTTLS offer. Inbound direct TLS stays deferred. See
+[the discovery design](s2s-discovery-2047.md#direct-tls-xep-0368).
 
 **Admission refusals before TLS** receive `policy-violation`, whichever rule
 refused the pair (the table above). A probe can still tell an admitted
@@ -612,8 +617,11 @@ example `host-unknown`), and anything else closes it with the condition the
 header check found.
 
 **Dialback namespace.** `StreamHeader::declare_dialback` binds the
-`jabber:server:dialback` namespace to the `db` prefix on an emitted header,
-for the dialback slice. Nothing sets it in this release.
+`jabber:server:dialback` namespace to the `db` prefix on an emitted header.
+The dialback slice (W4d) sets it where a dialback role applies to the
+stream, and the decision points that refused dialback while it was
+disabled now implement the XEP-0220 roles where configuration enables
+them; see [the dialback design](s2s-dialback-2047.md).
 
 **Trusted homes on the public profile (D8).** A domain on the trusted-home
 list may authenticate under the public-WebPKI profile; an operator who
