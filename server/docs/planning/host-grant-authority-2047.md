@@ -1357,7 +1357,8 @@ With no scope enrolled, these changes alter behaviour for every room:
   it, and admin channel or Space command makes one bounded host-grant read,
   and fails closed when it cannot be made.
 - A Spaces publish of an existing channel needs the channel's `manage`
-  permission unless the channel already belongs to that Space (all rooms).
+  permission or deployment ownership, unless the channel already belongs to
+  that Space by its link or its parent relationship (all rooms).
 - Subscribing to, receiving events from and publishing to a room-bound
   extension node follow the room's current right (all rooms).
 - The owner reseed no longer lifts a ban on any node; Owner seeds and

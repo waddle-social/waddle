@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "90cbb1968c76489a5770f63852956807fd5b0a61",
+  "baseline_commit": "33e65f08ce566e76cd07a5c3e5383240520edb24",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -165,7 +165,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs",
-      "sha256": "8e7e990252a8d9714655024f697ab29cea55bccc6c36e096cecf1a1142670935"
+      "sha256": "33dce8fd4524f0d2b12d9b65c2b5534d2bbd78bdf076c145ecb1972a668217d3"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs",
@@ -398,12 +398,12 @@
     },
     "parent-publish": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs",
-      "line": 16,
+      "line": 17,
       "text": "pub(super) async fn handle_spaces_publish("
     },
     "parent-rollback": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs",
-      "line": 472,
+      "line": 495,
       "text": "async fn rollback_spaces_publish("
     },
     "parent-cleanup": {
@@ -713,7 +713,7 @@
     },
     "placement": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs",
-      "line": 397,
+      "line": 400,
       "text": "async fn channel_placement_allowed("
     },
     "extension-route-access": {
@@ -765,7 +765,7 @@
     "host_grant_affiliation"
   ],
   "lexical_snapshot": {
-    "sha256": "f334d61616802b32c5c22330e0263df3be9350b73a25e794ca8ab6803cba3fed",
+    "sha256": "375ce5457c6de01930d924ceecbe5cfbbf8a30ea11840b70853708669909609c",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,

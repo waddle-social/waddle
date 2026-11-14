@@ -4,7 +4,7 @@ Status: source inventory for #2047 F0; **production closure is not established**
 Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
-through `90cbb1968c76489a5770f63852956807fd5b0a61` (see the last refresh
+through `33e65f08ce566e76cd07a5c3e5383240520edb24` (see the last refresh
 below); the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -133,7 +133,7 @@ subscriptions there are never a second grant store.
 **W8 — Parent/bookmark/link changes and compensation (concrete).**
 [Spaces publish/move](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L16) separately changes the bookmark, SQL
 channel-space link and graph parent once
-[the publisher manages the channel or it already belongs to the Space](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L397),
+[the publisher manages the channel or owns the deployment, or the channel already belongs to the Space](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L400),
 then runs [stale cleanup](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_bookmark_cleanup.rs#L4).
 [Publish rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L472), [retract](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs#L17) and
 [Space deletion](../../crates/waddle-server/src/admin/spaces.rs#L1116) can remove or restore these inputs. Error results
@@ -346,7 +346,7 @@ in this second target-main delta. This remains a selected static review: new
 vocabulary, external writers and unreviewed files can still escape it.
 
 The selected evidence was refreshed a third time for the host-grant writer
-fence, through `90cbb1968c76489a5770f63852956807fd5b0a61`:
+fence, through `33e65f08ce566e76cd07a5c3e5383240520edb24`:
 
 - The canonical host-grant store (`permissions/host_grant`) is a grant store
   and its acceptance admission an acceptance authority; both are anchored
