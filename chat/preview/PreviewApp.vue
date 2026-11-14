@@ -6,6 +6,9 @@ import { connectionStore } from "@/lib/connection-store";
 import { appController } from "@/stores/app-controller";
 import { $xmppStatus } from "@/stores/xmpp-status";
 import type { ChatAppController } from "@/shell/chat-app-controller";
+import { seedInbox } from "./inbox-preview";
+import { seedSettings } from "./settings-preview";
+import { seedAdmin } from "./admin-preview";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
@@ -79,6 +82,10 @@ function seed(c: ChatAppController) {
   } else {
     $xmppStatus.set({ state: "online", detail: "" });
   }
+  // Area fixtures (each returns unless the screen has its prefix).
+  seedInbox(c, screen);
+  seedSettings(c, screen);
+  seedAdmin(c, screen);
 }
 
 watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: true });
