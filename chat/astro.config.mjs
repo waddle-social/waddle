@@ -5,7 +5,6 @@ import cloudflare from "@astrojs/cloudflare";
 import pandacss from "@pandacss/vite";
 import { waddleFonts } from "@waddle/design/astro-fonts";
 import faroUploader from "@grafana/faro-rollup-plugin";
-import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
 import { noiseSuppressionAudioWorkletVitePlugin } from "@workadventure/noise-suppression/vite";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
@@ -161,10 +160,8 @@ export default defineConfig({
       },
     },
     plugins: [
-      // Panda first: it appends its generated CSS to global.css (the file
-      // declaring the pd_* layers) before Tailwind compiles that file.
+      // Appends the generated CSS to global.css (the file declaring the pd_* layers).
       pandacss(),
-      tailwindcss(),
       // Serve the DTLN (@workadventure/noise-suppression) AudioWorklet module
       // and its bundled LiteRT/model assets from our own origin — the #914 AI
       // noise filter must be self-hosted, no third-party CDN.

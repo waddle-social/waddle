@@ -10,19 +10,11 @@
  * (src/styles/global.css). `panda codegen` still runs before dev, build,
  * test and lint so `styled-system/` exists for type checking and Knip.
  *
- * Tailwind coexistence (Tailwind v4 stays installed until every component
- * is migrated):
- * - Layers are prefixed `pd_*` so they never merge with Tailwind's `base`
- *   and `utilities`. global.css fixes the order
- *   `theme, base, pd_*, components, utilities`: Panda beats Tailwind's
- *   reset, and Tailwind utilities on not-yet-migrated markup still beat
- *   Panda's element-level global CSS.
- * - Panda preflight is off; Tailwind's reset (preflight) is the one reset.
- *   Turn Panda's on when Tailwind is removed.
- * - The legacy `--background`, `--primary`, … variables in
- *   src/styles/global/tokens.css alias the Panda semantic token variables,
- *   so Tailwind utilities and the `.chat-*` sheets already use Polar Huddle
- *   colours.
+ * Cascade: layers are prefixed `pd_*`; global.css fixes their order around
+ * the legacy `base` (body) and `components` (`.chat-*` hooks) layers. Panda's
+ * preflight is the reset. The legacy `--background`, `--primary`, …
+ * variables in src/styles/global/tokens.css alias the Panda semantic token
+ * variables for the remaining `.chat-*` rules.
  *
  * Recipes: every preset recipe and variant is emitted (`staticCss`), so
  * `btn({ variant: props.tone })` works with runtime values. `css()` is
@@ -42,7 +34,7 @@ import { waddlePreset } from "@waddle/design";
 
 export default defineConfig({
   presets: ["@pandacss/preset-base", waddlePreset],
-  preflight: false,
+  preflight: true,
   include: ["./src/**/*.{ts,vue,astro}"],
   exclude: [],
   outdir: "styled-system",

@@ -1,10 +1,8 @@
-/* Cascade order while Tailwind and Panda coexist (see panda.config.ts):
-   Tailwind's reset < Panda (pd_*) < Tailwind utilities. Declared before the
-   Tailwind import so its own `@layer theme, base, components, utilities`
-   statement cannot reorder them. @pandacss/vite appends the generated
+/* Cascade order: Panda's reset and globals, then the legacy body rules
+   (base), Panda tokens, recipes and utilities, then the remaining legacy
+   `.chat-*` hook rules (components). @pandacss/vite appends the generated
    styles to this file because it declares the Panda layers. */
-@layer theme, base, pd_reset, pd_base, pd_tokens, pd_recipes, pd_utilities, components, utilities;
-@import "tailwindcss";
+@layer pd_reset, pd_base, base, pd_tokens, pd_recipes, pd_utilities, components;
 @import "./global/tokens.css";
 @import "./global/motion.css";
 @import "./global/controls.css";
