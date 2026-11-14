@@ -76,6 +76,28 @@ pub(super) fn is_sasl2_response_parse_failure(frame: &str, err: &ParseError) -> 
     }
 }
 
+/// Whether a frame that parsing refused is nonetheless a stanza: a
+/// well-formed `<iq/>`, `<message/>` or `<presence/>` in the `jabber:client`
+/// namespace, refused for its content (an address outside the identity
+/// profile, or a payload the typed parser rejects).
+///
+/// Such a frame counts toward the XEP-0198 handled count. A frame that is
+/// not well-formed XML, an element in another namespace, and every
+/// non-stanza element (SASL, stream management, an unknown root) are not
+/// stanzas and are not counted.
+pub(super) fn is_refused_client_stanza(frame: &str, err: &ParseError) -> bool {
+    if !matches!(
+        err,
+        ParseError::IdentityProfile { .. } | ParseError::InvalidStanza { .. }
+    ) {
+        return false;
+    }
+    Element::from_str(&inject_client_ns_if_missing(frame)).is_ok_and(|element| {
+        element.ns() == waddle_xmpp::ns::JABBER_CLIENT
+            && matches!(element.name(), "iq" | "message" | "presence")
+    })
+}
+
 pub(super) fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
     match (parse_error_root_name(frame), err) {
         _ if is_sasl2_parse_failure(frame, err) => {

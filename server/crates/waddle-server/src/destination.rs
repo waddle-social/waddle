@@ -12,12 +12,11 @@
 //! IQ requests then receive the error from [`unroutable_iq_reply`] and IQ
 //! results and errors are dropped.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use jid::{BareJid, DomainPart, DomainRef, FullJid, Jid};
-use waddle_xmpp::identity::canonical_jid;
+use waddle_xmpp::identity::{canonical_jid, CanonicalDomain, DomainKind};
 use waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo;
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::Stanza;
@@ -206,17 +205,41 @@ impl RemoteDestination {
 
 /// Why an unserved domainpart cannot name a federation peer.
 ///
-/// RFC 7622 §3.2 permits both forms in an address but notes that IP-literal
-/// domainparts might not be accepted for server-to-server communication and
-/// that unqualified hostnames resolve only on a local network. A peer is
-/// discovered through DNS SRV records and authenticated by a DNS reference
-/// identity (RFC 6120 §13.7.2, RFC 9525), and neither form can satisfy both.
+/// The reasons follow the identity profile's domain classification
+/// ([`DomainKind`]); only a fully qualified DNS name can name a peer
+/// (ADR-0020 D3). RFC 7622 §3.2 permits IP literals and unqualified hostnames
+/// in an address but notes that IP-literal domainparts might not be accepted
+/// for server-to-server communication and that unqualified hostnames resolve
+/// only on a local network. A peer is discovered through DNS SRV records and
+/// authenticated by a DNS reference identity (RFC 6120 §13.7.2, RFC 9525),
+/// and none of these forms can satisfy both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InvalidDestination {
     /// An IPv4 address or bracketed IPv6 address.
     IpLiteral,
+    /// A name a resolver or URL parser reads as an IPv4 address, such as
+    /// `2130706433`, `0x7f.1` or `127.1` ([`DomainKind::NumericIpv4Form`]).
+    NumericIpv4Form,
     /// A single DNS label with no parent domain.
     UnqualifiedHost,
+    /// A domainpart the identity profile cannot prepare (IDNA2008 with STD3
+    /// rules), although the `jid` parser accepted it, such as one containing
+    /// `_`. Client stanzas never carry one, because the frame parser refuses
+    /// it first.
+    UnpreparableDomain,
+}
+
+impl InvalidDestination {
+    /// The reason a domain of `kind` cannot name a peer, or `None` for a
+    /// fully qualified DNS name.
+    pub fn for_kind(kind: DomainKind) -> Option<Self> {
+        match kind {
+            DomainKind::Dns => None,
+            DomainKind::SingleLabel => Some(Self::UnqualifiedHost),
+            DomainKind::NumericIpv4Form => Some(Self::NumericIpv4Form),
+            DomainKind::Ipv4 | DomainKind::Ipv6 => Some(Self::IpLiteral),
+        }
+    }
 }
 
 /// `address` in the identity profile's canonical form
@@ -235,22 +258,20 @@ pub enum InvalidDestination {
 /// parser applies the profile to their decoded addresses and refuses
 /// spellings it would fold. An address that cannot be put in canonical form
 /// (a domain that IDNA2008 rejects although the `jid` parser accepted it) is
-/// returned unchanged; it matches no served domain, so it classifies as
-/// unserved.
+/// returned unchanged; it matches no served domain and classifies as
+/// [`InvalidDestination::UnpreparableDomain`].
 pub fn canonical_address(address: &Jid) -> Jid {
     canonical_jid(address).unwrap_or_else(|_| address.clone())
 }
 
+/// Classify an unserved domain with the identity profile's
+/// [`CanonicalDomain::kind`], the one classification admission, routing and
+/// discovery share.
 fn unroutable_domain(domain: &DomainRef) -> Option<InvalidDestination> {
-    let raw = domain.as_str();
-    let ipv6 = raw
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-        .is_some_and(|inner| inner.parse::<Ipv6Addr>().is_ok());
-    if ipv6 || raw.parse::<Ipv4Addr>().is_ok() {
-        return Some(InvalidDestination::IpLiteral);
+    match CanonicalDomain::from_domain(domain) {
+        Ok(domain) => InvalidDestination::for_kind(domain.kind()),
+        Err(_) => Some(InvalidDestination::UnpreparableDomain),
     }
-    (!raw.contains('.')).then_some(InvalidDestination::UnqualifiedHost)
 }
 
 /// Why a stanza addressed to an unserved domain was not routed.
@@ -290,10 +311,20 @@ impl UnroutableReason {
                 DefinedCondition::RemoteServerNotFound,
                 "IP-literal domains cannot be reached from this server.",
             ),
+            Self::InvalidDestination(InvalidDestination::NumericIpv4Form) => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "Numeric IPv4 domains cannot be reached from this server.",
+            ),
             Self::InvalidDestination(InvalidDestination::UnqualifiedHost) => (
                 ErrorType::Cancel,
                 DefinedCondition::RemoteServerNotFound,
                 "Unqualified domains cannot be reached from this server.",
+            ),
+            Self::InvalidDestination(InvalidDestination::UnpreparableDomain) => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "The domain is not a valid domain name.",
             ),
             Self::RouteTimedOut => (
                 ErrorType::Wait,

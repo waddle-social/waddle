@@ -3,8 +3,8 @@ use super::frame_backstop::{
     StanzaTimeout,
 };
 use super::parse_errors::{
-    is_sasl2_parse_failure, is_sasl2_response_parse_failure, is_sasl_parse_failure,
-    parse_error_responses,
+    is_refused_client_stanza, is_sasl2_parse_failure, is_sasl2_response_parse_failure,
+    is_sasl_parse_failure, parse_error_responses,
 };
 use super::resource_binding::handle_resource_binding;
 use super::sasl::{
@@ -451,6 +451,10 @@ enum MalformedInboundInput {
     Protocol {
         sasl: MalformedSaslInput,
         responses: Option<Vec<ResponseFrame>>,
+        /// The frame is a stanza that parsing refused (see
+        /// [`is_refused_client_stanza`]); it counts toward the XEP-0198
+        /// handled count like any other stanza the server processed.
+        stanza: bool,
     },
 }
 
@@ -504,8 +508,13 @@ impl ClassifiedInboundFrame {
                             let responses = parse_error_responses(frame, &error).map(|responses| {
                                 responses.into_iter().map(ResponseFrame::from).collect()
                             });
+                            let stanza = is_refused_client_stanza(frame, &error);
                             warn!(error = %error, len = frame.len(), "Classified malformed XMPP frame");
-                            MalformedInboundInput::Protocol { sasl, responses }
+                            MalformedInboundInput::Protocol {
+                                sasl,
+                                responses,
+                                stanza,
+                            }
                         }
                     };
                     ClassifiedInboundInput::Malformed(malformed)
@@ -717,7 +726,11 @@ async fn handle_xmpp_frame_impl(
             conn.begin_server_stream_open_response();
             return stream_open_error_response(domain, None, condition);
         }
-        ClassifiedInboundInput::Malformed(MalformedInboundInput::Protocol { sasl, responses }) => {
+        ClassifiedInboundInput::Malformed(MalformedInboundInput::Protocol {
+            sasl,
+            responses,
+            stanza,
+        }) => {
             if sasl2_authentication_pending(phase) {
                 if sasl == MalformedSaslInput::Sasl2Response {
                     clear_sasl2_authentication_pending(phase, AuthFailure::ScramMalformed);
@@ -731,6 +744,15 @@ async fn handle_xmpp_frame_impl(
                 *phase = ConnectionPhase::closing(None);
                 *authenticated_session = None;
                 return vec![websocket_stream_close_element()].into();
+            }
+            if stanza {
+                count_refused_stanza(
+                    state,
+                    phase,
+                    registry_owner.as_ref(),
+                    sm_state,
+                    sm_inbound_completion,
+                );
             }
             if let Some(responses) = responses {
                 if phase.scram_pending_username().is_some() && sasl != MalformedSaslInput::None {
@@ -1302,6 +1324,47 @@ async fn handle_xmpp_frame_impl(
             responses
         }
     }
+}
+
+/// Count a stanza that parsing refused as handled (XEP-0198 §4).
+///
+/// "Handled" means the server has accepted responsibility for the stanza,
+/// which includes processing it directly. A stanza refused at parsing has
+/// been processed to completion: it was answered with a stanza error where
+/// RFC 6120 allows one, or dropped where it forbids one, and resending it
+/// after resumption would be refused again. The client counts every stanza
+/// it sends, so leaving one out would also shift every later
+/// acknowledgement onto the wrong stanza. It completes in order behind any
+/// stanza still being dispatched.
+///
+/// Only a bound stream with stream management enabled counts, and a stream
+/// that lost its registry slot to a replacement counts nothing more, as for
+/// parsed stanzas.
+fn count_refused_stanza(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
+    sm_state: &mut waddle_xmpp::stream_management::StreamManagementState,
+    completion: &mut SmInboundCompletionTracker,
+) {
+    if !sm_state.enabled {
+        return;
+    }
+    let Some(bound) = phase.bound_jid() else {
+        return;
+    };
+    if let Some(owner) = registry_owner {
+        if !state
+            .deps
+            .protocol
+            .connection_registry
+            .is_owned_by(bound, owner)
+        {
+            return;
+        }
+    }
+    let sequence = completion.reserve(sm_state);
+    completion.complete(sequence, sm_state);
 }
 
 pub(super) fn settle_inbound_dispatch(

@@ -319,6 +319,11 @@ pub async fn local_account_jid_exists(
 /// address. An entry is returned only under its stored name's canonical
 /// address; a row whose stored name preparation would change is left out
 /// rather than presented under another account's address.
+///
+/// Rows are one account only when their stored names are identical (an OIDC
+/// row and the native row its SCRAM sign-in mirrors). Names that differ only
+/// in case are different rows, so a legacy `Bob` never takes the place of
+/// the canonical `bob` before the non-canonical row is left out.
 pub(crate) async fn search_local_accounts(
     actor: &ActorRef<DbActor>,
     domain: &str,
@@ -346,7 +351,7 @@ pub(crate) async fn search_local_accounts(
                     FROM native_users WHERE domain = ?
                 ), ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY LOWER(xmpp_localpart) ORDER BY source, username
+                        PARTITION BY xmpp_localpart ORDER BY source, username
                     ) AS position
                     FROM accounts
                 )

@@ -247,6 +247,52 @@ fn ip_literals_and_unqualified_hosts_are_invalid_destinations() {
 }
 
 #[test]
+fn numeric_ipv4_forms_are_invalid_destinations() {
+    // ADR-0020 D3: names a resolver or URL parser reads as an IPv4 address
+    // are refused as peers, by the identity profile's classification.
+    for address in [
+        "2130706433",
+        "0x7f.1",
+        "127.1",
+        "bob@0x7f000001",
+        "bob@0x7f.0x1/phone",
+        "1.2.3.0x4",
+        "0177.0.0.1",
+        "bob@017700000001",
+        "01.2.3.4",
+        "remote.test.123",
+    ] {
+        assert_eq!(
+            classify(address),
+            Destination::Invalid {
+                address: jid(address),
+                reason: InvalidDestination::NumericIpv4Form,
+            },
+            "{address}"
+        );
+    }
+    // A label that merely starts with digits or `0x` is a DNS label.
+    for address in ["bob@0x7f.example", "bob@example.0xg", "bob@123abc.test"] {
+        assert!(
+            matches!(classify(address), Destination::Remote(_)),
+            "{address}"
+        );
+    }
+}
+
+#[test]
+fn domains_the_profile_cannot_prepare_are_invalid_destinations() {
+    // The `jid` parser accepts `_`; IDNA2008 with STD3 rules does not.
+    assert!(matches!(
+        classify("bob@exa_mple.test"),
+        Destination::Invalid {
+            reason: InvalidDestination::UnpreparableDomain,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_single_label_home_domain_is_still_local() {
     let served = ServedDomains::new(domain("localhost"))
         .with_service(ServedService::Muc, domain("muc.localhost"));
@@ -276,7 +322,9 @@ fn unroutable_request_error_is_swapped_bounded_and_locally_attributed() {
     for reason in [
         UnroutableReason::FederationDisabled,
         UnroutableReason::InvalidDestination(InvalidDestination::IpLiteral),
+        UnroutableReason::InvalidDestination(InvalidDestination::NumericIpv4Form),
         UnroutableReason::InvalidDestination(InvalidDestination::UnqualifiedHost),
+        UnroutableReason::InvalidDestination(InvalidDestination::UnpreparableDomain),
     ] {
         let request = ping_get("room@muc.remote.test/nick");
         let reply = unroutable_iq_reply(&request, &sender, sender.domain(), reason)

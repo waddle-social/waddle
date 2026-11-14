@@ -514,9 +514,13 @@ async fn handle_muc_mediated_decline(
     // must name one of the recorded inviters; with exactly one
     // outstanding invitation a missing/mismatched `to` is forgiven
     // (there is nothing to disambiguate).
+    // The `to` is taken exactly under the identity profile, so a spelling
+    // that preparation would fold never selects another inviter's
+    // invitation; the C2S frame parser has already refused one with
+    // `<jid-malformed/>`.
     let declined_to = inbound_decline
         .attr("to")
-        .and_then(|to| to.parse::<jid::Jid>().ok())
+        .and_then(|to| waddle_xmpp::identity::parse_jid(to).ok())
         .map(|jid| jid.to_bare());
     let (invite, invitation_created_at) = match declined_to
         .as_ref()

@@ -334,10 +334,11 @@ pub async fn start_with_config_and_owner_outbox(
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
-    let server_owner_jids = resolve_server_owner_jids(
-        &bootstrap_membership::BootstrapMembershipConfig::from_env(),
-        &xmpp_config.domain,
-    );
+    // Owner entries outside the identity profile fail configuration load
+    // here, before any membership is provisioned from them.
+    let owner_config = bootstrap_membership::BootstrapMembershipConfig::try_from_env()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let server_owner_jids = resolve_server_owner_jids(&owner_config, &xmpp_config.domain);
     let state = Arc::new(AppState::new_with_deps(AppStateDeps {
         db_pool: Arc::clone(&db_pool),
         blob_storage,

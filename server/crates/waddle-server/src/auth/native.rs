@@ -25,7 +25,9 @@ use crate::db::{row_value, ValueExt};
 
 use super::directory::{canonical_account_jid, exact_account_jid};
 use super::AuthError;
-use waddle_xmpp::identity::{AccountLocalpart, CanonicalDomain, ACCOUNT_LOCALPART_MAX_BYTES};
+use waddle_xmpp::identity::{
+    AccountLocalpart, CanonicalBareJid, CanonicalDomain, ACCOUNT_LOCALPART_MAX_BYTES,
+};
 
 /// Default PBKDF2 iteration count for SCRAM key derivation.
 /// 4096 is the minimum recommended by RFC 7677.
@@ -68,14 +70,7 @@ impl NativeUserStore {
     pub async fn register(&self, request: RegisterRequest) -> Result<i64, AuthError> {
         // A new account must be in the account profile; its canonical bare
         // JID is its lookup key.
-        let localpart = validate_username(&request.username)?;
-        let domain = CanonicalDomain::parse_exact(&request.domain)
-            .ok()
-            .filter(|domain| domain.as_str() == request.domain)
-            .ok_or_else(|| {
-                AuthError::InvalidRequest("account domain is not in canonical form".to_string())
-            })?;
-        let jid = localpart.account_jid(&domain);
+        let jid = Self::validate_new_account(&request.username, &request.domain)?;
 
         // Check if the JID is already held, including by a name registered
         // before the account profile that folds to the same key.
@@ -149,6 +144,23 @@ impl NativeUserStore {
         );
 
         Ok(user_id)
+    }
+
+    /// The canonical bare JID a new account `username@domain` would hold,
+    /// or why it cannot be provisioned: the username must be in the account
+    /// profile ([`AccountLocalpart`]) and the domain already canonical, each
+    /// exactly as given. Callers that act on an account by name before
+    /// registering it validate first, because lookups by a name outside the
+    /// profile fold it onto another account's key.
+    pub fn validate_new_account(
+        username: &str,
+        domain: &str,
+    ) -> Result<CanonicalBareJid, AuthError> {
+        let localpart = validate_username(username)?;
+        let domain = CanonicalDomain::parse_canonical(domain).map_err(|_| {
+            AuthError::InvalidRequest("account domain is not in canonical form".to_string())
+        })?;
+        Ok(localpart.account_jid(&domain))
     }
 
     /// Check if an account holds the JID `username@domain`, in whatever case

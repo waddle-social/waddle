@@ -118,6 +118,10 @@ async fn stanzas_with_addresses_outside_the_profile_get_jid_malformed() {
             r#"<iq type="set" id="roster-case"><query xmlns="jabber:iq:roster"><item jid="Bob@localhost"/></query></iq>"#,
             "roster-case",
         ),
+        (
+            r#"<iq type="set" id="command-case" to="localhost"><command xmlns="http://jabber.org/protocol/commands" node="group-dm:create" action="execute"><x xmlns="jabber:x:data" type="submit"><field var="name" type="text-single"><value>pair</value></field><field var="member_jids" type="jid-multi"><value>admin@localhost</value><value>Bob@localhost</value></field></x></command></iq>"#,
+            "command-case",
+        ),
     ] {
         let response = round_trip(&mut client, frame, id).await;
         let Iq::Error {
@@ -149,6 +153,20 @@ async fn stanzas_with_addresses_outside_the_profile_get_jid_malformed() {
         DefinedCondition::JidMalformed
     );
 
+    // A mediated invitation names the account it grants membership to, so
+    // its `to` is held to the profile as well.
+    let invite = round_trip(
+        &mut client,
+        r#"<message id="invite-case" to="room@muc.localhost"><x xmlns="http://jabber.org/protocol/muc#user"><invite to="Bob@localhost"/></x></message>"#,
+        "invite-case",
+    )
+    .await;
+    assert_eq!(invite.attr("type"), Some("error"));
+    assert_eq!(
+        stanza_error(&invite).defined_condition,
+        DefinedCondition::JidMalformed
+    );
+
     // A trailing dot is canonicalized, not refused: the server answers its
     // own ping.
     let pong = round_trip(
@@ -161,6 +179,49 @@ async fn stanzas_with_addresses_outside_the_profile_get_jid_malformed() {
         Iq::try_from(pong).expect("typed IQ"),
         Iq::Result { .. }
     ));
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn refused_peer_domain_forms_are_unroutable_not_malformed() {
+    let server = TestServer::start();
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        server.fixed_account_password(),
+        "web",
+    )
+    .await
+    .expect("authenticated client");
+
+    // ADR-0020 D3: a stanza from a local account to an IP-address, numeric
+    // IPv4 or single-label domain receives <remote-server-not-found/>.
+    for (index, to) in [
+        "2130706433",
+        "0x7f.1",
+        "bob@127.1",
+        "bob@0x7f000001/phone",
+        "127.0.0.1",
+        "intranet",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("peer-form-{index}");
+        let frame =
+            format!(r#"<iq type="get" id="{id}" to="{to}"><ping xmlns="urn:xmpp:ping"/></iq>"#);
+        let response = round_trip(&mut client, &frame, &id).await;
+        let Iq::Error { error, .. } = Iq::try_from(response).expect("typed IQ") else {
+            panic!("{to}: expected an IQ error");
+        };
+        assert_eq!(error.type_, ErrorType::Cancel, "{to}");
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::RemoteServerNotFound,
+            "{to}"
+        );
+    }
     client.close().await.expect("close");
 }
 
@@ -212,7 +273,8 @@ async fn directory_search_never_presents_a_folded_address() {
         "sqlite://{}?mode=rwc",
         directory.path().join("identity.sqlite3").display()
     );
-    let server = TestServer::start_persistent_with_extra_accounts(&url, &[]);
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&url, &[("bob", "bob-password-123")]);
     let mut client = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
@@ -224,20 +286,28 @@ async fn directory_search_never_presents_a_folded_address() {
     .expect("authenticated client");
     let pool = SqlitePool::connect(&url).await.expect("seed database");
     // `Bob` was written before the profile; preparation would fold it onto
-    // `bob@localhost`, an address it does not hold.
+    // `bob@localhost`, the native account `bob`, which it is not. It is
+    // left out, and it does not hide the canonical `bob`.
     seed_oidc(&pool, "Bob").await;
     seed_oidc(&pool, "bob.member").await;
 
-    let bob = "bob.member@localhost"
+    let bob = "bob@localhost"
+        .parse::<jid::BareJid>()
+        .expect("canonical JID");
+    let member = "bob.member@localhost"
         .parse::<jid::BareJid>()
         .expect("canonical JID");
     assert_eq!(
         search(&mut client, "s-text", "bob").await,
-        vec![bob.clone()]
+        vec![bob.clone(), member.clone()]
+    );
+    assert_eq!(
+        search(&mut client, "s-address", "bob@localhost").await,
+        vec![bob, member.clone()]
     );
     assert_eq!(
         search(&mut client, "s-exact", "bob.member@localhost").await,
-        vec![bob]
+        vec![member]
     );
     // A non-canonical address stays free text and matches no name.
     assert!(search(&mut client, "s-folded", "Bob.Member@LOCALHOST")

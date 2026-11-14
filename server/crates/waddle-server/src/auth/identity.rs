@@ -177,34 +177,41 @@ impl IdentityService {
         claims: &IdentityClaims,
         issuer: &str,
     ) -> String {
-        if let Some(v) = claims.preferred_username.as_deref() {
-            let slug = username_to_localpart(v);
-            if !slug.is_empty() {
+        // Each source is used only when its slug keeps at least one
+        // character; a name with nothing to transliterate falls through to
+        // the next source and finally to the subject digest.
+        if let Some(slug) = claims
+            .preferred_username
+            .as_deref()
+            .and_then(username_to_localpart)
+        {
+            return slug;
+        }
+
+        if let Some(claim_key) = provider.username_claim.as_deref() {
+            if let Some(slug) = claims
+                .raw_claims
+                .get(claim_key)
+                .and_then(|v| v.as_str())
+                .and_then(username_to_localpart)
+            {
                 return slug;
             }
         }
 
-        if let Some(claim_key) = provider.username_claim.as_deref() {
-            if let Some(v) = claims.raw_claims.get(claim_key).and_then(|v| v.as_str()) {
-                let slug = username_to_localpart(v);
-                if !slug.is_empty() {
-                    return slug;
-                }
-            }
-        }
-
-        if let Some(email) = claims.email.as_deref() {
-            if let Some((local, _)) = email.split_once('@') {
-                let slug = username_to_localpart(local);
-                if !slug.is_empty() {
-                    return slug;
-                }
-            }
+        if let Some(slug) = claims
+            .email
+            .as_deref()
+            .and_then(|email| email.split_once('@'))
+            .and_then(|(local, _)| username_to_localpart(local))
+        {
+            return slug;
         }
 
         // Keep the fallback within the account profile's length with its
         // digest intact: `ext_` + provider + `_` + 12 hex digits.
-        let mut provider_component = username_to_localpart(&provider.id);
+        let mut provider_component =
+            username_to_localpart(&provider.id).unwrap_or_else(|| "provider".to_string());
         provider_component.truncate(PROVIDER_COMPONENT_MAX_BYTES);
 
         let digest = Sha256::digest(format!("{}:{}", issuer, claims.subject.trim()).as_bytes());
@@ -219,9 +226,10 @@ impl IdentityService {
         issuer: &str,
         domain: &str,
     ) -> Result<UserRecord, AuthError> {
-        // A slug is at most 60 bytes, so a suffix of up to three digits keeps
-        // every candidate within the account profile.
-        let base = username_to_localpart(&Self::derive_base_username(provider, claims, issuer));
+        // The base is a slug of at most 60 bytes or the `ext_` fallback, which
+        // is shorter, so a suffix of up to three digits keeps every candidate
+        // within the account profile.
+        let base = Self::derive_base_username(provider, claims, issuer);
 
         for i in 0..200 {
             let username = if i == 0 {

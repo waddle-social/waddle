@@ -1,15 +1,23 @@
 //! The identity profile at the account stores: canonical configured
-//! domains, exact provisioning and lookup, and the reconciliation report for
-//! accounts written before the profile. In-memory SQLite, no server process.
+//! domains, exact provisioning and lookup, OIDC name derivation, admin
+//! command addresses, and the reconciliation report for accounts written
+//! before the profile. In-memory SQLite, no server process.
 
 use kameo::actor::{ActorRef, Spawn};
+use waddle_server::admin::channels::{
+    parse_group_dm_create_args, parse_kick_args, parse_set_affiliation_args,
+};
+use waddle_server::admin::spaces::parse_set_role_args;
 use waddle_server::auth::identity_profile::{
     reconcile_identity_profile, require_canonical_domains, AccountFinding, AccountRecord,
 };
-use waddle_server::auth::{local_account_exists, AuthError, NativeUserStore, RegisterRequest};
+use waddle_server::auth::{
+    local_account_exists, username_to_localpart, AuthError, NativeUserStore, RegisterRequest,
+};
 use waddle_server::db::actor::{DbActor, DbExecute};
 use waddle_server::db::{Database, MigrationRunner, Value};
-use waddle_xmpp::identity::{CanonicalDomain, IdentityError};
+use waddle_xmpp::identity::{AccountLocalpart, CanonicalDomain, IdentityError};
+use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 
 const DOMAIN: &str = "localhost";
 
@@ -207,8 +215,11 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
     // Spellings preparation would change.
     seed_oidc(&actor, "straße@localhost", "straße", Some("strasse")).await;
     seed_native(&actor, "Carol", DOMAIN, Some("carol@localhost")).await;
-    // Unkeyed, and folding onto the OIDC `alice` across the stores.
+    // Unkeyed, with the OIDC row a SCRAM sign-in writes for the same
+    // name: one account in both stores, not a collision.
     seed_native(&actor, "alice", DOMAIN, None).await;
+    // Folding onto the native `Carol` across the stores.
+    seed_oidc(&actor, "carol@localhost", "carol", Some("carol")).await;
     // Another deployment's domain.
     seed_native(
         &actor,
@@ -223,7 +234,7 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
     let report = reconcile_identity_profile(&actor, &domain)
         .await
         .expect("reconciliation");
-    assert_eq!(report.accounts, 8);
+    assert_eq!(report.accounts, 9);
     assert!(!report.is_clean());
 
     let native = |username: &'static str| {
@@ -249,16 +260,22 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
     );
     assert_eq!(
         report.findings(&native("Carol").await),
-        Some(&[AccountFinding::NonCanonicalSpelling][..])
+        Some(
+            &[
+                AccountFinding::NonCanonicalSpelling,
+                AccountFinding::FoldedCollision
+            ][..]
+        )
+    );
+    assert_eq!(
+        report.findings(&oidc("carol@localhost")),
+        Some(&[AccountFinding::FoldedCollision][..])
     );
     assert_eq!(
         report.findings(&native("alice").await),
-        Some(&[AccountFinding::MissingKey, AccountFinding::FoldedCollision][..])
+        Some(&[AccountFinding::MissingKey][..])
     );
-    assert_eq!(
-        report.findings(&oidc("alice@localhost")),
-        Some(&[AccountFinding::FoldedCollision][..])
-    );
+    assert_eq!(report.findings(&oidc("alice@localhost")), None);
     assert_eq!(
         report.findings(&native("remote").await),
         Some(&[AccountFinding::ForeignDomain][..])
@@ -277,4 +294,102 @@ async fn reconciliation_reports_accounts_outside_the_profile() {
             .expect("second reconciliation"),
         report
     );
+}
+
+#[test]
+fn oidc_names_are_transliterated_into_the_account_profile() {
+    for (name, slug) in [
+        ("Øyvind", Some("oyvind")),
+        ("José", Some("jose")),
+        ("Straße", Some("strasse")),
+        ("Ærøskøbing", Some("aeroskobing")),
+        ("Łukasz", Some("lukasz")),
+        ("ＡＢＣ", Some("abc")),
+        ("Alice+Dev", Some("alicedev")),
+        ("李小龙", None),
+        ("", None),
+    ] {
+        let derived = username_to_localpart(name);
+        assert_eq!(derived.as_deref(), slug, "{name:?}");
+        if let Some(derived) = derived {
+            assert!(AccountLocalpart::parse(&derived).is_ok(), "{name:?}");
+        }
+    }
+}
+
+#[test]
+fn a_fixed_account_is_validated_before_it_is_reset() {
+    assert_eq!(
+        NativeUserStore::validate_new_account("admin", DOMAIN)
+            .expect("account profile")
+            .as_str(),
+        "admin@localhost"
+    );
+    for (username, domain) in [("Admin", DOMAIN), ("admin", "Localhost"), ("äda", DOMAIN)] {
+        assert!(
+            NativeUserStore::validate_new_account(username, domain).is_err(),
+            "{username}@{domain}"
+        );
+    }
+}
+
+fn form(fields: Vec<Field>) -> DataForm {
+    fields
+        .into_iter()
+        .fold(DataForm::new(FormType::Submit), DataForm::add_field)
+}
+
+fn text(var: &str, value: &str) -> Field {
+    Field::new(var, FieldType::TextSingle).with_value(value)
+}
+
+#[test]
+fn admin_command_jids_are_taken_exactly() {
+    // Fields submitted without a `type` reach the command parsers as text;
+    // the parsers hold them to the identity profile themselves.
+    let group_dm = |members: &[&str]| {
+        let mut field = Field::new("member_jids", FieldType::TextSingle);
+        for member in members {
+            field = field.add_value(*member);
+        }
+        parse_group_dm_create_args(Some(&form(vec![text("name", "pair"), field])))
+    };
+    let created = group_dm(&["alice@localhost", " bob@localhost ", ""]).expect("canonical members");
+    assert_eq!(created.member_jids.len(), 2);
+    for members in [
+        &["alice@localhost", "Bob@localhost"][..],
+        &["alice@localhost", "stra\u{df}e@localhost"][..],
+        &["alice@localhost", "bob@LOCALHOST"][..],
+    ] {
+        assert!(group_dm(members).is_err(), "{members:?}");
+    }
+
+    let affiliation = |member: &str| {
+        parse_set_affiliation_args(Some(&form(vec![
+            text("channel_jid", "room@muc.localhost"),
+            text("member_jid", member),
+            text("affiliation", "member"),
+        ])))
+    };
+    assert!(affiliation("bob@localhost").is_ok());
+    assert!(affiliation("Bob@localhost").is_err());
+
+    let kick = |occupant: &str| {
+        parse_kick_args(Some(&form(vec![
+            text("channel_jid", "room@muc.localhost"),
+            text("occupant_jid", occupant),
+        ])))
+    };
+    assert!(kick("bob@localhost").is_ok());
+    assert!(kick("\u{FF42}ob@localhost").is_err());
+
+    let role = |member: &str| {
+        parse_set_role_args(Some(&form(vec![
+            text("space_jid", "space@spaces.localhost"),
+            text("member_jid", member),
+            text("role", "member"),
+        ])))
+    };
+    assert!(role("bob@localhost").is_ok());
+    assert!(role("BOB@localhost").is_err());
 }

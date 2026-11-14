@@ -104,6 +104,11 @@ pub(crate) async fn seed_fixed_test_account(
     db_pool: &Arc<DatabasePool>,
     config: &FixedTestAccountConfig,
 ) -> Result<()> {
+    // Validate before deleting: the reset looks the name up by its folded
+    // key, so a name outside the account profile (`Admin`) would otherwise
+    // delete another account (`admin`) before registration refuses it.
+    NativeUserStore::validate_new_account(&config.username, &config.domain)
+        .map_err(|err| anyhow::anyhow!("Invalid fixed test account: {err}"))?;
     let native_user_store = NativeUserStore::new(db_pool.global_actor().clone());
     // Seeding runs before the startup key backfill, so this also removes a
     // row an older node wrote without its key; it would block the insert.

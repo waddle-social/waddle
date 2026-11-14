@@ -35,19 +35,11 @@ pub fn require_canonical_domains(
     account_domain: &str,
     service_domains: &[&str],
 ) -> Result<CanonicalDomain, IdentityError> {
-    let account = exact_domain(account_domain)?;
+    let account = CanonicalDomain::parse_canonical(account_domain)?;
     for service in service_domains {
-        exact_domain(service)?;
+        CanonicalDomain::parse_canonical(service)?;
     }
     Ok(account)
-}
-
-fn exact_domain(text: &str) -> Result<CanonicalDomain, IdentityError> {
-    let domain = CanonicalDomain::parse_exact(text)?;
-    if domain.as_str() != text {
-        return Err(IdentityError::NonCanonicalDomain);
-    }
-    Ok(domain)
 }
 
 /// An account row, identified by its store key.
@@ -77,7 +69,9 @@ pub enum AccountFinding {
     /// The recorded lookup key is not the key of the stored name.
     KeyMismatch,
     /// The stored names of two or more accounts fold to one address, across
-    /// both stores. At most one of them can hold that address.
+    /// both stores. At most one of them can hold that address. Rows whose
+    /// stored names are identical (an OIDC row and the native account whose
+    /// SCRAM sign-in created it) are one account, not a collision.
     FoldedCollision,
     /// A native account whose domain is not this deployment's account
     /// domain. It is not an account of this deployment.
@@ -148,6 +142,11 @@ impl IdentityProfileReport {
     }
 }
 
+/// Rows grouped by the address their stored names fold to, and within that
+/// by the exact stored name and domain. Rows with the same exact name are
+/// one account; more than one exact name in a group is a collision.
+type FoldedNames = BTreeMap<String, BTreeMap<(String, String), Vec<AccountRecord>>>;
+
 /// Read both account stores and report every account outside the identity
 /// profile at `domain`, this deployment's canonical account domain. Read
 /// only; the two stores are read one after the other, not in one snapshot.
@@ -156,7 +155,7 @@ pub async fn reconcile_identity_profile(
     domain: &CanonicalDomain,
 ) -> Result<IdentityProfileReport, AuthError> {
     let mut findings: BTreeMap<AccountRecord, Vec<AccountFinding>> = BTreeMap::new();
-    let mut folded: BTreeMap<String, Vec<AccountRecord>> = BTreeMap::new();
+    let mut folded = FoldedNames::new();
     let mut accounts = 0;
 
     let users = query(
@@ -192,6 +191,8 @@ pub async fn reconcile_identity_profile(
         if let Some(jid) = canonical_account_jid(&localpart, domain.as_str()) {
             folded
                 .entry(jid.to_string())
+                .or_default()
+                .entry((localpart.clone(), domain.as_str().to_owned()))
                 .or_default()
                 .push(record.clone());
         }
@@ -241,6 +242,8 @@ pub async fn reconcile_identity_profile(
             folded
                 .entry(jid.to_string())
                 .or_default()
+                .entry((username.clone(), row_domain.clone()))
+                .or_default()
                 .push(record.clone());
         }
         if !found.is_empty() {
@@ -248,8 +251,8 @@ pub async fn reconcile_identity_profile(
         }
     }
 
-    for records in folded.into_values().filter(|records| records.len() > 1) {
-        for record in records {
+    for names in folded.into_values().filter(|names| names.len() > 1) {
+        for record in names.into_values().flatten() {
             findings
                 .entry(record)
                 .or_default()
