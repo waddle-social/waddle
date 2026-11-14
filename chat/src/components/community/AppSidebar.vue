@@ -26,12 +26,14 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 /**
  * The shell sidebar (Sidebar board): community, ⌘K jump, your views,
  * what is live (`#live` slot), rooms, direct messages, the huddle you are
- * in (`#dock` slot) and your account. Ink in both themes: it always
- * renders `data-theme="night"`. Every action is an existing controller
+ * in (`#dock` slot) and your account. Ink in both themes: it renders
+ * `data-theme="night"` (except as the phone home screen). Every action is an existing controller
  * call; the sidebar holds no state of its own.
  */
 const props = defineProps<{
   controller: ChatAppController;
+  /** The phone home screen (Mobile-Home board) follows the page theme. */
+  followTheme?: boolean;
 }>();
 
 const {
@@ -212,7 +214,7 @@ const dockClass = css({ flex: "none", padding: "6px 10px 0", display: "flex", fl
 </script>
 
 <template>
-  <nav :class="rootClass" :aria-label="communityName" data-theme="night">
+  <nav :class="rootClass" :aria-label="communityName" :data-theme="followTheme ? undefined : 'night'">
     <div :class="topClass">
       <button
         type="button"

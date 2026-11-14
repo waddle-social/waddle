@@ -51,9 +51,11 @@ import MembersPage from "@/components/community/pages/MembersPage.vue";
 import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
 import PeopleRail from "@/components/community/PeopleRail.vue";
 import { css, cx } from "styled-system/css";
-import { btn } from "styled-system/recipes";
+import { btn, empty } from "styled-system/recipes";
+import spotEmpty from "@waddle/design/assets/spot-empty.svg?url";
 import { cardClasses } from "@/ui/part-classes";
 import AdminView from "@/components/admin/AdminView.vue";
+import AppSidebar from "@/components/community/AppSidebar.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
 import CurrentCallPanel from "@/components/calls/CurrentCallPanel.vue";
@@ -592,6 +594,13 @@ function onAdminNavigate(match: AdminMatch) {
 function onAdminBack() {
   openHome();
 }
+/** A page header's sidebar button. On phones the sidebar is the home
+ * screen (Mobile-Home board), so it goes back there; wider screens keep
+ * the drawer, though their sidebar is always visible. */
+function openNav() {
+  if (window.matchMedia("(max-width: 767.98px)").matches) openHome();
+  else ui.showMobileNav.value = true;
+}
 let disconnectMessageToolbarLifecycle: (() => void) | null = null;
 
 onMounted(() => {
@@ -642,6 +651,7 @@ const supersededOutsideConversation = computed(() => {
     || ui.activePage.value === "rooms"
     || ui.activePage.value === "members"
     || ui.activePage.value === "settings"
+    || ui.activePage.value === "admin"
   );
 });
 
@@ -664,12 +674,14 @@ const supersededBannerClass = computed(() =>
   !supersededOutsideConversation.value
   && supersededContentPaneObscured.value
   && supersededThreadStackDepth.value < 2
-    ? "md:hidden"
+    ? hiddenFromMdClass
     : "",
 );
 
-const adminFrameClass = css({ display: "flex", height: "100%", minHeight: 0, flexDirection: "column" });
-const adminViewClass = css({ minHeight: 0, flex: 1 });
+const adminViewClass = css({ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 });
+const hiddenFromMdClass = css({ md: { display: "none" } });
+const phoneHomeClass = css({ display: "flex", flex: 1, minHeight: 0, md: { display: "none" } });
+const desktopHomeClass = css({ display: "none", md: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 } });
 const supersededBannerFrameClass = css({ position: "absolute", insetInline: 0, top: 0, zIndex: "panel" });
 // Collapsed right-hand panels: a slim vertical strip per inactive panel (lg and up).
 const accordionBarClass = css({
@@ -700,8 +712,10 @@ const accordionLabelClass = css({
   overflow: "hidden",
   textOverflow: "ellipsis",
 });
-const contextColumnClass = css({ display: "flex", flexDirection: "column", gap: "3", padding: "4", minHeight: 0 });
+const contextColumnClass = css({ flex: 1, display: "flex", flexDirection: "column", gap: "3", padding: "4", minHeight: 0 });
 const contextCard = cardClasses("quiet");
+// ProfileCard board, empty state: centred in the panel.
+const noOnePickedClass = cx(empty(), css({ flex: 1, justifyContent: "center", "& h2": { margin: 0, font: "700 24px/1.25 {fonts.display}" } }));
 const seeEventsClass = cx(btn({ size: "sm" }), css({ alignSelf: "flex-start" }));
 
 async function recoverSupersededFromShell() {
@@ -710,24 +724,7 @@ async function recoverSupersededFromShell() {
 </script>
 
 <template>
-  <div v-if="ui.activePage.value === 'admin'" :class="adminFrameClass">
-    <!-- The admin route bypasses the chat shell entirely, so the superseded
-         recovery affordance must render here as well or the sticky latch
-         leaves the tab without any reconnect action. -->
-    <SupersededRecoveryBanner
-      v-if="messaging.xmppStatus.value.kind === 'superseded'"
-      :detail="messaging.xmppStatus.value.detail"
-      @recover="recoverSupersededFromShell"
-    />
-    <AdminView
-      :class="adminViewClass"
-      :xmpp-client="xmppClient"
-      :active-panel="adminPanelFromUrl"
-      @navigate="onAdminNavigate"
-      @back="onAdminBack"
-    />
-  </div>
-  <div v-else class="chat-app-shell">
+  <div class="chat-app-shell">
     <CallAudioPlaybackPrompt />
     <ChatMobileDrawers
       :controller="controller"
@@ -789,21 +786,37 @@ async function recoverSupersededFromShell() {
         />
       </div>
       <!-- Main content -->
-      <HomeDashboard
-        v-if="ui.activePage.value === 'dashboard'"
-        v-bind="homeDashboardProps"
-        @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
-        @select-channel-room="selectChannelByRoomJid"
-        @select-group-dm="selectGroupDm"
-        @join-channel-call="joinChannelCallFromActivity"
-        @join-group-dm-call="joinGroupDmCallFromActivity"
-        @leave-channel-call="leaveRetainedChannelCall"
-        @answer-dm="answerDmFromActivity"
-        @select-contact="handleOpenDm"
-        @reconnect-dm="reconnectDmFromDock"
-        @end-dm="endRecoveredDmFromActivity"
-        @open-nav="ui.showMobileNav.value = true"
+      <!-- Admin sits in the same sidebar shell (App-Admin board). -->
+      <AdminView
+        v-if="ui.activePage.value === 'admin'"
+        :class="adminViewClass"
+        :xmpp-client="xmppClient"
+        :active-panel="adminPanelFromUrl"
+        @navigate="onAdminNavigate"
+        @back="onAdminBack"
       />
+      <!-- Phones: the sidebar is the home screen (Mobile-Home board). -->
+      <template v-else-if="ui.activePage.value === 'dashboard'">
+        <div :class="phoneHomeClass">
+          <AppSidebar :controller="controller" follow-theme />
+        </div>
+        <div :class="desktopHomeClass">
+          <HomeDashboard
+            v-bind="homeDashboardProps"
+            @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
+            @select-channel-room="selectChannelByRoomJid"
+            @select-group-dm="selectGroupDm"
+            @join-channel-call="joinChannelCallFromActivity"
+            @join-group-dm-call="joinGroupDmCallFromActivity"
+            @leave-channel-call="leaveRetainedChannelCall"
+            @answer-dm="answerDmFromActivity"
+            @select-contact="handleOpenDm"
+            @reconnect-dm="reconnectDmFromDock"
+            @end-dm="endRecoveredDmFromActivity"
+            @open-nav="openNav"
+          />
+        </div>
+      </template>
       <FeedPane
         v-else-if="ui.activeCommunitySurface.value === 'feed'"
         :entries="socialFeed.entries.value"
@@ -830,7 +843,7 @@ async function recoverSupersededFromShell() {
         @refresh="socialFeed.refresh(); stories.refresh()"
         @story-selected="(id) => stories.markStoryRead(id)"
         @react="(id, emoji) => stories.toggleReaction(id, emoji)"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <EventsPane
         v-else-if="ui.activeCommunitySurface.value === 'events'"
@@ -850,7 +863,7 @@ async function recoverSupersededFromShell() {
         @cancel-series="(id) => communityEvents.cancel(id)"
         @cancel-instance="(uid, dtstart) => communityEvents.cancelInstance(uid, dtstart)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
@@ -858,7 +871,7 @@ async function recoverSupersededFromShell() {
         :root-author-jid="threadsListRootAuthorJid"
         :on-select-thread-entry="onSelectThreadEntry"
         :on-join-channel-call="joinChannelCallFromActivity"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <UnreadView
         v-else-if="ui.activePage.value === 'unread'"
@@ -867,7 +880,7 @@ async function recoverSupersededFromShell() {
         :on-select-channel="(id: string) => selectChannel(id)"
         :on-select-thread="onSelectThread"
         :on-refresh-inbox="channelUnread.hydrateFromInbox"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <RoomsPage
         v-else-if="ui.activePage.value === 'rooms'"
@@ -883,14 +896,14 @@ async function recoverSupersededFromShell() {
         :answer-dm="answerDmFromActivity"
         :reconnect-dm="reconnectDmFromDock"
         :end-dm="endRecoveredDmFromActivity"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <MembersPage
         v-else-if="ui.activePage.value === 'members'"
         :controller="controller"
         :call-participants="retainedMucCallParticipantsStore"
         @select-member="onSelectMember"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"
@@ -989,7 +1002,7 @@ async function recoverSupersededFromShell() {
               @load-older="loadOlderActiveMessages"
               @retry-load="retryActiveLoad"
               @edit-channel="openChannelEdit"
-              @open-nav="ui.showMobileNav.value = true"
+              @open-nav="openNav"
               @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
               @open-thread="openThread"
@@ -1196,7 +1209,7 @@ async function recoverSupersededFromShell() {
               :room-jid="activeChannelRoomJid"
               :xmpp-client="xmppClient"
               :action-error="activeActionError"
-              @open-nav="ui.showMobileNav.value = true"
+              @open-nav="openNav"
               @close="closeExtensionRoutePanel"
               @invoke-action="invokeExtensionRouteAction"
             />
@@ -1238,9 +1251,10 @@ async function recoverSupersededFromShell() {
               @message="handleOpenDm"
               @close="selectedMember = null"
             />
-            <div v-else :class="contextCard.root">
-              <span :class="contextCard.kicker">Profile</span>
-              <span :class="contextCard.body">Pick a member to see their profile here.</span>
+            <div v-else :class="noOnePickedClass" role="status">
+              <img :src="spotEmpty" alt="" />
+              <h2>No one picked</h2>
+              <p>Pick someone to see their profile here.</p>
             </div>
           </template>
         </div>
