@@ -165,3 +165,19 @@ topologies = { local = "experimental", federated = "unsupported" }
 XEP-0060 = ["crates/waddle-server/tests/xep0060_pubsub_ws.rs"]
 XEP-0472 = ["crates/waddle-server/tests/xep0472_social_feed_ws.rs"]
 XEP-0501 = ["crates/waddle-server/tests/xep0501_stories_ws.rs"]
+
+# SASL2 and Bind 2 are stream features rather than disco features, so this
+# capability claims no advertised disco feature. `configured`: operators can
+# turn it off with WADDLE_XMPP_SASL2=disabled (docs/operations/sasl2.md).
+[[capability]]
+id = "sasl2-authentication"
+server_maturity = "beta"
+availability = "configured"
+protocols = ["XEP-0198", "XEP-0386", "XEP-0388"]
+advertised_features = []
+server_evidence = ["crates/waddle-server/tests/sasl2_dark_ws.rs", "crates/waddle-server/tests/sasl2_inline_dark_ws.rs"]
+topologies = { local = "beta", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0198 = ["crates/waddle-server/tests/sasl2_inline_dark_ws.rs", "crates/waddle-server/tests/sm_durable_inline.rs", "crates/waddle-xmpp-core/tests/xep0388_inline_resume.rs"]
+XEP-0386 = ["crates/waddle-server/tests/sasl2_inline_dark_ws.rs", "crates/waddle-xmpp-core/tests/xep0386_bind2.rs"]
+XEP-0388 = ["crates/waddle-server/tests/sasl2_dark_ws.rs", "crates/waddle-xmpp-core/tests/xep0388_sasl2_authenticate.rs", "crates/waddle-xmpp-core/tests/xep0388_server_exchange.rs"]

@@ -300,9 +300,49 @@ fn reset_xmpp_config_env() {
         "WADDLE_SPACES_JID",
         "WADDLE_MUC_DOMAIN",
         "WADDLE_XMPP_PUBLIC_WEBSOCKET_URL",
+        "WADDLE_XMPP_SASL2",
     ] {
         std::env::remove_var(key);
     }
+}
+
+#[test]
+fn test_xmpp_config_enables_sasl2_by_default() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    let config = XmppConfig::from_env().expect("default config parses");
+    assert_eq!(config.sasl2, super::Sasl2Negotiation::Enabled);
+    std::env::set_var("WADDLE_XMPP_SASL2", "  ");
+    let config = XmppConfig::from_env().expect("empty selection parses");
+    assert_eq!(config.sasl2, super::Sasl2Negotiation::Enabled);
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_parses_sasl2_selection() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    for (configured, expected) in [
+        ("enabled", super::Sasl2Negotiation::Enabled),
+        (" Disabled ", super::Sasl2Negotiation::Disabled),
+        ("disabled", super::Sasl2Negotiation::Disabled),
+    ] {
+        std::env::set_var("WADDLE_XMPP_SASL2", configured);
+        let config = XmppConfig::from_env().expect("SASL2 selection parses");
+        assert_eq!(config.sasl2, expected, "{configured:?}");
+    }
+
+    std::env::set_var("WADDLE_XMPP_SASL2", "true");
+    let error = XmppConfig::from_env().expect_err("unknown selection must fail startup");
+    assert!(
+        format!("{error:#}").contains("WADDLE_XMPP_SASL2"),
+        "unexpected error: {error:#}"
+    );
+
+    reset_xmpp_config_env();
 }
 
 #[test]

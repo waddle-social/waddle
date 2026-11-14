@@ -1,4 +1,6 @@
-//! Dark XEP-0388 OAUTHBEARER framing over the production WebSocket router.
+//! XEP-0388 SASL2 framing over the production WebSocket router, under both
+//! `WADDLE_XMPP_SASL2` selections. The loopback transport proves the
+//! application handshake, not TLS behaviour.
 #![cfg(feature = "test-support")]
 
 use axum::serve::Listener;
@@ -16,12 +18,14 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use waddle_server::test_support::{
-    create_test_session, router, websocket_state, websocket_state_with_sasl2, WebSocketState,
+    create_test_session, router, websocket_state, websocket_state_with_sasl2,
+    websocket_state_with_sasl2_disabled, WebSocketState,
 };
 use waddle_xmpp_core::xep0388::{
     Sasl2Authenticate, Sasl2Challenge, Sasl2Data, Sasl2Failure, Sasl2FailureCondition,
     Sasl2Feature, Sasl2Mechanism, Sasl2Response, Sasl2Success, NS_SASL2,
 };
+use waddle_xmpp_core::xep0388_inline::Sasl2InlineOffer;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const NS_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
@@ -180,7 +184,7 @@ fn oversized_iq_frame() -> String {
 }
 
 #[tokio::test]
-async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_in_place() {
+async fn enabled_selection_authenticates_and_sends_post_auth_features_in_place() {
     let state = websocket_state_with_sasl2().await;
     let session = create_test_session(&state, "alice").await;
     let (mut peer, server) = connect(state).await;
@@ -188,16 +192,24 @@ async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_
     let features = start_stream(&mut peer).await;
     let authentication = features
         .get_child("authentication", NS_SASL2)
-        .expect("explicit fixture advertises SASL2");
+        .expect("enabled selection advertises SASL2");
     let offered = Sasl2Feature::from_element(authentication).expect("typed SASL2 feature");
     assert_eq!(
         offered.mechanisms,
         vec![Sasl2Mechanism::ScramSha256, Sasl2Mechanism::OAuthBearer]
     );
-    assert!(
-        offered.inline.is_none(),
-        "inline features remain out of scope"
-    );
+    let inline = Sasl2InlineOffer::from_inline_features(
+        offered
+            .inline
+            .as_ref()
+            .expect("the durable authority offers inline features"),
+    )
+    .expect("typed inline offer");
+    assert!(inline.stream_resumption);
+    assert!(inline
+        .bind2
+        .as_ref()
+        .is_some_and(|bind2| bind2.supports_stream_management()));
 
     send(&mut peer, authenticate(bearer(&session.id, None))).await;
     let success = receive(&mut peer).await;
@@ -241,8 +253,20 @@ async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_
 }
 
 #[tokio::test]
-async fn default_fixture_does_not_advertise_or_accept_sasl2() {
+async fn default_selection_advertises_sasl2_beside_sasl1() {
     let state = websocket_state().await;
+    let (mut peer, server) = connect(state).await;
+
+    let features = start_stream(&mut peer).await;
+    assert!(features.get_child("authentication", NS_SASL2).is_some());
+    assert!(features.get_child("mechanisms", NS_SASL).is_some());
+
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn disabled_selection_does_not_advertise_or_accept_sasl2() {
+    let state = websocket_state_with_sasl2_disabled().await;
     let session = create_test_session(&state, "alice").await;
     let (mut peer, server) = connect(state).await;
 

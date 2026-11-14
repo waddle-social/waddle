@@ -157,8 +157,51 @@ pub struct XmppConfig {
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
+    /// Whether the WebSocket listener offers XEP-0388 SASL2 alongside SASL1
+    /// (`WADDLE_XMPP_SASL2`, default enabled).
+    pub sasl2: Sasl2Negotiation,
     /// ACME configuration for managed TLS certificates.
     pub acme: XmppAcmeConfig,
+}
+
+/// Operator switch for XEP-0388 SASL2 negotiation on the WebSocket listener.
+///
+/// When enabled, unauthenticated stream features advertise SASL2 next to the
+/// SASL1 mechanisms, with XEP-0198 inline resumption and XEP-0386 Bind 2
+/// offered where the durable stream-management authority is selected. When
+/// disabled, SASL2 is neither advertised nor accepted and clients
+/// authenticate with SASL1. Read from `WADDLE_XMPP_SASL2` as `enabled` or
+/// `disabled`; unset or empty selects [`Sasl2Negotiation::Enabled`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sasl2Negotiation {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+impl Sasl2Negotiation {
+    /// Whether SASL2 is advertised and accepted.
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+/// A `WADDLE_XMPP_SASL2` value other than `enabled` or `disabled`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("expected `enabled` or `disabled`")]
+pub struct InvalidSasl2Negotiation;
+
+impl FromStr for Sasl2Negotiation {
+    type Err = InvalidSasl2Negotiation;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(InvalidSasl2Negotiation),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +240,7 @@ impl Default for XmppConfig {
             public_websocket_url: Url::parse("ws://localhost:3000/ws")
                 .expect("default public XMPP WebSocket URL is valid"),
             native_auth_enabled: true,
+            sasl2: Sasl2Negotiation::default(),
             acme: XmppAcmeConfig {
                 enabled: false,
                 email: None,
@@ -298,6 +342,9 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
 
+        let sasl2 =
+            parse_optional_env_value::<Sasl2Negotiation>("WADDLE_XMPP_SASL2")?.unwrap_or_default();
+
         let acme_enabled = std::env::var("WADDLE_XMPP_ACME_ENABLED")
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
@@ -328,6 +375,7 @@ impl XmppConfig {
             pubsub_database_url,
             public_websocket_url,
             native_auth_enabled,
+            sasl2,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
                 email: acme_email,

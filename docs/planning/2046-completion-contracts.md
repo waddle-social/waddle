@@ -529,7 +529,7 @@ included.
   session to the generation that superseded it
   (`W/cleanup/durable_sm.rs`). A fence refusal retires the binding with
   the cause `SessionSuperseded`.
-- **SASL2**, where the dark handshake is enabled, processes inline resume
+- **SASL2**, where `WADDLE_XMPP_SASL2` enables it, processes inline resume
   and Bind 2 through the same operations and writes `<success/>` when its
   inline results are known (`W/sasl.rs`).
 
@@ -631,7 +631,6 @@ Open before the durable selector can be chosen in production:
   "Replacement on a clustered store" in
   `2139-durable-sm-session-model.md`); a session it cannot claim is left
   to expire, and its frames reach offline delivery then.
-- The inline offer is not advertised in the SASL2 stream feature.
 
 ## M7: schema baseline
 

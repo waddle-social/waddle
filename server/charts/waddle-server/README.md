@@ -67,6 +67,14 @@ helm upgrade --install waddle ./charts/waddle-server \
 If `xmpp.tls.secretName` is not set, the chart will not inject `WADDLE_XMPP_TLS_CERT` and
 `WADDLE_XMPP_TLS_KEY`, and the server will use its internal defaults.
 
+## SASL2 negotiation
+
+`xmpp.sasl2` renders `WADDLE_XMPP_SASL2`. With the default `enabled`, the
+WebSocket listener advertises XEP-0388 SASL2 beside the SASL1 mechanisms,
+offering XEP-0198 inline resumption and XEP-0386 Bind 2. `disabled` withdraws
+the SASL2 feature and refuses SASL2 requests, leaving SASL1. The chart rejects
+any other value. See the [SASL2 runbook](../../docs/operations/sasl2.md).
+
 ## Persistence
 
 By default this chart creates a PVC and stores:

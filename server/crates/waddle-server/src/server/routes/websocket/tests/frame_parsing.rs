@@ -595,14 +595,13 @@ async fn different_auth_mechanism_aborting_scram_records_scram_failure_metrics()
     );
 }
 
-#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn malformed_sasl2_scram_response_records_one_failure_metric() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = super::create_test_websocket_state_with_extension_manager(
         super::empty_extension_manager().await,
         super::TestStateOverrides {
-            sasl2_test_capability: true,
+            sasl2: crate::server::Sasl2Negotiation::Enabled,
             ..super::TestStateOverrides::default()
         },
     )
@@ -651,10 +650,16 @@ async fn malformed_sasl2_scram_response_records_one_failure_metric() {
     );
 }
 
-#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn typed_oversized_frame_closes_pending_sasl2_exchange() {
-    let state = crate::test_support::websocket_state_with_sasl2().await;
+    let state = super::create_test_websocket_state_with_extension_manager(
+        super::empty_extension_manager().await,
+        super::TestStateOverrides {
+            sasl2: crate::server::Sasl2Negotiation::Enabled,
+            ..super::TestStateOverrides::default()
+        },
+    )
+    .await;
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::sasl2_oauth_error_pending();
     let input = super::super::frame::ClassifiedInboundFrame::classify(

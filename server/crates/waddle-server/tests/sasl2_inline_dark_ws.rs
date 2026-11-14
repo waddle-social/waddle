@@ -1,11 +1,9 @@
-//! Dark XEP-0388 handshake with XEP-0198 inline resume and XEP-0386 Bind 2
-//! over the production WebSocket router.
+//! XEP-0388 handshake with XEP-0198 inline resume and XEP-0386 Bind 2 over
+//! the production WebSocket router, with `WADDLE_XMPP_SASL2=enabled`.
 //!
-//! The fixture advertises and dispatches SASL2 only because it opts into the
-//! test capability, and processes inline requests only because it selects the
-//! durable stream-management authority. Neither is true of a production
-//! build's defaults. The loopback transport proves the application handshake,
-//! not TLS or early-data behaviour.
+//! Inline requests are offered and processed only where the durable
+//! stream-management authority is selected, as production startup does. The
+//! loopback transport proves the application handshake, not TLS behaviour.
 #![cfg(feature = "test-support")]
 
 use axum::serve::Listener;
@@ -27,11 +25,12 @@ use waddle_server::test_support::{
 use waddle_xmpp::ownership::SmSessionKey;
 use waddle_xmpp::stream_management::durable::DurableSmState;
 use waddle_xmpp_core::xep0388::{
-    Sasl2Authenticate, Sasl2Data, Sasl2Failure, Sasl2FailureCondition, Sasl2Mechanism, Sasl2Success,
+    Sasl2Authenticate, Sasl2Data, Sasl2Failure, Sasl2FailureCondition, Sasl2Feature,
+    Sasl2Mechanism, Sasl2Success, NS_SASL2,
 };
 use waddle_xmpp_core::xep0388_inline::{
-    Bind2Request, Bind2StreamManagementResult, Sasl2InlineRequests, Sasl2InlineResults,
-    SmInlineEnable, SmInlineResume, SmInlineResumeResult, SmStreamId, NS_SM,
+    Bind2Request, Bind2StreamManagementResult, Sasl2InlineOffer, Sasl2InlineRequests,
+    Sasl2InlineResults, SmInlineEnable, SmInlineResume, SmInlineResumeResult, SmStreamId, NS_SM,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,7 +84,7 @@ async fn receive(peer: &mut Peer) -> Element {
     }
 }
 
-async fn start_stream(peer: &mut Peer) {
+async fn start_stream(peer: &mut Peer) -> Option<Sasl2InlineOffer> {
     send(
         peer,
         Element::builder("open", NS_FRAMING)
@@ -100,6 +99,14 @@ async fn start_stream(peer: &mut Peer) {
         (features.name(), features.ns()),
         ("features", NS_STREAM.to_owned())
     );
+    let authentication = features
+        .get_child("authentication", NS_SASL2)
+        .expect("SASL2 is advertised");
+    Sasl2Feature::from_element(authentication)
+        .expect("typed SASL2 feature")
+        .inline
+        .as_ref()
+        .map(|inline| Sasl2InlineOffer::from_inline_features(inline).expect("typed inline offer"))
 }
 
 fn bearer(token: &str) -> Vec<u8> {
@@ -203,7 +210,14 @@ async fn bind2_binds_and_enables_stream_management_inside_success() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
     let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let offer = start_stream(&mut peer)
+        .await
+        .expect("inline features offered");
+    assert!(offer.stream_resumption);
+    assert!(offer
+        .bind2
+        .as_ref()
+        .is_some_and(|bind2| bind2.supports_stream_management()));
 
     let resume_token = bind_resumable(&mut peer, &session.id).await;
 
@@ -301,7 +315,11 @@ async fn inline_requests_are_malformed_without_the_durable_authority() {
     let state = websocket_state_with_sasl2_without_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
     let (mut peer, server) = connect(state).await;
-    start_stream(&mut peer).await;
+    assert_eq!(
+        start_stream(&mut peer).await,
+        None,
+        "no inline features are offered without the durable authority"
+    );
 
     let frame = authenticate(&mut peer, &session.id, &bind_with_resumable_session()).await;
     let failure = Sasl2Failure::from_element(&frame).expect("SASL2 failure");
