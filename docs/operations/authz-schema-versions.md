@@ -5,9 +5,9 @@ The server's built-in SpiceDB schema
 this release every replica rewrote the schema at every start, so a replica of
 an older release reverted any newer schema it found. Now a replica writes the
 schema only to install it into an unversioned store or to upgrade a store
-recorded at an older version, and refuses to start against a store recorded at
-a newer or unrecognised version without writing anything
-(`permissions::authz_schema_version`).
+recorded at an older version, and refuses to start, without writing anything,
+against a store recorded at a newer or unrecognised version or holding an
+unfinished upgrade to a newer version (`permissions::authz_schema_version`).
 
 The version is recorded in one marker relationship:
 
@@ -23,6 +23,29 @@ schema, whatever its own startup logic: releases before this one lack the
 whole `waddle_authz_schema` definition. The version is read from this
 relationship at full consistency, never by comparing schema text, because
 `ReadSchema` can serve a cached schema after a direct datastore reset.
+
+What the marker guarantees, and what it does not:
+
+- Guaranteed: the stored schema declares the marker's relation, and only a
+  binary whose schema declares it can write the schema.
+- Not guaranteed: that the stored schema is exactly the marker's version.
+  During an upgrade from N to M, the new release first writes the schema of M,
+  which declares `version_N` and `version_M`, and only then replaces the
+  marker. Until it does, and indefinitely if that release stops in between,
+  the store holds the policy of M under a marker of N.
+- To narrow that gap, a replica that finds a marker of its own or an older
+  version also reads the stored schema (`ReadSchema`) and refuses to start if
+  `waddle_authz_schema` there declares a version newer than its own. That read
+  only ever adds a refusal; a cached schema can make it refuse spuriously or
+  miss an unfinished upgrade, but never causes a schema write.
+- Not covered by that check: replicas of N already running, or whose check ran
+  just before the new release wrote its schema, serve under the schema of M
+  (SpiceDB evaluates permissions centrally). A store without a marker is not
+  checked against its stored schema, so that the authorised downgrade below
+  works; as a result, if a newer release installs its schema into an
+  unversioned store and stops before recording its version, an older release
+  that starts next installs and records its own schema, and the newer release
+  upgrades the store again when it next starts.
 
 ## Version 1: outcast precedence
 
@@ -48,35 +71,59 @@ For a subject holding `channel#outcast`, SpiceDB now answers:
   denied. Moderators of the room who are not banned can still delete those
   messages through `channel->moderate`.
 
-The server code paths that serve rooms today already check `outcast` before
-these permissions: MUC join and archive access, the extension host, extension
-PubSub commands and extension route items. For them the visible result does not
-change; the schema now enforces the same rule for every caller, including any
-that does not check `outcast` first. The local test backend evaluates the same
-rule.
+What this changes for users is narrower than the schema:
+
+- The server code paths that consult these channel permissions already check
+  `outcast` first: MUC join and archive access, the extension host, extension
+  PubSub commands and extension route items. Their visible result does not
+  change.
+- Groupchat send, corrections and retractions, reactions, pins and moderation
+  are gated by MUC occupancy and role and by sender-JID checks, not by the
+  permission graph, so version 1 does not change them.
+- No production code writes `message#author` or `message#channel`, or checks
+  message `edit` or `delete`. The message rules above take effect only once
+  something writes those relations.
+- Only permissions are subtracted, not relations. A check of a relation name,
+  for example `Permission::Member` on a channel, still answers whether the
+  relation is held, ban or no ban.
+- `managed_channel_permission_allowed` falls back to deployment membership
+  on default channels when the channel permission is denied, so a banned
+  deployment member passes it there; its callers check `outcast` first.
+
+The local test backend evaluates the same rule as SpiceDB, and deleting the
+`outcast` relation restores what the subject's other relations grant.
 
 ## Startup
 
-At startup, after the codec marker pre-check of
+At startup, with the codec guard of
 [authz-codec-cutover.md](authz-codec-cutover.md):
 
-1. The replica reads the version marker.
-   - Version 1: it proceeds without writing the schema.
+1. A store the codec guard refuses, because it is marked for another codec or
+   holds relationships without a codec marker, is refused before anything is
+   written. Otherwise the replica reads the version marker.
+   - Version 1: it reads the stored schema, refuses to start if that declares
+     a version newer than 1, and otherwise proceeds without writing the
+     schema.
    - None: it writes the built-in schema.
-   - An older version: it writes the built-in schema with the older marker
-     relation kept beside its own.
+   - An older version: the same stored-schema check, then it writes the
+     built-in schema with the older marker relation kept beside its own.
    - A newer version, or any other content: it refuses to start and writes
      nothing.
 2. The codec guard binds or refuses the store.
 3. The replica records the version: it creates the marker if there is none, or
-   replaces an older marker and then writes the built-in schema again to drop
-   the older relation. Replicas starting together record one marker. It logs
-   `Recorded the authorization schema version` or `Upgraded the authorization
-   schema version`.
+   replaces an older marker and then, unless the stored schema now declares a
+   newer version, writes the built-in schema again to drop the older relation.
+   Replicas starting together record one marker. It logs `Recorded the
+   authorization schema version` or `Upgraded the authorization schema
+   version`.
 
-The marker is recorded only after the codec guard accepts the store. A store
-the codec guard refuses gains no relationship, so the release that wrote it can
-still start against it.
+A populated store without a codec marker, the store of a release before
+#2047, is refused in step 1 with its schema left as it is, so replicas of that
+release that are still running keep their own policy and their schema writes
+at restart do not alternate with this release's. The marker is recorded only
+after the codec guard accepts the store, so a store refused in step 2 (one
+populated while this replica was starting) gains no relationship, and the
+release that wrote it can still write its own schema again.
 
 ## Rollout within #2047
 
@@ -114,11 +161,21 @@ Mixed-version replicas during such a rollout:
   If the new policy is not safe for the old binary's callers, roll out with
   `Recreate` instead of `RollingUpdate`.
 - Until the new marker is recorded (step 3), an old replica that starts reads
-  its own version, proceeds and writes nothing.
+  its own version as the marker, finds the newer version declared in the
+  stored schema, and refuses with `authorization store schema declares version
+  M, newer than version N of this server`. It writes nothing.
 - After the new marker is recorded, an old replica that starts refuses with
   `authorization store schema is version N, newer than version M of this
   server`, and SpiceDB would refuse its schema anyway. Already running old
   replicas keep serving under the new schema until they are replaced.
+
+The upgrade path from an older recorded version (the `Older` branch of step 1
+and step 3) cannot run while version 1 is the only version, so it has only
+offline coverage. **Version 2 must ship with a live upgrade test** in
+`server/crates/waddle-server/tests/authz_schema_version.rs`: a store recorded
+at version 1 is upgraded and recorded at version 2, racing replicas of both
+versions included, and a version 1 replica refuses the store once version 2
+has written its schema.
 
 Old-binary retirement: the rollout is complete when no pod of an older image
 remains. A crash-looping old pod that logs `Refusing the authorization store:
@@ -153,6 +210,18 @@ is not one this server may write` with a `reason`, and fails startup:
   schema: Authorization store refused: ...`, or with `Failed to record the
   permission schema version: ...` if a later release recorded the store while
   this replica was starting.
+- `authorization store schema declares version M, newer than version N of this
+  server, while its marker records version K`: a later release wrote its
+  schema in step 1 of an upgrade and has not recorded its version, either
+  because it is still starting or because it stopped. Start the later release
+  to finish the upgrade; this binary is refused until then, and afterwards by
+  the ordinary newer-version refusal. Startup fails with `Failed to ensure
+  permission schema: Authorization store refused: ...`, or with `Failed to
+  record the permission schema version: ...` if the later release wrote its
+  schema while this replica was starting. Abandoning the upgrade instead is a
+  schema downgrade: with the fleet stopped, an operator writes the schema of
+  version K back (`zed schema write`, from the source of the release that
+  recorded K); do not touch the marker.
 - `authorization store holds an unrecognised schema-version marker`: the
   marker definition holds anything other than one well-formed marker. Do not
   edit it; find out what wrote it.

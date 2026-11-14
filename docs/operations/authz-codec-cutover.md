@@ -17,9 +17,14 @@ server reads the codec marker
 - marker for `v2`: the server starts;
 - no marker and no Waddle relationships: the server writes the marker, then
   starts. Of several replicas starting together, one writes it;
-- no marker but Waddle relationships: the server refuses to start;
+- no marker but Waddle relationships: the server refuses to start, before it
+  rewrites the schema. A Waddle definition that the stored schema does not
+  declare counts as empty;
 - any other marker content: the server refuses to start, before it rewrites the
   schema.
+
+The marker is read, and an unmarked store scanned, once before the schema is
+written and again, strictly, after it is written and before the server serves.
 
 Production runs the `spicedb` SpiceDBCluster on its PostgreSQL datastore, which
 the running release has populated, including through the startup reseed of
@@ -27,9 +32,16 @@ deployment memberships. **This build refuses to start against production until
 that store is emptied.** Each replica logs `Refusing the authorization store: it is not bound to the current ID codec`
 with a `reason` naming the first populated definition, and startup fails with
 `Authorization store is not usable with this server: Authorization store
-refused: authorization store holds ...`. No relationship is written in that
-case; the schema gains the empty `waddle_authz_codec` and `waddle_authz_schema`
-definitions, which the previous release removes again when it starts.
+refused: authorization store holds ...` (`Failed to ensure permission schema:
+Authorization store refused: authorization store holds ...` when, as usual, the
+store is already populated when the replica starts). In that case neither a
+relationship nor the schema is written: replicas of the previous release that
+are still running keep evaluating their own schema, and their schema writes at
+restart do not alternate with this release's. Only a store that becomes
+populated between the two scans, because a replica of the previous release
+wrote to it while this release was starting, has this release's schema written
+before it is refused; the previous release then writes its own schema again
+when it next starts, because neither marker was written.
 
 Main auto-deploys. Merge this change only inside an explicitly authorised
 `Recreate` window, or ship it as part of the planned fresh production redeploy
@@ -144,9 +156,12 @@ startup. The surfaced error depends on where the refusal happens:
 
 - ``authorization store holds `<definition>` relationships but no codec
   marker``: the store was written by the previous release, or a pre-codec
-  binary wrote to it before it was marked. Startup fails with
-  `Authorization store is not usable with this server: Authorization store
-  refused: ...`. Follow the procedure above.
+  binary wrote to it before it was marked. This is checked before the schema
+  is written, so startup fails with `Failed to ensure permission schema:
+  Authorization store refused: ...` and the stored schema is left as it is; if
+  the relationships appeared while the replica was starting, the refusal comes
+  after the schema write, as `Authorization store is not usable with this
+  server: Authorization store refused: ...`. Follow the procedure above.
 - `authorization store is marked for a different or unrecognised ID codec`:
   the store belongs to another codec version, for example a later release. Run
   the release that wrote it. Do not edit or delete the marker. This is checked
