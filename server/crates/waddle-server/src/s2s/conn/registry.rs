@@ -30,6 +30,7 @@ use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::telemetry::attributes::S2sResource;
 
 use super::capacity::SocketCount;
+use super::outbox::Outbox;
 use super::peer_stream::{StreamDirection, VerifiedPeerStream};
 use crate::s2s::config::{Deadlines, ResourceLimits};
 
@@ -125,6 +126,8 @@ pub(super) struct Registration {
     pub(super) socket: Arc<SocketCount>,
     /// Whether the peer may use the reserved share of the caps.
     pub(super) reserved: bool,
+    /// Where stanzas for an outbound stream go; `None` for an inbound one.
+    pub(super) outbox: Option<Outbox>,
 }
 
 #[derive(Debug)]
@@ -135,6 +138,7 @@ struct Entry {
     socket: Arc<SocketCount>,
     reserved: bool,
     registered_at: Instant,
+    outbox: Option<Outbox>,
 }
 
 /// What registering a stream would do to the registered ones.
@@ -309,6 +313,7 @@ impl Registry {
                 socket: registration.socket,
                 reserved: registration.reserved,
                 registered_at: now,
+                outbox: registration.outbox,
             },
         );
         Ok(StreamSlot {
@@ -494,6 +499,24 @@ impl Registry {
             .values()
             .map(|entry| entry.stream.clone())
             .collect()
+    }
+
+    /// The channel of the registered outbound `stream`, while the registry
+    /// still holds that exact connection for its pair.
+    pub(super) fn outbox(&self, stream: &VerifiedPeerStream) -> Option<Outbox> {
+        if stream.direction() != StreamDirection::Outbound {
+            return None;
+        }
+        let key = StreamKey {
+            direction: StreamDirection::Outbound,
+            local: stream.local().clone(),
+            remote: stream.remote().clone(),
+        };
+        self.state()
+            .streams
+            .get(&key)
+            .filter(|entry| entry.stream.connection() == stream.connection())
+            .and_then(|entry| entry.outbox.clone())
     }
 
     /// Established streams in `direction`.

@@ -17,12 +17,16 @@
 //!   per-stage deadlines and a bounded shutdown join, as recorded in
 //!   `server/docs/planning/s2s-connection-manager-2047.md`.
 //!
-//! No stanza is routed: an established inbound stream hands each stanza
-//! to a [`StanzaSink`], and the sink of this release refuses all of them.
+//! An established inbound stream hands each stanza to a [`StanzaSink`];
+//! [`RefuseAllStanzas`] refuses every one, and the S2S router
+//! (`crate::s2s::route`) is the sink when S2S is enabled. An established
+//! outbound stream writes the stanzas [`S2sHandle::transmit`] gives it, one
+//! at a time.
 
 mod admission;
 mod capacity;
 mod endpoints;
+mod outbox;
 mod peer_stream;
 mod registry;
 mod service;
@@ -35,6 +39,7 @@ mod transport;
 pub use endpoints::{
     ConfiguredEndpoints, Endpoint, EndpointOrigin, EndpointResolver, Endpoints, ResolveError,
 };
+pub use outbox::TransmitError;
 pub use peer_stream::{AuthenticationStrength, StreamDirection, TlsParameters, VerifiedPeerStream};
 pub use service::{ConnectError, S2sHandle, S2sService, ServiceOptions, ShutdownReport};
 pub use sink::{RefuseAllStanzas, SinkVerdict, StanzaSink};

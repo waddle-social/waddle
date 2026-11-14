@@ -17,6 +17,11 @@
 //!
 //! The end of the shutdown drain (abort) interrupts every step, including
 //! a TLS handshake or a write in progress.
+//!
+//! An established outbound stream also writes the stanzas handed to it
+//! through its outbox, one at a time, and reports each write; it stops
+//! taking them once it starts to close, and returns those still waiting
+//! unwritten.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -34,6 +39,7 @@ use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 
 use super::admission::{Claim, ConnectionAdmission};
 use super::capacity::{InboundSlot, OutboundSlot, SocketCount};
+use super::outbox::{self, OutboxReceiver, Transmission, Untransmitted};
 use super::peer_stream::{StreamDirection, TlsParameters, VerifiedPeerStream};
 use super::registry::{
     Activity, DialSlot, NegotiationSlot, RegisterRefusal, Registration, StreamSlot, StreamTokens,
@@ -126,6 +132,9 @@ enum Event {
     Replaced,
     Deadline(DeadlineKind),
     Read(Result<usize, TransportError>),
+    /// A stanza for an established outbound stream, or `None` when its
+    /// outbox can no longer receive any.
+    Transmit(Option<Transmission>),
 }
 
 /// The state of one connection.
@@ -149,6 +158,8 @@ pub(super) struct Session {
     negotiation: Option<NegotiationSlot>,
     registered: Option<StreamSlot>,
     peer_stream: Option<VerifiedPeerStream>,
+    /// Stanzas for an established outbound stream.
+    outbox: Option<OutboxReceiver>,
     tls_transport: S2sTransport,
     shutdown_sent: bool,
     evicted: bool,
@@ -186,6 +197,7 @@ impl Session {
             negotiation: None,
             registered: None,
             peer_stream: None,
+            outbox: None,
             tls_transport: start.tls_transport,
             shutdown_sent: false,
             evicted: false,
@@ -229,6 +241,7 @@ impl Session {
             let shutdown = self.shared.shutdown.clone();
             let evict = self.tokens.evict.clone();
             let replace = self.tokens.replace.clone();
+            let transmitting = self.takes_transmissions();
             let event = tokio::select! {
                 biased;
                 () = abort.cancelled() => return S2sOutcome::Shutdown,
@@ -237,6 +250,9 @@ impl Session {
                 () = replace.cancelled(), if !self.replaced => Event::Replaced,
                 () = tokio::time::sleep_until(at.into()) => Event::Deadline(kind),
                 read = self.transport.read(&mut buffer) => Event::Read(read),
+                transmission = next_transmission(&mut self.outbox), if transmitting => {
+                    Event::Transmit(transmission)
+                }
             };
             let outputs = match event {
                 Event::Shutdown => {
@@ -266,9 +282,57 @@ impl Session {
                 }
                 Event::Read(Err(TransportError::Tls(_))) => return S2sOutcome::Tls,
                 Event::Read(Err(_)) => return S2sOutcome::Io,
+                Event::Transmit(None) => {
+                    self.outbox = None;
+                    continue;
+                }
+                Event::Transmit(Some(transmission)) => {
+                    let written = tokio::select! {
+                        biased;
+                        () = abort.cancelled() => return S2sOutcome::Shutdown,
+                        written = self.transmit(transmission) => written,
+                    };
+                    match written {
+                        Ok(()) => continue,
+                        Err(outcome) => return outcome,
+                    }
+                }
             };
             queue.extend(outputs);
         }
+    }
+
+    /// Whether the stream takes stanzas from its outbox now: an established
+    /// outbound stream that is not closing.
+    fn takes_transmissions(&self) -> bool {
+        self.outbox.is_some()
+            && self.phase == NegotiationPhase::Established
+            && !self.stream.is_closed()
+            && !self.shutdown_sent
+            && !self.evicted
+            && !self.replaced
+    }
+
+    /// Write one stanza from the outbox and report the write to its sender.
+    /// A stanza the codec refuses is reported and the stream continues; a
+    /// failed write ends the connection, and its sender learns only that
+    /// the outcome is unknown.
+    async fn transmit(&mut self, transmission: Transmission) -> Result<(), S2sOutcome> {
+        let Transmission { stanza, written } = transmission;
+        let outputs = match self.stream.send_stanza(stanza) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                let _ = written.send(Err(Untransmitted::Refused(error)));
+                return Ok(());
+            }
+        };
+        for output in outputs {
+            // Dropping `written` on failure tells the sender the outcome is
+            // unknown.
+            self.execute(output).await?;
+        }
+        let _ = written.send(Ok(()));
+        Ok(())
     }
 
     /// Bookkeeping after the codec consumed input. `progressed` is whether
@@ -365,7 +429,18 @@ impl Session {
                     None => SinkVerdict::Refuse,
                 };
                 match verdict {
+                    SinkVerdict::Accepted => Ok(Vec::new()),
                     SinkVerdict::Refuse => Ok(self.stream.signal(Signal::PolicyViolation)),
+                }
+            }
+            Output::MalformedAddress(stanza) => {
+                let verdict = match &self.peer_stream {
+                    Some(stream) => self.shared.sink.offer_malformed(stream, stanza),
+                    None => SinkVerdict::Refuse,
+                };
+                match verdict {
+                    SinkVerdict::Accepted => Ok(Vec::new()),
+                    SinkVerdict::Refuse => Ok(self.stream.signal(Signal::ImproperAddressing)),
                 }
             }
             Output::Close(reason) => Err(self.close_outcome(reason)),
@@ -476,17 +551,26 @@ impl Session {
             .config
             .admission()
             .is_reserved_peer(stream.remote());
+        let (outbox, receiver) = match self.direction {
+            StreamDirection::Outbound => {
+                let (outbox, receiver) = outbox::outbox();
+                (Some(outbox), Some(receiver))
+            }
+            StreamDirection::Inbound => (None, None),
+        };
         let registration = Registration {
             stream: stream.clone(),
             activity: Arc::clone(&self.activity),
             tokens: self.tokens.clone(),
             socket: self.role.socket(),
             reserved,
+            outbox,
         };
         match self.shared.registry.register(registration) {
             Ok(slot) => {
                 self.registered = Some(slot);
                 self.peer_stream = Some(stream);
+                self.outbox = receiver;
                 Ok(())
             }
             Err(refusal) => Err(self.refused(refusal)),
@@ -638,6 +722,11 @@ impl Session {
 
     /// Close the transport, report the outcome and release every slot.
     async fn end(mut self, outcome: S2sOutcome) {
+        // Stanzas still waiting were never written; their senders may send
+        // them on another stream.
+        if let Some(mut receiver) = self.outbox.take() {
+            outbox::drain(&mut receiver);
+        }
         let abort = self.shared.abort.clone();
         if !abort.is_cancelled() {
             // Abort interrupts the close too; the socket is dropped anyway.
@@ -677,6 +766,14 @@ impl Session {
         // Unregister before reporting the new stream count.
         self.registered = None;
         telemetry::stream_counts(&self.shared.registry);
+    }
+}
+
+/// The next stanza from an outbox, or never when there is none.
+async fn next_transmission(outbox: &mut Option<OutboxReceiver>) -> Option<Transmission> {
+    match outbox {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
     }
 }
 
