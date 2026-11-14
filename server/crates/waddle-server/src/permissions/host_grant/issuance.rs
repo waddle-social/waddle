@@ -102,6 +102,17 @@ pub enum IssuanceRefusal {
 }
 
 /// The inputs issuance decides from.
+///
+/// Its account domains and the served account domains of the replica's
+/// [`HostGrantAttachment`](super::HostGrantAttachment), which admission
+/// honours privileged grants for, must come from one configuration value.
+/// Issuance records an owner or admin grant as `local` because its subject
+/// is an account of a served domain, and admission honours the grant only
+/// if it agrees that the domain is served; were the two sets configured
+/// apart, a grant issued here could be honoured as no grant there, or the
+/// reverse. Nothing in this slice builds a policy from configuration yet;
+/// the one that does takes the domains from where the attachment takes
+/// them.
 #[derive(Clone, Debug, Default)]
 pub struct IssuancePolicy {
     account_domains: ServedAccountDomains,

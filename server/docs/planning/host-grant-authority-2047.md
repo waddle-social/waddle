@@ -16,8 +16,9 @@ actor roadmap retain their ordering and activation gates.
 The first slice is implemented (`permissions/host_grant`, migration 2001).
 What it decided for its scope is recorded under
 [First-slice decisions](#first-slice-decisions); the evidence for those
-decisions is the first slice's focused set, which has not been executed. No
-scope is enrolled by any release configuration, and nothing enrolls one at
+decisions is the first slice's focused set, executed as described under
+[Running the first slice's focused set](#running-the-first-slices-focused-set).
+No scope is enrolled by any release configuration, and nothing enrolls one at
 runtime, so the slice changes no behavior of an existing deployment beyond
 its migration, the built-in authorization schema's version, one indexed
 lookup on legacy channel and Space permission writes, a privilege check of
@@ -1008,7 +1009,11 @@ Member-level and negative grants of remote accounts are honored as stored.
 The served account domains are the replica's configured account domain:
 admission takes them from its attachment (B1) and a mutation from its
 issuance policy. A replica that serves no account domain honors no
-privileged grant. W5e replaces this rule with the trusted-home and `pkix`
+privileged grant. Both sets must come from one configuration value: issuance
+records an owner or admin grant as `local` because its subject's domain is
+served, and admission honors it only if it agrees. No issuance policy is
+built from configuration in this slice; when one is, it takes the account
+domains from the value the attachment takes them from. W5e replaces this rule with the trusted-home and `pkix`
 evaluation. Issuance is unchanged by it.
 
 A mutation's initiator is an account whose authority is evaluated from the
@@ -1068,10 +1073,19 @@ projected subject are that canonical text.
   manages. The identity profile already refuses such addresses where
   stanzas are parsed.
 - A PostgreSQL replica checks its runtime role's privileges on the
-  host-grant relations when it starts. A mismatch does not stop the
-  replica; it logs an error and serves no enrolled scope. A deployment
-  whose runtime role owns the schema logs that error at every start and
-  must move to the restricted runtime before it enrolls a scope.
+  host-grant relations when it starts. A failure does not stop the
+  replica, which serves no enrolled scope until the check passes. A
+  failure that a later attempt may pass (a failed statement, an expired
+  lock or statement bound, bounds that could not be installed) is retried
+  in the background with a backoff capped at one minute; a role that does
+  not match the profile is not retried. Each failure is logged by its kind,
+  as an error when the database holds a scope that is enrolled and not
+  retired or when that cannot be read, and otherwise as information. A
+  deployment whose runtime role owns the schema therefore logs the mismatch
+  at every start, as an error once a scope is enrolled, and must move to
+  the restricted runtime before it enrolls one. While a replica is
+  unattached, each refused acceptance for a managed room is also logged
+  as a warning by its kind, at most once a minute.
 - The owner phase is what retires a scope as well as what enrolls one. The
   runtime role's grant matrix is unchanged by that: it reads the lifecycle
   ledger and cannot write it.
@@ -1089,7 +1103,7 @@ export WADDLE_TEST_SPICEDB_PRESHARED_KEY=KEY
 export WADDLE_TEST_SPICEDB_DISPOSABLE=1
 cargo nextest run -p waddle-server --features test-support --locked \
     --run-ignored all \
-    -E 'binary(host_grant_authority) | binary(xep0045_host_grant_admission) | binary(xep0045_host_grant_audience) | binary(host_grant_projection) | binary(authz_schema_version)'
+    -E 'binary(host_grant_authority) | binary(xep0045_host_grant_admission) | binary(xep0045_host_grant_audience) | binary(host_grant_projection) | binary(authz_schema_version) | binary(channel_outcast_precedence) | binary(authz_codec_incarnation) | binary(authz_id_codec)'
 ```
 
 The PostgreSQL login must be a superuser. Each case creates and drops its
@@ -1103,6 +1117,16 @@ PostgreSQL only; `host_grant_projection` and the `live_spicedb_` cases of
 `authz_schema_version` need both stores. `xep0045_host_grant_audience`
 plans its messages with the production room planner against a real room
 actor; the other admission cases build their plans by hand.
+
+The focused set was executed on 2026-11-14 against PostgreSQL 17.11 and
+SpiceDB 1.56.1 with nextest's default parallelism: two consecutive runs
+passed 110 of 110 cases. An earlier run of the same revision failed one
+admission case with an ingress substrate timeout; the case passed alone and
+in both later runs. An expired bound under parallel load is the likely
+cause, but it has not been confirmed. That SpiceDB used the memory
+datastore, so the `live_spicedb_` and `host_grant_projection` cases are
+evidence against SpiceDB's API and consistency semantics, not against a
+PostgreSQL-backed SpiceDB datastore.
 
 ## Blocking review ledger
 
