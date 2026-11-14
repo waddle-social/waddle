@@ -33,6 +33,7 @@ on:
     - colony/wrangler.jsonc
     - colony/wrangler.jsonc/**
     - cue.mod/**
+    - design/**
     - design/assets/**
     - design/package.json
     - design/package.json/**
