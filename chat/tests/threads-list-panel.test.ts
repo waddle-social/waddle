@@ -69,11 +69,10 @@ describe("ThreadsListPanel state", () => {
     await panel.fetchThreadsPage(false);
 
     expect(client.fetchThreads).toHaveBeenCalledTimes(1);
-    // Default view is now Unread over the last 7 days.
+    // Default view is Unread over all time (no activeSince).
     expect(client.fetchThreads.mock.calls[0]?.[0]).toEqual({
       pageSize: 50,
       status: "unread",
-      activeSince: "2026-05-26T00:00:00.000Z",
       sort: "recent",
     });
     expect(panel.hasEntries.value).toBe(false);
@@ -225,7 +224,6 @@ describe("ThreadsListPanel state", () => {
     expect(client.fetchThreads.mock.calls[1]?.[0]).toEqual({
       pageSize: 50,
       status: "unread",
-      activeSince: "2026-05-26T00:00:00.000Z",
       sort: "recent",
     });
     scope.stop();
