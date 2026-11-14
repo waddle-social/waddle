@@ -443,13 +443,25 @@ JIDs. Both issues must be resolved before remote grants can be used.
   Condition (b) is never met on a dialback-only stream.
 - A `pkix` stream of a trusted home may be verified under the public-WebPKI
   trust profile (D2) as well as a private-CA profile; the S2S configuration
-  can require a private-CA profile for a given trusted home. Public chains
-  are not checked for revocation, so a trusted home whose key is
-  compromised keeps privileged authority and room moderation over `pkix`
-  streams until that certificate expires, at most the public leaf validity
-  ceiling, unless the operator removes the home from the trusted-home list
-  or denylists it. This residual risk is accepted as part of activation
-  (G22).
+  can require a private-CA profile for a given trusted home. On the public
+  profile the trusted home's authority rests on every publicly trusted CA
+  and on control of its domain, so its residual risk is:
+  - Public chains are not checked for revocation, so a trusted home whose
+    key is compromised keeps privileged authority and room moderation over
+    `pkix` streams until that certificate expires, at most the public leaf
+    validity ceiling.
+  - Any publicly trusted CA can issue a certificate for the trusted home's
+    domain, so a certificate mis-issued by any of them carries the same
+    authority for its validity.
+  - Whoever gains control of the domain, through an expired registration
+    or a hijacked DNS zone or registrar account, can obtain a valid
+    certificate by domain validation and holds the same authority.
+
+  In each case the authority lasts until the operator removes the home from
+  the trusted-home list or denylists it. Requiring a private-CA profile for
+  the home, whose chains only that CA issues and whose revocation lists are
+  checked, avoids all three. This residual risk is accepted as part of
+  activation (G22).
 - A grant that is not honored contributes nothing to admission. A privileged
   or moderator grant that fails either condition yields neither `moderate` nor
   the member-level permissions, such as `read` and `send_message`, that the

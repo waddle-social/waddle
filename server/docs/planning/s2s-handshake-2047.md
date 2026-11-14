@@ -349,22 +349,19 @@ cancellation; no unbounded spawned-task or logging queue is allowed.
 | Resource | Ceiling / deadline |
 | --- | --- |
 | Open S2S sockets, all stages | 32 per process; 16 inbound and 16 outbound. |
-| Unauthenticated inbound sockets | 8 globally; 4 per source IP, before header parsing. |
-| Concurrent expensive handshakes | 4 globally; per-IP and peer limits also apply. |
+| Unauthenticated inbound sockets | 8 globally; 2 per source address (ceiling 4), before header parsing, as [the connection-manager design](s2s-connection-manager-2047.md#resource-model) sets them (gate G7). |
+| Concurrent expensive handshakes | 4 inbound and 2 outbound TLS handshakes, separately, each direction on its own verifier workers; the per-address and per-peer limits also apply ([connection-manager design](s2s-connection-manager-2047.md#resource-model), gate G7). |
 | Established streams | 1 per exact directional pair; a new authenticated stream replaces the incumbent, rate limited (see [decisions after the G4 review](#decisions-after-the-g4-review)). |
 | Inbound accept rate | Token bucket 8/second, burst 8 globally; 2/second, burst 4 per source IP. |
 | Initial/restarted header or SASL element | 8 KiB including attributes; decoded authzid at most 1 KiB. |
-| XML top-level stanza | 64 KiB raw UTF-8, bounded incrementally before DOM construction. |
-| XML shape | Depth 32 below stream root; 32 attributes per element; 1,024 elements per stanza; 8 KiB total attribute bytes per stanza. |
-| XML buffering | 128 KiB maximum per connection; reject DTDs/external entities and unsupported encodings; bounded whitespace counts toward rate/deadline. |
-| XML decoded tree | 128 KiB of retained strings per top-level stanza, charging each element's and attribute's namespace name per copy; declared namespace names at most 1 KiB; one name or attribute value at most 8 KiB (the parser's per-connection scratch buffer). Node structure is bounded by the element count, about 1.25 MiB at 1,024 elements, so resident decoder state is about 1.7 MiB per connection in the worst case. |
+| XML stanza, shape, buffering and decoded tree | Before SASL succeeds, the pre-authentication mode holds every first-level element to 8 KiB; after it, `STREAM_CODEC_LIMITS` applies (512 KiB per stanza, 4,096 elements, depth 32 and the rest), with its memory model, as the [decoding limits of the connection-manager design](s2s-connection-manager-2047.md#decoding-limits-g7) set them (gate G7). Every stage rejects DTDs, external entities and unsupported encodings and bounds input incrementally before a tree is built; whitespace counts toward the input rate. |
 | TLS handshake buffering | 128 KiB per connection, chain at most 8 certificates and 64 KiB encoded; demonstrate library enforcement under B2. |
 | Output buffer | 16 control frames and 64 KiB per connection; first exhausted bound closes. No application queue. |
 | TCP connect / initial header / TLS / each expected stream restart | 5 seconds each; 20 seconds total through authenticated post-SASL header. Timers do not reset on partial bytes. |
 | Whole SASL phase | 5 seconds from mechanisms offer, including challenges, replacements and abort/retry; never renew this or the total negotiation deadline. |
 | SASL exchanges / aborts / XML stream restarts | 3 auth starts total, 3 abort elements total; at most the expected post-TLS and post-success headers. Replacements/aborts never add a stream restart. |
-| Established incomplete element / idle | 5 seconds / 300 seconds, as [the connection-manager design](s2s-connection-manager-2047.md#deadlines) sets them (gate G7); continuous whitespace cannot avoid the element/rate limits. |
-| Input rate | 64 KiB/second, burst 128 KiB per socket; 512 KiB/second, burst 1 MiB globally. |
+| Established incomplete element / idle | 5 seconds of time the server is willing to read, at most 30 seconds per element / 300 seconds, as [the connection-manager design](s2s-connection-manager-2047.md#deadlines) sets them (gate G7); continuous whitespace cannot avoid the element/rate limits. |
+| Input rate | 64 KiB/second, burst 128 KiB per socket; 512 KiB/second, burst 1 MiB globally; configurable down to 32 KiB/second ([connection-manager design](s2s-connection-manager-2047.md#resource-model), gate G7). |
 | Terminal write and close / operator drain | 1 second / 5 seconds, capped by the process's remaining drain budget. |
 | Outbound attempts | Made on demand through the connection manager, one in progress per directional pair, with per-domain backoff after a failure (gate G7); no autonomous retry. |
 
@@ -433,11 +430,14 @@ because input the initiator sends after `<starttls/>` without waiting for
 5.4.3.1). Bytes received between SASL success and the post-SASL stream header
 are discarded and close the stream with `policy-violation`. Each read handed
 to the decoder is at most the buffered-input ceiling minus the stanza ceiling
-(64 KiB with the fixture limits).
+(64 KiB with the pilot limits).
 
-**Codec limits.** The fixture limits match the ceilings above (8 KiB header,
-64 KiB stanza, depth 32, 32 attributes per element, 1,024 elements and 8 KiB
-of attributes per stanza, 128 KiB buffered) and add: 8 KiB for a first-level
+**Codec limits.** The codec's pilot limits (`CodecLimits::PILOT`, which the
+codec's own tests use) are an 8 KiB header, a 64 KiB stanza, depth 32, 32
+attributes per element, 1,024 elements and 8 KiB of attributes per stanza
+and 128 KiB buffered; the connection manager uses `STREAM_CODEC_LIMITS`
+after SASL instead ([connection-manager design](s2s-connection-manager-2047.md#decoding-limits-g7),
+gate G7). The pilot limits add: 8 KiB for a first-level
 STARTTLS, SASL or dialback element; 8 KiB for one name or attribute value
 while the parser assembles it; 1 KiB for a declared namespace name; and
 128 KiB for the strings retained by the decoded tree of one first-level
@@ -623,7 +623,11 @@ not checked for revocation (verifier design, "Revocation of public
 chains"), so a trusted home's compromised key keeps its privileged
 authority until its certificate expires, at most the public leaf validity
 ceiling, unless the operator denylists the domain or removes it from the
-trusted-home list and restarts. This residual risk is recorded in
+trusted-home list and restarts. On that profile any publicly trusted CA can
+issue a certificate for the trusted home's domain, so a mis-issued
+certificate, or one obtained by whoever gains control of the domain (an
+expired registration, a hijacked DNS zone or registrar account), carries
+the same authority for its validity. This residual risk is recorded in
 [ADR-0020 D8](../adrs/0020-independent-community-federation.md#decision-remote-authority-and-reassigned-jids-d8)
 and accepted as part of the activation decision (gate G22).
 
@@ -661,10 +665,23 @@ and accepted as part of the activation decision (gate G22).
 - A-labels are accepted in received headers and stanza addresses and read
   as the same domain as their U-labels, although RFC 7622 §3.2.1 says a
   prepared domainpart contains no A-labels; emitted headers use U-labels.
-- A stanza address on an established stream gets no ASCII case mapping:
-  its domain must be one canonical spelling, as everywhere else the
-  identity profile reads addresses, and a stanza whose `to` or `from` is
-  outside the profile closes the stream with `improper-addressing`.
+- ASCII uppercase letters in the domainpart of a stanza's `to` or `from`
+  on an established stream are mapped to lowercase as in stream headers,
+  and the stanza is handed on with the canonical lowercase domain. The
+  localpart and resourcepart are read exactly. Any other address the
+  identity profile refuses closes the stream with `improper-addressing`.
+  For the routing slice (W5a): a syntactically valid address in a
+  spelling the profile refuses (an uppercase localpart, a width or
+  compatibility form) is to be answered with a `jid-malformed` stanza
+  error and the stream kept; stream errors stay for an absent, empty or
+  unparseable address and for a domain outside the stream's pair. This
+  release has no stanza reply path, since every stanza that passes the
+  checks is refused with `policy-violation`, so the stanza error arrives
+  with routing.
+- Whitespace (or U+FEFF) before a stream header, initial or restarted, is
+  refused with `not-well-formed`, although XML 1.0 allows whitespace before
+  the root element of a document without an XML declaration. The harness
+  slice (W10) confirms that Prosody and ejabberd send none.
 - A failed SASL EXTERNAL exchange closes the stream. RFC 6120 §6.4.5 says
   the receiving entity SHOULD allow a reasonable number of retries where
   appropriate for the mechanism; a certificate that failed once fails

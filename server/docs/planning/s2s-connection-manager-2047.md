@@ -109,12 +109,14 @@ wiring in `server/lifecycle.rs`.
   `admission.require_private_ca` lists trusted homes that count as trusted
   only on a private-CA profile; each entry must be a trusted home with a
   configured private-CA profile, or the load fails. The residual risk of a
-  public-profile trusted home is that public chains are not checked for
-  revocation (verifier design, "Revocation of public chains"): a
+  public-profile trusted home is threefold: public chains are not checked
+  for revocation (verifier design, "Revocation of public chains"), so a
   compromised key of a trusted home is usable until its certificate
-  expires, at most the public leaf validity ceiling, unless the operator
-  denylists the domain. Accepting that is part of the activation decision
-  (gate G22).
+  expires, at most the public leaf validity ceiling; any publicly trusted
+  CA can mis-issue a certificate for the domain; and whoever gains control
+  of the domain can obtain one by domain validation. Each lasts until the
+  operator denylists the domain or removes it from the trusted-home list.
+  Accepting that is part of the activation decision (gate G22).
 - Admission is checked at stream open (the pre-TLS header on an inbound
   stream, before dialling on an outbound one) and again before SASL
   EXTERNAL succeeds. Every refusal of the pair before TLS is
@@ -129,9 +131,12 @@ wiring in `server/lifecycle.rs`.
   `s2s` when `listen` is configured, and an inherited `s2s` descriptor
   without it is left over and fails startup, as any unexpected descriptor
   does. The launcher bound the inherited descriptor, so startup also fails
-  unless it is bound to a loopback address equal to `listen`; port zero in
-  `listen`, which only the native fixture uses, matches the port the first
-  process bound. There is no inbound direct TLS. The pre-TLS header must
+  unless it is bound to a loopback address equal to `listen` and to the
+  same port. The one exception is a `listen` port of zero, which only the
+  native fixture configures: its first process binds an ephemeral port and
+  its successors inherit it, so any port is accepted then, never another
+  address. A nonzero `listen` port never matches a different port. There
+  is no inbound direct TLS. The pre-TLS header must
   carry `from` (`bad-format` otherwise); the admitted pair fixes the
   reference identity and trust profile before the handshake.
 - **Outbound** dials only configured endpoints through the
@@ -165,10 +170,15 @@ wiring in `server/lifecycle.rs`.
 - **Stanzas.** An established inbound stream hands each stanza that passes
   the codec's address checks to a `StanzaSink`. The codec reads a stanza's
   `to` and `from` with the identity profile's parser, not JID preparation,
-  and hands the stanza on with both rewritten in canonical form (a
-  trailing dot removed, the domain in A-labels). The sink of this release
-  refuses every stanza, and the stream closes with `policy-violation`; the
-  routing slice replaces it.
+  after mapping ASCII uppercase in the domainpart to lowercase as stream
+  headers do, and hands the stanza on with both rewritten in canonical form
+  (a trailing dot removed, the domain in A-labels and lowercase). Any other
+  spelling the profile refuses closes the stream with `improper-addressing`;
+  the routing slice is to answer a syntactically valid address in such a
+  spelling with a `jid-malformed` stanza error instead and keep the stream
+  ([handshake design](s2s-handshake-2047.md#decisions-after-the-g4-review)).
+  The sink of this release refuses every stanza, and the stream closes with
+  `policy-violation`; the routing slice replaces it.
 - **Duplicate pairs.** A new fully authenticated stream for a directional
   pair replaces the existing one, which closes with `conflict` (owner
   decision). To prevent two peers making a pair flap, a stream younger than
@@ -186,25 +196,33 @@ wiring in `server/lifecycle.rs`.
 ## Resource model
 
 Configuration may set any value from one up to its ceiling, never beyond.
-Caps and rates default to their ceilings, so they can only be lowered; the
-idle timeout, connection age, eviction idle time, replacement interval and
-the two backoff durations default below their ceilings and can be raised to
-them. The values are bounds, not measured capacity.
+Rates and most caps default to their ceilings, so they can only be lowered;
+the unauthenticated sockets per source address (2, ceiling 4) and the
+negotiating streams per remote domain (3, ceiling 4) default below them, as
+do the idle timeout, connection age, eviction idle time, replacement
+interval and the two backoff durations, and can be raised to them. The input
+rates (`input_per_second`, `input_burst`, `input_per_socket_per_second`,
+`input_per_socket_burst`) also have a floor of 32 KiB/s, at which a stanza
+at the 512 KiB ceiling arrives in 16 seconds, within the 30-second bound on
+one element. The load also fails when limits do not fit together:
+established streams plus unauthenticated sockets above the socket cap, a
+peer cap not below the inbound socket cap, or a global input rate or burst
+below the per-socket one. The values are bounds, not measured capacity.
 
 | Resource | Value | On exhaustion |
 | --- | --- | --- |
-| Open sockets, all stages | 32 (16 inbound, 16 outbound) | Inbound: when the inbound cap is full, the established inbound stream without traffic the longest is evicted if it has had none for the eviction idle time (30 s), and the new socket takes its place; otherwise the socket is closed at accept, no byte read. Outbound: the same with outbound streams; otherwise the attempt fails, no backoff. |
-| Unauthenticated inbound sockets | 8 globally, 4 per source address | Closed at accept. |
+| Open sockets, all stages | 32 (16 inbound, 16 outbound) | Inbound: only a socket every other accept limit admits can find the inbound cap full. Then the established inbound stream without traffic the longest is evicted if it has had none for the eviction idle time (30 s), and the new socket takes its place under the same lock; otherwise the socket is closed at accept, no byte read. A stream outside the reserve is evicted first; in `open` mode a new socket, whose peer is unknown at accept, never evicts a reserved peer's stream. Outbound: the same with outbound streams, where an attempt to a reserved peer may evict a reserved peer's stream when no other can be evicted; otherwise the attempt fails, no backoff. |
+| Unauthenticated inbound sockets | 8 globally, 2 per source address (ceiling 4) | Closed at accept. |
 | Tracked source addresses | 256, idle entries expire after 60 s | A new address is closed at accept while full. |
 | Accept rate | 8/s burst 8 globally; 2/s burst 4 per address | Closed at accept. Every per-address limit is checked before a global token is spent, so a source over its own limits cannot drain the allowance others share. |
 | TLS handshakes | 4 inbound, 2 outbound, separately | Inbound closes without XML (after `<proceed/>`, TLS cannot carry an error); outbound fails without backoff. |
 | Verifier workers | One per handshake slot and as many waiters, per direction | A waiting handshake is bounded by its stage deadline; a refused one is treated like an exhausted handshake cap. Inbound handshakes can never occupy the outbound workers. |
-| Established streams | 24: the socket cap less the unauthenticated cap, so negotiation always has sockets. In `open` mode, 18 (all but a quarter) for peers that are neither allowlisted nor trusted homes | Evict the stream without traffic the longest if it has had none for the eviction idle time; a peer outside the reserve evicts only streams outside it. Otherwise refuse the new stream with `resource-constraint`. |
-| Peers (remote domains with an established stream) | 12, below each direction's socket cap. In `open` mode, 9 for peers that are neither allowlisted nor trusted homes | Evict every stream of the peer whose latest traffic is oldest if none of its streams has had traffic for the eviction idle time, as for streams; otherwise refuse with `resource-constraint`. |
-| Negotiating streams per remote domain | 2 in each direction, counted separately | An inbound connection counts only once TLS has verified the remote domain, and is closed with `resource-constraint` if the domain's inbound budget is full. Outbound: the attempt fails. |
+| Established streams | 24: the socket cap less the unauthenticated cap, so negotiation always has sockets. In `open` mode, 18 (all but a quarter) for peers that are neither allowlisted nor trusted homes | Evict the stream without traffic the longest if it has had none for the eviction idle time. A peer outside the reserve evicts only streams outside it, whether its general share or the whole cap is full. Otherwise refuse the new stream with `resource-constraint`. |
+| Peers (remote domains with an established stream) | 12, below each direction's socket cap. In `open` mode, 9 for peers that are neither allowlisted nor trusted homes | Evict every stream of the peer whose latest traffic is oldest if none of its streams has had traffic for the eviction idle time, as for streams, and a peer outside the reserve only a peer outside it; otherwise refuse with `resource-constraint`. |
+| Negotiating streams per remote domain | 3 in each direction (ceiling 4), counted separately | An inbound connection counts only once TLS has verified the remote domain, and is closed with `resource-constraint` if the domain's inbound budget is full. Outbound: the attempt fails. |
 | Outbound attempts in progress | 8, one per directional pair | `ConnectError::Busy` or `InProgress`. |
 | Outbound backoff | Failing remote domains only; 1 s doubling to 300 s; 256 entries | A domain without an entry is never refused. When the table is full, a new failure replaces the entry updated longest ago among those whose wait has passed, or else the entry updated longest ago. |
-| Input rate | 64 KiB/s burst 128 KiB per socket; 512 KiB/s burst 1 MiB globally | Reads pause (backpressure); the connection is not closed for its rate. Deadlines still bound a throttled negotiation. |
+| Input rate | 64 KiB/s burst 128 KiB per socket; 512 KiB/s burst 1 MiB globally; each at least 32 KiB/s | Reads pause (backpressure); the connection is not closed for its rate. Deadlines still bound a throttled negotiation; the incomplete-element deadline adds back the time reads waited for the rates (see [Deadlines](#deadlines)). |
 | Output | rustls buffer limit 64 KiB per connection; each batch written within the 1 s write deadline | Close. |
 
 **Per-peer budgets.** A remote domain's budget is spent only by
@@ -219,9 +237,13 @@ direction; it can only use its own share of the unauthenticated caps.
 it arrives as an IPv4-mapped IPv6 address, and an IPv6 source by its /64
 prefix. Per-address limits are an availability control, not an identity: a
 NAT can put many peers behind one address, and a source with more address
-space than a /64 can spread across prefixes. While S2S is limited to
-loopback endpoints and `.test` domains (before gate G6) that is accepted;
-it is decided again with discovery (G6) and at activation (G20).
+space than a /64 can spread across prefixes. One address can hold at most
+two of the four inbound handshakes, but two addresses can hold all four,
+and four addresses every unauthenticated socket, delaying every other
+peer's new connections until their stage deadlines close them. While S2S is
+limited to loopback endpoints and `.test` domains (before gate G6) both are
+accepted; they are decided again with discovery (G6) and at activation
+(G20).
 
 **Traffic and eviction.** Traffic is a first-level element or stream header
 received, or anything sent; whitespace keepalives are not traffic. They
@@ -229,23 +251,65 @@ keep a stream open, because the idle timeout counts anything received or
 sent, but they do not protect it from eviction, which uses the time since
 the stream's last traffic. A peer that keeps its streams busy is never
 displaced, and an attacker who opens streams from many domains in `open`
-mode can displace only streams that carry nothing, never those of the
-reserve's allowlisted and trusted-home peers once the general share is
-full. The reserve is a quarter of each cap, rounded down, so a cap below
-four reserves nothing. In `allowlist` mode every admitted peer is on the
-allowlist and the whole cap is theirs.
+mode can displace only streams that carry nothing. The reserve is a quarter
+of each of the stream and peer caps, rounded down, so a cap below four
+reserves nothing. What the code guarantees for the reserve's allowlisted
+and trusted-home peers in `open` mode:
+
+- A peer outside the reserve never evicts a reserved peer's stream: at
+  the stream and peer caps it evicts only streams outside the reserve,
+  whether its general share or the whole cap is full, and a new inbound
+  socket, whose peer is unknown at accept, evicts only a stream outside the
+  reserve.
+- Peers outside the reserve hold at most the general share of each cap,
+  so once they fill it, the remaining quarter is left to reserved peers.
+- The socket caps hold no reserve. The general share of streams (18) and
+  the unauthenticated sockets (8) together exceed the inbound socket cap
+  (16), so busy streams of peers outside the reserve and unauthenticated
+  sockets can fill every inbound socket and keep a reserved peer from
+  connecting inbound until one of them ends or goes quiet; the reserved
+  peer's own outbound streams are unaffected. This is accepted with the
+  per-address limits while S2S is limited to loopback and `.test` (before
+  G6), and decided again at G6 and G20, either by resizing the defaults so
+  the general share and the unauthenticated cap fit the inbound socket cap
+  or by reserving inbound sockets.
+- A certificate with a wildcard name, or with many names, authenticates
+  one remote domain per name it covers, and each is a separate peer. One
+  such certificate can therefore fill the general share of the peer and
+  stream caps by itself in `open` mode. Accepted before G6; G20 and the
+  peer-identity slice (W12) decide whether peers are grouped by
+  certificate or by registrable domain for these caps.
+
+In `allowlist` mode every admitted peer is on the allowlist and the whole
+of each cap is theirs, and a new socket may evict any quiet stream.
 
 **Backoff.** Backoff is recorded only for outbound failures attributable to
 the peer or the path to it: certificate, TLS and protocol failures, peer
 stream errors (such as `host-unknown` or `see-other-host`), peer closes,
-timeouts and I/O failures. Local capacity refusals and shutdown record
-nothing. A success forgets the domain's entry, and an entry whose wait
-passed more than the maximum backoff ago is forgotten when the next failure
-is recorded, so a later failure starts again from the initial wait. The
-table bounds the memory backoff uses; it never decides which domains can be
+timeouts and I/O failures. Local capacity refusals, shutdown and a local
+`conflict`, which another stream for the same pair causes, record nothing.
+A success forgets the domain's entry, and an entry whose wait passed more
+than the maximum backoff ago is forgotten when the next failure is
+recorded, so a later failure starts again from the initial wait. The table
+bounds the memory backoff uses; it never decides which domains can be
 dialled. How many destinations local users can make this server dial at
 once is bounded by the cap on attempts in progress. Inbound connections
-never feed the backoff table.
+never feed the backoff table. An outbound request finds the pair's
+established stream and takes the pair's dial slot under one lock, and an
+attempt registers its stream before it gives up the slot, so two requests
+for one pair never dial twice.
+
+Two limits of this design are recorded for discovery (G6), when local
+users' requests can reach arbitrary domains:
+
+- **Backoff flush.** Failures to more distinct domains than the table holds
+  (256) replace the entries of failing domains that are still waiting, so
+  a sender who can make this server dial many failing domains can flush a
+  domain's backoff and have it dialled again before its wait ends.
+- **No global dial rate.** Only the number of attempts in progress (8) is
+  capped; there is no rate on new outbound attempts across all domains, so
+  attempts that fail quickly can follow one another without pause, each to
+  a domain without a backoff entry.
 
 ## Deadlines
 
@@ -255,7 +319,7 @@ never feed the backoff table.
 | Each negotiation stage: initial header, TLS handshake, each expected restart | 5 s | No |
 | SASL phase, from the post-TLS header | 5 s | No, nor by replaced or aborted exchanges |
 | Whole negotiation, from accept or connect | 20 s | No |
-| Unfinished first-level element on an established stream | 5 s | No; completing an element restarts it for the next one |
+| Unfinished first-level element on an established stream | 5 s of time the server is willing to read; time reads wait for the input rates is added back, up to 30 s for the element in all | No; completing an element restarts it for the next one |
 | Established-stream idle | 300 s (ceiling 3,600 s) | Yes, by anything received or sent, whitespace keepalives included |
 | Established-stream maximum age | 3,600 s (ceiling 24 h), and never beyond the certificate evidence's expiry | No |
 | Write of one batch, terminal error and close | 1 s | — |
@@ -263,6 +327,18 @@ never feed the backoff table.
 
 A negotiation timeout closes with `connection-timeout`, expiry and maximum
 age with `reset`.
+
+The unfinished-element deadline charges the peer only for time the server
+was willing to read. The transport records how long its reads have waited
+for the per-socket and global input rates, including a wait cut short by
+another event, and the deadline is the element's start plus 5 s plus the
+time its reads waited since then, never later than 30 s after the start. A
+peer that stops sending for 5 s of readable time is closed with
+`connection-timeout`, while a stanza at the 512 KiB ceiling read at the
+default 64 KiB/s per-socket rate, about eight seconds after a drained burst,
+arrives. When many streams share an exhausted global rate a ceiling stanza
+can take longer than 30 s and is then closed; verification measures how
+close a busy global rate comes to that bound.
 
 ## Shutdown join
 
@@ -312,9 +388,11 @@ and 8.
   connection's worst case is about 9 MiB (the input buffer, up to twice the
   tree-string ceiling in capacity, and about 4.9 MiB of node structure at
   4,096 elements with attributes), reached only by a peer that keeps one
-  maximal stanza unfinished, which the 5 s incomplete-element deadline ends.
-  Across the 24-stream cap the worst case is about 220 MiB. This is an
-  analysis, not a measurement; verification measures it.
+  maximal stanza unfinished. The incomplete-element deadline ends that
+  after 5 s of time the server is willing to read and at most 30 s after
+  the element began, however slowly the input rates let it be read. Across
+  the 24-stream cap the worst case is about 220 MiB. This is an analysis,
+  not a measurement; verification measures it.
 - The TLS handshake's own buffering is rustls's; the 128 KiB handshake
   allocation target of the handshake design is not shown to hold.
 
@@ -341,8 +419,15 @@ id, codes and counts; certificate failures log `VerifyError::code` only.
   trust-profile kind into the remote principal, and address stanzas to
   peers in U-labels as stream headers already are.
 - The harness slice (W10): clustered ejabberd with `max_s2s_connections`
-  above one, for the one-stream-per-pair restriction.
-- Measurement: a stanza at the 512 KiB ceiling sent at the per-socket input
-  rate (64 KiB/s after a 128 KiB burst) takes about six seconds, longer
-  than the 5 s unfinished-element deadline. Verification measures whether
-  the ceilings, the rate or the deadline need to change together.
+  above one, for the one-stream-per-pair restriction; a stanza whose `to`
+  domain is in mixed case; and whether Prosody or ejabberd ever sends
+  whitespace before a stream header, which this profile refuses.
+- Routing: answer a stanza whose syntactically valid address is in a
+  spelling the identity profile refuses with a `jid-malformed` stanza error
+  and keep the stream.
+- Measurement: the time a stanza at the 512 KiB ceiling takes when many
+  streams share an exhausted global input rate, against the 30-second
+  bound on one element.
+- Discovery (G6) and activation (G20): the socket-layer reserve, handshake
+  monopolisation by a few source addresses, backoff flush, a global dial
+  rate and wildcard-certificate peers, recorded above.
