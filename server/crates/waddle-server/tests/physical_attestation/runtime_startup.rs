@@ -77,7 +77,7 @@ async fn restricted_startup_runs_pinned_preflight_then_refuses_unprepared_stores
 
     let temp = tempfile::tempdir().expect("startup gate directory");
     let port_file = temp.path().join("port");
-    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    let mut server = tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("WADDLE_")
             || key.to_string_lossy().starts_with("OTEL_")

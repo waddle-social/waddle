@@ -18,9 +18,10 @@ pub mod cluster_support;
 use std::time::Duration;
 
 use cluster_support::{
-    cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db, reset_and_enroll,
-    reset_node_lease_tables, spawn_cluster_server_with_envs, wait_for_cross_node_registration,
-    wait_for_node_lease_lapse, wait_for_readiness, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    activate_mailbox_epoch, cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db,
+    reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
+    wait_for_cross_node_registration, wait_for_node_lease_lapse, wait_for_readiness,
+    CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use minidom::Element;
 use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
@@ -88,6 +89,14 @@ async fn cluster(extra_envs: &[(&str, &str)]) -> Option<Cluster> {
         spawn_cluster_server_with_envs(&postgres_url, &pool.pool_env, port_b, &[port_a], &envs)
             .await;
     wait_for_cross_node_registration(&node_a, &node_b).await;
+    // A full JID bound on another node is reached by a bound request, which
+    // the mailbox carries only from protocol epoch 2 on
+    // (`docs/planning/2173-direct-lanes.md`, "Below protocol epoch 2"); a
+    // multi-replica deployment reaches that epoch before it serves. The
+    // shared database holds whatever epoch an earlier test left, so it is
+    // set here, once the first node has built the schema the epoch row
+    // lives in.
+    activate_mailbox_epoch(&db).await;
     let owner_password = node_b.fixed_account_password().to_owned();
     Some(Cluster {
         db,
@@ -842,15 +851,21 @@ async fn a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper(
 
     // A holder that does not answer keeps its claim while its lease is not
     // known to have lapsed. The survivor may be fencing itself in this
-    // window, so the attempt may also end without any reply.
+    // window, so the attempt may also end without any reply. The lease can
+    // also lapse while the attempt waits on the holder. The attempt then
+    // resumes the session itself and its connection is the one under test:
+    // another resume would supersede it.
     let early = async {
         let mut client = WsXmppClient::connect(&node_b.ws_url()).await?;
         client.authenticate(DOMAIN, OWNER, &owner_password).await?;
         send_element(&mut client, request.clone()).await;
-        recv_resume_reply(&mut client, Duration::from_secs(10)).await
+        let reply = recv_resume_reply(&mut client, Duration::from_secs(10)).await?;
+        Ok::<_, String>((client, reply))
     };
-    if let Ok(reply) = early.await {
-        if claim_owner(&db, &before.session_id).await.as_deref() == Some(node_a_id.as_str()) {
+    let mut early_resume = None;
+    if let Ok((client, reply)) = early.await {
+        let holder = claim_owner(&db, &before.session_id).await;
+        if holder.as_deref() == Some(node_a_id.as_str()) {
             assert!(reply.is("failed", SM_NS), "{reply:?}");
             assert!(
                 reply.get_child("resource-constraint", STANZAS_NS).is_some(),
@@ -861,20 +876,27 @@ async fn a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper(
                 Some(before.clone()),
                 "a refused resume leaves the session as it was"
             );
+        } else if reply.is("resumed", SM_NS) && holder.as_deref() == Some(node_b_id.as_str()) {
+            early_resume = Some((client, reply));
         }
     }
 
-    wait_for_node_lease_lapse(&db, &node_a_id).await;
-    wait_for_readiness(&node_b, true, Duration::from_secs(30)).await;
-    let (mut on_b, reply) = resume_until_claimed_by(
-        &db,
-        &node_b,
-        &node_b_id,
-        &owner_password,
-        &before.session_id,
-        &request,
-    )
-    .await;
+    let (mut on_b, reply) = match early_resume {
+        Some(resumed) => resumed,
+        None => {
+            wait_for_node_lease_lapse(&db, &node_a_id).await;
+            wait_for_readiness(&node_b, true, Duration::from_secs(30)).await;
+            resume_until_claimed_by(
+                &db,
+                &node_b,
+                &node_b_id,
+                &owner_password,
+                &before.session_id,
+                &request,
+            )
+            .await
+        }
+    };
     assert!(reply.is("resumed", SM_NS), "resume on node B: {reply:?}");
     assert_eq!(reply.attr("previd"), Some(token.as_str()));
     let after = wait_for_session(&db, &jid, |row| {

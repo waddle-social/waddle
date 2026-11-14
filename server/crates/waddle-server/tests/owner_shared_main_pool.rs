@@ -217,7 +217,7 @@ async fn explicit_store_override_fails_before_owner_schema_mutation() {
         .extend_pairs(retained)
         .append_pair("options", &format!("-c search_path={schema}"));
     let owner_url = url.to_string();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    let mut command = tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("WADDLE_")
             || key.to_string_lossy().starts_with("OTEL_")

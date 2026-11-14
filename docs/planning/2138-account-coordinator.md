@@ -29,6 +29,16 @@ A full JID names a slot, never a connection. Every mutation names the
 slot's current binding. A delayed command that carries only a full JID
 cannot change a replacement.
 
+Queued subscription requests are presented after the coordinator holds the
+resource as available. A subscribe is queued before its sender reads the
+recipient's available resources from the coordinator, and the connection
+reads the queue only after the frame that made the resource available has
+sent its snapshot (`present_pending_subscriptions`, called after
+`sync_snapshot`). A request is therefore delivered live by its sender or
+found in the queue; reading the queue on the presence frame itself, before
+the snapshot reached the coordinator, let a subscribe that saw the resource
+unavailable be queued after the read and wait for the next session.
+
 The presentation flags are keyed by the stream-management session when the
 binding has one and by the binding otherwise. A resume mints a new binding
 for the same session, so a binding key alone would flush twice. The

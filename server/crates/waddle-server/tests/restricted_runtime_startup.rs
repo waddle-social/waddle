@@ -94,7 +94,8 @@ impl Prepared {
     async fn refused_startup(&self, extra: &[(&str, &str)]) -> (String, bool) {
         let temp = tempfile::tempdir().expect("startup directory");
         let port_file = temp.path().join("port");
-        let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+        let mut server =
+            tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
             if key_text.starts_with("WADDLE_") || key_text.starts_with("OTEL_") {

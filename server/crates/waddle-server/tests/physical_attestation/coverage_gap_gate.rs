@@ -99,19 +99,27 @@ fn known_gaps_are_unique_and_evidence_files_exist() {
     let ids: HashSet<_> = COVERAGE_GAPS_V1.iter().map(|gap| gap.id).collect();
     assert_eq!(ids.len(), COVERAGE_GAPS_V1.len(), "duplicate coverage gap");
     assert_eq!(ids, expected);
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Evidence paths are repository-relative and all lie in the server
+    // workspace. They are resolved against the workspace root rather than
+    // the repository root, because the Nix test lanes unpack only the server
+    // workspace. The manifest directory is read at run time: nextest
+    // rewrites it when it runs an archive outside its build directory.
+    let manifest_dir =
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR");
+    let workspace = std::path::Path::new(&manifest_dir)
         .parent()
         .expect("crates directory")
         .parent()
-        .expect("server directory")
-        .parent()
-        .expect("repository root");
+        .expect("server workspace");
     for gap in COVERAGE_GAPS_V1 {
         assert!(!gap.problem.is_empty());
         assert!(!gap.sources.is_empty());
         let mut evidence = String::new();
         for source in gap.sources {
-            let text = std::fs::read_to_string(root.join(source))
+            let path = source.strip_prefix("server/").unwrap_or_else(|| {
+                panic!("evidence file {source} is outside the server workspace")
+            });
+            let text = std::fs::read_to_string(workspace.join(path))
                 .unwrap_or_else(|error| panic!("cannot read evidence file {source}: {error}"));
             evidence.push_str(&text);
         }

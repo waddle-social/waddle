@@ -49,14 +49,23 @@ const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Locate the `waddle-server` binary produced by the current build.
 ///
-/// The harness lives in a separate test-support crate, so the
-/// `CARGO_BIN_EXE_waddle-server` compile-time env (which cargo injects
-/// only into waddle-server's own test targets) is not available here.
-/// Integration-test executables run from `<target>/<profile>/deps/`,
-/// and cargo places package binaries one directory up. Running the
-/// tests through cargo (`cargo test -p waddle-server`, `cargo test
-/// --workspace`) always builds the binary before the tests execute.
-fn waddle_server_bin() -> std::path::PathBuf {
+/// Test runners publish the binary's location at run time in
+/// `CARGO_BIN_EXE_waddle-server`: cargo for its own test targets, and
+/// nextest for every test, with the path rewritten when an archive is
+/// extracted somewhere other than where it was built. The compile-time
+/// `env!` form of that variable names the build directory, which does not
+/// exist on an archive's runner, so callers spawn this path instead.
+///
+/// Without that variable (a test-support target cargo did not give it to),
+/// the binary is found next to the test's `deps/` directory: integration
+/// test executables run from `<target>/<profile>/deps/`, and cargo places
+/// package binaries one directory up. Running the tests through cargo
+/// (`cargo test -p waddle-server`, `cargo test --workspace`) always builds
+/// the binary before the tests execute.
+pub fn waddle_server_binary() -> std::path::PathBuf {
+    if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_waddle-server") {
+        return bin.into();
+    }
     let exe = std::env::current_exe().expect("current test executable path");
     let profile_dir = exe
         .parent() // <target>/<profile>/deps
@@ -231,7 +240,7 @@ impl TestServer {
         mam_database_url: Option<String>,
         extra_envs: &[(&str, &str)],
     ) -> Self {
-        let bin = waddle_server_bin();
+        let bin = waddle_server_binary();
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
         let test_profile_publish_token = uuid::Uuid::new_v4().to_string();
         let extra_accounts_env = extra_accounts
