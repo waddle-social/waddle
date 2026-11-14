@@ -316,3 +316,93 @@ async fn responses_to_unserved_server_and_service_destinations_are_dropped_silen
     assert_silent_then_local_ping(&mut origin, "after-drops").await;
     origin.close().await.expect("close origin");
 }
+
+#[tokio::test]
+async fn unserved_requests_before_binding_are_refused_not_answered_locally() {
+    let server = TestServer::start();
+    let mut client = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("WebSocket connect");
+    client
+        .authenticate(DOMAIN, "admin", server.fixed_account_password())
+        .await
+        .expect("SCRAM authentication");
+
+    // RFC 6120 §7.1: before binding, a stanza to another domain is not
+    // processed. It is neither routed nor answered by a namespace handler
+    // (a disco#info here must not return this server's identity).
+    for (index, target) in ["remote.test", "bob@remote.test/phone", "127.0.0.1"]
+        .into_iter()
+        .enumerate()
+    {
+        for namespace in [DISCO_INFO_NS, NS_PING] {
+            let iq = request(
+                namespace,
+                false,
+                Some(jid(target)),
+                &format!("prebind-{index}-{namespace}"),
+            );
+            let reply = round_trip(&mut client, iq.clone()).await;
+            let Iq::Error { error, .. } = &reply else {
+                panic!("{target}: pre-bind request must be refused: {reply:?}");
+            };
+            assert_eq!(reply.from(), iq.to(), "RFC 6120 §8.3.1 swap");
+            assert_eq!(reply.to(), None, "no bound address to answer");
+            assert_eq!(error.type_, ErrorType::Auth);
+            assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
+            assert_eq!(error.by, None);
+        }
+    }
+
+    // The refusal is a stanza error: the stream stays usable for binding.
+    client
+        .bind("after-prebind")
+        .await
+        .expect("bind after refusals");
+    client.close().await.expect("close client");
+}
+
+#[tokio::test]
+async fn a_trailing_domain_dot_routes_to_the_canonical_destination() {
+    let server = TestServer::start_with_extra_accounts(&[("peer", PEER_PASSWORD)]);
+    let mut origin = connect(
+        &server,
+        "admin",
+        server.fixed_account_password(),
+        "dot-origin",
+    )
+    .await;
+    let mut peer = connect(&server, "peer", PEER_PASSWORD, "dot-peer").await;
+    let origin_jid = bound_jid(&origin);
+
+    // `peer@localhost./dot-peer` names the bound peer resource (RFC 7622
+    // §3.2), not a resource called "/dot-peer" or a remote domain.
+    let iq = request(
+        DISCO_INFO_NS,
+        false,
+        Some(jid("peer@localhost./dot-peer")),
+        "dot-local",
+    );
+    send_iq(&mut origin, iq).await;
+    let forwarded = receive_iq(&mut peer, "dot-local").await;
+    assert!(matches!(forwarded, Iq::Get { .. }), "{forwarded:?}");
+    assert_eq!(forwarded.from(), Some(&origin_jid));
+
+    // A remote destination with a trailing dot is still remote.
+    for (index, target) in ["bob@remote.test.", "bob@remote.test./phone"]
+        .into_iter()
+        .enumerate()
+    {
+        let iq = request(
+            NS_PING,
+            false,
+            Some(jid(target)),
+            &format!("dot-remote-{index}"),
+        );
+        let reply = round_trip(&mut origin, iq.clone()).await;
+        assert_unroutable(&reply, &iq, &origin_jid);
+    }
+
+    origin.close().await.expect("close origin");
+    peer.close().await.expect("close peer");
+}

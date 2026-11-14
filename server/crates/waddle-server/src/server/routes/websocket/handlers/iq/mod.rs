@@ -141,7 +141,8 @@ pub use conn_state::IqConnState;
 #[cfg(test)]
 pub(crate) use conn_state::RESOURCE_METADATA_WRITE_GATE;
 use destination_route::{
-    classify_iq_destination, route_iq_response, route_unserved_request, unclassified_iq,
+    classify_iq_destination, refuse_unbound_unserved_request, route_iq_response,
+    route_unserved_request, unclassified_iq,
 };
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;

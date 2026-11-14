@@ -6,8 +6,11 @@
 > remote route; while server-to-server transport is disabled it is refused
 > with `cancel/remote-server-not-found` attributed to the home server
 > ([RFC 6120 section 10.4.3](https://www.rfc-editor.org/rfc/rfc6120.html#section-10.4.3)).
-> XEP-0410 treats that condition as undecided rather than joined. The
-> addressing, ID and payload rules below still apply.
+> XEP-0410 treats that condition as undecided rather than joined. Before
+> resource binding such a request is not routed and is refused with
+> `auth/not-authorized`
+> ([RFC 6120 section 7.1](https://www.rfc-editor.org/rfc/rfc6120.html#section-7.1)).
+> The addressing, ID and payload rules below still apply.
 
 Issue #2047 also affects XEP-0280 controls: an IQ addressed to an unserved domain
 can otherwise enable or disable the originating local resource's Carbons and

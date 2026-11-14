@@ -28,7 +28,10 @@ use super::{
     bad_request_iq_error, feature_not_implemented_iq_error, forbidden_iq_error,
     internal_server_error_iq_error, item_not_found_iq_error,
 };
-use super::{classify_iq_destination, route_iq_response, route_unserved_request, unclassified_iq};
+use super::{
+    classify_iq_destination, refuse_unbound_unserved_request, route_iq_response,
+    route_unserved_request, unclassified_iq,
+};
 use super::{handle_channel_search_iq, handle_user_search_iq};
 use super::{handle_command_iq, CommandTargets};
 use super::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
@@ -131,12 +134,16 @@ pub async fn handle_iq_with_conn_state(
         )
         .await;
     }
-    // A request to an unserved domain goes to the remote route, never to a
-    // local handler that could fabricate the remote entity's answer. Before
-    // resource binding there is no bound address to stamp or to answer, so
-    // those requests keep the namespace handlers' authentication errors.
-    if let (Some(sender), Some(unserved)) = (phase.bound_jid(), destination.unserved()) {
-        return route_unserved_request(iq, unserved, sender, state).await;
+    // A request to an unserved domain never reaches a local handler that
+    // could fabricate the remote entity's answer, whatever the stream phase.
+    // A bound resource's request goes to the remote route; before binding
+    // there is no address to stamp as its sender, so it is refused
+    // (RFC 6120 §7.1).
+    if let Some(unserved) = destination.unserved() {
+        return match phase.bound_jid() {
+            Some(sender) => route_unserved_request(iq, unserved, sender, state).await,
+            None => refuse_unbound_unserved_request(&iq, response_from),
+        };
     }
 
     let payload_ns = match &iq {

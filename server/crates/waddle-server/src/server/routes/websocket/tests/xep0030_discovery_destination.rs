@@ -1,6 +1,6 @@
-//! Parser-valid bound discovery requests must not borrow a foreign identity.
-//! The existing parser checks IQ type/query name/namespace, not a full XML schema.
-//! Pre-bind foreign discovery policy is deliberately outside this slice.
+//! Parser-valid discovery requests must not borrow a foreign identity, before
+//! or after resource binding. The existing parser checks IQ type/query
+//! name/namespace, not a full XML schema.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -431,7 +431,7 @@ async fn disco_results_and_errors_never_generate_a_reply() {
 }
 
 #[tokio::test]
-async fn prebind_discovery_keeps_local_component_support_and_no_bound_attribution() {
+async fn prebind_discovery_keeps_local_components_and_refuses_unserved_domains() {
     let state = create_test_websocket_state().await;
     for phase in [
         ConnectionPhase::new(),
@@ -453,10 +453,16 @@ async fn prebind_discovery_keeps_local_component_support_and_no_bound_attributio
                 request(kind, Some("remote.test"), None, None),
             )
             .await;
-            // This slice does not define or fix pre-bind foreign discovery.
-            assert!(!replies
-                .iter()
-                .any(|reply| matches!(reply, Iq::Error { error, .. } if error.by.is_some())));
+            // RFC 6120 §7.1: refused before binding, never answered locally
+            // and never addressed to a bound JID.
+            assert_eq!(replies.len(), 1, "{replies:?}");
+            let Iq::Error { to, error, .. } = &replies[0] else {
+                panic!("pre-bind foreign discovery must be refused: {replies:?}")
+            };
+            assert_eq!(*to, None);
+            assert_eq!(error.type_, ErrorType::Auth);
+            assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
+            assert_eq!(error.by, None);
         }
     }
 }

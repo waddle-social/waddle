@@ -16,11 +16,12 @@ use xmpp_parsers::iq::Iq;
 
 use super::{
     build_iq_error_xml_typed, handle_caps_disco_info_result, internal_server_error_iq_error,
-    route_full_jid_iq, stanza_to_xml, ConnectionPhase, ResponseBatch, WebSocketState,
+    not_authorized_iq_error, route_full_jid_iq, stanza_to_xml, ConnectionPhase, ResponseBatch,
+    WebSocketState,
 };
 use crate::destination::{
-    unroutable_iq_reply, Destination, RemoteDestination, RemoteOutbound, RemoteRouteOutcome,
-    UnroutableReason, UnservedDestination,
+    offer_iq, unroutable_iq_reply, Destination, IqOffer, RemoteDestination, UnroutableReason,
+    UnservedDestination, REMOTE_ROUTE_OFFER_TIMEOUT,
 };
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 
@@ -92,7 +93,7 @@ pub(super) async fn route_iq_response(
             ResponseBatch::default()
         }
         Destination::Remote(remote) => {
-            if let Some((reason, _)) = offer_remote(state, sender, remote, iq).await {
+            if let IqOffer::Refused { reason, .. } = offer_remote(state, sender, remote, iq).await {
                 debug!(?reason, "Dropping unroutable remote IQ result/error");
             }
             ResponseBatch::default()
@@ -115,46 +116,70 @@ pub(super) async fn route_unserved_request(
     sender: &FullJid,
     state: &WebSocketState,
 ) -> ResponseBatch {
-    let refused = match destination {
-        UnservedDestination::Remote(remote) => offer_remote(state, sender, remote, iq).await,
+    let reply = match destination {
+        UnservedDestination::Remote(remote) => {
+            match offer_remote(state, sender, remote, iq).await {
+                IqOffer::Accepted | IqOffer::Unattributed => None,
+                IqOffer::Refused { reason, reply } => {
+                    debug!(?reason, "Refusing IQ request to an unserved domain");
+                    reply
+                }
+            }
+        }
         UnservedDestination::Invalid(reason) => {
-            Some((UnroutableReason::InvalidDestination(reason), iq))
+            let reason = UnroutableReason::InvalidDestination(reason);
+            debug!(id = %iq.id(), ?reason, "Refusing IQ request to an unserved domain");
+            unroutable_iq_reply(&iq, &Jid::from(sender.clone()), sender.domain(), reason)
+                .map(Box::new)
         }
     };
-    let Some((reason, request)) = refused else {
-        return ResponseBatch::default();
-    };
-    debug!(id = %request.id(), ?reason, "Refusing IQ request to an unserved domain");
-    let sender_jid = Jid::from(sender.clone());
-    unroutable_iq_reply(&request, &sender_jid, sender.domain(), reason)
-        .map(|reply| vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))])
+    reply
+        .map(|reply| vec![stanza_to_xml(&Stanza::Iq(reply))])
         .unwrap_or_default()
         .into()
 }
 
+/// Refuse an IQ get/set to an unserved domain from a stream that has not bound
+/// a resource.
+///
+/// RFC 6120 §7.1 forbids the server to process a stanza that a client sends,
+/// before resource binding, to any entity other than the server or its own
+/// account, and names `<not-authorized/>` as the condition. The request is
+/// neither routed (there is no bound address to stamp as `from`) nor handed
+/// to a namespace handler (which could answer for the remote entity). The
+/// condition is applied as a stanza error rather than by closing the stream,
+/// like the other errors this server returns before binding. The reply has no
+/// `to` and no `by` (optional under §8.3.2): the stream has no bound address,
+/// and no routing attribution exists for a stanza that was never routed.
+pub(super) fn refuse_unbound_unserved_request(
+    iq: &Iq,
+    response_from: Option<&str>,
+) -> ResponseBatch {
+    debug!(id = %iq.id(), "Refusing IQ request to an unserved domain before resource binding");
+    vec![build_iq_error_xml_typed(
+        iq.id(),
+        response_from,
+        None,
+        not_authorized_iq_error("Bind a resource before addressing other domains."),
+    )]
+    .into()
+}
+
 /// Offer `iq` to the remote route with `from` stamped to the bound sender
-/// (RFC 6120 §8.1.2.1). Returns the refused IQ and the reason, or `None` when
-/// the route took ownership of it.
+/// (RFC 6120 §8.1.2.1), bounded by [`REMOTE_ROUTE_OFFER_TIMEOUT`].
 async fn offer_remote(
     state: &WebSocketState,
     sender: &FullJid,
     destination: RemoteDestination,
     mut iq: Iq,
-) -> Option<(UnroutableReason, Iq)> {
+) -> IqOffer {
     *iq.from_mut() = Some(Jid::from(sender.clone()));
-    let outbound = RemoteOutbound {
-        sender: Jid::from(sender.clone()),
+    offer_iq(
+        state.deps.remote_route.as_ref(),
         destination,
-        stanza: Stanza::Iq(Box::new(iq)),
-    };
-    match state.deps.remote_route.route(outbound).await {
-        RemoteRouteOutcome::Accepted => None,
-        RemoteRouteOutcome::Unroutable { reason, outbound } => match outbound.stanza {
-            Stanza::Iq(iq) => Some((reason, *iq)),
-            Stanza::Message(_) | Stanza::Presence(_) => {
-                warn!("remote route returned a different stanza kind than it was offered");
-                None
-            }
-        },
-    }
+        iq,
+        sender.domain(),
+        REMOTE_ROUTE_OFFER_TIMEOUT,
+    )
+    .await
 }

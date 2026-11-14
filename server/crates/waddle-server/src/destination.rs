@@ -6,15 +6,19 @@
 //! of a remote entity, and IQ results and errors are routed by address instead
 //! of being consumed by whichever handler claims their payload namespace.
 //!
-//! Remote destinations are handed to a [`RemoteRoute`]. Until server-to-server
-//! transport is configured the route is [`FederationDisabled`], which refuses
-//! every stanza; callers then answer IQ requests with
-//! [`unroutable_iq_reply`] and drop IQ results and errors.
+//! Remote destinations are handed to a [`RemoteRoute`] through [`offer_iq`],
+//! which bounds the wait and fails closed. Until server-to-server transport is
+//! configured the route is [`FederationDisabled`], which refuses every stanza;
+//! IQ requests then receive the error from [`unroutable_iq_reply`] and IQ
+//! results and errors are dropped.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use jid::{BareJid, DomainPart, DomainRef, FullJid, Jid};
+use jid::{BareJid, DomainPart, DomainRef, FullJid, Jid, NodePart, ResourcePart};
+use waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo;
+use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -82,10 +86,18 @@ impl ServedDomains {
     }
 
     /// Classify the `to` address of a client-originated stanza.
+    ///
+    /// The address is first put in canonical form: one trailing label
+    /// separator is removed from its domainpart (RFC 7622 §3.2), and every
+    /// address carried by the result uses that form. Domainparts are otherwise
+    /// compared exactly as parsed: an internationalized domain written with
+    /// A-labels (`xn--…`) and the same domain written with U-labels are not
+    /// unified, so they can classify differently.
     pub fn classify(&self, to: Option<&Jid>) -> Destination {
         let Some(address) = to else {
             return Destination::Missing;
         };
+        let address = &canonical_address(address);
         let domain = address.domain();
         if *self.local == *domain {
             return match (address.node().is_some(), address.clone().try_into_full()) {
@@ -206,6 +218,43 @@ pub enum InvalidDestination {
     UnqualifiedHost,
 }
 
+/// `address` without a trailing label separator on its domainpart.
+///
+/// The `jid` crate validates such a domainpart without the separator but keeps
+/// the original text, so `node@domain.` reports `domain.` as its domain, and in
+/// `node@domain./resource` the resourcepart accessor is offset by one byte.
+/// The parts are therefore re-read from the canonical text, splitting it the
+/// way the parser does (the first `/` starts the resourcepart, and an `@`
+/// before it ends the localpart), and the address is rebuilt from typed parts.
+fn canonical_address(address: &Jid) -> Jid {
+    let raw = address.as_str();
+    let (bare, resource) = match raw.split_once('/') {
+        Some((bare, resource)) => (bare, Some(resource)),
+        None => (raw, None),
+    };
+    let (node, domain) = match bare.split_once('@') {
+        Some((node, domain)) => (Some(node), domain),
+        None => (None, bare),
+    };
+    let Some(domain) = domain.strip_suffix('.') else {
+        return address.clone();
+    };
+    // Every part was accepted by the same checks when `address` was parsed,
+    // so rebuilding cannot fail; the original address is kept if it does.
+    jid_from_raw_parts(node, domain, resource).unwrap_or_else(|| address.clone())
+}
+
+fn jid_from_raw_parts(node: Option<&str>, domain: &str, resource: Option<&str>) -> Option<Jid> {
+    let node = node.map(NodePart::new).transpose().ok()?;
+    let domain = DomainPart::new(domain).ok()?;
+    let resource = resource.map(ResourcePart::new).transpose().ok()?;
+    Some(Jid::from_parts(
+        node.as_deref(),
+        &domain,
+        resource.as_deref(),
+    ))
+}
+
 fn unroutable_domain(domain: &DomainRef) -> Option<InvalidDestination> {
     let raw = domain.as_str();
     let ipv6 = raw
@@ -225,6 +274,9 @@ pub enum UnroutableReason {
     FederationDisabled,
     /// The destination cannot name a federation peer.
     InvalidDestination(InvalidDestination),
+    /// The remote route did not answer within [`REMOTE_ROUTE_OFFER_TIMEOUT`]
+    /// and the offer was cancelled.
+    RouteTimedOut,
 }
 
 impl UnroutableReason {
@@ -237,23 +289,33 @@ impl UnroutableReason {
     /// for a deployment (§10.4), so a disabled transport resolves no route.
     /// `service-unavailable` would describe the recipient rather than the
     /// route (§8.3.3.19) and, for an occupant JID, XEP-0410 §3.2 reads it as
-    /// "still joined"; `remote-server-timeout` implies an attempted stream.
+    /// "still joined". `remote-server-timeout` (§8.3.3.17) is used only when a
+    /// configured route was attempted and did not take the stanza in time; it
+    /// has type `wait` because a later attempt may succeed.
     pub fn stanza_error(self, home: &DomainRef) -> StanzaError {
-        let text = match self {
-            Self::FederationDisabled => "Routing to remote domains is not enabled on this server.",
-            Self::InvalidDestination(InvalidDestination::IpLiteral) => {
-                "IP-literal domains cannot be reached from this server."
-            }
-            Self::InvalidDestination(InvalidDestination::UnqualifiedHost) => {
-                "Unqualified domains cannot be reached from this server."
-            }
+        let (type_, condition, text) = match self {
+            Self::FederationDisabled => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "Routing to remote domains is not enabled on this server.",
+            ),
+            Self::InvalidDestination(InvalidDestination::IpLiteral) => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "IP-literal domains cannot be reached from this server.",
+            ),
+            Self::InvalidDestination(InvalidDestination::UnqualifiedHost) => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "Unqualified domains cannot be reached from this server.",
+            ),
+            Self::RouteTimedOut => (
+                ErrorType::Wait,
+                DefinedCondition::RemoteServerTimeout,
+                "The route to the remote domain did not respond in time.",
+            ),
         };
-        let mut error = StanzaError::new(
-            ErrorType::Cancel,
-            DefinedCondition::RemoteServerNotFound,
-            "en",
-            text,
-        );
+        let mut error = StanzaError::new(type_, condition, "en", text);
         error.by = Some(Jid::from(BareJid::from_parts(None, home)));
         error
     }
@@ -287,15 +349,56 @@ pub fn unroutable_iq_reply(
 }
 
 /// A stanza from a local entity addressed to a remote domain.
+///
+/// The sender is the stanza's own `from`, so the route can never be told one
+/// sender while the stanza names another. For a client stanza `from` is the
+/// bound full JID stamped by the caller (RFC 6120 §8.1.2.1).
 #[derive(Debug)]
 pub struct RemoteOutbound {
-    /// The local sender; `stanza` carries it as `from`. For a client stanza
-    /// this is the bound full JID (RFC 6120 §8.1.2.1).
-    pub sender: Jid,
+    sender: Jid,
+    destination: RemoteDestination,
+    stanza: Stanza,
+}
+
+impl RemoteOutbound {
+    /// Wrap `stanza` for `destination`. A stanza without `from` has no sender
+    /// a remote peer could answer and is handed back as the error.
+    pub fn new(destination: RemoteDestination, stanza: Stanza) -> Result<Self, Box<Stanza>> {
+        let sender = match &stanza {
+            Stanza::Iq(iq) => iq.from().cloned(),
+            Stanza::Message(message) => message.from.clone(),
+            Stanza::Presence(presence) => presence.from.clone(),
+        };
+        match sender {
+            Some(sender) => Ok(Self {
+                sender,
+                destination,
+                stanza,
+            }),
+            None => Err(Box::new(stanza)),
+        }
+    }
+
+    /// The local sender: the stanza's `from`.
+    pub fn sender(&self) -> &Jid {
+        &self.sender
+    }
+
     /// Where the stanza is addressed.
-    pub destination: RemoteDestination,
+    pub fn destination(&self) -> &RemoteDestination {
+        &self.destination
+    }
+
     /// The stanza to route.
-    pub stanza: Stanza,
+    pub fn stanza(&self) -> &Stanza {
+        &self.stanza
+    }
+
+    /// The destination and the stanza, for an implementation that takes
+    /// ownership of the stanza.
+    pub fn into_parts(self) -> (RemoteDestination, Stanza) {
+        (self.destination, self.stanza)
+    }
 }
 
 /// The result of offering a stanza to the remote route.
@@ -308,17 +411,48 @@ pub enum RemoteRouteOutcome {
     Unroutable {
         /// Why it was refused.
         reason: UnroutableReason,
-        /// The refused stanza.
+        /// The refused stanza, exactly as offered.
         outbound: Box<RemoteOutbound>,
     },
 }
 
-/// Egress for client-originated stanzas addressed to remote domains.
+/// How long [`offer_iq`] waits for [`RemoteRoute::route`] before it cancels
+/// the call and fails closed. It bounds the hand-off to the route, not
+/// delivery to the peer, and stays well below the per-connection handler
+/// backstop so a slow route is reported as a routing failure.
+pub const REMOTE_ROUTE_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Egress for stanzas from local entities addressed to remote domains.
 ///
 /// The caller has already classified the destination and stamped the sender.
 /// An implementation must either take ownership of the stanza or return it as
 /// [`RemoteRouteOutcome::Unroutable`]; it never produces a local reply itself.
 /// Request correlation and reply delivery belong to the implementation.
+///
+/// # Contract
+///
+/// - **Enqueue only.** `route` hands the stanza to a bounded per-peer queue
+///   and returns promptly. It must not resolve DNS, dial, negotiate a stream
+///   or wait for a peer. Callers wrap it in [`REMOTE_ROUTE_OFFER_TIMEOUT`] and
+///   drop the future when it expires, so the hand-off must be cancel-safe: a
+///   cancelled call has not queued the stanza. The sender of a cancelled
+///   request already holds a `remote-server-timeout` error.
+/// - **Return what was offered.** `Unroutable` carries the offered
+///   [`RemoteOutbound`] unchanged. Callers do not trust anything else: a
+///   different stanza kind or IQ ID is discarded and the sender of a request
+///   receives the error without the echoed payload. A request is never left
+///   without a reply.
+/// - **Correlate responses.** An IQ result or error offered here answers a
+///   request that reached a local entity from a remote peer. It may be sent
+///   only when it matches a pending inbound server-to-server request by ID,
+///   sender, recipient, type and expiry, and completes that request at most
+///   once (ADR-0020); anything else is dropped, never forwarded.
+/// - **No server-minted credentials.** Nothing minted by this server for a
+///   local recipient, such as the LiveKit join token in the Waddle Jingle
+///   transport, may leave over a server-to-server stream. Callers remove the
+///   credentials they mint before offering (see
+///   [`without_server_minted_credentials`]); an implementation must still
+///   refuse or strip any it finds.
 #[async_trait]
 pub trait RemoteRoute: Send + Sync {
     /// Offer one stanza for remote delivery.
@@ -338,4 +472,118 @@ impl RemoteRoute for FederationDisabled {
             outbound: Box::new(outbound),
         }
     }
+}
+
+/// The result of [`offer_iq`].
+#[derive(Debug)]
+pub enum IqOffer {
+    /// The route took the IQ.
+    Accepted,
+    /// The IQ was not routed. `reply` is the error for the sender of a
+    /// request; it is `None` for a result or error, which is never answered
+    /// (RFC 6120 §8.3.1).
+    Refused {
+        /// Why it was not routed.
+        reason: UnroutableReason,
+        /// The error to send to the request's sender.
+        reply: Option<Box<Iq>>,
+    },
+    /// The IQ has no `from`, so there is neither a sender to route for nor an
+    /// address to answer. It was not offered and is dropped.
+    Unattributed,
+}
+
+/// Offer an IQ from a local entity to `route`, waiting at most `deadline`,
+/// and fail closed.
+///
+/// The sender is the IQ's `from`. A request that is not routed always yields
+/// an error reply addressed to that sender and attributed to `home`: with the
+/// echoed payload when the route returned the IQ it was offered, and without
+/// it when the route timed out or returned anything else.
+pub async fn offer_iq(
+    route: &dyn RemoteRoute,
+    destination: RemoteDestination,
+    iq: Iq,
+    home: &DomainRef,
+    deadline: Duration,
+) -> IqOffer {
+    let offered = OfferedIq::capture(&iq);
+    let outbound = match RemoteOutbound::new(destination, Stanza::Iq(Box::new(iq))) {
+        Ok(outbound) => outbound,
+        Err(_) => return IqOffer::Unattributed,
+    };
+    let sender = outbound.sender().clone();
+    let (reason, returned) = match tokio::time::timeout(deadline, route.route(outbound)).await {
+        Ok(RemoteRouteOutcome::Accepted) => return IqOffer::Accepted,
+        Ok(RemoteRouteOutcome::Unroutable { reason, outbound }) => {
+            (reason, Some(outbound.into_parts().1))
+        }
+        Err(_) => (UnroutableReason::RouteTimedOut, None),
+    };
+    IqOffer::Refused {
+        reason,
+        reply: offered.reply(returned, &sender, home, reason).map(Box::new),
+    }
+}
+
+/// The addressing of an offered IQ, kept so that a request can be answered
+/// even when the route does not hand the IQ back.
+struct OfferedIq {
+    id: String,
+    to: Option<Jid>,
+    request: bool,
+}
+
+impl OfferedIq {
+    fn capture(iq: &Iq) -> Self {
+        Self {
+            id: iq.id().to_owned(),
+            to: iq.to().cloned(),
+            request: matches!(iq, Iq::Get { .. } | Iq::Set { .. }),
+        }
+    }
+
+    fn reply(
+        self,
+        returned: Option<Stanza>,
+        sender: &Jid,
+        home: &DomainRef,
+        reason: UnroutableReason,
+    ) -> Option<Iq> {
+        if !self.request {
+            return None;
+        }
+        // Echo the payload only from the IQ that was offered (RFC 6120
+        // §8.3.1 permits the echo; it is never required).
+        let payload = match returned {
+            Some(Stanza::Iq(iq)) if iq.id() == self.id => match *iq {
+                Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload),
+                Iq::Result { .. } | Iq::Error { .. } => None,
+            },
+            _ => None,
+        };
+        Some(Iq::Error {
+            from: self.to,
+            to: Some(sender.clone()),
+            id: self.id,
+            payload,
+            error: reason.stanza_error(home),
+        })
+    }
+}
+
+/// `iq` with every credential this server minted for a local recipient
+/// removed: the Waddle LiveKit transport in a Jingle payload. Revoke the
+/// credential before calling this; the stripped IQ no longer names it.
+pub fn without_server_minted_credentials(mut iq: Iq) -> Iq {
+    let payload = match &mut iq {
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload),
+        Iq::Result { payload, .. } | Iq::Error { payload, .. } => payload.as_mut(),
+    };
+    if let Some(payload) = payload {
+        if payload.is("jingle", NS_JINGLE) {
+            *payload = credential_free_jingle_echo(payload);
+        }
+    }
+    iq
 }
