@@ -26,14 +26,17 @@ that owns each case.
 
 ADR-0020 D8 also bounds remote authority. A remote principal may hold a
 privileged grant (owner, admin or manager standing, or any other grant that
-confers a management permission) only when its home domain is on the
-operator's trusted-home list, and admission honors that grant only on a
+confers a management permission) or room moderation (the XEP-0045 moderator
+role and the channel `moderate` permission) only when its home domain is on
+the operator's trusted-home list, and admission honors either only on a
 stream with `pkix` strength while the home is still listed. Grant issuance,
-bootstrap and repair refuse a privileged grant to a JID of any other home.
-Room moderation (the XEP-0045 moderator role and the channel `moderate`
-permission) is honored for a remote principal only on a `pkix` stream. A
-message author's own `edit` and `delete` are neither. Policy (B2) must encode
-all of these.
+bootstrap and repair refuse a privileged or moderator grant to a JID of any
+other home, whose accounts hold only member-level grants. A grant that is not
+honored contributes nothing: it yields neither `moderate` nor the
+member-level `read` and `send_message` the schema would otherwise derive from
+it. A message author's own `edit` and `delete` are neither privileged nor
+moderation; outcast removes them in that room (ADR-0020 D5). Policy (B2) must
+encode all of these.
 
 ## Evidence and assumptions
 
@@ -101,7 +104,10 @@ gives outcast precedence and separately handles members-only/deployment rules.
 No other channel permission (`send_message`, `view`, `moderate`, `manage` or
 `delete`) subtracts `outcast` either, so a room outcast who can view the parent
 Space appears to keep access. ADR-0020 D5 requires outcast precedence in every
-channel action, made as its own reviewed behavior change (W5o in the plan).
+channel action and every message action in that room, including a message
+author's own `edit` and `delete`, while a moderator can still remove an
+outcast's messages through the moderator's own `moderate`. It is made as its
+own reviewed behavior change (W5o in the plan).
 Because every replica writes the built-in SpiceDB schema at startup
 ([`permissions/actor.rs`](../../crates/waddle-server/src/permissions/actor.rs)),
 an older replica would revert that change, so it needs the fenced schema
@@ -194,9 +200,10 @@ authentication strength of the stream it arrived on (`pkix` or `dialback`), the
 current ADR-0020 D1 admission decision for that domain, including a denylist
 entry for a parent domain, and whether its home is on the trusted-home list
 the replica runs. Admission rejects work from a domain that is no longer
-admitted; honors privileged authority only for a trusted home on a `pkix`
-stream and room moderation only on a `pkix` stream (D8); and enforces any host
-policy that requires `pkix` strength (ADR-0020 gate G17).
+admitted; honors privileged authority and room moderation only for a trusted
+home on a `pkix` stream, and lets a grant that is not honored contribute
+nothing, including no member-level permission derived from it (D8); and
+enforces any host policy that requires `pkix` strength (ADR-0020 gate G17).
 
 For a fresh room manifest, revalidate and retain authority locks inside the
 same PostgreSQL transaction that accepts the canonical message and seals frozen
@@ -385,18 +392,22 @@ Home-account deletion does not automatically revoke remote grants. Waddle homes
 enforce durable non-reuse of retired account JIDs across their provisioning
 paths (the revocation slice, W5d). Other homes cannot be required to. By
 ADR-0020 D8, a reassigned JID at a home that is not on the trusted-home list
-may inherit non-privileged grants, including room moderation, as an accepted
-limitation, and never privileged ones; a trusted home is trusted for
-non-reuse, and an operator who lists it accepts that its reassignments could
-pass on privileged grants. After a reported reassignment, the host revokes the
-JID's grants through the fence and issues any grant for the new holder only
-after confirming the holder with the remote home's operator outside the
-protocol.
+may inherit member-level grants, as an accepted limitation, and never room
+moderation or privileged grants; a trusted home is trusted for non-reuse, and
+an operator who lists it accepts that its reassignments could pass on
+privileged grants and room moderation. After a reported reassignment, the
+host revokes the JID's grants through the fence and issues any grant for the
+new holder only after confirming the holder with the remote home's operator
+outside the protocol.
 
 The identity-profile slice also defines the canonical domain form (RFC 7622
 preparation, trailing dot, U-label and A-label equivalence) that ADR-0020 D1's
 admission, dialback and trusted-home lists, the verifier's reference
-identities and S2S routing compare in (gates G1 and G10).
+identities, S2S routing and discovery compare in (gates G1 and G10). The same
+form classifies the domains ADR-0020 D3 refuses: both RFC 7622 IP-address
+forms, other names a resolver or address parser accepts as an IPv4 address,
+such as `2130706433`, `0x7f.1` and `127.1`, and unqualified single-label
+names.
 
 ## First slice
 
@@ -499,11 +510,12 @@ S2S.
 | #2052 accepted-child regressions | Frozen target/payload, occupancy and lifecycle remain unchanged. | W5b |
 | Full JID or service identity offered as an account-grant subject | Refused; grant keys use the identity profile's canonical bare-JID binding. | W5b |
 | Raw versus typed JIDs; XML character references; case, sharp-s, trailing-dot and A-label/U-label pairs | Enforce the approved identity profile before lossy parsing; reject unsupported input without aliasing another account. Provisioning/authentication/lookup/ingress agree on audited bindings. | W5i (step 2); W5a at S2S ingress (step 6) |
-| Privileged grant issued through this slice's path to a remote JID, with the trusted-home set supplied as input | Refused for a home outside the set; recorded for a home in it. | W5b |
-| Privileged grant for a JID of a home not on the trusted-home list, written by bootstrap or repair | Refused. | W5c (step 4) |
+| Privileged or moderator grant issued through this slice's path to a remote JID, with the trusted-home set supplied as input | Refused for a home outside the set; recorded for a home in it. | W5b |
+| Privileged or moderator grant for a JID of a home not on the trusted-home list, written by bootstrap or repair | Refused. | W5c (step 4) |
 | Stored privileged grant for a remote principal: trusted home on `pkix` and on dialback-only streams; home removed from the list; home never listed, grant stored outside the canonical path | Honored only for a listed home on `pkix`; otherwise ignored, whatever is stored. | W5e (steps 6 and 7) |
-| Room moderation by a remote principal on `pkix` and on dialback-only streams; a message author's own edit and delete | Moderation honored only on `pkix`; the author's own edit and delete are not moderation and are not restricted by it. | W5e (steps 6 and 7) |
-| Outcast on every channel action, including `moderate`, `manage` and `delete` | Outcast wins every action at this slice's admission. | W5b |
+| Room moderation by a remote principal: trusted home on `pkix` and on dialback-only streams; home not on the list, on `pkix`; a message author's own edit and delete | Moderation honored only for a listed home on `pkix`; the author's own edit and delete are not moderation and are not restricted by it. | W5e (steps 6 and 7) |
+| Former admin of a home removed from the trusted-home list, holding no separate member-level grant | Cannot moderate or read through that grant: an unhonored grant contributes no permission. | W5e (steps 6 and 7) |
+| Outcast on every action the SQL policy protects, including channel `moderate`, `manage` and `delete` and an outcast author's own message `edit` and `delete` | The SQL policy evaluates outcast for every action it protects, and outcast wins each at this slice's admission. | W5b |
 | Acknowledged revoke across two replicas with queued work at joins, protected reads, PubSub and stream-management fanout and room administration | No new protected admission under the revoked grant after the fence, on any replica. | W5d |
 | Retired account JID on a Waddle home | Never issued to a new holder through any provisioning path. | W5d |
 
@@ -523,8 +535,8 @@ evidence.
 | ID | Unresolved decision/evidence | Work blocked | Under ADR-0020 |
 | --- | --- | --- | --- |
 | B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation) and W5c (writer inventory and exclusion); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
-| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel action (W5o) and the D8 rules: privileged grants for remote principals only from trusted homes and only on `pkix` streams, and room moderation only on `pkix` streams. |
-| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes, and W5o the fenced schema transition. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
+| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. |
+| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes, W5c extends it to the writers it fences, W5o decides the fenced schema transition and W5r bounded reconstruction. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b and extended by W5c for each surface it fences. |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c; W5d's #2056 control is its evidence. |
 | B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |

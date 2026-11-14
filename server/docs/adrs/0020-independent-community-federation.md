@@ -2,20 +2,23 @@
 
 ## Status
 
-Accepted on 2026-11-13 for decisions D1–D6; D1, D2 and D3 were extended and
-D7–D11 accepted on 2026-11-14. These decisions replace the restricted
+Accepted on 2026-11-13 for decisions D1–D6; D1, D2, D3 and D5 were extended
+and D7–D11 accepted on 2026-11-14. These decisions replace the restricted
 two-Waddle allowlist pilot this ADR previously proposed: the target is open,
 standards-compatible XMPP federation with independently operated servers,
 including Prosody and ejabberd, and XEP-0503 Spaces.
 
 Accepting these decisions selects designs; it is not evidence that any of them
 works, and none of the behavior they describe is implemented yet. None of the
-[gates](#gates) below has passed. Nothing in this ADR authorizes enabling S2S,
-advertising federation or any production activation; activation remains a
-separate explicit decision with a named window and runbook.
+[gates](#gates) below has passed. Nothing in this ADR authorizes merging the
+work into main, enabling S2S, advertising federation or any production
+activation: the rollout into main (G24) and activation (G22) each remain a
+separate explicit decision by the owner, with a named window and runbook.
 [The issue 2047 plan](../../../docs/planning/federation-2047.md) sequences the
 work and names, for each gate, the slice that owns it, the design document that
-records its decisions and the verification step that discharges it.
+records its decisions and the verification step that discharges it. Gate
+status is recorded in the plan's evidence log, and the close-out updates this
+status section.
 
 ## Context
 
@@ -57,14 +60,14 @@ JIDs. Both issues must be resolved before remote grants can be used.
 
 | ID | Decision |
 | --- | --- |
-| D1 | Peer admission modes `closed`, `allowlist` and `open` with a denylist. S2S is off by default; `allowlist` is the default mode until named evidence passes. Admission is enforced at stream open and at the protected-effect boundary. A denylist entry covers the domain and its subdomains; allowlist and dialback entries match exactly. |
+| D1 | Peer admission modes `closed`, `allowlist` and `open` with a denylist. S2S is off by default; `allowlist` is the default mode until named evidence passes. Admission is enforced at stream open and at the protected-effect boundary. A denylist entry covers the domain and its subdomains, applies in every mode and overrides every other list; allowlist, dialback and trusted-home entries match exactly. |
 | D2 | TLS always. PKIX and SASL EXTERNAL are primary and accept serverAuth-only certificates in both roles. The trust profile is chosen per domain, public WebPKI by default. Inbound streams use STARTTLS only. Inbound dialback is restricted, Waddle will implement the outbound dialback roles, and every stream carries its authentication strength to the effect boundary. |
-| D3 | SRV discovery merges `_xmpps-server` and `_xmpp-server`. The source domain is the only reference identity. Every DNS-derived address is checked against blocked address classes before connecting, and a failed lookup is not an absent record. IP-literal remote domains are refused, and `see-other-host` redirects are never followed. |
+| D3 | SRV discovery merges `_xmpps-server` and `_xmpp-server`. The source domain is the only reference identity. Every DNS-derived address is checked against blocked address classes before connecting, and a failed lookup is not an absent record. Remote domains that are IP addresses, numeric IPv4 forms or single-label names are refused, and `see-other-host` redirects are never followed. |
 | D4 | XEP-0503 is pinned at version 0.3.0; avatar and banner fetching is off. |
 | D5 | PostgreSQL is the canonical grant authority and SpiceDB a fenced projection, with conditions. The first grant-authority slice evaluates admission in SQL. |
 | D6 | AT Protocol login moves to its own issue and ADR. The federated subject is a stable home bare JID derived from the DID, never the handle. |
 | D7 | Remote traffic to local accounts is in scope. Until it is implemented, it is refused as if the account did not exist, and local accounts' direct messages and subscription requests to remote JIDs are refused. |
-| D8 | A remote principal holds privileged grants only when its home is on the operator's trusted-home list and its stream is PKIX-authenticated. Room moderation needs a PKIX-authenticated stream. A reassigned JID at a home not on that list may inherit non-privileged grants; this is an accepted limitation. |
+| D8 | A remote principal holds privileged grants and room moderation only when its home is on the operator's trusted-home list and its stream is PKIX-authenticated; a grant that is not honored contributes nothing. A reassigned JID at a home not on that list may inherit member-level grants; this is an accepted limitation. |
 | D9 | Tests are written with each slice and executed once all slices are integrated, except the TLS verifier and grant-fence focused tests, which run when their slices complete. |
 | D10 | Remote senders reach only local services explicitly enabled for them: MUC, the Spaces PubSub service, service discovery and ping, and local accounts under D7. Every other local service refuses them. |
 | D11 | Every slice reaches main after verification and close-out, together, under a rollout runbook. Changes that alter behavior while S2S is off pass their own rollout gate. |
@@ -88,13 +91,20 @@ JIDs. Both issues must be resolved before remote grants can be used.
   `moderate` permission, which lets a holder moderate occupants and other
   authors' messages in that room. It is not a privileged grant: in the current
   schema the channel `moderator` relation confers `moderate` without `manage`
-  or `delete`. A message author's own `edit` and `delete` permissions derive
-  from the message's `author` relation; they are neither room moderation nor
-  privileged.
+  or `delete`. For a remote principal, D8 nevertheless applies the same
+  conditions to room moderation as to privileged grants. A message author's
+  own `edit` and `delete` permissions derive from the message's `author`
+  relation; they are neither room moderation nor privileged.
+- **Member-level grant**: a grant that confers only member permissions in a
+  room or community, such as channel `read`, `view` and `send_message`, and
+  neither room moderation nor a privileged grant.
 - **Trusted home**: a remote domain on the operator's trusted-home list. By
   listing it, the operator asserts that the home never reassigns a retired
   account JID to a different holder, as Waddle homes do not; another Waddle
   deployment is the expected case. The list is configuration, not proof.
+  Listing a home delegates privileged authority and room moderation, wherever
+  grants name that home's accounts, to that home's operator and to whoever
+  later controls the domain.
 - **Authentication strength**: `pkix` when a stream's domain pair
   authenticated by SASL EXTERNAL after certificate validation, `dialback` when
   it authenticated by XEP-0220. A stream is *dialback-only* when its strength is
@@ -154,8 +164,8 @@ JIDs. Both issues must be resolved before remote grants can be used.
 - S2S is off by default; enabling it is explicit operator configuration.
 - An enabled deployment runs in one admission mode. `closed` admits no remote
   domain. `allowlist` admits only operator-listed domains. `open` admits any
-  domain that authenticates under D2, except domains the operator's denylist
-  covers.
+  domain that authenticates under D2. In every mode, a domain that the
+  operator's denylist covers is not admitted.
 - `allowlist` is the default mode until all of these pass: the negative-matrix
   cases that a third-party peer can drive, run against the pinned Prosody and
   ejabberd themselves; fail-closed host-grant admission; and the production
@@ -189,6 +199,12 @@ JIDs. Both issues must be resolved before remote grants can be used.
   label by label in canonical form, so denying `example.net` also denies
   `muc.example.net` but not `badexample.net`. The denylist applies at stream
   open and at the protected-effect boundary like any other admission decision.
+- The denylist overrides every other list: a domain it covers is not admitted,
+  not accepted by dialback and not treated as a trusted home, whatever the
+  allowlist, dialback list or trusted-home list says. A configuration that
+  puts a domain on the allowlist, the dialback list or the trusted-home list
+  while the denylist covers it, by naming it or one of its parent domains,
+  fails to load.
 - The dialback and trusted-home lists are separate from the admission lists;
   being admitted permits neither dialback nor privileged grants, and neither
   list admits a domain that D1 does not.
@@ -326,13 +342,21 @@ JIDs. Both issues must be resolved before remote grants can be used.
   socket only and never changes the reference identity.
 - Cap the number of SRV targets tried per domain and the number of addresses
   tried per target; the discovery design fixes both values (G6).
-- A remote domain must be a DNS domain name. A domainpart that is an IP
-  literal (RFC 7622 section 3.2) is refused for S2S: Waddle opens no stream to
-  it, an inbound stream claiming it is refused as a domain that is not
-  admitted, and a stanza from a local account addressed to it receives a
-  `remote-server-not-found` stanza error. An IP literal has no source domain
-  for a certificate to prove and would let a JID choose a socket address
-  without discovery.
+- A remote domain must be a fully qualified DNS domain name. These
+  domainparts are refused for S2S: both IP-address forms of RFC 7622 section
+  3.2, the bracketed `IP-literal` and the dotted-decimal `IPv4address`; any
+  other name that a resolver or address parser accepts as an IPv4 address,
+  such as the numeric, hexadecimal and abbreviated forms `2130706433`,
+  `0x7f.1` and `127.1`; and an unqualified single-label name. Waddle opens no
+  stream to such a domain, an inbound stream claiming it is refused as a
+  domain that is not admitted, and a stanza from a local account addressed to
+  it receives a `remote-server-not-found` stanza error. An IP address has no
+  source domain for a certificate to prove and would let a JID choose a socket
+  address without discovery, and a resolver could complete a single-label
+  name from its search list. The identity profile's canonical domain form
+  performs this classification once, and admission, routing and discovery use
+  it (G10). Every lookup is made for the fully qualified name without a
+  resolver search list (G6).
 - A `see-other-host` stream error from a peer ends that connection attempt,
   which fails and is retried later like any other failed attempt. Waddle never
   follows the redirect and never sends one. RFC 6120 section 4.9.3.19 describes
@@ -405,37 +429,42 @@ JIDs. Both issues must be resolved before remote grants can be used.
 
 ## Decision: remote authority and reassigned JIDs (D8)
 
-- A remote principal may hold a privileged grant only when both conditions
-  hold: (a) its home domain is a trusted home, on the operator's trusted-home
-  list; and (b) the stream that carries its request has `pkix` strength.
-- Grant issuance, bootstrap and repair refuse a privileged grant to a remote
-  JID whose home is not on the trusted-home list when the grant is written.
-  The protected-effect admission boundary honors a stored privileged grant for
-  a remote principal only on a `pkix` stream and only while its home is on the
-  trusted-home list that the replica runs, so removing a home from the list
-  withdraws that authority without revoking grants one by one (G17). Condition
-  (b) is never met on a dialback-only stream.
+- A remote principal may hold a privileged grant or room moderation only when
+  both conditions hold: (a) its home domain is a trusted home, on the
+  operator's trusted-home list; and (b) the stream that carries its request
+  has `pkix` strength.
+- Grant issuance, bootstrap and repair refuse a privileged grant or a room
+  moderator grant to a remote JID whose home is not on the trusted-home list
+  when the grant is written. The protected-effect admission boundary honors a
+  stored privileged grant, and room moderation from any stored grant or room
+  role, for a remote principal only on a `pkix` stream and only while its home
+  is on the trusted-home list that the replica runs, so removing a home from
+  the list withdraws that authority without revoking grants one by one (G17).
+  Condition (b) is never met on a dialback-only stream.
+- A grant that is not honored contributes nothing to admission. A privileged
+  or moderator grant that fails either condition yields neither `moderate` nor
+  the member-level permissions, such as `read` and `send_message`, that the
+  schema would otherwise derive from it; only a separate member-level grant
+  gives that principal member-level access.
 - Remote administration between deployments is therefore possible: an
   operator lists another Waddle deployment as a trusted home, and that
-  deployment's accounts can then hold owner, admin or manager grants over
-  `pkix` streams. Every other remote principal holds only non-privileged
-  grants.
-- Room moderation is honored for a remote principal from any admitted home,
-  but only on a `pkix` stream, never on a dialback-only stream, whatever grants
-  or room roles are stored. A message author's edit or deletion of their own
-  message is not room moderation and is not restricted by this rule.
+  deployment's accounts can then hold owner, admin or manager grants and
+  moderate rooms over `pkix` streams. Every other remote principal holds only
+  member-level grants.
+- A message author's edit or deletion of their own message is not room
+  moderation and is not restricted by these conditions; an outcast author
+  loses both in that room (D5).
 - Waddle-controlled homes enforce durable non-reuse of retired account JIDs
   across all their provisioning paths.
 - A home that is not on the trusted-home list cannot be required to do so: a
   home operator can impersonate or reassign its users, and grants follow JID
   semantics and trust that home. A re-registered remote account, or a domain
-  that changes hands, may therefore inherit the non-privileged grants of the
-  JID's previous holder, which include member-level access and room
-  moderation, but never privileged ones. This is an accepted, recorded
-  limitation.
-- A trusted home is trusted for non-reuse. If it does reassign a JID, the new
-  holder may also inherit privileged grants; an operator who lists a home
-  accepts that risk.
+  that changes hands, may therefore inherit the member-level grants of the
+  JID's previous holder, but never room moderation or privileged grants. This
+  is an accepted, recorded limitation.
+- A trusted home is trusted for non-reuse. If it does reassign a JID, or its
+  domain changes hands, the new holder may also inherit privileged grants and
+  room moderation; an operator who lists a home accepts that risk.
 - Waddle does not detect reassignment. When a reassignment is reported, a host
   administrator revokes the JID's grants through the revocation fence. Access
   for the new holder is a new grant, issued only after the administrator has
@@ -467,7 +496,8 @@ discovery, room joins, sends, history, fanout and administration; a community
 owner has no implicit deployment-wide or unrelated-community authority.
 Bootstrap grants identify an exact bare account JID and named community through
 secured operator provisioning, with audit and recovery; a remote JID can be
-bootstrapped to a privileged grant only when its home is a trusted home (D8).
+bootstrapped to a privileged or moderator grant only when its home is a trusted
+home (D8).
 
 Before protected remote dispatch is enabled or any activation, executable
 evidence must show how the selected authority interacts with the other stores
@@ -511,12 +541,13 @@ The grant-authority work must also fix and retire these known paths:
   [permission schema](../../crates/waddle-server/src/permissions/schema.rs)
   (`read`, `send_message`, `view`, `moderate`, `manage` and `delete`) subtracts
   `outcast`, so a room outcast who can view the parent Space appears to keep
-  access. Outcast takes precedence in every channel action. A message
-  author's own `edit` and `delete` permissions derive from the message's
-  `author` relation, not from a channel permission, and are intentionally
-  outside this change (D8); a moderator's deletion derives from channel
-  `moderate` and follows outcast precedence. This is a behavior
-  change and is made in its own reviewed change. Every replica currently writes
+  access. Outcast takes precedence in every channel action and in every
+  message action in that room, including a message author's own `edit` and
+  `delete`, which derive from the message's `author` relation: an outcast can
+  no longer edit or delete their own messages there. A moderator can still
+  remove an outcast's messages, because that deletion derives from the
+  moderator's own channel `moderate`. This is a behavior change and is made
+  in its own reviewed change. Every replica currently writes
   its built-in SpiceDB schema at startup, so an older replica would revert the
   fix; the change therefore needs a fenced schema transition, in which startup
   compares a versioned schema and refuses to overwrite a different one, and old
@@ -590,7 +621,9 @@ names 0.2.0.
   ([relay cutovers](../../../docs/operations/relay-cutovers.md)), so merging
   into main is a deployment. Every slice of this work reaches main only after
   the verification phase and the clean close-out review, and the slices merge
-  together, under one rollout runbook, rather than one at a time.
+  together, under one rollout runbook, rather than one at a time. That merge
+  also needs the owner's explicit go-ahead with a named window, in addition to
+  the reviewed runbook, as activation does (G24).
 - S2S stays off in that rollout (D1). Enabling it is the separate activation
   decision (G22).
 - A change that alters behavior while S2S is off has its own rollout part,
@@ -627,12 +660,12 @@ separate persistence and real account authentication. The ejabberd pin is
 25.08 or later and sets `s2s_use_starttls: required`; ejabberd documents
 `false` as the default, and the harness records the effective setting of the
 pinned version. The gate covers peer and component trust, spoofing, relay and
-forged IQs, discovery address restrictions, IP-literal domains and redirects,
-refusal of local services not enabled for remote senders, bounded resource
-exhaustion, identity collisions, scoped and remote administration, room
-moderation by stream strength, revoke races and stale repair, concurrent
-replicas, partial failure, and each deployment restarting while the other
-remains live. Its certificate matrix includes serverAuth-only certificates
+forged IQs, discovery address restrictions, IP-address and single-label
+domains and redirects, refusal of local services not enabled for remote
+senders, bounded resource exhaustion, identity collisions, scoped and remote
+administration, room moderation by home and stream strength, revoke races and
+stale repair, concurrent replicas, partial failure, and each deployment
+restarting while the other remains live. Its certificate matrix includes serverAuth-only certificates
 issued by the harness CA, modelled on the public `le-tlsserver.badxmpp.eu`
 test endpoint, whose current behavior has not been verified for this design
 and which the native harness does not contact; they must authenticate in both
@@ -687,25 +720,25 @@ and the verification step that discharges its evidence.
 | G3 Streaming codec and restart-buffer ownership (handshake B3) | Decision, evidence | Merge of the codec slice; merge to main | Handshake design |
 | G4 Independent review of the transport design with its G1–G3 decisions (handshake B4) | Decision | Merge of the connection manager, the first slice that accepts sockets | Handshake design |
 | G5 Dialback wire profile, classification of active certificate failures, and the residual risk of keys not bound to the TLS channel | Decision, enablement | Merge of the dialback slice; enabling inbound dialback | D2 |
-| G6 Discovery profile: completed blocked-address list, including embedded IPv4 forms; caps; failure handling; refusal of IP-literal domains and of `see-other-host` redirects; lifting the loopback and `.test` restriction on listeners, endpoints and domains | Decision, evidence | Merge of the discovery slice; any configuration outside loopback and `.test` | D3, handshake design |
+| G6 Discovery profile: completed blocked-address list, including embedded IPv4 forms; caps; failure handling; lookups without a resolver search list; refusal of IP-address, numeric IPv4 and single-label domains and of `see-other-host` redirects; lifting the loopback and `.test` restriction on listeners, endpoints and domains | Decision, evidence | Merge of the discovery slice; any configuration outside loopback and `.test` | D3, handshake design |
 | G7 Connection-manager admission and resource model: admission, dialback and trusted-home configuration, its matching rules and its distribution to replicas; global peer, socket and handshake caps with eviction and backoff; pre-authentication decoding limits | Decision, evidence | Merge of the connection manager | D1, D8, transport |
 | G8 Federated handoff contract: custody, retry identity, ordering scope, error responsibility | Decision, evidence | Merge of S2S routing | Delivery and recovery |
 | G9 Production authorization ID codec | Evidence | Remote identity lookup and grants; merge to main; the D1 default change | D5 item 5 |
-| G10 Host-grant B6 beyond the codec: XML-decoded identity enforcement before lossy parsing, canonical account binding, reconciliation, and the identity profile, including the canonical domain form that admission lists and reference identities use | Decision, evidence | Merge of the verifier, the connection manager, S2S routing and the first grant-authority slice; external identities and enrolled authority keys | [Host-grant design](../planning/host-grant-authority-2047.md) |
+| G10 Host-grant B6 beyond the codec: XML-decoded identity enforcement before lossy parsing, canonical account binding, reconciliation, and the identity profile, including the canonical domain form that admission lists, reference identities, routing and discovery use and its classification of IP-address, numeric IPv4 and single-label domains | Decision, evidence | Merge of the verifier, the connection manager, S2S routing and the first grant-authority slice; external identities and enrolled authority keys | [Host-grant design](../planning/host-grant-authority-2047.md) |
 | G11 Host-grant B1: writer and reader exclusion, old-writer retirement, store capabilities, credential separation and old-binary retirement | Decision, evidence, enablement | Merge of the grant-authority slices; enrollment; activation | Host-grant design |
 | G12 Host-grant B4: lock order, atomic admission, cancellation and lost-commit ownership | Decision, evidence | Merge of the first grant-authority slice; slices that build on it (D9 exception) | Host-grant design |
 | G13 Host-grant B7: restore incarnation surviving rollback and excluding old deployments and work | Decision, evidence, enablement | Merge of the restore slice; recovery capability and activation | Host-grant design |
-| G14 Host-grant B2: complete action, negative, admin and global dependency policy, including outcast precedence, privileged grants and room moderation under D8; actor projection; XMPP request and result identity | Decision, evidence | Merge of each slice that protects an operation | Host-grant design, D5, D8 |
+| G14 Host-grant B2: complete action, negative, admin and global dependency policy, including outcast precedence in every channel and message action, privileged grants and room moderation under D8, and grants that are not honored contributing nothing; actor projection; XMPP request and result identity | Decision, evidence | Merge of each slice that protects an operation | Host-grant design, D5, D8 |
 | G15 Host-grant B3: CAS, marker and schema protocol, including the fenced schema transition; bounded reconstruction | Decision, evidence | Merge of slices that write the projection or the schema; any admission that reads the projection | Host-grant design |
 | G16 Host-grant B5: PubSub and DirectFrame admission identity; read, join and stream-management sink contracts | Decision, evidence | Merge of the slice that fences those sinks; community activation | Host-grant design |
-| G17 Effect-boundary admission for remote principals: current D1 admission including denylisted parent domains; privileged authority only for a trusted home on a `pkix` stream; room moderation only on a `pkix` stream; authentication strength | Decision, evidence | Merge of the first slice that admits remote principals to protected effects | D1, D2, D8 |
+| G17 Effect-boundary admission for remote principals: current D1 admission including denylisted parent domains; privileged authority and room moderation only for a trusted home on a `pkix` stream, with a grant that is not honored contributing nothing; authentication strength | Decision, evidence | Merge of the first slice that admits remote principals to protected effects | D1, D2, D8 |
 | G18 Remote traffic to local accounts: RFC 6121 server rules and handler inventory | Decision, evidence | Lifting the D7 refusal | D7 |
 | G19 Release gate evidence and a clean close-out review of the integrated head | Evidence | Merge to main; feature advertisement; activation | This ADR |
 | G20 The negative-matrix cases a third-party peer can drive, passing against the pinned Prosody and against the pinned ejabberd themselves: spoofed `from`, forged and replayed IQ results, relay through an unserved domain, oversized and deeply nested stanzas, wrong and expired certificates, a parent-domain certificate for a subdomain, and per-peer queue exhaustion; with fail-closed host-grant admission and the production authorization ID codec. All other negative cases run between two Waddle deployments only | Enablement | Changing the default mode from `allowlist` to `open` | D1 |
 | G21 Reviewed advertisement change limited to demonstrated behavior | Enablement | Adding any federation feature to `capabilities.toml` or disco | This ADR |
 | G22 Explicit activation decision with a named window and runbook, including retirement of old binaries and credentials and a check of the public-WebPKI profile against a real public peer | Enablement | Enabling S2S in any deployment | This ADR |
 | G23 Remote reachability of local services: inventory of every local service and handler a stanza from an S2S stream can reach, and refusal outside the enabled set | Decision, evidence | Merge of S2S routing; each later change that enables a service or operation for remote senders | D10 |
-| G24 Rollout of changes that alter behavior while S2S is off: old-binary retirement, store emptiness or migration, and mixed-version behavior, collected in one reviewed rollout runbook | Decision, enablement | Merge to main | D11 |
+| G24 Rollout of changes that alter behavior while S2S is off: old-binary retirement, store emptiness or migration, and mixed-version behavior, collected in one reviewed rollout runbook; and the owner's explicit go-ahead with a named window | Decision, enablement | Merge to main | D11 |
 
 ## Protocol references
 

@@ -23,9 +23,11 @@ conflicts with them, they control:
   dialback list and the D8 trusted-home list, including how a change reaches
   every replica and closes the streams of a domain that is no longer admitted
   (gate G7). Allowlist, dialback-list and trusted-home entries match exactly;
-  a denylist entry also covers every subdomain of its domain. All of them, and
-  every stream domain, are compared in the canonical domain form that the
-  identity-profile slice defines (gates G1 and G10).
+  a denylist entry also covers every subdomain of its domain, applies in every
+  mode and overrides the other lists, and a configuration that also lists a
+  domain the denylist covers as allowed, dialback or trusted fails to load.
+  All of them, and every stream domain, are compared in the canonical domain
+  form that the identity-profile slice defines (gates G1 and G10).
 - A leaf whose extended key usage is serverAuth only is accepted in both TLS
   roles, in every trust profile and admission mode (see
   [the verifier design](s2s-verifier-2047.md)).
@@ -48,10 +50,12 @@ conflicts with them, they control:
   stream's authentication strength, `pkix` or `dialback`, which travels into
   the remote principal and the protected-effect admission witness.
 - DNS discovery follows D3, including the blocked address classes checked on
-  every DNS-derived address. DNS never supplies a reference identity. An
-  IP-literal remote domain is refused in both directions, and a
-  `see-other-host` stream error ends the connection attempt; Waddle never
-  follows or sends one.
+  every DNS-derived address, and lookups use no resolver search list. DNS
+  never supplies a reference identity. A remote domain that is either RFC 7622
+  IP-address form, another name accepted as an IPv4 address or an unqualified
+  single-label name is refused in both directions, as the identity profile's
+  canonical domain form classifies it, and a `see-other-host` stream error
+  ends the connection attempt; Waddle never follows or sends one.
 - Tests are written with the transport slices and executed in the
   verification phase, except the verifier's focused set, which runs when its
   slice completes (D9).
@@ -401,7 +405,7 @@ table also names the verification step for each item.
 
 | ID | Settled by ADR-0020 | Remaining items, owner and gate |
 | --- | --- | --- |
-| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; per-domain trust profiles; inbound STARTTLS only, with a mandatory pre-TLS `from`; inbound dialback policy and outbound dialback roles; one domain pair per stream. D3: discovery, the source domain as the only reference identity, blocked address classes, lookup failure versus absence, IP-literal domains and redirects. D1: admission modes and list matching. | Codec slice (W4a): header and stream-error behavior, including the error for a missing pre-TLS `from`, and SASL conformance, recorded in [codec decisions](#codec-decisions-for-g1-and-g3). Verifier slice (W4b): updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix. Identity-profile slice (W5i): the canonical domain form and IDNA processing that reference identities and admission lists use. Gate G1. The dialback wire profile and the classification of certificate outcomes are not part of B1; the dialback slice (W4d) decides them under gate G5. |
+| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; per-domain trust profiles; inbound STARTTLS only, with a mandatory pre-TLS `from`; inbound dialback policy and outbound dialback roles; one domain pair per stream. D3: discovery, the source domain as the only reference identity, blocked address classes, lookup failure versus absence, IP-address, numeric IPv4 and single-label domains, and redirects. D1: admission modes, list matching and denylist precedence. | Codec slice (W4a): header and stream-error behavior, including the error for a missing pre-TLS `from`, and SASL conformance, recorded in [codec decisions](#codec-decisions-for-g1-and-g3). Verifier slice (W4b): updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix. Identity-profile slice (W5i): the canonical domain form and IDNA processing that reference identities and admission lists use. Gate G1. The dialback wire profile and the classification of certificate outcomes are not part of B1; the dialback slice (W4d) decides them under gate G5. |
 | B2 | D2: per-domain profiles with public WebPKI by default; serverAuth-only EKU accepted; hard CRL checks only for configured private CAs. | Verifier slice (W4b): concrete verifier for both profiles; revocation handling for public chains; algorithm intersection; parser and CRL ceilings; cancellation and resource bounds. Evidence: the verifier's focused set when the slice completes, then two-process evidence in verification. Gate G2. |
 | B3 | Nothing. | Codec slice (W4a): decided as recorded in [codec decisions](#codec-decisions-for-g1-and-g3); evidence in verification. Gate G3. |
 | B4 | Nothing; accepting the ADR is not this review. | Independent review of this design with its recorded B1–B3 decisions, including the codec decisions and the identity profile's canonical domain form, before the connection manager (W4c) merges into the integration branch. Gate G4. |
@@ -480,9 +484,12 @@ is `not-authorized`; a negotiation element out of sequence is
 valid `to` and `from` is `improper-addressing`, a recipient outside the
 stream's destination is `host-unknown`, a sender outside its source is
 `invalid-from`, any other stanza is `policy-violation` while application
-dispatch is disabled, and a first-level element that is not a stanza is
-`unsupported-stanza-type`. Streams are directional, so any first-level
-element received on an established initiating stream is `policy-violation`.
+dispatch is disabled, a negotiation or dialback element is
+`policy-violation`, and only a first-level element that is none of these is
+`unsupported-stanza-type`. Streams are directional, so a first-level element
+received on an established initiating stream is `policy-violation` once it
+passes the namespace checks above; a `jabber:client` stanza there is still
+`invalid-namespace`.
 
 When the receiving role has no response header open, it opens one before the
 error, with `from` set to the last served recipient or the configured default
