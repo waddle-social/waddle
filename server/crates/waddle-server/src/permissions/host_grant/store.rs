@@ -145,6 +145,44 @@ impl HostGrantStore {
         super::runtime_attach::verify_current_role(&self.db).await
     }
 
+    /// Whether any scope is enrolled and not retired, read in a bounded
+    /// read-only snapshot. A database without the host-grant relations
+    /// holds none. It tells an operator whether a replica that cannot admit
+    /// managed rooms leaves a live scope unserved.
+    pub async fn holds_unretired_scope(&self) -> Result<bool, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let mut rows = tx
+            .query(
+                "SELECT pg_catalog.to_regclass('host_grant_scope_lifecycles') IS NOT NULL",
+                (),
+            )
+            .await?;
+        let present = match rows.next().await? {
+            Some(row) => row.get::<bool>(0)?,
+            None => false,
+        };
+        drop(rows);
+        let unretired = if present {
+            let mut rows = tx
+                .query(
+                    "SELECT EXISTS (SELECT 1 FROM host_grant_scope_lifecycles \
+                     WHERE retired_at_ms IS NULL)",
+                    (),
+                )
+                .await?;
+            let unretired = match rows.next().await? {
+                Some(row) => row.get::<bool>(0)?,
+                None => false,
+            };
+            drop(rows);
+            unretired
+        } else {
+            false
+        };
+        tx.rollback().await?;
+        Ok(unretired)
+    }
+
     async fn begin_write(&self) -> Result<EnteredTransaction<'_>, HostGrantError> {
         Ok(begin_guarded_store_writer(&self.db, LOCK_TIMEOUT, STATEMENT_TIMEOUT).await?)
     }

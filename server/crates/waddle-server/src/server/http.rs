@@ -886,38 +886,106 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     Ok(router)
 }
 
+/// The first delay before the host-grant privilege check is repeated after
+/// a failure that may pass on a later attempt; each further failure doubles
+/// it up to [`HOST_GRANT_ATTACH_RETRY_MAX`].
+const HOST_GRANT_ATTACH_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(1);
+const HOST_GRANT_ATTACH_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Let the ingress authority admit rooms that enrolled host-grant scopes
 /// manage, if this replica's runtime role holds exactly the grant store's
 /// privileges.
 ///
-/// The check runs before the WebSocket state exists, so no acceptance
-/// precedes it. A role that does not match the profile leaves the authority
-/// unattached: every acceptance for a managed room is then refused with a
-/// committed stanza error, and rooms that no scope manages are unaffected.
-/// The failure is logged by its kind only. SQLite holds no canonical grant
-/// store and no enrolled scope, so there is nothing to attach.
+/// The first check runs before the WebSocket state exists, so when it
+/// passes no acceptance precedes it. A failure that may pass on a later
+/// attempt (a statement that failed, a lock or statement bound that
+/// expired, bounds that could not be installed) is retried in the
+/// background with a capped exponential backoff until the check passes,
+/// finds that the role does not match the profile, or the replica stops.
+/// A role that does not match the profile leaves the authority unattached.
+/// While it is unattached every acceptance for a managed room is refused
+/// with a committed stanza error, and rooms that no scope manages are
+/// unaffected. SQLite holds no canonical grant store and no enrolled scope,
+/// so there is nothing to attach.
 async fn attach_host_grant_store(
-    ingress: &IngressAuthority,
+    ingress: &Arc<IngressAuthority>,
     state: &AppState,
     account_domain: waddle_xmpp::identity::CanonicalDomain,
+    stop: tokio_util::sync::CancellationToken,
 ) {
-    use crate::permissions::host_grant::{
-        HostGrantAttachment, HostGrantStore, ServedAccountDomains,
-    };
+    use crate::permissions::host_grant::{HostGrantStore, ServedAccountDomains};
     let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
         return;
     };
-    match HostGrantAttachment::verify(&store, ServedAccountDomains::new([account_domain])).await {
+    let served = ServedAccountDomains::new([account_domain]);
+    if !try_attach_host_grant_store(ingress, &store, &served).await {
+        return;
+    }
+    let ingress = Arc::clone(ingress);
+    tokio::spawn(async move {
+        let mut delay = HOST_GRANT_ATTACH_RETRY_INITIAL;
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(delay) => {}
+            }
+            if !try_attach_host_grant_store(&ingress, &store, &served).await {
+                return;
+            }
+            delay = delay.saturating_mul(2).min(HOST_GRANT_ATTACH_RETRY_MAX);
+        }
+    });
+}
+
+/// One host-grant privilege check. The answer is whether to check again:
+/// only a failure that a later attempt may pass is retried.
+async fn try_attach_host_grant_store(
+    ingress: &IngressAuthority,
+    store: &crate::permissions::host_grant::HostGrantStore,
+    served: &crate::permissions::host_grant::ServedAccountDomains,
+) -> bool {
+    use crate::permissions::host_grant::{HostGrantAttachment, HostGrantError};
+    match HostGrantAttachment::verify(store, served.clone()).await {
         Ok(attachment) => {
             ingress.attach_host_grants(attachment);
+            false
         }
         Err(error) => {
-            tracing::error!(
-                kind = error.kind(),
-                "The runtime role's privileges on the host-grant store are not verified; \
-                 rooms of enrolled scopes are unavailable on this replica"
+            let retrying = matches!(
+                error,
+                HostGrantError::Database(_) | HostGrantError::Busy | HostGrantError::BoundsUnproven
             );
+            log_unverified_host_grant_store(store, &error, retrying).await;
+            retrying
         }
+    }
+}
+
+/// Log a failed host-grant privilege check by its kind only. The failure
+/// is an error when an unretired scope is enrolled, which this replica
+/// cannot serve, or when that cannot be read; otherwise the replica loses
+/// nothing by it and it is logged as information.
+async fn log_unverified_host_grant_store(
+    store: &crate::permissions::host_grant::HostGrantStore,
+    error: &crate::permissions::host_grant::HostGrantError,
+    retrying: bool,
+) {
+    const UNVERIFIED: &str = "The runtime role's privileges on the host-grant store are not \
+                              verified; rooms of enrolled scopes are unavailable on this replica";
+    match store.holds_unretired_scope().await {
+        Ok(false) => info!(kind = error.kind(), retrying, "{UNVERIFIED}"),
+        Ok(true) => tracing::error!(
+            kind = error.kind(),
+            retrying,
+            unretired_scope = true,
+            "{UNVERIFIED}"
+        ),
+        Err(probe) => tracing::error!(
+            kind = error.kind(),
+            retrying,
+            probe_kind = probe.kind(),
+            "{UNVERIFIED}"
+        ),
     }
 }
 
@@ -1653,7 +1721,13 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks = ProviderDispatchTracker::new();
     let ingress = open_ingress_authority(server_config, &state).await?;
-    attach_host_grant_store(&ingress, &state, account_domain.clone()).await;
+    attach_host_grant_store(
+        &ingress,
+        &state,
+        account_domain.clone(),
+        shutdown_handle.stop_token(),
+    )
+    .await;
     let websocket_state = Arc::new(WebSocketState {
         #[cfg(feature = "test-support")]
         sasl2_test_capability: false,
