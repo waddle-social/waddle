@@ -118,7 +118,6 @@
   --chat-reaction-popover-width: min(22rem, calc(100vw - 2rem));
   --chat-profile-menu-width: 18rem;
   --chat-account-menu-width: 14rem;
-  --chat-channel-thread-indent: 1.75rem;
   --chat-thread-action-indent: calc(var(--chat-message-avatar-size) + var(--space-sm));
   --chat-touch-action-space: 3.25rem;
   --chat-message-header-height: 1.125rem;
@@ -147,7 +146,6 @@
   --chat-attachment-image-width: min(100%, 20rem);
   --chat-attachment-card-width: min(100%, 28rem);
   --chat-composer-block: var(--space-sm);
-  --chat-composer-inner-height: 2.75rem;
   --chat-composer-input-radius: var(--radius-lg);
   --chat-composer-input-control-radius: calc(var(--chat-composer-input-radius) - var(--space-2xs));
   --shadow-pane: none;

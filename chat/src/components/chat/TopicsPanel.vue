@@ -20,6 +20,8 @@ import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
 import type { MemberLoadState } from "@/waddles/directory";
 import Skeleton from "@/components/ui/Skeleton.vue";
+import { css, cx } from "styled-system/css";
+import { badge, iconbtn, liveDot, room, tag } from "styled-system/recipes";
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
@@ -71,6 +73,121 @@ const props = defineProps<{
 }>();
 
 const callState = useStore($callState);
+
+// Panda classes (static). Rows reuse the sidebar's `room` recipe.
+const rootClass = css({ display: "flex", flexDirection: "column", minHeight: 0, color: "fg" });
+const headClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1",
+  padding: "4px 4px 8px 12px",
+  "& h3": { margin: 0, flex: 1, minWidth: 0, font: "700 13px/1.3 {fonts.body}", color: "fg.muted" },
+});
+const smIconClass = iconbtn({ size: "sm" });
+const listClass = css({ display: "flex", flexDirection: "column", gap: "0.5", padding: "0 4px 8px" });
+const groupClass = css({ display: "flex", flexDirection: "column", gap: "0.5" });
+const rowClass = cx(room(), css({ flex: 1, cursor: "pointer", border: 0, bg: "transparent", width: "100%", textAlign: "left", font: "inherit", "& .wd-badge, & .wd-tag": { flex: "none" } }));
+const threadRowClass = cx(rowClass, css({ minHeight: "36px", pl: "9", fontSize: "sm", "& svg": { width: "16px", height: "16px" } }));
+const rowWrapClass = css({ display: "flex", alignItems: "center", gap: "1" });
+const metaClass = css({ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", font: "400 12px/1.35 {fonts.body}", color: "fg.muted" });
+const nameStackClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", "& > :first-child": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "fg", fontWeight: 600 } });
+const countClass = css({ flex: "none", font: "600 12px/1 {fonts.body}", fontVariantNumeric: "tabular-nums", color: "fg.soft" });
+const sectionHeadClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1",
+  borderRadius: "control",
+  _hover: { bg: "state.hover" },
+});
+const sectionToggleClass = css({
+  display: "flex",
+  flex: 1,
+  minWidth: 0,
+  alignItems: "center",
+  gap: "1.5",
+  minHeight: "36px",
+  padding: "10px 8px 4px 10px",
+  border: 0,
+  bg: "transparent",
+  textAlign: "left",
+  cursor: "pointer",
+  font: "700 13px/1.3 {fonts.body}",
+  color: "fg.muted",
+  _hover: { color: "fg" },
+  "& > svg": { width: "16px", height: "16px", flex: "none", transition: "rotate {durations.base} {easings.out}" },
+  "&[aria-expanded=false] > svg:first-child": { rotate: "-90deg" },
+});
+const callsHeadClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "10px 8px 4px 10px", font: "700 13px/1.3 {fonts.body}", color: "fg.muted" });
+const sectionLabelClass = css({ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const callChipClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1",
+  flex: "none",
+  height: "22px",
+  px: "2",
+  borderRadius: "pill",
+  bg: "live.subtle",
+  color: "live.text",
+  boxShadow: "inset 0 0 0 1px {colors.live}",
+  font: "700 12px/1 {fonts.body}",
+  fontVariantNumeric: "tabular-nums",
+  "& svg": { width: "14px", height: "14px", color: "currentColor" },
+});
+const callActionClass = css({ display: "none", "@media (min-width: 1536px)": { display: "inline" } });
+const callActionTagClass = cx(tag(), css({ display: "none", color: "live.text", borderColor: "live", xl: { display: "inline-flex" } }));
+const callIconClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "28px",
+  height: "28px",
+  flex: "none",
+  borderRadius: "control",
+  bg: "live.subtle",
+  color: "live.text",
+  "& svg": { width: "16px", height: "16px", color: "currentColor" },
+});
+const leaveClass = cx(iconbtn(), css({ color: "danger.text", _hover: { bg: "danger.subtle", color: "danger.text" } }));
+const forumTagClass = tag();
+const dotClass = badge({ dot: true });
+const emptyGroupClass = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "2", padding: "6px 10px 6px 34px", fontSize: "sm", color: "fg.muted" });
+const createClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1",
+  height: "32px",
+  px: "2.5",
+  border: 0,
+  borderRadius: "pill",
+  bg: "action.subtle",
+  color: "action.text",
+  font: "600 13px/1 {fonts.body}",
+  cursor: "pointer",
+  _hover: { bg: "action", color: "action.fg" },
+  "& svg": { width: "14px", height: "14px" },
+});
+const emptyClass = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "3", padding: "40px 16px", textAlign: "center", fontSize: "sm", color: "fg.muted" });
+const newClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+  height: "36px",
+  px: "3",
+  borderRadius: "control",
+  border: "1px solid {colors.border}",
+  bg: "surface",
+  color: "fg",
+  font: "600 13px/1 {fonts.body}",
+  cursor: "pointer",
+  _hover: { bg: "state.hover" },
+  "& svg": { width: "16px", height: "16px" },
+});
+const skelGroupClass = css({ display: "flex", flexDirection: "column", gap: "1" });
+const skelHeadClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "10px 8px 4px" });
+const skelRowClass = css({ display: "flex", alignItems: "center", gap: "2.5", minHeight: "rowH", px: "2.5" });
+const footClass = css({ padding: "8px 4px 0", borderTop: "1px solid {colors.border.soft}" });
+const footRowClass = cx(rowClass, css({ "& svg:last-child": { width: "16px", height: "16px", transition: "translate {durations.base} {easings.out}" }, "&:hover svg:last-child": { translate: "2px 0" } }));
 
 /**
  * Resolve the channel's MUC room JID and look up the live-call
@@ -421,381 +538,253 @@ watch(
 </script>
 
 <template>
-  <div class="chat-sidebar-pane glass-panel">
-    <!-- Waddle header -->
-    <div class="chat-sidebar-header">
-      <div class="min-w-0 flex-1">
-        <span class="type-pane-title truncate text-sidebar-foreground">Spaces</span>
-      </div>
-      <div class="flex gap-0.5 flex-shrink-0">
-        <button
-          v-if="waddle && canManageCommunity"
-          class="chat-icon-button chat-icon-button--sm hover:bg-sidebar-accent"
-          title="Settings"
-          aria-label="Waddle settings"
-          type="button"
-          @click="emit('openSettings')"
-        >
-          <Settings class="w-3.5 h-3.5 text-sidebar-muted hover:text-primary" />
-        </button>
-        <button
-          v-if="canManageChannels"
-          class="chat-icon-button chat-icon-button--sm hover:bg-sidebar-accent"
-          title="New channel or space"
-          aria-label="New channel or space"
-          type="button"
-          @click="emit('createChannel')"
-        >
-          <Plus class="w-3.5 h-3.5 text-sidebar-muted hover:text-primary" />
-        </button>
-      </div>
+  <div :class="rootClass">
+    <div :class="headClass">
+      <h3>Spaces</h3>
+      <button
+        v-if="waddle && canManageCommunity"
+        :class="smIconClass"
+        title="Settings"
+        aria-label="Waddle settings"
+        type="button"
+        @click="emit('openSettings')"
+      >
+        <Settings aria-hidden="true" />
+      </button>
+      <button
+        v-if="canManageChannels"
+        :class="smIconClass"
+        title="New channel or space"
+        aria-label="New channel or space"
+        type="button"
+        @click="emit('createChannel')"
+      >
+        <Plus aria-hidden="true" />
+      </button>
     </div>
 
-    <!-- Channel list -->
-    <div class="chat-pane-scroll chat-sidebar-scroll">
-      <div class="chat-panel-stack">
-        <div
-          v-if="refreshedGroupCallRows.length > 0"
-          class="chat-list-stack"
-        >
-          <section class="grid gap-1" aria-label="Active group calls">
-            <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
-              <Phone class="h-3 w-3 text-primary" aria-hidden="true" />
-              <span class="flex-1 truncate">Active calls</span>
-              <span
-                class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary/15 text-primary ring-1 ring-primary/30"
-                aria-hidden="true"
-              >
-                {{ refreshedGroupCallRows.length }}
-              </span>
-            </div>
-            <div
-              v-for="row in refreshedGroupCallRows"
-              :key="row.key"
-              class="flex items-center gap-1"
-            >
-              <button
-                class="chat-list-row min-h-10 flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left group text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
-                :class="isActiveGroupCallRow(row) ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground' : ''"
-                type="button"
-                :aria-current="isActiveGroupCallRow(row) ? 'page' : undefined"
-                :aria-label="refreshedGroupCallRowLabel(row)"
-                @click="selectRefreshedGroupCallRow(row)"
-              >
-                <span class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <Video v-if="row.media.video" class="h-3.5 w-3.5" aria-hidden="true" />
-                  <Phone v-else class="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-                <span class="min-w-0 flex-1">
-                  <span class="type-control type-strong block truncate text-sidebar-foreground">
-                    {{ row.title }}
-                  </span>
-                  <span class="type-meta block truncate text-sidebar-muted" :title="row.roomJid">
-                    {{ refreshedGroupCallMeta(row) }}
-                  </span>
-                </span>
-                <span
-                  class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
-                  :title="refreshedGroupCallBadgeLabel(row)"
-                  aria-hidden="true"
-                >
-                  <Video v-if="row.media.video" class="w-3 h-3" />
-                  <Phone v-else class="w-3 h-3" />
-                  <span class="type-numeric leading-none">{{ row.participantCount }}</span>
-                </span>
-                <span
-                  class="type-meta hidden shrink-0 rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-primary xl:inline-flex"
-                  aria-hidden="true"
-                >
-                  {{ groupCallActionLabel(row.roomJid) }}
-                </span>
-              </button>
-              <button
-                v-if="canLeaveRetainedGroupCall(row.roomJid)"
-                type="button"
-                class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive-text hover:bg-destructive/10"
-                :title="leaveRefreshedGroupCallLabel(row)"
-                :aria-label="leaveRefreshedGroupCallLabel(row)"
-                @click="leaveRefreshedGroupCall(row)"
-              >
-                <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            </div>
-          </section>
+    <div :class="listClass">
+      <section v-if="refreshedGroupCallRows.length > 0" :class="groupClass" aria-label="Active group calls">
+        <div :class="callsHeadClass">
+          <span :class="liveDot()" aria-hidden="true" />
+          <span :class="sectionLabelClass">Active calls</span>
+          <span :class="callChipClass" aria-hidden="true">{{ refreshedGroupCallRows.length }}</span>
         </div>
-
-        <div v-if="isLoading" class="chat-list-stack" aria-hidden="true">
-          <section
-            v-for="i in 2"
-            :key="`topics-skel-group-${i}`"
-            class="grid gap-1"
+        <div v-for="row in refreshedGroupCallRows" :key="row.key" :class="rowWrapClass">
+          <button
+            :class="rowClass"
+            type="button"
+            :aria-current="isActiveGroupCallRow(row) ? 'page' : undefined"
+            :aria-label="refreshedGroupCallRowLabel(row)"
+            @click="selectRefreshedGroupCallRow(row)"
           >
-            <div class="flex items-center gap-1.5 px-2 pt-2 pb-1">
-              <Skeleton width="0.625rem" height="0.625rem" radius="0.125rem" />
-              <Skeleton :width="i === 1 ? '40%' : '55%'" height="0.55rem" />
-            </div>
-            <div
-              v-for="j in i === 1 ? 4 : 3"
-              :key="`topics-skel-row-${i}-${j}`"
-              class="flex w-full min-h-10 items-center gap-2.5 px-3 py-2"
-            >
-              <Skeleton width="0.875rem" height="0.875rem" radius="0.25rem" />
-              <Skeleton :width="`${30 + ((j * 13) % 45)}%`" height="0.6rem" />
-            </div>
-          </section>
+            <span :class="callIconClass">
+              <Video v-if="row.media.video" aria-hidden="true" />
+              <Phone v-else aria-hidden="true" />
+            </span>
+            <span :class="nameStackClass">
+              <span>{{ row.title }}</span>
+              <span :class="metaClass" :title="row.roomJid">{{ refreshedGroupCallMeta(row) }}</span>
+            </span>
+            <span :class="callChipClass" :title="refreshedGroupCallBadgeLabel(row)" aria-hidden="true">
+              <Video v-if="row.media.video" />
+              <Phone v-else />
+              {{ row.participantCount }}
+            </span>
+            <span :class="callActionTagClass" aria-hidden="true">{{ groupCallActionLabel(row.roomJid) }}</span>
+          </button>
+          <button
+            v-if="canLeaveRetainedGroupCall(row.roomJid)"
+            type="button"
+            :class="leaveClass"
+            :title="leaveRefreshedGroupCallLabel(row)"
+            :aria-label="leaveRefreshedGroupCallLabel(row)"
+            @click="leaveRefreshedGroupCall(row)"
+          >
+            <PhoneOff aria-hidden="true" />
+          </button>
         </div>
+      </section>
 
-        <div v-else-if="channels.length === 0 && spaces.length === 0" class="type-caption text-center py-10 text-sidebar-muted">
-          <div class="flex flex-col items-center gap-3 px-4">
-            <span>There are no channels or spaces configured yet.</span>
+      <div v-if="isLoading" aria-hidden="true">
+        <section v-for="i in 2" :key="`topics-skel-group-${i}`" :class="skelGroupClass">
+          <div :class="skelHeadClass">
+            <Skeleton width="0.625rem" height="0.625rem" radius="0.125rem" />
+            <Skeleton :width="i === 1 ? '40%' : '55%'" height="0.55rem" />
+          </div>
+          <div v-for="j in i === 1 ? 4 : 3" :key="`topics-skel-row-${i}-${j}`" :class="skelRowClass">
+            <Skeleton width="0.875rem" height="0.875rem" radius="0.25rem" />
+            <Skeleton :width="`${30 + ((j * 13) % 45)}%`" height="0.6rem" />
+          </div>
+        </section>
+      </div>
+
+      <div v-else-if="channels.length === 0 && spaces.length === 0" :class="emptyClass">
+        <span>There are no channels or spaces configured yet.</span>
+        <button v-if="canManageChannels" :class="newClass" type="button" @click="emit('createChannel')">
+          <Plus aria-hidden="true" />
+          New channel or space
+        </button>
+      </div>
+
+      <template v-else>
+        <!-- Community pseudo-channels: community-wide surfaces (Feed,
+             Events) and the Unread / Threads views, which are NOT real
+             channels. Selecting one swaps the content area. -->
+        <section :class="groupClass" aria-label="Community surfaces">
+          <button
+            type="button"
+            :class="rowClass"
+            :aria-current="isUnreadActive ? 'page' : undefined"
+            @click="emit('selectUnreadView')"
+          >
+            <Inbox aria-hidden="true" />
+            <span class="wd-room__name">Unread</span>
+            <span v-if="(unreadTotalCount ?? 0) > 0" :class="badge()" aria-hidden="true">{{ unreadTotalCount }}</span>
+          </button>
+          <button
+            type="button"
+            :class="rowClass"
+            :aria-current="isThreadsActive ? 'page' : undefined"
+            @click="emit('selectThreadsView')"
+          >
+            <ListTree aria-hidden="true" />
+            <span class="wd-room__name">Threads</span>
+            <span v-if="(threadsUnreadCount ?? 0) > 0" :class="badge()" aria-hidden="true">{{ threadsUnreadCount }}</span>
+          </button>
+          <button
+            type="button"
+            :class="rowClass"
+            :aria-current="activeCommunitySurface === 'feed' ? 'page' : undefined"
+            @click="emit('selectCommunitySurface', 'feed')"
+          >
+            <MessageSquareText aria-hidden="true" />
+            <span class="wd-room__name">Feed</span>
+            <span v-if="((feedNewCount ?? 0) + (storiesActiveCount ?? 0)) > 0" :class="badge()" aria-hidden="true">{{ (feedNewCount ?? 0) + (storiesActiveCount ?? 0) }}</span>
+          </button>
+          <button
+            type="button"
+            :class="rowClass"
+            :aria-current="activeCommunitySurface === 'events' ? 'page' : undefined"
+            @click="emit('selectCommunitySurface', 'events')"
+          >
+            <CalendarDays aria-hidden="true" />
+            <span class="wd-room__name">Events</span>
+            <span v-if="(upcomingEventCount ?? 0) > 0" :class="badge({ variant: 'quiet' })" aria-hidden="true">{{ upcomingEventCount }}</span>
+          </button>
+        </section>
+
+        <section v-for="group in channelGroups" :key="group.id" :class="groupClass">
+          <div :class="sectionHeadClass">
+            <button
+              :class="sectionToggleClass"
+              type="button"
+              :aria-expanded="!isGroupCollapsed(group.id)"
+              :aria-label="groupToggleLabel(group)"
+              @click="toggleGroup(group.id)"
+            >
+              <ChevronDown aria-hidden="true" />
+              <span :class="sectionLabelClass">{{ group.name }}</span>
+              <!-- Rolled-up activity on a collapsed group. -->
+              <template v-if="isGroupCollapsed(group.id)">
+                <span v-if="groupBadgeModel(group).callCount > 0" :class="callChipClass" aria-hidden="true">
+                  <Phone />
+                  {{ groupBadgeModel(group).callCount }}
+                </span>
+                <span
+                  v-if="groupBadgeModel(group).notification?.kind === 'mentions'"
+                  :class="badge()"
+                  aria-hidden="true"
+                >{{ groupBadgeModel(group).notification?.count }}</span>
+                <span
+                  v-else-if="groupBadgeModel(group).notification?.kind === 'unread'"
+                  :class="badge({ variant: 'quiet' })"
+                  aria-hidden="true"
+                >{{ groupBadgeModel(group).notification?.count }}</span>
+                <span
+                  v-else-if="groupBadgeModel(group).notification?.kind === 'activity'"
+                  :class="dotClass"
+                  aria-hidden="true"
+                />
+              </template>
+              <span :class="countClass">{{ group.channels.length }}</span>
+            </button>
             <button
               v-if="canManageChannels"
-              class="type-control inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-sidebar-foreground hover:bg-sidebar-accent"
+              :class="smIconClass"
               type="button"
-              @click="emit('createChannel')"
+              :aria-label="group.space ? `Create channel in ${group.name}` : 'Create standalone channel'"
+              @click="emit('createChannelInSpace', group.space?.id ?? null)"
             >
-              <Plus class="h-3.5 w-3.5" />
-              New channel or space
+              <Plus aria-hidden="true" />
             </button>
           </div>
-        </div>
-
-        <div v-else class="chat-list-stack">
-          <!-- Community pseudo-channels — top-of-sidebar rows for
-               community-wide surfaces (Feed, Events) that
-               are NOT real channels. Selecting one swaps the
-               content area for that surface's content pane. -->
-          <section class="grid gap-1" aria-label="Community surfaces">
-            <button
-              type="button"
-              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
-              :class="isUnreadActive ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
-              @click="emit('selectUnreadView')"
-            >
-              <Inbox class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
-              <span class="flex-1 truncate type-control">Unread</span>
-              <span
-                v-if="(unreadTotalCount ?? 0) > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-                aria-hidden="true"
-              >{{ unreadTotalCount }}</span>
-            </button>
-            <button
-              type="button"
-              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
-              :class="isThreadsActive ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
-              @click="emit('selectThreadsView')"
-            >
-              <ListTree class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
-              <span class="flex-1 truncate type-control">Threads</span>
-              <span
-                v-if="(threadsUnreadCount ?? 0) > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-                aria-hidden="true"
-              >{{ threadsUnreadCount }}</span>
-            </button>
-            <button
-              type="button"
-              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
-              :class="activeCommunitySurface === 'feed' ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
-              @click="emit('selectCommunitySurface', 'feed')"
-            >
-              <MessageSquareText class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
-              <span class="flex-1 truncate type-control">Feed</span>
-              <span
-                v-if="((feedNewCount ?? 0) + (storiesActiveCount ?? 0)) > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-                aria-hidden="true"
-              >{{ (feedNewCount ?? 0) + (storiesActiveCount ?? 0) }}</span>
-            </button>
-            <button
-              type="button"
-              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
-              :class="activeCommunitySurface === 'events' ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
-              @click="emit('selectCommunitySurface', 'events')"
-            >
-              <CalendarDays class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
-              <span class="flex-1 truncate type-control">Events</span>
-              <span
-                v-if="(upcomingEventCount ?? 0) > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary/15 px-1 text-primary"
-                aria-hidden="true"
-              >{{ upcomingEventCount }}</span>
-            </button>
-          </section>
-
-          <section v-for="group in channelGroups" :key="group.id" class="grid gap-1">
-            <div class="flex items-center gap-1 rounded-md hover:bg-sidebar-accent/35">
-              <button
-                class="type-section-label flex min-w-0 flex-1 items-center gap-1.5 px-2 pt-2 pb-1 text-left text-sidebar-muted hover:text-sidebar-foreground"
-                type="button"
-                :aria-expanded="!isGroupCollapsed(group.id)"
-                :aria-label="groupToggleLabel(group)"
-                @click="toggleGroup(group.id)"
-              >
-                <ChevronDown
-                  class="h-3 w-3 flex-shrink-0 transition-transform"
-                  :class="isGroupCollapsed(group.id) ? '-rotate-90' : ''"
-                />
-                <span class="flex-1 truncate">{{ group.name }}</span>
-                <!-- Rolled-up activity badges on a collapsed group —
-                     match the iter-54 .chat-badge-glow halo so they
-                     pull the eye the same way the rail bell badge
-                     and sidebar unread badges do. Activity dot
-                     already had a glow; mention / unread counts now
-                     get one too. -->
-                <template v-if="isGroupCollapsed(group.id)">
-                  <span
-                    v-if="groupBadgeModel(group).callCount > 0"
-                    class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center gap-0.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30"
-                    aria-hidden="true"
-                  >
-                    <Phone class="w-3 h-3" />
-                    <span class="type-numeric leading-none">{{ groupBadgeModel(group).callCount }}</span>
-                  </span>
-                  <span
-                    v-if="groupBadgeModel(group).notification?.kind === 'mentions'"
-                    class="chat-badge-glow--mention type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-live text-live-foreground"
-                    aria-hidden="true"
-                  >{{ groupBadgeModel(group).notification?.count }}</span>
-                  <span
-                    v-else-if="groupBadgeModel(group).notification?.kind === 'unread'"
-                    class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
-                    aria-hidden="true"
-                  >{{ groupBadgeModel(group).notification?.count }}</span>
-                  <span
-                    v-else-if="groupBadgeModel(group).notification?.kind === 'activity'"
-                    class="w-2 h-2 rounded-full bg-primary shadow-[0_0_6px_var(--glow-strong)]"
-                    aria-hidden="true"
-                  />
-                </template>
-                <span class="type-meta type-numeric text-sidebar-muted">{{ group.channels.length }}</span>
-              </button>
+          <template v-if="!isGroupCollapsed(group.id)">
+            <div v-if="group.channels.length === 0" :class="emptyGroupClass">
+              <span>No channels yet.</span>
               <button
                 v-if="canManageChannels"
-                class="chat-icon-button chat-icon-button--sm mr-1 mt-1"
+                :class="createClass"
                 type="button"
                 :aria-label="group.space ? `Create channel in ${group.name}` : 'Create standalone channel'"
                 @click="emit('createChannelInSpace', group.space?.id ?? null)"
               >
-                <Plus class="h-3.5 w-3.5" />
+                <Plus aria-hidden="true" />
+                <span>Create</span>
               </button>
             </div>
-            <template v-if="!isGroupCollapsed(group.id)">
-              <!-- Empty group row — when a channel group has no
-                   channels, the "Create" button is the row's only
-                   point of action. Tint it primary so it reads as
-                   "this is the next step here" instead of as a
-                   generic outlined chip lost against the muted
-                   sidebar. Matches the same brand language used by
-                   the composer armed glow / unread rails / mention
-                   spotlight (iter 32/39). -->
-              <div
-                v-if="group.channels.length === 0"
-                class="type-caption flex items-center justify-between gap-2 px-6 py-2 text-sidebar-muted"
-              >
-                <span>No channels yet.</span>
+            <template v-for="{ channel, unread } in group.channels" :key="channel.id">
+              <div :class="rowWrapClass">
                 <button
-                  v-if="canManageChannels"
-                  class="type-control inline-flex items-center gap-1 rounded-md border border-primary/25 bg-primary/10 px-2 py-1 text-primary transition-colors hover:bg-primary/20 hover:border-primary/40"
-                  type="button"
-                  :aria-label="group.space ? `Create channel in ${group.name}` : 'Create standalone channel'"
-                  @click="emit('createChannelInSpace', group.space?.id ?? null)"
-                >
-                  <Plus class="h-3 w-3" aria-hidden="true" />
-                  <span>Create</span>
-                </button>
-              </div>
-              <template v-for="{ channel, unread } in group.channels" :key="channel.id">
-              <div class="flex items-center gap-1">
-                <button
-                  class="chat-list-row min-h-10 flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left group"
-                  :class="[
-                    isActiveChannelPage(channel)
-                      ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
-                      : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
-                    !isActiveChannelPage(channel) && unread.mentions > 0
-                      ? 'chat-list-row--unread chat-list-row--mention'
-                      : !isActiveChannelPage(channel) && unread.unread > 0
-                        ? 'chat-list-row--unread'
-                        : '',
-                  ]"
+                  :class="rowClass"
                   :aria-current="isActiveChannelPage(channel) ? 'page' : undefined"
                   :aria-label="channelRowLabel(channel, unread, isActiveChannelPage(channel))"
+                  :data-unread="!isActiveChannelPage(channel) && (unread.unread > 0 || unread.mentions > 0 || hasActivity(channel.id)) ? '' : undefined"
                   type="button"
                   @click="selectChannelRow(channel)"
                 >
-                  <component
-                    :is="channelIcon(channel)"
-                    class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
-                    :class="isActiveChannelPage(channel) ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
-                  />
-                  <span
-                    class="type-control truncate flex-1"
-                    :class="[
-                      isActiveChannelPage(channel) ? 'type-emphasis' : '',
-                      (unread.unread > 0 || hasActivity(channel.id)) && !isActiveChannelPage(channel) ? 'type-strong text-sidebar-foreground' : '',
-                    ]"
-                  >{{ channel.name }}</span>
-                  <span
-                    v-if="detectForumChannel(channel)"
-                    class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"
-                  >
-                    Forum
-                  </span>
-                  <!--
-                    XEP-0272 Muji "call ongoing in this channel" indicator.
-                    Sits before the unread/mention badges so it claims the
-                    spot closest to the channel name — Slack-Huddle and
-                    Discord-voice both place the call affordance there.
-                    Suppressed on the active channel (`!isActiveChannelPage`)
-                    since the room header's MucCallButton already shows
-                    participant count when you're inside the room. Visual
-                    language (pulsing primary ring + Phone icon + count)
-                    matches MucCallButton.vue:97-107 so the two reads as
-                    the same affordance.
-                  -->
+                  <component :is="channelIcon(channel)" aria-hidden="true" />
+                  <span class="wd-room__name">{{ channel.name }}</span>
+                  <span v-if="detectForumChannel(channel)" :class="forumTagClass">Forum</span>
+                  <!-- XEP-0272 Muji "call ongoing in this channel" chip, in
+                       the live colour. Suppressed on the active channel:
+                       the room header's call button already shows it. -->
                   <span
                     v-if="callParticipantCount(channel) > 0 && !isActiveChannelPage(channel)"
-                    class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
-                  :title="channelCallBadgeLabel(channel)"
-                  aria-hidden="true"
-                >
-                  <Video v-if="groupCallMedia(callRoomJid(channel)).video" class="w-3 h-3" />
-                  <Phone v-else class="w-3 h-3" />
-                    <span class="type-numeric leading-none">{{ callParticipantCount(channel) }}</span>
-                    <span
-                      v-if="channelCallActionLabel(channel)"
-                      class="hidden 2xl:inline leading-none"
-                    >
-                      · {{ channelCallActionLabel(channel) }}
-                    </span>
+                    :class="callChipClass"
+                    :title="channelCallBadgeLabel(channel)"
+                    aria-hidden="true"
+                  >
+                    <Video v-if="groupCallMedia(callRoomJid(channel)).video" />
+                    <Phone v-else />
+                    {{ callParticipantCount(channel) }}
+                    <span v-if="channelCallActionLabel(channel)" :class="callActionClass">· {{ channelCallActionLabel(channel) }}</span>
                   </span>
                   <span
                     v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
-                    class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-live text-live-foreground"
+                    :class="badge()"
                     aria-hidden="true"
                   >{{ unread.mentions }}</span>
                   <span
                     v-else-if="unread.unread > 0 && !isActiveChannelPage(channel)"
-                    class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                    :class="badge({ variant: 'quiet' })"
                     aria-hidden="true"
                   >{{ unread.unread }}</span>
                   <span
                     v-else-if="hasActivity(channel.id) && !isActiveChannelPage(channel)"
-                    class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
+                    :class="dotClass"
                     aria-hidden="true"
                   />
                 </button>
                 <button
                   v-if="canLeaveChannelCall(channel)"
                   type="button"
-                  class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive-text hover:bg-destructive/10"
+                  :class="leaveClass"
                   :title="leaveChannelCallLabel(channel)"
                   :aria-label="leaveChannelCallLabel(channel)"
                   @click="leaveChannelCall(channel)"
                 >
-                  <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+                  <PhoneOff aria-hidden="true" />
                 </button>
               </div>
 
@@ -803,49 +792,29 @@ watch(
               <button
                 v-for="thread in channelThreads(channel)"
                 :key="thread.threadId"
-                class="chat-channel-thread-row chat-list-row flex items-center gap-2 px-2.5 py-2 text-left text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground group"
+                :class="threadRowClass"
                 type="button"
                 :aria-label="threadRowLabel(thread)"
+                :data-unread="thread.unread > 0 ? '' : undefined"
                 @click="emit('selectThread', channel.id, thread.threadId)"
               >
-                <MessageCircle class="w-3 h-3 flex-shrink-0 opacity-40 group-hover:opacity-70" />
-                <span
-                  class="type-caption truncate flex-1"
-                  :class="thread.unread > 0 ? 'type-strong text-sidebar-foreground' : ''"
-                >{{ truncateTitle(thread.title) }}</span>
-                <span
-                  v-if="thread.replyCount > 0"
-                  class="type-meta type-numeric text-sidebar-muted"
-                >{{ thread.replyCount }}</span>
-                <span
-                  v-if="thread.unread > 0"
-                  class="type-count-badge inline-flex min-w-[16px] h-[16px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
-                  aria-hidden="true"
-                >{{ thread.unread }}</span>
+                <MessageCircle aria-hidden="true" />
+                <span class="wd-room__name">{{ truncateTitle(thread.title) }}</span>
+                <span v-if="thread.replyCount > 0" :class="countClass">{{ thread.replyCount }}</span>
+                <span v-if="thread.unread > 0" :class="badge()" aria-hidden="true">{{ thread.unread }}</span>
               </button>
-              </template>
             </template>
-          </section>
-        </div>
-      </div>
+          </template>
+        </section>
+      </template>
     </div>
 
-    <!-- Members footer — promoted from a flat "Members N" row to a
-         clearly affordant button: the trailing ChevronRight signals
-         "this opens a panel" (matches the iconography of other
-         disclosure actions in the app) and the row lifts on hover.
-         The Users glyph wakes up alongside the chevron so the whole
-         row reads as one armed control. -->
-    <div v-if="waddle" class="chat-sidebar-footer">
-      <button
-        class="chat-sidebar-footer-action chat-list-row w-full flex items-center gap-2.5 bg-sidebar-accent/40 px-3 py-0 text-sidebar-muted hover:bg-sidebar-accent/70 hover:text-sidebar-foreground text-left group"
-        type="button"
-        @click="emit('openMembers')"
-      >
-        <Users class="w-3.5 h-3.5 flex-shrink-0 opacity-40 group-hover:opacity-70 transition-opacity" />
-        <span class="type-control flex-1">Members</span>
-        <span class="type-meta text-sidebar-muted">{{ memberCountLabel() }}</span>
-        <ChevronRight class="w-3.5 h-3.5 flex-shrink-0 opacity-30 group-hover:opacity-70 group-hover:translate-x-0.5 transition-all" aria-hidden="true" />
+    <div v-if="waddle" :class="footClass">
+      <button :class="footRowClass" type="button" @click="emit('openMembers')">
+        <Users aria-hidden="true" />
+        <span class="wd-room__name">Members</span>
+        <span :class="countClass">{{ memberCountLabel() }}</span>
+        <ChevronRight aria-hidden="true" />
       </button>
     </div>
   </div>

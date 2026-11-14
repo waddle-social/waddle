@@ -1260,10 +1260,6 @@
   }
 }
 
-.chat-channel-thread-row {
-  margin-inline-start: var(--chat-channel-thread-indent);
-}
-
 .chat-attachment-strip {
   display: flex;
   flex-wrap: wrap;

@@ -136,16 +136,6 @@
   padding: var(--space-sm);
 }
 
-.chat-sidebar-footer {
-  flex-shrink: 0;
-  border-top: 1px solid var(--border);
-  padding: var(--chat-composer-block) var(--space-xs);
-}
-
-.chat-sidebar-footer-action {
-  min-height: var(--chat-composer-inner-height);
-}
-
 @media (min-width: 64rem) {
   .chat-active-thread-pane {
     width: var(--chat-thread-width);
