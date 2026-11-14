@@ -365,16 +365,18 @@ mod tests {
         let actor = PermissionActor::spawn(PermissionActor::new_for_tests(db));
         let config = BootstrapMembershipConfig::new(vec!["rawkode".to_string()]);
 
-        provision_user_membership(&actor, &config, "user-owner", "rawkode")
+        // Bootstrap provisions deployment ownership only for the account's
+        // own bare JID, so the subjects are account JIDs.
+        provision_user_membership(&actor, &config, "rawkode@example.com", "rawkode")
             .await
             .expect("owner");
-        provision_user_membership(&actor, &config, "user-member", "alice")
+        provision_user_membership(&actor, &config, "alice@example.com", "alice")
             .await
             .expect("member");
 
         let owner = actor
             .ask(CheckPermission {
-                subject: Subject::user("user-owner"),
+                subject: Subject::user("rawkode@example.com"),
                 permission: Permission::Owner,
                 object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
             })
@@ -382,7 +384,7 @@ mod tests {
             .expect("owner check");
         let member = actor
             .ask(CheckPermission {
-                subject: Subject::user("user-member"),
+                subject: Subject::user("alice@example.com"),
                 permission: Permission::Member,
                 object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
             })
