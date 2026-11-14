@@ -1,0 +1,133 @@
+//! Issuance rules for remote principals (ADR-0020 D8).
+//!
+//! A remote principal may hold a privileged grant or room moderation only
+//! when its home domain is on the operator's trusted-home list. Issuance
+//! therefore refuses an owner or admin affiliation for a JID whose domain is
+//! neither served by this deployment nor a trusted home. Member-level and
+//! negative affiliations are issued to any account.
+//!
+//! The trusted-home set is an input: this module neither loads nor
+//! distributes it. Whether a stored grant is honoured at admission, which
+//! also depends on the stream's authentication strength, is decided where
+//! remote principals are admitted, not here.
+
+use std::collections::BTreeSet;
+
+use thiserror::Error;
+use waddle_xmpp::identity::CanonicalDomain;
+
+use super::model::{GrantSubject, RoomAffiliation};
+
+/// Why issuance accepted a grant, recorded with it as provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuanceBasis {
+    /// The subject is an account of a domain this deployment serves.
+    Local,
+    /// The subject's home is a trusted home, so it may hold a privileged or
+    /// moderator grant.
+    TrustedHome,
+    /// The subject is remote and the grant confers neither privilege nor
+    /// moderation.
+    Unprivileged,
+}
+
+impl IssuanceBasis {
+    pub(crate) fn as_storage(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::TrustedHome => "trusted_home",
+            Self::Unprivileged => "unprivileged",
+        }
+    }
+
+    pub(crate) fn from_storage(value: &str) -> Option<Self> {
+        [Self::Local, Self::TrustedHome, Self::Unprivileged]
+            .into_iter()
+            .find(|basis| basis.as_storage() == value)
+    }
+}
+
+/// Why issuance refuses a grant.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum IssuanceRefusal {
+    #[error(
+        "a privileged or moderator grant to a remote account requires its home to be a trusted \
+         home"
+    )]
+    UntrustedHome,
+    #[error("a grant subject is an account, not an identity of a local service")]
+    LocalService,
+    #[error("a trusted home is a remote domain that can name a federation peer")]
+    InvalidTrustedHome,
+    #[error("a domain cannot be both served locally and a trusted home")]
+    TrustedHomeIsLocal,
+}
+
+/// The inputs issuance decides from.
+#[derive(Clone, Debug, Default)]
+pub struct IssuancePolicy {
+    account_domains: BTreeSet<String>,
+    service_domains: BTreeSet<String>,
+    trusted_homes: BTreeSet<String>,
+}
+
+impl IssuancePolicy {
+    /// `account_domains` are the domains whose accounts this deployment
+    /// homes, `service_domains` the domains of its own services (rooms and
+    /// PubSub), and `trusted_homes` the operator's trusted-home list. A
+    /// trusted home must be a fully qualified DNS name that this deployment
+    /// does not serve; entries match exactly.
+    pub fn new(
+        account_domains: impl IntoIterator<Item = CanonicalDomain>,
+        service_domains: impl IntoIterator<Item = CanonicalDomain>,
+        trusted_homes: impl IntoIterator<Item = CanonicalDomain>,
+    ) -> Result<Self, IssuanceRefusal> {
+        let account_domains = domain_texts(account_domains);
+        let service_domains = domain_texts(service_domains);
+        let mut homes = BTreeSet::new();
+        for home in trusted_homes {
+            if !home.kind().names_federation_peer() {
+                return Err(IssuanceRefusal::InvalidTrustedHome);
+            }
+            if account_domains.contains(home.as_str()) || service_domains.contains(home.as_str()) {
+                return Err(IssuanceRefusal::TrustedHomeIsLocal);
+            }
+            homes.insert(home.as_str().to_owned());
+        }
+        Ok(Self {
+            account_domains,
+            service_domains,
+            trusted_homes: homes,
+        })
+    }
+
+    /// Decide whether `affiliation` may be issued to `subject`.
+    pub fn check(
+        &self,
+        subject: &GrantSubject,
+        affiliation: RoomAffiliation,
+    ) -> Result<IssuanceBasis, IssuanceRefusal> {
+        let domain = subject.jid().domain().as_str();
+        if self.service_domains.contains(domain) {
+            return Err(IssuanceRefusal::LocalService);
+        }
+        if self.account_domains.contains(domain) {
+            return Ok(IssuanceBasis::Local);
+        }
+        if !affiliation.confers_privilege_or_moderation() {
+            return Ok(IssuanceBasis::Unprivileged);
+        }
+        if self.trusted_homes.contains(domain) {
+            Ok(IssuanceBasis::TrustedHome)
+        } else {
+            Err(IssuanceRefusal::UntrustedHome)
+        }
+    }
+}
+
+fn domain_texts(domains: impl IntoIterator<Item = CanonicalDomain>) -> BTreeSet<String> {
+    domains
+        .into_iter()
+        .map(|domain| domain.as_str().to_owned())
+        .collect()
+}

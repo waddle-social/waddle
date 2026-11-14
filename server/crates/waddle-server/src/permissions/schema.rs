@@ -180,6 +180,12 @@ impl Default for PermissionSchema {
 /// messages they wrote there, while the room's moderators can still remove
 /// them.
 ///
+///
+/// Host-grant projection marker: `waddle_grant_projection` holds one marker
+/// relationship per enrolled scope lifecycle and confers no permission. The
+/// host-grant authority writes it in the same request as the relationships
+/// it describes (`permissions::host_grant::projection`).
+///
 /// [`AUTHZ_SCHEMA_VERSION`]: super::authz_schema_version::AUTHZ_SCHEMA_VERSION
 pub const SPICEDB_SCHEMA: &str = r#"
 definition user {}
@@ -255,12 +261,16 @@ definition role {
   permission manage = manager + parent->admin
 }
 
+definition waddle_grant_projection {
+  relation marker: waddle_grant_projection
+}
+
 definition waddle_authz_codec {
   relation codec: waddle_authz_codec
 }
 
 definition waddle_authz_schema {
-  relation version_1: waddle_authz_schema
+  relation version_2: waddle_authz_schema
 }
 "#;
 

@@ -7,6 +7,10 @@ use crate::db::actor::DbActor;
 use crate::db::Database;
 use std::sync::Arc;
 
+use super::host_grant::{
+    HostGrantStore, ProjectionIntent, ProjectionMarker, ProjectionObservation, ProjectionWrite,
+    ScopeLifecycleId,
+};
 use super::schema::SPICEDB_SCHEMA;
 use super::spicedb::SpiceDbPermissionBackend;
 use super::{CheckRequest, PermissionChecker, PermissionSchema, TupleStore};
@@ -92,13 +96,26 @@ impl Permission {
 #[derive(Actor)]
 pub struct PermissionActor {
     backend: PermissionActorBackend,
+    /// The canonical host-grant store, when this deployment has one. The
+    /// tuple-writing messages refuse an object that belongs to one of its
+    /// enrolled scopes: only the authority's own projection writes there.
+    host_grants: Option<HostGrantStore>,
 }
 
 impl PermissionActor {
     pub fn new(backend: SpiceDbPermissionBackend) -> Self {
         Self {
             backend: PermissionActorBackend::SpiceDb(Box::new(backend)),
+            host_grants: None,
         }
+    }
+
+    /// Refuse legacy tuple writes to the objects of scopes enrolled in
+    /// `store`. The refusal is decided from the store on every write, so it
+    /// holds after a restart and on every replica.
+    pub fn with_host_grant_store(mut self, store: HostGrantStore) -> Self {
+        self.host_grants = Some(store);
+        self
     }
 
     pub async fn from_server_config(config: &ServerConfig) -> Result<Self, PermissionError> {
@@ -121,6 +138,73 @@ impl PermissionActor {
                 tuple_store,
                 checker: Box::new(checker),
             },
+            host_grants: None,
+        }
+    }
+
+    /// Refuse a legacy write that names an object of an enrolled host-grant
+    /// scope, as the tuple's object or as a Space or channel subject. A
+    /// store that cannot be read refuses the write as well.
+    async fn refuse_enrolled_scope(
+        &self,
+        object: &Object,
+        subject: &Subject,
+    ) -> Result<(), PermissionError> {
+        let Some(store) = &self.host_grants else {
+            return Ok(());
+        };
+        let subject_object = match subject.subject_type {
+            SubjectType::Space => Some(Object::new(ObjectType::Space, subject.id.as_str())),
+            SubjectType::Channel => Some(Object::new(ObjectType::Channel, subject.id.as_str())),
+            SubjectType::User | SubjectType::Role => None,
+        };
+        for candidate in std::iter::once(object).chain(subject_object.as_ref()) {
+            match store.enrolled_object(candidate).await {
+                Ok(false) => {}
+                Ok(true) => return Err(PermissionError::HostGrantScopeEnrolled),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Refusing a permission write: the host-grant authority could not be read"
+                    );
+                    return Err(PermissionError::HostGrantAuthorityUnavailable);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn observe_host_grant_projection(
+        &self,
+        msg: &ObserveHostGrantProjection,
+    ) -> Result<ProjectionObservation, PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => {
+                backend
+                    .observe_host_grant_projection(msg.lifecycle, &msg.channels)
+                    .await
+            }
+            // The local backend is not a projection target: it establishes
+            // neither SpiceDB nor cross-store behaviour.
+            PermissionActorBackend::Local { .. } => {
+                Err(PermissionError::UnsupportedOperation("local"))
+            }
+        }
+    }
+
+    async fn write_host_grant_projection(
+        &self,
+        msg: &WriteHostGrantProjection,
+    ) -> Result<ProjectionWrite, PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => {
+                backend
+                    .write_host_grant_projection(msg.previous.as_ref(), &msg.intent)
+                    .await
+            }
+            PermissionActorBackend::Local { .. } => {
+                Err(PermissionError::UnsupportedOperation("local"))
+            }
         }
     }
 
@@ -402,6 +486,8 @@ impl kameo::message::Message<WriteTuple> for PermissionActor {
         msg: WriteTuple,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.tuple.object, &msg.tuple.subject)
+            .await?;
         self.write_tuple(msg.tuple).await?;
         self.clear_cache().await;
         Ok(())
@@ -421,6 +507,8 @@ impl kameo::message::Message<DeleteTuple> for PermissionActor {
         msg: DeleteTuple,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.tuple.object, &msg.tuple.subject)
+            .await?;
         self.delete_tuple(&msg.tuple).await?;
         self.clear_cache().await;
         Ok(())
@@ -444,6 +532,8 @@ impl kameo::message::Message<ReplaceExclusiveRelation> for PermissionActor {
         msg: ReplaceExclusiveRelation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.object, &msg.subject)
+            .await?;
         self.replace_exclusive_relation(msg).await?;
         self.clear_cache().await;
         Ok(())
@@ -481,9 +571,55 @@ impl kameo::message::Message<SwapExclusiveRelation> for PermissionActor {
         msg: SwapExclusiveRelation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.object, &msg.subject)
+            .await?;
         let outcome = self.swap_exclusive_relation(msg).await?;
         self.clear_cache().await;
         Ok(outcome)
+    }
+}
+
+/// Read the SpiceDB projection of one enrolled host-grant scope: its marker
+/// and the affiliation family of its rooms. See
+/// `permissions::host_grant::projection`.
+pub struct ObserveHostGrantProjection {
+    pub lifecycle: ScopeLifecycleId,
+    /// The authorization object of each of the scope's rooms.
+    pub channels: Vec<String>,
+}
+
+impl kameo::message::Message<ObserveHostGrantProjection> for PermissionActor {
+    type Reply = Result<ProjectionObservation, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ObserveHostGrantProjection,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.observe_host_grant_projection(&msg).await
+    }
+}
+
+/// Write a scope's intended projection and its marker in one request,
+/// conditioned on the exact marker `previous`, or on a fresh namespace when
+/// there is none. An error leaves the outcome unknown. See
+/// `permissions::host_grant::projection`.
+pub struct WriteHostGrantProjection {
+    pub previous: Option<ProjectionMarker>,
+    pub intent: ProjectionIntent,
+}
+
+impl kameo::message::Message<WriteHostGrantProjection> for PermissionActor {
+    type Reply = Result<ProjectionWrite, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: WriteHostGrantProjection,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let outcome = self.write_host_grant_projection(&msg).await;
+        self.clear_cache().await;
+        outcome
     }
 }
 

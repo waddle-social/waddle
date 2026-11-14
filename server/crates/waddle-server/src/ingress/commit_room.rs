@@ -62,6 +62,139 @@ pub(super) async fn assert_snapshot_coordinates(
     CanonicalMessageRepository::assert_room_snapshot(tx, room, coordinates).await
 }
 
+/// How the host-grant authority decided a fresh room acceptance.
+pub(super) enum HostGrantAcceptance {
+    /// No enrolled scope manages the room; its existing admission applies.
+    Unmanaged,
+    /// The sender and these recipients are admitted under the scope's
+    /// canonical policy state, whose guard this transaction now holds.
+    Admitted {
+        audience: Vec<jid::BareJid>,
+    },
+    Refused(HostGrantRefusal),
+}
+
+/// Why a managed room's fresh acceptance is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostGrantRefusal {
+    Denied(crate::permissions::host_grant::AdmissionDenial),
+    /// The transaction cannot seal a manifest for the room. A managed room
+    /// accepts nothing through an acceptance that freezes no children.
+    UnsupportedAcceptance,
+}
+
+/// Admit a fresh acceptance for a room an enrolled host-grant scope manages.
+///
+/// The decision is made from PostgreSQL in this transaction, after its
+/// ownership claims and before anything it accepts is recorded: the scope's
+/// guard is taken shared and held until the transaction ends, so a revoke
+/// either committed before this read or waits for this transaction. The
+/// sender needs `send_message` and every recipient the plan would freeze
+/// needs `read`.
+pub(super) async fn admit_host_grants(
+    tx: &mut IngressUowTransaction<'_>,
+    submission: &IngressSubmission,
+    can_seal: bool,
+) -> Result<HostGrantAcceptance, IngressUowError> {
+    use crate::ingress_uow::HostGrantAdmissionRepository;
+    use crate::permissions::host_grant::{HostGrantAction, RoomAcceptance, RoomAdmission};
+    use crate::server::routes::interpret::effects::RoomExecutionPath;
+    let RoomExecutionPath::Local {
+        room,
+        manifest_snapshot,
+        ..
+    } = &submission.plan.room_execution
+    else {
+        return Ok(HostGrantAcceptance::Unmanaged);
+    };
+    // An unmanaged room costs one indexed lookup and nothing else.
+    let Some(scope) = HostGrantAdmissionRepository::managing_scope(tx, room).await? else {
+        return Ok(HostGrantAcceptance::Unmanaged);
+    };
+    let audience = frozen_recipients(&submission.plan.intents);
+    let admission = HostGrantAdmissionRepository::admit_room_acceptance(
+        tx,
+        &scope,
+        &RoomAcceptance {
+            room,
+            sender: submission.principal.bare_jid(),
+            action: HostGrantAction::SendMessage,
+            audience: &audience,
+        },
+    )
+    .await?;
+    Ok(match admission {
+        RoomAdmission::Denied(denial) => {
+            HostGrantAcceptance::Refused(HostGrantRefusal::Denied(denial))
+        }
+        RoomAdmission::Admitted(_) if !can_seal || manifest_snapshot.is_none() => {
+            HostGrantAcceptance::Refused(HostGrantRefusal::UnsupportedAcceptance)
+        }
+        RoomAdmission::Admitted(_) => {
+            super::commit::commit_hooks::after_host_grant_admission().await;
+            HostGrantAcceptance::Admitted { audience }
+        }
+    })
+}
+
+/// The bare JID of every recipient a manifest sealed from `intents` would
+/// freeze a child for.
+fn frozen_recipients(intents: &[waddle_xmpp::ingress::IngressEffectIntent]) -> Vec<jid::BareJid> {
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    let mut seen = std::collections::HashSet::new();
+    let mut recipients: Vec<jid::BareJid> = Vec::new();
+    let mut add = |target: &jid::FullJid| {
+        let bare = target.to_bare();
+        if seen.insert(bare.clone()) {
+            recipients.push(bare);
+        }
+    };
+    for intent in intents {
+        match intent {
+            IngressEffectIntent::RouteDirect { fanout, .. } => fanout.iter().for_each(&mut add),
+            IngressEffectIntent::RouteMucGroupchat {
+                occupants,
+                reflection,
+                ..
+            } => {
+                occupants.iter().for_each(&mut add);
+                add(reflection);
+            }
+            IngressEffectIntent::RouteMucSystemBroadcast { occupants, .. } => {
+                occupants.iter().for_each(&mut add);
+            }
+            IngressEffectIntent::Carbons {
+                carbon_recipients, ..
+            } => carbon_recipients.iter().for_each(&mut add),
+            IngressEffectIntent::RouteOccupantPm { recipient, .. }
+            | IngressEffectIntent::CallSignal { recipient, .. }
+            | IngressEffectIntent::ErrorReply { recipient, .. } => add(recipient),
+            _ => {}
+        }
+    }
+    recipients
+}
+
+/// Every child a freshly sealed manifest froze must name a recipient that
+/// was admitted. A child outside the admitted audience fails the
+/// transaction: nothing is accepted for it.
+pub(super) fn assert_admitted_children(
+    manifest: &super::FrozenRoomManifest,
+    audience: &[jid::BareJid],
+) -> Result<(), IngressUowError> {
+    let admitted = manifest.children.iter().all(|child| {
+        child
+            .target
+            .as_ref()
+            .is_none_or(|target| audience.contains(&target.to_bare()))
+    });
+    if admitted {
+        Ok(())
+    } else {
+        Err(IngressUowError::HostGrantAudienceUnproven)
+    }
+}
+
 pub(super) async fn seal(
     tx: &mut IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,

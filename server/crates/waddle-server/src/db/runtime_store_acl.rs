@@ -102,6 +102,55 @@ const ACCOUNT_BINDING_RELATIONS: &[Relation] = &[
         delete: true,
     },
 ];
+/// The host-grant store reads the authority incarnation, the lifecycle
+/// ledger and the room bindings, which the owner phase alone writes. It
+/// row-locks and updates scope state, inserts and updates grant rows, and
+/// appends to the operation journal: an outcome is written once, and no
+/// host-grant row is ever deleted.
+const HOST_GRANT_RELATIONS: &[Relation] = &[
+    Relation {
+        name: "host_grant_authority",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_scope_lifecycles",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_scopes",
+        insert: false,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_rooms",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grants",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_operations",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_operation_changes",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+];
 const PENDING_RELATIONS: &[Relation] = &[
     Relation {
         name: "pending_delivery",
@@ -165,6 +214,21 @@ pub(crate) async fn verify_account_bindings(
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
     verify(tx, schema, ACCOUNT_BINDING_RELATIONS, false).await
+}
+
+pub(crate) async fn verify_host_grants(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    verify(tx, schema, HOST_GRANT_RELATIONS, false).await
+}
+
+/// The host-grant relations carry no trigger and no rule.
+pub(crate) async fn unexpected_host_grant_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, HOST_GRANT_RELATIONS, false).await
 }
 
 pub(crate) async fn verify_pending(

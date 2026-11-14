@@ -6,14 +6,16 @@ mod authz_id;
 mod authz_incarnation;
 mod authz_schema_version;
 mod check;
+pub mod host_grant;
 mod schema;
 mod spicedb;
 mod tuple;
 
 pub use actor::{
     CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation, EnsureSchema, ExclusiveRelationSwap,
-    ListRelations, ListSubjects, LookupResources, LookupSubjects, Permission, PermissionActor,
-    RecordAuthzSchemaVersion, ReplaceExclusiveRelation, SwapExclusiveRelation, WriteTuple,
+    ListRelations, ListSubjects, LookupResources, LookupSubjects, ObserveHostGrantProjection,
+    Permission, PermissionActor, RecordAuthzSchemaVersion, ReplaceExclusiveRelation,
+    SwapExclusiveRelation, WriteHostGrantProjection, WriteTuple,
 };
 pub use authz_id::{
     decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, EncodedObjectId,
@@ -98,6 +100,21 @@ pub enum PermissionError {
 
     #[error("Unsupported operation for '{0}' permission backend")]
     UnsupportedOperation(&'static str),
+
+    #[error("Host-grant projection refused: {0}")]
+    HostGrantProjection(#[from] host_grant::ProjectionRefusal),
+
+    /// The object belongs to a scope whose grants the host-grant authority
+    /// owns. Only its canonical operations change them.
+    #[error(
+        "the object belongs to an enrolled host-grant scope; legacy permission writes are refused"
+    )]
+    HostGrantScopeEnrolled,
+
+    /// Whether the object belongs to an enrolled scope could not be read, so
+    /// the legacy write is refused rather than risk writing into one.
+    #[error("the host-grant authority could not be read; the permission write is refused")]
+    HostGrantAuthorityUnavailable,
 }
 
 impl From<DatabaseError> for PermissionError {

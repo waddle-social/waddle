@@ -151,7 +151,10 @@ pub fn classify_codec_markers(rows: &[CodecMarkerRow]) -> CodecMarkerState {
 /// the schema-version marker definition (`permissions::authz_schema_version`).
 /// Both markers use fixed ASCII IDs that bypass the codec, so neither can hold
 /// an ID written by another encoding. Derived from the built-in schema so a
-/// new definition is covered automatically.
+/// new definition is covered automatically. The host-grant projection marker
+/// definition stays guarded although its IDs bypass the codec too: a
+/// projection marker is written only after grants, so a store that holds one
+/// and no codec marker was not written under this guard.
 pub fn guarded_resource_definitions() -> impl Iterator<Item = &'static str> {
     spicedb_definition_names().filter(|name| {
         *name != AUTHZ_CODEC_MARKER_DEFINITION && *name != AUTHZ_SCHEMA_MARKER_DEFINITION

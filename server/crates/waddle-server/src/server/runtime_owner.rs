@@ -292,6 +292,7 @@ impl RestrictedRuntimeOwnerEvidence {
 const NONE: &str = "";
 const READ: &str = "SELECT";
 const READ_INSERT: &str = "SELECT, INSERT";
+const READ_UPDATE: &str = "SELECT, UPDATE";
 const READ_INSERT_UPDATE: &str = "SELECT, INSERT, UPDATE";
 const READ_INSERT_DELETE: &str = "SELECT, INSERT, DELETE";
 const READ_WRITE: &str = "SELECT, INSERT, UPDATE, DELETE";
@@ -330,6 +331,20 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("pending_auth", READ_INSERT_DELETE),
     ("xmpp_auth_codes", READ_INSERT_DELETE),
     ("permission_tuples", READ_WRITE),
+    // Host-grant authority (ADR-0020 D5). The owner phase alone enrolls a
+    // scope and binds its rooms, so the incarnation, the lifecycle ledger and
+    // the room bindings are read-only to the runtime. The runtime row-locks
+    // and updates a scope's state, inserts and updates grant rows (a revoke
+    // is a row, never a delete), and appends to the operation journal, which
+    // it can neither rewrite nor delete. The store's attachment verifies
+    // exactly these sets.
+    ("host_grant_authority", READ),
+    ("host_grant_scope_lifecycles", READ),
+    ("host_grant_scopes", READ_UPDATE),
+    ("host_grant_rooms", READ),
+    ("host_grants", READ_INSERT_UPDATE),
+    ("host_grant_operations", READ_INSERT),
+    ("host_grant_operation_changes", READ_INSERT),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

@@ -24,6 +24,8 @@ pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transact
 mod error;
 pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
+mod host_grant_admission;
+pub(crate) use host_grant_admission::HostGrantAdmissionRepository;
 mod mailbox;
 pub use mailbox::{
     LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal, MailboxDeadLetterReason,
@@ -166,6 +168,10 @@ pub struct IngressUnitOfWork {
     /// the mailbox epoch; zero before any did. See
     /// [`Self::mailbox_acceptance_active_now`].
     mailbox_epoch_proven_at_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// Set once a transaction has seen the host-grant relations on an
+    /// unattested PostgreSQL handle, so later transactions do not look for
+    /// them again. Shared by every clone.
+    host_grant_relations: Arc<std::sync::atomic::AtomicBool>,
     /// Optional full-identity writer capability retained by the exact
     /// physically attested pool.
     attested_pg_writer: Option<AttestedPostgresWriterCapability>,
@@ -220,6 +226,7 @@ impl IngressUnitOfWork {
             attested_pg_writer,
             seated_rooms: Default::default(),
             mailbox_epoch_proven_at_ms: Default::default(),
+            host_grant_relations: Default::default(),
             fencing: IngressFencing::SingleNode,
         })
     }
@@ -530,6 +537,7 @@ impl IngressUnitOfWork {
             lineage,
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
+            host_grant_relations: Arc::clone(&self.host_grant_relations),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
         })
@@ -567,6 +575,8 @@ pub struct IngressUowTransaction<'a> {
     /// The canonical identity source bound at [`IngressUnitOfWork`]
     /// construction; single-node transactions cannot mint claim fences.
     fencing: IngressFencing,
+    /// Shared with the unit of work; see its field of the same name.
+    host_grant_relations: Arc<std::sync::atomic::AtomicBool>,
     /// Node-authority guards minted for this transaction's claim fences.
     /// Held here — not on the independently droppable fence — so identity
     /// rotation or terminal disable cannot complete until this transaction

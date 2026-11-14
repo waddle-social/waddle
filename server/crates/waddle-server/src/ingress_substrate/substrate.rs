@@ -2097,6 +2097,10 @@ pub(crate) enum PreparedIngressRelation {
     RoomOccupants,
     #[cfg(feature = "clustering")]
     DirectRequests,
+    HostGrantAuthority,
+    HostGrantScopes,
+    HostGrantRooms,
+    HostGrants,
 }
 
 /// Only a prepared transaction can supply a schema; callers cannot pass an
@@ -2133,6 +2137,10 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::RoomOccupants => "ingress_room_occupants",
         #[cfg(feature = "clustering")]
         PreparedIngressRelation::DirectRequests => "ingress_direct_requests",
+        PreparedIngressRelation::HostGrantAuthority => "host_grant_authority",
+        PreparedIngressRelation::HostGrantScopes => "host_grant_scopes",
+        PreparedIngressRelation::HostGrantRooms => "host_grant_rooms",
+        PreparedIngressRelation::HostGrants => "host_grants",
     };
     match prepared {
         Some(prepared) => format!("{}.{name}", quote_postgres_identifier(prepared.schema())),

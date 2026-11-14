@@ -215,6 +215,18 @@ pub use crate::server::routes::websocket::muc_invites::{
 };
 /// The production `/ws` RFC 7395 router, so suites can serve a test state
 /// over a real loopback WebSocket and drive the live connection loop.
+/// Hold an ingress acceptance transaction that the host-grant authority
+/// admitted, with the scope's guard held, until `proceed` is notified.
+/// `entered` is notified when the transaction reaches the gate.
+pub async fn with_host_grant_admission_gate<F: std::future::Future>(
+    entered: Arc<tokio::sync::Notify>,
+    proceed: Arc<tokio::sync::Notify>,
+    future: F,
+) -> F::Output {
+    crate::ingress::commit::commit_hooks::with_host_grant_admission_gate(entered, proceed, future)
+        .await
+}
+
 pub use crate::server::routes::websocket::router;
 pub use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
 pub use crate::server::routes::websocket::test_state::{

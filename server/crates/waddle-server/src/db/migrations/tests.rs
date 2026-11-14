@@ -42,6 +42,38 @@ fn baseline_row(driver: DatabaseDriver) -> LedgerRow {
     (BASELINE_VERSION, baseline.description, Some(checksum))
 }
 
+/// Every catalog entry as a run that applies it records it.
+fn catalog_rows(driver: DatabaseDriver) -> Vec<LedgerRow> {
+    MigrationRunner::single()
+        .migrations
+        .iter()
+        .map(|migration| {
+            (
+                migration.version,
+                migration.description.clone(),
+                Some(migration_checksum(migration, driver)),
+            )
+        })
+        .collect()
+}
+
+/// The catalog's versions, in order.
+fn catalog_versions() -> Vec<i64> {
+    MigrationRunner::single()
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .collect()
+}
+
+/// The versions after the baseline, which a stamped database still applies.
+fn versions_after_baseline() -> Vec<i64> {
+    catalog_versions()
+        .into_iter()
+        .filter(|version| *version > BASELINE_VERSION)
+        .collect()
+}
+
 async fn ledger(db: &Database) -> Vec<LedgerRow> {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
@@ -117,10 +149,12 @@ async fn sqlite_retired_history_database(name: &str) -> Database {
 async fn a_fresh_sqlite_database_is_built_from_the_baseline() {
     let db = Database::in_memory("baseline-fresh").await.expect("sqlite");
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION]);
+    assert_eq!(applied, catalog_versions());
+    assert_eq!(applied.first(), Some(&BASELINE_VERSION));
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
     assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Sqlite)]
+        ledger(&db).await.first(),
+        Some(&baseline_row(DatabaseDriver::Sqlite))
     );
     let conn = db.guard().await.expect("guard");
     for table in [
@@ -168,23 +202,20 @@ async fn a_complete_retired_sqlite_ledger_is_stamped_without_ddl() {
         .run(&db)
         .await
         .expect("stamp");
-    assert!(applied.is_empty(), "a stamp applies nothing");
-    assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Sqlite)]
-    );
+    // The stamp runs no DDL and records the baseline; the migrations after
+    // the baseline are then applied as on any baseline database. On SQLite
+    // none of them creates a table.
+    assert_eq!(applied, versions_after_baseline());
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
     assert_eq!(sqlite_table_count(&db).await, objects);
 
-    // A second run finds the baseline and changes nothing.
+    // A second run finds the complete ledger and changes nothing.
     assert!(MigrationRunner::deployment(BaselineAction::Stamp)
         .run(&db)
         .await
         .expect("second run")
         .is_empty());
-    assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Sqlite)]
-    );
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
 }
 
 #[tokio::test]
@@ -388,10 +419,11 @@ async fn postgres_fresh_database_is_built_from_the_baseline_in_any_schema() {
     let schema = unique_postgres_schema_name("baseline_fresh");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION]);
+    assert_eq!(applied, catalog_versions());
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Postgres));
     assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Postgres)]
+        ledger(&db).await.first(),
+        Some(&baseline_row(DatabaseDriver::Postgres))
     );
     // The template functions name the schema they were rendered for.
     let attach: String = sqlx::query_scalar(&format!(
