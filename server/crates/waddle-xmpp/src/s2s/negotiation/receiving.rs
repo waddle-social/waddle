@@ -235,7 +235,7 @@ impl Receiving {
             }
             (_, TopLevel::Stanza(_)) => self.fail(steps, StreamErrorCondition::NotAuthorized),
             // Input sent after `<starttls/>` without waiting for `<proceed/>`
-            // is refused rather than handed to TLS (RFC 6120 §5.4.2.3).
+            // is refused rather than handed to TLS (RFC 6120 §5.4.3.1).
             (State::AwaitStartTls, TopLevel::StartTls) if pipelined => {
                 self.fail(steps, StreamErrorCondition::PolicyViolation)
             }

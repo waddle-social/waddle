@@ -181,7 +181,7 @@ pub enum NegotiationInput {
     /// A first-level element after which the peer had already sent more
     /// input. The receiving role refuses this for `<starttls/>`: the
     /// initiating entity must not send anything until it has received
-    /// `<proceed/>` (RFC 6120 §5.4.2.3), and bytes it sent earlier are
+    /// `<proceed/>` (RFC 6120 §5.4.3.1), and bytes it sent earlier are
     /// neither XML of this stream nor the TLS handshake it asked for.
     PipelinedElement(Element),
     /// The peer sent `</stream:stream>`.

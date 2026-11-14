@@ -531,7 +531,7 @@ to='home-b.test'>key</db:result>",
 
 #[test]
 fn bytes_pipelined_after_starttls_are_refused() {
-    // RFC 6120 §5.4.2.3: TLS starts only after `<proceed/>`, so anything the
+    // RFC 6120 §5.4.3.1: TLS starts only after `<proceed/>`, so anything the
     // initiating entity sent before reading it is neither XML of this stream
     // nor a handshake it was invited to start.
     let pipelined: [&[u8]; 3] = [
