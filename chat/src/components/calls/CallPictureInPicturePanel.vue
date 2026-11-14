@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount } from "vue";
 import { Mic, MicOff, PhoneOff, RotateCcw, Video, VideoOff } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { huddleCtl } from "styled-system/recipes";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import CallTile from "./CallTile.vue";
@@ -31,11 +33,31 @@ function attach(
 onBeforeUnmount(() => {
   attachments.detachAll();
 });
+
+// Lives in a Document Picture-in-Picture window: the dark stage in
+// miniature, one tile over a row of round controls.
+const rootClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  width: "100vw",
+  height: "100vh",
+  padding: "2",
+  boxSizing: "border-box",
+  bgColor: "sea.deep",
+  color: "fg",
+  fontFamily: "body",
+});
+const tileClass = css({ flex: "1 1 0%", minHeight: 0 });
+const emptyClass = css({ display: "grid", placeItems: "center", width: "100%", height: "100%", borderRadius: "12px", border: "1px dashed {colors.border}", color: "fg.muted", fontSize: "sm" });
+const controlsClass = css({ display: "flex", justifyContent: "center", gap: "2" });
+const buttonClass = cx(huddleCtl(), css({ px: 0, "& svg": { width: "20px", height: "20px" } }));
+const dangerClass = css({ bg: "danger", color: "danger.fg", _hover: { bg: "danger.hover" } });
 </script>
 
 <template>
-  <section class="call-pip-panel" aria-label="Call Picture-in-Picture">
-    <div class="call-pip-panel__tile">
+  <section :class="rootClass" data-theme="night" aria-label="Call Picture-in-Picture">
+    <div :class="tileClass">
       <CallTile
         v-if="tile"
         :key="tile.key"
@@ -50,100 +72,45 @@ onBeforeUnmount(() => {
         :attach="attach"
         :interactive="false"
       />
-      <div v-else class="call-pip-panel__empty">No active video</div>
+      <div v-else :class="emptyClass">No active video</div>
     </div>
     <!-- No tooltips here: this panel lives in a Document Picture-in-Picture
          window, a separate document a body-portalled tooltip cannot reach.
          The aria-labels carry the names. -->
-    <div class="call-pip-panel__controls">
+    <div :class="controlsClass">
       <button
         type="button"
-        class="call-pip-panel__button"
+        :class="buttonClass"
+        :data-off="!micEnabled"
         :aria-label="micEnabled ? 'Mute' : 'Unmute'"
         @click="emit('toggleMic')"
       >
-        <component :is="micEnabled ? Mic : MicOff" class="w-4 h-4" />
+        <component :is="micEnabled ? Mic : MicOff" aria-hidden="true" />
       </button>
       <button
         type="button"
-        class="call-pip-panel__button"
+        :class="buttonClass"
         :aria-label="camEnabled ? 'Camera off' : 'Camera on'"
         @click="emit('toggleCam')"
       >
-        <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
+        <component :is="camEnabled ? Video : VideoOff" aria-hidden="true" />
       </button>
       <button
         type="button"
-        class="call-pip-panel__button"
+        :class="buttonClass"
         aria-label="Return to call"
         @click="emit('returnToCall')"
       >
-        <RotateCcw class="w-4 h-4" />
+        <RotateCcw aria-hidden="true" />
       </button>
       <button
         type="button"
-        class="call-pip-panel__button call-pip-panel__button--danger"
+        :class="[buttonClass, dangerClass]"
         aria-label="Hang up"
         @click="emit('hangup')"
       >
-        <PhoneOff class="w-4 h-4" />
+        <PhoneOff aria-hidden="true" />
       </button>
     </div>
   </section>
 </template>
-
-<style scoped>
-.call-pip-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: 100vw;
-  height: 100vh;
-  padding: 0.5rem;
-  background: var(--background);
-  color: var(--foreground);
-  box-sizing: border-box;
-}
-
-.call-pip-panel__tile {
-  flex: 1 1 0%;
-  min-height: 0;
-}
-
-.call-pip-panel__empty {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
-  border-radius: var(--radius-md);
-  background: var(--muted);
-  color: var(--muted-foreground);
-}
-
-.call-pip-panel__controls {
-  display: flex;
-  justify-content: center;
-  gap: 0.375rem;
-}
-
-.call-pip-panel__button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: var(--radius-sm);
-  background: var(--secondary);
-  color: var(--secondary-foreground);
-}
-
-.call-pip-panel__button:hover,
-.call-pip-panel__button:focus-visible {
-  background: var(--muted);
-}
-
-.call-pip-panel__button--danger {
-  background: var(--destructive);
-  color: var(--destructive-foreground);
-}
-</style>

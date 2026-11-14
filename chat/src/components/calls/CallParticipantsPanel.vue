@@ -6,6 +6,10 @@ import {
   type CallVolumeMixerRow,
 } from "@/lib/calls/call-volume-mixer";
 import type { CallRosterRow } from "@/lib/calls/call-roster";
+import { css } from "styled-system/css";
+import { btn, liveDot } from "styled-system/recipes";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { barePeerJid } from "@/lib/xmpp/jid";
 
 /**
  * The Participants roster shown inside the call Dock: one row per
@@ -62,65 +66,96 @@ function onResetAll(): void {
   lastEmittedLevels.value = {};
   emit("resetAll");
 }
+
+function avatarJid(identity: string): string | null {
+  return identity.includes("@") ? barePeerJid(identity) : null;
+}
+
+// HuddleStage board dock roster: 28px avatar · name · hand/mic/cam, then
+// the volume slider(s) with a % readout under the name.
+const rootClass = css({ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" });
+const listClass = css({ flex: "1 1 auto", minHeight: 0, overflowY: "auto", listStyle: "none", margin: 0, padding: "6px", display: "flex", flexDirection: "column", gap: "0.5" });
+const rowClass = css({
+  display: "grid",
+  gridTemplateColumns: "28px minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: "4px 10px",
+  padding: "8px 10px",
+  borderRadius: "control",
+  _hover: { bg: "state.hover" },
+});
+const nameCellClass = css({ display: "flex", alignItems: "center", gap: "1.5", minWidth: 0 });
+const nameClass = css({ minWidth: 0, font: "700 14px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const mediaClass = css({ display: "inline-flex", alignItems: "center", gap: "1.5", color: "fg.muted", "& svg": { width: "16px", height: "16px", flex: "none" } });
+const handClass = css({ color: "gold.text" });
+const offClass = css({ color: "danger.text" });
+const controlClass = css({
+  gridColumn: "2 / -1",
+  display: "flex",
+  alignItems: "center",
+  gap: "2",
+  minWidth: 0,
+  fontSize: "12px",
+  color: "fg.muted",
+  "&[data-disabled]": { opacity: 0.58 },
+  "& > svg": { width: "16px", height: "16px", flex: "none" },
+});
+const sliderWrapClass = css({ position: "relative", flex: "1 1 auto", minWidth: "4rem", display: "flex", alignItems: "center" });
+const sliderClass = css({ width: "100%", accentColor: "action", _disabled: { cursor: "not-allowed" } });
+const tickClass = css({ position: "absolute", top: "50%", width: "1px", height: "14px", transform: "translateY(-50%)", bg: "border.strong", pointerEvents: "none" });
+const percentClass = css({ flex: "0 0 36px", textAlign: "right", fontVariantNumeric: "tabular-nums" });
+const footerClass = css({ flex: "none", borderTop: "1px solid {colors.border.soft}", padding: "3" });
 </script>
 
 <template>
-  <div class="call-participants" aria-label="Participants">
-    <ul class="call-participants__rows">
+  <div :class="rootClass" aria-label="Participants">
+    <ul :class="listClass">
       <li
         v-for="row in rows"
         :key="row.key"
-        class="call-participants__row"
-        :class="{ 'call-participants__row--speaking': row.speaking }"
+        :class="rowClass"
+        :data-speaking="row.speaking || undefined"
       >
-        <div class="call-participants__person">
-          <span
-            v-if="row.speaking"
-            class="call-participants__speaking"
-            aria-label="Speaking"
-          />
-          <span class="call-participants__name type-control truncate">{{ row.label }}</span>
+        <UserAvatar :name="row.label" :jid="avatarJid(row.identity)" size="sm" :speaking="row.speaking" />
+        <span :class="nameCellClass">
+          <span :class="nameClass">{{ row.label }}</span>
+          <span v-if="row.speaking" :class="liveDot()" aria-label="Speaking" />
+        </span>
+        <span :class="mediaClass">
           <Hand
             v-if="row.raisedHand"
-            class="call-participants__raised-hand"
+            :class="handClass"
             aria-label="Hand raised"
           />
-          <span class="call-participants__media">
-            <component
-              :is="row.micOn ? Mic : MicOff"
-              class="call-participants__icon"
-              :class="{ 'call-participants__icon--off': !row.micOn }"
-              :aria-label="row.micOn ? 'Microphone on' : 'Microphone off'"
-            />
-            <component
-              :is="row.cameraOn ? Video : VideoOff"
-              class="call-participants__icon"
-              :class="{ 'call-participants__icon--off': !row.cameraOn }"
-              :aria-label="row.cameraOn ? 'Camera on' : 'Camera off'"
-            />
-          </span>
-        </div>
+          <component
+            :is="row.micOn ? Mic : MicOff"
+            :class="row.micOn ? undefined : offClass"
+            :aria-label="row.micOn ? 'Microphone on' : 'Microphone off'"
+          />
+          <component
+            :is="row.cameraOn ? Video : VideoOff"
+            :aria-label="row.cameraOn ? 'Camera on' : 'Camera off'"
+          />
+        </span>
 
         <div
           v-for="volume in row.volumeRows"
           :key="volume.key"
-          class="call-participants__control"
-          :class="{ 'call-participants__control--disabled': volume.disabled }"
+          :class="controlClass"
+          :data-disabled="volume.disabled || undefined"
         >
           <VolumeX
             v-if="volume.muted"
-            class="call-participants__volume-icon"
             aria-label="Muted"
           />
           <Volume2
             v-else
-            class="call-participants__volume-icon"
             aria-hidden="true"
           />
-          <span v-if="volume.hint" class="call-participants__hint">{{ volume.hint }}</span>
-          <div class="call-participants__slider-wrap">
+          <span v-if="volume.hint">{{ volume.hint }}</span>
+          <div :class="sliderWrapClass">
             <input
-              class="call-participants__slider"
+              :class="sliderClass"
               type="range"
               min="0"
               max="200"
@@ -131,17 +166,17 @@ function onResetAll(): void {
               :aria-valuetext="volume.ariaValueText"
               @input="onInput(volume, $event)"
             >
-            <span class="call-participants__tick" aria-hidden="true" style="left:50%;" />
+            <span :class="tickClass" aria-hidden="true" style="left:50%;" />
           </div>
-          <span class="call-participants__percent">{{ Math.round(volume.level * 100) }}%</span>
+          <span :class="percentClass">{{ Math.round(volume.level * 100) }}%</span>
         </div>
       </li>
     </ul>
 
-    <footer class="call-participants__footer">
+    <footer :class="footerClass">
       <button
         type="button"
-        class="chat-action-button chat-action-button--secondary"
+        :class="btn({ size: 'sm' })"
         @click="onResetAll"
       >
         Reset all
@@ -149,134 +184,3 @@ function onResetAll(): void {
     </footer>
   </div>
 </template>
-
-<style scoped>
-.call-participants {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  height: 100%;
-}
-
-.call-participants__rows {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  overflow-y: auto;
-  padding: 0.75rem;
-}
-
-.call-participants__row {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-}
-
-.call-participants__person {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.call-participants__speaking {
-  flex: 0 0 auto;
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 9999px;
-  background: oklch(0.7 0.18 145);
-  box-shadow: 0 0 0 3px color-mix(in oklab, oklch(0.7 0.18 145) 25%, transparent);
-}
-
-.call-participants__name {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.call-participants__raised-hand {
-  flex: 0 0 auto;
-  width: 1rem;
-  height: 1rem;
-  color: oklch(0.78 0.16 85);
-}
-
-.call-participants__media {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-}
-
-.call-participants__icon {
-  width: 1rem;
-  height: 1rem;
-  color: var(--foreground);
-}
-
-.call-participants__icon--off {
-  color: var(--muted-foreground);
-}
-
-.call-participants__control {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-  padding-left: 0.25rem;
-}
-
-.call-participants__control--disabled {
-  opacity: 0.58;
-}
-
-.call-participants__volume-icon {
-  flex: 0 0 auto;
-  width: 1rem;
-  height: 1rem;
-  color: var(--muted-foreground);
-}
-
-.call-participants__hint {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-}
-
-.call-participants__slider-wrap {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 4rem;
-  display: flex;
-  align-items: center;
-}
-
-.call-participants__slider {
-  width: 100%;
-  accent-color: var(--primary);
-}
-
-.call-participants__tick {
-  position: absolute;
-  top: 50%;
-  width: 1px;
-  height: 0.875rem;
-  transform: translateY(-50%);
-  background: color-mix(in oklab, var(--foreground) 28%, transparent);
-  pointer-events: none;
-}
-
-.call-participants__percent {
-  flex: 0 0 2.25rem;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-  text-align: right;
-}
-
-.call-participants__footer {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--border);
-  padding: 0.75rem;
-}
-</style>

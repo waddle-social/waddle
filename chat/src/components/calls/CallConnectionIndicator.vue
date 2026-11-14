@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
+import { css } from "styled-system/css";
 import {
   $callConnectionPhase,
   $callConnectionQuality,
@@ -46,71 +47,46 @@ const statusText = computed(() => {
 
 /** Spoken text: only the degraded label, empty (silent) when healthy. */
 const announcement = computed(() => chip.value.label ?? "");
+
+// HuddleStage connection chip: quiet bars while healthy, a tinted pill
+// with a label once degraded.
+const rootClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+  flex: "none",
+  height: "28px",
+  borderRadius: "pill",
+  color: "presence.available",
+  font: "600 13px/1 {fonts.body}",
+  whiteSpace: "nowrap",
+});
+const TONE = {
+  neutral: css({ color: "fg.muted" }),
+  warn: css({ px: "2.5", color: "warning.text", bg: "color-mix(in srgb, {colors.presence.away} 14%, transparent)" }),
+  danger: css({ px: "2.5", color: "danger.text", bg: "color-mix(in srgb, {colors.danger} 14%, transparent)" }),
+};
+const healthyClass = css({ color: "presence.available" });
+const barsClass = css({ display: "inline-flex", alignItems: "flex-end", gap: "2px", width: "16px", height: "16px" });
+const barClass = css({ flex: 1, borderRadius: "1px", bg: "currentColor" });
+const barOffClass = css({ opacity: 0.25 });
+const srOnly = css({ srOnly: true });
 </script>
 
 <template>
   <div
-    class="call-connection"
-    :class="`call-connection--${chip.tone}`"
+    :class="['call-connection', rootClass, chip.bars > 0 && !chip.label ? healthyClass : TONE[chip.tone]]"
     :title="statusText"
   >
-    <span class="call-connection__bars" aria-hidden="true">
+    <span :class="barsClass" aria-hidden="true">
       <span
         v-for="bar in bars"
         :key="bar"
-        class="call-connection__bar"
-        :class="bar <= chip.bars ? 'call-connection__bar--on' : 'call-connection__bar--off'"
+        :class="[barClass, bar > chip.bars && barOffClass]"
         :style="{ height: `${bar * 33}%` }"
       />
     </span>
-    <span v-if="chip.label" class="type-control call-connection__label">{{ chip.label }}</span>
-    <span class="sr-only" role="status" aria-live="polite">{{ announcement }}</span>
+    <span v-if="chip.label">{{ chip.label }}</span>
+    <span :class="srOnly" role="status" aria-live="polite">{{ announcement }}</span>
   </div>
 </template>
-
-<style scoped>
-.call-connection {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
-  color: var(--muted-foreground);
-}
-
-/* Warn / danger tint the whole chip (bars + label) together. */
-.call-connection--warn {
-  color: var(--warning);
-}
-
-.call-connection--danger {
-  color: var(--destructive);
-}
-
-.call-connection__bars {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 2px;
-  width: 1rem;
-  height: 1rem;
-}
-
-.call-connection__bar {
-  flex: 1;
-  border-radius: 1px;
-  align-self: flex-end;
-}
-
-/* Filled segments take the chip's current color. */
-.call-connection__bar--on {
-  background: currentColor;
-}
-
-/* Empty segments are a faint ghost of it, so the bar count reads at a
-   glance without a hard background box. */
-.call-connection__bar--off {
-  background: color-mix(in oklab, currentColor 25%, transparent);
-}
-
-.call-connection__label {
-  white-space: nowrap;
-}
-</style>

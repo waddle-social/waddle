@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video } from "lucide-vue-next";
-import { toastClasses } from "@/ui/part-classes";
+import { callToastClasses } from "./call-toast-classes";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
@@ -11,7 +11,7 @@ import { connectionStore } from "@/lib/connection-store";
 // Styled like every other toast (opaque ink, night-coloured in daylight);
 // the ember border marks it as live. It is not on the generic toaster
 // because it is persistent and derived from `$callState`.
-const cls = toastClasses;
+const cls = callToastClasses;
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);
@@ -42,7 +42,7 @@ const callerLabel = computed(() => {
 
 const mediaLabel = computed(() => {
   if (state.value.phase !== "incoming") return "";
-  return state.value.media.video ? "Video call" : "Audio call";
+  return state.value.media.video ? "Video call" : "Voice call";
 });
 
 const statusLabel = computed(() => {
@@ -103,44 +103,41 @@ async function decline(): Promise<void> {
 <template>
   <div
     v-if="state.phase === 'incoming'"
-    :class="[cls.root, 'call-toast fixed bottom-6 right-6 z-50 w-80 max-w-[calc(100vw-2rem)] flex-col animate-slide-up']"
+    :class="cls.root"
+    data-theme="night"
     role="dialog"
     aria-live="assertive"
     aria-label="Incoming call"
   >
-    <div class="flex w-full items-center gap-3">
-      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-live/15 text-live">
-        <component :is="state.media.video ? Video : Phone" class="w-5 h-5" />
+    <div :class="cls.head">
+      <span :class="cls.icon" data-pulse="true" aria-hidden="true">
+        <component :is="state.media.video ? Video : Phone" />
       </span>
-      <div class="min-w-0 flex-1">
-        <div :class="[cls.title, 'truncate']">{{ callerLabel }}</div>
-        <div :class="cls.description">{{ mediaLabel }} · {{ statusLabel }}</div>
+      <div :class="cls.copy">
+        <div :class="cls.title">{{ callerLabel }}</div>
+        <div :class="cls.status">{{ mediaLabel }} · {{ statusLabel }}</div>
       </div>
     </div>
-    <div
-      v-if="lastError"
-      class="w-full rounded-md border border-destructive/40 bg-destructive/15 px-2 py-1 type-caption text-destructive-text"
-      role="alert"
-    >
+    <div v-if="lastError" :class="cls.alert" role="alert">
       {{ lastError }}
     </div>
-    <div class="flex w-full items-center justify-end gap-2">
+    <div :class="cls.actions">
       <button
-        class="call-toast__secondary inline-flex h-7 items-center gap-1.5 rounded-full border border-current/30 px-2.5 text-[12px] font-bold hover:bg-white/10 disabled:opacity-50"
+        :class="cls.decline"
         type="button"
         :disabled="controlsDisabled"
         @click="decline"
       >
-        <PhoneOff class="w-3.5 h-3.5" />
+        <PhoneOff aria-hidden="true" />
         <span>Decline</span>
       </button>
       <button
-        :class="[cls.actionTrigger, 'inline-flex items-center gap-1.5 disabled:opacity-50']"
+        :class="cls.accept"
         type="button"
         :disabled="controlsDisabled"
         @click="accept"
       >
-        <Phone class="w-3.5 h-3.5" />
+        <Phone aria-hidden="true" />
         <span>{{ controlsDisabled && !declining ? "Connecting…" : "Accept" }}</span>
       </button>
     </div>

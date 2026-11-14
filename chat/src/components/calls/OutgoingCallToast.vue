@@ -2,15 +2,15 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video, X } from "lucide-vue-next";
-import { toastClasses } from "@/ui/part-classes";
+import { callToastClasses } from "./call-toast-classes";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 
-// Styled like every other toast (opaque ink, night-coloured in daylight).
-// Ringing out is live (ember border); "call ended" is a neutral notice.
-const cls = toastClasses;
+// Ink in both themes (Huddle-DM board): ringing out pulses; "call ended"
+// is a quiet notice.
+const cls = callToastClasses;
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);
@@ -25,7 +25,7 @@ const peerLabel = computed(() => {
 
 const mediaLabel = computed(() => {
   if (state.value.phase !== "outgoing") return "";
-  return state.value.media.video ? "Video call" : "Audio call";
+  return state.value.media.video ? "Video call" : "Voice call";
 });
 
 const outgoingStatusLabel = computed(() => {
@@ -93,62 +93,48 @@ function dismissEnded(): void {
 <template>
   <div
     v-if="state.phase === 'outgoing'"
-    :class="[cls.root, 'call-toast fixed bottom-6 right-6 z-50 w-80 max-w-[calc(100vw-2rem)] flex-col animate-slide-up']"
+    :class="cls.root"
+    data-theme="night"
     role="dialog"
     aria-live="polite"
     aria-label="Outgoing call"
   >
-    <div class="flex w-full items-center gap-3">
-      <span
-        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-live/15 text-live motion-safe:animate-pulse"
-      >
-        <component :is="state.media.video ? Video : Phone" class="w-5 h-5" />
+    <div :class="cls.head">
+      <span :class="cls.icon" data-pulse="true" aria-hidden="true">
+        <component :is="state.media.video ? Video : Phone" />
       </span>
-      <div class="min-w-0 flex-1">
-        <div :class="[cls.title, 'truncate']">{{ peerLabel }}</div>
-        <div :class="cls.description">{{ mediaLabel }} · {{ outgoingStatusLabel }}</div>
+      <div :class="cls.copy">
+        <div :class="cls.title">{{ peerLabel }}</div>
+        <div :class="cls.status">{{ mediaLabel }} · {{ outgoingStatusLabel }}</div>
       </div>
     </div>
-    <div
-      v-if="lastError"
-      class="w-full rounded-md border border-destructive/40 bg-destructive/15 px-2 py-1 type-caption text-destructive-text"
-      role="alert"
-    >
+    <div v-if="lastError" :class="cls.alert" role="alert">
       {{ lastError }}
     </div>
-    <div class="flex w-full items-center justify-end gap-2">
-      <button
-        class="call-toast__secondary inline-flex h-7 items-center gap-1.5 rounded-full border border-current/30 px-2.5 text-[12px] font-bold hover:bg-white/10"
-        type="button"
-        @click="cancel"
-      >
-        <PhoneOff class="w-3.5 h-3.5" />
-        <span>Cancel</span>
-      </button>
-    </div>
+    <button :class="cls.cancel" type="button" @click="cancel">
+      <PhoneOff aria-hidden="true" />
+      <span>Cancel</span>
+    </button>
   </div>
 
   <div
     v-else-if="state.phase === 'ended' && endedCopy"
-    :class="[cls.root, 'call-toast fixed bottom-6 right-6 z-50 w-80 max-w-[calc(100vw-2rem)] !items-center animate-slide-up']"
-    style="border-color: var(--border)"
+    :class="cls.root"
+    data-theme="night"
     role="status"
     aria-live="polite"
     aria-label="Call ended"
   >
-    <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-current">
-      <PhoneOff class="w-5 h-5" />
-    </span>
-    <div class="min-w-0 flex-1">
-      <div :class="[cls.title, 'truncate']">{{ endedCopy }}</div>
+    <div :class="cls.head">
+      <span :class="cls.icon" data-tone="quiet" aria-hidden="true">
+        <PhoneOff />
+      </span>
+      <div :class="cls.copy">
+        <div :class="cls.title">{{ endedCopy }}</div>
+      </div>
+      <button :class="cls.dismiss" type="button" aria-label="Dismiss" @click="dismissEnded">
+        <X aria-hidden="true" />
+      </button>
     </div>
-    <button
-      :class="[cls.closeTrigger, 'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md']"
-      type="button"
-      aria-label="Dismiss"
-      @click="dismissEnded"
-    >
-      <X class="h-3.5 w-3.5" aria-hidden="true" />
-    </button>
   </div>
 </template>

@@ -8,6 +8,10 @@ import { $xmppStatus } from "@/stores/xmpp-status";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { $pinnedRooms } from "@/stores/pinned-messages";
+import { seedCallPreview } from "./call-fixtures";
+import CallErrorToast from "@/components/calls/CallErrorToast.vue";
+import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
+import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
@@ -16,6 +20,7 @@ import { $pinnedRooms } from "@/stores/pinned-messages";
  *   offline | reconnecting | error | reconnected | superseded
  *   room | room-pinned | room-loading | room-quiet | room-forum
  *   room-unavailable | room-pick | dm | dm-group | dm-quiet | dms
+ *   huddle-* | call-* (see call-fixtures.ts)
  * The account menu and the homeserver editor are opened by clicking.
  */
 const screen = new URLSearchParams(location.search).get("screen") ?? "home";
@@ -86,6 +91,7 @@ function seed(c: ChatAppController) {
   } else {
     $xmppStatus.set({ state: "online", detail: "" });
   }
+  if (screen.startsWith("huddle-") || screen.startsWith("call-")) seedCallPreview(c, screen);
 }
 
 const ROOM_SCREENS = ["room", "room-pinned", "room-loading", "room-quiet", "room-forum", "room-unavailable"];
@@ -160,5 +166,9 @@ watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: tru
 <template>
   <AppShell>
     <RoutePageShell route-id="home" />
+    <!-- XmppProvider hosts these in the app; the preview has no provider. -->
+    <IncomingCallToast />
+    <OutgoingCallToast />
+    <CallErrorToast />
   </AppShell>
 </template>

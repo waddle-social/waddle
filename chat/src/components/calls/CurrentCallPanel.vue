@@ -1,17 +1,15 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
+import { css, cx } from "styled-system/css";
+import { btn, iconbtn, liveDot } from "styled-system/recipes";
 import { useStore } from "@nanostores/vue";
 import {
   Maximize2,
-  MessageCircle,
   Mic,
   MicOff,
-  Phone,
-  PhoneCall,
   PhoneOff,
   Settings,
-  Users,
   Video,
   VideoOff,
 } from "lucide-vue-next";
@@ -175,98 +173,129 @@ function expandCall(): void {
   }
   emit("selectDm", current.targetJid);
 }
+
+// "Your huddle" (Sidebar / Huddle-Minimized boards): the call you are in,
+// docked at the bottom of the sidebar so it follows you everywhere. The
+// `current-call-panel--mobile` hook (ChatReadyShell) makes it the full-bleed
+// bar above the page on phones (Mobile-Huddle, minimized).
+const rootClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  padding: "10px 12px",
+  borderRadius: "14px",
+  border: "1px solid {colors.live}",
+  bg: "live.subtle",
+  color: "fg",
+  "&.current-call-panel--mobile": {
+    borderRadius: 0,
+    border: 0,
+    borderBottom: "1px solid {colors.live}",
+    md: { display: "none" },
+  },
+});
+const summaryClass = css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0 });
+const dotClass = cx(liveDot(), css({ "&[data-connecting=true]": { bg: "fg.soft", animation: "none" } }));
+const copyClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", lineHeight: "1.3" });
+const titleClass = css({ font: "700 14px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const statusClass = css({ textStyle: "caption", color: "live.text", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const returnClass = cx(btn({ size: "sm" }), css({ flex: "none", _disabled: { opacity: 1, cursor: "default", bg: "transparent", borderColor: "transparent", color: "live.text" } }));
+const controlsClass = css({ display: "flex", alignItems: "center", gap: "1.5" });
+const controlClass = cx(iconbtn({ size: "sm" }), css({
+  bg: "surface",
+  color: "fg",
+  _coarse: { width: "44px", height: "44px" },
+  "&[data-off=true]": { bg: "color-mix(in srgb, {colors.danger} 18%, transparent)", color: "danger.text" },
+  _disabled: { opacity: 0.5, cursor: "not-allowed" },
+}));
+const hangupClass = cx(iconbtn({ size: "sm" }), css({
+  marginLeft: "auto",
+  bg: "danger",
+  color: "danger.fg",
+  _hover: { bg: "danger.hover", color: "danger.fg" },
+  _coarse: { width: "44px", height: "44px" },
+}));
 </script>
 
 <template>
   <aside
     v-if="panel"
-    class="current-call-panel"
+    :class="rootClass"
     aria-label="Current call"
   >
-    <div class="current-call-panel__summary">
-      <span class="current-call-panel__icon" :class="{ 'current-call-panel__icon--connecting': !isConnected }" aria-hidden="true">
-        <Users v-if="panel.kind === 'muc'" class="h-3.5 w-3.5" />
-        <Video v-else-if="panel.media.video" class="h-3.5 w-3.5" />
-        <Phone v-else class="h-3.5 w-3.5" />
-      </span>
-      <span class="current-call-panel__copy">
-        <span class="current-call-panel__title type-control">{{ panel.title }}</span>
-        <span class="current-call-panel__status type-meta">
-          <span class="current-call-panel__live-dot" :class="{ 'current-call-panel__live-dot--muted': !isConnected }" aria-hidden="true" />
-          {{ statusLabel }} · {{ callTypeLabel }} · {{ participantLabel }}
-        </span>
+    <div :class="summaryClass">
+      <span :class="dotClass" :data-connecting="!isConnected" aria-hidden="true" />
+      <span :class="copyClass">
+        <span :class="titleClass">{{ panel.title }}</span>
+        <span :class="statusClass">{{ statusLabel }} · {{ callTypeLabel }} · {{ participantLabel }}</span>
       </span>
       <button
         type="button"
-        class="current-call-panel__return type-meta"
-        :class="{ 'current-call-panel__return--active': panel.viewing }"
+        :class="returnClass"
         :disabled="panel.viewing"
         :aria-label="`${returnLabel} ${panel.title} call`"
         @click="returnToCall"
       >
-        <MessageCircle v-if="panel.kind === 'dm'" class="h-3 w-3" />
-        <PhoneCall v-else class="h-3 w-3" />
         <span>{{ returnLabel }}</span>
       </button>
     </div>
 
-    <div class="current-call-panel__controls" aria-label="Current call controls">
+    <div :class="controlsClass" aria-label="Current call controls">
       <AppTooltip :label="micEnabled ? 'Mute' : 'Unmute'">
         <button
           type="button"
-          class="current-call-panel__control"
-          :class="{ 'current-call-panel__control--off': !micEnabled }"
+          :class="controlClass"
+          :data-off="!micEnabled"
           :disabled="controlsDisabled"
           :aria-label="micEnabled ? 'Mute microphone' : 'Unmute microphone'"
           @click="toggleMic"
         >
-          <Mic v-if="micEnabled" class="h-3.5 w-3.5" />
-          <MicOff v-else class="h-3.5 w-3.5" />
+          <Mic v-if="micEnabled" aria-hidden="true" />
+          <MicOff v-else aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip :label="camEnabled ? 'Camera off' : 'Camera on'">
         <button
           type="button"
-          class="current-call-panel__control"
-          :class="{ 'current-call-panel__control--off': !camEnabled }"
+          :class="controlClass"
           :disabled="controlsDisabled"
           :aria-label="camEnabled ? 'Turn camera off' : 'Turn camera on'"
           @click="toggleCam"
         >
-          <Video v-if="camEnabled" class="h-3.5 w-3.5" />
-          <VideoOff v-else class="h-3.5 w-3.5" />
+          <Video v-if="camEnabled" aria-hidden="true" />
+          <VideoOff v-else aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip label="Expand call">
         <button
           type="button"
-          class="current-call-panel__control"
+          :class="controlClass"
           :disabled="controlsDisabled"
           aria-label="Expand current call"
           @click="expandCall"
         >
-          <Maximize2 class="h-3.5 w-3.5" />
+          <Maximize2 aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip label="Call settings">
         <button
           type="button"
-          class="current-call-panel__control"
+          :class="controlClass"
           :disabled="controlsDisabled"
           aria-label="Open call settings"
           @click="settingsOpen = true"
         >
-          <Settings class="h-3.5 w-3.5" />
+          <Settings aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip label="Hang up">
         <button
           type="button"
-          class="current-call-panel__control current-call-panel__control--danger"
+          :class="hangupClass"
           aria-label="Hang up current call"
           @click="hangupActiveCall"
         >
-          <PhoneOff class="h-3.5 w-3.5" />
+          <PhoneOff aria-hidden="true" />
         </button>
       </AppTooltip>
     </div>
@@ -274,188 +303,3 @@ function expandCall(): void {
     <CallSettingsDialog v-model:open="settingsOpen" />
   </aside>
 </template>
-
-<style scoped>
-.current-call-panel {
-  display: flex;
-  flex-shrink: 0;
-  flex-direction: column;
-  gap: 0.5rem;
-  border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--sidebar-accent) 38%, var(--card)),
-      color-mix(in oklab, var(--card) 94%, transparent)
-    );
-  padding: 0.625rem;
-}
-
-.current-call-panel__summary {
-  display: grid;
-  grid-template-columns: 1.875rem minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.current-call-panel__icon {
-  display: inline-flex;
-  height: 1.875rem;
-  width: 1.875rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: 0.5rem;
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 18%, transparent);
-  color: oklch(0.46 0.14 145);
-}
-
-.current-call-panel__icon--connecting {
-  background: color-mix(in oklab, var(--primary) 14%, transparent);
-  color: var(--primary);
-}
-
-.current-call-panel__copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 0.125rem;
-}
-
-.current-call-panel__title,
-.current-call-panel__status {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.current-call-panel__title {
-  color: var(--sidebar-foreground);
-}
-
-.current-call-panel__status {
-  color: var(--sidebar-muted);
-}
-
-.current-call-panel__live-dot {
-  display: inline-block;
-  width: 0.4rem;
-  height: 0.4rem;
-  margin-right: 0.25rem;
-  border-radius: 9999px;
-  background: oklch(0.7 0.18 145);
-  box-shadow: 0 0 0 3px color-mix(in oklab, oklch(0.7 0.18 145) 18%, transparent);
-  vertical-align: 0.05em;
-}
-
-.current-call-panel__live-dot--muted {
-  background: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 18%, transparent);
-}
-
-.current-call-panel__return,
-.current-call-panel__control {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 0.5rem;
-  transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    border-color 160ms ease,
-    transform 160ms ease;
-}
-
-.current-call-panel__return {
-  min-width: 4.25rem;
-  height: 1.75rem;
-  gap: 0.25rem;
-  border: 1px solid color-mix(in oklab, var(--primary) 24%, transparent);
-  background: color-mix(in oklab, var(--primary) 10%, transparent);
-  color: var(--primary);
-  padding: 0 0.5rem;
-  white-space: nowrap;
-}
-
-.current-call-panel__return:hover {
-  background: color-mix(in oklab, var(--primary) 16%, transparent);
-}
-
-.current-call-panel__return:disabled {
-  cursor: default;
-}
-
-.current-call-panel__return--active {
-  border-color: color-mix(in oklab, oklch(0.7 0.18 145) 34%, transparent);
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 16%, transparent);
-  color: oklch(0.46 0.14 145);
-}
-
-.current-call-panel__controls {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0.375rem;
-}
-
-.current-call-panel__control {
-  height: 2rem;
-  min-width: 0;
-  border: 1px solid transparent;
-  background: color-mix(in oklab, var(--sidebar-accent) 68%, transparent);
-  color: var(--sidebar-foreground);
-}
-
-.current-call-panel__control:hover:not(:disabled) {
-  transform: translateY(-1px);
-  background: color-mix(in oklab, var(--sidebar-accent) 90%, transparent);
-  color: var(--primary);
-}
-
-.current-call-panel__control:disabled {
-  cursor: not-allowed;
-  opacity: 0.48;
-}
-
-.current-call-panel__control--off {
-  border-color: color-mix(in oklab, var(--primary) 26%, transparent);
-  background: color-mix(in oklab, var(--primary) 12%, transparent);
-  color: var(--primary);
-}
-
-.current-call-panel__control--danger {
-  background: color-mix(in oklab, var(--destructive) 12%, transparent);
-  color: var(--destructive);
-}
-
-.current-call-panel__control--danger:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--destructive) 18%, transparent);
-  color: var(--destructive);
-}
-
-.current-call-panel.current-call-panel--mobile {
-  border-top: 0;
-  border-right: 0;
-  border-bottom: 1px solid var(--border);
-  padding: 0.5rem 0.75rem;
-}
-
-@media (min-width: 64rem) {
-  .current-call-panel.current-call-panel--mobile {
-    display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .current-call-panel__return,
-  .current-call-panel__control {
-    transition: none;
-  }
-
-  .current-call-panel__control:hover:not(:disabled) {
-    transform: none;
-  }
-}
-</style>
