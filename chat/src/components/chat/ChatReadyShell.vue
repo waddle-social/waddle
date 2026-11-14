@@ -680,6 +680,35 @@ const supersededBannerClass = computed(() =>
 const adminFrameClass = css({ display: "flex", height: "100%", minHeight: 0, flexDirection: "column" });
 const adminViewClass = css({ minHeight: 0, flex: 1 });
 const supersededBannerFrameClass = css({ position: "absolute", insetInline: 0, top: 0, zIndex: "panel" });
+// Collapsed right-hand panels: a slim vertical strip per inactive panel (lg and up).
+const accordionBarClass = css({
+  display: "none",
+  lg: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    width: "44px",
+    minHeight: 0,
+    flex: "none",
+    pt: "5",
+    border: 0,
+    borderLeft: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    color: "fg.muted",
+    cursor: "pointer",
+    transition: "background-color {durations.fast} {easings.out}, color {durations.fast} {easings.out}",
+    _hover: { bg: "state.hover", color: "fg" },
+  },
+});
+const accordionLabelClass = css({
+  writingMode: "vertical-rl",
+  maxHeight: "60%",
+  textStyle: "caption",
+  fontWeight: 600,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+});
 const contextColumnClass = css({ display: "flex", flexDirection: "column", gap: "3", padding: "4", minHeight: 0 });
 const contextCard = cardClasses("quiet");
 const seeEventsClass = cx(btn({ size: "sm" }), css({ alignSelf: "flex-start" }));
@@ -989,11 +1018,11 @@ async function recoverSupersededFromShell() {
               && activeRightPanel !== 'thread'
               && activeThreadStack.length >= 1"
             type="button"
-            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :class="accordionBarClass"
             :title="getThreadLabel(activeThreadStack[activeThreadStack.length - 1] ?? '')"
             @click="activateRightPanel('thread')"
           >
-            <span class="accordion-bar-label text-muted-foreground/70">
+            <span :class="accordionLabelClass">
               {{ getThreadLabel(activeThreadStack[activeThreadStack.length - 1] ?? '') }}
             </span>
           </button>
@@ -1002,11 +1031,11 @@ async function recoverSupersededFromShell() {
             <!-- Channel / main-feed bar -->
             <button
               type="button"
-              class="chat-accordion-bar bg-muted/30 hover:bg-muted/60"
+              :class="accordionBarClass"
               title="Back to channel"
               @click="closeThreadPanel"
             >
-              <span class="accordion-bar-label text-muted-foreground/80">
+              <span :class="accordionLabelClass">
                 {{ threadPanelIsDm ? (activeDmPeer?.peerUsername ?? 'Direct message') : (waddles.currentChannel.value?.name ?? 'Channel') }}
               </span>
             </button>
@@ -1015,11 +1044,11 @@ async function recoverSupersededFromShell() {
               v-for="(threadId, i) in activeThreadStack.slice(0, -2)"
               :key="threadId"
               type="button"
-              class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+              :class="accordionBarClass"
               :title="getThreadLabel(threadId)"
               @click="popThreadTo(i)"
             >
-              <span class="accordion-bar-label text-muted-foreground/60">
+              <span :class="accordionLabelClass">
                 {{ getThreadLabel(threadId) }}
               </span>
             </button>
@@ -1031,11 +1060,11 @@ async function recoverSupersededFromShell() {
               && ui.showPinnedPanel.value
               && (activeChannelRoomJid || activeDmPeer?.peerJid)"
             type="button"
-            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :class="accordionBarClass"
             title="Pinned messages"
             @click="activateRightPanel('pinned')"
           >
-            <span class="accordion-bar-label text-muted-foreground/70">
+            <span :class="accordionLabelClass">
               Pinned
             </span>
           </button>
@@ -1045,11 +1074,11 @@ async function recoverSupersededFromShell() {
               && activeRightPanel !== 'extension'
               && activeExtensionRouteKey"
             type="button"
-            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :class="accordionBarClass"
             :title="activeExtensionRoute?.label ?? 'Extensions'"
             @click="activateRightPanel('extension')"
           >
-            <span class="accordion-bar-label text-muted-foreground/70">
+            <span :class="accordionLabelClass">
               {{ activeExtensionRoute?.label ?? 'Extensions' }}
             </span>
           </button>

@@ -3,6 +3,8 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, UserPlus, Video } from "lucide-vue-next";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { css, cx } from "styled-system/css";
+import { badge, iconbtn, room } from "styled-system/recipes";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -30,7 +32,7 @@ import type { CallMedia } from "@/lib/calls/types";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import type { GroupDmSummary } from "@/lib/chat-types";
-import type { DmConversation } from "@/lib/xmpp-client";
+import type { DmConversation, OccupantPresence } from "@/lib/xmpp-client";
 
 const props = withDefaults(defineProps<{
   conversations: DmConversation[];
@@ -147,12 +149,10 @@ function preview(text?: string): string {
   return text.length > 44 ? `${text.slice(0, 44)}…` : text;
 }
 
-function dotClass(show?: DmConversation["presenceShow"]): string {
-  if (show === "away") return "bg-warning/75";
-  if (show === "dnd") return "bg-destructive/75";
-  if (show === "xa") return "bg-warning/55";
-  if (show === "available") return "bg-success/75";
-  return "bg-muted-foreground/25";
+function presenceOf(show?: DmConversation["presenceShow"]): OccupantPresence {
+  if (show === "available") return "online";
+  if (show === "away" || show === "xa") return "away";
+  return show === "dnd" ? "dnd" : "offline";
 }
 
 function hasCallActivity(peerJid: string): boolean {
@@ -257,72 +257,6 @@ function callActivityEyebrow(activity: DmCallActivity): string {
   if (activity.direction === "incoming") return "Incoming call";
   if (activity.direction === "outgoing") return "Calling";
   return "Ringing";
-}
-
-function callActivityToneClass(activity: DmCallActivity): string {
-  switch (callActivityVisualTone(activity)) {
-    case "warning":
-      return "border-warning/25 bg-warning/10 hover:bg-warning/15";
-    case "primary":
-      return "border-primary/25 bg-primary/8 hover:bg-primary/12";
-    case "success":
-      return "border-success/20 bg-success/10 hover:bg-success/15";
-  }
-}
-
-function callActivityActiveToneClass(activity: DmCallActivity): string {
-  switch (callActivityVisualTone(activity)) {
-    case "warning":
-      return "bg-warning/15 text-sidebar-foreground ring-1 ring-warning/30";
-    case "primary":
-      return "bg-primary/10 text-sidebar-foreground ring-1 ring-primary/30";
-    case "success":
-      return "bg-success/15 text-sidebar-foreground ring-1 ring-success/30";
-  }
-}
-
-function callActivityIconClass(activity: DmCallActivity): string {
-  switch (callActivityVisualTone(activity)) {
-    case "warning":
-      return "border-warning/25 bg-background/90 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/90 text-primary";
-    case "success":
-      return "border-success/25 bg-background/90 text-success-foreground";
-  }
-}
-
-function callActivityAccentClass(activity: DmCallActivity): string {
-  switch (callActivityVisualTone(activity)) {
-    case "warning":
-      return "text-warning-foreground";
-    case "primary":
-      return "text-primary";
-    case "success":
-      return "text-success-foreground";
-  }
-}
-
-function callActivityDotClass(activity: DmCallActivity): string {
-  switch (callActivityVisualTone(activity)) {
-    case "warning":
-      return "bg-warning shadow-[0_0_6px_var(--warning)]";
-    case "primary":
-      return "bg-primary shadow-[0_0_6px_var(--primary)]";
-    case "success":
-      return "bg-success shadow-[0_0_6px_var(--success)]";
-  }
-}
-
-function callActivityPillClass(activity: DmCallActivity): string {
-  switch (callActivityVisualTone(activity)) {
-    case "warning":
-      return "border-warning/25 bg-background/70 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/70 text-primary";
-    case "success":
-      return "border-success/25 bg-background/70 text-success-foreground";
-  }
 }
 
 function callActivitySince(activity: DmCallActivity): string {
@@ -495,87 +429,155 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
   if (entry.lastTs) parts.push(formatTimelineStamp(entry.lastTs));
   return parts.filter(Boolean).join(", ");
 }
+
+// The conversation list (Rooms page): sidebar-style rows on the rail.
+// Call rows take their colour from `data-tone`: live (aurora), action or warning.
+const cls = {
+  root: css({ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, flex: 1, bg: "bg.rail" }),
+  head: css({ display: "flex", alignItems: "center", gap: "2", flex: "none", minHeight: "header", px: "4", borderBottom: "1px solid {colors.border.soft}" }),
+  headIcon: css({ width: "18px", height: "18px", color: "fg.soft", flex: "none" }),
+  title: css({ margin: 0, flex: 1, minWidth: 0, font: "700 16px/1.3 {fonts.display}", color: "fg" }),
+  scroll: css({ flex: 1, minHeight: 0, overflowX: "hidden", overflowY: "auto", p: "2" }),
+  srOnly: css({ srOnly: true }),
+  empty: css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "2", py: "10", px: "4", textAlign: "center" }),
+  emptyIcon: css({ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "56px", height: "56px", borderRadius: "pill", bg: "action.subtle", color: "action.text", "& svg": { width: "24px", height: "24px" } }),
+  emptyTitle: css({ fontSize: "sm", fontWeight: 700, color: "fg" }),
+  emptyBody: css({ textStyle: "caption", color: "fg.muted", maxWidth: "14rem" }),
+  stack: css({ display: "flex", flexDirection: "column", gap: "3" }),
+  section: css({ display: "grid", gap: "0.5" }),
+  sectionLabel: css({ display: "flex", alignItems: "center", gap: "1.5", px: "2.5", pt: "2", pb: "1", textStyle: "sidebarSection", color: "fg.muted", "& svg": { width: "14px", height: "14px" } }),
+  grow: css({ flex: 1, minWidth: 0, truncate: true }),
+  row: cx(room(), css({ width: "100%", minHeight: "48px", py: "1.5", border: 0, bg: "transparent", textAlign: "left", cursor: "pointer" })),
+  // The DM row is a div around two buttons; the selected look follows the inner button.
+  rowSelected: css({ "&:has(> button[aria-current=page])": { bg: "state.selected", color: "fg", fontWeight: 700 } }),
+  rowButton: css({ display: "flex", flex: 1, minWidth: 0, alignItems: "center", gap: "2.5", border: 0, p: 0, bg: "transparent", color: "inherit", font: "inherit", textAlign: "left", cursor: "pointer" }),
+  lines: css({ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }),
+  line: css({ display: "flex", alignItems: "center", gap: "1.5", minWidth: 0 }),
+  name: css({ flex: 1, minWidth: 0, truncate: true, color: "fg" }),
+  sub: css({ flex: 1, minWidth: 0, truncate: true, textStyle: "caption", fontWeight: 400, color: "fg.muted" }),
+  time: css({ textStyle: "timestamp", color: "fg.muted", fontVariantNumeric: "tabular-nums", flex: "none" }),
+  groupIcon: css({ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "28px", height: "28px", flex: "none", borderRadius: "sm", bg: "surface.2", color: "fg", "& svg": { width: "16px", height: "16px", color: "inherit" } }),
+  badges: css({ display: "flex", alignItems: "center", gap: "1", flex: "none" }),
+  livePill: css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1",
+    height: "20px",
+    px: "1.5",
+    flex: "none",
+    borderRadius: "pill",
+    bg: "live.subtle",
+    color: "live.text",
+    textStyle: "caption",
+    fontWeight: 600,
+    "& svg": { width: "12px", height: "12px", color: "inherit" },
+    "&[data-muted]": { bg: "surface.2", color: "fg.muted" },
+  }),
+  mentionBadge: css({ bg: "live", color: "live.fg" }),
+  rowAction: css({ opacity: 0.7, _hover: { opacity: 1 }, "&:focus-visible": { opacity: 1 } }),
+  callRow: css({
+    "--tone": "{colors.live.text}",
+    "--tone-bg": "{colors.live.subtle}",
+    display: "flex",
+    alignItems: "center",
+    gap: "2",
+    minHeight: "64px",
+    px: "3",
+    py: "2.5",
+    borderRadius: "control",
+    border: "1px solid color-mix(in oklab, var(--tone) 30%, transparent)",
+    bg: "var(--tone-bg)",
+    color: "fg",
+    "&[data-tone=primary]": { "--tone": "{colors.action.text}", "--tone-bg": "{colors.action.subtle}" },
+    "&[data-tone=warning]": { "--tone": "{colors.warning.text}", "--tone-bg": "{colors.warning.subtle}" },
+    "&[data-active]": { boxShadow: "inset 0 0 0 1px var(--tone)" },
+  }),
+  callFace: css({ position: "relative", flex: "none" }),
+  callBadge: css({
+    position: "absolute",
+    right: "-4px",
+    bottom: "-4px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "16px",
+    height: "16px",
+    borderRadius: "pill",
+    border: "1px solid var(--tone)",
+    bg: "surface",
+    color: "var(--tone)",
+    "& svg": { width: "10px", height: "10px" },
+  }),
+  eyebrow: css({ display: "flex", alignItems: "center", gap: "1", textStyle: "caption", fontWeight: 600, color: "var(--tone)" }),
+  dot: css({ width: "6px", height: "6px", borderRadius: "pill", bg: "var(--tone)", flex: "none" }),
+  callTitle: css({ display: "block", truncate: true, fontSize: "sm", fontWeight: 700, color: "fg" }),
+  callMeta: css({ display: "block", truncate: true, textStyle: "caption", color: "fg.muted" }),
+  pill: css({ flex: "none", px: "2", py: "1", borderRadius: "pill", border: "1px solid var(--tone)", textStyle: "caption", fontWeight: 600, color: "var(--tone)" }),
+  arrow: css({ width: "14px", height: "14px", flex: "none", color: "var(--tone)" }),
+  endButton: css({ color: "danger.text", _hover: { bg: "danger.subtle", color: "danger.text" } }),
+};
 </script>
 
 <template>
-  <div class="chat-sidebar-pane glass-panel">
-    <div class="chat-sidebar-header">
-      <div class="flex items-center gap-2">
-        <MessageCircle class="w-4 h-4 text-primary/70" />
-        <h2 class="type-pane-title text-sidebar-foreground">Direct messages</h2>
-      </div>
-      <div class="flex items-center gap-1">
-        <AppTooltip label="New group message">
-          <button
-            class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
-            aria-label="New group message"
-            type="button"
-            @click="emit('newGroupDm')"
-          >
-            <MessagesSquare class="w-4 h-4" />
-          </button>
-        </AppTooltip>
-        <AppTooltip label="New message">
-          <button
-            class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
-            aria-label="New direct message"
-            type="button"
-            @click="emit('newDm')"
-          >
-            <Plus class="w-4 h-4" />
-          </button>
-        </AppTooltip>
-      </div>
+  <div :class="cls.root">
+    <div :class="cls.head">
+      <MessageCircle :class="cls.headIcon" aria-hidden="true" />
+      <h2 :class="cls.title">Direct messages</h2>
+      <AppTooltip label="New group message">
+        <button
+          :class="iconbtn()"
+          aria-label="New group message"
+          type="button"
+          @click="emit('newGroupDm')"
+        >
+          <MessagesSquare aria-hidden="true" />
+        </button>
+      </AppTooltip>
+      <AppTooltip label="New message">
+        <button
+          :class="iconbtn()"
+          aria-label="New direct message"
+          type="button"
+          @click="emit('newDm')"
+        >
+          <Plus aria-hidden="true" />
+        </button>
+      </AppTooltip>
     </div>
 
-    <div class="chat-pane-scroll chat-sidebar-scroll">
-      <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+    <div :class="cls.scroll">
+      <p :class="cls.srOnly" role="status" aria-live="polite" aria-atomic="true">
         {{ activeCallStatusMessage }}
       </p>
-      <!-- Empty state — halo + MessageCircle glyph + caption + hint
-           matches the iter-37 / 47 / 48 authored-empty-state pattern
-           used elsewhere in the app. -->
-      <div v-if="visibleGroupDms.length === 0 && visibleConversations.length === 0 && activeCallRows.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
-        <div class="chat-empty-state__halo">
-          <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
-          <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
-            <MessageCircle class="w-4 h-4 text-primary" aria-hidden="true" />
-          </span>
-        </div>
-        <div class="type-control text-sidebar-foreground">No conversations yet</div>
-        <div class="type-caption text-sidebar-muted max-w-[14rem]">
-          Start one with the + button above.
-        </div>
+      <div v-if="visibleGroupDms.length === 0 && visibleConversations.length === 0 && activeCallRows.length === 0" :class="cls.empty">
+        <span :class="cls.emptyIcon" aria-hidden="true"><MessageCircle /></span>
+        <div :class="cls.emptyTitle">No conversations yet</div>
+        <div :class="cls.emptyBody">Start one with the + button above.</div>
       </div>
 
-      <div v-else class="chat-list-stack">
+      <div v-else :class="cls.stack">
         <section
           v-if="visibleThreadEntries.length > 0"
-          class="grid gap-1"
+          :class="cls.section"
           aria-label="Direct message threads"
         >
-          <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
-            <MessagesSquare class="h-3 w-3 text-primary/70" aria-hidden="true" />
-            <span class="flex-1 truncate">Threads</span>
-            <span
-              class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary/15 text-primary ring-1 ring-primary/25"
-              aria-hidden="true"
-            >
-              {{ visibleThreadEntries.length }}
-            </span>
+          <div :class="cls.sectionLabel">
+            <MessagesSquare aria-hidden="true" />
+            <span :class="cls.grow">Threads</span>
+            <span :class="badge({ quiet: true })" aria-hidden="true">{{ visibleThreadEntries.length }}</span>
           </div>
           <button
             v-for="entry in visibleThreadEntries"
             :key="entry.threadId"
-            class="chat-list-row w-full min-h-12 flex items-center gap-3 px-3 py-2 text-left group text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+            :class="cls.row"
             type="button"
             :aria-label="threadEntryLabel(entry)"
             @click="emit('selectThread', entry.threadId)"
           >
-            <MessagesSquare class="h-4 w-4 shrink-0 text-primary/70" aria-hidden="true" />
-            <span class="min-w-0 flex-1">
-              <span class="type-control block truncate text-sidebar-foreground">{{ threadEntryTitle(entry) }}</span>
-              <span class="type-caption block truncate text-sidebar-muted">
+            <MessagesSquare aria-hidden="true" />
+            <span :class="cls.lines">
+              <span :class="cls.name">{{ threadEntryTitle(entry) }}</span>
+              <span :class="cls.sub">
                 {{ entry.count }} {{ entry.count === 1 ? 'reply' : 'replies' }}<template v-if="entry.lastTs"> · {{ formatTimelineStamp(entry.lastTs) }}</template>
               </span>
             </span>
@@ -584,73 +586,58 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
 
         <section
           v-if="activeCallRows.length > 0"
-          class="grid gap-1"
+          :class="cls.section"
           aria-label="Active direct calls"
         >
-          <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
-            <PhoneCall class="h-3 w-3 text-success-foreground" aria-hidden="true" />
-            <span class="flex-1 truncate">Active calls</span>
-            <span
-              class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-success/15 text-success-foreground ring-1 ring-success/30"
-              aria-hidden="true"
-            >
-              {{ activeCallRows.length }}
-            </span>
+          <div :class="cls.sectionLabel">
+            <PhoneCall aria-hidden="true" />
+            <span :class="cls.grow">Active calls</span>
+            <span :class="badge({ quiet: true })" aria-hidden="true">{{ activeCallRows.length }}</span>
           </div>
           <div
             v-for="row in activeCallRows"
             :key="`dm-call:${row.peerJid}:${row.activity.sid}`"
-            class="chat-list-row w-full min-h-16 flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left group text-sidebar-muted hover:text-sidebar-foreground"
-            :class="[
-              callActivityToneClass(row.activity),
-              isActiveConversation(row.peerJid) ? `chat-list-row--active ${callActivityActiveToneClass(row.activity)}` : '',
-            ]"
+            :class="cls.callRow"
+            :data-tone="callActivityVisualTone(row.activity)"
+            :data-active="isActiveConversation(row.peerJid) ? '' : undefined"
           >
             <button
-              class="flex min-w-0 flex-1 items-center gap-3 text-left"
+              :class="cls.rowButton"
               type="button"
               :aria-current="isActiveConversation(row.peerJid) ? 'page' : undefined"
               :aria-label="activeCallRowLabel(row)"
               @click="selectCallActivity(row.activity)"
             >
-              <span class="relative shrink-0">
+              <span :class="cls.callFace">
                 <UserAvatar :name="row.title" :jid="conversationPeerAvatarJid(row.peerJid)" size="sm" />
-                <span class="absolute -right-1 -bottom-1 flex h-4 w-4 items-center justify-center rounded-full border" :class="callActivityIconClass(row.activity)">
-                  <Video v-if="hasKnownDmCallMedia(row.activity) && row.activity.media.video" class="h-2.5 w-2.5" aria-hidden="true" />
-                  <PhoneIncoming v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'incoming'" class="h-2.5 w-2.5" aria-hidden="true" />
-                  <PhoneOutgoing v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'outgoing'" class="h-2.5 w-2.5" aria-hidden="true" />
-                  <Phone v-else class="h-2.5 w-2.5" aria-hidden="true" />
+                <span :class="cls.callBadge">
+                  <Video v-if="hasKnownDmCallMedia(row.activity) && row.activity.media.video" aria-hidden="true" />
+                  <PhoneIncoming v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'incoming'" aria-hidden="true" />
+                  <PhoneOutgoing v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'outgoing'" aria-hidden="true" />
+                  <Phone v-else aria-hidden="true" />
                 </span>
               </span>
-              <span class="min-w-0 flex-1 space-y-0.5">
-                <span class="type-meta flex items-center gap-1" :class="callActivityAccentClass(row.activity)">
-                  <span class="h-1.5 w-1.5 rounded-full" :class="callActivityDotClass(row.activity)" aria-hidden="true" />
-                  <span class="truncate">{{ row.eyebrow }}</span>
+              <span :class="cls.lines">
+                <span :class="cls.eyebrow">
+                  <span :class="cls.dot" aria-hidden="true" />
+                  <span :class="cls.grow">{{ row.eyebrow }}</span>
                 </span>
-                <span class="type-control type-strong block truncate text-sidebar-foreground">
-                  {{ row.title }}
-                </span>
-                <span class="type-meta block truncate text-sidebar-muted">
+                <span :class="cls.callTitle">{{ row.title }}</span>
+                <span :class="cls.callMeta">
                   {{ row.meta }}<template v-if="row.description"> · {{ row.description }}</template><template v-if="row.since"> · {{ row.since }}</template>
                 </span>
               </span>
-              <span
-                class="type-meta shrink-0 rounded-full border px-2 py-1"
-                :class="callActivityPillClass(row.activity)"
-                aria-hidden="true"
-              >
-                {{ row.action }}
-              </span>
-              <ArrowRight class="h-3.5 w-3.5 shrink-0" :class="callActivityAccentClass(row.activity)" aria-hidden="true" />
+              <span :class="cls.pill" aria-hidden="true">{{ row.action }}</span>
+              <ArrowRight :class="cls.arrow" aria-hidden="true" />
             </button>
             <AppTooltip v-if="canEndCallActivity(row.activity)" :label="endCallActivityLabel(row)">
               <button
                 type="button"
-                class="chat-icon-button shrink-0 text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
+                :class="[iconbtn({ size: 'sm' }), cls.endButton]"
                 :aria-label="endCallActivityLabel(row)"
                 @click="endCallActivity(row.activity)"
               >
-                <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+                <PhoneOff aria-hidden="true" />
               </button>
             </AppTooltip>
           </div>
@@ -658,120 +645,114 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
 
         <section
           v-if="visibleGroupDms.length > 0"
-          class="grid gap-1"
+          :class="cls.section"
           aria-label="Group direct messages"
         >
-          <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
-            <MessagesSquare class="h-3 w-3 text-primary/70" aria-hidden="true" />
-            <span class="flex-1 truncate">Groups</span>
+          <div :class="cls.sectionLabel">
+            <MessagesSquare aria-hidden="true" />
+            <span :class="cls.grow">Groups</span>
           </div>
           <button
             v-for="group in visibleGroupDms"
             :key="group.roomJid"
-            class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
-            :class="normalizedPeerJid(activeGroupDmRoomJid ?? '') === normalizedPeerJid(group.roomJid)
-              ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
-              : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
+            :class="cls.row"
             type="button"
+            :data-unread="(group.unreadCount ?? 0) > 0 ? '' : undefined"
             :aria-current="normalizedPeerJid(activeGroupDmRoomJid ?? '') === normalizedPeerJid(group.roomJid) ? 'page' : undefined"
             :aria-label="groupDmRowLabel(group)"
             @click="emit('selectGroupDm', group.roomJid)"
           >
-            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sidebar-accent text-sidebar-foreground">
-              <MessagesSquare class="h-4 w-4" aria-hidden="true" />
-            </span>
-            <span class="min-w-0 flex-1">
-              <span class="type-control block truncate text-sidebar-foreground">{{ group.name }}</span>
-              <span class="type-caption block truncate text-sidebar-muted">
+            <span :class="cls.groupIcon"><MessagesSquare aria-hidden="true" /></span>
+            <span :class="cls.lines">
+              <span :class="cls.name">{{ group.name }}</span>
+              <span :class="cls.sub">
                 <template v-if="hasGroupCallActivity(group.roomJid)">{{ groupCallActivityLabel(group.roomJid) }}</template>
                 <template v-else>Group message</template>
               </span>
             </span>
-            <span class="flex shrink-0 items-center gap-1">
+            <span :class="cls.badges">
               <span
                 v-if="hasGroupCallActivity(group.roomJid)"
-                class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success-foreground"
+                :class="cls.livePill"
                 :title="groupCallMediaLabel(group.roomJid)"
                 :aria-label="groupCallMediaLabel(group.roomJid)"
               >
-                <PhoneCall class="h-3 w-3" />
+                <PhoneCall aria-hidden="true" />
                 <span>{{ groupCallMediaLabel(group.roomJid) }}</span>
               </span>
               <span
                 v-if="(group.mentionCount ?? 0) > 0"
-                class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-live text-live-foreground"
+                :class="[badge(), cls.mentionBadge]"
                 aria-hidden="true"
               >@{{ group.mentionCount }}</span>
               <span
                 v-if="(group.unreadCount ?? 0) > 0"
-                class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                :class="badge()"
                 aria-hidden="true"
               >{{ group.unreadCount }}</span>
             </span>
           </button>
         </section>
 
-        <div
-          v-for="conversation in visibleConversations"
-          :key="conversation.peerJid"
-          class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
-          :class="isActiveConversation(conversation.peerJid)
-            ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
-            : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
-          @click="emit('selectDm', conversation.peerJid)"
-        >
-          <button
-            class="flex min-w-0 flex-1 items-center gap-3 text-left"
-            type="button"
-            :aria-current="isActiveConversation(conversation.peerJid) ? 'page' : undefined"
-            :aria-label="conversationRowLabel(conversation)"
-            @click.stop="emit('selectDm', conversation.peerJid)"
+        <section :class="cls.section">
+          <div
+            v-for="conversation in visibleConversations"
+            :key="conversation.peerJid"
+            :class="[cls.row, cls.rowSelected]"
+            :data-unread="conversation.unreadCount > 0 ? '' : undefined"
+            @click="emit('selectDm', conversation.peerJid)"
           >
-            <div class="relative">
-              <UserAvatar :name="conversation.peerUsername" :jid="conversationPeerAvatarJid(conversation.peerJid)" size="sm" :in-call="peerInCall(conversation.peerJid)" />
-              <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
-            </div>
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center justify-between gap-2">
-                <span class="type-control truncate">{{ conversation.peerUsername }}</span>
-                <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-sidebar-muted">
-                  {{ formatTimelineStamp(conversation.lastMessageAt) }}
-                </span>
-              </div>
-              <div class="flex items-center gap-1.5">
-                <span class="type-caption text-sidebar-muted min-w-0 flex-1 truncate">{{ preview(conversation.lastMessageBody) }}</span>
-                <span
-                  v-if="hasCallActivity(conversation.peerJid)"
-                  class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border px-1.5"
-                  :class="isHiddenCurrentCallPeer(conversation.peerJid)
-                    ? 'border-border bg-muted/60 text-sidebar-muted'
-                    : 'border-success/25 bg-success/10 text-success-foreground'"
-                  :title="callActivityLabel(conversation.peerJid)"
-                  :aria-label="callActivityLabel(conversation.peerJid)"
-                >
-                  <PhoneCall class="h-3 w-3" />
-                  <span>{{ isHiddenCurrentCallPeer(conversation.peerJid) ? 'Current call' : callActivityLabel(conversation.peerJid) }}</span>
-                </span>
-                <span
-                  v-if="conversation.unreadCount > 0"
-                  class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-                >
-                  {{ conversation.unreadCount }}
-                </span>
-              </div>
-            </div>
-          </button>
-          <AppTooltip :label="addPeopleLabel(conversation)">
             <button
-              class="chat-icon-button shrink-0 text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              :class="cls.rowButton"
               type="button"
-              :aria-label="addPeopleLabel(conversation)"
-              @click.stop="emit('addPeopleToDm', conversation.peerJid)"
+              :aria-current="isActiveConversation(conversation.peerJid) ? 'page' : undefined"
+              :aria-label="conversationRowLabel(conversation)"
+              @click.stop="emit('selectDm', conversation.peerJid)"
             >
-              <UserPlus class="h-3.5 w-3.5" aria-hidden="true" />
+              <UserAvatar
+                :name="conversation.peerUsername"
+                :jid="conversationPeerAvatarJid(conversation.peerJid)"
+                :presence="presenceOf(conversation.presenceShow)"
+                size="sm"
+                :in-call="peerInCall(conversation.peerJid)"
+              />
+              <span :class="cls.lines">
+                <span :class="cls.line">
+                  <span :class="cls.name">{{ conversation.peerUsername }}</span>
+                  <span v-if="conversation.lastMessageAt" :class="cls.time">
+                    {{ formatTimelineStamp(conversation.lastMessageAt) }}
+                  </span>
+                </span>
+                <span :class="cls.line">
+                  <span :class="cls.sub">{{ preview(conversation.lastMessageBody) }}</span>
+                  <span
+                    v-if="hasCallActivity(conversation.peerJid)"
+                    :class="cls.livePill"
+                    :data-muted="isHiddenCurrentCallPeer(conversation.peerJid) ? '' : undefined"
+                    :title="callActivityLabel(conversation.peerJid)"
+                    :aria-label="callActivityLabel(conversation.peerJid)"
+                  >
+                    <PhoneCall aria-hidden="true" />
+                    <span>{{ isHiddenCurrentCallPeer(conversation.peerJid) ? 'Current call' : callActivityLabel(conversation.peerJid) }}</span>
+                  </span>
+                  <span v-if="conversation.unreadCount > 0" :class="badge()">
+                    {{ conversation.unreadCount }}
+                  </span>
+                </span>
+              </span>
             </button>
-          </AppTooltip>
-        </div>
+            <AppTooltip :label="addPeopleLabel(conversation)">
+              <button
+                :class="[iconbtn({ size: 'sm' }), cls.rowAction]"
+                type="button"
+                :aria-label="addPeopleLabel(conversation)"
+                @click.stop="emit('addPeopleToDm', conversation.peerJid)"
+              >
+                <UserPlus aria-hidden="true" />
+              </button>
+            </AppTooltip>
+          </div>
+        </section>
       </div>
     </div>
   </div>

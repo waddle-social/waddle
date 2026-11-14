@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
-import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
+import { ChevronLeft, Hash, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { header, iconbtn, tag } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
@@ -209,6 +211,71 @@ function presenceText(show?: string): string {
   return "offline";
 }
 
+const dmPeerPresence = computed<OccupantPresence>(() => {
+  const show = props.dmPeer?.presenceShow;
+  if (show === "available" || show === "chat") return "online";
+  if (show === "away" || show === "xa") return "away";
+  return show === "dnd" ? "dnd" : "offline";
+});
+
+// App-Room / App-DM header: sigil or avatar, title, one muted caption, quiet icon buttons.
+const rootClass = cx(header(), css({ flex: "none", gap: "2", px: "3", md: { gap: "3", px: "6" } }));
+const emptyClass = css({ md: { display: "none" } });
+const titleGroupClass = css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0, flex: 1 });
+const sigilClass = css({ display: "none", flex: "none", color: "fg.soft", "& svg": { width: "20px", height: "20px" }, md: { display: "inline-flex" } });
+const avatarSlotClass = css({ display: "none", flex: "none", md: { display: "inline-flex" } });
+const titleStackClass = css({ display: "flex", flexDirection: "column", minWidth: 0, lineHeight: 1.3, md: { flexDirection: "row", alignItems: "baseline", gap: "3" } });
+const dmTitleStackClass = css({ display: "flex", flexDirection: "column", minWidth: 0, lineHeight: 1.3 });
+const titleRowClass = css({ display: "flex", alignItems: "center", gap: "2", minWidth: 0 });
+const titleClass = css({ margin: 0, font: "700 16px/1.3 {fonts.display}", color: "fg", truncate: true, md: { fontSize: "18px" } });
+const captionClass = css({ textStyle: "caption", color: "fg.muted", truncate: true });
+const callStatusClass = css({
+  display: "none",
+  alignItems: "center",
+  gap: "1",
+  maxWidth: "9rem",
+  height: "22px",
+  px: "2",
+  flex: "none",
+  borderRadius: "pill",
+  bg: "live.subtle",
+  color: "live.text",
+  textStyle: "caption",
+  fontWeight: 600,
+  "& svg": { width: "12px", height: "12px", flex: "none" },
+  lg: { display: "inline-flex" },
+});
+const actionsClass = css({ display: "flex", alignItems: "center", gap: "1", flex: "none" });
+const wideOnlyClass = css({ display: "none", alignItems: "center", gap: "1", lg: { display: "flex" } });
+const compactOnlyClass = css({ display: "flex", alignItems: "center", gap: "1", lg: { display: "none" } });
+const navButtonClass = cx(iconbtn(), css({ ml: "-1", md: { display: "none" }, _coarse: { width: "44px", height: "44px" } }));
+const connectionChipClass = css({ display: "none", md: { display: "inline-flex" } });
+const stackClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1",
+  height: "36px",
+  ml: "1",
+  px: "1.5",
+  border: 0,
+  borderRadius: "pill",
+  bg: "transparent",
+  color: "fg.muted",
+  cursor: "pointer",
+  _hover: { bg: "state.hover", color: "fg" },
+});
+const stackFacesClass = css({ display: "inline-flex", "& > * + *": { ml: "-6px" } });
+const stackFaceClass = css({
+  display: "inline-flex",
+  borderRadius: "pill",
+  boxShadow: "0 0 0 2px {colors.bg}",
+  outline: "none",
+  _focusVisible: { boxShadow: "0 0 0 2px {colors.bg}, 0 0 0 4px {colors.focus}" },
+  "&[data-presence=offline]": { opacity: 0.6 },
+});
+const stackMoreClass = css({ textStyle: "caption", fontWeight: 600, fontVariantNumeric: "tabular-nums", px: "1" });
+const stackFallbackClass = css({ display: "inline-flex", alignItems: "center", gap: "1.5", textStyle: "caption", fontWeight: 600, px: "1", "& svg": { width: "16px", height: "16px" } });
+
 const memberButtonCopy = computed(() => {
   if (props.memberCount !== null) {
     const noun = props.memberCount === 1 ? "member" : "members";
@@ -240,244 +307,199 @@ const memberButtonCopy = computed(() => {
 </script>
 
 <template>
-  <div class="chat-pane-header border-b border-border px-[var(--chat-content-inline)] py-0 flex flex-shrink-0 items-center justify-between gap-[var(--space-sm)] lg:gap-[var(--space-md)] glass-surface">
-    <div class="chat-message-lane flex min-w-0 items-center gap-2">
-      <button
-        class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
-        type="button"
-        aria-label="Open navigation"
-        @click="emit('openNav')"
-      >
-        <Menu class="w-4 h-4" />
-      </button>
-      <div class="chat-pane-title-group">
-        <span v-if="dmPeer?.peerJid" class="hidden lg:flex">
-          <UserAvatar :name="dmPeer.peerUsername" :jid="conversationPeerAvatarJid(dmPeer.peerJid)" size="sm" />
-        </span>
-        <span v-else class="chat-pane-title-icon hidden rounded-lg bg-primary/8 lg:flex">
-          <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
-        </span>
-        <div class="min-w-0">
-          <div class="flex min-w-0 items-center gap-2">
-            <h1 class="type-chat-title truncate">
-              {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "…" }}
-            </h1>
-            <span
-              v-if="isForumChannel"
-              class="type-badge rounded-full border border-primary/15 bg-primary/8 px-2 py-0.5 text-primary/80"
-            >
-              Forum
-            </span>
-            <span v-if="dmPeer" class="hidden lg:inline type-meta text-muted-foreground">
-              · {{ dmPeerPresenceText }}
-            </span>
-            <span
-              v-if="showDmCallActivityStatus"
-              class="type-meta hidden h-5 max-w-[9rem] shrink-0 items-center gap-1 overflow-hidden rounded-full border border-success/25 bg-success/10 px-2 text-success lg:inline-flex"
-            >
-              <PhoneCall class="h-3 w-3" />
-              <span class="truncate">{{ dmCallActivityLabel }}</span>
-            </span>
-          </div>
-          <div v-if="dmPeer" class="lg:hidden type-caption text-muted-foreground truncate">
-            {{ dmHeaderSecondaryText }}
-          </div>
-          <!-- Desktop subtitle slot: prefer the channel's own description
-               (its "topic") so rooms with a stated subject get character
-               at the top of the chat instead of an empty title bar.
-               Falls back to the space name (already what mobile shows)
-               when no description is set. Single-line, truncate, muted
-               so it sits behind the H1 title without competing. -->
-          <div v-else-if="channel?.description" class="type-caption text-muted-foreground truncate">
-            {{ channel.description }}
-          </div>
-          <div v-else-if="channel && waddle" class="lg:hidden type-caption text-muted-foreground truncate">
-            {{ waddle.name }}
-          </div>
+  <!-- With nothing open (App-DMs, Pick a room) only the phone keeps the bar, for its sidebar button. -->
+  <div :class="cx(rootClass, !channel && !dmPeer && emptyClass)">
+    <button
+      :class="navButtonClass"
+      type="button"
+      aria-label="Open navigation"
+      @click="emit('openNav')"
+    >
+      <ChevronLeft aria-hidden="true" />
+    </button>
+    <div v-if="channel || dmPeer" :class="titleGroupClass">
+      <span v-if="dmPeer?.peerJid" :class="avatarSlotClass">
+        <UserAvatar
+          :name="dmPeer.peerUsername"
+          :jid="conversationPeerAvatarJid(dmPeer.peerJid)"
+          :presence="dmPeerPresence"
+          size="md"
+        />
+      </span>
+      <span v-else :class="sigilClass" aria-hidden="true">
+        <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" :stroke-width="1.75" />
+      </span>
+      <div :class="dmPeer ? dmTitleStackClass : titleStackClass">
+        <div :class="titleRowClass">
+          <h1 :class="titleClass">
+            {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "…" }}
+          </h1>
+          <span v-if="isForumChannel" :class="tag()">Forum</span>
+          <span v-if="showDmCallActivityStatus" :class="callStatusClass">
+            <PhoneCall aria-hidden="true" />
+            <span :class="css({ truncate: true })">{{ dmCallActivityLabel }}</span>
+          </span>
         </div>
+        <span v-if="dmPeer" :class="captionClass">{{ dmHeaderSecondaryText }}</span>
+        <!-- The room's own description (its topic) when it has one,
+             otherwise the space name on narrow screens. -->
+        <span v-else-if="channel?.description" :class="captionClass">{{ channel.description }}</span>
+        <span v-else-if="channel && waddle" :class="cx(captionClass, css({ md: { display: 'none' } }))">{{ waddle.name }}</span>
       </div>
     </div>
-    <div class="flex shrink-0 items-center gap-3">
+    <div :class="actionsClass">
       <div
         v-if="connectionNotice && connectionStatusClasses"
-        class="hidden md:inline-flex"
-        :class="connectionStatusClasses.chip"
+        :class="cx(connectionChipClass, connectionStatusClasses.chip)"
       >
-        <component
-          :is="connectionStatusIcon"
-          :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
-        />
+        <component :is="connectionStatusIcon" />
         <span>{{ connectionNotice.shortLabel }}</span>
       </div>
-      <div class="flex items-center gap-1.5">
-        <!-- Header toggle buttons (Search, Pin) — the active state
-             reads as "armed" instead of merely "hovered" by swapping
-             the bg-muted treatment for a primary-tinted fill + a
-             small primary ring. Hover stays bg-muted so the three
-             visual states (rest / hover / armed) separate cleanly. -->
-        <AppTooltip v-if="channel || dmPeer" label="Search messages">
+      <AppTooltip v-if="channel || dmPeer" label="Search messages">
+        <button
+          :class="iconbtn()"
+          aria-label="Search messages"
+          :aria-pressed="showSearch"
+          type="button"
+          @click="showSearch = !showSearch"
+        >
+          <Search aria-hidden="true" />
+        </button>
+      </AppTooltip>
+      <!-- Wide-layout actions. Below `lg` these live in the overflow menu. -->
+      <div :class="wideOnlyClass">
+        <AppTooltip v-if="channel || dmPeer" label="Pinned messages">
           <button
-            class="chat-icon-button chat-icon-button--md transition-all duration-200"
-            :class="showSearch
-              ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
-              : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-            aria-label="Search messages"
-            :aria-pressed="showSearch"
+            :class="iconbtn()"
+            aria-label="Pinned messages"
+            :aria-pressed="showPinnedPanel"
             type="button"
-            @click="showSearch = !showSearch"
+            @click="showPinnedPanel = !showPinnedPanel"
           >
-            <Search class="w-3.5 h-3.5" />
+            <Pin aria-hidden="true" />
           </button>
         </AppTooltip>
-        <!-- Wide-layout actions. Below `lg` these live in the overflow
-             menu at the end of the row instead. -->
-        <div class="hidden lg:flex items-center gap-1.5">
-          <AppTooltip v-if="channel || dmPeer" label="Pinned messages">
-            <button
-              class="chat-icon-button chat-icon-button--md transition-all duration-200"
-              :class="showPinnedPanel
-                ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-              aria-label="Pinned messages"
-              :aria-pressed="showPinnedPanel"
-              type="button"
-              @click="showPinnedPanel = !showPinnedPanel"
-            >
-              <Pin class="w-3.5 h-3.5" />
-            </button>
-          </AppTooltip>
+        <NotifyModeButton
+          v-if="channel?.jid"
+          :room-jid="channel.jid"
+          :room-name="channel.name"
+          conversation-kind="private-group"
+          :client="xmppClient ?? null"
+          :store="notifySettings"
+        />
+        <!-- Per-DM XEP-0492 notify picker (#720): the bare peer JID keys
+             the same store as rooms; `direct-chat` routes the publish to
+             the `urn:waddle:dm-bookmarks:0` PEP node. -->
+        <NotifyModeButton
+          v-else-if="dmPeer?.peerJid"
+          :room-jid="dmPeer.peerJid"
+          :room-name="dmPeer.peerUsername"
+          conversation-kind="direct-chat"
+          :client="xmppClient ?? null"
+          :store="notifySettings"
+        />
+        <AppTooltip v-if="canManageChannels && channel" label="Room settings">
+          <button
+            :class="iconbtn()"
+            aria-label="Channel settings"
+            type="button"
+            @click="emit('editChannel')"
+          >
+            <Settings aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <CallButton
+          v-if="dmPeer?.peerJid"
+          :peer-bare-jid="dmPeer.peerJid"
+          :show-activity-controls="showDmCallActivityControls !== false"
+        />
+        <MucCallButton
+          v-else-if="callRoomJid"
+          :room-jid="callRoomJid"
+          :show-active-pill="showCallActivePill !== false"
+          :hide-start-controls-when-active-call="hideMucStartControlsWhenActiveCall"
+        />
+        <!-- Who is here right now: opens the room details; a face opens that person. -->
+        <AppTooltip v-if="channel" :label="memberButtonCopy.title">
+          <button
+            :class="stackClass"
+            type="button"
+            :aria-label="`${memberButtonCopy.aria}. ${onlineCount} online.`"
+            @click="emit('openDetails')"
+          >
+            <span v-if="visibleMembers.length > 0" :class="stackFacesClass" @click.stop>
+              <span
+                v-for="member in visibleMembers"
+                :key="`hdr-avatar:${member.nick}`"
+                :class="stackFaceClass"
+                :data-presence="member.presence"
+                :title="member.presence ? `${member.nick} · ${presenceLabel(member.presence)}` : member.nick"
+                tabindex="0"
+                @click.stop="onAvatarClick(member)"
+                @keydown.enter.stop="onAvatarClick(member)"
+              >
+                <UserAvatar
+                  :name="member.nick"
+                  :jid="member.avatarJid"
+                  :presence="member.presence"
+                  size="sm"
+                />
+              </span>
+            </span>
+            <span
+              v-if="overflowCount > 0"
+              :class="stackMoreClass"
+              :title="`${overflowCount} more`"
+            >+{{ overflowCount }}</span>
+            <span v-else-if="visibleMembers.length === 0" :class="stackFallbackClass">
+              <Users aria-hidden="true" />
+              <span>{{ memberButtonCopy.primary }}</span>
+            </span>
+          </button>
+        </AppTooltip>
+      </div>
+      <!-- Compact-layout actions: members, then everything else in one overflow menu. -->
+      <div v-if="channel || dmPeer" :class="compactOnlyClass">
+        <AppTooltip v-if="channel" :label="memberButtonCopy.title">
+          <button
+            :class="iconbtn()"
+            type="button"
+            :aria-label="memberButtonCopy.aria"
+            @click="emit('openDetails')"
+          >
+            <Users aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <ChatHeaderOverflowMenu
+          :show-call-items="showOverflowCallItems"
+          :call-busy="overflowCallBusy"
+          :call-noun="dmPeer ? 'call' : 'huddle'"
+          :pinned-open="showPinnedPanel"
+          :show-channel-settings="canManageChannels && !!channel"
+          @voice-call="overflowCall?.start({ audio: true, video: false })"
+          @video-call="overflowCall?.start({ audio: true, video: true })"
+          @toggle-pinned="showPinnedPanel = !showPinnedPanel"
+          @edit-channel="emit('editChannel')"
+        >
           <NotifyModeButton
             v-if="channel?.jid"
+            variant="submenu"
             :room-jid="channel.jid"
             :room-name="channel.name"
             conversation-kind="private-group"
             :client="xmppClient ?? null"
             :store="notifySettings"
           />
-          <!-- Per-DM XEP-0492 notify picker (#720). The DM's bare peer
-               JID keys the same unified store as channels; the
-               `direct-chat` kind routes the publish to the
-               `urn:waddle:dm-bookmarks:0` PEP node and resolves the §3
-               default (`always`). The rich-payload toggle (#719) is the
-               same control channels expose. -->
           <NotifyModeButton
             v-else-if="dmPeer?.peerJid"
+            variant="submenu"
             :room-jid="dmPeer.peerJid"
             :room-name="dmPeer.peerUsername"
             conversation-kind="direct-chat"
             :client="xmppClient ?? null"
             :store="notifySettings"
           />
-          <AppTooltip v-if="canManageChannels && channel" label="Channel settings">
-            <button
-              class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-              aria-label="Channel settings"
-              type="button"
-              @click="emit('editChannel')"
-            >
-              <Settings class="w-3.5 h-3.5" />
-            </button>
-          </AppTooltip>
-          <CallButton
-            v-if="dmPeer?.peerJid"
-            :peer-bare-jid="dmPeer.peerJid"
-            :show-activity-controls="showDmCallActivityControls !== false"
-          />
-          <MucCallButton
-            v-else-if="callRoomJid"
-            :room-jid="callRoomJid"
-            :show-active-pill="showCallActivePill !== false"
-            :hide-start-controls-when-active-call="hideMucStartControlsWhenActiveCall"
-          />
-          <!-- Live presence stack. Mobile gets the compact members
-               button instead: avatars in the corner of a narrow header
-               read as "the app changed my profile picture" rather than
-               "these other people are here." -->
-          <AppTooltip v-if="channel" :label="memberButtonCopy.title">
-            <button
-              class="chat-presence-stack"
-              type="button"
-              :aria-label="`${memberButtonCopy.aria}. ${onlineCount} online.`"
-              @click="emit('openDetails')"
-            >
-              <span
-                v-if="visibleMembers.length > 0"
-                class="chat-presence-stack__avatars"
-                @click.stop
-              >
-                <span
-                  v-for="member in visibleMembers"
-                  :key="`hdr-avatar:${member.nick}`"
-                  class="chat-presence-stack__avatar-wrap"
-                  :class="member.presence && `chat-presence-stack__avatar-wrap--${member.presence}`"
-                  :title="member.presence ? `${member.nick} · ${presenceLabel(member.presence)}` : member.nick"
-                  tabindex="0"
-                  @click.stop="onAvatarClick(member)"
-                  @keydown.enter.stop="onAvatarClick(member)"
-                >
-                  <UserAvatar
-                    :name="member.nick"
-                    :jid="member.avatarJid"
-                    :presence="member.presence"
-                    size="xs"
-                  />
-                </span>
-              </span>
-              <span
-                v-if="overflowCount > 0"
-                class="chat-presence-stack__overflow"
-                :title="`${overflowCount} more`"
-              >+{{ overflowCount }}</span>
-              <span v-else-if="visibleMembers.length === 0" class="chat-presence-stack__fallback">
-                <Users class="w-3.5 h-3.5" />
-                <span class="type-control">{{ memberButtonCopy.primary }}</span>
-              </span>
-            </button>
-          </AppTooltip>
-        </div>
-        <!-- Compact-layout actions: members, then everything else in
-             one overflow menu. -->
-        <div v-if="channel || dmPeer" class="flex items-center gap-1.5 lg:hidden">
-          <AppTooltip v-if="channel" :label="memberButtonCopy.title">
-            <button
-              class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-              type="button"
-              :aria-label="memberButtonCopy.aria"
-              @click="emit('openDetails')"
-            >
-              <Users class="w-4 h-4" />
-            </button>
-          </AppTooltip>
-          <ChatHeaderOverflowMenu
-            :show-call-items="showOverflowCallItems"
-            :call-busy="overflowCallBusy"
-            :pinned-open="showPinnedPanel"
-            :show-channel-settings="canManageChannels && !!channel"
-            @voice-call="overflowCall?.start({ audio: true, video: false })"
-            @video-call="overflowCall?.start({ audio: true, video: true })"
-            @toggle-pinned="showPinnedPanel = !showPinnedPanel"
-            @edit-channel="emit('editChannel')"
-          >
-            <NotifyModeButton
-              v-if="channel?.jid"
-              variant="submenu"
-              :room-jid="channel.jid"
-              :room-name="channel.name"
-              conversation-kind="private-group"
-              :client="xmppClient ?? null"
-              :store="notifySettings"
-            />
-            <NotifyModeButton
-              v-else-if="dmPeer?.peerJid"
-              variant="submenu"
-              :room-jid="dmPeer.peerJid"
-              :room-name="dmPeer.peerUsername"
-              conversation-kind="direct-chat"
-              :client="xmppClient ?? null"
-              :store="notifySettings"
-            />
-          </ChatHeaderOverflowMenu>
-        </div>
+        </ChatHeaderOverflowMenu>
       </div>
     </div>
   </div>
