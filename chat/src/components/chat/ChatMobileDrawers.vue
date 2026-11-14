@@ -173,7 +173,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             @click="openChannelEdit(); ui.showMobileDetails.value = false"
           >
             <PencilLine aria-hidden="true" />
-            <span>Edit channel</span>
+            <span>Edit room</span>
           </button>
           <button
             :class="rowClass"

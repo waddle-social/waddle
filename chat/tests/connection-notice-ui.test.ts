@@ -83,8 +83,9 @@ async function suppressVueLifecycleSetupWarnings<T>(fn: () => Promise<T>): Promi
 describe("connection notice UI", () => {
   test("keeps the superseded reconnect banner wired in ContentArea source", () => {
     const source = readFileSync(new URL("../src/components/chat/ContentArea.vue", import.meta.url), "utf8");
-    expect(source).toContain('v-if="connectionNotice.actionLabel"');
-    expect(source).toContain('@click="handleConnectionNoticeAction"');
+    const notice = readFileSync(new URL("../src/components/chat/ConnectionNotice.vue", import.meta.url), "utf8");
+    expect(notice).toContain('v-if="notice.actionLabel"');
+    expect(source).toContain('@action="handleConnectionNoticeAction"');
     expect(source).toContain("recoverSupersededSession()");
   });
 

@@ -1,0 +1,31 @@
+---
+// Dev-only design preview (WADDLE_PREVIEW=1 bun run dev → /_preview).
+// Same head as AppLayout minus XmppProvider and telemetry; PreviewApp
+// seeds the real controller with fixture data instead of connecting.
+import { Font } from "astro:assets";
+import "@/styles/global.css";
+import PreviewApp from "./PreviewApp.vue";
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <Font cssVariable="--font-display" preload />
+    <Font cssVariable="--font-body" preload />
+    <Font cssVariable="--font-mono" />
+    <script is:inline>
+      // The theme preference reads localStorage on mount, so set it there.
+      if (new URLSearchParams(location.search).get("theme") === "daylight") {
+        localStorage.setItem("waddle:theme", "daylight");
+        document.documentElement.setAttribute("data-theme", "daylight");
+      } else {
+        localStorage.removeItem("waddle:theme");
+      }
+    </script>
+    <title>Waddle preview</title>
+  </head>
+  <body>
+    <PreviewApp client:only="vue" />
+  </body>
+</html>

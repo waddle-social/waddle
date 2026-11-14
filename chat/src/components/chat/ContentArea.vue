@@ -60,8 +60,8 @@ import {
   threadChipParticipants as threadChipParticipantsFor,
 } from "./timeline-display-meta";
 import { latestThreadReply } from "./thread-reply-card";
-import { btn, waddle } from "styled-system/recipes";
-import { connectionNoticeClasses, useConnectionNotice } from "./composables/use-connection-notice";
+import ConnectionNotice from "./ConnectionNotice.vue";
+import { useConnectionNotice } from "./composables/use-connection-notice";
 import { useMessageJump } from "./composables/use-message-jump";
 
 const draft = defineModel<string>("draft", { required: true });
@@ -794,27 +794,11 @@ function dayDividerLabel(createdAt: string): string {
       @reconnect-dm="(peerJid, media) => emit('reconnectDm', peerJid, media)"
       @end-dm="(peerJid, sid) => emit('endDm', peerJid, sid)"
     />
-    <div
-      v-if="connectionNotice && connectionStatusClasses"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      :class="[connectionNoticeClasses.card, connectionStatusClasses.banner]"
-    >
-      <span v-if="connectionNotice.tone === 'reconnecting'" :class="waddle()" aria-hidden="true"><i /><i /><i /></span>
-      <div :class="connectionNoticeClasses.text">
-        <p :class="connectionNoticeClasses.title">{{ connectionNotice.title }}</p>
-        <p :class="connectionNoticeClasses.body">{{ connectionNotice.body }}</p>
-      </div>
-      <button
-        v-if="connectionNotice.actionLabel"
-        type="button"
-        :class="btn({ variant: 'primary', size: 'sm' })"
-        @click="handleConnectionNoticeAction"
-      >
-        <span>{{ connectionNotice.actionLabel }}</span>
-      </button>
-    </div>
+    <ConnectionNotice
+      v-if="connectionNotice"
+      :notice="connectionNotice"
+      @action="handleConnectionNoticeAction"
+    />
     <div
       v-if="updateAvailable"
       role="status"

@@ -242,6 +242,18 @@ export default defineConfig({
   },
 
   integrations: [
+    // Dev-only design preview with fixture data: WADDLE_PREVIEW=1 bun run dev,
+    // then open /_preview?screen=…&theme=daylight (see preview/PreviewApp.vue).
+    {
+      name: "waddle-preview",
+      hooks: {
+        "astro:config:setup": ({ command, injectRoute }) => {
+          if (command === "dev" && process.env.WADDLE_PREVIEW) {
+            injectRoute({ pattern: "/_preview", entrypoint: "./preview/preview.astro" });
+          }
+        },
+      },
+    },
     vue({
       appEntrypoint: "/src/vue-app.ts",
     }),

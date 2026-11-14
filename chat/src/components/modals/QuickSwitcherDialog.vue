@@ -203,7 +203,7 @@ function badgeLabel(entry: QuickSwitcherEntry): string {
 </script>
 
 <template>
-  <AppDialog v-model:open="open" :labelled-by="titleId">
+  <AppDialog v-model:open="open" :labelled-by="titleId" size="lg">
     <h2 :id="titleId" :class="srOnly">Jump to a room, person or page</h2>
     <div :class="searchRow">
       <Search aria-hidden="true" />

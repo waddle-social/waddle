@@ -17,7 +17,7 @@ const RECONNECTING_NOTICE_DELAY_MS = 3000;
 
 /**
  * The notice card (Connection-Notices board), shared by ContentArea's
- * banner and SupersededRecoveryBanner. `TONE_ACCENT[tone].banner` adds the
+ * banner and SupersededRecoveryBanner. `connectionToneClasses[tone].banner` adds the
  * state's border colour.
  */
 export const connectionNoticeClasses = {
@@ -43,7 +43,7 @@ export const connectionNoticeClasses = {
 };
 
 // Literal objects per tone: Panda extracts `css()` statically.
-const TONE_ACCENT: Record<ConnectionNoticeCopy["tone"], { banner: string; chip: string }> = {
+export const connectionToneClasses: Record<ConnectionNoticeCopy["tone"], { banner: string; chip: string }> = {
   offline: {
     banner: css({ borderColor: "border.strong" }),
     chip: css({ display: "inline-flex", alignItems: "center", gap: "1.5", height: "28px", px: "2.5", borderRadius: "pill", border: "1px solid", bg: "surface", font: "600 13px/1 {fonts.body}", "& svg": { width: "14px", height: "14px" }, borderColor: "border.strong", color: "fg.muted" }),
@@ -153,7 +153,7 @@ export function useConnectionNotice(input: {
   const connectionStatusClasses = computed(() => {
     const tone = connectionNotice.value?.tone;
     if (!tone) return null;
-    const accent = connectionNotice.value?.actionKind === "recover-superseded" ? TONE_ACCENT.reconnecting : TONE_ACCENT[tone];
+    const accent = connectionNotice.value?.actionKind === "recover-superseded" ? connectionToneClasses.reconnecting : connectionToneClasses[tone];
     return { ...accent, chip: cx(accent.chip, `connection-chip--${tone}`) };
   });
 
