@@ -29,7 +29,8 @@ pub use admission::{AdmissionDecision, AdmissionMode, AdmissionPolicy, Admission
 pub use error::{ConfigError, ConfigSection};
 pub use limits::{
     Deadlines, RateLimit, ResourceLimits, MAX_CONFIG_FILE_BYTES, MAX_ENDPOINTS_PER_DOMAIN,
-    MAX_MATERIAL_FILE_BYTES, MAX_TOTAL_MATERIAL_BYTES, STREAM_CODEC_LIMITS,
+    MAX_INCOMPLETE_ELEMENT_TIME, MAX_MATERIAL_FILE_BYTES, MAX_TOTAL_MATERIAL_BYTES,
+    MIN_INPUT_BYTES_PER_SECOND, STREAM_CODEC_LIMITS,
 };
 pub use load::{S2sActivation, CONFIG_FILE_VARIABLE, ENABLED_VARIABLE};
 pub use snapshot::{ConfiguredEndpoint, S2sConfig};

@@ -16,7 +16,9 @@
 //! displace only streams that carry nothing. In `open` mode a quarter of
 //! each cap is reserved for allowlisted and trusted-home peers
 //! ([`crate::s2s::config::AdmissionPolicy::is_reserved_peer`]): other peers
-//! share the rest and can evict only each other.
+//! share the rest and can evict only each other, whichever cap is full.
+//! A new socket whose stream is not yet known, at accept, never evicts a
+//! reserved peer's stream in `open` mode either.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -177,6 +179,15 @@ struct State {
     dialing: HashSet<(CanonicalDomain, CanonicalDomain)>,
     /// Outbound backoff of failing remote domains.
     backoff: HashMap<CanonicalDomain, Backoff>,
+}
+
+/// What [`Registry::begin_dial`] found for a directional pair.
+#[derive(Debug)]
+pub(super) enum DialStart {
+    /// The pair's established outbound stream.
+    Established(VerifiedPeerStream),
+    /// No stream: the caller dials, holding the pair's attempt.
+    Dial(DialSlot),
 }
 
 /// Why an outbound attempt may not start now.
@@ -355,12 +366,15 @@ impl Registry {
         let new_peer = !live
             .iter()
             .any(|(existing, _)| existing.remote == key.remote);
+        // A stream outside the reserve makes room only among streams
+        // outside it, also when the whole cap rather than its general share
+        // is full: it never evicts a reserved peer's stream.
         if new_peer {
             if !reserved && peers(live, true) >= general_share(self.limits.max_peers) {
                 return Some(Need::Peer { general: true });
             }
             if peers(live, false) >= self.limits.max_peers {
-                return Some(Need::Peer { general: false });
+                return Some(Need::Peer { general: !reserved });
             }
         }
         let general_streams = live.iter().filter(|(_, entry)| !entry.reserved).count();
@@ -368,7 +382,7 @@ impl Registry {
             return Some(Need::Stream { general: true });
         }
         if live.len() >= self.limits.max_streams {
-            return Some(Need::Stream { general: false });
+            return Some(Need::Stream { general: !reserved });
         }
         None
     }
@@ -432,40 +446,45 @@ impl Registry {
     /// Make room for a new socket in `direction` when its socket cap is
     /// full: evict the established stream in that direction that has
     /// carried no traffic the longest, if that has lasted the eviction
-    /// time, and return its socket for the caller to release. The evicted
-    /// connection sends `resource-constraint` and closes.
+    /// time, and return its socket for the new one to take over. The
+    /// evicted connection sends `resource-constraint` and closes.
+    ///
+    /// A stream outside the reserve is evicted first. A reserved peer's
+    /// stream is evicted only when no other stream can be and
+    /// `newcomer_reserved` says the new socket may use the reserve: an
+    /// outbound socket whose remote domain is a reserved peer, or any
+    /// socket where admission holds nothing in reserve. An inbound socket
+    /// is anonymous at accept, so in `open` mode it never evicts a reserved
+    /// peer's stream.
     pub(super) fn evict_for_socket(
         &self,
         direction: StreamDirection,
+        newcomer_reserved: bool,
         now: Instant,
     ) -> Option<Arc<SocketCount>> {
         let mut state = self.state();
-        let victim = state
-            .streams
-            .iter()
-            .filter(|(key, entry)| key.direction == direction && self.evictable(entry, now))
-            .max_by_key(|(_, entry)| entry.activity.quiet(now))
-            .map(|(key, _)| key.clone())?;
+        let quietest = |reserved: bool| {
+            state
+                .streams
+                .iter()
+                .filter(|(key, entry)| {
+                    key.direction == direction
+                        && entry.reserved == reserved
+                        && self.evictable(entry, now)
+                })
+                .max_by_key(|(_, entry)| entry.activity.quiet(now))
+                .map(|(key, _)| key.clone())
+        };
+        let victim = quietest(false).or_else(|| {
+            if newcomer_reserved {
+                quietest(true)
+            } else {
+                None
+            }
+        })?;
         let entry = state.streams.remove(&victim)?;
         entry.tokens.evict.cancel();
         Some(entry.socket)
-    }
-
-    /// The established outbound stream for a pair, if there is one.
-    pub(super) fn outbound(
-        &self,
-        local: &CanonicalDomain,
-        remote: &CanonicalDomain,
-    ) -> Option<VerifiedPeerStream> {
-        let key = StreamKey {
-            direction: StreamDirection::Outbound,
-            local: local.clone(),
-            remote: remote.clone(),
-        };
-        self.state()
-            .streams
-            .get(&key)
-            .map(|entry| entry.stream.clone())
     }
 
     /// Every established stream.
@@ -486,17 +505,29 @@ impl Registry {
             .count()
     }
 
-    /// Start an outbound attempt from `local` to `remote` if the remote
-    /// domain's backoff has passed, no attempt for the pair is in progress
-    /// and the cap on attempts allows one. A domain without a backoff entry
-    /// is never refused for the table's size.
+    /// The established outbound stream from `local` to `remote`, or else a
+    /// new outbound attempt if the remote domain's backoff has passed, no
+    /// attempt for the pair is in progress and the cap on attempts allows
+    /// one. Both are decided under one lock: an attempt registers its
+    /// stream before it releases its dial slot, so a caller always finds
+    /// either the stream or the attempt in progress, never neither. A
+    /// domain without a backoff entry is never refused for the table's
+    /// size.
     pub(super) fn begin_dial(
         self: &Arc<Self>,
         local: &CanonicalDomain,
         remote: &CanonicalDomain,
         now: Instant,
-    ) -> Result<DialSlot, DialRefusal> {
+    ) -> Result<DialStart, DialRefusal> {
         let mut state = self.state();
+        let key = StreamKey {
+            direction: StreamDirection::Outbound,
+            local: local.clone(),
+            remote: remote.clone(),
+        };
+        if let Some(entry) = state.streams.get(&key) {
+            return Ok(DialStart::Established(entry.stream.clone()));
+        }
         if state
             .backoff
             .get(remote)
@@ -512,10 +543,10 @@ impl Registry {
             return Err(DialRefusal::Busy);
         }
         state.dialing.insert(pair.clone());
-        Ok(DialSlot {
+        Ok(DialStart::Dial(DialSlot {
             registry: Arc::clone(self),
             pair,
-        })
+        }))
     }
 
     /// Record a failed outbound attempt to `remote` that the peer or the

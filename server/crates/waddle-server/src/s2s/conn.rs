@@ -39,5 +39,6 @@ pub use peer_stream::{AuthenticationStrength, StreamDirection, TlsParameters, Ve
 pub use service::{ConnectError, S2sHandle, S2sService, ServiceOptions, ShutdownReport};
 pub use sink::{RefuseAllStanzas, SinkVerdict, StanzaSink};
 pub use startup::{
-    check_inherited_listener, load_config, load_enabled_config, StartupError, S2S_LISTENER_NAME,
+    check_inherited_listener, load_config, load_enabled_config, load_enabled_config_from,
+    StartupError, S2S_LISTENER_NAME,
 };

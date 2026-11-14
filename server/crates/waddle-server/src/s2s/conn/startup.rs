@@ -1,6 +1,7 @@
 //! Process startup of the S2S service: whether it runs, and the snapshot it
 //! runs with.
 
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -37,8 +38,17 @@ pub enum StartupError {
 pub async fn load_enabled_config(
     xmpp: &XmppConfig,
 ) -> Result<Option<Arc<S2sConfig>>, StartupError> {
+    load_enabled_config_from(xmpp, |name| std::env::var_os(name)).await
+}
+
+/// [`load_enabled_config`] with the activation variables read through
+/// `variable` instead of the process environment.
+pub async fn load_enabled_config_from(
+    xmpp: &XmppConfig,
+    variable: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<Arc<S2sConfig>>, StartupError> {
     let settings = TlsSettings::new(Arc::new(rustls::crypto::ring::default_provider()));
-    load_config(S2sActivation::from_env()?, xmpp, settings).await
+    load_config(S2sActivation::from_variables(variable)?, xmpp, settings).await
 }
 
 /// Load and validate the snapshot `activation` names, checking certificates
@@ -63,8 +73,14 @@ pub async fn load_config(
 /// configured `listen` address. A cold start binds `listen` itself, which
 /// the loader has checked is loopback; an inherited descriptor was bound
 /// by the launcher and could be bound anywhere, so it is accepted only on
-/// a loopback address equal to `listen`. Port zero in `listen`, which only
-/// the native fixture uses, matches the port the first process bound.
+/// a loopback address equal to `listen`.
+///
+/// The port must equal the configured one, with one exception: when
+/// `listen` names port zero, any port is accepted, because the first
+/// process of that configuration bound an ephemeral port and its
+/// successors inherit it. Only the native fixture configures port zero; a
+/// nonzero `listen` port never matches another port, and the address must
+/// match in either case.
 pub fn check_inherited_listener(
     configured: SocketAddr,
     actual: SocketAddr,

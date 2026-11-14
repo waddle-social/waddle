@@ -141,6 +141,12 @@ pub enum ConfigError {
     InvalidAddress(ConfigSection),
     #[error("`limits.{0}` must be greater than zero and at most its ceiling")]
     LimitOutOfRange(&'static str),
+    /// A limit within its own range that does not fit another: established
+    /// streams and unauthenticated sockets beyond the socket cap, a peer
+    /// cap not below the inbound socket cap, or a global input rate or
+    /// burst below the per-socket one.
+    #[error("`limits.{0}` does not fit the other limits")]
+    InconsistentLimit(&'static str),
     #[error("the clock cannot tell the current time")]
     ClockUnavailable,
 }

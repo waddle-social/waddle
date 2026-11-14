@@ -196,6 +196,15 @@ impl AdmissionPolicy {
             || self.trusted_homes.contains(domain)
     }
 
+    /// Whether the stream and peer caps hold a reserve back from some
+    /// admitted peers: only in `open` mode, where an admitted peer need be
+    /// neither allowlisted nor a trusted home. In every other mode each
+    /// admitted peer may use the whole of each cap, so an anonymous new
+    /// connection may make room by evicting any stream.
+    pub fn holds_reserve(&self) -> bool {
+        self.mode == AdmissionMode::Open
+    }
+
     /// Whether the operator requires `domain`, a trusted home, to
     /// authenticate under a private-CA profile.
     pub fn requires_private_ca(&self, domain: &CanonicalDomain) -> bool {

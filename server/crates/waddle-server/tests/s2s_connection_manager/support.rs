@@ -2,11 +2,13 @@
 //! configuration files in a temporary directory, configuration snapshots
 //! loaded through the production loader with a fixed clock, and services
 //! started on real loopback listeners. The CA is every peer's private-CA
-//! profile, so no public root is involved.
+//! profile, so no public root is involved. A hand-written peer
+//! ([`RawPeer`]) negotiates STARTTLS and SASL EXTERNAL with a deployment
+//! and then writes whatever a test gives it.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use minidom::Element;
@@ -16,16 +18,21 @@ use rcgen::{
     KeyIdMethod, KeyPair, KeyUsagePurpose, SerialNumber,
 };
 use rustls::crypto::ring::default_provider;
-use rustls::pki_types::UnixTime;
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::time_provider::TimeProvider;
+use rustls::{ClientConfig, RootCertStore};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
 use waddle_server::s2s::config::{ConfigError, S2sConfig};
-use waddle_server::s2s::conn::{S2sHandle, S2sService, ServiceOptions};
+use waddle_server::s2s::conn::{
+    S2sHandle, S2sService, ServiceOptions, SinkVerdict, StanzaSink, VerifiedPeerStream,
+};
 use waddle_server::s2s::verify::TlsSettings;
 use waddle_xmpp::identity::CanonicalDomain;
-use waddle_xmpp::ns::{STREAM, TLS};
+use waddle_xmpp::ns::{SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
     CodecLimits, HeaderAddress, Inbound, StreamDecoder, StreamEncoder, StreamErrorCondition,
     StreamHeader, StreamLanguage, StreamVersion,
@@ -109,8 +116,8 @@ impl Pki {
         }
     }
 
-    /// A certificate for `names` and its key, written as PEM files.
-    pub fn credentials(&self, file: &str, names: &[&str]) -> (PathBuf, PathBuf) {
+    /// A leaf certificate for `names`, valid in both TLS roles, and its key.
+    fn issue(&self, names: &[&str]) -> (Certificate, KeyPair) {
         let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
         let mut params = CertificateParams::new(names).expect("DNS names");
         params.distinguished_name = name("s2s test server");
@@ -126,10 +133,36 @@ impl Pki {
         let certificate = params
             .signed_by(&key, &self.certificate, &self.key)
             .expect("a leaf");
+        (certificate, key)
+    }
+
+    /// A certificate for `names` and its key, written as PEM files.
+    pub fn credentials(&self, file: &str, names: &[&str]) -> (PathBuf, PathBuf) {
+        let (certificate, key) = self.issue(names);
         (
             write(&self.dir, &format!("{file}.chain.pem"), &certificate.pem()),
             write(&self.dir, &format!("{file}.key.pem"), &key.serialize_pem()),
         )
+    }
+
+    /// TLS client settings for a hand-written peer authenticating as
+    /// `local`: a certificate for it from this CA, this CA as the only
+    /// root, and the fixed clock.
+    pub fn client_config(&self, local: &str) -> ClientConfig {
+        let (certificate, key) = self.issue(&[local]);
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(self.certificate.der().clone())
+            .expect("the test CA as a root");
+        ClientConfig::builder_with_details(Arc::new(default_provider()), Arc::new(FixedTime))
+            .with_safe_default_protocol_versions()
+            .expect("the provider's protocol versions")
+            .with_root_certificates(roots)
+            .with_client_auth_cert(
+                vec![certificate.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .expect("a client certificate")
     }
 
     /// Write a file into the PKI's directory.
@@ -261,10 +294,32 @@ pub async fn listener() -> (TcpListener, SocketAddr) {
     (listener, address)
 }
 
+/// A loopback port that is bound but not listening, so a connection to it
+/// is refused, held for as long as the returned socket lives: no other
+/// test can start listening on it meanwhile.
+pub fn dead_port() -> (TcpSocket, SocketAddr) {
+    let socket = TcpSocket::new_v4().expect("a socket");
+    socket
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("bind a loopback port");
+    let address = socket.local_addr().expect("a bound address");
+    (socket, address)
+}
+
 /// Start a deployment from `spec` on `listener`.
 pub async fn start(pki: &Pki, spec: &Spec, listener: TcpListener) -> Deployment {
+    start_with(pki, spec, listener, ServiceOptions::default()).await
+}
+
+/// Start a deployment from `spec` on `listener` with `options`.
+pub async fn start_with(
+    pki: &Pki,
+    spec: &Spec,
+    listener: TcpListener,
+    options: ServiceOptions,
+) -> Deployment {
     let config = spec.load(pki).await.expect("a valid configuration");
-    let service = S2sService::start(Arc::new(config), Some(listener), ServiceOptions::default());
+    let service = S2sService::start(Arc::new(config), Some(listener), options);
     let address = service.local_address().expect("a listening service");
     let handle = service.handle();
     Deployment {
@@ -290,17 +345,21 @@ pub async fn pair(pki: &Pki, adjust: impl Fn(&mut Spec)) -> (Deployment, Deploym
     (a, b)
 }
 
-/// A plaintext initial stream header, built with the codec's encoder.
-pub fn header(from: Option<&str>, to: &str) -> Vec<u8> {
-    let header = StreamHeader {
+/// An initiating stream header from `from` to `to`.
+fn stream_header(from: Option<&str>, to: &str) -> StreamHeader {
+    StreamHeader {
         from: HeaderAddress::from(from.map(domain)),
         to: HeaderAddress::Domain(domain(to)),
         id: None,
         version: Some(StreamVersion::V1_0),
         lang: Some(StreamLanguage::english()),
         declare_dialback: false,
-    };
-    StreamEncoder::open(&header)
+    }
+}
+
+/// A plaintext initial stream header, built with the codec's encoder.
+pub fn header(from: Option<&str>, to: &str) -> Vec<u8> {
+    StreamEncoder::open(&stream_header(from, to))
         .expect("an encodable stream header")
         .1
 }
@@ -420,4 +479,187 @@ pub async fn eventually(wait: Duration, check: impl Fn() -> bool) -> bool {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     check()
+}
+
+/// Read from `socket` into `decoder` until it yields the first-level
+/// element `name` in `namespace`, skipping stream headers and other
+/// elements before it.
+async fn expect_element<S: AsyncRead + Unpin>(
+    socket: &mut S,
+    decoder: &mut StreamDecoder,
+    name: &str,
+    namespace: &str,
+) -> Element {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut chunk = [0u8; 4096];
+    loop {
+        while let Some(item) = decoder.next_item().expect("well-formed input") {
+            if let Inbound::Element(element) = item {
+                assert!(
+                    !element.is("error", STREAM),
+                    "a stream error while waiting for <{name}/>: {:?}",
+                    StreamErrorCondition::from_peer_element(element.clone())
+                );
+                if element.is(name, namespace) {
+                    return element;
+                }
+            }
+        }
+        let read = tokio::time::timeout_at(deadline, socket.read(&mut chunk))
+            .await
+            .expect("the deployment answers in time")
+            .expect("read");
+        assert!(read > 0, "the deployment closed while awaiting <{name}/>");
+        decoder
+            .push(&chunk[..read])
+            .expect("input within the limits");
+    }
+}
+
+/// A hand-written peer on one connection: it negotiates STARTTLS and SASL
+/// EXTERNAL with a deployment as one local domain, with a certificate for
+/// it from the test CA, and then writes what a test gives it on the
+/// established stream.
+pub struct RawPeer {
+    tls: TlsStream<TcpStream>,
+    encoder: StreamEncoder,
+    decoder: StreamDecoder,
+}
+
+impl RawPeer {
+    /// Establish a stream from `local` to `remote` at `address`. The
+    /// deployment registers the stream when it reads the last header sent
+    /// here, which can be just after this returns.
+    pub async fn establish(pki: &Pki, address: SocketAddr, local: &str, remote: &str) -> Self {
+        let header = stream_header(Some(local), remote);
+        let mut socket = TcpStream::connect(address).await.expect("connect");
+        let (mut encoder, opening) = StreamEncoder::open(&header).expect("a stream header");
+        socket.write_all(&opening).await.expect("write a header");
+        let mut decoder = StreamDecoder::new(CodecLimits::PILOT);
+        expect_element(&mut socket, &mut decoder, "features", STREAM).await;
+        let starttls = Element::builder("starttls", TLS).build();
+        let bytes = encoder.element(&starttls).expect("an encodable element");
+        socket.write_all(&bytes).await.expect("write STARTTLS");
+        expect_element(&mut socket, &mut decoder, "proceed", TLS).await;
+
+        let connector = TlsConnector::from(Arc::new(pki.client_config(local)));
+        let server_name = ServerName::try_from(remote.to_owned()).expect("a server name");
+        let mut tls = connector
+            .connect(server_name, socket)
+            .await
+            .expect("the TLS handshake");
+
+        let (mut encoder, opening) = StreamEncoder::open(&header).expect("a stream header");
+        tls.write_all(&opening).await.expect("write a header");
+        let mut decoder = StreamDecoder::new(CodecLimits::PILOT);
+        expect_element(&mut tls, &mut decoder, "features", STREAM).await;
+        // An initial response of `=` is an empty one (RFC 6120 §6.4.2):
+        // no authorization identity.
+        let auth = Element::builder("auth", SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "EXTERNAL",
+            )
+            .append("=")
+            .build();
+        let bytes = encoder.element(&auth).expect("an encodable element");
+        tls.write_all(&bytes)
+            .await
+            .expect("write the SASL exchange");
+        expect_element(&mut tls, &mut decoder, "success", SASL).await;
+
+        let (encoder, opening) = StreamEncoder::open(&header).expect("a stream header");
+        tls.write_all(&opening).await.expect("write a header");
+        let mut decoder = StreamDecoder::new(CodecLimits::PILOT);
+        expect_element(&mut tls, &mut decoder, "features", STREAM).await;
+        Self {
+            tls,
+            encoder,
+            decoder,
+        }
+    }
+
+    /// `element` serialised as a first-level element of the stream.
+    pub fn encode(&mut self, element: &Element) -> Vec<u8> {
+        self.encoder.element(element).expect("an encodable element")
+    }
+
+    /// Write `bytes` on the established stream.
+    pub async fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.tls.write_all(bytes).await?;
+        self.tls.flush().await
+    }
+
+    /// Read until the deployment closes the connection or `wait` passes:
+    /// the stream error it sent, if any, whether it closed, and when the
+    /// reader stopped.
+    pub async fn read_until_closed(
+        &mut self,
+        wait: Duration,
+    ) -> (Option<StreamErrorCondition>, bool, Instant) {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut error = None;
+        let mut chunk = [0u8; 4096];
+        let closed = loop {
+            while let Ok(Some(item)) = self.decoder.next_item() {
+                if let Inbound::Element(element) = item {
+                    if element.is("error", STREAM) {
+                        error = Some(StreamErrorCondition::from_peer_element(element));
+                    }
+                }
+            }
+            match tokio::time::timeout_at(deadline, self.tls.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => break true,
+                Ok(Ok(read)) => {
+                    if self.decoder.push(&chunk[..read]).is_err() {
+                        break true;
+                    }
+                }
+                Err(_) => break false,
+            }
+        };
+        while let Ok(Some(item)) = self.decoder.next_item() {
+            if let Inbound::Element(element) = item {
+                if element.is("error", STREAM) {
+                    error = Some(StreamErrorCondition::from_peer_element(element));
+                }
+            }
+        }
+        (error, closed, Instant::now())
+    }
+}
+
+/// A stanza sink that keeps every stanza it is offered and refuses it, as
+/// the sink of this release does.
+#[derive(Debug, Default)]
+pub struct RecordingSink {
+    stanzas: Mutex<Vec<Element>>,
+}
+
+impl RecordingSink {
+    /// The stanzas offered so far.
+    pub fn stanzas(&self) -> Vec<Element> {
+        match self.stanzas.lock() {
+            Ok(stanzas) => stanzas.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// How many stanzas were offered so far.
+    pub fn count(&self) -> usize {
+        match self.stanzas.lock() {
+            Ok(stanzas) => stanzas.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        }
+    }
+}
+
+impl StanzaSink for RecordingSink {
+    fn offer(&self, _stream: &VerifiedPeerStream, stanza: Element) -> SinkVerdict {
+        match self.stanzas.lock() {
+            Ok(mut stanzas) => stanzas.push(stanza),
+            Err(poisoned) => poisoned.into_inner().push(stanza),
+        }
+        SinkVerdict::Refuse
+    }
 }

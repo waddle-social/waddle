@@ -7,13 +7,16 @@
 //! verifier again, and records are processed inline.
 //!
 //! Reads are rate limited per socket and globally: a peer over its rate is
-//! read more slowly, which its deadlines still bound. Only the socket read
-//! awaits; every other step is synchronous, so a read cancelled by a
-//! deadline or a shutdown loses no input.
+//! read more slowly, which its deadlines still bound. The transport keeps
+//! the total time its reads have waited for the rates
+//! ([`Transport::throttled`]), so a deadline that should charge the peer
+//! only for time the server was willing to read can add it back. Only the
+//! rate wait and the socket read await; every other step is synchronous,
+//! so a read cancelled by a deadline or a shutdown loses no input.
 
 use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustls::Connection;
 use thiserror::Error;
@@ -48,6 +51,38 @@ pub(super) enum TransportError {
     WorkerLost,
 }
 
+/// Time reads have waited for the input rates.
+#[derive(Debug, Default)]
+struct Throttle {
+    /// Waits that have ended.
+    total: Duration,
+    /// The wait begun last, from its start to when it is due to end. A
+    /// wait whose read was cancelled counts until it was due to end or the
+    /// next read began, whichever came first.
+    current: Option<(Instant, Instant)>,
+}
+
+impl Throttle {
+    fn begin(&mut self, now: Instant, delay: Duration) {
+        self.settle(now);
+        self.current = Some((now, now + delay));
+    }
+
+    /// Count the wait begun last up to `now` and end it.
+    fn settle(&mut self, now: Instant) {
+        if let Some((start, end)) = self.current.take() {
+            self.total += end.min(now).saturating_duration_since(start);
+        }
+    }
+
+    fn total(&self, now: Instant) -> Duration {
+        let current = self.current.map_or(Duration::ZERO, |(start, end)| {
+            end.min(now).saturating_duration_since(start)
+        });
+        self.total + current
+    }
+}
+
 /// One connection's socket and, after STARTTLS, its TLS session.
 pub(super) struct Transport {
     socket: TcpStream,
@@ -55,6 +90,7 @@ pub(super) struct Transport {
     /// Ciphertext read from the socket that rustls has not taken yet.
     pending: Vec<u8>,
     bucket: TokenBucket,
+    throttle: Throttle,
     capacity: Arc<Capacity>,
     activity: Arc<Activity>,
 }
@@ -71,9 +107,22 @@ impl Transport {
             tls: None,
             pending: Vec::new(),
             bucket: TokenBucket::new(rate, Instant::now()),
+            throttle: Throttle::default(),
             capacity,
             activity,
         }
+    }
+
+    /// The total time this transport's reads have waited for the input
+    /// rates up to `now`, including a wait still in progress.
+    pub(super) fn throttled(&self, now: Instant) -> Duration {
+        self.throttle.total(now)
+    }
+
+    /// How long a socket read beginning at `now` would first wait for the
+    /// input rates.
+    pub(super) fn next_wait(&self, now: Instant) -> Duration {
+        self.bucket.delay(now).max(self.capacity.input_delay(now))
     }
 
     /// The TLS session once its handshake has completed.
@@ -111,14 +160,17 @@ impl Transport {
         }
     }
 
-    /// One rate-limited socket read.
+    /// One rate-limited socket read. The wait for the rates is recorded
+    /// before it starts, so a wait cut short by cancellation still counts
+    /// for the time it lasted.
     async fn read_socket(&mut self, buffer: &mut [u8]) -> Result<usize, TransportError> {
-        let delay = self
-            .bucket
-            .delay(Instant::now())
-            .max(self.capacity.input_delay());
+        let now = Instant::now();
+        self.throttle.settle(now);
+        let delay = self.next_wait(now);
         if !delay.is_zero() {
+            self.throttle.begin(now, delay);
             tokio::time::sleep(delay).await;
+            self.throttle.settle(Instant::now());
         }
         let read = self.socket.read(buffer).await?;
         if read > 0 {

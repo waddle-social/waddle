@@ -29,7 +29,7 @@ use super::document::{
 use super::error::{ConfigError, ConfigSection};
 use super::limits::{
     Deadlines, ResourceLimits, MAX_ENDPOINTS_PER_DOMAIN, MAX_ENDPOINT_DOMAINS, MAX_LIST_ENTRIES,
-    MAX_LOCAL_DOMAINS, MAX_PRIVATE_CA_PROFILES, MAX_PROFILE_FILES,
+    MAX_LOCAL_DOMAINS, MAX_PRIVATE_CA_PROFILES, MAX_PROFILE_FILES, MIN_INPUT_BYTES_PER_SECOND,
 };
 use super::load::MaterialReader;
 use crate::s2s::verify::{
@@ -589,20 +589,31 @@ fn endpoints(
     Ok(endpoints)
 }
 
-/// A lowered count: present values must be within `1..=ceiling`.
-fn count(name: &'static str, value: Option<usize>, ceiling: usize) -> Result<usize, ConfigError> {
+/// A count within `1..=ceiling`, or the default.
+fn count(
+    name: &'static str,
+    value: Option<usize>,
+    default: usize,
+    ceiling: usize,
+) -> Result<usize, ConfigError> {
     match value {
-        None => Ok(ceiling),
+        None => Ok(default),
         Some(value) if value > 0 && value <= ceiling => Ok(value),
         Some(_) => Err(ConfigError::LimitOutOfRange(name)),
     }
 }
 
-/// A lowered rate: present values must be within `1..=ceiling`.
-fn rate(name: &'static str, value: Option<u32>, ceiling: u32) -> Result<u32, ConfigError> {
+/// A rate or burst within `floor..=ceiling`, or the default.
+fn rate(
+    name: &'static str,
+    value: Option<u32>,
+    default: u32,
+    floor: u32,
+    ceiling: u32,
+) -> Result<u32, ConfigError> {
     match value {
-        None => Ok(ceiling),
-        Some(value) if value > 0 && value <= ceiling => Ok(value),
+        None => Ok(default),
+        Some(value) if value >= floor.max(1) && value <= ceiling => Ok(value),
         Some(_) => Err(ConfigError::LimitOutOfRange(name)),
     }
 }
@@ -628,75 +639,137 @@ fn duration(
 }
 
 fn limits(document: &LimitsDocument) -> Result<(ResourceLimits, Deadlines), ConfigError> {
+    let limits = resource_limits(document)?;
+    check_limits_fit(&limits)?;
+    Ok((limits, deadlines(document)?))
+}
+
+fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigError> {
+    let default = ResourceLimits::DEFAULT;
     let ceiling = ResourceLimits::CEILING;
+    let cap = |name, value, pick: fn(&ResourceLimits) -> usize| {
+        count(name, value, pick(&default), pick(&ceiling))
+    };
     let mut limits = ResourceLimits {
-        max_sockets: count("max_sockets", document.max_sockets, ceiling.max_sockets)?,
-        max_inbound_sockets: count(
-            "max_inbound_sockets",
-            document.max_inbound_sockets,
-            ceiling.max_inbound_sockets,
-        )?,
-        max_outbound_sockets: count(
-            "max_outbound_sockets",
-            document.max_outbound_sockets,
-            ceiling.max_outbound_sockets,
-        )?,
-        max_unauthenticated: count(
-            "max_unauthenticated",
-            document.max_unauthenticated,
-            ceiling.max_unauthenticated,
-        )?,
-        max_unauthenticated_per_address: count(
+        max_sockets: cap("max_sockets", document.max_sockets, |l| l.max_sockets)?,
+        max_inbound_sockets: cap("max_inbound_sockets", document.max_inbound_sockets, |l| {
+            l.max_inbound_sockets
+        })?,
+        max_outbound_sockets: cap("max_outbound_sockets", document.max_outbound_sockets, |l| {
+            l.max_outbound_sockets
+        })?,
+        max_unauthenticated: cap("max_unauthenticated", document.max_unauthenticated, |l| {
+            l.max_unauthenticated
+        })?,
+        max_unauthenticated_per_address: cap(
             "max_unauthenticated_per_address",
             document.max_unauthenticated_per_address,
-            ceiling.max_unauthenticated_per_address,
+            |l| l.max_unauthenticated_per_address,
         )?,
-        max_inbound_handshakes: count(
+        max_inbound_handshakes: cap(
             "max_inbound_handshakes",
             document.max_inbound_handshakes,
-            ceiling.max_inbound_handshakes,
+            |l| l.max_inbound_handshakes,
         )?,
-        max_outbound_handshakes: count(
+        max_outbound_handshakes: cap(
             "max_outbound_handshakes",
             document.max_outbound_handshakes,
-            ceiling.max_outbound_handshakes,
+            |l| l.max_outbound_handshakes,
         )?,
-        max_dialing: count("max_dialing", document.max_dialing, ceiling.max_dialing)?,
-        max_backoff_destinations: count(
+        max_dialing: cap("max_dialing", document.max_dialing, |l| l.max_dialing)?,
+        max_backoff_destinations: cap(
             "max_backoff_destinations",
             document.max_backoff_destinations,
-            ceiling.max_backoff_destinations,
+            |l| l.max_backoff_destinations,
         )?,
-        max_streams: count("max_streams", document.max_streams, ceiling.max_streams)?,
-        max_peers: count("max_peers", document.max_peers, ceiling.max_peers)?,
-        max_negotiating_per_peer: count(
+        max_streams: cap("max_streams", document.max_streams, |l| l.max_streams)?,
+        max_peers: cap("max_peers", document.max_peers, |l| l.max_peers)?,
+        max_negotiating_per_peer: cap(
             "max_negotiating_per_peer",
             document.max_negotiating_per_peer,
-            ceiling.max_negotiating_per_peer,
+            |l| l.max_negotiating_per_peer,
         )?,
-        ..ceiling
+        ..default
     };
-    limits.accept_rate.per_second = rate(
+    let connections = |name, value, default, ceiling| rate(name, value, default, 1, ceiling);
+    limits.accept_rate.per_second = connections(
         "accept_per_second",
         document.accept_per_second,
+        default.accept_rate.per_second,
         ceiling.accept_rate.per_second,
     )?;
-    limits.accept_rate.burst = rate(
+    limits.accept_rate.burst = connections(
         "accept_burst",
         document.accept_burst,
+        default.accept_rate.burst,
         ceiling.accept_rate.burst,
     )?;
-    limits.accept_rate_per_address.per_second = rate(
+    limits.accept_rate_per_address.per_second = connections(
         "accept_per_address_per_second",
         document.accept_per_address_per_second,
+        default.accept_rate_per_address.per_second,
         ceiling.accept_rate_per_address.per_second,
     )?;
-    limits.accept_rate_per_address.burst = rate(
+    limits.accept_rate_per_address.burst = connections(
         "accept_per_address_burst",
         document.accept_per_address_burst,
+        default.accept_rate_per_address.burst,
         ceiling.accept_rate_per_address.burst,
     )?;
+    limits.input_rate_global.per_second = rate(
+        "input_per_second",
+        document.input_per_second,
+        default.input_rate_global.per_second,
+        MIN_INPUT_BYTES_PER_SECOND,
+        ceiling.input_rate_global.per_second,
+    )?;
+    limits.input_rate_global.burst = rate(
+        "input_burst",
+        document.input_burst,
+        default.input_rate_global.burst,
+        1,
+        ceiling.input_rate_global.burst,
+    )?;
+    limits.input_rate_per_socket.per_second = rate(
+        "input_per_socket_per_second",
+        document.input_per_socket_per_second,
+        default.input_rate_per_socket.per_second,
+        MIN_INPUT_BYTES_PER_SECOND,
+        ceiling.input_rate_per_socket.per_second,
+    )?;
+    limits.input_rate_per_socket.burst = rate(
+        "input_per_socket_burst",
+        document.input_per_socket_burst,
+        default.input_rate_per_socket.burst,
+        1,
+        ceiling.input_rate_per_socket.burst,
+    )?;
+    Ok(limits)
+}
 
+/// Refuse limits that are each within range but do not fit together.
+fn check_limits_fit(limits: &ResourceLimits) -> Result<(), ConfigError> {
+    // Established streams never take the sockets unauthenticated
+    // connections need to negotiate.
+    if limits.max_streams + limits.max_unauthenticated > limits.max_sockets {
+        return Err(ConfigError::InconsistentLimit("max_streams"));
+    }
+    // Every peer could hold an inbound stream with an inbound socket to
+    // spare for a new connection.
+    if limits.max_peers >= limits.max_inbound_sockets {
+        return Err(ConfigError::InconsistentLimit("max_peers"));
+    }
+    // One socket can never be granted more than every socket together.
+    if limits.input_rate_global.per_second < limits.input_rate_per_socket.per_second {
+        return Err(ConfigError::InconsistentLimit("input_per_second"));
+    }
+    if limits.input_rate_global.burst < limits.input_rate_per_socket.burst {
+        return Err(ConfigError::InconsistentLimit("input_burst"));
+    }
+    Ok(())
+}
+
+fn deadlines(document: &LimitsDocument) -> Result<Deadlines, ConfigError> {
     let defaults = Deadlines::DEFAULT;
     let ceilings = Deadlines::CEILING;
     let deadlines = Deadlines {
@@ -782,5 +855,5 @@ fn limits(document: &LimitsDocument) -> Result<(ResourceLimits, Deadlines), Conf
     if deadlines.backoff_initial > deadlines.backoff_max {
         return Err(ConfigError::LimitOutOfRange("backoff_initial_ms"));
     }
-    Ok((limits, deadlines))
+    Ok(deadlines)
 }

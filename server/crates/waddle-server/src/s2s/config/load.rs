@@ -5,7 +5,7 @@
 //! `WADDLE_S2S_CONFIG_FILE` read; while S2S is off, no S2S file is opened,
 //! no listener is bound and no peer is dialled.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use tokio::fs::File;
@@ -33,9 +33,17 @@ pub enum S2sActivation {
 impl S2sActivation {
     /// Read the process environment.
     pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_variables(|name| std::env::var_os(name))
+    }
+
+    /// Read the two variables through `variable`, which returns a
+    /// variable's value as the environment would hold it.
+    pub fn from_variables(
+        variable: impl Fn(&str) -> Option<OsString>,
+    ) -> Result<Self, ConfigError> {
         Self::from_os_values(
-            std::env::var_os(ENABLED_VARIABLE).as_deref(),
-            std::env::var_os(CONFIG_FILE_VARIABLE).map(PathBuf::from),
+            variable(ENABLED_VARIABLE).as_deref(),
+            variable(CONFIG_FILE_VARIABLE).map(PathBuf::from),
         )
     }
 

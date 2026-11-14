@@ -28,7 +28,7 @@ use super::admission::ConnectionAdmission;
 use super::capacity::{Capacity, InboundSlot, OutboundSlot};
 use super::endpoints::{ConfiguredEndpoints, EndpointResolver, Endpoints, ResolveError};
 use super::peer_stream::{StreamDirection, VerifiedPeerStream};
-use super::registry::{Activity, DialRefusal, DialSlot, Registry};
+use super::registry::{Activity, DialRefusal, DialSlot, DialStart, Registry};
 use super::session::{is_peer_failure, EstablishedSender, Role, Session, SessionStart};
 use super::sink::{RefuseAllStanzas, StanzaSink};
 use super::telemetry;
@@ -133,35 +133,39 @@ impl Shared {
         self.tasks.close();
     }
 
-    /// Admit an inbound socket from `address`. When the inbound socket cap
-    /// is full, the inbound stream that has carried no traffic the longest
-    /// is evicted if that has lasted the eviction time, and its socket
-    /// makes room for this one.
+    /// Admit an inbound socket from `address`. When every limit but the
+    /// inbound socket cap admits it and that cap is full, the inbound
+    /// stream that has carried no traffic the longest is evicted if that
+    /// has lasted the eviction time, and this socket takes its place. The
+    /// socket's peer is unknown at accept, so in `open` mode only a stream
+    /// outside the reserve can be evicted for it.
     fn admit_inbound(&self, address: std::net::IpAddr) -> Result<InboundSlot, S2sResource> {
         match self.capacity.admit_inbound(address) {
             Err(S2sResource::Sockets) => {
-                let socket = self
+                let newcomer_reserved = !self.config.admission().holds_reserve();
+                let evicted = self
                     .registry
-                    .evict_for_socket(StreamDirection::Inbound, Instant::now())
+                    .evict_for_socket(StreamDirection::Inbound, newcomer_reserved, Instant::now())
                     .ok_or(S2sResource::Sockets)?;
-                socket.release();
-                self.capacity.admit_inbound(address)
+                self.capacity.admit_inbound_replacing(address, &evicted)
             }
             admitted => admitted,
         }
     }
 
-    /// Admit an outbound socket, evicting an outbound stream without
-    /// traffic as [`Shared::admit_inbound`] does for inbound ones.
-    fn admit_outbound(&self) -> Result<OutboundSlot, S2sResource> {
+    /// Admit an outbound socket to `remote`, evicting an outbound stream
+    /// without traffic as [`Shared::admit_inbound`] does for inbound ones.
+    /// The remote domain is known, so a reserved peer's attempt may evict
+    /// another reserved peer's stream when no other stream can be evicted.
+    fn admit_outbound(&self, remote: &CanonicalDomain) -> Result<OutboundSlot, S2sResource> {
         match self.capacity.admit_outbound() {
             Err(S2sResource::Sockets) => {
-                let socket = self
+                let newcomer_reserved = self.config.admission().is_reserved_peer(remote);
+                let evicted = self
                     .registry
-                    .evict_for_socket(StreamDirection::Outbound, Instant::now())
+                    .evict_for_socket(StreamDirection::Outbound, newcomer_reserved, Instant::now())
                     .ok_or(S2sResource::Sockets)?;
-                socket.release();
-                self.capacity.admit_outbound()
+                self.capacity.admit_outbound_replacing(&evicted)
             }
             admitted => admitted,
         }
@@ -326,10 +330,7 @@ impl S2sHandle {
             .admission()
             .decide(remote)
             .map_err(ConnectError::NotAdmitted)?;
-        if let Some(stream) = shared.registry.outbound(local, remote) {
-            return Ok(stream);
-        }
-        let dial = shared
+        let start = shared
             .registry
             .begin_dial(local, remote, Instant::now())
             .map_err(|refusal| match refusal {
@@ -337,6 +338,10 @@ impl S2sHandle {
                 DialRefusal::InProgress => ConnectError::InProgress,
                 DialRefusal::Busy => ConnectError::Busy,
             })?;
+        let dial = match start {
+            DialStart::Established(stream) => return Ok(stream),
+            DialStart::Dial(dial) => dial,
+        };
         let endpoints = shared
             .resolver
             .resolve(remote)
@@ -489,7 +494,7 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
             return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
         }
     };
-    let slot = match shared.admit_outbound() {
+    let slot = match shared.admit_outbound(&attempt.remote) {
         Ok(slot) => slot,
         Err(resource) => {
             telemetry::capacity_refused(StreamDirection::Outbound, resource);

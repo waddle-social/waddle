@@ -14,8 +14,8 @@ use waddle_xmpp::s2s::StreamErrorCondition;
 use waddle_xmpp::telemetry::attributes::S2sOutcome;
 
 use crate::support::{
-    domain, eventually, header, listener, pair, raw_exchange, raw_exchange_until, start, Pki,
-    Received, Spec, HOME_A, HOME_B,
+    dead_port, domain, eventually, header, listener, pair, raw_exchange, raw_exchange_until, start,
+    Pki, Received, Spec, HOME_A, HOME_B,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -310,9 +310,9 @@ async fn admission_is_checked_before_anything_is_dialled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_endpoint_fails_and_backs_off() {
     let pki = Pki::new();
-    // A port that was bound and released, so nothing listens on it.
-    let (unused, closed_address) = listener().await;
-    drop(unused);
+    // A port bound for the whole test without listening, so every
+    // connection to it is refused.
+    let (_held, closed_address) = dead_port();
     let (listener_a, _) = listener().await;
     let mut spec = Spec::new(HOME_A, HOME_B);
     spec.endpoints = vec![(HOME_B, closed_address)];

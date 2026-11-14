@@ -9,7 +9,11 @@
 //! established stream ends when its certificate evidence or its maximum
 //! age runs out, when it has received and sent nothing, not even
 //! whitespace, for the idle time, or when one unfinished element stays
-//! unfinished too long.
+//! unfinished too long. That last deadline charges the peer only for time
+//! the server was willing to read: time its reads waited for the input
+//! rates is added back, up to [`MAX_INCOMPLETE_ELEMENT_TIME`] for the
+//! element in all, so a large stanza from a peer that is being read slowly
+//! still arrives while a peer that stops sending is still closed.
 //!
 //! The end of the shutdown drain (abort) interrupts every step, including
 //! a TLS handshake or a write in progress.
@@ -38,6 +42,7 @@ use super::service::Shared;
 use super::sink::SinkVerdict;
 use super::telemetry;
 use super::transport::{Transport, TransportError};
+use crate::s2s::config::MAX_INCOMPLETE_ELEMENT_TIME;
 use crate::s2s::verify::{
     initiating_config, receiving_config, OutboundTransport, PeerVerifier, Verification,
     VerifiedPeer,
@@ -95,6 +100,26 @@ enum DeadlineKind {
     Expired,
 }
 
+/// An unfinished first-level element on an established stream.
+#[derive(Debug, Clone, Copy)]
+struct Unfinished {
+    /// When the element began, or the element before it completed.
+    since: Instant,
+    /// The transport's total wait for the input rates at `since`.
+    waited: Duration,
+}
+
+impl Unfinished {
+    /// When the element has had `allowed` of time the server was willing
+    /// to read, given that reads have waited `waited` in total for the
+    /// rates by now and the next read will wait `upcoming` before it
+    /// starts; at the latest [`MAX_INCOMPLETE_ELEMENT_TIME`] after `since`.
+    fn deadline(&self, allowed: Duration, waited: Duration, upcoming: Duration) -> Instant {
+        let held_back = waited.saturating_sub(self.waited) + upcoming;
+        (self.since + allowed + held_back).min(self.since + MAX_INCOMPLETE_ELEMENT_TIME)
+    }
+}
+
 enum Event {
     Shutdown,
     Evicted,
@@ -118,7 +143,7 @@ pub(super) struct Session {
     stage_deadline: Instant,
     sasl_deadline: Option<Instant>,
     phase: NegotiationPhase,
-    incomplete_since: Option<Instant>,
+    incomplete: Option<Unfinished>,
     expiry: Option<Instant>,
     verified: Option<VerifiedPeer>,
     negotiation: Option<NegotiationSlot>,
@@ -155,7 +180,7 @@ impl Session {
             stage_deadline: Instant::now() + deadlines.stage,
             sasl_deadline: None,
             phase,
-            incomplete_since: None,
+            incomplete: None,
             expiry: None,
             verified: None,
             negotiation: None,
@@ -227,6 +252,10 @@ impl Session {
                     self.replaced = true;
                     self.stream.signal(Signal::Conflict)
                 }
+                // A read that waited for the input rates after the
+                // deadline was computed moved the incomplete-element
+                // deadline later; one that is no longer due is not acted on.
+                Event::Deadline(_) if self.deadline().0 > Instant::now() => continue,
                 Event::Deadline(DeadlineKind::Timeout) => self.stream.signal(Signal::Timeout),
                 Event::Deadline(DeadlineKind::Expired) => self.stream.signal(Signal::Expired),
                 Event::Read(Ok(0)) => return S2sOutcome::PeerClosed,
@@ -246,7 +275,8 @@ impl Session {
     /// the input completed an element or a stream header or ended the
     /// stream, which is traffic; whitespace and partial elements are not.
     /// On an established stream, completing an element restarts the
-    /// unfinished-element deadline for the element that follows it.
+    /// unfinished-element deadline for the element that follows it; partial
+    /// input never does.
     fn after_receive(&mut self, progressed: bool) {
         if let Role::Inbound { admission, .. } = &self.role {
             if admission.claim() == Claim::Refused {
@@ -258,9 +288,13 @@ impl Session {
         }
         if self.stream.phase() == NegotiationPhase::Established {
             if self.stream.retained_bytes() == 0 {
-                self.incomplete_since = None;
-            } else if progressed || self.incomplete_since.is_none() {
-                self.incomplete_since = Some(Instant::now());
+                self.incomplete = None;
+            } else if progressed || self.incomplete.is_none() {
+                let now = Instant::now();
+                self.incomplete = Some(Unfinished {
+                    since: now,
+                    waited: self.transport.throttled(now),
+                });
             }
         }
     }
@@ -555,9 +589,13 @@ impl Session {
         let now = Instant::now();
         if self.phase == NegotiationPhase::Established {
             let idle = now + deadlines.idle.saturating_sub(self.activity.idle(now));
-            let incomplete = self
-                .incomplete_since
-                .map(|since| since + deadlines.incomplete_element);
+            let incomplete = self.incomplete.map(|unfinished| {
+                unfinished.deadline(
+                    deadlines.incomplete_element,
+                    self.transport.throttled(now),
+                    self.transport.next_wait(now),
+                )
+            });
             let timeout = incomplete.map_or(idle, |incomplete| incomplete.min(idle));
             return match self.expiry {
                 Some(expiry) if expiry <= timeout => (expiry, DeadlineKind::Expired),
@@ -644,8 +682,9 @@ impl Session {
 
 /// Whether an outbound attempt that ended with `outcome` failed because of
 /// the peer or the path to it, which backs the domain off. Local capacity
-/// and shutdown do not, and neither does a refusal of the domain's own
-/// admission, which no retry changes.
+/// and shutdown do not, nor does a refusal of the domain's own admission,
+/// which no retry changes, nor a local `conflict`, which another stream for
+/// the same pair caused and which says nothing about the peer.
 pub(super) fn is_peer_failure(outcome: S2sOutcome) -> bool {
     matches!(
         outcome,
@@ -657,7 +696,6 @@ pub(super) fn is_peer_failure(outcome: S2sOutcome) -> bool {
             | S2sOutcome::PeerClosed
             | S2sOutcome::Timeout
             | S2sOutcome::Expired
-            | S2sOutcome::Conflict
             | S2sOutcome::Io
     )
 }

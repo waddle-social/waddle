@@ -4,12 +4,22 @@
 //! Every value has a default and a ceiling, and configuration may set any
 //! value from one up to its ceiling, never beyond, so a configuration file
 //! cannot weaken the bounds recorded in
-//! `server/docs/planning/s2s-connection-manager-2047.md`. Every cap and rate
-//! defaults to its ceiling, so those can only be lowered. Six deadlines
-//! default below their ceilings and can also be raised: the
+//! `server/docs/planning/s2s-connection-manager-2047.md`. Every rate and
+//! most caps default to their ceilings, so those can only be lowered; the
+//! unauthenticated sockets per source address and the negotiating streams
+//! per peer default below their ceilings and can also be raised. Six
+//! deadlines default below their ceilings and can also be raised: the
 //! established-stream idle timeout, the maximum connection age, the
 //! eviction idle time, the replacement interval and the two backoff
 //! durations.
+//!
+//! The input rates also have a floor, [`MIN_INPUT_BYTES_PER_SECOND`], so a
+//! stanza at the codec's ceiling can always arrive within
+//! [`MAX_INCOMPLETE_ELEMENT_TIME`]. The loader also refuses limits that do
+//! not fit together: established streams and unauthenticated sockets
+//! together must fit the socket cap, so negotiation always has sockets;
+//! the peer cap must stay below the inbound socket cap; and the global
+//! input rate and burst must be at least the per-socket ones.
 
 use std::time::Duration;
 
@@ -43,6 +53,18 @@ pub const MAX_PRIVATE_CA_PROFILES: usize = 32;
 /// together.
 pub const MAX_PROFILE_FILES: usize = 24;
 
+/// The lowest configurable input rate, per socket and globally, in bytes
+/// per second: a stanza at the codec's 512 KiB ceiling arrives in at most
+/// 16 seconds at this rate, within [`MAX_INCOMPLETE_ELEMENT_TIME`].
+pub const MIN_INPUT_BYTES_PER_SECOND: u32 = 32 * 1024;
+
+/// The longest one first-level element on an established stream may stay
+/// unfinished, however long the input rates held its reads back. The
+/// incomplete-element deadline ([`Deadlines::incomplete_element`]) charges
+/// the peer only for time the server was willing to read; this bounds the
+/// whole time.
+pub const MAX_INCOMPLETE_ELEMENT_TIME: Duration = Duration::from_secs(30);
+
 /// A token bucket: `per_second` tokens accrue each second up to `burst`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimit {
@@ -62,7 +84,9 @@ pub struct ResourceLimits {
     pub max_outbound_sockets: usize,
     /// Inbound sockets that have not completed authentication.
     pub max_unauthenticated: usize,
-    /// Unauthenticated inbound sockets from one source address.
+    /// Unauthenticated inbound sockets from one source address. The
+    /// default is below the inbound handshake cap, so one source address
+    /// cannot hold every inbound handshake.
     pub max_unauthenticated_per_address: usize,
     /// TLS handshakes in progress on inbound connections. Each direction
     /// has its own verifier workers of this size, so inbound handshakes
@@ -102,14 +126,24 @@ pub struct ResourceLimits {
     /// entry updated longest ago.
     pub max_backoff_destinations: usize,
     /// Bytes read from one socket per second, with its burst. A peer over
-    /// its rate is read more slowly; the connection is not closed for it.
+    /// its rate is read more slowly; the connection is not closed for it,
+    /// and the time its reads wait is not charged against its
+    /// incomplete-element deadline.
     pub input_rate_per_socket: RateLimit,
     /// Bytes read from all S2S sockets together per second, with its burst.
     pub input_rate_global: RateLimit,
 }
 
 impl ResourceLimits {
-    /// The ceilings, which are also the defaults.
+    /// The defaults: every value at its ceiling except the unauthenticated
+    /// sockets per source address and the negotiating streams per peer.
+    pub const DEFAULT: Self = Self {
+        max_unauthenticated_per_address: 2,
+        max_negotiating_per_peer: 3,
+        ..Self::CEILING
+    };
+
+    /// The ceilings.
     pub const CEILING: Self = Self {
         max_sockets: 32,
         max_inbound_sockets: 16,
@@ -120,7 +154,7 @@ impl ResourceLimits {
         max_outbound_handshakes: 2,
         max_streams: 24,
         max_peers: 12,
-        max_negotiating_per_peer: 2,
+        max_negotiating_per_peer: 4,
         accept_rate: RateLimit {
             per_second: 8,
             burst: 8,
@@ -145,7 +179,7 @@ impl ResourceLimits {
 
 impl Default for ResourceLimits {
     fn default() -> Self {
-        Self::CEILING
+        Self::DEFAULT
     }
 }
 
@@ -162,7 +196,10 @@ pub struct Deadlines {
     pub sasl: Duration,
     /// Everything from TCP accept or connect to the established stream.
     pub negotiation: Duration,
-    /// An unfinished first-level element on an established stream.
+    /// An unfinished first-level element on an established stream,
+    /// counting only time the server was willing to read: time a read
+    /// waits for the input rates is added back. The element may still take
+    /// no longer than [`MAX_INCOMPLETE_ELEMENT_TIME`] in all.
     pub incomplete_element: Duration,
     /// An established stream with no traffic: nothing received, not even a
     /// whitespace keepalive, and nothing sent.
@@ -178,10 +215,10 @@ pub struct Deadlines {
     /// either direction, before it can be evicted for a new one. Whitespace
     /// keepalives do not count.
     pub eviction_idle: Duration,
-    /// The shortest time between two replacements of the stream of one
-    /// directional pair. A new authenticated stream replaces the existing
-    /// one, which closes with `conflict`, unless the pair's stream was
-    /// replaced more recently than this; the new stream is then refused
+    /// How long the stream of one directional pair is kept before a newer
+    /// one may replace it. A new authenticated stream replaces the existing
+    /// one, which closes with `conflict`, unless the existing stream was
+    /// registered less than this long ago; the new stream is then refused
     /// with `conflict` instead, so two peers cannot make a pair flap.
     pub replacement_interval: Duration,
     /// Wait after the first failed outbound attempt to a domain.
@@ -253,9 +290,10 @@ impl Default for Deadlines {
 /// and node structure of about 130 bytes per element plus about 1.1 KiB per
 /// element with attributes, about 4.9 MiB at 4,096 elements. The worst case
 /// is therefore about 9 MiB for a peer that keeps one maximal stanza
-/// unfinished, and about 220 MiB across the 24 established streams the
-/// stream cap allows. This is an analysis, not a measurement; the
-/// verification phase measures it.
+/// unfinished, which it can do for at most [`MAX_INCOMPLETE_ELEMENT_TIME`],
+/// and about 220 MiB across the 24 established streams the stream cap
+/// allows. This is an analysis, not a measurement; the verification phase
+/// measures it.
 pub const STREAM_CODEC_LIMITS: CodecLimits = CodecLimits {
     max_header_bytes: 8 * 1024,
     max_stanza_bytes: 512 * 1024,

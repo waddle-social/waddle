@@ -2,17 +2,18 @@
 //! admission with the dialback and trusted-home lists, refused domain
 //! forms, load failures and the default resource model.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use jid::{BareJid, DomainPart};
 use waddle_server::s2s::config::{
-    AdmissionMode, AdmissionRefusal, ConfigError, ConfigSection, ResourceLimits, S2sActivation,
-    ENABLED_VARIABLE, MAX_MATERIAL_FILE_BYTES,
+    AdmissionMode, AdmissionRefusal, ConfigError, ConfigSection, RateLimit, ResourceLimits,
+    S2sActivation, CONFIG_FILE_VARIABLE, ENABLED_VARIABLE, MAX_INCOMPLETE_ELEMENT_TIME,
+    MAX_MATERIAL_FILE_BYTES, MIN_INPUT_BYTES_PER_SECOND, STREAM_CODEC_LIMITS,
 };
 use waddle_server::s2s::conn::{
-    check_inherited_listener, load_config, load_enabled_config, StartupError,
+    check_inherited_listener, load_config, load_enabled_config_from, StartupError,
 };
 use waddle_server::s2s::verify::TrustProfileKind;
 use waddle_server::server::XmppConfig;
@@ -136,13 +137,65 @@ async fn startup_reads_nothing_while_s2s_is_off_and_checks_the_served_domains() 
     );
 }
 
+/// The activation variables as `pairs` set them and nothing else.
+fn variables(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+    let pairs: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
+    move |name| {
+        pairs
+            .iter()
+            .find(|(set, _)| set == name)
+            .map(|(_, value)| OsString::from(value))
+    }
+}
+
 #[tokio::test]
 async fn the_process_entry_point_is_off_without_the_flag() {
-    // Nothing in the test environment sets the flag, so S2S stays off and
-    // no S2S file is read.
-    assert_eq!(std::env::var_os(ENABLED_VARIABLE), None);
-    let config = load_enabled_config(&served(HOME_A)).await.expect("S2S off");
-    assert!(config.is_none());
+    // The variables are given explicitly, so the process environment the
+    // test runs in plays no part.
+    let pki = Pki::new();
+    let xmpp = served(HOME_A);
+    let missing_file = pki.dir.path().join("missing.toml");
+    let missing_file = missing_file.to_str().expect("a UTF-8 path");
+    for unset in [
+        variables(&[]),
+        variables(&[(ENABLED_VARIABLE, "false")]),
+        // A file named while the flag is unset or false is never read.
+        variables(&[(CONFIG_FILE_VARIABLE, missing_file)]),
+        variables(&[
+            (ENABLED_VARIABLE, "false"),
+            (CONFIG_FILE_VARIABLE, missing_file),
+        ]),
+    ] {
+        let config = load_enabled_config_from(&xmpp, unset)
+            .await
+            .expect("S2S off");
+        assert!(config.is_none());
+    }
+
+    // The flag without a file fails startup.
+    let enabled = load_enabled_config_from(&xmpp, variables(&[(ENABLED_VARIABLE, "true")])).await;
+    assert!(
+        matches!(
+            enabled,
+            Err(StartupError::Config(ConfigError::MissingConfigFile))
+        ),
+        "{enabled:?}"
+    );
+
+    // The flag and a valid file start S2S with that file.
+    let path = pki.file("entry.toml", &Spec::new(HOME_A, HOME_B).toml(&pki));
+    let path = path.to_str().expect("a UTF-8 path");
+    let config = load_enabled_config_from(
+        &xmpp,
+        variables(&[(ENABLED_VARIABLE, "true"), (CONFIG_FILE_VARIABLE, path)]),
+    )
+    .await
+    .expect("a valid configuration")
+    .expect("S2S on");
+    assert_eq!(config.local_domains(), &[domain(HOME_A)]);
 }
 
 #[test]
@@ -184,6 +237,63 @@ fn the_default_caps_leave_room_for_negotiation() {
     assert!(limits.max_peers < limits.max_inbound_sockets);
     assert!(limits.max_peers < limits.max_outbound_sockets);
     assert!(limits.max_peers <= limits.max_streams);
+    // One source address cannot hold every inbound handshake.
+    assert!(limits.max_unauthenticated_per_address < limits.max_inbound_handshakes);
+    // Two caps default below ceilings an operator may raise them to.
+    let ceiling = ResourceLimits::CEILING;
+    assert_eq!(limits.max_unauthenticated_per_address, 2);
+    assert_eq!(ceiling.max_unauthenticated_per_address, 4);
+    assert_eq!(limits.max_negotiating_per_peer, 3);
+    assert_eq!(ceiling.max_negotiating_per_peer, 4);
+}
+
+#[test]
+fn even_the_lowest_input_rate_reads_a_ceiling_stanza_within_the_element_bound() {
+    let ceiling = u64::try_from(STREAM_CODEC_LIMITS.max_stanza_bytes).expect("a size");
+    let floor = u64::from(MIN_INPUT_BYTES_PER_SECOND);
+    assert!(ceiling.div_ceil(floor) < MAX_INCOMPLETE_ELEMENT_TIME.as_secs());
+    let limits = ResourceLimits::default();
+    for rate in [limits.input_rate_per_socket, limits.input_rate_global] {
+        assert!(rate.per_second >= MIN_INPUT_BYTES_PER_SECOND);
+    }
+}
+
+#[tokio::test]
+async fn limits_load_within_their_ranges() {
+    let pki = Pki::new();
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec![
+        "max_unauthenticated_per_address = 4".to_owned(),
+        "max_negotiating_per_peer = 4".to_owned(),
+        "input_per_socket_per_second = 32768".to_owned(),
+        "input_per_socket_burst = 16384".to_owned(),
+        "input_per_second = 65536".to_owned(),
+        "input_burst = 65536".to_owned(),
+    ];
+    let config = spec.load(&pki).await.expect("limits within their ranges");
+    let limits = config.limits();
+    assert_eq!(limits.max_unauthenticated_per_address, 4);
+    assert_eq!(limits.max_negotiating_per_peer, 4);
+    assert_eq!(
+        limits.input_rate_per_socket,
+        RateLimit {
+            per_second: 32 * 1024,
+            burst: 16 * 1024,
+        }
+    );
+    assert_eq!(
+        limits.input_rate_global,
+        RateLimit {
+            per_second: 64 * 1024,
+            burst: 64 * 1024,
+        }
+    );
+
+    let config = Spec::new(HOME_A, HOME_B)
+        .load(&pki)
+        .await
+        .expect("the defaults");
+    assert_eq!(config.limits(), &ResourceLimits::default());
 }
 
 #[tokio::test]
@@ -453,6 +563,81 @@ async fn contradictory_or_incomplete_configurations_fail_to_load() {
         spec,
         |error| matches!(error, ConfigError::LimitOutOfRange("stage_timeout_ms")),
         "a zero deadline",
+    )
+    .await;
+
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["max_negotiating_per_peer = 5".to_owned()];
+    check(
+        spec,
+        |error| {
+            matches!(
+                error,
+                ConfigError::LimitOutOfRange("max_negotiating_per_peer")
+            )
+        },
+        "a per-peer budget above its ceiling",
+    )
+    .await;
+
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["input_per_socket_per_second = 1024".to_owned()];
+    check(
+        spec,
+        |error| {
+            matches!(
+                error,
+                ConfigError::LimitOutOfRange("input_per_socket_per_second")
+            )
+        },
+        "an input rate below its floor",
+    )
+    .await;
+
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["input_per_second = 1048576".to_owned()];
+    check(
+        spec,
+        |error| matches!(error, ConfigError::LimitOutOfRange("input_per_second")),
+        "an input rate above its ceiling",
+    )
+    .await;
+
+    // The default 24 streams and 8 unauthenticated sockets need 32.
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["max_sockets = 31".to_owned()];
+    check(
+        spec,
+        |error| matches!(error, ConfigError::InconsistentLimit("max_streams")),
+        "streams that would take the sockets negotiation needs",
+    )
+    .await;
+
+    // The default peer cap is 12.
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["max_inbound_sockets = 12".to_owned()];
+    check(
+        spec,
+        |error| matches!(error, ConfigError::InconsistentLimit("max_peers")),
+        "a peer cap not below the inbound socket cap",
+    )
+    .await;
+
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["input_per_second = 32768".to_owned()];
+    check(
+        spec,
+        |error| matches!(error, ConfigError::InconsistentLimit("input_per_second")),
+        "a global input rate below the per-socket rate",
+    )
+    .await;
+
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.limits = vec!["input_burst = 65536".to_owned()];
+    check(
+        spec,
+        |error| matches!(error, ConfigError::InconsistentLimit("input_burst")),
+        "a global input burst below the per-socket burst",
     )
     .await;
 

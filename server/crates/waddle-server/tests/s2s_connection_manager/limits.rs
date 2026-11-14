@@ -1,24 +1,34 @@
-//! The resource model: socket caps, per-peer budgets, deadlines, eviction
-//! and its reserve, replacement of a pair's stream, backoff and the
-//! shutdown join.
+//! The resource model: socket caps, per-peer budgets, deadlines and the
+//! input rates, eviction and its reserve, replacement of a pair's stream,
+//! backoff and the shutdown join.
 //!
 //! Every connection in these tests comes from 127.0.0.1, so a test that
 //! opens more than four in a row waits for the per-address accept rate (two
-//! a second after a burst of four).
+//! a second after a burst of four), and by default at most two of them can
+//! be unauthenticated at once.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use waddle_server::s2s::config::ResourceLimits;
-use waddle_server::s2s::conn::{ConnectError, StreamDirection};
+use waddle_server::s2s::config::{
+    Deadlines, ResourceLimits, MAX_INCOMPLETE_ELEMENT_TIME, STREAM_CODEC_LIMITS,
+};
+use waddle_server::s2s::conn::{ConnectError, ServiceOptions, StreamDirection};
+use waddle_xmpp::disco::items::DISCO_ITEMS_NS;
+use waddle_xmpp::ns::JABBER_SERVER;
 use waddle_xmpp::s2s::StreamErrorCondition;
 use waddle_xmpp::telemetry::attributes::S2sOutcome;
 use waddle_xmpp::telemetry::test_support::MetricsTestGuard;
 
 use crate::support::{
-    domain, eventually, header, listener, pair, raw_exchange, read_until_closed, start, Deployment,
-    Pki, Received, Spec, HOME_A, HOME_B,
+    dead_port, domain, eventually, header, listener, pair, raw_exchange, raw_exchange_until,
+    read_until_closed, start, start_with, Deployment, Pki, RawPeer, Received, RecordingSink, Spec,
+    HOME_A, HOME_B,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -36,6 +46,21 @@ async fn holds_streams(deployment: &Deployment, count: usize) {
         "expected {count} streams, found {}",
         deployment.handle.streams().len()
     );
+}
+
+/// The remote domains of `deployment`'s established streams.
+fn remotes(deployment: &Deployment) -> BTreeSet<String> {
+    deployment
+        .handle
+        .streams()
+        .iter()
+        .map(|stream| stream.remote().as_str().to_owned())
+        .collect()
+}
+
+/// The set of `domains`, to compare with [`remotes`].
+fn set_of(domains: &[&str]) -> BTreeSet<String> {
+    domains.iter().map(|domain| (*domain).to_owned()).collect()
 }
 
 /// Inbound connections that ended with `outcome`.
@@ -177,8 +202,17 @@ async fn shutdown_tells_negotiating_peers_and_joins_every_task() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unverified_claims_never_use_a_peers_negotiation_budget() {
     let pki = Pki::new();
-    let (a, b) = pair(&pki, |_| {}).await;
+    // Every socket here comes from one address; its unauthenticated cap is
+    // raised to its ceiling so that it admits the claims and the real
+    // home-a together.
+    let (a, b) = pair(&pki, |spec| {
+        spec.limits = vec!["max_unauthenticated_per_address = 4".to_owned()];
+    })
+    .await;
     let defaults = ResourceLimits::default();
+    assert!(
+        defaults.max_negotiating_per_peer < ResourceLimits::CEILING.max_unauthenticated_per_address
+    );
     // Raw sockets claim to be home-a and stop after the plaintext header,
     // as many as home-a's whole per-peer budget.
     let mut claims = Vec::new();
@@ -289,37 +323,79 @@ async fn the_peer_cap_counts_remote_domains() {
         .connect(&domain(HOME_A), &domain(HOME_B))
         .await
         .expect("the first peer");
+    holds_streams(&b, 1).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     c.handle
         .connect(&domain(HOME_C), &domain(HOME_B))
         .await
         .expect("the second peer evicts the idle first one");
-    assert!(
-        eventually(WAIT, || b
-            .handle
-            .streams()
-            .iter()
-            .all(|stream| stream.remote() == &domain(HOME_C)))
-        .await
-    );
+    assert!(eventually(WAIT, || remotes(&b) == set_of(&[HOME_C])).await);
+    assert!(eventually(WAIT, || a.handle.streams().is_empty()).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_full_inbound_socket_cap_with_no_quiet_stream_refuses_at_accept() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let pki = Pki::new();
+    // The peer cap stays below the inbound socket cap, as the loader
+    // requires.
     let (a, b) = pair(&pki, |spec| {
-        spec.limits = vec!["max_inbound_sockets = 1".to_owned()];
+        spec.limits = vec![
+            "max_inbound_sockets = 2".to_owned(),
+            "max_peers = 1".to_owned(),
+        ];
     })
     .await;
     a.handle
         .connect(&domain(HOME_A), &domain(HOME_B))
         .await
-        .expect("a stream holding the only inbound socket");
+        .expect("a stream holding one inbound socket");
     holds_streams(&b, 1).await;
-    // The default eviction idle time is far longer than this test, so
-    // nothing can make room.
+    // An unauthenticated socket holds the other.
+    let _held = TcpStream::connect(b.address).await.expect("connect");
+    assert!(eventually(WAIT, || b.handle.open_sockets() == 2).await);
+    // Every other limit admits a third socket, but the default eviction
+    // idle time is far longer than this test, so nothing can make room.
     let received = raw_exchange(b.address, &header(Some(HOME_A), HOME_B), WAIT).await;
     assert!(received.closed_without_xml(), "{received:?}");
+    assert!(eventually(WAIT, || inbound_refusals(&metrics, "sockets") == 1).await);
+    assert_eq!(a.handle.streams().len(), 1);
+    assert_eq!(b.handle.streams().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socket_its_source_address_refuses_never_evicts_a_stream() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let pki = Pki::new();
+    let (a, b) = pair(&pki, |spec| {
+        spec.limits = vec![
+            "max_inbound_sockets = 2".to_owned(),
+            "max_peers = 1".to_owned(),
+            "max_unauthenticated_per_address = 1".to_owned(),
+            "eviction_idle_ms = 1".to_owned(),
+        ];
+    })
+    .await;
+    a.handle
+        .connect(&domain(HOME_A), &domain(HOME_B))
+        .await
+        .expect("a stream holding one inbound socket");
+    holds_streams(&b, 1).await;
+    // An unauthenticated socket from the same address holds the other
+    // inbound socket and the address's only unauthenticated place.
+    let _held = TcpStream::connect(b.address).await.expect("connect");
+    assert!(eventually(WAIT, || b.handle.open_sockets() == 2).await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The stream is quiet long enough to be evicted and the inbound socket
+    // cap is full, but the address's own cap refuses the new socket, so
+    // nothing is evicted for it.
+    let received = raw_exchange(b.address, &header(Some(HOME_A), HOME_B), WAIT).await;
+    assert!(received.closed_without_xml(), "{received:?}");
+    assert!(eventually(WAIT, || inbound_refusals(&metrics, "source_address") == 1).await);
+    assert_eq!(inbound_refusals(&metrics, "sockets"), 0);
+    assert_eq!(inbound_endings(&metrics, "evicted"), 0);
+    assert_eq!(b.handle.streams().len(), 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(a.handle.streams().len(), 1);
 }
 
@@ -396,11 +472,194 @@ async fn a_quiet_stream_is_evicted_for_a_new_socket_at_the_default_caps() {
             == defaults.max_inbound_sockets - 1)
         .await
     );
-    let inbound = b.handle.streams();
-    assert_eq!(inbound.len(), defaults.max_inbound_sockets);
-    assert!(inbound
+    // The new stream registers on home-b once home-b reads its last
+    // header, which can be just after home-a's `connect` returned.
+    assert!(
+        eventually(WAIT, || remotes(&b).contains(HOME_A)
+            && b.handle.streams().len() == defaults.max_inbound_sockets)
+        .await,
+        "{:?}",
+        remotes(&b)
+    );
+}
+
+/// `home-b.test` in `open` mode serving `locals`, allowlisting `home-a`
+/// (a reserved peer) and trusting the test CA for `home-a` and `others`,
+/// with `limits`.
+async fn open_hub(
+    pki: &Pki,
+    locals: &[&'static str],
+    others: &[&'static str],
+    limits: &[&str],
+) -> Deployment {
+    let (listener_b, _) = listener().await;
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.mode = "open";
+    spec_b.local = locals.to_vec();
+    spec_b.private = [[HOME_A].as_slice(), others].concat();
+    spec_b.limits = limits.iter().map(|line| (*line).to_owned()).collect();
+    start(pki, &spec_b, listener_b).await
+}
+
+/// A deployment serving `locals` that admits and dials every domain of
+/// `hub`.
+async fn spokes_of(
+    pki: &Pki,
+    locals: &[&'static str],
+    hub: &Deployment,
+    hub_domains: &[&'static str],
+) -> Deployment {
+    let mut spec = Spec::new(locals[0], HOME_B);
+    spec.local = locals.to_vec();
+    spec.allow = hub_domains.to_vec();
+    spec.private = hub_domains.to_vec();
+    spec.endpoints = hub_domains
         .iter()
-        .any(|stream| stream.remote() == &domain(HOME_A)));
+        .map(|domain| (*domain, hub.address))
+        .collect();
+    let (listener, _) = listener().await;
+    start(pki, &spec, listener).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_outside_the_reserve_never_evicts_a_reserved_peer_at_the_full_cap() {
+    const RESERVED: &str = "home-a2.test";
+    const GENERAL: [&str; 3] = ["c.test", "d.test", "e.test"];
+    let pki = Pki::new();
+    let (listener_b, address_b) = listener().await;
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.mode = "open";
+    spec_b.allow = vec![HOME_A, RESERVED];
+    spec_b.private = [[HOME_A, RESERVED].as_slice(), GENERAL.as_slice()].concat();
+    // Four peers, a quarter of them reserved; every stream is soon quiet
+    // long enough to be evicted.
+    spec_b.limits = vec![
+        "max_peers = 4".to_owned(),
+        "eviction_idle_ms = 1".to_owned(),
+    ];
+    let b = start(&pki, &spec_b, listener_b).await;
+    let mut spec_peers = Spec::new(HOME_A, HOME_B);
+    spec_peers.local = [[HOME_A, RESERVED].as_slice(), GENERAL.as_slice()].concat();
+    spec_peers.endpoints = vec![(HOME_B, address_b)];
+    let (listener_peers, _) = listener().await;
+    let peers = start(&pki, &spec_peers, listener_peers).await;
+
+    // Both reserved peers connect first, so theirs are the quietest
+    // streams. They hold half of the cap, more than its reserved quarter,
+    // so the cap is full while its general share still has room.
+    for (index, local) in [HOME_A, RESERVED, GENERAL[0], GENERAL[1]]
+        .into_iter()
+        .enumerate()
+    {
+        peers
+            .handle
+            .connect(&domain(local), &domain(HOME_B))
+            .await
+            .expect("a peer within the cap");
+        holds_streams(&b, index + 1).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A third peer outside the reserve takes the place of the quietest
+    // peer outside it, never that of a reserved peer.
+    tokio::time::sleep(ACCEPT_PAUSE).await;
+    peers
+        .handle
+        .connect(&domain(GENERAL[2]), &domain(HOME_B))
+        .await
+        .expect("a peer that evicts another outside the reserve");
+    let expected = set_of(&[HOME_A, RESERVED, GENERAL[1], GENERAL[2]]);
+    assert!(
+        eventually(WAIT, || remotes(&b) == expected).await,
+        "{:?}",
+        remotes(&b)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_open_mode_a_new_socket_never_evicts_a_reserved_peers_stream() {
+    const LOCALS: [&str; 2] = [HOME_B, "muc.home-b.test"];
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let pki = Pki::new();
+    let b = open_hub(
+        &pki,
+        &LOCALS,
+        &[],
+        &[
+            "max_inbound_sockets = 2",
+            "max_peers = 1",
+            "eviction_idle_ms = 1",
+        ],
+    )
+    .await;
+    let a = spokes_of(&pki, &[HOME_A], &b, &LOCALS).await;
+    for (index, local) in LOCALS.into_iter().enumerate() {
+        a.handle
+            .connect(&domain(HOME_A), &domain(local))
+            .await
+            .expect("a stream of the allowlisted home-a");
+        holds_streams(&b, index + 1).await;
+    }
+    assert_eq!(b.handle.open_sockets(), 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Both inbound sockets carry quiet streams of a reserved peer. A new
+    // socket's peer is unknown at accept, so in `open` mode it cannot
+    // evict them.
+    let received = raw_exchange(b.address, &header(Some("anyone.test"), HOME_B), WAIT).await;
+    assert!(received.closed_without_xml(), "{received:?}");
+    assert!(eventually(WAIT, || inbound_refusals(&metrics, "sockets") == 1).await);
+    assert_eq!(inbound_endings(&metrics, "evicted"), 0);
+    assert_eq!(b.handle.streams().len(), 2);
+    assert_eq!(a.handle.streams().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_socket_evicts_a_quiet_stream_outside_the_reserve_first() {
+    const LOCALS: [&str; 2] = [HOME_B, "muc.home-b.test"];
+    const OTHER: &str = "c.test";
+    let pki = Pki::new();
+    let b = open_hub(
+        &pki,
+        &LOCALS,
+        &[OTHER],
+        &[
+            "max_inbound_sockets = 3",
+            "max_peers = 2",
+            "eviction_idle_ms = 1",
+        ],
+    )
+    .await;
+    let a = spokes_of(&pki, &[HOME_A], &b, &LOCALS).await;
+    let c = spokes_of(&pki, &[OTHER], &b, &[HOME_B]).await;
+    // home-a's two streams are the quietest; c.test's is outside the
+    // reserve.
+    for (index, local) in LOCALS.into_iter().enumerate() {
+        a.handle
+            .connect(&domain(HOME_A), &domain(local))
+            .await
+            .expect("a stream of the allowlisted home-a");
+        holds_streams(&b, index + 1).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    c.handle
+        .connect(&domain(OTHER), &domain(HOME_B))
+        .await
+        .expect("a stream outside the reserve");
+    holds_streams(&b, 3).await;
+    assert_eq!(b.handle.open_sockets(), 3);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // A new socket takes the place of c.test's stream, although home-a's
+    // streams have been quiet longer.
+    let received = raw_exchange_until(
+        b.address,
+        &header(Some("anyone.test"), HOME_B),
+        WAIT,
+        Received::offers_starttls,
+    )
+    .await;
+    assert!(received.offers_starttls(), "{received:?}");
+    assert!(eventually(WAIT, || c.handle.streams().is_empty()).await);
+    assert_eq!(remotes(&b), set_of(&[HOME_A]));
+    assert_eq!(a.handle.streams().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -542,11 +801,10 @@ async fn a_stream_younger_than_the_replacement_interval_is_kept() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_full_backoff_table_never_refuses_a_healthy_destination() {
     let pki = Pki::new();
-    // Ports that were bound and released, so nothing listens on them.
-    let (unused_one, dead_one) = listener().await;
-    let (unused_two, dead_two) = listener().await;
-    drop(unused_one);
-    drop(unused_two);
+    // Ports bound for the whole test without listening, so every
+    // connection to them is refused.
+    let (_held_one, dead_one) = dead_port();
+    let (_held_two, dead_two) = dead_port();
     let (listener_b, address_b) = listener().await;
     let _b = start(&pki, &Spec::new(HOME_B, HOME_A), listener_b).await;
     let mut spec = Spec::new(HOME_A, HOME_B);
@@ -614,4 +872,106 @@ async fn attempts_for_different_pairs_to_one_domain_run_together() {
     assert!(account.is_ok(), "{account:?}");
     assert!(muc.is_ok(), "{muc:?}");
     assert_eq!(a.handle.streams().len(), 2);
+}
+
+/// A `disco#items` result from home-a to home-b with `items` items, each
+/// one element with a `jid` and a short description, the shape the
+/// per-stanza ceiling is sized for.
+fn items_result(items: usize) -> Element {
+    let mut query = Element::builder("query", DISCO_ITEMS_NS);
+    for index in 0..items {
+        let item = Element::builder("item", DISCO_ITEMS_NS)
+            .attr(
+                xml_ncname!("jid").to_owned(),
+                format!("room-{index:04}@muc.home-a.test"),
+            )
+            .append(
+                "A room on home-a, listed in the directory with a description of what it is for.",
+            )
+            .build();
+        query = query.append(item);
+    }
+    Element::builder("iq", JABBER_SERVER)
+        .attr(xml_ncname!("type").to_owned(), "result")
+        .attr(xml_ncname!("id").to_owned(), "ceiling")
+        .attr(xml_ncname!("from").to_owned(), "alice@home-a.test/phone")
+        .attr(xml_ncname!("to").to_owned(), "bob@home-b.test")
+        .append(query.build())
+        .build()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ceiling_size_stanza_read_at_the_input_rate_is_delivered() {
+    let pki = Pki::new();
+    let sink = Arc::new(RecordingSink::default());
+    let (listener_b, address_b) = listener().await;
+    let options = ServiceOptions {
+        sink: sink.clone(),
+        ..ServiceOptions::default()
+    };
+    let b = start_with(&pki, &Spec::new(HOME_B, HOME_A), listener_b, options).await;
+    let mut peer = RawPeer::establish(&pki, address_b, HOME_A, HOME_B).await;
+    holds_streams(&b, 1).await;
+
+    // As many items as fit the per-stanza ceiling with a little room.
+    let limit = STREAM_CODEC_LIMITS.max_stanza_bytes;
+    let base = peer.encode(&items_result(0)).len();
+    let per_item = peer.encode(&items_result(1)).len() - base;
+    let items =
+        ((limit - 1024 - base) / per_item).min(STREAM_CODEC_LIMITS.max_elements_per_stanza - 2);
+    let stanza = peer.encode(&items_result(items));
+    assert!(stanza.len() <= limit, "{} bytes", stanza.len());
+    assert!(stanza.len() > limit / 10 * 9, "{} bytes", stanza.len());
+
+    // Whitespace as large as the per-socket burst drains the bucket, so
+    // the whole stanza is read at the per-socket rate: far longer than the
+    // incomplete-element deadline, all but a moment of it spent waiting
+    // for the rate, which is not charged to the peer.
+    let rate = ResourceLimits::default().input_rate_per_socket;
+    let keepalives = vec![b' '; usize::try_from(rate.burst).expect("a burst")];
+    let reading = Duration::from_secs(
+        u64::try_from(stanza.len()).expect("a length") / u64::from(rate.per_second),
+    );
+    assert!(reading > Deadlines::default().incomplete_element);
+    assert!(reading < MAX_INCOMPLETE_ELEMENT_TIME);
+    let writing = async {
+        // The deployment closes the stream once its sink refuses the
+        // stanza, which may end a write still in progress.
+        let _ = peer.write(&keepalives).await;
+        let _ = peer.write(&stanza).await;
+    };
+    let delivered = eventually(MAX_INCOMPLETE_ELEMENT_TIME, || sink.count() > 0);
+    let ((), delivered) = tokio::join!(writing, delivered);
+    assert!(delivered, "the stanza was not delivered");
+    let stanzas = sink.stanzas();
+    assert_eq!(stanzas.len(), 1);
+    assert_eq!(stanzas[0].attr("id"), Some("ceiling"));
+    let query = stanzas[0]
+        .get_child("query", DISCO_ITEMS_NS)
+        .expect("the query");
+    assert_eq!(query.children().count(), items);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_that_stops_mid_element_is_closed_at_the_incomplete_element_deadline() {
+    let pki = Pki::new();
+    let (listener_b, address_b) = listener().await;
+    let b = start(&pki, &Spec::new(HOME_B, HOME_A), listener_b).await;
+    let mut peer = RawPeer::establish(&pki, address_b, HOME_A, HOME_B).await;
+    holds_streams(&b, 1).await;
+    // The head of a stanza and part of its body, then nothing. Far less
+    // than the burst has been read, so no read waits for the rate: the
+    // whole time is time the server is willing to read.
+    let started = Instant::now();
+    peer.write(b"<message from='alice@home-a.test' to='bob@home-b.test'><body>still typ")
+        .await
+        .expect("write part of a stanza");
+    let (error, closed, at) = peer.read_until_closed(Duration::from_secs(15)).await;
+    assert!(closed);
+    assert_eq!(error, Some(StreamErrorCondition::ConnectionTimeout));
+    let lasted = at.duration_since(started);
+    let allowed = Deadlines::default().incomplete_element;
+    assert!(lasted >= allowed, "{lasted:?}");
+    assert!(lasted < allowed + Duration::from_secs(3), "{lasted:?}");
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
 }

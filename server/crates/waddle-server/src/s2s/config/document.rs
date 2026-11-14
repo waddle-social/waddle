@@ -91,8 +91,9 @@ pub(super) struct EndpointDocument {
     pub(super) address: String,
 }
 
-/// Lowered caps and deadlines; see [`super::ResourceLimits`] and
-/// [`super::Deadlines`]. Durations are in milliseconds.
+/// Caps, rates and deadlines within their ceilings; see
+/// [`super::ResourceLimits`] and [`super::Deadlines`]. Rates are in
+/// connections or bytes per second, durations in milliseconds.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct LimitsDocument {
@@ -112,6 +113,12 @@ pub(super) struct LimitsDocument {
     pub(super) accept_burst: Option<u32>,
     pub(super) accept_per_address_per_second: Option<u32>,
     pub(super) accept_per_address_burst: Option<u32>,
+    /// Bytes read from all S2S sockets together per second.
+    pub(super) input_per_second: Option<u32>,
+    pub(super) input_burst: Option<u32>,
+    /// Bytes read from one socket per second.
+    pub(super) input_per_socket_per_second: Option<u32>,
+    pub(super) input_per_socket_burst: Option<u32>,
     pub(super) connect_timeout_ms: Option<u64>,
     pub(super) stage_timeout_ms: Option<u64>,
     pub(super) sasl_timeout_ms: Option<u64>,

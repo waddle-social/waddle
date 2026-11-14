@@ -6,9 +6,9 @@
 //!
 //! A socket's place in the socket counts is a [`SocketCount`], which the
 //! registry also holds for an established stream: evicting an idle stream
-//! to make room for a new socket releases the evicted socket's count at
-//! once, while its connection sends `resource-constraint` and closes within
-//! the write deadline.
+//! to make room for a new socket hands the evicted socket's place to the
+//! new one at once, under the lock, while the evicted connection sends
+//! `resource-constraint` and closes within the write deadline.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -76,13 +76,14 @@ impl TokenBucket {
         self.tokens -= f64::from(u32::try_from(amount).unwrap_or(u32::MAX));
     }
 
-    /// How long until the balance is no longer negative.
-    pub(super) fn delay(&mut self, now: Instant) -> Duration {
-        self.refill(now);
-        if self.tokens >= 0.0 || self.per_second <= 0.0 {
+    /// How long from `now` until the balance is no longer negative.
+    pub(super) fn delay(&self, now: Instant) -> Duration {
+        let elapsed = now.saturating_duration_since(self.updated).as_secs_f64();
+        let tokens = (self.tokens + elapsed * self.per_second).min(self.burst);
+        if tokens >= 0.0 || self.per_second <= 0.0 {
             return Duration::ZERO;
         }
-        Duration::from_secs_f64(-self.tokens / self.per_second)
+        Duration::from_secs_f64(-tokens / self.per_second)
     }
 }
 
@@ -159,54 +160,88 @@ impl Capacity {
     /// Admit a new inbound socket from `address`, or name the limit that
     /// refuses it. A refused socket is closed without any XML.
     ///
-    /// The socket caps are checked first, then the global unauthenticated
-    /// cap, then every per-address limit, and only then is a global accept
-    /// token spent: a source over its own limits cannot drain the allowance
-    /// every other source shares.
+    /// Every other limit is checked before the socket caps, and nothing is
+    /// spent until all of them admit the socket: the global unauthenticated
+    /// cap, the address table, the per-address unauthenticated cap and
+    /// rate, and the global accept rate. [`S2sResource::Sockets`] therefore
+    /// refuses only a socket every other limit admits, so a caller that
+    /// evicts a stream for it ([`Capacity::admit_inbound_replacing`]) never
+    /// evicts one for a socket that is refused anyway. A source over its
+    /// own limits cannot drain the global accept allowance every other
+    /// source shares.
     pub(super) fn admit_inbound(
         self: &Arc<Self>,
         address: IpAddr,
+    ) -> Result<InboundSlot, S2sResource> {
+        self.admit_inbound_with(address, None)
+    }
+
+    /// Admit a new inbound socket from `address` in place of `evicted`, the
+    /// socket of an inbound stream evicted to make room for it. The evicted
+    /// socket's place passes to the new one under the lock, so no other
+    /// connection can take it in between. The evicted socket stops being
+    /// counted whether or not the new one is admitted.
+    pub(super) fn admit_inbound_replacing(
+        self: &Arc<Self>,
+        address: IpAddr,
+        evicted: &SocketCount,
+    ) -> Result<InboundSlot, S2sResource> {
+        self.admit_inbound_with(address, Some(evicted))
+    }
+
+    fn admit_inbound_with(
+        self: &Arc<Self>,
+        address: IpAddr,
+        evicted: Option<&SocketCount>,
     ) -> Result<InboundSlot, S2sResource> {
         let now = Instant::now();
         let limits = self.limits;
         let key = address_key(address);
         let mut state = self.state();
-        if state.sockets >= limits.max_sockets || state.inbound >= limits.max_inbound_sockets {
-            return Err(S2sResource::Sockets);
+        if let Some(evicted) = evicted {
+            evicted.release_locked(&mut state);
         }
         if state.unauthenticated >= limits.max_unauthenticated {
             return Err(S2sResource::Unauthenticated);
         }
-        if !state.addresses.contains_key(&key) {
-            state.addresses.retain(|_, entry| {
-                entry.unauthenticated > 0
-                    || now.saturating_duration_since(entry.last_seen) < ADDRESS_EXPIRY
-            });
-            if state.addresses.len() >= limits.max_tracked_addresses {
-                return Err(S2sResource::SourceAddress);
+        match state.addresses.get_mut(&key) {
+            Some(entry) => {
+                if entry.unauthenticated >= limits.max_unauthenticated_per_address {
+                    return Err(S2sResource::SourceAddress);
+                }
+                if !entry.bucket.has_token(now) {
+                    return Err(S2sResource::AcceptRate);
+                }
+            }
+            None => {
+                state.addresses.retain(|_, entry| {
+                    entry.unauthenticated > 0
+                        || now.saturating_duration_since(entry.last_seen) < ADDRESS_EXPIRY
+                });
+                if state.addresses.len() >= limits.max_tracked_addresses {
+                    return Err(S2sResource::SourceAddress);
+                }
+                // A new address has no socket and a full bucket, which the
+                // loader keeps at one token or more.
             }
         }
+        if !state.accept.has_token(now) {
+            return Err(S2sResource::AcceptRate);
+        }
+        if state.sockets >= limits.max_sockets || state.inbound >= limits.max_inbound_sockets {
+            return Err(S2sResource::Sockets);
+        }
+        // Every limit admits the socket; spend and count, under the same
+        // lock and at the same instant as the checks above.
+        state.accept.try_take(now);
         let entry = state.addresses.entry(key).or_insert_with(|| AddressState {
             bucket: TokenBucket::new(limits.accept_rate_per_address, now),
             unauthenticated: 0,
             last_seen: now,
         });
         entry.last_seen = now;
-        if entry.unauthenticated >= limits.max_unauthenticated_per_address {
-            return Err(S2sResource::SourceAddress);
-        }
-        if !entry.bucket.has_token(now) {
-            return Err(S2sResource::AcceptRate);
-        }
-        if !state.accept.try_take(now) {
-            return Err(S2sResource::AcceptRate);
-        }
-        if let Some(entry) = state.addresses.get_mut(&key) {
-            // The token was available above, under the same lock and at
-            // the same instant.
-            entry.bucket.try_take(now);
-            entry.unauthenticated += 1;
-        }
+        entry.bucket.try_take(now);
+        entry.unauthenticated += 1;
         state.sockets += 1;
         state.inbound += 1;
         state.unauthenticated += 1;
@@ -219,7 +254,26 @@ impl Capacity {
 
     /// Admit a new outbound socket.
     pub(super) fn admit_outbound(self: &Arc<Self>) -> Result<OutboundSlot, S2sResource> {
+        self.admit_outbound_with(None)
+    }
+
+    /// Admit a new outbound socket in place of `evicted`, as
+    /// [`Capacity::admit_inbound_replacing`] does for inbound ones.
+    pub(super) fn admit_outbound_replacing(
+        self: &Arc<Self>,
+        evicted: &SocketCount,
+    ) -> Result<OutboundSlot, S2sResource> {
+        self.admit_outbound_with(Some(evicted))
+    }
+
+    fn admit_outbound_with(
+        self: &Arc<Self>,
+        evicted: Option<&SocketCount>,
+    ) -> Result<OutboundSlot, S2sResource> {
         let mut state = self.state();
+        if let Some(evicted) = evicted {
+            evicted.release_locked(&mut state);
+        }
         if state.sockets >= self.limits.max_sockets
             || state.outbound >= self.limits.max_outbound_sockets
         {
@@ -265,23 +319,24 @@ impl Capacity {
         self.state().input.consume(bytes, Instant::now());
     }
 
-    /// How long every S2S socket waits before its next read, because the
-    /// global input rate is exhausted.
-    pub(super) fn input_delay(&self) -> Duration {
-        self.state().input.delay(Instant::now())
+    /// How long from `now` every S2S socket waits before its next read,
+    /// because the global input rate is exhausted.
+    pub(super) fn input_delay(&self, now: Instant) -> Duration {
+        self.state().input.delay(now)
     }
 
     /// Open sockets, for tests and logs.
     pub(super) fn open_sockets(&self) -> usize {
         self.state().sockets
     }
+}
 
-    fn release_socket(&self, direction: StreamDirection) {
-        let mut state = self.state();
-        state.sockets = state.sockets.saturating_sub(1);
+impl State {
+    fn release_socket(&mut self, direction: StreamDirection) {
+        self.sockets = self.sockets.saturating_sub(1);
         let count = match direction {
-            StreamDirection::Inbound => &mut state.inbound,
-            StreamDirection::Outbound => &mut state.outbound,
+            StreamDirection::Inbound => &mut self.inbound,
+            StreamDirection::Outbound => &mut self.outbound,
         };
         *count = count.saturating_sub(1);
     }
@@ -289,7 +344,7 @@ impl Capacity {
 
 /// One admitted socket's place in the socket counts. It is released
 /// exactly once: when its slot drops, or earlier when its established
-/// stream is evicted to make room for a new socket.
+/// stream is evicted and a new socket takes its place.
 #[derive(Debug)]
 pub(super) struct SocketCount {
     capacity: Arc<Capacity>,
@@ -308,8 +363,13 @@ impl SocketCount {
 
     /// Stop counting this socket. Later calls do nothing.
     pub(super) fn release(&self) {
+        self.release_locked(&mut self.capacity.state());
+    }
+
+    /// [`SocketCount::release`] under a lock the caller holds.
+    fn release_locked(&self, state: &mut State) {
         if !self.released.swap(true, Ordering::AcqRel) {
-            self.capacity.release_socket(self.direction);
+            state.release_socket(self.direction);
         }
     }
 }
