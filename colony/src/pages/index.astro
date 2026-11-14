@@ -16,7 +16,7 @@ const initials = handle.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2).toUpperCase()
 const details = css({
   display: "grid",
   gridTemplateColumns: "auto minmax(0, 1fr)",
-  "& > *": { m: 0, px: "3.5", py: "2.5", borderBottom: "1px solid {colors.border.soft}" },
+  "& > *": { m: 0, px: "14px", py: "2.5", borderBottom: "1px solid {colors.border.soft}" },
   "& > :nth-last-child(-n + 2)": { borderBottom: "none" },
   "& dt": { fontSize: "xs", color: "fg.muted" },
   "& dd": { fontSize: "sm", overflowWrap: "anywhere" },

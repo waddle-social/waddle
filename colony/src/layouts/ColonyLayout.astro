@@ -45,6 +45,8 @@ const widths = {
       class={cx(
         sea(),
         css({
+          // The board's tighter sea glow; the recipe default is 120% 80%.
+          bgImage: "radial-gradient(90% 70% at 50% 0%, {colors.sea.shallow}, {colors.sea} 55%, {colors.sea.deep})",
           minHeight: "100dvh",
           boxSizing: "border-box",
           flexDirection: "column",
@@ -55,7 +57,7 @@ const widths = {
         }),
       )}
     >
-      <section class={cx(card(), css({ borderRadius: "panel", p: "8", _narrow: { p: "6" } }), widths[width])}>
+      <section class={cx(card(), css({ borderRadius: "panel", p: "8" }), widths[width])}>
         <div class={css({ display: "flex", alignItems: "center", gap: "3" })}>
           <span
             class={css({

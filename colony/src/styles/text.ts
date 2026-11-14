@@ -1,6 +1,6 @@
 import { css } from "../../styled-system/css";
 
-export const kicker = css({ textStyle: "eyebrow", fontWeight: 500, lineHeight: 1.2 });
+export const kicker = css({ textStyle: "eyebrow", fontSize: "2xs", fontWeight: 500, lineHeight: 1.2 });
 export const heading = css({ m: 0, textStyle: "headline", fontWeight: 700, lineHeight: 1.2, letterSpacing: "-0.01em" });
 export const lead = css({ m: 0, fontSize: "md", lineHeight: 1.5, color: "fg.muted" });
 export const note = css({ m: 0, fontSize: "xs", lineHeight: 1.5, color: "fg.muted" });
