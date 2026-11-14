@@ -5,10 +5,14 @@ import { fontProviders } from 'astro/config'
 
 const sans = ['system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Noto Sans', 'sans-serif']
 
-export const waddleFonts = [
+// Annotated (not `satisfies`) so the mixed providers widen to Astro's Array<FontFamily>.
+export const waddleFonts: NonNullable<AstroUserConfig['fonts']> = [
   {
-    provider: fontProviders.fontsource(),
-    name: 'Bricolage Grotesque',
+    // The Fontsource API only serves the weight axis; the package's wdth.css adds
+    // the width axis the display styles use (font-stretch 87.5–90%).
+    provider: fontProviders.npm(),
+    options: { package: '@fontsource-variable/bricolage-grotesque', version: '5.3.0', file: 'wdth.css' },
+    name: 'Bricolage Grotesque Variable',
     cssVariable: '--font-display',
     weights: ['500 800'],
     styles: ['normal'],
@@ -33,4 +37,4 @@ export const waddleFonts = [
     subsets: ['latin', 'latin-ext'],
     fallbacks: ['ui-monospace', 'SF Mono', 'Menlo', 'Consolas', 'monospace'],
   },
-] satisfies NonNullable<AstroUserConfig['fonts']>
+]

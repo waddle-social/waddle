@@ -12,6 +12,9 @@
   "scripts": {
     "test": "bun test"
   },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "5.3.0"
+  },
   "peerDependencies": {
     "@pandacss/dev": "2.5.0",
     "astro": "~7.3.8"
