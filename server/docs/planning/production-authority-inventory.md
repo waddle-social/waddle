@@ -131,11 +131,11 @@ host-grant scope, other than leaving a subscription,
 subscriptions there are never a second grant store.
 
 **W8 — Parent/bookmark/link changes and compensation (concrete).**
-[Spaces publish/move](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L16) separately changes the bookmark, SQL
+[Spaces publish/move](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L17) separately changes the bookmark, SQL
 channel-space link and graph parent once
 [the publisher manages the channel or owns the deployment, or the channel already belongs to the Space](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L400),
 then runs [stale cleanup](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_bookmark_cleanup.rs#L4).
-[Publish rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L472), [retract](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs#L17) and
+[Publish rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L495), [retract](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs#L17) and
 [Space deletion](../../crates/waddle-server/src/admin/spaces.rs#L1116) can remove or restore these inputs. Error results
 and best-effort rollback do not prove no mutation happened. There is no single
 SQL/graph revision covering the whole operation. A link is used as a projection
