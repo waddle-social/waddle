@@ -350,6 +350,10 @@ pub(crate) enum ExtensionBotDispatchError {
     BotOutcast,
     #[error("extension bots never take part in group DMs")]
     GroupDm,
+    /// A room an enrolled host-grant scope manages admits accounts by their
+    /// grants, and no grant is an extension bot's.
+    #[error("extension bots hold no grant in a managed room")]
+    ManagedRoom,
     #[error("extension bot could not join the room")]
     BotJoinFailed,
     #[error("extension room message target did not match dispatch room")]
@@ -393,6 +397,23 @@ pub(crate) async fn plan_extension_bot_groupchat(
         );
         return Err(ExtensionBotDispatchError::MissingRoomRegistry);
     };
+    // A room an enrolled host-grant scope manages is never joined by a bot:
+    // seating one would make it an occupant the canonical grants never
+    // admitted. A room whose management cannot be told is refused as well.
+    {
+        use crate::permissions::host_grant::{Enrollment, RoomBinding};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room_enrollment(RoomBinding::Room(&room_jid))
+            .await
+        {
+            Enrollment::Unmanaged => {}
+            Enrollment::Enrolled => return Err(ExtensionBotDispatchError::ManagedRoom),
+            Enrollment::Undecided => return Err(ExtensionBotDispatchError::RoomLookupFailed),
+        }
+    }
     // #1108: the dormancy sweep can seal and stop the room actor between the
     // registry lookup and the join. One retry looks the room up again, which
     // loads a fresh one; the send is never dropped for it.

@@ -47,22 +47,6 @@ use waddle_xmpp::pubsub::Affiliation;
 
 use crate::server::AppState;
 
-/// `true` iff `jid` is the community owner of this deployment.
-///
-/// Returns `true` if either:
-///
-/// - `jid` is in the configured [`AppState::server_owner_jids`] bootstrap
-///   set, OR
-/// - `jid` holds an [`Affiliation::Owner`] row on any PubSub node under
-///   [`AppState::spaces_jid`].
-///
-/// On a storage error from the dynamic lookup, returns `false` (closed by
-/// default) and logs at `warn!`. We never grant admin access because of an
-/// I/O failure.
-///
-/// This is the single chokepoint for admin authorization. New admin
-/// commands MUST call this (or `caller_or_forbidden` in the per-handler
-/// modules, which wraps it) before performing any work.
 /// Refuse an admin command that would read or change a room an enrolled
 /// host-grant scope manages.
 ///
@@ -71,16 +55,20 @@ use crate::server::AppState;
 /// (XEP-0045 affiliation changes by an admitted owner or admin), and the
 /// room ends only when its scope is retired. The community owner role these
 /// commands require is not one of its grants. A room whose management
-/// cannot be read is refused as well.
+/// cannot be told is refused as well.
 pub(crate) async fn refuse_host_grant_room(
     state: &AppState,
     room_jid: &BareJid,
 ) -> Result<(), Box<waddle_xmpp::commands::CommandResult>> {
-    use crate::permissions::host_grant::{RoomBinding, RoomGate};
-    match state.host_grants.room(RoomBinding::Room(room_jid)).await {
-        RoomGate::Unmanaged => Ok(()),
-        RoomGate::Managed(_) => Err(refused_for_enrolled_scope()),
-        RoomGate::Unavailable => Err(host_grant_store_unavailable()),
+    use crate::permissions::host_grant::{Enrollment, RoomBinding};
+    match state
+        .host_grants
+        .room_enrollment(RoomBinding::Room(room_jid))
+        .await
+    {
+        Enrollment::Unmanaged => Ok(()),
+        Enrollment::Enrolled => Err(refused_for_enrolled_scope()),
+        Enrollment::Undecided => Err(host_grant_store_unavailable()),
     }
 }
 
@@ -115,6 +103,22 @@ fn host_grant_store_unavailable() -> Box<waddle_xmpp::commands::CommandResult> {
     ))
 }
 
+/// `true` iff `jid` is the community owner of this deployment.
+///
+/// Returns `true` if either:
+///
+/// - `jid` is in the configured [`AppState::server_owner_jids`] bootstrap
+///   set, OR
+/// - `jid` holds an [`Affiliation::Owner`] row on any PubSub node under
+///   [`AppState::spaces_jid`].
+///
+/// On a storage error from the dynamic lookup, returns `false` (closed by
+/// default) and logs at `warn!`. We never grant admin access because of an
+/// I/O failure.
+///
+/// This is the single chokepoint for admin authorization. New admin
+/// commands MUST call this (or `caller_or_forbidden` in the per-handler
+/// modules, which wraps it) before performing any work.
 pub async fn is_community_owner(state: &AppState, jid: &BareJid) -> bool {
     if is_owner_in(&state.server_owner_jids, jid) {
         return true;

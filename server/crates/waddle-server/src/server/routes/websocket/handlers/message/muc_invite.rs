@@ -796,6 +796,22 @@ async fn rollback_invite_grant(
     if !granted_membership {
         return;
     }
+    // A room an enrolled host-grant scope manages, or one whose management
+    // cannot be told now, is left alone: its members are its canonical
+    // grants, and its actor's affiliation list is written only from them.
+    {
+        use crate::permissions::host_grant::{Enrollment, RoomBinding};
+        if state
+            .deps
+            .app_state
+            .host_grants
+            .room_enrollment(RoomBinding::Room(room_jid))
+            .await
+            != Enrollment::Unmanaged
+        {
+            return;
+        }
+    }
     if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
         if let Err(error) = super::super::iq::persist_managed_channel_affiliation(
             state,

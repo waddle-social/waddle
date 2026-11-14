@@ -33,18 +33,15 @@ impl ExtensionHostAdapter {
         for row in rows {
             let room = waddle_xmpp::managed_room_jid(&row.id, &self.state.deps.service_domains.muc)
                 .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?;
-            if self.ensure_not_outcast(invocation, &room).await.is_err() {
-                continue;
-            }
-            if !self
-                .allowed(
-                    invocation,
-                    Object::new(ObjectType::Channel, &row.id),
-                    Permission::View,
-                )
-                .await?
+            // A channel the account may not view is left out, as is a
+            // managed room whose grants cannot be read now.
+            match self
+                .channel_allowed(invocation, &row.id, Permission::View)
+                .await
             {
-                continue;
+                Ok(true) => {}
+                Ok(false) | Err(ExtensionHostAdapterError::Storage(_)) => continue,
+                Err(error) => return Err(error),
             }
             out.push(HostChannel {
                 room,
@@ -70,6 +67,21 @@ impl ExtensionHostAdapter {
 
         let mut out = Vec::new();
         for node in nodes {
+            // The Space of an enrolled host-grant scope holds no grant a
+            // Space listing could be decided by, and is not served through
+            // PubSub; it is left out, as is a node whose enrollment cannot
+            // be told.
+            if self
+                .state
+                .deps
+                .app_state
+                .host_grants
+                .space_enrolled(&node)
+                .await
+                != Ok(false)
+            {
+                continue;
+            }
             if !self
                 .allowed(
                     invocation,

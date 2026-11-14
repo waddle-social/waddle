@@ -28,8 +28,8 @@ use crate::server::routes::websocket::InFlightLease;
 use crate::server::routes::websocket::LeaveAskFailure;
 use crate::server::routes::websocket::LocalDepartureItem;
 use crate::server::routes::websocket::PendingLocalMucDepartures;
-use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use jid::{BareJid, FullJid};
@@ -587,7 +587,7 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_list(&state, &args).await {
+    match run_list(&state, &args, &ctx.from.to_bare()).await {
         Ok(result) => CommandResult::Completed {
             session_id: None,
             form: Some(build_list_form(&result)),
@@ -1156,6 +1156,7 @@ fn send_err<E: std::fmt::Display>(prefix: &'static str) -> impl FnOnce(E) -> Adm
 async fn run_list(
     state: &AppState,
     args: &ChannelsListArgs,
+    caller: &BareJid,
 ) -> Result<ChannelsListResult, AdminErr> {
     // Inventory is durable; room actor residency is only used for enrichment.
     // Preserve instant rooms too, using serialized JIDs for sorting and cursors.
@@ -1207,6 +1208,8 @@ async fn run_list(
         }
         Err(error) => tracing::warn!(%error, "Admin channel inventory has no local room details"),
     }
+
+    let managed = withhold_managed_rooms(state, caller, &mut rooms).await?;
 
     // Space links may live in a separate database; use their storage interface.
     let space_node = match args.space_jid.as_ref() {
@@ -1271,6 +1274,21 @@ async fn run_list(
     // Counts describe available local snapshots, not cluster-wide presence.
     // Dormant, remote, or disappearing actors must never remove catalog rows.
     for entry in &mut entries {
+        if let Some(grants) = managed.get(entry.channel_jid.as_str()) {
+            use crate::permissions::host_grant::RoomAffiliation;
+            let count = |affiliation| {
+                u32::try_from(grants.grants.recorded(affiliation).len()).unwrap_or(u32::MAX)
+            };
+            entry.affiliation_owner_count = count(RoomAffiliation::Owner);
+            entry.affiliation_admin_count = count(RoomAffiliation::Admin);
+            entry.affiliation_member_count = count(RoomAffiliation::Member);
+            entry.affiliation_outcast_count = count(RoomAffiliation::Outcast);
+            if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
+                entry.occupant_count =
+                    u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
+            }
+            continue;
+        }
         if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
             entry.occupant_count =
                 u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
@@ -1289,6 +1307,54 @@ async fn run_list(
         entries,
         next_cursor,
     })
+}
+
+/// Remove from `rooms` every room an enrolled host-grant scope manages that
+/// `caller`'s canonical grants do not allow to view, and every managed room
+/// whose grants cannot be read now. The community-owner role the channel
+/// commands require is not one of a managed room's grants. A room that is
+/// kept is shown members-only, its binding's access model, and its grants
+/// are returned by room address so that its counts are its recorded grants
+/// rather than the room actor's mirror.
+async fn withhold_managed_rooms(
+    state: &AppState,
+    caller: &BareJid,
+    rooms: &mut BTreeMap<String, (BareJid, RoomConfig, ChannelType)>,
+) -> Result<HashMap<String, crate::permissions::host_grant::ManagedRoomGrants>, AdminErr> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    let channel_ids: Vec<String> = rooms
+        .values()
+        .filter_map(|(room_jid, _, _)| waddle_xmpp::parse_managed_room_jid(room_jid))
+        .collect();
+    let channel_refs: Vec<&str> = channel_ids.iter().map(String::as_str).collect();
+    let enrolled = state
+        .host_grants
+        .enrolled_channels(&channel_refs)
+        .await
+        .map_err(|_| internal_err("the host-grant authority is unavailable"))?;
+    let mut managed = HashMap::new();
+    let mut withheld = Vec::new();
+    for (key, (room_jid, config, _)) in rooms.iter_mut() {
+        let enrolled_room = waddle_xmpp::parse_managed_room_jid(room_jid)
+            .is_some_and(|channel_id| enrolled.contains(&channel_id));
+        if !enrolled_room {
+            continue;
+        }
+        match state.host_grants.room(RoomBinding::Room(room_jid)).await {
+            RoomGate::Managed(grants) if grants.allows(caller, HostGrantAction::View) => {
+                config.members_only = true;
+                managed.insert(key.clone(), grants);
+            }
+            RoomGate::Managed(_) | RoomGate::Unavailable => withheld.push(key.clone()),
+            // The enrolled set named it; a room that is unmanaged after all
+            // keeps its listing.
+            RoomGate::Unmanaged => {}
+        }
+    }
+    for key in withheld {
+        rooms.remove(&key);
+    }
+    Ok(managed)
 }
 
 async fn local_channel_snapshot(

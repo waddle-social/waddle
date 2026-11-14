@@ -1564,6 +1564,22 @@ pub(super) async fn handle_muc_admin_iq(
             }
         }
     }
+    // A change the store recorded is what every admission reads; the room
+    // actor only mirrors it. Unless the actor applies it below, the mirror
+    // is put back in line with the canonical grants in the background.
+    let mirror_repair = host_grant_room
+        .as_ref()
+        .filter(|_| !affiliation_updates.is_empty())
+        .map(|_| {
+            super::muc_admin_host_grant::MirrorRepair::arm(
+                state,
+                &room_jid,
+                affiliation_updates
+                    .iter()
+                    .map(|(jid, _)| jid.clone())
+                    .collect(),
+            )
+        });
     // A room an enrolled scope manages writes no authorization relationship
     // here and so has nothing to roll back.
     let managed_channel_id =
@@ -1964,6 +1980,10 @@ pub(super) async fn handle_muc_admin_iq(
             }
         }
     };
+    // The actor applied the recorded change: its mirror holds it.
+    if let Some(repair) = mirror_repair {
+        repair.disarm();
+    }
     // XEP-0045 §8.2/§9.1 stanza ordering (#1265 item 6): the kicked/
     // banned occupant's unavailable presence goes out first, then the
     // moderator's IQ result, then the broadcast to remaining occupants.

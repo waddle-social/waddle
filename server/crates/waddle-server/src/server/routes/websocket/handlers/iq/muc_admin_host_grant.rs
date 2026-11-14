@@ -203,23 +203,71 @@ fn issuance_policy(
     IssuancePolicy::for_served(served, services, []).ok()
 }
 
+/// Delays before each further reconciliation pass of a recorded change whose
+/// pass did not finish: about a minute in all.
+const RECONCILE_RETRY_DELAYS: [std::time::Duration; 6] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+    std::time::Duration::from_secs(8),
+    std::time::Duration::from_secs(16),
+    std::time::Duration::from_secs(32),
+];
+
 /// Project the recorded change and activate it if it is an increase. The
-/// reply does not wait: a pass that does not finish leaves the change
-/// recorded and not effective, and the recovery pass a replica runs when it
-/// attaches to the store, or the next change of the scope, picks it up.
+/// reply does not wait. A pass that does not finish (the projection did not
+/// answer, another operation got ahead, the store was busy) is repeated in
+/// the background after each of [`RECONCILE_RETRY_DELAYS`]; after the last,
+/// the change stays recorded and not effective until the next change of
+/// the scope or the recovery pass a replica runs when it attaches to the
+/// store. A contradiction or a scope that no longer admits changes is not
+/// retried.
 fn spawn_reconcile(authority: HostGrantAuthority, command: SetAffiliation) {
+    use crate::permissions::host_grant::Reconciliation;
     tokio::spawn(async move {
-        match authority.reconcile(command.lifecycle).await {
-            Ok(outcome) => tracing::debug!(
-                outcome = ?outcome,
-                "Reconciled a room affiliation change's projection"
-            ),
-            Err(error) => warn!(
-                kind = error.kind(),
-                "Could not reconcile a room affiliation change's projection"
-            ),
+        let mut delays = RECONCILE_RETRY_DELAYS.iter();
+        loop {
+            let retry = match authority.reconcile(command.lifecycle).await {
+                Ok(Reconciliation::Activated(_) | Reconciliation::AlreadyActive(_)) => {
+                    tracing::debug!("Reconciled a room affiliation change's projection");
+                    return;
+                }
+                Ok(Reconciliation::Contradiction(_)) => {
+                    warn!(
+                        kind = "contradiction",
+                        "A room affiliation change's projection contradicts the store"
+                    );
+                    return;
+                }
+                Ok(Reconciliation::Superseded | Reconciliation::ProjectionUnknown) => true,
+                Err(error) => reconcile_error_is_transient(&error),
+            };
+            let Some(delay) = delays.next().filter(|_| retry) else {
+                warn!(
+                    kind = "unfinished",
+                    "A room affiliation change's projection was not reconciled; it stays \
+                     recorded and not effective until the scope's next reconciliation"
+                );
+                return;
+            };
+            tokio::time::sleep(*delay).await;
         }
     });
+}
+
+/// Whether a failed reconciliation pass may finish if repeated. A scope
+/// that was retired, exhausted or bound to another incarnation or policy
+/// version, or whose rows are corrupt, will not.
+fn reconcile_error_is_transient(error: &HostGrantError) -> bool {
+    !matches!(
+        error,
+        HostGrantError::ScopeRetired
+            | HostGrantError::ScopeExhausted
+            | HostGrantError::IncarnationChanged
+            | HostGrantError::PolicyVersionUnsupported
+            | HostGrantError::UnknownScope
+            | HostGrantError::CorruptRow { .. }
+    )
 }
 
 /// The stanza error a refused change replies with. None names a JID, a room
@@ -248,6 +296,122 @@ fn refusal(error: &HostGrantError) -> StanzaError {
             warn!(kind = other.kind(), "A room affiliation change failed");
             internal_server_error_iq_error("Internal server error.")
         }
+    }
+}
+
+/// Delays before each attempt to put a managed room actor's affiliation
+/// list back in line with the canonical grants.
+const MIRROR_REPAIR_DELAYS: [std::time::Duration; 5] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(4),
+    std::time::Duration::from_secs(16),
+    std::time::Duration::from_secs(60),
+];
+
+/// A repair of the room actor's affiliation list for the subjects of a
+/// recorded change, armed once the store recorded the change and disarmed
+/// once the room actor applied it.
+///
+/// The actor's list of a managed room is a mirror: no admission reads it,
+/// but the role it seats an occupant with and the lists a stale actor shows
+/// follow it. When the actor did not apply a recorded change (it refused,
+/// failed, timed out or answered ambiguously), dropping the armed repair
+/// sets each subject's entry to the affiliation the canonical grants
+/// record, in the background, after each of [`MIRROR_REPAIR_DELAYS`] until
+/// one attempt succeeds.
+pub(super) struct MirrorRepair {
+    pending: Option<MirrorRepairWork>,
+}
+
+struct MirrorRepairWork {
+    room_registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    host_grants: crate::permissions::host_grant::HostGrantGate,
+    room: BareJid,
+    subjects: Vec<BareJid>,
+}
+
+impl MirrorRepair {
+    pub(super) fn arm(state: &WebSocketState, room: &BareJid, subjects: Vec<BareJid>) -> Self {
+        Self {
+            pending: Some(MirrorRepairWork {
+                room_registry: state.deps.protocol.room_registry.clone(),
+                host_grants: state.deps.app_state.host_grants.clone(),
+                room: room.clone(),
+                subjects,
+            }),
+        }
+    }
+
+    /// The actor applied the change; nothing is repaired.
+    pub(super) fn disarm(mut self) {
+        self.pending = None;
+    }
+}
+
+impl Drop for MirrorRepair {
+    fn drop(&mut self) {
+        let Some(work) = self.pending.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            for delay in MIRROR_REPAIR_DELAYS {
+                tokio::time::sleep(delay).await;
+                if work.repair_once().await {
+                    return;
+                }
+            }
+            warn!(
+                kind = "mirror_repair_unfinished",
+                "A managed room actor's affiliation list could not be put back in line with the \
+                 canonical grants"
+            );
+        });
+    }
+}
+
+impl MirrorRepairWork {
+    /// One attempt; `true` once every subject's entry matches the recorded
+    /// grant, or when there is no room actor left to repair.
+    async fn repair_once(&self) -> bool {
+        use waddle_xmpp::muc::room_actor::ChangeAffiliation;
+        use waddle_xmpp::muc::room_registry_actor::GetRoom;
+        let grants = match self.host_grants.room(RoomBinding::Room(&self.room)).await {
+            RoomGate::Managed(grants) => grants,
+            RoomGate::Unmanaged => return true,
+            RoomGate::Unavailable => return false,
+        };
+        let actor = match self
+            .room_registry
+            .ask(GetRoom {
+                room_jid: self.room.clone(),
+            })
+            .await
+        {
+            Ok(Some(actor)) => actor,
+            // A room actor spawned later hydrates from durable state the
+            // committed mutations wrote, not from this attempt.
+            Ok(None) => return true,
+            Err(_) => return false,
+        };
+        let mut repaired = true;
+        for subject in &self.subjects {
+            let affiliation = muc_affiliation(grants.grants.recorded_affiliation(subject));
+            if actor
+                .ask(ChangeAffiliation {
+                    jid: subject.clone(),
+                    affiliation,
+                })
+                .await
+                .is_err()
+            {
+                repaired = false;
+            }
+        }
+        repaired
     }
 }
 

@@ -107,6 +107,15 @@ pub async fn seed_owner_on_all_nodes(
     Ok(outcomes)
 }
 
+/// The issuance policy of a seed on a deployment whose accounts live at
+/// `account_domain`: privileged seeds name accounts of that domain, and no
+/// trusted home is configured for bootstrap and repair writers (ADR-0020
+/// D8). `None` when the domain is not a canonical account domain.
+pub fn account_domain_seed_issuance(account_domain: &str) -> Option<IssuancePolicy> {
+    let domain = waddle_xmpp::identity::CanonicalDomain::parse_exact(account_domain).ok()?;
+    IssuancePolicy::new([domain], [], []).ok()
+}
+
 async fn node_may_be_seeded(policy: OwnerSeedPolicy<'_>, node: &str) -> bool {
     policy.host_grants.space_enrolled(node).await == Ok(false)
 }
@@ -120,8 +129,7 @@ async fn seed_owner_one(
 ) -> OwnerSeedOutcome {
     if !policy.issuance.admits_privileged_subject(entity) {
         warn!(
-            spaces = %spaces_jid,
-            node = %node,
+            kind = "subject_refused",
             "refused to seed an Owner affiliation for an account outside the served domains and \
              trusted homes",
         );

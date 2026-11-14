@@ -682,6 +682,13 @@ async fn run_list(state: &AppState, args: &SpacesListArgs) -> Result<SpacesListR
     if let Some(cursor) = args.after_cursor.as_deref() {
         rows.retain(|row| row.space_node.as_str() > cursor);
     }
+    // The Space of an enrolled host-grant scope is left out: no grant of the
+    // scope is a Space's, so no caller holds canonical standing on it, and
+    // its counts would come from PubSub state the scope does not consult.
+    let Some(enrolled) = state.host_grants.enrolled().settled_snapshot().await else {
+        return Err(internal_err("the host-grant authority is unavailable"));
+    };
+    rows.retain(|row| enrolled.space_node(row.space_node.as_str()).is_none());
 
     let limit = args.page_size as usize;
     let total = rows.len();
@@ -952,6 +959,11 @@ async fn run_create(
     // Mint a fresh localpart for this space. Mirror the chat-side
     // convention of slugified-name + short-id by lowercasing+slugifying
     // the name and appending a short UUID tail.
+    // A privileged seed names an account of this deployment's account
+    // domain (ADR-0020 D8); a domain that yields no issuance policy refuses
+    // the creation before anything is written.
+    let issuance = crate::spaces_pubsub_seed::account_domain_seed_issuance(account_domain)
+        .ok_or_else(|| internal_err("the account domain yields no owner seed issuance policy"))?;
     let localpart = mint_space_localpart(&args.name);
     let domain = state.spaces_jid.domain();
     let space_jid: BareJid = format!("{localpart}@{domain}")
@@ -988,12 +1000,6 @@ async fn run_create(
 
     // Seed server-owners as PubSub owners on the new node so they can
     // administer it. Mirrors `spaces_pubsub_seed::seed_owners_on_node`.
-    let issuance = waddle_xmpp::identity::CanonicalDomain::parse_exact(account_domain)
-        .ok()
-        .and_then(|domain| {
-            crate::permissions::host_grant::IssuancePolicy::new([domain], [], []).ok()
-        })
-        .unwrap_or_default();
     crate::spaces_pubsub_seed::seed_owners_on_node(
         &state.pubsub_storage,
         &state.spaces_jid,

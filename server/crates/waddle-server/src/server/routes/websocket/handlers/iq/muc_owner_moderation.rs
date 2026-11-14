@@ -1721,7 +1721,38 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         // extent that they cause the room to grant the Moderator *role* on
         // entry; if an owner has explicitly taken a non-moderator role
         // (e.g. visitor), that signal is intentional and must be honoured.
-        if !matches!(context.role, waddle_xmpp::Role::Moderator) {
+        //
+        // A room an enrolled host-grant scope manages is moderated by the
+        // canonical grants' `moderate` alone: the role the room actor holds
+        // for the sender, like its affiliation list, is a mirror that may
+        // still name a revoked moderator.
+        let moderates = {
+            use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .allows(
+                    RoomBinding::Room(&room_jid),
+                    &sender_jid.to_bare(),
+                    HostGrantAction::Moderate,
+                )
+                .await
+            {
+                RoomGate::Unmanaged => matches!(context.role, waddle_xmpp::Role::Moderator),
+                RoomGate::Managed(allowed) => allowed,
+                RoomGate::Unavailable => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                    .into();
+                }
+            }
+        };
+        if !moderates {
             return vec![build_iq_error_xml_typed(
                 id,
                 response_from,

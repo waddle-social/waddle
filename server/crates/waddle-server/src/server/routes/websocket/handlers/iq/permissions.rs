@@ -354,14 +354,17 @@ pub(super) async fn seed_spaces_node_owners(
         return;
     }
     // A privileged seed names an account of this deployment's account
-    // domain; no trusted home is configured for it (ADR-0020 D8).
-    let issuance =
-        waddle_xmpp::identity::CanonicalDomain::parse_exact(&state.deps.auth_state.xmpp_domain)
-            .ok()
-            .and_then(|domain| {
-                crate::permissions::host_grant::IssuancePolicy::new([domain], [], []).ok()
-            })
-            .unwrap_or_default();
+    // domain; no trusted home is configured for it (ADR-0020 D8). An
+    // account domain that yields no issuance policy seeds nothing.
+    let Some(issuance) =
+        crate::spaces_pubsub_seed::account_domain_seed_issuance(&state.deps.auth_state.xmpp_domain)
+    else {
+        tracing::warn!(
+            kind = "issuance_policy_invalid",
+            "Refused to seed Spaces node owners: the account domain yields no issuance policy"
+        );
+        return;
+    };
     crate::spaces_pubsub_seed::seed_owners_on_node(
         &state.deps.protocol.pubsub_storage,
         spaces_jid,

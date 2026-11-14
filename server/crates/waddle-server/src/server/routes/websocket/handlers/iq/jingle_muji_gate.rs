@@ -450,8 +450,16 @@ async fn verify_room_membership(
         // into the LiveKit token. `GetOccupantVoice` resolves role and
         // room moderation in one round-trip so the answer is a single
         // consistent snapshot.
-        Ok(Some(voice)) => GateOutcome::Allow {
-            media_capabilities: Some(MediaCapabilities::from_muc_voice(voice)),
+        Ok(Some(voice)) => match host_grant_call_participation(state, full_jid, room_jid).await {
+            Ok(()) => GateOutcome::Allow {
+                media_capabilities: Some(MediaCapabilities::from_muc_voice(voice)),
+            },
+            Err(denial) => {
+                if record_setup_denials {
+                    record_sfu_token_denial(room_jid, &full_jid.to_bare(), denial.reason);
+                }
+                GateOutcome::Deny(denial.error)
+            }
         },
         Ok(None) => {
             if record_setup_denials {
@@ -484,6 +492,50 @@ async fn verify_room_membership(
                 "could not verify MUC membership; please retry",
             )))
         }
+    }
+}
+
+/// Why a call in a room an enrolled host-grant scope manages was refused.
+struct HostGrantCallDenial {
+    reason: SfuDenialReason,
+    error: Box<StanzaError>,
+}
+
+/// A call in a room an enrolled host-grant scope manages is participation
+/// in the room: the caller's canonical grants must allow `send_message`,
+/// whatever occupancy, role or voice the room actor still holds for them.
+/// Every verification of a call (its setup on either replica of a relayed
+/// initiate, and the re-check before a token is released) passes here.
+async fn host_grant_call_participation(
+    state: &WebSocketState,
+    full_jid: &FullJid,
+    room_jid: &BareJid,
+) -> Result<(), HostGrantCallDenial> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .allows(
+            RoomBinding::Room(room_jid),
+            &full_jid.to_bare(),
+            HostGrantAction::SendMessage,
+        )
+        .await
+    {
+        RoomGate::Unmanaged | RoomGate::Managed(true) => Ok(()),
+        RoomGate::Managed(false) => Err(HostGrantCallDenial {
+            reason: SfuDenialReason::MembershipDenied,
+            error: Box::new(forbidden_iq_error(
+                "not an occupant of the requested room — join the MUC first",
+            )),
+        }),
+        RoomGate::Unavailable => Err(HostGrantCallDenial {
+            reason: SfuDenialReason::InternalError,
+            error: Box::new(internal_server_error_iq_error(
+                "could not verify MUC membership; please retry",
+            )),
+        }),
     }
 }
 

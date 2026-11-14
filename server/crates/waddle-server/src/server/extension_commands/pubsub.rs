@@ -56,6 +56,20 @@ async fn authorize_extension_pubsub_publish(
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
         return Err("PubSub node is not bound to a managed channel".to_string());
     };
+    // A room an enrolled host-grant scope manages serves no extension state:
+    // its room-bound nodes are neither read nor subscribed to, so nothing is
+    // published to them either. A room whose management cannot be told now
+    // is refused as well.
+    match context
+        .app_state
+        .host_grants
+        .channel_enrolled(&channel_id)
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => return Err("extension state is not served for this room".to_string()),
+        Err(_) => return Err("the host-grant authority is unavailable".to_string()),
+    }
     let object = Object::new(ObjectType::Channel, channel_id.clone());
     let subject = Subject::user(user_id);
     let outcast = context
