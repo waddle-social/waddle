@@ -5,7 +5,7 @@
 //   huddle-room      you are in the #design huddle (split, right panel)
 //   huddle-expanded  same call, expanded
 //   huddle-minimized in the #design huddle, looking at #general
-//   call-incoming | call-outgoing | call-active | call-error  (DM with linus)
+//   call-incoming | call-outgoing | call-active | call-ended | call-error  (DM with linus)
 // Query: &state=connecting|waiting  &notice=mic|audio|sharing|poor|reconnecting|pip
 //        &view=gallery|speaker  &dock=participants|chat
 import { $callState, $lastCallError } from "@/lib/calls/call-store";
@@ -121,6 +121,10 @@ export function seedCallPreview(c: ChatAppController, screen: string) {
       $callState.set({ phase: "active", peer: full("linus"), sid: "pv-dm", media, join, kind: "dm" });
       useCallEngine().remoteTracks.value = [audioTrack("linus")];
       $callUiMode.set(q.get("mode") === "expanded" ? "expanded" : "split");
+      void c.selectDm("linus@waddle.test");
+      break;
+    case "call-ended":
+      $callState.set({ phase: "ended", sid: "pv-end", reason: "decline" });
       void c.selectDm("linus@waddle.test");
       break;
     case "call-error":
