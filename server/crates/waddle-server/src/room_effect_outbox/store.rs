@@ -41,6 +41,24 @@ fn staged_reservation_lookup_failures() -> &'static std::sync::Mutex<StagedReser
     })
 }
 
+/// A lease renewal of one row that waits for the test before it runs. The
+/// first `pass_through` renewals of the row run normally; the next one
+/// reports through `reached` and waits for `release`.
+#[cfg(test)]
+struct LeaseRenewalPause {
+    pass_through: usize,
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+fn lease_renewal_pauses() -> &'static std::sync::Mutex<HashMap<RoomEffectKey, LeaseRenewalPause>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<RoomEffectKey, LeaseRenewalPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 pub fn retry_delay_ms(attempt: i64) -> i64 {
     let shift = if attempt <= 1 {
         0
@@ -212,6 +230,35 @@ impl RoomEffectOutboxStore {
     }
     pub fn database(&self) -> &Database {
         &self.db
+    }
+    /// Hold the lease renewal of `key` that follows its first `pass_through`
+    /// renewals. The returned receiver resolves once that renewal is waiting;
+    /// it runs, against the rows as they are then, when the returned sender
+    /// fires or is dropped. This test seam places a concurrent change at an
+    /// exact renewal checkpoint of a drain.
+    #[cfg(test)]
+    pub fn pause_lease_renewal_for_test(
+        &self,
+        key: &RoomEffectKey,
+        pass_through: usize,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = tokio::sync::oneshot::channel();
+        lease_renewal_pauses()
+            .lock()
+            .expect("lease renewal pause lock")
+            .insert(
+                key.clone(),
+                LeaseRenewalPause {
+                    pass_through,
+                    reached,
+                    release,
+                },
+            );
+        (reached_rx, release_tx)
     }
     /// Make the next exact staged-reservation lookup fail. This test seam
     /// exercises recovery after the database read itself fails.
@@ -805,6 +852,26 @@ impl RoomEffectOutboxStore {
         token: &RoomEffectLeaseToken,
         now_ms: i64,
     ) -> Result<bool, RoomEffectOutboxError> {
+        #[cfg(test)]
+        {
+            let paused = {
+                let mut pauses = lease_renewal_pauses()
+                    .lock()
+                    .expect("lease renewal pause lock");
+                match pauses.get_mut(key) {
+                    Some(pause) if pause.pass_through > 0 => {
+                        pause.pass_through -= 1;
+                        None
+                    }
+                    Some(_) => pauses.remove(key),
+                    None => None,
+                }
+            };
+            if let Some(pause) = paused {
+                let _ = pause.reached.send(());
+                let _ = pause.release.await;
+            }
+        }
         let c = self.db.guard().await?;
         Ok(c.execute("UPDATE clustering_muc_room_effects SET leased_at_ms=? WHERE lifecycle_id=? AND revision=? AND ordinal=? AND lease_token=? AND NOT superseded",crate::db_params![now_ms,key.lifecycle.to_string(),key.revision.as_i64(),key.ordinal.as_i64(),token.as_str()]).await?==1)
     }

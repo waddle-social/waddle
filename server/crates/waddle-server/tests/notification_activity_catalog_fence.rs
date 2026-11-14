@@ -130,18 +130,31 @@ async fn pg17_activity_public_entries_fence_mutation_and_marker() {
         let db = db.clone();
         async move { NotificationActivityStore::initialize_owner(db).await }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let snapshot: Vec<(String, String, bool)> = sqlx::query_as(
-        "SELECT state::text, query::text, xact_start IS NULL FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
-    )
-    .bind(&application)
-    .fetch_all(&admin)
-    .await
-    .expect("inspect retry snapshot");
+    // The owner retries every few milliseconds, so its backend is between
+    // attempts (ROLLBACK acknowledged, no transaction) only briefly. Poll
+    // for that state rather than sampling once after a fixed delay.
+    let mut snapshot: Vec<(String, String, bool)> = Vec::new();
+    let rolled_back = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            snapshot = sqlx::query_as(
+                "SELECT state::text, query::text, xact_start IS NULL FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+            )
+            .bind(&application)
+            .fetch_all(&admin)
+            .await
+            .expect("inspect retry snapshot");
+            if snapshot
+                .iter()
+                .any(|(state, query, no_xact)| state == "idle" && query == "ROLLBACK" && *no_xact)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
     assert!(
-        snapshot
-            .iter()
-            .any(|(state, query, no_xact)| state == "idle" && query == "ROLLBACK" && *no_xact),
+        rolled_back.is_ok(),
         "owner did not acknowledge rollback after Activity gate contention: {snapshot:?}"
     );
     // Take catalog-S only after the owner's ROLLBACK was observed. Holding it

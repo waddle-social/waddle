@@ -311,15 +311,32 @@ async fn acknowledging_a_stanza_that_was_never_exposed_is_a_stream_error() {
         .expect("handled-count-too-high stream error");
     assert!(error.contains(SM_NS));
 
-    let row = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
-        row.outbound_appended >= i64::from(written)
+    // The stream error closes the stream, and the server then ends the
+    // session concurrently with this test: the frames the invalid count
+    // claimed were handled stay in custody until that close transfers them
+    // to offline delivery. Observe the settled outcome, not a moment of the
+    // teardown: the session is closed with every frame released, and the
+    // stanza the client never acknowledged reaches its next resource.
+    let closed = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_TERMINAL
+            && row.outbound_appended >= i64::from(written)
+            && row.outbound_acked == row.outbound_appended
     })
     .await;
-    assert_eq!(row.outbound_acked, 0, "an invalid count releases nothing");
-    assert_eq!(
-        retained_frames(&fixture.pool, &row.session_id).await,
-        row.outbound_appended
-    );
+    assert_eq!(closed.terminal_reason, Some(REASON_CLOSED));
+    assert_eq!(retained_frames(&fixture.pool, &closed.session_id).await, 0);
+    drop(alice);
+
+    let mut desk = authenticate(&fixture.server, 0).await;
+    desk.bind("desk").await.expect("bind desk");
+    send_element(
+        &mut desk,
+        Element::builder("presence", "jabber:client").build(),
+    )
+    .await;
+    // An invalid count releases nothing: the unacknowledged stanza is
+    // delivered offline.
+    recv_chats(&mut desk, &["m1"]).await;
 }
 
 #[tokio::test]
