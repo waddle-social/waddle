@@ -7,8 +7,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use minidom::Element;
 use rcgen::{
     date_time_ymd, BasicConstraints, Certificate, CertificateParams,
     CertificateRevocationListParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -24,6 +25,11 @@ use waddle_server::s2s::config::{ConfigError, S2sConfig};
 use waddle_server::s2s::conn::{S2sHandle, S2sService, ServiceOptions};
 use waddle_server::s2s::verify::TlsSettings;
 use waddle_xmpp::identity::CanonicalDomain;
+use waddle_xmpp::ns::{STREAM, TLS};
+use waddle_xmpp::s2s::{
+    CodecLimits, HeaderAddress, Inbound, StreamDecoder, StreamEncoder, StreamErrorCondition,
+    StreamHeader, StreamLanguage, StreamVersion,
+};
 
 pub const HOME_A: &str = "home-a.test";
 pub const HOME_B: &str = "home-b.test";
@@ -284,34 +290,124 @@ pub async fn pair(pki: &Pki, adjust: impl Fn(&mut Spec)) -> (Deployment, Deploym
     (a, b)
 }
 
-/// A plaintext initial stream header.
+/// A plaintext initial stream header, built with the codec's encoder.
 pub fn header(from: Option<&str>, to: &str) -> Vec<u8> {
-    let from = from.map_or(String::new(), |from| format!(" from='{from}'"));
-    format!(
-        "<?xml version='1.0'?><stream:stream xmlns='jabber:server' \
-xmlns:stream='http://etherx.jabber.org/streams'{from} to='{to}' version='1.0'>"
-    )
-    .into_bytes()
+    let header = StreamHeader {
+        from: HeaderAddress::from(from.map(domain)),
+        to: HeaderAddress::Domain(domain(to)),
+        id: None,
+        version: Some(StreamVersion::V1_0),
+        lang: Some(StreamLanguage::english()),
+        declare_dialback: false,
+    };
+    StreamEncoder::open(&header)
+        .expect("an encodable stream header")
+        .1
+}
+
+/// What a raw peer received, and whether the server closed the connection
+/// before the reader stopped waiting.
+#[derive(Debug)]
+pub struct Received {
+    pub bytes: Vec<u8>,
+    pub closed: bool,
+    /// When the reader stopped: at the close or when the wait ended.
+    pub at: Instant,
+}
+
+impl Received {
+    /// The first-level elements the server sent, decoded as a peer would.
+    pub fn elements(&self) -> Vec<Element> {
+        let mut decoder = StreamDecoder::new(CodecLimits::PILOT);
+        if decoder.push(&self.bytes).is_err() {
+            return Vec::new();
+        }
+        let mut elements = Vec::new();
+        while let Ok(Some(item)) = decoder.next_item() {
+            if let Inbound::Element(element) = item {
+                elements.push(element);
+            }
+        }
+        elements
+    }
+
+    /// The condition of the stream error the server sent, if it sent one.
+    pub fn stream_error(&self) -> Option<StreamErrorCondition> {
+        self.elements()
+            .into_iter()
+            .find(|element| element.is("error", STREAM))
+            .map(StreamErrorCondition::from_peer_element)
+    }
+
+    /// Whether the server offered STARTTLS.
+    pub fn offers_starttls(&self) -> bool {
+        self.elements().iter().any(|element| {
+            element.is("features", STREAM)
+                && element.children().any(|child| child.is("starttls", TLS))
+        })
+    }
+
+    /// Whether the server closed the connection without sending anything.
+    pub fn closed_without_xml(&self) -> bool {
+        self.closed && self.bytes.is_empty()
+    }
 }
 
 /// Send `bytes` to `address` as a raw peer and collect what comes back
 /// until the server closes the connection or `wait` passes.
-pub async fn raw_exchange(address: SocketAddr, bytes: &[u8], wait: Duration) -> String {
+pub async fn raw_exchange(address: SocketAddr, bytes: &[u8], wait: Duration) -> Received {
     let mut socket = TcpStream::connect(address).await.expect("connect");
     socket.write_all(bytes).await.expect("write");
     read_until_closed(&mut socket, wait).await
 }
 
-/// Read until the peer closes the connection or `wait` passes.
-pub async fn read_until_closed(socket: &mut TcpStream, wait: Duration) -> String {
-    let mut received = Vec::new();
-    let _ = tokio::time::timeout(wait, socket.read_to_end(&mut received)).await;
-    String::from_utf8_lossy(&received).into_owned()
+/// Send `bytes` to `address` as a raw peer and collect what comes back
+/// until `done` holds, the server closes the connection or `wait` passes.
+pub async fn raw_exchange_until(
+    address: SocketAddr,
+    bytes: &[u8],
+    wait: Duration,
+    done: impl Fn(&Received) -> bool,
+) -> Received {
+    let mut socket = TcpStream::connect(address).await.expect("connect");
+    socket.write_all(bytes).await.expect("write");
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut received = Received {
+        bytes: Vec::new(),
+        closed: false,
+        at: Instant::now(),
+    };
+    let mut chunk = [0u8; 4096];
+    loop {
+        match tokio::time::timeout_at(deadline, socket.read(&mut chunk)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => {
+                received.closed = true;
+                break;
+            }
+            Ok(Ok(read)) => {
+                received.bytes.extend_from_slice(&chunk[..read]);
+                if done(&received) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    received.at = Instant::now();
+    received
 }
 
-/// Whether `received` carries the stream error `condition`.
-pub fn has_stream_error(received: &str, condition: &str) -> bool {
-    received.contains("stream:error") && received.contains(&format!("<{condition}"))
+/// Read until the peer closes the connection or `wait` passes.
+pub async fn read_until_closed(socket: &mut TcpStream, wait: Duration) -> Received {
+    let mut bytes = Vec::new();
+    let closed = tokio::time::timeout(wait, socket.read_to_end(&mut bytes))
+        .await
+        .is_ok();
+    Received {
+        bytes,
+        closed,
+        at: Instant::now(),
+    }
 }
 
 /// Wait until `check` holds, for at most `wait`.

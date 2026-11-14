@@ -5,8 +5,10 @@
 //! identity profile's canonical form. Allowlist, dialback and trusted-home
 //! entries match exactly. A denylist entry covers its domain and every
 //! subdomain, label by label, applies in every mode and overrides every
-//! other list. Only a fully qualified DNS name can be admitted: an IP
-//! address, a numeric IPv4 form or a single-label name never is.
+//! other list; unlike the other lists it may name domains outside `.test`
+//! while admission is limited to `.test`. Only a fully qualified DNS name
+//! can be admitted: an IP address, a numeric IPv4 form or a single-label
+//! name never is.
 //!
 //! Admission grants transport only. It says nothing about communities,
 //! rooms or any other protected effect, which host policy decides.
@@ -133,16 +135,18 @@ impl AdmissionPolicy {
         if !domain.kind().names_federation_peer() {
             return Err(AdmissionRefusal::NotAPeerDomain);
         }
+        if self.local.contains(domain) {
+            return Err(AdmissionRefusal::LocalDomain);
+        }
+        // The denylist may already name domains outside `.test`, so its
+        // refusal does not change when the restriction below is lifted.
+        if self.is_denylisted(domain) {
+            return Err(AdmissionRefusal::Denylisted);
+        }
         // The discovery slice lifts this restriction through its own
         // reviewed change (ADR-0020 gate G6).
         if !is_test_domain(domain) {
             return Err(AdmissionRefusal::OutsideTestDomain);
-        }
-        if self.local.contains(domain) {
-            return Err(AdmissionRefusal::LocalDomain);
-        }
-        if self.is_denylisted(domain) {
-            return Err(AdmissionRefusal::Denylisted);
         }
         match self.mode {
             AdmissionMode::Closed => Err(AdmissionRefusal::Closed),
@@ -178,6 +182,18 @@ impl AdmissionPolicy {
             && self.trusted_homes.contains(domain)
             && (profile == TrustProfileKind::PrivateCa
                 || !self.private_ca_required.contains(domain))
+    }
+
+    /// Whether streams with `domain` may use the quarter of the stream and
+    /// peer caps that `open` mode reserves for known peers: the domain is
+    /// on the allowlist or the trusted-home list. In `allowlist` mode every
+    /// admitted domain is on the allowlist, so the reserve is never held
+    /// back from one. This says nothing about admission, which
+    /// [`AdmissionPolicy::decide`] checks.
+    pub fn is_reserved_peer(&self, domain: &CanonicalDomain) -> bool {
+        self.mode != AdmissionMode::Open
+            || self.allow.contains(domain)
+            || self.trusted_homes.contains(domain)
     }
 
     /// Whether the operator requires `domain`, a trusted home, to

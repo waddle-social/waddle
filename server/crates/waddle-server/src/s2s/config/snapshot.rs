@@ -199,10 +199,29 @@ impl S2sConfig {
     }
 }
 
+/// Whether a list's entries must be within `.test` while ADR-0020 gate G6
+/// restricts S2S to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Domains this release may serve, admit or dial.
+    TestOnly,
+    /// Denylist entries, which refuse and never admit, so they may name
+    /// real domains before the restriction is lifted.
+    AnyDomain,
+}
+
 /// Prepare every entry of a domain list as a federation peer domain.
 fn peer_domains(
     section: ConfigSection,
     entries: &[String],
+) -> Result<Vec<CanonicalDomain>, ConfigError> {
+    scoped_domains(section, entries, Scope::TestOnly)
+}
+
+fn scoped_domains(
+    section: ConfigSection,
+    entries: &[String],
+    scope: Scope,
 ) -> Result<Vec<CanonicalDomain>, ConfigError> {
     if entries.len() > MAX_LIST_ENTRIES {
         return Err(ConfigError::TooManyEntries(section));
@@ -210,7 +229,7 @@ fn peer_domains(
     let mut seen = BTreeSet::new();
     let mut domains = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
-        let domain = peer_domain(section, index, entry)?;
+        let domain = peer_domain(section, index, entry, scope)?;
         if !seen.insert(domain.clone()) {
             return Err(ConfigError::Duplicate { section, index });
         }
@@ -223,6 +242,7 @@ fn peer_domain(
     section: ConfigSection,
     index: usize,
     entry: &str,
+    scope: Scope,
 ) -> Result<CanonicalDomain, ConfigError> {
     let domain = CanonicalDomain::prepare(entry).map_err(|error| ConfigError::InvalidDomain {
         section,
@@ -234,7 +254,7 @@ fn peer_domain(
     }
     // The discovery slice lifts this restriction through its own reviewed
     // change (ADR-0020 gate G6).
-    if !is_test_domain(&domain) {
+    if scope == Scope::TestOnly && !is_test_domain(&domain) {
         return Err(ConfigError::OutsideTestDomain { section, index });
     }
     Ok(domain)
@@ -272,7 +292,7 @@ fn admission(
         Some(ModeDocument::Closed) => AdmissionMode::Closed,
         Some(ModeDocument::Open) => AdmissionMode::Open,
     };
-    let deny_entries = peer_domains(ConfigSection::Denylist, &document.deny)?;
+    let deny_entries = scoped_domains(ConfigSection::Denylist, &document.deny, Scope::AnyDomain)?;
     // A denylist entry covering a local domain would refuse this
     // deployment's own name; it is a contradiction, not a policy.
     if let Some(index) = deny_entries
@@ -298,24 +318,27 @@ fn admission(
         local,
         &deny,
     )?;
-    Ok(AdmissionPolicy::new(
+    let policy = AdmissionPolicy::new(
         mode,
         local.clone(),
-        allow,
+        allow.iter().cloned().collect(),
         deny,
-        dialback,
-        trusted_homes,
-    ))
+        dialback.iter().cloned().collect(),
+        trusted_homes.iter().cloned().collect(),
+    );
+    warn_unadmitted(&policy, ConfigSection::DialbackList, &dialback);
+    warn_unadmitted(&policy, ConfigSection::TrustedHomes, &trusted_homes);
+    Ok(policy)
 }
 
-/// An allowlist, dialback or trusted-home list: exact entries that name no
-/// local domain and that no denylist entry covers.
+/// An allowlist, dialback or trusted-home list, in file order: exact
+/// entries that name no local domain and that no denylist entry covers.
 fn exact_list(
     section: ConfigSection,
     entries: &[String],
     local: &BTreeSet<CanonicalDomain>,
     deny: &BTreeSet<CanonicalDomain>,
-) -> Result<BTreeSet<CanonicalDomain>, ConfigError> {
+) -> Result<Vec<CanonicalDomain>, ConfigError> {
     let domains = peer_domains(section, entries)?;
     for (index, domain) in domains.iter().enumerate() {
         if local.contains(domain) {
@@ -327,7 +350,26 @@ fn exact_list(
             return Err(ConfigError::Denied { section, index });
         }
     }
-    Ok(domains.into_iter().collect())
+    Ok(domains)
+}
+
+/// Warn about dialback or trusted-home entries that the admission mode
+/// never admits, such as every entry in `closed` mode or one missing from
+/// the allowlist in `allowlist` mode. Those lists never admit a domain
+/// themselves, so such an entry has no effect; it is likely a mistake but
+/// not a contradiction, and the snapshot still loads. The warning names
+/// the setting and the entry's position, never the domain.
+fn warn_unadmitted(policy: &AdmissionPolicy, section: ConfigSection, entries: &[CanonicalDomain]) {
+    for (index, domain) in entries.iter().enumerate() {
+        if policy.decide(domain).is_err() {
+            tracing::warn!(
+                setting = section.as_str(),
+                index,
+                mode = policy.mode().code(),
+                "s2s list entry is never admitted in this admission mode"
+            );
+        }
+    }
 }
 
 /// Mark the trusted homes that must authenticate under a private-CA
@@ -526,7 +568,7 @@ fn endpoints(
     let section = ConfigSection::Endpoints;
     let mut endpoints: BTreeMap<CanonicalDomain, Vec<ConfiguredEndpoint>> = BTreeMap::new();
     for (index, document) in documents.iter().enumerate() {
-        let domain = peer_domain(section, index, &document.domain)?;
+        let domain = peer_domain(section, index, &document.domain, Scope::TestOnly)?;
         if local.contains(&domain) {
             return Err(ConfigError::LocalDomain { section, index });
         }

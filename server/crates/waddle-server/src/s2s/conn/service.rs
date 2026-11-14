@@ -7,9 +7,10 @@
 //! certificate verification runs on the bounded verifier workers, off the
 //! async runtime.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -21,10 +22,10 @@ use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
     DialbackMode, InitiatingConfig, ReceivingConfig, S2sStream, SaslLimits, StreamLanguage,
 };
-use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sTransport};
+use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 
 use super::admission::ConnectionAdmission;
-use super::capacity::Capacity;
+use super::capacity::{Capacity, InboundSlot, OutboundSlot};
 use super::endpoints::{ConfiguredEndpoints, EndpointResolver, Endpoints, ResolveError};
 use super::peer_stream::{StreamDirection, VerifiedPeerStream};
 use super::registry::{Activity, DialRefusal, DialSlot, Registry};
@@ -89,12 +90,81 @@ pub(super) struct Shared {
     /// Cancelled when the drain time is up: connections drop their sockets.
     pub(super) abort: CancellationToken,
     tasks: TaskTracker,
+    /// Whether tasks may still be spawned. Shutdown clears it under the
+    /// lock before closing the tracker, and every spawn happens under the
+    /// lock, so no task starts after the join has begun.
+    open: Mutex<bool>,
     next_connection: AtomicU64,
 }
 
 impl Shared {
     fn next_connection(&self) -> u64 {
         self.next_connection.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn lock_open(&self) -> std::sync::MutexGuard<'_, bool> {
+        // A bool is always usable, so a poisoned lock is too.
+        match self.open.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Spawn `task` on the tracker unless shutdown has begun; `false` when
+    /// it was not spawned.
+    fn spawn<F>(&self, task: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let open = self.lock_open();
+        if !*open {
+            return false;
+        }
+        self.tasks.spawn(task);
+        true
+    }
+
+    /// Stop new tasks, tell every connection to drain and close the
+    /// tracker.
+    fn close(&self) {
+        let mut open = self.lock_open();
+        *open = false;
+        self.shutdown.cancel();
+        self.tasks.close();
+    }
+
+    /// Admit an inbound socket from `address`. When the inbound socket cap
+    /// is full, the inbound stream that has carried no traffic the longest
+    /// is evicted if that has lasted the eviction time, and its socket
+    /// makes room for this one.
+    fn admit_inbound(&self, address: std::net::IpAddr) -> Result<InboundSlot, S2sResource> {
+        match self.capacity.admit_inbound(address) {
+            Err(S2sResource::Sockets) => {
+                let socket = self
+                    .registry
+                    .evict_for_socket(StreamDirection::Inbound, Instant::now())
+                    .ok_or(S2sResource::Sockets)?;
+                socket.release();
+                self.capacity.admit_inbound(address)
+            }
+            admitted => admitted,
+        }
+    }
+
+    /// Admit an outbound socket, evicting an outbound stream without
+    /// traffic as [`Shared::admit_inbound`] does for inbound ones.
+    fn admit_outbound(&self) -> Result<OutboundSlot, S2sResource> {
+        match self.capacity.admit_outbound() {
+            Err(S2sResource::Sockets) => {
+                let socket = self
+                    .registry
+                    .evict_for_socket(StreamDirection::Outbound, Instant::now())
+                    .ok_or(S2sResource::Sockets)?;
+                socket.release();
+                self.capacity.admit_outbound()
+            }
+            admitted => admitted,
+        }
     }
 }
 
@@ -113,8 +183,6 @@ pub enum ConnectError {
     InProgress,
     #[error("the cap on outbound attempts in progress is reached")]
     Busy,
-    #[error("too many remote domains are backing off")]
-    TooManyDestinations,
     #[error("no endpoint: {0}")]
     Resolve(ResolveError),
     #[error("the attempt failed: {}", outcome_code(*.0))]
@@ -179,15 +247,14 @@ impl S2sService {
             shutdown,
             abort: CancellationToken::new(),
             tasks: TaskTracker::new(),
+            open: Mutex::new(true),
             next_connection: AtomicU64::new(1),
         });
         let local_address = listener
             .as_ref()
             .and_then(|listener| listener.local_addr().ok());
         if let Some(listener) = listener {
-            shared
-                .tasks
-                .spawn(accept_loop(Arc::clone(&shared), listener));
+            shared.spawn(accept_loop(Arc::clone(&shared), listener));
         }
         tracing::info!(
             generation = %shared.config.generation(),
@@ -219,8 +286,7 @@ impl S2sService {
     pub async fn shutdown(self, budget: Duration) -> ShutdownReport {
         let started = Instant::now();
         let deadlines = *self.shared.config.deadlines();
-        self.shared.shutdown.cancel();
-        self.shared.tasks.close();
+        self.shared.close();
         let drain = deadlines.drain.min(budget);
         let drained = tokio::time::timeout(drain, self.shared.tasks.wait())
             .await
@@ -265,12 +331,11 @@ impl S2sHandle {
         }
         let dial = shared
             .registry
-            .begin_dial(remote, Instant::now())
+            .begin_dial(local, remote, Instant::now())
             .map_err(|refusal| match refusal {
                 DialRefusal::BackingOff => ConnectError::BackingOff,
                 DialRefusal::InProgress => ConnectError::InProgress,
                 DialRefusal::Busy => ConnectError::Busy,
-                DialRefusal::TooManyDestinations => ConnectError::TooManyDestinations,
             })?;
         let endpoints = shared
             .resolver
@@ -285,7 +350,9 @@ impl S2sHandle {
             dial,
             sender,
         };
-        shared.tasks.spawn(run_attempt(Arc::clone(shared), attempt));
+        if !shared.spawn(run_attempt(Arc::clone(shared), attempt)) {
+            return Err(ConnectError::ShuttingDown);
+        }
         match receiver.await {
             Ok(Ok(stream)) => Ok(stream),
             Ok(Err(outcome)) => Err(ConnectError::Failed(outcome)),
@@ -327,7 +394,7 @@ async fn accept_loop(shared: Arc<Shared>, listener: TcpListener) {
                 continue;
             }
         };
-        match shared.capacity.admit_inbound(address.ip()) {
+        match shared.admit_inbound(address.ip()) {
             Ok(slot) => {
                 let started = Instant::now();
                 let _ = socket.set_nodelay(true);
@@ -354,7 +421,9 @@ async fn accept_loop(shared: Arc<Shared>, listener: TcpListener) {
                         tls_transport: S2sTransport::StartTls,
                     },
                 );
-                shared.tasks.spawn(session.run(Vec::new()));
+                // A session not spawned because shutdown began drops its
+                // socket here.
+                shared.spawn(session.run(Vec::new()));
             }
             Err(resource) => {
                 drop(socket);
@@ -410,29 +479,42 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
     let started = Instant::now();
     let deadlines = *shared.config.deadlines();
     let negotiation_deadline = started + deadlines.negotiation;
-    let negotiation = match shared.registry.begin_negotiation(&attempt.remote) {
+    let negotiation = match shared
+        .registry
+        .begin_negotiation(StreamDirection::Outbound, &attempt.remote)
+    {
         Ok(slot) => slot,
         Err(resource) => {
             telemetry::capacity_refused(StreamDirection::Outbound, resource);
             return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
         }
     };
-    let slot = match shared.capacity.admit_outbound() {
+    let slot = match shared.admit_outbound() {
         Ok(slot) => slot,
         Err(resource) => {
             telemetry::capacity_refused(StreamDirection::Outbound, resource);
             return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
         }
     };
+    let addresses: Vec<SocketAddr> = attempt
+        .endpoints
+        .iter()
+        .map(|endpoint| endpoint.address)
+        .collect();
     let mut connected: Option<TcpStream> = None;
-    for endpoint in attempt.endpoints.iter() {
+    for address in addresses {
         let deadline = (Instant::now() + deadlines.connect).min(negotiation_deadline);
-        let connect = TcpStream::connect(endpoint.address);
-        if let Ok(Ok(socket)) = tokio::time::timeout_at(deadline.into(), connect).await {
+        let connect = tokio::time::timeout_at(deadline.into(), TcpStream::connect(address));
+        // A drain does not wait for a TCP connect.
+        let connect = tokio::select! {
+            biased;
+            () = shared.shutdown.cancelled() => {
+                return fail_attempt(&shared, attempt, S2sOutcome::Shutdown);
+            }
+            connect = connect => connect,
+        };
+        if let Ok(Ok(socket)) = connect {
             connected = Some(socket);
-            break;
-        }
-        if shared.shutdown.is_cancelled() {
             break;
         }
     }
@@ -471,7 +553,7 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
             role: Role::Outbound {
                 local,
                 remote,
-                _slot: slot,
+                slot,
                 dial: Some(dial),
                 established: Some(sender),
             },

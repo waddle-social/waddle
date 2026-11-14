@@ -14,8 +14,9 @@
 //! arrives with discovery.
 //!
 //! Until the discovery slice lifts it through its own reviewed change
-//! (ADR-0020 gate G6), every configured domain must be within `.test` and
-//! the listener and every endpoint must be loopback addresses.
+//! (ADR-0020 gate G6), every configured domain must be within `.test`,
+//! except denylist entries, which only refuse, and the listener and every
+//! endpoint must be loopback addresses.
 
 mod admission;
 mod document;

@@ -1,15 +1,23 @@
-//! The configuration snapshot: activation, D1 admission with the dialback
-//! and trusted-home lists, refused domain forms and load failures.
+//! The configuration snapshot: activation and startup checks, D1
+//! admission with the dialback and trusted-home lists, refused domain
+//! forms, load failures and the default resource model.
 
+use std::ffi::OsStr;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use jid::{BareJid, DomainPart};
 use waddle_server::s2s::config::{
-    AdmissionMode, AdmissionRefusal, ConfigError, ConfigSection, S2sActivation,
-    MAX_MATERIAL_FILE_BYTES,
+    AdmissionMode, AdmissionRefusal, ConfigError, ConfigSection, ResourceLimits, S2sActivation,
+    ENABLED_VARIABLE, MAX_MATERIAL_FILE_BYTES,
+};
+use waddle_server::s2s::conn::{
+    check_inherited_listener, load_config, load_enabled_config, StartupError,
 };
 use waddle_server::s2s::verify::TrustProfileKind;
+use waddle_server::server::XmppConfig;
 
-use crate::support::{domain, load_text, Pki, Spec, HOME_A, HOME_B};
+use crate::support::{domain, load_text, settings, Pki, Spec, HOME_A, HOME_B};
 
 /// A change to a deployment's specification.
 type Adjust = fn(&mut Spec);
@@ -38,9 +46,144 @@ fn s2s_is_off_unless_explicitly_enabled() {
         Err(ConfigError::RelativeConfigFile)
     ));
     assert!(matches!(
-        S2sActivation::from_values(Some("yes"), file),
+        S2sActivation::from_values(Some("yes"), file.clone()),
         Err(ConfigError::InvalidEnabledFlag)
     ));
+    assert_eq!(
+        S2sActivation::from_os_values(Some(OsStr::new("true")), file.clone()).expect("on"),
+        S2sActivation::Enabled(PathBuf::from("/etc/waddle/s2s.toml"))
+    );
+    assert_eq!(
+        S2sActivation::from_os_values(None, file).expect("off"),
+        S2sActivation::Disabled
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_enable_flag_that_is_not_unicode_fails_instead_of_reading_as_unset() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let file = Some(PathBuf::from("/etc/waddle/s2s.toml"));
+    assert!(matches!(
+        S2sActivation::from_os_values(Some(OsStr::from_bytes(b"tru\xff")), file),
+        Err(ConfigError::InvalidEnabledFlag)
+    ));
+}
+
+/// The XMPP configuration of a process serving `domain` with its default
+/// MUC and Spaces services.
+fn served(domain: &str) -> XmppConfig {
+    XmppConfig {
+        domain: domain.to_owned(),
+        muc_domain: DomainPart::new(&["muc.", domain].concat())
+            .expect("a MUC domain")
+            .into_owned(),
+        spaces_jid: BareJid::new(&["spaces.", domain].concat()).expect("a Spaces JID"),
+        ..XmppConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn startup_reads_nothing_while_s2s_is_off_and_checks_the_served_domains() {
+    let pki = Pki::new();
+    // While S2S is off no file is read, so a missing one is no error.
+    let off = load_config(S2sActivation::Disabled, &served(HOME_A), settings())
+        .await
+        .expect("S2S off");
+    assert!(off.is_none());
+
+    // The account, MUC and Spaces domains this process serves.
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.local = vec![HOME_A, "muc.home-a.test", "spaces.home-a.test"];
+    let path = pki.file("served.toml", &spec.toml(&pki));
+    let config = load_config(
+        S2sActivation::Enabled(path.clone()),
+        &served(HOME_A),
+        settings(),
+    )
+    .await
+    .expect("served local domains")
+    .expect("S2S on");
+    assert_eq!(config.local_domains().len(), 3);
+
+    // A local domain this process does not serve fails startup.
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.local = vec![HOME_A, "other.home-a.test"];
+    let path = pki.file("unserved.toml", &spec.toml(&pki));
+    let unserved = load_config(S2sActivation::Enabled(path), &served(HOME_A), settings()).await;
+    assert!(
+        matches!(
+            unserved,
+            Err(StartupError::UnservedLocalDomain { index: 1 })
+        ),
+        "{unserved:?}"
+    );
+
+    // An enabled S2S without a readable file fails startup.
+    let missing = load_config(
+        S2sActivation::Enabled(pki.dir.path().join("missing.toml")),
+        &served(HOME_A),
+        settings(),
+    )
+    .await;
+    assert!(
+        matches!(
+            missing,
+            Err(StartupError::Config(ConfigError::ConfigFileUnreadable))
+        ),
+        "{missing:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_process_entry_point_is_off_without_the_flag() {
+    // Nothing in the test environment sets the flag, so S2S stays off and
+    // no S2S file is read.
+    assert_eq!(std::env::var_os(ENABLED_VARIABLE), None);
+    let config = load_enabled_config(&served(HOME_A)).await.expect("S2S off");
+    assert!(config.is_none());
+}
+
+#[test]
+fn an_inherited_listener_must_be_on_the_configured_loopback_address() {
+    let address = |text: &str| -> SocketAddr { text.parse().expect("a socket address") };
+    let configured = address("127.0.0.1:5269");
+    assert!(check_inherited_listener(configured, address("127.0.0.1:5269")).is_ok());
+    for actual in [
+        "0.0.0.0:5269",
+        "192.0.2.1:5269",
+        "127.0.0.2:5269",
+        "127.0.0.1:5270",
+        "[::1]:5269",
+        "[::]:5269",
+    ] {
+        assert!(
+            matches!(
+                check_inherited_listener(configured, address(actual)),
+                Err(StartupError::InheritedListenerMismatch)
+            ),
+            "{actual}"
+        );
+    }
+    // Port zero, used only by the native fixture, matches the port the
+    // first process bound, but never another address.
+    let any_port = address("127.0.0.1:0");
+    assert!(check_inherited_listener(any_port, address("127.0.0.1:40000")).is_ok());
+    assert!(check_inherited_listener(any_port, address("0.0.0.0:40000")).is_err());
+    assert!(check_inherited_listener(address("[::1]:5269"), address("[::1]:5269")).is_ok());
+}
+
+#[test]
+fn the_default_caps_leave_room_for_negotiation() {
+    let limits = ResourceLimits::default();
+    // Established streams never take the sockets that unauthenticated
+    // connections need, and peers stay below each direction's socket cap.
+    assert!(limits.max_streams + limits.max_unauthenticated <= limits.max_sockets);
+    assert!(limits.max_streams < limits.max_sockets);
+    assert!(limits.max_peers < limits.max_inbound_sockets);
+    assert!(limits.max_peers < limits.max_outbound_sockets);
+    assert!(limits.max_peers <= limits.max_streams);
 }
 
 #[tokio::test]
@@ -433,6 +576,55 @@ async fn trusted_homes_are_trusted_on_the_public_profile_unless_a_private_ca_is_
     assert!(admission.requires_private_ca(&domain(HOME_B)));
     // Being admitted does not make a domain a trusted home.
     assert!(!admission.is_trusted_home(&domain("other.test"), TrustProfileKind::PrivateCa));
+}
+
+#[tokio::test]
+async fn the_denylist_may_name_domains_outside_the_test_domain() {
+    let pki = Pki::new();
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.deny = vec!["evil.example"];
+    let config = spec.load(&pki).await.expect("a valid configuration");
+    let admission = config.admission();
+    for denied in ["evil.example", "muc.evil.example"] {
+        assert_eq!(
+            admission.decide(&domain(denied)),
+            Err(AdmissionRefusal::Denylisted),
+            "{denied}"
+        );
+    }
+    assert_eq!(
+        admission.decide(&domain("fine.example")),
+        Err(AdmissionRefusal::OutsideTestDomain)
+    );
+    // Lists that admit or trust still may not.
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.trusted_homes = vec!["home.example"];
+    assert!(matches!(
+        spec.load(&pki).await,
+        Err(ConfigError::OutsideTestDomain {
+            section: ConfigSection::TrustedHomes,
+            index: 0
+        })
+    ));
+}
+
+#[tokio::test]
+async fn only_open_mode_holds_back_the_reserved_share_of_the_caps() {
+    let pki = Pki::new();
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.mode = "open";
+    spec.trusted_homes = vec!["trusted.test"];
+    let config = spec.load(&pki).await.expect("open mode");
+    let admission = config.admission();
+    assert!(admission.is_reserved_peer(&domain(HOME_B)));
+    assert!(admission.is_reserved_peer(&domain("trusted.test")));
+    assert!(!admission.is_reserved_peer(&domain("anyone.test")));
+
+    let config = Spec::new(HOME_A, HOME_B)
+        .load(&pki)
+        .await
+        .expect("allowlist mode");
+    assert!(config.admission().is_reserved_peer(&domain(HOME_B)));
 }
 
 #[tokio::test]

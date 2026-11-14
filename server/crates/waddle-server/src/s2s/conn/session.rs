@@ -7,8 +7,12 @@
 //! restart) has its own deadline, the SASL phase has one from its start,
 //! and the whole negotiation has one from the TCP accept or connect. An
 //! established stream ends when its certificate evidence or its maximum
-//! age runs out, when it has been idle too long, or when an unfinished
-//! element stays unfinished too long.
+//! age runs out, when it has received and sent nothing, not even
+//! whitespace, for the idle time, or when one unfinished element stays
+//! unfinished too long.
+//!
+//! The end of the shutdown drain (abort) interrupts every step, including
+//! a TLS handshake or a write in progress.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -19,16 +23,16 @@ use rustls::{ClientConnection, Connection, ServerConnection};
 use tokio::sync::oneshot;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
-    AuthorizationDecision, AuthorizationRequest, CloseReason, NegotiationPhase, Output, S2sStream,
-    Signal, StreamErrorCondition,
+    AuthorizationDecision, AuthorizationRequest, CloseReason, NegotiatedStream, NegotiationPhase,
+    Output, S2sStream, Signal, StreamErrorCondition,
 };
 use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 
 use super::admission::{Claim, ConnectionAdmission};
-use super::capacity::{InboundSlot, OutboundSlot};
+use super::capacity::{InboundSlot, OutboundSlot, SocketCount};
 use super::peer_stream::{StreamDirection, TlsParameters, VerifiedPeerStream};
 use super::registry::{
-    Activity, DialSlot, NegotiationSlot, RegisterRefusal, StreamSlot, StreamTokens,
+    Activity, DialSlot, NegotiationSlot, RegisterRefusal, Registration, StreamSlot, StreamTokens,
 };
 use super::service::Shared;
 use super::sink::SinkVerdict;
@@ -54,12 +58,22 @@ pub(super) enum Role {
     Outbound {
         local: CanonicalDomain,
         remote: CanonicalDomain,
-        _slot: OutboundSlot,
+        slot: OutboundSlot,
         /// Held until the attempt succeeds or fails, so a second dial for
         /// the pair is refused meanwhile.
         dial: Option<DialSlot>,
         established: Option<EstablishedSender>,
     },
+}
+
+impl Role {
+    /// The connection's place in the socket counts.
+    fn socket(&self) -> Arc<SocketCount> {
+        match self {
+            Self::Inbound { slot, .. } => slot.socket(),
+            Self::Outbound { slot, .. } => slot.socket(),
+        }
+    }
 }
 
 /// Everything a new session starts from.
@@ -156,7 +170,8 @@ impl Session {
         }
     }
 
-    /// Hold the per-peer negotiation slot taken before the session started.
+    /// Hold the per-peer negotiation slot an outbound attempt took before
+    /// dialling.
     pub(super) fn with_negotiation(mut self, slot: NegotiationSlot) -> Self {
         self.negotiation = Some(slot);
         self
@@ -171,9 +186,15 @@ impl Session {
     async fn drive(&mut self, initial: Vec<Output>) -> S2sOutcome {
         let mut queue: VecDeque<Output> = initial.into();
         let mut buffer = vec![0u8; PLAINTEXT_CHUNK];
+        let abort = self.shared.abort.clone();
         loop {
             while let Some(output) = queue.pop_front() {
-                match self.execute(output).await {
+                let executed = tokio::select! {
+                    biased;
+                    () = abort.cancelled() => return S2sOutcome::Shutdown,
+                    executed = self.execute(output) => executed,
+                };
+                match executed {
                     Ok(more) => queue.extend(more),
                     Err(outcome) => return outcome,
                 }
@@ -181,7 +202,6 @@ impl Session {
             self.track_phase();
             let (at, kind) = self.deadline();
             let shutdown = self.shared.shutdown.clone();
-            let abort = self.shared.abort.clone();
             let evict = self.tokens.evict.clone();
             let replace = self.tokens.replace.clone();
             let event = tokio::select! {
@@ -212,9 +232,7 @@ impl Session {
                 Event::Read(Ok(0)) => return S2sOutcome::PeerClosed,
                 Event::Read(Ok(read)) => {
                     let outputs = self.stream.receive(&buffer[..read]);
-                    if let Err(outcome) = self.after_receive() {
-                        return outcome;
-                    }
+                    self.after_receive(!outputs.is_empty());
                     outputs
                 }
                 Event::Read(Err(TransportError::Tls(_))) => return S2sOutcome::Tls,
@@ -224,36 +242,27 @@ impl Session {
         }
     }
 
-    /// Checks after the codec consumed input: per-peer capacity once the
-    /// inbound header named the remote domain, and the unfinished-element
-    /// deadline on an established stream.
-    fn after_receive(&mut self) -> Result<(), S2sOutcome> {
-        let negotiating = self.negotiation.is_none() && self.peer_stream.is_none();
-        if let (Role::Inbound { admission, .. }, true) = (&self.role, negotiating) {
-            match admission.claim() {
-                Claim::Admitted { remote, .. } if self.negotiation.is_none() => {
-                    match self.shared.registry.begin_negotiation(&remote) {
-                        Ok(slot) => self.negotiation = Some(slot),
-                        // Capacity is unavailable before the stream is
-                        // safe to continue: close without further XML.
-                        Err(resource) => {
-                            self.capacity_refusal = Some(resource);
-                            return Err(S2sOutcome::Capacity);
-                        }
-                    }
-                }
-                Claim::Refused => self.admission_refused = true,
-                Claim::Admitted { .. } | Claim::None => {}
+    /// Bookkeeping after the codec consumed input. `progressed` is whether
+    /// the input completed an element or a stream header or ended the
+    /// stream, which is traffic; whitespace and partial elements are not.
+    /// On an established stream, completing an element restarts the
+    /// unfinished-element deadline for the element that follows it.
+    fn after_receive(&mut self, progressed: bool) {
+        if let Role::Inbound { admission, .. } = &self.role {
+            if admission.claim() == Claim::Refused {
+                self.admission_refused = true;
             }
         }
-        if self.phase == NegotiationPhase::Established {
-            if self.stream.retained_bytes() > 0 {
-                self.incomplete_since.get_or_insert_with(Instant::now);
-            } else {
+        if progressed {
+            self.activity.traffic();
+        }
+        if self.stream.phase() == NegotiationPhase::Established {
+            if self.stream.retained_bytes() == 0 {
                 self.incomplete_since = None;
+            } else if progressed || self.incomplete_since.is_none() {
+                self.incomplete_since = Some(Instant::now());
             }
         }
-        Ok(())
     }
 
     /// Execute one codec output; `Err` ends the connection.
@@ -262,7 +271,10 @@ impl Session {
             Output::Transmit(bytes) => {
                 let write = self.shared.config.deadlines().write;
                 match tokio::time::timeout(write, self.transport.write_all(&bytes)).await {
-                    Ok(Ok(())) => Ok(Vec::new()),
+                    Ok(Ok(())) => {
+                        self.activity.traffic();
+                        Ok(Vec::new())
+                    }
                     Ok(Err(TransportError::Tls(_))) => Err(S2sOutcome::Tls),
                     Ok(Err(_)) => Err(S2sOutcome::Io),
                     Err(_) => Err(S2sOutcome::Timeout),
@@ -277,18 +289,42 @@ impl Session {
                     handoff: handoff.into_bytes(),
                     deadline: self.handshake_deadline(),
                 };
-                let verified = establish_tls(&self.shared, &mut self.transport, request)
-                    .await
-                    .map_err(|failure| {
-                        self.capacity_refusal = failure.resource;
-                        failure.outcome
-                    })?;
+                // A drain does not wait for a handshake: no XML, and so no
+                // `system-shutdown`, can be sent during one.
+                let shutdown = self.shared.shutdown.clone();
+                let handshake = tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => return Err(S2sOutcome::Shutdown),
+                    handshake = establish_tls(&self.shared, &mut self.transport, request) => handshake,
+                };
+                let verified = handshake.map_err(|failure| {
+                    self.capacity_refusal = failure.resource;
+                    failure.outcome
+                })?;
                 let peer = verified.tls_peer();
+                let remote = verified.domain().clone();
                 self.verified = Some(verified);
-                Ok(self.stream.tls_established(peer))
+                let mut outputs = self.stream.tls_established(peer);
+                if self.direction == StreamDirection::Inbound {
+                    // TLS has proven the remote domain, so its per-peer
+                    // budget applies from here; a claim that was never
+                    // verified did not count against it.
+                    match self
+                        .shared
+                        .registry
+                        .begin_negotiation(StreamDirection::Inbound, &remote)
+                    {
+                        Ok(slot) => self.negotiation = Some(slot),
+                        Err(resource) => {
+                            self.capacity_refusal = Some(resource);
+                            outputs.extend(self.stream.signal(Signal::ResourceExhausted));
+                        }
+                    }
+                }
+                Ok(outputs)
             }
             Output::Authorize(request) => Ok(self.authorize(&request)),
-            Output::Established(_) => self.established(),
+            Output::Established(negotiated) => self.established(negotiated),
             Output::Stanza(stanza) => {
                 let verdict = match &self.peer_stream {
                     Some(stream) => self.shared.sink.offer(stream, stanza),
@@ -319,9 +355,11 @@ impl Session {
     }
 
     /// Decide SASL EXTERNAL for the receiving role: the certificate still
-    /// holds, the pair is the one TLS verified and admission still admits
-    /// the remote domain; then the stream is registered, which refuses a
-    /// duplicate pair and may evict an idle stream.
+    /// holds, the pair is the one TLS verified, admission still admits the
+    /// remote domain and the registry could take the stream. The stream is
+    /// registered only after the post-SASL header, so a peer that stops
+    /// after SASL never replaces or evicts another stream; one the registry
+    /// would refuse now is refused before SASL succeeds.
     fn authorize(&mut self, request: &AuthorizationRequest) -> Vec<Output> {
         let Some(verified) = self.verified.clone() else {
             return self
@@ -344,17 +382,37 @@ impl Session {
                 .stream
                 .authorization(request.exchange, AuthorizationDecision::Denied);
         }
-        if self.shared.config.admission().decide(&remote).is_err() {
+        let admission = self.shared.config.admission();
+        if admission.decide(&remote).is_err() {
             self.admission_refused = true;
             return self
                 .stream
                 .authorization(request.exchange, AuthorizationDecision::Denied);
         }
-        match self.register(local, &verified) {
+        let reserved = admission.is_reserved_peer(&remote);
+        match self
+            .shared
+            .registry
+            .check(self.direction, &local, &remote, reserved)
+        {
             Ok(()) => self
                 .stream
                 .authorization(request.exchange, AuthorizationDecision::Granted),
-            Err(signal) => self.stream.signal(signal),
+            Err(refusal) => {
+                let signal = self.refused(refusal);
+                self.stream.signal(signal)
+            }
+        }
+    }
+
+    /// The signal that closes a stream the registry refused.
+    fn refused(&mut self, refusal: RegisterRefusal) -> Signal {
+        match refusal {
+            RegisterRefusal::Conflict => Signal::Conflict,
+            RegisterRefusal::Full(resource) => {
+                self.capacity_refusal = Some(resource);
+                Signal::ResourceExhausted
+            }
         }
     }
 
@@ -379,43 +437,49 @@ impl Session {
             tls,
             self.shared.config.generation(),
         );
-        match self.shared.registry.register(
-            stream.clone(),
-            Arc::clone(&self.activity),
-            self.tokens.clone(),
-        ) {
+        let reserved = self
+            .shared
+            .config
+            .admission()
+            .is_reserved_peer(stream.remote());
+        let registration = Registration {
+            stream: stream.clone(),
+            activity: Arc::clone(&self.activity),
+            tokens: self.tokens.clone(),
+            socket: self.role.socket(),
+            reserved,
+        };
+        match self.shared.registry.register(registration) {
             Ok(slot) => {
                 self.registered = Some(slot);
                 self.peer_stream = Some(stream);
                 Ok(())
             }
-            Err(RegisterRefusal::Conflict) => Err(Signal::Conflict),
-            Err(RegisterRefusal::Full(resource)) => {
-                self.capacity_refusal = Some(resource);
-                Err(Signal::ResourceExhausted)
-            }
+            Err(refusal) => Err(self.refused(refusal)),
         }
     }
 
-    /// The codec completed negotiation.
-    fn established(&mut self) -> Result<Vec<Output>, S2sOutcome> {
+    /// The codec completed negotiation with the post-SASL stream header.
+    /// The certificate is checked again for currency, which is the only
+    /// check an outbound stream gets after TLS, and the stream is
+    /// registered in either direction.
+    fn established(&mut self, negotiated: NegotiatedStream) -> Result<Vec<Output>, S2sOutcome> {
         let verified = self.verified.clone().ok_or(S2sOutcome::Protocol)?;
-        if let Role::Outbound { local, .. } = &self.role {
-            // The initiating role has no authorization step: the receiving
-            // server's certificate is checked again here.
-            let current = self
-                .shared
-                .config
-                .settings()
-                .now()
-                .is_some_and(|now| verified.is_current(now));
-            if !current {
-                return Ok(self.stream.signal(Signal::Expired));
-            }
-            let local = local.clone();
-            if let Err(signal) = self.register(local, &verified) {
-                return Ok(self.stream.signal(signal));
-            }
+        let current = self
+            .shared
+            .config
+            .settings()
+            .now()
+            .is_some_and(|now| verified.is_current(now));
+        if !current {
+            return Ok(self.stream.signal(Signal::Expired));
+        }
+        let local = match self.direction {
+            StreamDirection::Inbound => negotiated.destination,
+            StreamDirection::Outbound => negotiated.source,
+        };
+        if let Err(signal) = self.register(local, &verified) {
+            return Ok(self.stream.signal(signal));
         }
         let Some(stream) = self.peer_stream.clone() else {
             return Err(S2sOutcome::Protocol);
@@ -536,9 +600,15 @@ impl Session {
 
     /// Close the transport, report the outcome and release every slot.
     async fn end(mut self, outcome: S2sOutcome) {
-        if outcome != S2sOutcome::Shutdown || !self.shared.abort.is_cancelled() {
+        let abort = self.shared.abort.clone();
+        if !abort.is_cancelled() {
+            // Abort interrupts the close too; the socket is dropped anyway.
             let write = self.shared.config.deadlines().write;
-            let _ = tokio::time::timeout(write, self.transport.close()).await;
+            tokio::select! {
+                biased;
+                () = abort.cancelled() => {}
+                _ = tokio::time::timeout(write, self.transport.close()) => {}
+            }
         }
         if let Role::Outbound {
             remote,

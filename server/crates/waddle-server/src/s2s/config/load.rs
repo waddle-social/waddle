@@ -5,6 +5,7 @@
 //! `WADDLE_S2S_CONFIG_FILE` read; while S2S is off, no S2S file is opened,
 //! no listener is bound and no peer is dialled.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use tokio::fs::File;
@@ -32,10 +33,23 @@ pub enum S2sActivation {
 impl S2sActivation {
     /// Read the process environment.
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_values(
-            std::env::var(ENABLED_VARIABLE).ok().as_deref(),
+        Self::from_os_values(
+            std::env::var_os(ENABLED_VARIABLE).as_deref(),
             std::env::var_os(CONFIG_FILE_VARIABLE).map(PathBuf::from),
         )
+    }
+
+    /// Decide from the variables as the environment holds them. A flag
+    /// that is not Unicode is neither `true` nor `false`, so it fails like
+    /// any other value instead of reading as unset.
+    pub fn from_os_values(
+        enabled: Option<&OsStr>,
+        file: Option<PathBuf>,
+    ) -> Result<Self, ConfigError> {
+        let enabled = enabled
+            .map(|value| value.to_str().ok_or(ConfigError::InvalidEnabledFlag))
+            .transpose()?;
+        Self::from_values(enabled, file)
     }
 
     /// Decide from the two variables' values. An unset or `false` flag

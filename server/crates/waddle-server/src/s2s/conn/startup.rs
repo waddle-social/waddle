@@ -1,6 +1,7 @@
 //! Process startup of the S2S service: whether it runs, and the snapshot it
 //! runs with.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -21,6 +22,10 @@ pub enum StartupError {
     Config(#[from] ConfigError),
     #[error("S2S local domain {index} is not the XMPP domain, the MUC domain or the Spaces domain this process serves")]
     UnservedLocalDomain { index: usize },
+    #[error(
+        "the inherited `s2s` listener is not bound to the configured loopback `listen` address"
+    )]
+    InheritedListenerMismatch,
 }
 
 /// Load and validate the S2S snapshot when the environment enables S2S.
@@ -32,14 +37,44 @@ pub enum StartupError {
 pub async fn load_enabled_config(
     xmpp: &XmppConfig,
 ) -> Result<Option<Arc<S2sConfig>>, StartupError> {
-    let path = match S2sActivation::from_env()? {
+    let settings = TlsSettings::new(Arc::new(rustls::crypto::ring::default_provider()));
+    load_config(S2sActivation::from_env()?, xmpp, settings).await
+}
+
+/// Load and validate the snapshot `activation` names, checking certificates
+/// and CRLs with `settings`, and check its local domains against the
+/// domains `xmpp` serves. `None`, without reading any file, when S2S is
+/// disabled.
+pub async fn load_config(
+    activation: S2sActivation,
+    xmpp: &XmppConfig,
+    settings: TlsSettings,
+) -> Result<Option<Arc<S2sConfig>>, StartupError> {
+    let path = match activation {
         S2sActivation::Disabled => return Ok(None),
         S2sActivation::Enabled(path) => path,
     };
-    let settings = TlsSettings::new(Arc::new(rustls::crypto::ring::default_provider()));
     let config = S2sConfig::load(&path, settings).await?;
     check_local_domains(&config, xmpp)?;
     Ok(Some(Arc::new(config)))
+}
+
+/// Check the `s2s` listener inherited through `LISTEN_FDS` against the
+/// configured `listen` address. A cold start binds `listen` itself, which
+/// the loader has checked is loopback; an inherited descriptor was bound
+/// by the launcher and could be bound anywhere, so it is accepted only on
+/// a loopback address equal to `listen`. Port zero in `listen`, which only
+/// the native fixture uses, matches the port the first process bound.
+pub fn check_inherited_listener(
+    configured: SocketAddr,
+    actual: SocketAddr,
+) -> Result<(), StartupError> {
+    let port_matches = configured.port() == 0 || configured.port() == actual.port();
+    if actual.ip().is_loopback() && actual.ip() == configured.ip() && port_matches {
+        Ok(())
+    } else {
+        Err(StartupError::InheritedListenerMismatch)
+    }
 }
 
 /// Every S2S local domain must be a domain this process serves to remote

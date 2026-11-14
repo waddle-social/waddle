@@ -10,14 +10,20 @@ use tokio::net::TcpListener;
 use waddle_server::s2s::config::AdmissionRefusal;
 use waddle_server::s2s::conn::{AuthenticationStrength, ConnectError, StreamDirection};
 use waddle_server::s2s::verify::{MatchedIdentifier, TrustProfileKind};
+use waddle_xmpp::s2s::StreamErrorCondition;
 use waddle_xmpp::telemetry::attributes::S2sOutcome;
 
 use crate::support::{
-    domain, eventually, has_stream_error, header, listener, pair, raw_exchange, start, Pki, Spec,
-    HOME_A, HOME_B,
+    domain, eventually, header, listener, pair, raw_exchange, raw_exchange_until, start, Pki,
+    Received, Spec, HOME_A, HOME_B,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
+
+/// Whether the server has offered STARTTLS or closed the connection.
+fn answered(received: &Received) -> bool {
+    received.offers_starttls() || received.stream_error().is_some()
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn starttls_and_external_establish_streams_in_both_directions() {
@@ -83,22 +89,23 @@ async fn an_initial_header_without_from_is_refused_before_tls() {
     let pki = Pki::new();
     let (_a, b) = pair(&pki, |_| {}).await;
     let received = raw_exchange(b.address, &header(None, HOME_B), WAIT).await;
-    assert!(has_stream_error(&received, "bad-format"), "{received}");
-    assert!(!received.contains("starttls"), "no TLS is offered");
+    assert!(received.closed, "{received:?}");
+    assert_eq!(
+        received.stream_error(),
+        Some(StreamErrorCondition::BadFormat)
+    );
+    assert!(!received.offers_starttls(), "no TLS is offered");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_admitted_peer_is_offered_starttls() {
     let pki = Pki::new();
     let (_a, b) = pair(&pki, |_| {}).await;
-    let received = raw_exchange(
-        b.address,
-        &header(Some(HOME_A), HOME_B),
-        Duration::from_millis(500),
-    )
-    .await;
-    assert!(received.contains("starttls"), "{received}");
-    assert!(!received.contains("stream:error"), "{received}");
+    let received =
+        raw_exchange_until(b.address, &header(Some(HOME_A), HOME_B), WAIT, answered).await;
+    assert!(received.offers_starttls(), "{received:?}");
+    assert_eq!(received.stream_error(), None);
+    assert!(!received.closed, "the server awaits STARTTLS");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -111,19 +118,22 @@ async fn a_denylisted_subdomain_is_refused_before_tls_in_open_mode() {
     .await;
     for claimed in ["evil.test", "muc.evil.test"] {
         let received = raw_exchange(b.address, &header(Some(claimed), HOME_B), WAIT).await;
-        assert!(
-            has_stream_error(&received, "policy-violation"),
-            "{claimed}: {received}"
+        assert_eq!(
+            received.stream_error(),
+            Some(StreamErrorCondition::PolicyViolation),
+            "{claimed}: {received:?}"
         );
+        assert!(!received.offers_starttls(), "{claimed}");
     }
     // A name that merely ends in the same characters is not covered.
-    let received = raw_exchange(
+    let received = raw_exchange_until(
         b.address,
         &header(Some("badevil.test"), HOME_B),
-        Duration::from_millis(500),
+        WAIT,
+        answered,
     )
     .await;
-    assert!(received.contains("starttls"), "{received}");
+    assert!(received.offers_starttls(), "{received:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -132,9 +142,10 @@ async fn ip_addresses_numeric_forms_and_single_label_names_are_refused_before_tl
     let (_a, b) = pair(&pki, |spec| spec.mode = "open").await;
     for claimed in ["127.0.0.1", "[::1]", "2130706433", "localhost"] {
         let received = raw_exchange(b.address, &header(Some(claimed), HOME_B), WAIT).await;
-        assert!(
-            has_stream_error(&received, "policy-violation"),
-            "{claimed}: {received}"
+        assert_eq!(
+            received.stream_error(),
+            Some(StreamErrorCondition::PolicyViolation),
+            "{claimed}: {received:?}"
         );
     }
 }
@@ -144,7 +155,11 @@ async fn an_unserved_destination_is_host_unknown() {
     let pki = Pki::new();
     let (_a, b) = pair(&pki, |_| {}).await;
     let received = raw_exchange(b.address, &header(Some(HOME_A), "other.test"), WAIT).await;
-    assert!(has_stream_error(&received, "host-unknown"), "{received}");
+    assert_eq!(
+        received.stream_error(),
+        Some(StreamErrorCondition::HostUnknown),
+        "{received:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -156,11 +171,12 @@ async fn tls_sent_to_the_starttls_port_is_closed_without_xml() {
         0x16, 0x03, 0x01, 0x00, 0xc0, 0x01, 0x00, 0x00, 0xbc, 0x03, 0x03,
     ];
     let received = raw_exchange(b.address, &client_hello, WAIT).await;
-    assert!(received.is_empty(), "{received}");
+    assert!(received.closed_without_xml(), "{received:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_with_a_certificate_from_another_ca_does_not_authenticate() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let pki = Pki::new();
     let other = Pki::new();
     let (listener_a, address_a) = listener().await;
@@ -189,7 +205,26 @@ async fn a_peer_with_a_certificate_from_another_ca_does_not_authenticate() {
     );
 
     let result = a.handle.connect(&domain(HOME_A), &domain(HOME_B)).await;
-    assert!(matches!(result, Err(ConnectError::Failed(_))), "{result:?}");
+    // TLS 1.3 completes the client's side of the handshake before the
+    // server has checked the client certificate, so home-a sees the alert,
+    // or the close that follows it, after the handshake.
+    assert!(
+        matches!(
+            result,
+            Err(ConnectError::Failed(
+                S2sOutcome::Tls | S2sOutcome::PeerClosed | S2sOutcome::Io
+            ))
+        ),
+        "{result:?}"
+    );
+    // home-b refused the certificate: an active certificate failure.
+    assert!(
+        eventually(WAIT, || metrics.counter_sum(
+            "waddle.s2s.connections",
+            &[("direction", "inbound"), ("outcome", "certificate")]
+        ) == Some(1))
+        .await
+    );
     assert!(b.handle().streams().is_empty());
     assert!(a.handle.streams().is_empty());
 }
@@ -203,6 +238,10 @@ async fn a_redirect_ends_the_attempt_and_is_never_followed() {
     let mut spec = Spec::new(HOME_A, HOME_B);
     spec.allow = vec![HOME_B, "redirect.test"];
     spec.endpoints = vec![("redirect.test", redirect_address)];
+    // The backoff outlasts the one second the redirector waits for a
+    // second connection below, so the attempt after that wait still finds
+    // the domain backing off.
+    spec.limits = vec!["backoff_initial_ms = 60000".to_owned()];
     let a = start(&pki, &spec, listener_a).await;
 
     let server = tokio::spawn(async move {

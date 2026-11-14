@@ -123,7 +123,8 @@ pub enum S2sResource {
     Sockets,
     /// Inbound sockets that have not authenticated yet.
     Unauthenticated,
-    /// Unauthenticated inbound sockets from one source address.
+    /// Unauthenticated inbound sockets from one source address (an IPv6
+    /// /64 prefix), or the table of tracked source addresses.
     SourceAddress,
     /// The inbound accept rate, globally or for one source address.
     AcceptRate,
@@ -133,7 +134,8 @@ pub enum S2sResource {
     Streams,
     /// Remote domains with an established stream.
     Peers,
-    /// Negotiating streams claiming one remote domain.
+    /// Streams negotiating with one remote domain in one direction; an
+    /// inbound stream counts once TLS has verified the domain.
     PerPeer,
 }
 

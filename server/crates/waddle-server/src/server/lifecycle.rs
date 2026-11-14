@@ -134,13 +134,13 @@ pub async fn start_with_config_and_owner_outbox(
     let mut s2s_listener = None;
     let http_listener = if let Some(ref mut set) = inherited {
         // Launcher inheritance path: all listeners MUST be inherited. The
-        // `s2s` listener is taken only when S2S listens; an inherited `s2s`
-        // descriptor without it is left over and fails startup below.
-        if s2s_config
-            .as_ref()
-            .is_some_and(|config| config.listen().is_some())
-        {
-            s2s_listener = Some(set.take(crate::s2s::conn::S2S_LISTENER_NAME));
+        // `s2s` listener is taken only when S2S listens, and only when it
+        // is bound to the configured loopback address; an inherited `s2s`
+        // descriptor without `listen` is left over and fails startup below.
+        if let Some(address) = s2s_config.as_ref().and_then(|config| config.listen()) {
+            let listener = set.take(crate::s2s::conn::S2S_LISTENER_NAME);
+            crate::s2s::conn::check_inherited_listener(address, listener.local_addr()?)?;
+            s2s_listener = Some(listener);
         }
         set.take("http")
     } else {

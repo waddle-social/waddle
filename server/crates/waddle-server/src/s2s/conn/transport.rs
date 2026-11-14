@@ -48,8 +48,7 @@ pub(super) enum TransportError {
     WorkerLost,
 }
 
-/// One connection's socket and, after STARTTLS or a direct TLS connect,
-/// its TLS session.
+/// One connection's socket and, after STARTTLS, its TLS session.
 pub(super) struct Transport {
     socket: TcpStream,
     tls: Option<Connection>,
@@ -125,7 +124,7 @@ impl Transport {
         if read > 0 {
             self.bucket.consume(read, Instant::now());
             self.capacity.consume_input(read);
-            self.activity.touch();
+            self.activity.input();
         }
         Ok(read)
     }
