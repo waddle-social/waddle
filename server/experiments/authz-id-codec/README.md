@@ -65,10 +65,14 @@ encoding with a marker relationship,
 
 - marker present for `v2`: the server starts;
 - marker absent: the guard reads one relationship of every other definition in
-  the built-in schema; if any exists, the server refuses to start, otherwise it
-  creates the marker with preconditions that those definitions and the marker
-  definition are still empty, so racing replicas write it once;
-- marker present with any other content: the server refuses to start.
+  the built-in schema. If any exists, it reads the marker again and starts if
+  another replica has marked the store meanwhile, otherwise the server refuses
+  to start. If none exists, it creates the marker with preconditions that those
+  definitions and the marker definition are still empty, so racing replicas
+  write it once;
+- marker present with any other content: the server refuses to start. This is
+  also checked before the schema is written, so the server never rewrites the
+  schema of a store marked for another codec.
 
 The guard proves only that the store held no Waddle relationships when it was
 marked. It neither migrates nor reconstructs grants: a store written by the
@@ -79,14 +83,21 @@ dual read or store routing. The guard covers the SpiceDB backend only; the
 local test backend stores identifiers unencoded in its own tables. Live tests
 for the guard are in `crates/waddle-server/tests/authz_codec_incarnation.rs`.
 
+Deploying this guard to a store written by an earlier release, emptying it, the
+grants that are lost, and why the previous binary cannot be restored onto a
+marked store are covered by the operator runbook,
+[`docs/operations/authz-codec-cutover.md`](../../../docs/operations/authz-codec-cutover.md).
+
 Still unresolved: a reviewed policy for reconstructing grants from trustworthy
 authority (any migration of an existing store), and an authoritative principal
 canonicalization contract consistent with account lookup and identity
 resolution; treating this JID parser's equality as that contract is
 insufficient. Canonicalization must be established before choosing stored
-principal keys and must not be invented independently inside this codec. The
-workspace pins `jid` exactly because the accepted user-ID set depends on it.
-These gates do not close issue #2047.
+principal keys and must not be invented independently inside this codec.
+`waddle-server` pins `jid` exactly because the accepted user-ID set depends on
+it; that set also depends on the `stringprep` and `idna` versions in the server
+Cargo.lock, so updating any of the three is a codec change. These gates do not
+close issue #2047.
 
 The codec is pure and deterministic: a failed validation returns a typed error
 before any external effect. There are no claims, locks, retries, fences, or
