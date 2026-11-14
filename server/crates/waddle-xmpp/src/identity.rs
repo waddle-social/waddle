@@ -9,6 +9,11 @@
 //!   non-transitional processing with STD3 ASCII rules, and written as
 //!   lowercase A-labels. The U-label and A-label spellings of a domain are
 //!   the same [`CanonicalDomain`]. IP literals keep their canonical text.
+//!   Each canonical domain has one [`DomainKind`]: a fully qualified DNS
+//!   name, a single-label name, a numeric IPv4 form such as `0x7f.1`, or an
+//!   IP literal. Only a fully qualified DNS name can name a federation peer;
+//!   the other kinds are valid addresses that admission, routing and
+//!   discovery refuse by kind.
 //! - Waddle never folds an address it is given. An XML-decoded address is
 //!   accepted only when the `jid` parser would leave its localpart and
 //!   resourcepart byte-for-byte unchanged and its domainpart is written in

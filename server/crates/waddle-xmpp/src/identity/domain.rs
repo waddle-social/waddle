@@ -6,15 +6,60 @@ use jid::{DomainPart, DomainRef};
 
 use super::error::IdentityError;
 
-/// What a canonical domain names.
+/// What a canonical domain names, as [`CanonicalDomain::kind`] classifies
+/// it. Every domainpart a JID can carry has exactly one kind.
+///
+/// Only [`DomainKind::Dns`] can name a server-to-server peer (ADR-0020 D3);
+/// see [`DomainKind::names_federation_peer`]. The other kinds are valid in
+/// local addresses, and every place that admits, routes, discovers or dials
+/// a remote domain refuses them by this classification rather than by
+/// re-reading the text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DomainKind {
-    /// A DNS name, including an unqualified host name such as `localhost`.
+    /// A fully qualified DNS name: two or more labels, the final one not a
+    /// number (see [`DomainKind::NumericIpv4Form`]).
     Dns,
-    /// An IPv4 address in dotted-quad form.
+    /// A DNS name of one label, such as `localhost`. A resolver could
+    /// complete it from its search list.
+    SingleLabel,
+    /// A name a resolver or URL parser reads as an IPv4 address in a form
+    /// other than the dotted quad: its final label is a number, either all
+    /// decimal digits (`2130706433`, `127.1`, the leading-zero octal form
+    /// `0177.0.0.1`) or `0x` followed by hexadecimal digits (`0x7f.1`,
+    /// `0x7f000001`). This is the WHATWG URL Standard's "ends in a number"
+    /// rule, applied to the canonical (lowercase) text.
+    NumericIpv4Form,
+    /// An IPv4 address in dotted-quad form (RFC 7622 §3.2 `IPv4address`).
     Ipv4,
     /// A bracketed IPv6 address (RFC 3986 `IP-literal`).
     Ipv6,
+}
+
+impl DomainKind {
+    /// Whether a domain of this kind can name a server-to-server peer: only
+    /// a fully qualified DNS name. An IP address or numeric IPv4 form has no
+    /// source domain for a certificate to prove and would let an address
+    /// choose a socket without discovery; a resolver could complete a
+    /// single-label name from its search list.
+    pub fn names_federation_peer(self) -> bool {
+        matches!(self, Self::Dns)
+    }
+
+    /// Whether this is one of the two IP-address forms of RFC 7622 §3.2.
+    pub fn is_ip_literal(self) -> bool {
+        matches!(self, Self::Ipv4 | Self::Ipv6)
+    }
+
+    /// A stable code for logs and reports.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Dns => "dns",
+            Self::SingleLabel => "single_label",
+            Self::NumericIpv4Form => "numeric_ipv4_form",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
 }
 
 /// A domainpart in the profile's one canonical form.
@@ -26,10 +71,13 @@ pub enum DomainKind {
 ///   IDNA2008 hyphen restrictions and DNS length limits, and is written in
 ///   lowercase A-label form. `bücher.example` and `xn--bcher-kva.example`
 ///   are the same canonical domain, `xn--bcher-kva.example`.
-/// - The final label of a DNS name must not be all digits, so no DNS name
-///   can be mistaken for an IPv4 address in another spelling.
 /// - An IPv4 address keeps its dotted-quad text and an IPv6 address its
 ///   bracketed RFC 5952 text.
+/// - Every canonical domain has one [`DomainKind`]. A name whose final label
+///   is a number is a [`DomainKind::NumericIpv4Form`], never a
+///   [`DomainKind::Dns`] name, so no DNS name can be another spelling of an
+///   IPv4 address. Such a name is a valid domainpart and keeps its own text;
+///   it is not rewritten to the dotted quad a resolver would read.
 ///
 /// The canonical text is accepted unchanged by the `jid` parser, so it is
 /// also a valid [`DomainPart`]. The A-label form is the comparison form for
@@ -62,7 +110,7 @@ impl CanonicalDomain {
         if !spelled_as(unrooted, &ascii, &unicode) {
             return Err(IdentityError::NonCanonicalDomain);
         }
-        Self::from_ascii(ascii)
+        Self::from_parser_stable(ascii)
     }
 
     /// Prepare a domain from operator configuration under RFC 7622 §3.2,
@@ -74,7 +122,19 @@ impl CanonicalDomain {
         if let Some(literal) = ip_literal(unrooted) {
             return literal;
         }
-        Self::from_ascii(dns_to_ascii(unrooted)?)
+        Self::from_parser_stable(dns_to_ascii(unrooted)?)
+    }
+
+    /// Accept text that is already the canonical text of a domain: no
+    /// trailing dot, lowercase, A-labels. This is the rule for configured
+    /// domains this deployment serves and for stored identities, where any
+    /// other spelling is refused rather than mapped.
+    pub fn parse_canonical(input: &str) -> Result<Self, IdentityError> {
+        let domain = Self::parse_exact(input)?;
+        if domain.as_str() != input {
+            return Err(IdentityError::NonCanonicalDomain);
+        }
+        Ok(domain)
     }
 
     /// The canonical form of a domainpart the `jid` parser has already
@@ -84,14 +144,6 @@ impl CanonicalDomain {
     /// [`CanonicalDomain::parse_exact`] before parsing.
     pub fn from_domain(domain: &DomainRef) -> Result<Self, IdentityError> {
         Self::prepare(domain.as_str())
-    }
-
-    fn from_ascii(ascii: String) -> Result<Self, IdentityError> {
-        let last = ascii.rsplit('.').next().unwrap_or_default();
-        if !last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(IdentityError::InvalidDomain);
-        }
-        Self::from_parser_stable(ascii)
     }
 
     fn from_parser_stable(text: String) -> Result<Self, IdentityError> {
@@ -117,37 +169,44 @@ impl CanonicalDomain {
         self.0
     }
 
-    /// What the domain names.
+    /// What the domain names. The classification is a function of the
+    /// canonical text alone; see [`DomainKind`].
     pub fn kind(&self) -> DomainKind {
         let text = self.as_str();
         if text.starts_with('[') {
             DomainKind::Ipv6
         } else if text.parse::<Ipv4Addr>().is_ok() {
             DomainKind::Ipv4
-        } else {
+        } else if ends_in_a_number(text) {
+            DomainKind::NumericIpv4Form
+        } else if text.contains('.') {
             DomainKind::Dns
+        } else {
+            DomainKind::SingleLabel
         }
     }
 
-    /// The U-label presentation of a DNS name, for display. IP literals and
+    /// The U-label presentation of a name, for display. IP literals and
     /// all-ASCII names are returned as they are.
     pub fn to_unicode(&self) -> String {
-        match self.kind() {
-            DomainKind::Dns => {
-                dns_to_unicode(self.as_str()).unwrap_or_else(|_| self.as_str().to_owned())
-            }
-            DomainKind::Ipv4 | DomainKind::Ipv6 => self.as_str().to_owned(),
+        if self.kind().is_ip_literal() {
+            return self.as_str().to_owned();
         }
+        dns_to_unicode(self.as_str()).unwrap_or_else(|_| self.as_str().to_owned())
     }
 
     /// Whether this domain is `ancestor` or a subdomain of it, compared
     /// label by label: `muc.example.net` is within `example.net`,
-    /// `badexample.net` is not. IP literals are within only themselves.
+    /// `badexample.net` is not. Only DNS and single-label names have
+    /// subdomains; IP literals and numeric IPv4 forms are within only
+    /// themselves.
     pub fn is_within(&self, ancestor: &CanonicalDomain) -> bool {
         if self == ancestor {
             return true;
         }
-        if self.kind() != DomainKind::Dns || ancestor.kind() != DomainKind::Dns {
+        let has_labels =
+            |kind: DomainKind| matches!(kind, DomainKind::Dns | DomainKind::SingleLabel);
+        if !has_labels(self.kind()) || !has_labels(ancestor.kind()) {
             return false;
         }
         self.as_str()
@@ -192,6 +251,21 @@ fn ip_literal(text: &str) -> Option<Result<CanonicalDomain, IdentityError>> {
     text.parse::<Ipv4Addr>()
         .ok()
         .map(|address| CanonicalDomain::from_parser_stable(address.to_string()))
+}
+
+/// The WHATWG URL Standard's "ends in a number checker" for canonical text,
+/// which never ends in a dot: the final label is non-empty and all ASCII
+/// digits (decimal, or octal with a leading zero), or `0x` followed by zero
+/// or more hexadecimal digits. A resolver or URL parser reads such a name as
+/// an IPv4 address.
+fn ends_in_a_number(text: &str) -> bool {
+    let last = text.rsplit('.').next().unwrap_or(text);
+    if !last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+    last.strip_prefix("0x")
+        .or_else(|| last.strip_prefix("0X"))
+        .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn dns_to_ascii(text: &str) -> Result<String, IdentityError> {

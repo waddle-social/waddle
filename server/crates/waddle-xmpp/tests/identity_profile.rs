@@ -97,13 +97,7 @@ fn ip_literals_have_one_canonical_text() {
     assert_eq!(domain("127.0.0.1").kind(), DomainKind::Ipv4);
     assert_eq!(domain("[::1]").kind(), DomainKind::Ipv6);
     assert_eq!(domain("127.0.0.1.").as_str(), "127.0.0.1");
-    for input in [
-        "[0:0:0:0:0:0:0:1]",
-        "[::1",
-        "01.2.3.4",
-        "1.2.3",
-        "[::FFFF:1.2.3.4]",
-    ] {
+    for input in ["[0:0:0:0:0:0:0:1]", "[::1", "[::FFFF:1.2.3.4]"] {
         assert!(CanonicalDomain::parse_exact(input).is_err(), "{input:?}");
     }
     assert_eq!(
@@ -115,6 +109,72 @@ fn ip_literals_have_one_canonical_text() {
 }
 
 #[test]
+fn every_domainpart_has_one_kind() {
+    for (input, kind) in [
+        ("example.org", DomainKind::Dns),
+        ("muc.xn--bcher-kva.example", DomainKind::Dns),
+        ("0x7f.example", DomainKind::Dns),
+        ("example.0xg", DomainKind::Dns),
+        ("example.123abc", DomainKind::Dns),
+        ("localhost", DomainKind::SingleLabel),
+        ("intranet.", DomainKind::SingleLabel),
+        ("bücher", DomainKind::SingleLabel),
+        ("127.0.0.1", DomainKind::Ipv4),
+        ("192.0.2.10.", DomainKind::Ipv4),
+        ("[::1]", DomainKind::Ipv6),
+        ("[2001:db8::1]", DomainKind::Ipv6),
+        // ADR-0020 D3: the numeric, hexadecimal and abbreviated forms.
+        ("2130706433", DomainKind::NumericIpv4Form),
+        ("0x7f.1", DomainKind::NumericIpv4Form),
+        ("127.1", DomainKind::NumericIpv4Form),
+        // Other forms a resolver or URL parser reads as IPv4.
+        ("0x7f000001", DomainKind::NumericIpv4Form),
+        ("0x7f.0x1", DomainKind::NumericIpv4Form),
+        ("0x7f.0.0.0x1", DomainKind::NumericIpv4Form),
+        ("1.2.3.0x4", DomainKind::NumericIpv4Form),
+        ("0177.0.0.1", DomainKind::NumericIpv4Form),
+        ("017700000001", DomainKind::NumericIpv4Form),
+        ("01.2.3.4", DomainKind::NumericIpv4Form),
+        ("1.2.3", DomainKind::NumericIpv4Form),
+        ("127.0.0.1.1", DomainKind::NumericIpv4Form),
+        ("example.123", DomainKind::NumericIpv4Form),
+        ("example.0x", DomainKind::NumericIpv4Form),
+        ("example.09", DomainKind::NumericIpv4Form),
+    ] {
+        let canonical = domain(input);
+        assert_eq!(canonical.kind(), kind, "{input:?}");
+        assert_eq!(
+            canonical.kind().names_federation_peer(),
+            kind == DomainKind::Dns,
+            "{input:?}"
+        );
+        // The classification is of a valid domainpart, so the address
+        // parses: a refused peer domain is unroutable, not malformed.
+        let address = format!("bob@{input}");
+        let parsed = parse_bare_jid(&address).expect("valid address");
+        assert_eq!(
+            CanonicalDomain::from_domain(parsed.domain())
+                .expect("canonical")
+                .kind(),
+            kind,
+            "{input:?}"
+        );
+    }
+    // A numeric form is held to the same spelling rule as any other name.
+    assert_eq!(
+        CanonicalDomain::parse_exact("0X7F.1"),
+        Err(IdentityError::NonCanonicalDomain)
+    );
+    assert_eq!(
+        CanonicalDomain::prepare("0X7F.1").expect("prepared").kind(),
+        DomainKind::NumericIpv4Form
+    );
+    // A numeric form keeps its own text; it is not rewritten to a dotted quad.
+    assert_eq!(domain("127.1").as_str(), "127.1");
+    assert_ne!(domain("01.2.3.4"), domain("1.2.3.4"));
+}
+
+#[test]
 fn subdomain_coverage_is_label_by_label() {
     let parent = domain("example.net");
     assert!(domain("example.net").is_within(&parent));
@@ -123,6 +183,9 @@ fn subdomain_coverage_is_label_by_label() {
     assert!(!domain("badexample.net").is_within(&parent));
     assert!(!domain("example.net.evil").is_within(&parent));
     assert!(!domain("[::1]").is_within(&domain("localhost")));
+    assert!(domain("example.net").is_within(&domain("net")));
+    assert!(!domain("a.0x7f.1").is_within(&domain("0x7f.1")));
+    assert!(domain("0x7f.1").is_within(&domain("0x7f.1")));
 }
 
 #[test]
@@ -330,6 +393,129 @@ fn payload_jid_attributes_are_held_to_the_same_profile() {
         .get_child("item", "jabber:iq:roster")
         .expect("roster item");
     assert_eq!(item.attr("jid"), Some("bob@xn--bcher-kva.example"));
+}
+
+#[test]
+fn refused_peer_domain_forms_parse_as_addresses() {
+    // D3 refuses these domains as unroutable at classification; they are
+    // syntactically valid addresses, so the frame parser accepts them.
+    for to in [
+        "2130706433",
+        "bob@0x7f.1",
+        "bob@127.1/phone",
+        "0x7f000001",
+        "intranet",
+        "[::1]",
+    ] {
+        let frame = format!("<iq type='get' id='p1' to='{to}'><ping xmlns='urn:xmpp:ping'/></iq>");
+        let Stanza::Iq(iq) = stanza(&frame) else {
+            panic!("expected an IQ");
+        };
+        assert_eq!(iq.to().map(Jid::as_str), Some(to), "{to}");
+    }
+}
+
+#[test]
+fn mediated_invitation_addresses_are_held_to_the_profile() {
+    assert_eq!(
+        refusal(
+            "<message to='room@muc.example.org'><x xmlns='http://jabber.org/protocol/muc#user'><invite to='Bob@example.org'/></x></message>"
+        ),
+        ("message", IdentityError::NonCanonicalLocalpart)
+    );
+    assert_eq!(
+        refusal(
+            "<message to='room@muc.example.org'><x xmlns='http://jabber.org/protocol/muc#user'><decline to='stra&#xDF;e@example.org'/></x></message>"
+        ),
+        ("message", IdentityError::NonCanonicalLocalpart)
+    );
+    let Stanza::Message(message) = stanza(
+        "<message to='room@muc.example.org'><x xmlns='http://jabber.org/protocol/muc#user'><invite to='bob@b&#xFC;cher.example.'/></x></message>",
+    ) else {
+        panic!("expected a message");
+    };
+    let invite = message
+        .payloads
+        .iter()
+        .find_map(|payload| payload.get_child("invite", "http://jabber.org/protocol/muc#user"))
+        .expect("invite");
+    assert_eq!(invite.attr("to"), Some("bob@xn--bcher-kva.example"));
+}
+
+fn command_with_field(field: &str) -> String {
+    format!(
+        "<iq type='set' id='c1' to='example.org'><command xmlns='http://jabber.org/protocol/commands' node='group-dm:create' action='execute'><x xmlns='jabber:x:data' type='submit'>{field}</x></command></iq>"
+    )
+}
+
+#[test]
+fn typed_data_form_jid_fields_are_held_to_the_profile() {
+    for field in [
+        "<field var='member_jids' type='jid-multi'><value>bob@example.org</value><value>Carol@example.org</value></field>",
+        "<field var='member_jid' type='jid-single'><value>fu&#xDF;ball@example.org</value></field>",
+        "<field var='owner' type='jid-single'><value> EXAMPLE.org </value></field>",
+    ] {
+        assert_eq!(refusal(&command_with_field(field)).0, "iq", "{field}");
+    }
+    // Typed values are rewritten in canonical form; empty values and fields
+    // of other types are left alone.
+    let Stanza::Iq(iq) = stanza(&command_with_field(
+        "<field var='member_jids' type='jid-multi'><value> bob@example.org. </value><value/></field><field var='name' type='text-single'><value>Bob@Example</value></field>",
+    )) else {
+        panic!("expected an IQ");
+    };
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = *iq else {
+        panic!("expected an IQ set");
+    };
+    let form = payload.get_child("x", "jabber:x:data").expect("data form");
+    let values: Vec<String> = form
+        .children()
+        .flat_map(|field| field.children().map(minidom::Element::text))
+        .collect();
+    assert_eq!(values, ["bob@example.org", "", "Bob@Example"]);
+}
+
+#[test]
+fn data_form_jid_values_are_taken_exactly() {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
+
+    let form = DataForm::new(FormType::Submit)
+        .add_field(Field::new("member_jid", FieldType::TextSingle).with_value(" bob@example.org "))
+        .add_field(Field::new("owner", FieldType::TextSingle).with_value("Bob@example.org"))
+        .add_field(Field::new("empty", FieldType::TextSingle).with_value(""))
+        .add_field(
+            Field::new("members", FieldType::JidMulti)
+                .add_value("bob@example.org")
+                .add_value("")
+                .add_value("carol@example.org."),
+        )
+        .add_field(
+            Field::new("folded", FieldType::JidMulti)
+                .add_value("bob@example.org")
+                .add_value("\u{FB01}x@example.org"),
+        );
+    assert_eq!(
+        form.bare_jid("member_jid")
+            .expect("present")
+            .expect("canonical")
+            .as_str(),
+        "bob@example.org"
+    );
+    assert_eq!(
+        form.bare_jid("owner").expect("present"),
+        Err(IdentityError::NonCanonicalLocalpart)
+    );
+    assert!(form.bare_jid("empty").is_none());
+    assert!(form.bare_jid("absent").is_none());
+    let members: Vec<String> = form
+        .bare_jids("members")
+        .expect("present")
+        .expect("canonical")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(members, ["bob@example.org", "carol@example.org"]);
+    assert!(form.bare_jids("folded").expect("present").is_err());
 }
 
 #[test]
