@@ -5,6 +5,80 @@ import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 import type { Story, StoryReactionSummary } from "@/lib/xmpp-client";
 import { jidLocalpart } from "@/lib/xmpp/jid";
+import { css } from "styled-system/css";
+import { btn, chip, iconbtn, scrim } from "styled-system/recipes";
+
+const ui = {
+  positioner: css({
+    position: "fixed",
+    inset: 0,
+    zIndex: "dialog",
+    display: "flex",
+    alignItems: { base: "flex-end", md: "center" },
+    justifyContent: "center",
+    padding: { base: 0, md: "6" },
+  }),
+  scrim: scrim(),
+  dialog: css({
+    position: "relative",
+    zIndex: "dialog",
+    boxSizing: "border-box",
+    display: "flex",
+    flexDirection: "column",
+    width: { base: "100%", md: "672px" },
+    maxWidth: "100%",
+    maxHeight: { base: "92dvh", md: "calc(100dvh - 3rem)" },
+    overflow: "hidden",
+    borderRadius: { base: "24px 24px 0 0", md: "card" },
+    bg: "surface",
+    border: "1px solid {colors.border}",
+    borderBottomWidth: { base: 0, md: "1px" },
+    boxShadow: "overlay",
+    color: "fg",
+    outline: "none",
+  }),
+  grabber: css({ display: { base: "block", md: "none" }, alignSelf: "center", mt: "2", width: "40px", height: "4px", borderRadius: "pill", bg: "border" }),
+  head: css({ display: "flex", alignItems: "center", gap: "2.5", padding: { base: "8px 12px 10px 16px", md: "14px 16px" } }),
+  who: css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", lineHeight: 1.3, "& b": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }),
+  caption: css({ textStyle: "caption", color: "fg.muted" }),
+  close: iconbtn(),
+  scroll: css({ minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }),
+  media: css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    margin: { base: "0 12px", md: "0 16px" },
+    height: { base: "380px", md: "420px" },
+    maxHeight: "56dvh",
+    borderRadius: "14px",
+    overflow: "hidden",
+    bg: "sea.shallow",
+    "& img": { height: "92%", maxWidth: "92%", objectFit: "contain" },
+    "& video": { width: "100%", height: "100%", bg: "sea.deep" },
+  }),
+  body: css({ margin: { base: "12px 16px 0", md: "14px 18px 0" }, fontSize: "15px", lineHeight: 1.5, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }),
+  reactions: css({ display: "flex", flexDirection: "column", gap: "2", padding: { base: "12px 16px 4px", md: "14px 16px" } }),
+  quick: css({ display: "flex", flexWrap: "wrap", gap: "2", justifyContent: { base: "space-between", md: "flex-start" } }),
+  quickBtn: css({
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "44px",
+    height: "44px",
+    border: "1px solid {colors.border}",
+    borderRadius: "pill",
+    bg: "surface",
+    fontSize: "18px",
+    cursor: "pointer",
+    _hover: { borderColor: "border.strong", bgImage: "linear-gradient({colors.state.hover}, {colors.state.hover})" },
+    _pressed: { bg: "action.subtle", borderColor: "action" },
+  }),
+  summary: css({ display: "flex", flexWrap: "wrap", gap: "1" }),
+  chip: chip(),
+  foot: css({ display: "flex", alignItems: "center", gap: "2", padding: { base: "10px 16px 28px", md: "12px 16px" }, borderTop: "1px solid {colors.border.soft}", "& .wd-btn": { height: { base: "44px", md: "40px" } } }),
+  counter: css({ flex: 1, textAlign: "center", font: "600 13px/1 {fonts.mono}", color: "fg.muted" }),
+};
+const navButton = btn();
 
 interface StoryReactionEntry {
   emoji: string;
@@ -126,13 +200,13 @@ function onKeydown(event: KeyboardEvent) {
   <Teleport to="body">
     <div
       v-if="story"
-      class="z-modal fixed inset-0 flex items-end justify-center p-3 sm:items-center sm:p-6"
+      :class="ui.positioner"
       role="presentation"
     >
-      <div class="absolute inset-0 bg-background/75" @click="emit('close')" />
-      <article
+      <div :class="ui.scrim" @click="emit('close')" />
+      <div
         ref="dialogEl"
-        class="relative grid max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden rounded-lg border border-border bg-card shadow-2xl animate-slide-up"
+        :class="ui.dialog"
         role="dialog"
         aria-modal="true"
         aria-label="Story"
@@ -140,30 +214,30 @@ function onKeydown(event: KeyboardEvent) {
         @click.stop
         @keydown="onKeydown"
       >
-        <header class="flex items-center gap-3 border-b border-border px-4 py-3">
-          <UserAvatar :name="authorLabel(story.author)" :jid="story.author ?? null" size="sm" />
-          <div class="min-w-0 flex-1">
-            <p class="type-control truncate text-foreground">{{ authorLabel(story.author) }}</p>
-            <p v-if="listedAgo(story)" class="type-caption text-muted-foreground">
+        <span :class="ui.grabber" aria-hidden="true"></span>
+        <header :class="ui.head">
+          <UserAvatar :name="authorLabel(story.author)" :jid="story.author ?? null" size="md" />
+          <div :class="ui.who">
+            <b>{{ authorLabel(story.author) }}</b>
+            <span v-if="listedAgo(story)" :class="ui.caption">
               {{ listedAgo(story) }}
-            </p>
+            </span>
           </div>
           <button
             type="button"
-            class="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            :class="ui.close"
             aria-label="Close story"
             @click="emit('close')"
           >
-            <X class="h-4 w-4" aria-hidden="true" />
+            <X aria-hidden="true" />
           </button>
         </header>
 
-        <div class="flex min-h-0 flex-col gap-3 overflow-y-auto px-4 py-3">
-          <div v-if="story.mediaUrl" class="flex min-h-[12rem] items-center justify-center rounded-md bg-muted">
+        <div :class="ui.scroll">
+          <div v-if="story.mediaUrl" :class="ui.media">
             <video
               v-if="isVideoStory(story)"
               :src="story.mediaUrl"
-              class="max-h-[min(56dvh,34rem)] w-full rounded-md"
               controls
               playsinline
               referrerpolicy="no-referrer"
@@ -172,67 +246,66 @@ function onKeydown(event: KeyboardEvent) {
               v-else
               :src="story.mediaUrl"
               :alt="`Story media from ${authorLabel(story.author)}`"
-              class="max-h-[min(56dvh,34rem)] w-full rounded-md object-contain"
               referrerpolicy="no-referrer"
             />
           </div>
-          <p v-if="story.body" class="whitespace-pre-wrap break-words text-sm text-foreground">
+          <p v-if="story.body" :class="ui.body">
             {{ story.body }}
           </p>
+
+          <div :class="ui.reactions">
+            <div :class="ui.quick">
+              <button
+                v-for="emoji in QUICK_REACTION_EMOJIS"
+                :key="emoji"
+                type="button"
+                :class="ui.quickBtn"
+                :aria-label="`React with ${emoji}`"
+                :aria-pressed="reactionSummary?.mine.includes(emoji) ? 'true' : 'false'"
+                @click="emit('react', emoji)"
+              >
+                {{ emoji }}
+              </button>
+            </div>
+            <div v-if="reactionEntries.length > 0" :class="ui.summary">
+              <span
+                v-for="entry in reactionEntries"
+                :key="entry.emoji"
+                :class="ui.chip"
+                :data-pressed="reactionSummary?.mine.includes(entry.emoji) ? '' : undefined"
+                :title="entry.reactors.join(', ')"
+              >
+                <span>{{ entry.emoji }}</span>
+                <span class="wd-chip__n">{{ entry.count }}</span>
+              </span>
+            </div>
+          </div>
         </div>
 
-        <div class="grid gap-2 border-t border-border px-4 py-3">
-          <div class="flex flex-wrap items-center gap-1.5">
-            <button
-              v-for="emoji in QUICK_REACTION_EMOJIS"
-              :key="emoji"
-              type="button"
-              class="inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-sm hover:bg-muted/60"
-              :class="reactionSummary?.mine.includes(emoji) ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground'"
-              :aria-label="`React with ${emoji}`"
-              :aria-pressed="reactionSummary?.mine.includes(emoji) ? 'true' : 'false'"
-              @click="emit('react', emoji)"
-            >
-              {{ emoji }}
-            </button>
-          </div>
-          <div v-if="reactionEntries.length > 0" class="flex flex-wrap gap-1.5">
-            <span
-              v-for="entry in reactionEntries"
-              :key="entry.emoji"
-              class="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-foreground"
-              :title="entry.reactors.join(', ')"
-            >
-              <span>{{ entry.emoji }}</span>
-              <span class="text-muted-foreground">{{ entry.count }}</span>
-            </span>
-          </div>
-        </div>
-
-        <div class="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
+        <footer :class="ui.foot">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            :class="navButton"
             :disabled="!hasPrevious"
             @click="emit('previous')"
           >
-            <ChevronLeft class="h-3.5 w-3.5" aria-hidden="true" />
+            <ChevronLeft aria-hidden="true" />
             Prev
           </button>
-          <span class="type-caption text-muted-foreground" v-if="storyIndex !== null">
+          <span v-if="storyIndex !== null" :class="ui.counter">
             {{ storyIndex + 1 }} / {{ storyCount }}
           </span>
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            :class="navButton"
             :disabled="!hasNext"
             @click="emit('next')"
           >
             Next
-            <ChevronRight class="h-3.5 w-3.5" aria-hidden="true" />
+            <ChevronRight aria-hidden="true" />
           </button>
-        </div>
-      </article>
+        </footer>
+      </div>
     </div>
   </Teleport>
 </template>
