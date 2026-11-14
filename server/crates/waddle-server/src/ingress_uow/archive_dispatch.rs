@@ -692,7 +692,10 @@ async fn validate_registration(
 
 // Resource progress proves only that resource; a wildcard must await the
 // aggregate receipt. Archive retention cannot remove this independent index.
-const PREDECESSORS: &str = "
+macro_rules! predecessors_sql {
+    ($holder_lost:literal) => {
+        concat!(
+            "
 SELECT CAST(p.message_key AS TEXT), p.archive_seq, p.pending_row_id,
     CASE WHEN EXISTS (SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = p.message_key
         AND r.kind = p.kind AND r.semantic_identity_hash = p.semantic_identity_hash) THEN 1 ELSE 0 END
@@ -707,7 +710,34 @@ WHERE p.archive_jid = ? AND p.archive_seq < ?
     AND NOT EXISTS (SELECT 1 FROM ingress_carbon_receipts r
         WHERE p.resource <> '' AND r.message_key = p.message_key AND r.kind = p.kind
             AND r.semantic_identity_hash = p.semantic_identity_hash AND r.recipient = p.resource)
-ORDER BY p.archive_seq, p.message_key";
+",
+            $holder_lost,
+            "ORDER BY p.archive_seq, p.message_key"
+        )
+    };
+}
+
+const PREDECESSORS: &str = predecessors_sql!("");
+
+// A clustered owner commits a copy's completed send attempt right after the
+// socket accepted it, and the resource progress in a later transaction. While
+// the owner lives, the progress follows and the copy keeps holding later ones.
+// An owner lost between the two commits leaves the completed attempt as the
+// only delivery evidence (`ingress::live_delivery`), and the copy is already in
+// the resource's stream. A completed attempt whose holder incarnation is
+// committed as gone (its lease is expired or names a later epoch) therefore
+// releases later copies for that resource; recovery records the progress after
+// its grace. An attempt that only started has an unknown outcome and still
+// holds them, and a holder without a lease row has unknown liveness.
+#[cfg(feature = "clustering")]
+const PREDECESSORS_CLUSTERED: &str = predecessors_sql!(
+    "    AND NOT EXISTS (SELECT 1 FROM ingress_send_attempts a
+        JOIN clustering_nodes n ON n.node_id = a.node_id
+        WHERE p.resource <> '' AND a.message_key = p.message_key AND a.kind = p.kind
+            AND a.semantic_identity_hash = p.semantic_identity_hash AND a.recipient = p.resource
+            AND a.state = 2 AND (n.expired OR n.node_epoch <> a.node_incarnation))
+"
+);
 
 fn decode_message(stored: &str) -> Result<MessageKey, IngressUowError> {
     stored
@@ -860,6 +890,14 @@ async fn recorded_predecessors(
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
+    #[cfg(feature = "clustering")]
+    let predecessors = if matches!(tx.fencing(), super::IngressFencing::Clustered(_)) {
+        PREDECESSORS_CLUSTERED
+    } else {
+        PREDECESSORS
+    };
+    #[cfg(not(feature = "clustering"))]
+    let predecessors = PREDECESSORS;
     let mut candidates = Vec::new();
     let (transaction, prepared) = tx.prepared_parts();
     if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
@@ -928,7 +966,7 @@ async fn recorded_predecessors(
     } else {
         let mut rows = transaction
             .query(
-                PREDECESSORS,
+                predecessors,
                 crate::db_params![
                     position.archive.to_string(),
                     position.ordinal.to_storage(),

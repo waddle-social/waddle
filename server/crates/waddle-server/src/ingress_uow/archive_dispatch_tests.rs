@@ -591,6 +591,165 @@ async fn independent_pending(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+async fn readiness_in(
+    uow: &crate::ingress_uow::IngressUnitOfWork,
+    key: MessageKey,
+    receipt: &EffectReceiptKey,
+    resource: Option<&FullJid>,
+) -> DispatchReadiness {
+    let mut tx = uow.begin().await.expect("begin ingress transaction");
+    let result = ArchiveDispatchRepository::readiness(&mut tx, key, receipt, resource, None)
+        .await
+        .expect("read archive dispatch readiness");
+    tx.commit().await.expect("commit ingress transaction");
+    result
+}
+
+/// An owner commits a copy's completed send attempt before that resource's
+/// progress. While the attempt's holder lives, the copy keeps holding later
+/// copies for the resource. Once a clustered holder's incarnation is
+/// committed as gone, the completed attempt is the copy's delivery evidence
+/// and releases them; a sibling whose attempt only started, an archive-wide
+/// read and a holder of unknown liveness still block.
+async fn completed_send_attempt_of_a_lost_holder(fixture: IngressFixture, clustered: bool) {
+    use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+    use waddle_xmpp::ownership::NodeIdentity;
+
+    let desk: FullJid = "juliet@example.com/desk"
+        .parse()
+        .expect("valid first recipient resource JID");
+    let phone: FullJid = "juliet@example.com/phone"
+        .parse()
+        .expect("valid second recipient resource JID");
+    let targets = vec![
+        DispatchTarget::Resource(desk.clone()),
+        DispatchTarget::Resource(phone.clone()),
+    ];
+    let (a, ar) = message(
+        &fixture,
+        "sent by the holder",
+        &[desk.clone(), phone.clone()],
+    )
+    .await;
+    let (b, br) = message(&fixture, "sent afterwards", &[desk.clone(), phone.clone()]).await;
+    register(&fixture, a, &ar, 1, &targets).await;
+    register(&fixture, b, &br, 2, &targets).await;
+
+    let holder = NodeIdentity::new("holder-node", "first");
+    let mut leases = Vec::new();
+    for recipient in [&desk, &phone] {
+        let obligation = SendObligation {
+            message: a,
+            receipt: ar.clone(),
+            recipient: recipient.clone(),
+        };
+        let mut tx = fixture.uow.begin().await.expect("begin claim");
+        let claim = SendAttemptRepository::claim(
+            &mut tx,
+            &obligation,
+            &holder,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("claim send attempt");
+        tx.commit().await.expect("commit claim");
+        let SendClaim::Acquired(lease) = claim else {
+            panic!("expected an acquired lease, got {claim:?}");
+        };
+        let mut tx = fixture.uow.begin().await.expect("begin start");
+        assert!(SendAttemptRepository::start(&mut tx, &lease)
+            .await
+            .expect("start send attempt"));
+        tx.commit().await.expect("commit start");
+        leases.push(lease);
+    }
+    let mut tx = fixture.uow.begin().await.expect("begin completion");
+    assert!(SendAttemptRepository::complete(&mut tx, &leases[0])
+        .await
+        .expect("complete the desk attempt"));
+    tx.commit().await.expect("commit completion");
+
+    #[cfg(feature = "clustering")]
+    let uow = if clustered {
+        let deployment = fixture
+            .optional_text("SELECT deployment_uuid FROM _lineage")
+            .await
+            .expect("deployment");
+        crate::ingress_uow::IngressUnitOfWork::open_with_node_identity(
+            fixture.db.clone(),
+            crate::config::LineageConfig {
+                deployment_uuid: Some(crate::db::lineage::DeploymentUuid(
+                    deployment.parse().expect("deployment UUID"),
+                )),
+                action: None,
+            },
+            waddle_xmpp::ownership::SharedNodeIdentity::new(NodeIdentity::new(
+                "survivor-node",
+                "first",
+            )),
+        )
+        .expect("node-bound UOW")
+    } else {
+        fixture.uow.clone()
+    };
+    #[cfg(not(feature = "clustering"))]
+    let uow = fixture.uow.clone();
+    let lease = |sql: &'static str| {
+        let db = fixture.db.clone();
+        async move {
+            let conn = db.guard().await.expect("database guard");
+            conn.execute(sql, ()).await.expect("node lease fixture");
+        }
+    };
+    if clustered {
+        lease("INSERT INTO clustering_nodes (node_id, node_epoch, expired) VALUES ('holder-node', 'first', false)").await;
+    }
+    assert_eq!(
+        readiness_in(&uow, b, &br, Some(&desk)).await,
+        DispatchReadiness::Blocked(vec![a]),
+        "a live holder records the progress itself"
+    );
+    if !clustered {
+        fixture.close().await;
+        return;
+    }
+
+    lease("UPDATE clustering_nodes SET expired = true WHERE node_id = 'holder-node'").await;
+    assert_eq!(
+        readiness_in(&uow, b, &br, Some(&desk)).await,
+        DispatchReadiness::Ready
+    );
+    assert_eq!(
+        readiness_in(&uow, b, &br, Some(&phone)).await,
+        DispatchReadiness::Blocked(vec![a]),
+        "a started attempt has an unknown outcome"
+    );
+    assert_eq!(
+        readiness_in(&uow, b, &br, None).await,
+        DispatchReadiness::Blocked(vec![a])
+    );
+    assert_eq!(
+        readiness_in(&uow, a, &ar, Some(&desk)).await,
+        DispatchReadiness::Ready,
+        "the attempt releases later copies, not the copy's own obligation"
+    );
+
+    lease("UPDATE clustering_nodes SET expired = false, node_epoch = 'second' WHERE node_id = 'holder-node'").await;
+    assert_eq!(
+        readiness_in(&uow, b, &br, Some(&desk)).await,
+        DispatchReadiness::Ready,
+        "a later incarnation does not revive the attempt's holder"
+    );
+
+    lease("DELETE FROM clustering_nodes WHERE node_id = 'holder-node'").await;
+    assert_eq!(
+        readiness_in(&uow, b, &br, Some(&desk)).await,
+        DispatchReadiness::Blocked(vec![a]),
+        "a holder without a lease row has unknown liveness"
+    );
+    fixture.close().await;
+}
+
 async fn collect(fixture: &IngressFixture) -> usize {
     collect_at(fixture, chrono::Utc::now()).await
 }
@@ -645,6 +804,19 @@ async fn sqlite_archive_dispatch_promoted_pending() {
 async fn postgres_archive_dispatch_promoted_pending() {
     if let Some(fixture) = IngressFixture::postgres("promoted").await {
         independent_pending(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_archive_dispatch_completed_send_attempt_of_a_live_holder() {
+    completed_send_attempt_of_a_lost_holder(IngressFixture::sqlite().await, false).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_archive_dispatch_completed_send_attempt_of_a_lost_holder() {
+    if let Some(fixture) = IngressFixture::postgres("lost_holder").await {
+        completed_send_attempt_of_a_lost_holder(fixture, true).await;
     }
 }
 

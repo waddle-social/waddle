@@ -164,6 +164,21 @@ Recovery of each intermediate condition:
   `TransferHydrating` by a dead owner becomes `Detached` through an
   owner-lost record: by a successor holding the session claim on a clustered
   store, or for every owned row after a single-node restart.
+- **Owner lost after a socket accepted an ingress copy, before its
+  progress**: the owner commits the copy's completed send attempt right after
+  the socket accepts it, and the resource's delivery progress after that. An
+  owner lost between the two leaves the attempt as the only proof; the copy is
+  in the session's `sm_unacked` and is replayed when the session resumes.
+  On a clustered store, archive dispatch ordering counts a completed attempt
+  as delivery of that copy to its resource once the attempt's holder
+  incarnation is committed as gone: its node lease is expired or names a
+  later epoch (`server/crates/waddle-server/src/ingress_uow/archive_dispatch.rs`,
+  `PREDECESSORS_CLUSTERED`). Later copies for the resource are then not held
+  behind it until maintenance recovery records the progress after its grace.
+  While the holder lives, it records the progress itself and the copy keeps
+  holding later ones. An attempt that only started has an unknown outcome, and
+  a holder without a lease row has unknown liveness; both still hold them.
+  The definer-API candidate keeps the stricter rule.
 - **Resume commit unknown**: resolved like enable. Only a known rejection
   yields the permit for a fresh bind; an unresolved operation yields none.
 - **Late compensation or cleanup**: it names an old generation and fails the
