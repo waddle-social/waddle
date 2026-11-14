@@ -151,7 +151,7 @@ describe("call-chat composer", () => {
     expect(html).toContain('aria-label="Call chat composer"');
     expect(html).not.toContain('aria-label="Extensions"');
     // With a usable thread the composer is enabled (not greyed out).
-    expect(html).not.toContain("pointer-events_none");
+    expect(html).not.toContain("data-disabled");
   });
 
   test("expanded DM calls render the call-chat composer from the call sid", async () => {
@@ -194,7 +194,7 @@ describe("call-chat composer", () => {
 
     // The composer stays in the tab but is disabled until a thread resolves.
     expect(html).toContain('aria-label="Call chat composer"');
-    expect(html).toContain("pointer-events_none");
+    expect(html).toContain("data-disabled");
   });
 });
 

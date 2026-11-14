@@ -716,7 +716,7 @@ const cls = {
     <!-- Slack-style card: optional formatting row, the editor, pending
          attachments, then one action row (add, format, emoji, mention,
          command on the left; send on the right). -->
-    <div :class="[composer(), cls.card, disabled && cls.cardDisabled]">
+    <div :class="[composer(), cls.card, disabled && cls.cardDisabled]" :data-disabled="disabled || undefined">
       <input
         :ref="setFileInputRef"
         type="file"
@@ -776,6 +776,7 @@ const cls = {
           <button
             type="button"
             :class="[iconbtn(), cls.wide]"
+            data-composer-wide
             :aria-label="showFormatting ? 'Hide formatting' : 'Show formatting'"
             :aria-pressed="showFormatting"
             :disabled="disabled || isPreparingSend"
@@ -802,6 +803,7 @@ const cls = {
           <button
             type="button"
             :class="[iconbtn(), cls.wide]"
+            data-composer-wide
             aria-label="Mention someone"
             :disabled="disabled || isPreparingSend"
             @click="startMention"
@@ -813,6 +815,7 @@ const cls = {
           <button
             type="button"
             :class="[iconbtn(), cls.wide]"
+            data-composer-wide
             aria-label="Run a command"
             :disabled="disabled || isPreparingSend"
             @click="startSlashCommand"

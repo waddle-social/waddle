@@ -46,6 +46,7 @@ import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHead
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
 import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
 import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
+import CallChatPanel from "@/components/calls/CallChatPanel.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -414,6 +415,27 @@ const callChatMessages = computed(() =>
     : [],
 );
 
+// Replies sent from the right-hand huddle thread go on the call's thread,
+// exactly as the expanded surface's Chat tab sends them.
+const callThreadDraft = ref("");
+async function onSendCallThread(
+  body: string,
+  markup: MarkupSpan[],
+  references: MessageReference[],
+  files?: Array<File | Blob>,
+  linkPreview?: ComposerLinkPreviewSendPayload,
+): Promise<void> {
+  const threadId = activeCallThreadId.value?.trim();
+  if (!threadId) return;
+  const override = { threadId };
+  if (props.sendCallChatMessage) {
+    await props.sendCallChatMessage(body, markup, references, files, undefined, override, linkPreview);
+  } else {
+    emit("sendCallChat", body, markup, references, files, undefined, override, linkPreview);
+  }
+  callThreadDraft.value = "";
+}
+
 // Drive the Chat tab's unread badge: inbound (non-self) call-thread messages
 // accumulate while the Chat tab isn't the focused dock tab and clear once it is.
 const callDockOpen = useStore($callDockOpen);
@@ -747,7 +769,52 @@ const bubbleKind = computed<"direct" | "group" | undefined>(() => {
 });
 
 const cls = {
-  root: css({ position: "relative", flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, bg: "bg" }),
+  // Column-wrap flex: the call stage (`.call-split`, whose flex-basis is the
+  // persisted split percent of this box) and its thread wrap into a 400px
+  // right-hand column at xl; below xl the stage stacks above the room.
+  root: css({
+    position: "relative",
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+    minHeight: 0,
+    bg: "bg",
+    // The stage and its resize handle stack above the room below xl.
+    "& > .call-split, & > .call-split + [role=separator]": { order: { base: -1, xl: 0 } },
+    "& > [data-part=thread]": { display: { base: "none", xl: "flex" } },
+    "&:has(> .call-split)": { flexWrap: { xl: "wrap" } },
+    "&:has(> .call-split) > [data-part=main]": { flexBasis: { xl: "100%" }, width: { xl: "calc(100% - 400px)" } },
+    "&:has(> .call-split) > .call-split + [role=separator]": { width: { xl: "400px" } },
+    "&:has(> .call-split) > .call-split": {
+      width: { xl: "400px" },
+      borderLeft: { xl: "1px solid {colors.border.soft}" },
+    },
+    "&:not(:has(> .call-split)) > [data-part=thread]": { display: "none" },
+  }),
+  main: css({ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, width: "100%" }),
+  callThread: css({
+    flex: 1,
+    flexDirection: "column",
+    width: "400px",
+    minHeight: 0,
+    borderLeft: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    "& > :last-child": { flex: 1, minHeight: 0 },
+    // 400px column: keep the composer to attach, emoji and send.
+    "& [data-composer-wide]": { display: "none" },
+  }),
+  callThreadHead: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "2",
+    px: "4",
+    py: "3",
+    borderTop: "1px solid {colors.border.soft}",
+    borderBottom: "1px solid {colors.border.soft}",
+  }),
+  callThreadTitle: css({ margin: 0, font: "700 16px/1.25 {fonts.display}", color: "fg" }),
+  callThreadCount: css({ textStyle: "caption", color: "fg.muted" }),
   // Bubbles keep a readable lane on wide screens.
   dmLane: css({ width: "100%", maxWidth: "760px", mx: "auto" }),
   dropZone: css({
@@ -847,6 +914,7 @@ const cls = {
       <Upload aria-hidden="true" />
       <span :class="cls.dropLabel">Drop files to upload</span>
     </div>
+    <div data-part="main" :class="cls.main">
 
     <ChatHeader
       v-model:show-search="showSearch"
@@ -956,17 +1024,6 @@ const cls = {
       {{ replyJumpNotice }}
     </div>
 
-    <!-- Inline split-view for an active call in this conversation.
-         MUC and DM ownership gates live inside the component. -->
-    <CallSplitContainer
-      v-if="callRoomJid || dmPeer?.peerJid"
-      :room-jid="callRoomJid ?? undefined"
-      :dm-peer-jid="dmPeer?.peerJid"
-      :dm-peer-name="dmPeer?.peerUsername"
-      :xmpp-client="xmppClient"
-      :space-id="waddle?.id"
-      :channel-id="channel?.id"
-    />
 
     <!-- Composer (social / top-pinned mode) -->
     <!-- Note: the composer and typing indicator appear in two spots in the DOM
@@ -1230,6 +1287,46 @@ const cls = {
       :xmpp-client="xmppClient"
       @message="openPopoverDm"
     />
+    </div>
+    <!-- Huddle-Room / HuddlePanel: the active call opens in the right-hand
+         column with its thread below; it never covers the timeline. Below xl
+         it stacks above the room. MUC and DM ownership gates live inside the
+         component. -->
+    <CallSplitContainer
+      v-if="callRoomJid || dmPeer?.peerJid"
+      :room-jid="callRoomJid ?? undefined"
+      :dm-peer-jid="dmPeer?.peerJid"
+      :dm-peer-name="dmPeer?.peerUsername"
+      :xmpp-client="xmppClient"
+      :space-id="waddle?.id"
+      :channel-id="channel?.id"
+    />
+    <section
+      v-if="callRoomJid || dmPeer?.peerJid"
+      data-part="thread"
+      :class="cls.callThread"
+      :aria-label="dmPeer ? 'Call thread' : 'Huddle thread'"
+    >
+      <header :class="cls.callThreadHead">
+        <h2 :class="cls.callThreadTitle">{{ dmPeer ? "Call thread" : "Huddle thread" }}</h2>
+        <span :class="cls.callThreadCount">{{ callChatMessages.length === 1 ? "1 reply" : `${callChatMessages.length} replies` }}</span>
+      </header>
+      <CallChatPanel
+        v-model:draft="callThreadDraft"
+        :messages="callChatMessages"
+        :visible="true"
+        :avatar-jid-for="avatarJidFor"
+        :is-sending="isSending"
+        :disabled="!canShowComposer || !activeCallThreadId"
+        :mention-candidates="mentionCandidates"
+        :slow-mode-cooldown="slowModeCooldown"
+        :upload-progress="uploadProgress"
+        :in-muc="!dmPeer"
+        :link-preview-lookup="linkPreviewLookup"
+        :link-preview-scope="linkPreviewScope"
+        @send="onSendCallThread"
+      />
+    </section>
     <!-- Expanded call surface: absolutely positioned over the chat
          content pane (this root has `position: relative`) so the
          surrounding app shell — waddles rail, channel list, thread
