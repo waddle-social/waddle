@@ -38,6 +38,12 @@
         rm -rf "$out/vendor/sqlx-postgres"
         cp -R ${./server/vendor/sqlx-postgres} "$out/vendor/sqlx-postgres"
         chmod -R u+w "$out/vendor/sqlx-postgres"
+        rm -rf "$out/vendor/minidom"
+        cp -R ${./server/vendor/minidom} "$out/vendor/minidom"
+        chmod -R u+w "$out/vendor/minidom"
+        rm -rf "$out/vendor/kameo"
+        cp -R ${./server/vendor/kameo} "$out/vendor/kameo"
+        chmod -R u+w "$out/vendor/kameo"
       '';
       # cuengine (a waddle-server dev-dependency) links a cgo archive of its
       # Go bridge. Its build.rs otherwise `go build`s it from source, which
