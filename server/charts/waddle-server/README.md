@@ -49,6 +49,12 @@ database: it enrolls the database's lineage so pods can become ready.
 Remove it in the next upgrade. Without enrollment, pods stay alive but
 permanently not-ready. See `docs/operations/db-lineage.md`.
 
+With `restrictedRuntime.enabled` the chart refuses `deployment.lineageAction`:
+the server never enrolls. The owner Job's `owner-phase` enrolls instead, by
+itself, when the target schema holds no relation besides the `_lineage`
+table, and refuses a schema that holds tables but no lineage row (see
+`docs/runbooks/fresh-production-install.md`).
+
 ## XMPP TLS secret (recommended)
 
 When `xmpp.enabled=true`, mount a TLS secret and pass it through chart values:

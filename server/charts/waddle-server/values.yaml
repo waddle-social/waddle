@@ -76,8 +76,13 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
+# RuntimeDefault seccomp at pod and container level, with the container
+# settings below, satisfies the PodSecurity "restricted" profile for the
+# server pod and every owner Job container.
 podSecurityContext:
   fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
 
 # Pod termination grace period (seconds).
 # Must cover the configured shutdown waits: preStopSleepSeconds (endpoint
@@ -98,6 +103,8 @@ securityContext:
   capabilities:
     drop:
       - ALL
+  seccompProfile:
+    type: RuntimeDefault
 
 service:
   type: ClusterIP

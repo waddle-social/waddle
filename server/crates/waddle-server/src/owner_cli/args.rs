@@ -59,7 +59,11 @@ Environment (no flag; secret values are never printed):
   WADDLE_DEPLOYMENT_UUID          Deployment identity the lineage row names.
   WADDLE_DB_LINEAGE_ACTION        `enroll` or `adopt=<lineage-uuid>[,...]` for
                                   a database without a lineage row for this
-                                  deployment; unset otherwise.
+                                  deployment; unset otherwise. Unset, a target
+                                  schema that holds no relation besides the
+                                  lineage table is enrolled; one that holds
+                                  other relations and no lineage row is
+                                  refused.
   WADDLE_SESSION_KEY              The server's session key. The VAPID signing
                                   key is sealed under it.
   WADDLE_DB_BASELINE_ACTION       Unset or `stamp`: an empty database is built
