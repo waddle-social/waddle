@@ -114,7 +114,7 @@ class LocalShardTests(unittest.TestCase):
         for name in ('check_required_tests.py', 'verify_candidate_snapshot.py', 'qualification-shards.nix'):
             shutil.copyfile(SCRIPT_DIR / name, scripts / name)
         (scripts / 'build-nextest-archive.sh').write_text(
-            'printf "%s\\n%s\\n" "$PWD" "$1" > "$TEST_ROOT/.ci/nextest-archive/helper-source"\n'
+            'printf "%s\\n%s\\n%s\\n" "$PWD" "$0" "$1" > "$TEST_ROOT/.ci/nextest-archive/helper-source"\n'
             'exit_code="${COMPILE_EXIT:-0}"\n'
             'if [ "$exit_code" != 0 ]; then exit "$exit_code"; fi\n'
             'printf "%s\\n" "$TEST_ARCHIVE"\n')
@@ -218,7 +218,8 @@ raise SystemExit(r.main())
         self.assertIn('--keep-going', args)
         state = json.loads((self.diag / 'nix-state.json').read_text())
         self.assertEqual((self.diag / 'helper-source').read_text().splitlines(),
-                         [str(Path(state['source']) / 'server'), f"path:{state['source']}#waddle-server-test-archive"])
+                         [str(self.server), str(Path(state['source']) / 'server/scripts/build-nextest-archive.sh'),
+                          f"path:{state['source']}#waddle-server-test-archive"])
         for partition in range(1, 5):
             for name in REPORTS:
                 self.assertEqual((self.diag / f'shard-{partition}/{name}').read_text(), f'verified shard {partition}')
