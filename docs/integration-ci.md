@@ -1,7 +1,9 @@
 # Merge candidate verification
 
-`waddle-integration` runs on every pull request, merge-group `checks_requested`
-event, and explicit workflow dispatch. **Its same-repository `integration`
+`waddle-integration` runs on every merge-group `checks_requested` event and
+explicit workflow dispatch. It does not run on pull requests: every lane it
+contains is a copy of a workflow that already runs there, and running both
+doubled the demand for each runner, including the 32-core test builder. **Its same-repository `integration`
 aggregate is candidate-controlled and is not eligible as the required trusted
 gate.** A candidate can edit the workflow, generator, adapter, tests or task
 definitions and manufacture success. Action SHA pins, read-only permissions,
@@ -159,9 +161,12 @@ does not override the real workflow execution context.
 
 The existing server `checkCiDrift` and the integration planner check graph parity.
 Adding or changing a source PR lane without regenerating fails those checks.
-Original PR workflows remain active with their existing privileges, so applicable PR jobs temporarily execute
-in both workflows. This increases demand and deliberately preserves coverage;
-runner provisioning must be repaired before any separately trusted gate is enabled. Omitting
+Original PR workflows remain active with their existing privileges and are the
+only copy that runs on a pull request. A merge-group event runs the copies in
+this graph as well; the main ruleset requires no status check, so the queue does
+not wait for them. The planner's own contracts (`integration-ci.test.ts`,
+`test_integration_ci_project.py`, `test_cuenv_bootstrap.py`) also run in the
+server `checkCiDrift` task, which pull requests run. Omitting
 FlakeHub cache can increase compile and download time; no verification commands,
 runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are

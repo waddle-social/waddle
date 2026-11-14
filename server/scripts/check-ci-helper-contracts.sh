@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for the Postgres shard lane's CI helpers and the source
 # structure checks that run in the clippy lanes. The PR rustTests workflow runs
-# this before compiling; on main the publish-gating `ciHelperContracts` task
-# runs it, so a helper regression cannot ship an image.
+# this before compiling; on main the publish-gating `nixTestLocal` task runs
+# it before the shards, so a helper regression cannot ship an image.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

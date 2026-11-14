@@ -3,7 +3,9 @@
 
 name: waddle-android-deviceTests
 on:
-  pull_request:
+  push:
+    branches:
+    - main
     paths:
     - .cargo/**
     - .github/workflows/waddle-android-devicetests.yml
@@ -64,7 +66,6 @@ jobs:
     permissions:
       contents: read
       checks: write
-      pull-requests: write
       packages: none
       id-token: write
     name: waddle-android-deviceTests

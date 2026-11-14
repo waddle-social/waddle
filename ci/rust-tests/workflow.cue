@@ -11,7 +11,7 @@ import (
 // cuenv 0.55 wraps matrix jobs in the complete development shell and cannot
 // disable artifact compression. Keep the task commands and cache setup in their
 // existing CUE definitions while generating this focused workflow directly.
-let _testTask = server.tasks.nixTestLocal
+let _testTask = server.tasks.nixTestShards
 
 // Retain the old workflow's task inputs and cuenv's implicit schema/module
 // triggers. Normalize parent-relative paths before passing them to GitHub.
