@@ -13,14 +13,17 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ".github/workflows/waddle-server-default.yml"
 RUNNER = (
-    "${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' "
+    "${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result != '' "
+    "&& fromJSON(toJSON(needs)).fmt.result == '' "
     "&& '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\","
     "\"namespace-features:container.privileged=true;job.priority=1\"]' "
     "|| '[\"namespace-profile-linux-x86\"]') }}"
 )
-# The runner expression gives the 32-core builder to every job that does not
-# wait for fmt, so exactly these two jobs may have no dependencies.
-BUILDER_JOBS = {"fmt", "nixTestLocal"}
+# The two short gates that start with the workflow, on the normal profile.
+ROOT_JOBS = {"fmt", "ciHelperContracts"}
+# The only job the runner expression sends to the 32-core builder: it waits
+# for ciHelperContracts and not for fmt.
+BUILDER_JOB = "nixTestLocal"
 # Each of these waits for fmt alone and runs on the normal profile.
 PROFILE_GATES = {
     "mainChecks",
@@ -30,7 +33,7 @@ PROFILE_GATES = {
     "mainBuildImageStream",
     "mainBuildExtensionModules",
 }
-PUBLISH_GATES = BUILDER_JOBS | PROFILE_GATES
+PUBLISH_GATES = ROOT_JOBS | {BUILDER_JOB} | PROFILE_GATES
 PUBLISH = "publishContainerImage"
 # The short gates that share the mainChecks job.
 BATCHED_CHECKS = [
@@ -69,6 +72,12 @@ def needs(job):
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return set(value)
     raise ValueError("job needs must be a string or a list of strings")
+
+
+def selects_builder(dependencies):
+    """Mirror RUNNER: the builder goes to a job that waits for the helper
+    contracts and not for fmt."""
+    return "ciHelperContracts" in dependencies and "fmt" not in dependencies
 
 
 def run_batch(script, failing=()):
@@ -130,8 +139,12 @@ def validate(workflow, tasks, helper_script):
 
     jobs = workflow.get("jobs", {})
     require(set(jobs) == PUBLISH_GATES | {PUBLISH}, "unexpected job inventory")
-    for name in BUILDER_JOBS:
-        require(not needs(jobs[name]), f"builder job unexpectedly has dependencies: {name}")
+    for name in ROOT_JOBS:
+        require(not needs(jobs[name]), f"root job unexpectedly has dependencies: {name}")
+    require(
+        needs(jobs[BUILDER_JOB]) == {"ciHelperContracts"},
+        "the shard lane must wait for the helper contracts alone",
+    )
     for name in PROFILE_GATES:
         require(needs(jobs[name]) == {"fmt"}, f"gate must wait for fmt alone: {name}")
     require(
@@ -140,6 +153,10 @@ def validate(workflow, tasks, helper_script):
     )
     for name, job in jobs.items():
         require(job.get("runs-on") == RUNNER, f"unexpected runner selector: {name}")
+        require(
+            selects_builder(needs(job)) == (name == BUILDER_JOB),
+            f"the 32-core builder must go to {BUILDER_JOB} alone: {name}",
+        )
         require("if" not in job, f"conditional can bypass dependency success: {name}")
         require(not job.get("continue-on-error", False), f"job tolerates errors: {name}")
         steps = job.get("steps", [])
@@ -183,16 +200,8 @@ def validate(workflow, tasks, helper_script):
         "shard task no longer runs the bounded shard lane",
     )
     require(
-        command("nixTestLocal")
-        == [
-            "bash",
-            "-euo",
-            "pipefail",
-            "-c",
-            "bash scripts/check-ci-helper-contracts.sh && exec " + " ".join(SHARDS),
-        ]
-        and tasks["nixTestLocal"].get("hermetic") is False,
-        "test task no longer runs the helper contracts and then the bounded shard lane",
+        command("nixTestLocal") == SHARDS and tasks["nixTestLocal"].get("hermetic") is False,
+        "test task no longer runs the bounded shard lane",
     )
     for alias, source in ALIASES.items():
         require(
@@ -257,7 +266,11 @@ class PublishGraphTests(unittest.TestCase):
             ("publishContainerImage", "mainChecks", False),
             ("publishContainerImage", "mainTest", False),
             ("publishContainerImage", "nixTestLocal", False),
+            ("publishContainerImage", "ciHelperContracts", False),
+            ("nixTestLocal", "ciHelperContracts", False),
             ("nixTestLocal", "fmt", True),
+            ("ciHelperContracts", "fmt", True),
+            ("mainTest", "ciHelperContracts", True),
             ("mainChecks", "nixTestLocal", True),
         ):
             with self.subTest(source=source, target=target, add=add):
@@ -282,7 +295,7 @@ class PublishGraphTests(unittest.TestCase):
             self.check(workflow=workflow)
 
     def test_permissive_conditions_and_error_tolerance_are_rejected(self):
-        for name in ("fmt", "mainChecks", "nixTestLocal", "publishContainerImage"):
+        for name in ("fmt", "ciHelperContracts", "mainChecks", "nixTestLocal", "publishContainerImage"):
             for field, value in (("if", "${{ always() }}"), ("continue-on-error", True)):
                 with self.subTest(name=name, field=field):
                     workflow = copy.deepcopy(self.workflow)
@@ -306,10 +319,6 @@ class PublishGraphTests(unittest.TestCase):
             tasks[task]["args"][-1] = argument
             with self.assertRaises(ValueError):
                 self.check(tasks=tasks)
-        tasks = copy.deepcopy(self.tasks)
-        tasks["nixTestLocal"]["args"][-1] = " ".join(SHARDS)
-        with self.assertRaises(ValueError):
-            self.check(tasks=tasks)
         tasks = copy.deepcopy(self.tasks)
         tasks["mainTest"]["args"] = tasks["mainClippy"]["args"]
         with self.assertRaises(ValueError):

@@ -74,7 +74,7 @@ Three layers, cheapest first:
 
 1. **JVM** (every PR, `test` task): unit tests for the bridge, stores,
    auth API (MockWebServer), and ViewModels — no emulator, no SDK quirks.
-2. **Instrumented smoke** (`deviceTests` pipeline, on `main` and on
+2. **Instrumented smoke** (`deviceTests` pipeline, nightly and on
    request): Gradle-managed headless ATD emulator
    (`:app:atdApi34FossDebugAndroidTest`) boots the real APK — `.so` loading,
    JNA, and first-frame composition on device.

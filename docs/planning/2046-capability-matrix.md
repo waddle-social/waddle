@@ -28,7 +28,8 @@ access was used.
 | Live-verified | Observed working in production | Needs production access |
 
 **Executed since last change.** The repository holds no test-run reports,
-and hosted CI is paused ([`2046-ci-pause.md`](2046-ci-pause.md)). Every
+and hosted CI was paused from 2026-11-01 until #2395 restored it
+([`2046-ci-pause.md`](2046-ci-pause.md)). Every
 change merged as #2334 or later was merged without running its tests, so
 any capability last changed there is "no". For a capability last changed
 before #2334 this record cannot show a run either way from the tree; it
