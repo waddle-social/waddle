@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { css } from "styled-system/css";
+import { liveDot } from "styled-system/recipes";
 import { computed } from "vue";
 import { Phone, Video } from "lucide-vue-next";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
@@ -63,100 +65,46 @@ function onClick(): void {
   if (props.disabled) return;
   props.onJoin();
 }
+
+// Live pill in a room header: someone is in a huddle here and you are not.
+const pillClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+  height: "32px",
+  px: "3",
+  borderRadius: "pill",
+  border: "1px solid {colors.live}",
+  bg: "live.subtle",
+  color: "live.text",
+  font: "600 13px/1 {fonts.body}",
+  fontVariantNumeric: "tabular-nums",
+  cursor: "pointer",
+  transition: "background-color {durations.fast} {easings.out}",
+  _hover: { bg: "live", color: "live.fg" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+  _disabled: { opacity: 0.55, cursor: "not-allowed", _hover: { bg: "live.subtle", color: "live.text" } },
+  _coarse: { height: "44px" },
+  "& svg": { width: "14px", height: "14px" },
+});
+const separatorClass = css({ opacity: 0.5 });
 </script>
 
 <template>
   <button
     v-if="isVisible"
     type="button"
-    class="call-active-pill"
-    :class="{ 'call-active-pill--disabled': disabled }"
+    :class="pillClass"
     :disabled="disabled"
     :aria-label="ariaLabel"
     :title="ariaLabel"
     @click="onClick"
   >
-    <span class="call-active-pill__dot" aria-hidden="true" />
-    <Video v-if="media.video" class="call-active-pill__icon" aria-hidden="true" />
-    <Phone v-else class="call-active-pill__icon" aria-hidden="true" />
-    <span class="call-active-pill__count">{{ participantCount }}</span>
-    <span class="call-active-pill__separator" aria-hidden="true">·</span>
-    <span class="call-active-pill__state">Live</span>
+    <span :class="liveDot()" aria-hidden="true" />
+    <Video v-if="media.video" aria-hidden="true" />
+    <Phone v-else aria-hidden="true" />
+    <span>{{ participantCount }}</span>
+    <span :class="separatorClass" aria-hidden="true">·</span>
+    <span>Live</span>
   </button>
 </template>
-
-<style scoped>
-.call-active-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.125rem 0.625rem;
-  border-radius: 9999px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 12%, transparent);
-  border: 1px solid color-mix(in oklab, oklch(0.7 0.18 145) 40%, transparent);
-  color: oklch(0.4 0.12 145);
-  cursor: pointer;
-  transition: background-color 160ms ease-out, border-color 160ms ease-out,
-    transform 160ms ease-out, box-shadow 160ms ease-out;
-}
-
-:global(.dark) .call-active-pill {
-  color: oklch(0.85 0.13 145);
-}
-
-.call-active-pill:hover:not(:disabled) {
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 20%, transparent);
-  border-color: color-mix(in oklab, oklch(0.7 0.18 145) 60%, transparent);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px -2px color-mix(in oklab, oklch(0.7 0.18 145) 30%, transparent);
-}
-
-.call-active-pill:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in oklab, oklch(0.7 0.18 145) 50%, transparent);
-}
-
-.call-active-pill--disabled,
-.call-active-pill:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-  transform: none;
-  box-shadow: none;
-}
-
-.call-active-pill__dot {
-  width: 0.375rem;
-  height: 0.375rem;
-  border-radius: 9999px;
-  background: oklch(0.7 0.18 145);
-  box-shadow: 0 0 0 3px color-mix(in oklab, oklch(0.7 0.18 145) 25%, transparent);
-  animation: call-active-pill-pulse 1.6s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .call-active-pill__dot {
-    animation: none;
-  }
-}
-
-@keyframes call-active-pill-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.55; transform: scale(0.85); }
-}
-
-.call-active-pill__icon {
-  width: 0.75rem;
-  height: 0.75rem;
-}
-
-.call-active-pill__separator {
-  opacity: 0.4;
-}
-
-.call-active-pill__count,
-.call-active-pill__state {
-  font-variant-numeric: tabular-nums;
-}
-</style>

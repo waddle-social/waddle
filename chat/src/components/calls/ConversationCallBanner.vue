@@ -2,6 +2,9 @@
 import { computed, type Component } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, PhoneOff, Video } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, liveDot, tag } from "styled-system/recipes";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { $callState } from "@/lib/calls/call-store";
 import {
   canEndRecoveredDmCallActivity,
@@ -361,15 +364,6 @@ function capitalizeLabel(label: string): string {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
-function avatarInitials(label: string): string {
-  const parts = label
-    .trim()
-    .split(/[\s._-]+/)
-    .filter(Boolean);
-  const initials = parts.slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("");
-  return initials || "?";
-}
-
 function activateBanner(): void {
   const current = banner.value;
   if (!current || current.disabled) return;
@@ -403,6 +397,50 @@ function activateSecondaryBanner(): void {
     emit("endDm", current.peerJid, current.sid);
   }
 }
+
+// A live call in this conversation (Huddle-Join board): a card above the
+// timeline with who is in it and Join / Leave. `data-tone` quiets it when you
+// are busy elsewhere or the call is still syncing.
+const laneClass = css({ padding: "12px 24px 0", _narrow: { padding: "8px 12px 0" } });
+const cardClass = css({
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: "3",
+  maxWidth: "read",
+  padding: "4",
+  borderRadius: "16px",
+  bg: "surface",
+  border: "1px solid {colors.border.soft}",
+  color: "fg",
+  "&[data-tone=incoming]": { borderColor: "live" },
+});
+const mainClass = css({ flex: "1 1 280px", minWidth: 0, display: "flex", alignItems: "center", gap: "2.5" });
+const iconClass = css({
+  position: "relative",
+  display: "inline-flex",
+  flex: "none",
+  width: "36px",
+  height: "36px",
+  alignItems: "center",
+  justifyContent: "center",
+  borderRadius: "pill",
+  bg: "live.subtle",
+  color: "live.text",
+  "& svg": { width: "18px", height: "18px" },
+  "[data-tone=busy] &, [data-tone=syncing] &": { bg: "surface.2", color: "fg.muted" },
+});
+const iconDotClass = cx(liveDot(), css({ position: "absolute", top: 0, right: 0, width: "10px", height: "10px", boxShadow: "0 0 0 2px {colors.surface}", "[data-tone=busy] &, [data-tone=syncing] &": { display: "none" } }));
+const copyClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "0.5", lineHeight: "1.35" });
+const eyebrowClass = css({ textStyle: "eyebrow", color: "live.text", "[data-tone=busy] &, [data-tone=syncing] &": { color: "fg.muted" } });
+const titleClass = css({ margin: 0, font: "700 15px/1.35 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const bodyClass = css({ margin: 0, textStyle: "caption", color: "fg.muted" });
+const metaClass = css({ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "1.5", marginTop: "1" });
+const avatarsClass = css({ display: "inline-flex", "& > * + *": { marginLeft: "-6px" }, "& > *": { boxShadow: "0 0 0 2px {colors.surface}", borderRadius: "pill" } });
+const moreClass = css({ display: "inline-flex", alignItems: "center", justifyContent: "center", height: "28px", minWidth: "28px", px: "1.5", borderRadius: "pill", bg: "surface.2", color: "fg.muted", font: "700 12px/1 {fonts.body}" });
+const actionsClass = css({ display: "flex", flexWrap: "wrap", gap: "2", marginLeft: "auto" });
+const primaryClass = cx(btn({ variant: "live", size: "sm" }), css({ _coarse: { height: "44px" } }));
+const secondaryClass = cx(btn({ size: "sm" }), css({ _coarse: { height: "44px" } }));
 </script>
 
 <template>
@@ -410,309 +448,62 @@ function activateSecondaryBanner(): void {
     aria-live="polite"
     aria-atomic="true"
   >
-    <section
-      v-if="banner"
-      role="region"
-      :aria-label="banner.title"
-      class="conversation-call-banner"
-      :class="`conversation-call-banner--${banner.tone}`"
-    >
-      <div class="chat-message-lane conversation-call-banner__lane">
-        <div class="conversation-call-banner__main">
-          <div class="conversation-call-banner__avatars" aria-hidden="true">
-            <span
-              v-for="label in banner.avatarLabels.slice(0, 3)"
-              :key="label"
-              class="conversation-call-banner__avatar type-meta"
-            >
-              <img
-                v-if="avatarUrlFor(avatarJidFor(label))"
-                :src="avatarUrlFor(avatarJidFor(label)) ?? undefined"
-                alt=""
-                class="conversation-call-banner__avatar-image"
-              />
-              <template v-else>{{ avatarInitials(label) }}</template>
-            </span>
-            <span
-              v-if="banner.avatarLabels.length > 3"
-              class="conversation-call-banner__avatar conversation-call-banner__avatar--more type-meta"
-            >
-              +{{ banner.avatarLabels.length - 3 }}
-            </span>
-          </div>
-          <div class="conversation-call-banner__copy">
-            <div class="conversation-call-banner__eyebrow type-meta">
-              <span class="conversation-call-banner__pulse" aria-hidden="true" />
-              <span>{{ banner.eyebrow }}</span>
-            </div>
-            <div class="conversation-call-banner__title-row">
-              <span class="conversation-call-banner__icon" aria-hidden="true">
-                <component :is="banner.icon" class="h-3.5 w-3.5" />
+    <div v-if="banner" :class="laneClass">
+      <section
+        role="region"
+        :aria-label="banner.title"
+        :class="cardClass"
+        :data-tone="banner.tone"
+      >
+        <div :class="mainClass">
+          <span :class="iconClass" aria-hidden="true">
+            <component :is="banner.icon" />
+            <span :class="iconDotClass" />
+          </span>
+          <div :class="copyClass">
+            <span :class="eyebrowClass">{{ banner.eyebrow }}</span>
+            <p :class="titleClass">{{ banner.title }}</p>
+            <p :class="bodyClass">{{ banner.body }}</p>
+            <div :class="metaClass" aria-hidden="true">
+              <span v-if="banner.avatarLabels.length" :class="avatarsClass">
+                <AppAvatar
+                  v-for="label in banner.avatarLabels.slice(0, 3)"
+                  :key="label"
+                  :name="label"
+                  :src="avatarUrlFor(avatarJidFor(label))"
+                  size="sm"
+                />
+                <span v-if="banner.avatarLabels.length > 3" :class="moreClass">
+                  +{{ banner.avatarLabels.length - 3 }}
+                </span>
               </span>
-              <p class="type-control truncate">
-                {{ banner.title }}
-              </p>
-            </div>
-            <p class="type-caption chat-copy-measure conversation-call-banner__body">
-              {{ banner.body }}
-            </p>
-            <div class="conversation-call-banner__meta" aria-hidden="true">
-              <span
-                v-for="item in banner.meta"
-                :key="item"
-                class="conversation-call-banner__chip type-meta"
-              >
-                {{ item }}
-              </span>
+              <span v-for="item in banner.meta" :key="item" :class="tag()">{{ item }}</span>
             </div>
           </div>
         </div>
-        <div class="conversation-call-banner__actions">
+        <div :class="actionsClass">
           <button
             type="button"
-            class="conversation-call-banner__action type-control"
+            :class="primaryClass"
             :aria-label="banner.ariaLabel"
             :disabled="banner.disabled"
             @click="activateBanner"
           >
-            <component :is="banner.actionIcon" class="h-3.5 w-3.5" aria-hidden="true" />
+            <component :is="banner.actionIcon" aria-hidden="true" />
             <span>{{ banner.actionLabel }}</span>
           </button>
           <button
             v-if="banner.secondaryAction"
             type="button"
-            class="conversation-call-banner__action conversation-call-banner__action--secondary type-control"
+            :class="secondaryClass"
             :aria-label="banner.secondaryAriaLabel"
             @click="activateSecondaryBanner"
           >
-            <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+            <PhoneOff aria-hidden="true" />
             <span>{{ banner.secondaryActionLabel }}</span>
           </button>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.conversation-call-banner {
-  border-bottom: 1px solid color-mix(in oklab, var(--primary) 18%, var(--border));
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in oklab, var(--primary) 10%, var(--background)),
-      color-mix(in oklab, var(--card) 88%, var(--primary) 12%)
-    );
-  color: var(--foreground);
-}
-
-.conversation-call-banner--incoming {
-  border-bottom-color: color-mix(in oklab, oklch(0.76 0.17 72) 40%, var(--border));
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in oklab, oklch(0.76 0.17 72) 14%, var(--background)),
-      color-mix(in oklab, var(--card) 88%, oklch(0.76 0.17 72) 12%)
-    );
-}
-
-.conversation-call-banner--busy,
-.conversation-call-banner--syncing {
-  border-bottom-color: var(--border);
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in oklab, var(--muted) 42%, var(--background)),
-      color-mix(in oklab, var(--card) 92%, var(--muted) 8%)
-    );
-}
-
-.conversation-call-banner__lane {
-  display: flex;
-  flex-direction: column;
-  gap: 0.875rem;
-  padding: 0.75rem var(--chat-content-inline);
-}
-
-.conversation-call-banner__main {
-  display: flex;
-  min-width: 0;
-  align-items: flex-start;
-  gap: 0.75rem;
-}
-
-.conversation-call-banner__avatars {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  padding-left: 0.25rem;
-}
-
-.conversation-call-banner__avatar {
-  display: inline-flex;
-  width: 2rem;
-  height: 2rem;
-  align-items: center;
-  justify-content: center;
-  margin-left: -0.25rem;
-  border: 2px solid color-mix(in oklab, var(--background) 88%, transparent);
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--primary) 18%, var(--card));
-  color: var(--primary);
-  font-variant-numeric: tabular-nums;
-}
-
-.conversation-call-banner__avatar-image {
-  width: 100%;
-  height: 100%;
-  border-radius: 9999px;
-  object-fit: cover;
-}
-
-.conversation-call-banner__avatar--more {
-  background: color-mix(in oklab, var(--foreground) 9%, var(--card));
-  color: var(--muted-foreground);
-}
-
-.conversation-call-banner__copy {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.conversation-call-banner__eyebrow,
-.conversation-call-banner__title-row,
-.conversation-call-banner__meta {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-}
-
-.conversation-call-banner__eyebrow {
-  gap: 0.35rem;
-  color: color-mix(in oklab, var(--primary) 72%, var(--foreground));
-  text-transform: uppercase;
-}
-
-.conversation-call-banner--busy .conversation-call-banner__eyebrow,
-.conversation-call-banner--syncing .conversation-call-banner__eyebrow {
-  color: var(--muted-foreground);
-}
-
-.conversation-call-banner__pulse {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 9999px;
-  background: oklch(0.68 0.2 145);
-  box-shadow: 0 0 0 3px color-mix(in oklab, oklch(0.68 0.2 145) 24%, transparent);
-}
-
-.conversation-call-banner--incoming .conversation-call-banner__pulse {
-  background: oklch(0.76 0.17 72);
-  box-shadow: 0 0 0 3px color-mix(in oklab, oklch(0.76 0.17 72) 25%, transparent);
-}
-
-.conversation-call-banner--busy .conversation-call-banner__pulse,
-.conversation-call-banner--syncing .conversation-call-banner__pulse {
-  background: var(--muted-foreground);
-  box-shadow: none;
-}
-
-.conversation-call-banner__title-row {
-  gap: 0.4rem;
-}
-
-.conversation-call-banner__icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--primary);
-}
-
-.conversation-call-banner__body {
-  color: color-mix(in oklab, var(--foreground) 76%, transparent);
-}
-
-.conversation-call-banner__meta {
-  flex-wrap: wrap;
-  gap: 0.375rem;
-  padding-top: 0.125rem;
-}
-
-.conversation-call-banner__chip {
-  display: inline-flex;
-  min-height: 1.375rem;
-  align-items: center;
-  border: 1px solid color-mix(in oklab, var(--primary) 18%, var(--border));
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--background) 74%, transparent);
-  color: var(--muted-foreground);
-  padding: 0 0.5rem;
-  white-space: nowrap;
-}
-
-.conversation-call-banner__actions {
-  display: flex;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.conversation-call-banner__action {
-  display: inline-flex;
-  height: 2.25rem;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  gap: 0.375rem;
-  border: 1px solid color-mix(in oklab, var(--primary) 22%, var(--border));
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--background) 88%, transparent);
-  color: var(--primary);
-  padding: 0 0.875rem;
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
-}
-
-.conversation-call-banner__action--secondary {
-  border-color: color-mix(in oklab, var(--destructive) 24%, var(--border));
-  color: var(--destructive);
-}
-
-.conversation-call-banner__action:hover {
-  background: color-mix(in oklab, var(--primary) 11%, var(--background));
-}
-
-.conversation-call-banner__action--secondary:hover {
-  background: color-mix(in oklab, var(--destructive) 10%, var(--background));
-}
-
-.conversation-call-banner__action:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 35%, transparent);
-}
-
-.conversation-call-banner__action:disabled {
-  cursor: not-allowed;
-  border-color: var(--border);
-  color: var(--muted-foreground);
-}
-
-.conversation-call-banner__action:disabled:hover {
-  background: color-mix(in oklab, var(--background) 88%, transparent);
-}
-
-@media (pointer: coarse) {
-  .conversation-call-banner__action {
-    height: var(--control-touch);
-  }
-}
-
-@media (min-width: 640px) {
-  .conversation-call-banner__lane {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-  }
-}
-</style>
