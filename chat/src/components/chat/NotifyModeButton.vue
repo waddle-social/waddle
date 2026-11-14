@@ -2,6 +2,8 @@
 import { computed, ref } from "vue";
 import { Menu } from "@ark-ui/vue/menu";
 import { AtSign, Bell, BellOff, Check, ChevronRight } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { iconbtn, waddle } from "styled-system/recipes";
 import AppMenu from "@/components/ui/AppMenu.vue";
 import { menuClasses, menuItemHintClass, menuItemIconClass, menuItemStackClass } from "@/ui/menu-classes";
 import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
@@ -58,6 +60,7 @@ const submittingRich = ref(false);
 const errorMessage = ref<string | null>(null);
 
 const MODES: NotifyMode[] = ["always", "on-mention", "never"];
+const MODE_ICON = { always: Bell, "on-mention": AtSign, never: BellOff } as const;
 const RICH_VALUE = "rich-previews";
 
 const currentMode = computed<NotifyMode>(() => {
@@ -71,16 +74,7 @@ const richOptIn = computed<boolean>(() => props.store.getRichPayloadOptIn(props.
 // fetch-merge-publish round-trips can't race on the same bookmark.
 const busy = computed(() => submitting.value !== null || submittingRich.value);
 
-const icon = computed(() => {
-  switch (currentMode.value) {
-    case "always":
-      return Bell;
-    case "on-mention":
-      return AtSign;
-    case "never":
-      return BellOff;
-  }
-});
+const icon = computed(() => MODE_ICON[currentMode.value]);
 
 const disabled = computed(() => props.client === null || props.store.hydrating.value);
 
@@ -202,6 +196,49 @@ async function toggleRichPayload() {
     submittingRich.value = false;
   }
 }
+
+// Notification-mode menu (Rooms-Notify board): icon + label/hint rows,
+// the chosen mode on an action tint, a check for the preview opt-in.
+const contentClass = css({ width: "min(380px, calc(100vw - 16px))", maxWidth: "none" });
+const trigger = cx(iconbtn(), css({ '&[aria-expanded="true"]': { bg: "action.subtle", color: "action.text" } }));
+const submenuTrigger = css({ height: "auto", py: "2" });
+const submenuDisabled = css({ cursor: "not-allowed", opacity: 0.5 });
+const flex1 = css({ flex: 1 });
+const labelText = css({ font: "600 14px/1.3 {fonts.body}", color: "fg" });
+const option = cx(menuClasses.item, css({
+  alignItems: "flex-start",
+  height: "auto",
+  py: "2.5",
+  "& > svg": { mt: "1px" },
+}));
+const radioOption = cx(option, css({ "&[data-state=checked]": { bg: "action.subtle", "& > svg": { color: "action.text" } } }));
+const trailing = css({ display: "inline-flex", alignItems: "center", ml: "auto", flex: "none", alignSelf: "center" });
+const saving = css({ transform: "scale(0.7)", transformOrigin: "right center" });
+const checkBox = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "18px",
+  height: "18px",
+  flex: "none",
+  mt: "1px",
+  borderRadius: "4px",
+  border: "1px solid {colors.border.strong}",
+  "[data-state=checked] > &": { bg: "action", borderColor: "action", color: "action.fg" },
+  "& svg": { width: "12px !important", height: "12px !important", color: "inherit !important", strokeWidth: 3 },
+});
+const errorClass = css({
+  mx: "1",
+  mt: "1.5",
+  mb: "0.5",
+  px: "3",
+  py: "2.5",
+  borderRadius: "10px",
+  border: "1px solid {colors.danger}",
+  bg: "danger.subtle",
+  color: "danger.text",
+  font: "400 13px/1.45 {fonts.body}",
+});
 </script>
 
 <template>
@@ -212,36 +249,32 @@ async function toggleRichPayload() {
     :submenu="variant === 'submenu'"
     placement="bottom-end"
     aria-label="Notification mode"
-    content-class="w-64 max-w-[calc(100vw-1rem)]"
+    :content-class="contentClass"
     @update:open="onOpenChange"
     @select="onSelect"
   >
     <template #trigger>
       <div
         v-if="variant === 'submenu'"
-        :class="[menuClasses.item, 'py-2', disabled ? 'cursor-not-allowed opacity-50' : '']"
-        style="height: auto"
+        :class="[menuClasses.item, submenuTrigger, disabled && submenuDisabled]"
         :aria-disabled="disabled"
       >
-        <span :class="menuItemIconClass" aria-hidden="true"><component :is="icon" class="h-4 w-4" /></span>
-        <span :class="[menuItemStackClass, 'flex-1']">
-          <span class="type-control text-foreground">Notifications</span>
+        <span :class="menuItemIconClass" aria-hidden="true"><component :is="icon" /></span>
+        <span :class="[menuItemStackClass, flex1]">
+          <span :class="labelText">Notifications</span>
           <span :class="menuItemHintClass">{{ statusLabel }}</span>
         </span>
-        <ChevronRight class="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+        <ChevronRight aria-hidden="true" />
       </div>
       <button
         v-else
-        class="chat-icon-button chat-icon-button--md"
-        :class="disabled
-          ? 'opacity-50 cursor-not-allowed text-muted-foreground'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        :class="trigger"
         type="button"
         :aria-label="buttonTitle"
         :disabled="disabled"
         :aria-disabled="disabled"
       >
-        <component :is="icon" class="w-3.5 h-3.5" />
+        <component :is="icon" aria-hidden="true" />
       </button>
     </template>
     <Menu.RadioItemGroup :model-value="currentMode">
@@ -252,15 +285,17 @@ async function toggleRichPayload() {
         :value="mode"
         :disabled="busy"
         :close-on-select="false"
-        :class="[menuClasses.item, 'flex-col !items-start !gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
-        style="height: auto"
+        :class="radioOption"
       >
-        <div class="flex w-full items-center justify-between gap-2">
-          <Menu.ItemText class="type-field text-foreground">{{ NOTIFY_MODE_LABEL[mode] }}</Menu.ItemText>
-          <span v-if="submitting === mode" class="type-meta text-muted-foreground">Saving…</span>
-          <Menu.ItemIndicator v-else class="type-meta text-primary">Current</Menu.ItemIndicator>
-        </div>
-        <span class="type-meta text-muted-foreground">{{ NOTIFY_MODE_HINT[mode] }}</span>
+        <component :is="MODE_ICON[mode]" aria-hidden="true" />
+        <span :class="menuItemStackClass">
+          <Menu.ItemText :class="labelText">{{ NOTIFY_MODE_LABEL[mode] }}</Menu.ItemText>
+          <span :class="menuItemHintClass">{{ NOTIFY_MODE_HINT[mode] }}</span>
+        </span>
+        <span v-if="submitting === mode" :class="trailing" role="status" aria-label="Saving…">
+          <span :class="[waddle(), saving]" aria-hidden="true"><i /><i /><i /></span>
+        </span>
+        <Menu.ItemIndicator v-else :class="[trailing, menuItemHintClass]">Current</Menu.ItemIndicator>
       </Menu.RadioItem>
     </Menu.RadioItemGroup>
 
@@ -270,22 +305,23 @@ async function toggleRichPayload() {
       :checked="richOptIn"
       :disabled="busy"
       :close-on-select="false"
-      :class="[menuClasses.item, 'flex-col !items-start !gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
-      style="height: auto"
+      :class="option"
     >
-      <div class="flex w-full items-center justify-between gap-2">
-        <Menu.ItemText class="type-field text-foreground">Rich notification previews</Menu.ItemText>
-        <span v-if="submittingRich" class="type-meta text-muted-foreground">Saving…</span>
-        <Menu.ItemIndicator v-else>
-          <Check class="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-        </Menu.ItemIndicator>
-      </div>
-      <span class="type-meta text-muted-foreground">Show the sender and a message preview in push notifications for this chat.</span>
+      <span :class="checkBox" aria-hidden="true">
+        <Menu.ItemIndicator><Check /></Menu.ItemIndicator>
+      </span>
+      <span :class="menuItemStackClass">
+        <Menu.ItemText :class="labelText">Rich notification previews</Menu.ItemText>
+        <span :class="menuItemHintClass">Show the sender and a message preview in push notifications for this chat.</span>
+      </span>
+      <span v-if="submittingRich" :class="trailing" role="status" aria-label="Saving…">
+        <span :class="[waddle(), saving]" aria-hidden="true"><i /><i /><i /></span>
+      </span>
     </Menu.CheckboxItem>
 
     <p
       v-if="errorMessage"
-      class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive-text"
+      :class="errorClass"
       role="alert"
       aria-live="assertive"
     >{{ errorMessage }}</p>
