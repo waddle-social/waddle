@@ -3,8 +3,8 @@
 use std::fmt;
 
 use minidom::rxml::writer::{SimpleNamespaces, TrackNamespace};
-use minidom::rxml::{xml_ncname, Encoder, Item, Namespace, XmlVersion};
-use minidom::Element;
+use minidom::rxml::{xml_ncname, Encoder, Item, Namespace, NcNameStr, XmlVersion};
+use minidom::{Element, Node};
 use thiserror::Error;
 
 use crate::ns::{JABBER_SERVER, STREAM};
@@ -49,9 +49,7 @@ impl StreamEncoder {
         encoder
             .encode(Item::XmlDeclaration(XmlVersion::V1_0), &mut out)
             .map_err(|_| EncodeError::Xml)?;
-        let tracker = encoder.ns_tracker_mut();
-        tracker.declare_fixed(None, Namespace::from(JABBER_SERVER));
-        tracker.declare_fixed(Some(xml_ncname!("stream")), stream.clone());
+        declare_stream_namespaces(encoder.ns_tracker_mut());
         encoder
             .encode(
                 Item::ElementHeadStart(&stream, xml_ncname!("stream")),
@@ -96,12 +94,26 @@ impl StreamEncoder {
     }
 
     /// Serialise one first-level element.
+    ///
+    /// The element is written in the scope of the open stream header:
+    /// elements in the stream namespace use the `stream` prefix bound there,
+    /// which a peer may require (RFC 6120 §4.8.5), and elements in
+    /// `jabber:server` inherit the default namespace without redeclaring it.
+    /// Namespaces are written from each element's and attribute's namespace
+    /// name; prefixes recorded on a [`Element`] are not reproduced.
     pub fn element(&mut self, element: &Element) -> Result<Vec<u8>, EncodeError> {
         if self.closed {
             return Err(EncodeError::Closed);
         }
+        // A separate encoder per element, entered into the header's scope
+        // without output, keeps a serialisation failure from leaving the
+        // stream encoder inside a half-written element.
+        let mut namespaces = SimpleNamespaces::new();
+        declare_stream_namespaces(&mut namespaces);
+        namespaces.push();
+        let mut encoder = Encoder::from(namespaces);
         let mut out = Vec::new();
-        element.write_to(&mut out).map_err(|_| EncodeError::Xml)?;
+        write_element(&mut encoder, element, &mut out)?;
         Ok(out)
     }
 
@@ -132,6 +144,63 @@ impl StreamEncoder {
     pub fn is_closed(&self) -> bool {
         self.closed
     }
+}
+
+/// Bind the namespaces declared on every outbound stream header.
+fn declare_stream_namespaces(namespaces: &mut SimpleNamespaces) {
+    namespaces.declare_fixed(None, Namespace::from(JABBER_SERVER));
+    namespaces.declare_fixed(Some(xml_ncname!("stream")), Namespace::from(STREAM));
+}
+
+/// Write `root` and its descendants without recursion.
+fn write_element(
+    encoder: &mut Encoder<SimpleNamespaces>,
+    root: &Element,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    write_head(encoder, root, out)?;
+    let mut open = vec![root.nodes()];
+    while let Some(children) = open.last_mut() {
+        match children.next() {
+            Some(Node::Element(child)) => {
+                write_head(encoder, child, out)?;
+                open.push(child.nodes());
+            }
+            Some(Node::Text(text)) => encode(encoder, Item::Text(text), out)?,
+            None => {
+                open.pop();
+                encode(encoder, Item::ElementFoot, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write an element's start tag; an element without children is closed by
+/// the following [`Item::ElementFoot`] as an empty-element tag.
+fn write_head(
+    encoder: &mut Encoder<SimpleNamespaces>,
+    element: &Element,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let namespace = Namespace::from(element.ns());
+    let name = NcNameStr::from_str(element.name()).map_err(|_| EncodeError::Xml)?;
+    encode(encoder, Item::ElementHeadStart(&namespace, name), out)?;
+    for ((namespace, name), value) in element.attrs() {
+        encode(encoder, Item::Attribute(namespace, name, value), out)?;
+    }
+    if element.nodes().next().is_some() {
+        encode(encoder, Item::ElementHeadEnd, out)?;
+    }
+    Ok(())
+}
+
+fn encode(
+    encoder: &mut Encoder<SimpleNamespaces>,
+    item: Item<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    encoder.encode(item, out).map_err(|_| EncodeError::Xml)
 }
 
 fn address(address: &HeaderAddress) -> Option<&str> {

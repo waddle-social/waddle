@@ -469,6 +469,26 @@ fn stanza_before_authentication_is_not_authorized() {
 }
 
 #[test]
+fn stream_namespace_elements_use_the_stream_prefix() {
+    // RFC 6120 §4.8.5 allows a peer to require the `stream` prefix, so
+    // features and stream errors are written with the prefix bound on the
+    // response header rather than redeclaring the stream namespace.
+    let mut stream = receiver();
+    let out = stream.receive(INITIAL);
+    assert_eq!(after_header(&transmitted(&out)), FEATURES_STARTTLS);
+
+    let mut stream = receiver();
+    stream.receive(INITIAL);
+    let out = stream.receive(MESSAGE);
+    assert_stream_error(&out, StreamErrorCondition::NotAuthorized);
+    assert_eq!(
+        transmitted(&out),
+        b"<stream:error><not-authorized xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>\
+</stream:error></stream:stream>"
+    );
+}
+
+#[test]
 fn negotiation_commands_out_of_order_are_policy_violations() {
     let mut stream = receiver();
     assert_stream_error(
@@ -510,15 +530,40 @@ to='home-b.test'>key</db:result>",
 }
 
 #[test]
-fn bytes_coalesced_after_starttls_are_handed_to_tls() {
-    let tls_bytes: &[u8] =
-        b"\x16\x03\x01\x02\x00<message from='x@home-a.test' to='y@home-b.test'/>";
+fn bytes_pipelined_after_starttls_are_refused() {
+    // RFC 6120 §5.4.2.3: TLS starts only after `<proceed/>`, so anything the
+    // initiating entity sent before reading it is neither XML of this stream
+    // nor a handshake it was invited to start.
+    let pipelined: [&[u8]; 3] = [
+        b"\x16\x03\x01\x02\x00<message from='x@home-a.test' to='y@home-b.test'/>",
+        b"<message from='x@home-a.test' to='y@home-b.test'/>",
+        b" ",
+    ];
+    for tail in pipelined {
+        let mut stream = receiver();
+        let out = stream.receive(&concat(&[INITIAL, STARTTLS, tail]));
+        assert_stream_error(&out, StreamErrorCondition::PolicyViolation);
+        assert!(!out
+            .iter()
+            .any(|output| matches!(output, Output::StartTls(_))));
+        let elements = continuation_elements(&after_header(&transmitted(&out)));
+        assert!(!elements.iter().any(|element| element.is("proceed", TLS)));
+        let error = elements
+            .iter()
+            .find(|element| element.is("error", STREAM))
+            .expect("stream error sent in plaintext");
+        assert_eq!(
+            StreamErrorCondition::from_peer_element(error.clone()),
+            StreamErrorCondition::PolicyViolation
+        );
+        assert!(stream.is_closed());
+    }
+
+    // Without pipelined input TLS starts with an empty handoff; whatever
+    // arrives afterwards is read from the socket by the TLS engine.
     let mut stream = receiver();
-    let out = stream.receive(&concat(&[INITIAL, STARTTLS, tls_bytes]));
-    assert_eq!(close_reason(&out), None);
-    let elements = continuation_elements(&after_header(&transmitted(&out)));
-    assert!(elements.iter().any(|element| element.is("proceed", TLS)));
-    assert_eq!(handoff(out), tls_bytes);
+    stream.receive(INITIAL);
+    assert!(handoff(stream.receive(STARTTLS)).is_empty());
     assert_eq!(stream.phase(), NegotiationPhase::TlsHandshake);
     assert!(!stream.is_closed());
 }

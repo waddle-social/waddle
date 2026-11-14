@@ -4,11 +4,41 @@ use std::fmt;
 
 /// Byte and shape ceilings enforced by [`super::StreamDecoder`].
 ///
-/// Every byte ceiling is enforced against bytes handed to the XML parser, not
-/// against the size of the element tree built afterwards, so no ceiling can be
-/// bypassed by input that the parser buffers internally before emitting an
-/// event. The defaults are the restricted federation pilot profile; a larger
-/// value needs fresh exhaustion evidence.
+/// Raw byte ceilings are enforced against bytes handed to the XML parser, so
+/// none of them can be bypassed by input the parser buffers internally before
+/// emitting an event. The decoded element tree is bounded separately by
+/// [`Self::max_tree_bytes_per_stanza`], charged as the tree is built, because
+/// decoding can copy one namespace name into every element that inherits it.
+///
+/// # Resident memory per connection
+///
+/// One decoder retains at most:
+///
+/// - the raw input buffer: [`Self::max_buffered_bytes`]. The unfinished
+///   first-level element stays in this buffer until it completes, so it is
+///   held both raw and decoded;
+/// - the parser's scratch buffer, allocated up front:
+///   [`Self::max_token_bytes`];
+/// - the parser's stack of open element names and the decoder's namespace
+///   declarations in scope, both copies of raw bytes of the stream header and
+///   the unfinished element: at most [`Self::max_header_bytes`] plus
+///   [`Self::max_stanza_bytes`];
+/// - the strings of the decoded tree: [`Self::max_tree_bytes_per_stanza`],
+///   up to twice that in allocated capacity because text nodes grow by
+///   doubling as text events are appended;
+/// - the tree's node structure, which is bounded by element and attribute
+///   counts rather than by bytes: about 130 bytes per element plus about
+///   1.1 KiB for each element that carries attributes (the B-tree leaves of
+///   its attribute map). At the pilot's 1,024 elements this is about
+///   1.25 MiB, and it dominates the worst case.
+///
+/// With [`Self::PILOT`] the worst case is therefore roughly 1.7 MiB per
+/// connection, reached only by a peer that keeps one maximal first-level
+/// element unfinished. Lowering [`Self::max_elements_per_stanza`] is the
+/// effective lever for reducing it.
+///
+/// The defaults are the restricted federation pilot profile; a larger value
+/// needs fresh exhaustion evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodecLimits {
     /// Bytes from the start of a stream (or restart) through the end of the
@@ -31,6 +61,19 @@ pub struct CodecLimits {
     /// Bytes retained by the decoder: the unfinished first-level element plus
     /// input not yet parsed.
     pub max_buffered_bytes: usize,
+    /// Bytes of one element name, attribute name or attribute value while
+    /// the XML parser assembles it. The parser allocates a scratch buffer of
+    /// this size per connection. Character data is not limited by it: the
+    /// parser emits text in pieces of at most this size.
+    pub max_token_bytes: usize,
+    /// Bytes of one declared namespace name.
+    pub max_namespace_bytes: usize,
+    /// Bytes of the strings retained by the decoded tree of one first-level
+    /// element: every element's local name and namespace name, every
+    /// attribute's local name, namespace name and value, and all text. A
+    /// namespace name is charged once per element or attribute that carries
+    /// it, inherited or not, because each element stores its own copy.
+    pub max_tree_bytes_per_stanza: usize,
 }
 
 impl CodecLimits {
@@ -44,6 +87,13 @@ impl CodecLimits {
         max_attribute_bytes_per_stanza: 8 * 1024,
         max_elements_per_stanza: 1024,
         max_buffered_bytes: 128 * 1024,
+        // No legitimate name or attribute value exceeds the header or
+        // per-stanza attribute ceilings.
+        max_token_bytes: 8 * 1024,
+        max_namespace_bytes: 1024,
+        // A maximal stanza's own bytes plus a short namespace name inherited
+        // by each of its elements.
+        max_tree_bytes_per_stanza: 128 * 1024,
     };
 }
 
@@ -90,6 +140,9 @@ pub enum LimitKind {
     AttributeBytes,
     ElementsPerStanza,
     BufferedBytes,
+    TokenBytes,
+    NamespaceBytes,
+    TreeBytes,
 }
 
 impl LimitKind {
@@ -104,6 +157,9 @@ impl LimitKind {
             Self::AttributeBytes => "attribute_bytes",
             Self::ElementsPerStanza => "elements_per_stanza",
             Self::BufferedBytes => "buffered_bytes",
+            Self::TokenBytes => "token_bytes",
+            Self::NamespaceBytes => "namespace_bytes",
+            Self::TreeBytes => "tree_bytes",
         }
     }
 }

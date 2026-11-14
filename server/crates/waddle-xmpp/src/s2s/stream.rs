@@ -17,7 +17,10 @@ pub enum Output {
     Transmit(Vec<u8>),
     /// Start TLS after writing all earlier output. The handoff holds bytes
     /// already received after the boundary element; feed them to the TLS
-    /// engine before reading the socket again.
+    /// engine before reading the socket again. It is always empty in the
+    /// receiving role, which refuses input sent after `<starttls/>` before
+    /// `<proceed/>`; in the initiating role it holds bytes that followed the
+    /// peer's `<proceed/>`.
     StartTls(TlsHandoff),
     /// Decide SASL EXTERNAL authorization and answer with
     /// [`S2sStream::authorization`].
@@ -86,6 +89,10 @@ impl S2sStream {
     }
 
     /// Process received plaintext bytes.
+    ///
+    /// Each call must carry at most `max_buffered_bytes - max_stanza_bytes`
+    /// bytes of the configured [`CodecLimits`] (see
+    /// [`StreamDecoder::push`]); one TLS record's plaintext always fits.
     pub fn receive(&mut self, bytes: &[u8]) -> Vec<Output> {
         let mut out = Vec::new();
         if self.closed {
@@ -133,7 +140,15 @@ impl S2sStream {
         while !self.closed {
             let input = match self.decoder.next_item() {
                 Ok(Some(Inbound::Header(header))) => NegotiationInput::Header(header),
-                Ok(Some(Inbound::Element(element))) => NegotiationInput::Element(element),
+                Ok(Some(Inbound::Element(element))) => {
+                    // Bytes still retained after a complete item are input
+                    // the peer sent before reading any reply to it.
+                    if self.decoder.retained_bytes() > 0 {
+                        NegotiationInput::PipelinedElement(element)
+                    } else {
+                        NegotiationInput::Element(element)
+                    }
+                }
                 Ok(Some(Inbound::End)) => NegotiationInput::PeerEnd,
                 Ok(None) => return,
                 Err(error) => {

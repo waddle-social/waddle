@@ -93,7 +93,10 @@ impl Receiving {
         }
         match input {
             NegotiationInput::Header(header) => self.on_header(header, &mut steps),
-            NegotiationInput::Element(element) => self.on_element(element, &mut steps),
+            NegotiationInput::Element(element) => self.on_element(element, false, &mut steps),
+            NegotiationInput::PipelinedElement(element) => {
+                self.on_element(element, true, &mut steps)
+            }
             NegotiationInput::PeerEnd => self.close(&mut steps, CloseReason::PeerClosed),
             NegotiationInput::DecodeFailed(error) => self.fail(&mut steps, error.condition()),
             NegotiationInput::PrematureInput => {
@@ -215,7 +218,7 @@ impl Receiving {
         self.state = State::AwaitHeader(Stage::Tls);
     }
 
-    fn on_element(&mut self, element: Element, steps: &mut Vec<Step>) {
+    fn on_element(&mut self, element: Element, pipelined: bool, steps: &mut Vec<Step>) {
         let element = classify(element, self.config.sasl.max_authzid_bytes);
         match (self.state, element) {
             (_, TopLevel::PeerStreamError(condition)) => {
@@ -231,6 +234,11 @@ impl Receiving {
                 self.fail(steps, StreamErrorCondition::UnsupportedStanzaType)
             }
             (_, TopLevel::Stanza(_)) => self.fail(steps, StreamErrorCondition::NotAuthorized),
+            // Input sent after `<starttls/>` without waiting for `<proceed/>`
+            // is refused rather than handed to TLS (RFC 6120 §5.4.2.3).
+            (State::AwaitStartTls, TopLevel::StartTls) if pipelined => {
+                self.fail(steps, StreamErrorCondition::PolicyViolation)
+            }
             (State::AwaitStartTls, TopLevel::StartTls) => {
                 steps.push(Step::Send(elements::proceed()));
                 steps.push(Step::StartTls);

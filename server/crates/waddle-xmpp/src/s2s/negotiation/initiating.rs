@@ -80,7 +80,9 @@ impl Initiating {
         }
         match input {
             NegotiationInput::Header(header) => self.on_header(&header, &mut steps),
-            NegotiationInput::Element(element) => self.on_element(element, &mut steps),
+            NegotiationInput::Element(element) | NegotiationInput::PipelinedElement(element) => {
+                self.on_element(element, &mut steps)
+            }
             NegotiationInput::PeerEnd => self.close(&mut steps, CloseReason::PeerClosed),
             NegotiationInput::DecodeFailed(error) => self.fail(&mut steps, error.condition()),
             NegotiationInput::PrematureInput => {

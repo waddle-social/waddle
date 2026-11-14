@@ -93,6 +93,9 @@ fn small_limits() -> CodecLimits {
         max_attribute_bytes_per_stanza: 128,
         max_elements_per_stanza: 8,
         max_buffered_bytes: 1024,
+        max_token_bytes: 512,
+        max_namespace_bytes: 64,
+        max_tree_bytes_per_stanza: 512,
     }
 }
 
@@ -442,6 +445,9 @@ fn predefined_entities_and_cdata_are_accepted() {
 
 #[test]
 fn non_utf8_encoding_declaration_is_rejected() {
+    // RFC 6120 §4.9.3.22 suggests `unsupported-encoding`, but the parser
+    // reports this with the same error as other forbidden XML declarations,
+    // so the decoder answers `restricted-xml`.
     let error = decode_error(b"<?xml version='1.0' encoding='ISO-8859-1'?>");
     assert_eq!(error, DecodeError::RestrictedXml);
 }
@@ -600,6 +606,143 @@ fn element_count_is_bounded_per_stanza() {
         error,
         DecodeError::LimitExceeded(LimitKind::ElementsPerStanza)
     );
+}
+
+#[test]
+fn oversized_names_and_values_hit_the_token_limit() {
+    let long = vec![b'a'; CodecLimits::PILOT.max_token_bytes + 16];
+
+    let mut name = b"<message><".to_vec();
+    name.extend_from_slice(&long);
+    name.extend_from_slice(b"/></message>");
+    let error = after_header(&name);
+    assert_eq!(error, DecodeError::LimitExceeded(LimitKind::TokenBytes));
+    assert_eq!(error.condition(), StreamErrorCondition::PolicyViolation);
+
+    let mut value = b"<message to='".to_vec();
+    value.extend_from_slice(&long);
+    value.extend_from_slice(b"'/>");
+    assert_eq!(
+        after_header(&value),
+        DecodeError::LimitExceeded(LimitKind::TokenBytes)
+    );
+
+    // Character data is not a token: it is emitted in pieces.
+    let mut text = b"<message><body>".to_vec();
+    text.extend_from_slice(&long);
+    text.extend_from_slice(b"</body></message>");
+    let mut decoder = decoder();
+    let items = decode_chunks(&mut decoder, &[HEADER, &text]).expect("long text");
+    assert_eq!(elements_of(items).len(), 1);
+}
+
+#[test]
+fn namespace_names_are_capped() {
+    let limit = CodecLimits::PILOT.max_namespace_bytes;
+    let namespace = |len: usize| {
+        let mut uri = b"urn:".to_vec();
+        uri.resize(len, b'x');
+        uri
+    };
+
+    let mut at_limit = b"<message><x xmlns='".to_vec();
+    at_limit.extend_from_slice(&namespace(limit));
+    at_limit.extend_from_slice(b"'/></message>");
+    let mut decoder = decoder();
+    let items = decode_chunks(&mut decoder, &[HEADER, &at_limit]).expect("namespace at limit");
+    assert_eq!(elements_of(items).len(), 1);
+
+    for declaration in [&b" xmlns='"[..], &b" xmlns:p='"[..]] {
+        let mut over = b"<message".to_vec();
+        over.extend_from_slice(declaration);
+        over.extend_from_slice(&namespace(limit + 1));
+        over.extend_from_slice(b"'/>");
+        let error = after_header(&over);
+        assert_eq!(error, DecodeError::LimitExceeded(LimitKind::NamespaceBytes));
+        assert_eq!(error.condition(), StreamErrorCondition::PolicyViolation);
+    }
+}
+
+#[test]
+fn inherited_namespace_copies_are_charged_to_the_tree_budget() {
+    // A few kilobytes of wire, within every raw limit: one long default
+    // namespace inherited by a thousand empty elements would otherwise be
+    // copied into each of them.
+    let limits = CodecLimits::PILOT;
+    let mut uri = b"urn:".to_vec();
+    uri.resize(limits.max_namespace_bytes, b'x');
+    let mut stanza = b"<x xmlns='".to_vec();
+    stanza.extend_from_slice(&uri);
+    stanza.extend_from_slice(b"'>");
+    stanza.extend_from_slice(&b"<a/>".repeat(limits.max_elements_per_stanza - 1));
+    stanza.extend_from_slice(b"</x>");
+    assert!(stanza.len() < limits.max_stanza_bytes);
+
+    let error = after_header(&stanza);
+    assert_eq!(error, DecodeError::LimitExceeded(LimitKind::TreeBytes));
+    assert_eq!(error.condition(), StreamErrorCondition::PolicyViolation);
+
+    // The same shape fails while streaming, long before the whole element
+    // has arrived.
+    let mut decoder = decoder();
+    decode(&mut decoder, HEADER).expect("header");
+    let chunk_error = stanza.chunks(64).enumerate().find_map(|(index, chunk)| {
+        decode(&mut decoder, chunk)
+            .err()
+            .map(|error| (index, error))
+    });
+    let (index, error) = chunk_error.expect("tree budget enforced");
+    assert_eq!(error, DecodeError::LimitExceeded(LimitKind::TreeBytes));
+    assert!((index + 1) * 64 < stanza.len() / 2);
+}
+
+#[test]
+fn prefixed_namespace_copies_are_charged_to_the_tree_budget() {
+    let limits = CodecLimits::PILOT;
+    let mut uri = b"urn:".to_vec();
+    uri.resize(limits.max_namespace_bytes, b'x');
+    let declaration = |stanza: &mut Vec<u8>| {
+        stanza.extend_from_slice(b"<message xmlns:p='");
+        stanza.extend_from_slice(&uri);
+        stanza.extend_from_slice(b"'>");
+    };
+
+    // Prefixed attribute names: each attribute key names the namespace.
+    let mut attributes = Vec::new();
+    declaration(&mut attributes);
+    attributes.extend_from_slice(&b"<a p:k=''/>".repeat(limits.max_elements_per_stanza - 1));
+    attributes.extend_from_slice(b"</message>");
+    assert_eq!(
+        after_header(&attributes),
+        DecodeError::LimitExceeded(LimitKind::TreeBytes)
+    );
+
+    // Prefixed element names: each element copies the namespace.
+    let mut elements = Vec::new();
+    declaration(&mut elements);
+    elements.extend_from_slice(&b"<p:a/>".repeat(limits.max_elements_per_stanza - 1));
+    elements.extend_from_slice(b"</message>");
+    assert_eq!(
+        after_header(&elements),
+        DecodeError::LimitExceeded(LimitKind::TreeBytes)
+    );
+}
+
+#[test]
+fn honest_stanza_at_the_element_limit_fits_the_tree_budget() {
+    let limits = CodecLimits::PILOT;
+    let mut stanza = b"<iq type='result' id='1' from='home-a.test' to='home-b.test'>\
+<query xmlns='http://jabber.org/protocol/disco#items'>"
+        .to_vec();
+    stanza.extend_from_slice(&b"<item/>".repeat(limits.max_elements_per_stanza - 2));
+    stanza.extend_from_slice(b"</query></iq>");
+    let mut decoder = decoder();
+    let items = decode_chunks(&mut decoder, &[HEADER, &stanza]).expect("element limit");
+    let elements = elements_of(items);
+    let query = elements[0]
+        .get_child("query", "http://jabber.org/protocol/disco#items")
+        .expect("query");
+    assert_eq!(query.children().count(), limits.max_elements_per_stanza - 2);
 }
 
 #[test]
@@ -805,6 +948,49 @@ fn encoder_output_round_trips_through_the_decoder() {
     assert_eq!(
         StreamErrorCondition::from_peer_element(elements[1].clone()),
         StreamErrorCondition::HostUnknown
+    );
+}
+
+#[test]
+fn first_level_elements_are_written_in_the_header_scope() {
+    let header = StreamHeader::response(
+        domain("home-b.test"),
+        Some(domain("home-a.test")),
+        StreamLanguage::english(),
+    );
+    let (mut encoder, _) = StreamEncoder::open(&header).expect("open");
+
+    // Stream-namespace elements use the `stream` prefix bound on the
+    // header; other namespaces are declared as the default namespace.
+    let features = Element::builder("features", STREAM)
+        .append(
+            Element::builder("starttls", TLS)
+                .append(Element::builder("required", TLS).build())
+                .build(),
+        )
+        .build();
+    assert_eq!(
+        encoder.element(&features).expect("features"),
+        b"<stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'>\
+<required/></starttls></stream:features>"
+    );
+
+    // Stanzas inherit `jabber:server` from the header.
+    let message = Element::builder("message", JABBER_SERVER)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), "b@home-b.test")
+        .append(Element::builder("body", JABBER_SERVER).append("hi").build())
+        .build();
+    assert_eq!(
+        encoder.element(&message).expect("message"),
+        b"<message to='b@home-b.test'><body>hi</body></message>"
+    );
+
+    assert_eq!(
+        encoder
+            .stream_error(StreamErrorCondition::PolicyViolation)
+            .expect("stream error"),
+        b"<stream:error><policy-violation xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>\
+</stream:error></stream:stream>"
     );
 }
 

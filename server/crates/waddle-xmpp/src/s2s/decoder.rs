@@ -17,6 +17,14 @@
 //! restarts use that offset: bytes after `<proceed/>` are handed to the TLS
 //! engine and bytes after SASL success are discarded, and neither can reach
 //! the XML parser of the next stream.
+//!
+//! Decoding can amplify input: `minidom` stores an owned namespace name in
+//! every element, so a short element inheriting a long default namespace
+//! costs far more memory than its raw bytes. Declared namespace names are
+//! therefore capped, declarations in scope are shared rather than copied
+//! into attribute keys, and the strings retained by each first-level element
+//! are charged against [`CodecLimits::max_tree_bytes_per_stanza`] before
+//! they are stored.
 
 use minidom::rxml::error::{EndOrError, Error as XmlError};
 use minidom::rxml::{AttrMap, Namespace, NcName, Options, Parse, RawEvent, RawParser, WithOptions};
@@ -39,8 +47,8 @@ const XML_PREFIX: &str = "xml";
 const XMLNS: &str = "xmlns";
 /// Compact consumed input once this many bytes are no longer needed.
 const COMPACT_THRESHOLD: usize = 4096;
-/// Bytes inspected before a parser error to recognise a markup declaration.
-const MARKUP_DECLARATION_WINDOW: usize = 16;
+/// Bytes inspected before a parser error to recognise restricted markup.
+const RESTRICTED_MARKUP_WINDOW: usize = 16;
 
 /// One complete item decoded from the stream.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,8 +176,21 @@ struct StanzaInProgress {
     limit_kind: LimitKind,
     elements: usize,
     attribute_bytes: usize,
+    /// Bytes charged against [`CodecLimits::max_tree_bytes_per_stanza`].
+    tree_bytes: usize,
     /// Open elements; index 0 is the first-level element.
     stack: Vec<Element>,
+}
+
+impl StanzaInProgress {
+    /// Account for `bytes` of strings about to be stored in the tree.
+    fn charge(&mut self, bytes: usize, limit: usize) -> Result<(), DecodeError> {
+        self.tree_bytes = self.tree_bytes.saturating_add(bytes);
+        if self.tree_bytes > limit {
+            return Err(DecodeError::LimitExceeded(LimitKind::TreeBytes));
+        }
+        Ok(())
+    }
 }
 
 /// Incremental, bounded decoder for one direction of an S2S connection.
@@ -199,7 +220,7 @@ impl StreamDecoder {
     /// A decoder awaiting a stream header.
     pub fn new(limits: CodecLimits) -> Self {
         let options = Options {
-            max_token_length: limits.max_stanza_bytes.max(limits.max_header_bytes),
+            max_token_length: limits.max_token_bytes,
             ..Options::default()
         };
         let mut parser = RawParser::with_options(options);
@@ -248,6 +269,14 @@ impl StreamDecoder {
     /// Fails when the retained input would exceed
     /// [`CodecLimits::max_buffered_bytes`]. Bytes received after the peer
     /// closed its stream are dropped.
+    ///
+    /// The whole of `bytes` is accepted or the stream fails, so callers must
+    /// bound their reads: when [`Self::next_item`] is drained to `Ok(None)`
+    /// before every push, at most one unfinished item is retained (no more
+    /// than [`CodecLimits::max_stanza_bytes`]), and a push of at most
+    /// `max_buffered_bytes - max_stanza_bytes` bytes (64 KiB with
+    /// [`CodecLimits::PILOT`]) never fails for a peer within the other
+    /// limits. Plaintext from one TLS record is at most 16 KiB.
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), DecodeError> {
         match self.phase {
             Phase::Failed(error) => return Err(error),
@@ -258,7 +287,8 @@ impl StreamDecoder {
         if retained > self.limits.max_buffered_bytes {
             return Err(self.fail(DecodeError::LimitExceeded(LimitKind::BufferedBytes)));
         }
-        self.compact();
+        self.compact(bytes.len());
+        self.reserve(bytes.len());
         self.buffer.extend_from_slice(bytes);
         Ok(())
     }
@@ -341,12 +371,33 @@ impl StreamDecoder {
             .min(self.buffer.len())
     }
 
-    fn compact(&mut self) {
+    /// Drop consumed input before `incoming` bytes are appended. Consumed
+    /// input is kept while it is small and the buffer has room, to avoid
+    /// shifting the buffer on every push; the buffer length therefore never
+    /// exceeds [`CodecLimits::max_buffered_bytes`].
+    fn compact(&mut self, incoming: usize) {
         let dead = self.dead_prefix();
-        if dead > 0 && (dead >= COMPACT_THRESHOLD || dead == self.buffer.len()) {
+        let full = self.buffer.len().saturating_add(incoming) > self.limits.max_buffered_bytes;
+        if dead > 0 && (dead >= COMPACT_THRESHOLD || dead == self.buffer.len() || full) {
             self.buffer.drain(..dead);
             self.base += dead;
         }
+    }
+
+    /// Grow the buffer for `additional` bytes without letting amortised
+    /// growth allocate beyond [`CodecLimits::max_buffered_bytes`].
+    fn reserve(&mut self, additional: usize) {
+        let needed = self.buffer.len().saturating_add(additional);
+        if needed <= self.buffer.capacity() {
+            return;
+        }
+        let target = self
+            .buffer
+            .capacity()
+            .saturating_mul(2)
+            .min(self.limits.max_buffered_bytes)
+            .max(needed);
+        self.buffer.reserve_exact(target - self.buffer.len());
     }
 
     fn fail(&mut self, error: DecodeError) -> DecodeError {
@@ -379,24 +430,46 @@ impl StreamDecoder {
         }
     }
 
+    /// Map a parser error to the stream error it warrants.
+    ///
+    /// An XML declaration naming an encoding other than UTF-8 is reported
+    /// as `restricted-xml`, not `unsupported-encoding` (RFC 6120 §4.9.3.22):
+    /// the parser rejects it with the same error variant as a declaration
+    /// naming an XML version other than 1.0 or a non-standalone document,
+    /// and the variant's message is documented as not for interpretation.
     fn classify_parser_error(&self, error: XmlError) -> DecodeError {
         match error {
+            XmlError::RestrictedXml(_) if self.unemitted_bytes() >= self.limits.max_token_bytes => {
+                // The parser's only byte-count restriction: a name or
+                // attribute value filled its scratch buffer. Every other
+                // restriction is detected within a few bytes of the
+                // previous event.
+                DecodeError::LimitExceeded(LimitKind::TokenBytes)
+            }
             XmlError::RestrictedXml(_) | XmlError::UndeclaredEntity => DecodeError::RestrictedXml,
             XmlError::InvalidUtf8Byte(_) => DecodeError::UnsupportedEncoding,
-            _ if self.ends_in_markup_declaration() => DecodeError::RestrictedXml,
+            _ if self.ends_in_restricted_markup() => DecodeError::RestrictedXml,
             _ => DecodeError::NotWellFormed,
         }
     }
 
-    /// Whether the parser stopped inside `<!` followed by a letter: a
-    /// DOCTYPE, ENTITY or other markup declaration, which the parser reports
-    /// as a malformed CDATA section.
-    fn ends_in_markup_declaration(&self) -> bool {
+    /// Input consumed by the parser that no event has accounted for yet.
+    fn unemitted_bytes(&self) -> usize {
+        self.parsed.saturating_sub(self.emitted)
+    }
+
+    /// Whether the parser stopped inside `<!` followed by a letter or `-`:
+    /// a DOCTYPE, ENTITY or other markup declaration, or a comment. The
+    /// parser reports these as a malformed CDATA section; RFC 6120 §11.1
+    /// classes all of them as restricted XML.
+    fn ends_in_restricted_markup(&self) -> bool {
         let end = self.parsed.saturating_sub(self.base).min(self.buffer.len());
-        let start = end.saturating_sub(MARKUP_DECLARATION_WINDOW);
-        self.buffer[start..end]
-            .windows(3)
-            .any(|window| window[0] == b'<' && window[1] == b'!' && window[2].is_ascii_alphabetic())
+        let start = end.saturating_sub(RESTRICTED_MARKUP_WINDOW);
+        self.buffer[start..end].windows(3).any(|window| {
+            window[0] == b'<'
+                && window[1] == b'!'
+                && (window[2].is_ascii_alphabetic() || window[2] == b'-')
+        })
     }
 
     fn on_event(&mut self, event: RawEvent, start: usize) -> Result<Option<Inbound>, DecodeError> {
@@ -436,6 +509,7 @@ impl StreamDecoder {
                 limit_kind: LimitKind::StanzaBytes,
                 elements: 0,
                 attribute_bytes: 0,
+                tree_bytes: 0,
                 stack: Vec::new(),
             });
         }
@@ -475,6 +549,13 @@ impl StreamDecoder {
                 return Err(DecodeError::LimitExceeded(LimitKind::AttributeBytes));
             }
         }
+        let declaration = match &prefix {
+            None => local.as_str() == XMLNS,
+            Some(prefix) => prefix.as_str() == XMLNS,
+        };
+        if declaration && value.len() > self.limits.max_namespace_bytes {
+            return Err(DecodeError::LimitExceeded(LimitKind::NamespaceBytes));
+        }
         match prefix {
             None if local.as_str() == XMLNS => {
                 if head.default_declaration.replace(value).is_some() {
@@ -499,6 +580,8 @@ impl StreamDecoder {
     fn close_head(&mut self) -> Result<Option<Inbound>, DecodeError> {
         let head = self.head.take().ok_or(DecodeError::NotWellFormed)?;
         let depth = self.scopes.len();
+        // Declarations in scope are shared so that resolving a prefix for an
+        // attribute key clones a reference instead of the namespace name.
         let scope = Scope {
             default: head
                 .default_declaration
@@ -507,7 +590,7 @@ impl StreamDecoder {
             prefixes: head
                 .prefix_declarations
                 .iter()
-                .map(|(prefix, uri)| (prefix.clone(), Namespace::from(uri.clone())))
+                .map(|(prefix, uri)| (prefix.clone(), Namespace::from(uri.clone()).shared()))
                 .collect(),
         };
         self.scopes.push(scope);
@@ -540,9 +623,23 @@ impl StreamDecoder {
             }
         }
 
+        // The element copies its local name and namespace name; attribute
+        // keys share the declaration in scope but are charged as if copied,
+        // which keeps the charge independent of how the tree is stored.
+        let attribute_bytes = attributes
+            .iter()
+            .map(|((namespace, local), value)| namespace.len() + local.len() + value.len())
+            .fold(0usize, usize::saturating_add);
+        let element_bytes = head
+            .local
+            .len()
+            .saturating_add(namespace.len())
+            .saturating_add(attribute_bytes);
+        let limit = self.limits.max_tree_bytes_per_stanza;
+        let stanza = self.stanza.as_mut().ok_or(DecodeError::NotWellFormed)?;
+        stanza.charge(element_bytes, limit)?;
         let mut element = Element::bare(head.local.as_str(), String::from(namespace));
         *element.attrs_mut() = attributes;
-        let stanza = self.stanza.as_mut().ok_or(DecodeError::NotWellFormed)?;
         stanza.stack.push(element);
         Ok(None)
     }
@@ -583,7 +680,9 @@ impl StreamDecoder {
                 Ok(())
             }
             _ => {
+                let limit = self.limits.max_tree_bytes_per_stanza;
                 let stanza = self.stanza.as_mut().ok_or(DecodeError::NotWellFormed)?;
+                stanza.charge(text.len(), limit)?;
                 let element = stanza.stack.last_mut().ok_or(DecodeError::NotWellFormed)?;
                 element.append_text(text);
                 Ok(())
@@ -698,6 +797,6 @@ fn namespace_from_declaration(uri: String) -> Namespace {
     if uri.is_empty() {
         Namespace::none().clone()
     } else {
-        Namespace::from(uri)
+        Namespace::from(uri).shared()
     }
 }
