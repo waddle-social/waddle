@@ -494,10 +494,10 @@ def run(root, diagnostics):
     # not enough because 'always-allow-substitutes' (set by the Determinate
     # Nix installer) overrides it.
     if input_outputs:
-        command(['nix', 'build', '--print-build-logs', '--no-link', '--max-jobs', '4', '--cores', '4',
+        command(['nix', 'build', '--print-build-logs', '--no-link', '--max-jobs', '4', '--cores', '8',
                  *isolation, *input_outputs], cwd=root / 'server', capture=False)
     results = command(['nix', 'build', '--print-build-logs', '--no-link', '--json', '--keep-going',
-                       '--max-jobs', '4', '--cores', '4', *isolation, '--option', 'substitute', 'false',
+                       '--max-jobs', '4', '--cores', '8', *isolation, '--option', 'substitute', 'false',
                        *(f'{drv}^out' for drv in drvs)], cwd=root / 'server')
     validate_build_results(identities, results)
     atomic_write_text(diagnostics / 'shard-results.json', results)

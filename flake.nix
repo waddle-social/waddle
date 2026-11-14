@@ -302,7 +302,7 @@
               installPhase = ''mkdir -p "$out"'';
               checkPhase = ''
                 ${pkgs.python3}/bin/python3 ${./server/scripts/pin-nextest-shard.py} \
-                  --parent-pid "$$" --partition ${toString partition} --count 4 --cores 4
+                  --parent-pid "$$" --partition ${toString partition} --count 4 --cores 8
                 runHook preCheck
                 mkdir -p "$out"
                 extracted="$TMPDIR/nextest-archive"
