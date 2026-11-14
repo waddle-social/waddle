@@ -23,6 +23,12 @@
 # scripts/check_postgres_test_group.py checks detected call patterns
 # (ciHelperContracts); review new database fixtures and callers too because
 # its source-level analysis cannot resolve every Rust call.
+#
+# The group holds both one-thread tests and `threads-required = 'num-cpus'`
+# tests. Nextest before 0.9.151 could drop a queued group test whose
+# threads were freed by a test outside the group, ending the run with tests
+# "not run" and nothing failed or cancelled (nextest-rs/nextest#3697); the
+# flake overlays a fixed version.
 [test-groups]
 postgres = { max-threads = 1 }
 
