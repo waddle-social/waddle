@@ -95,6 +95,20 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     let is_pep = req.is_pep;
     let storage = &state.deps.protocol.pubsub_storage;
 
+    // The Space node of an enrolled host-grant scope delivers no event:
+    // a captured subscriber list is not an admission, and the scope's
+    // authority is its canonical grants, which PubSub does not consult.
+    if !is_pep
+        && owner.as_str() == state.deps.service_domains.spaces
+        && state.deps.app_state.host_grants.space_enrolled(node).await != Ok(false)
+    {
+        info!(
+            node_kind = "enrolled_space",
+            "Fan-out skipped: the node belongs to an enrolled host-grant scope"
+        );
+        return;
+    }
+
     let node_cfg = match storage.get_node(owner, node).await {
         Ok(Some(record)) => record.config,
         Ok(None) => {

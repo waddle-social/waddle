@@ -25,6 +25,12 @@
 //! - A replica admits a managed room only after it verified its runtime
 //!   role's privileges on the store when it started
 //!   ([`HostGrantAttachment`]).
+//! - Every other surface that admits a principal to a managed room (joins,
+//!   archive and discovery reads, PubSub, room administration, the
+//!   planner's audience sources) decides through [`HostGrantGate`], from the
+//!   same canonical grants and the same policy. Legacy reads of a managed
+//!   room's authorization objects through the permission actor answer
+//!   nothing.
 //!
 //! The decisions behind the lock order, the store capabilities and the
 //! marker protocol are recorded in
@@ -35,12 +41,14 @@
 mod admission;
 mod authority;
 mod error;
+mod gate;
 mod issuance;
 mod marker;
 mod model;
 mod policy;
 mod projection;
 mod runtime_attach;
+mod standing;
 mod store;
 
 pub(crate) use admission::{
@@ -51,6 +59,7 @@ pub use authority::{
     HostGrantAuthority, ProjectionContradiction, Reconciliation, VerifiedProjection,
 };
 pub use error::HostGrantError;
+pub use gate::{HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate};
 pub use issuance::{
     IssuanceBasis, IssuancePolicy, IssuanceRefusal, ServedAccountDomains, SubjectHome,
 };
@@ -72,6 +81,7 @@ pub use projection::{
     HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
 };
 pub use runtime_attach::HostGrantAttachment;
+pub use standing::{RoomBinding, RoomGrants, RoomLookup};
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
 pub use store::{Activation, HostGrantStore};

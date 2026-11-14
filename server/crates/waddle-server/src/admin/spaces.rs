@@ -361,7 +361,11 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_create(&state, &args).await {
+    // Admin commands reach the server only from authenticated accounts of
+    // this deployment, so the caller's domain is its account domain: the
+    // one a privileged seed may name (ADR-0020 D8).
+    let account_domain = ctx.from.domain().as_str().to_owned();
+    match run_create(&state, &args, &account_domain).await {
         Ok(space) => CommandResult::Completed {
             session_id: None,
             form: Some(build_space_form(NODE_CREATE, &space)),
@@ -940,7 +944,11 @@ fn channel_type_from_catalog_or_room_config(
         .unwrap_or_else(|| channel_type_from_room_config(config).to_string())
 }
 
-async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRef, AdminErr> {
+async fn run_create(
+    state: &AppState,
+    args: &SpacesCreateArgs,
+    account_domain: &str,
+) -> Result<SpaceRef, AdminErr> {
     // Mint a fresh localpart for this space. Mirror the chat-side
     // convention of slugified-name + short-id by lowercasing+slugifying
     // the name and appending a short UUID tail.
@@ -949,6 +957,7 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
     let space_jid: BareJid = format!("{localpart}@{domain}")
         .parse()
         .map_err(|e| internal_err(format!("constructed space JID is invalid: {e}")))?;
+    super::refuse_host_grant_space(state, &localpart).await?;
 
     let now = now_unix_seconds();
     // Create the pubsub node that backs the space's channel list.
@@ -979,11 +988,21 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
 
     // Seed server-owners as PubSub owners on the new node so they can
     // administer it. Mirrors `spaces_pubsub_seed::seed_owners_on_node`.
+    let issuance = waddle_xmpp::identity::CanonicalDomain::parse_exact(account_domain)
+        .ok()
+        .and_then(|domain| {
+            crate::permissions::host_grant::IssuancePolicy::new([domain], [], []).ok()
+        })
+        .unwrap_or_default();
     crate::spaces_pubsub_seed::seed_owners_on_node(
         &state.pubsub_storage,
         &state.spaces_jid,
         &localpart,
         &state.server_owner_jids,
+        crate::spaces_pubsub_seed::OwnerSeedPolicy {
+            issuance: &issuance,
+            host_grants: &state.host_grants,
+        },
     )
     .await;
 
@@ -1035,6 +1054,7 @@ fn mint_space_localpart(name: &str) -> String {
 async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRef, AdminErr> {
     let (node_name, space_jid) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node_name).await?;
     let space_node = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node_name)
@@ -1111,6 +1131,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     // under its canonical id is on this node too.
     let (node_name, space_jid) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node_name).await?;
 
     // Collect channels-to-destroy from both sources.
     let mut targets: BTreeSet<BareJid> = BTreeSet::new();
@@ -1133,6 +1154,12 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         if let Ok(room_jid) = stored.id.parse::<BareJid>() {
             targets.insert(room_jid);
         }
+    }
+    // A room an enrolled host-grant scope manages is never destroyed by a
+    // Space's deletion, nor unlinked from it: it ends only when its scope is
+    // retired. The whole deletion is refused before anything changes.
+    for room_jid in &targets {
+        super::refuse_host_grant_room(state, room_jid).await?;
     }
     let bookmarked_rooms: BTreeSet<BareJid> = items
         .iter()
@@ -1417,6 +1444,7 @@ async fn run_members(
 ) -> Result<SpacesMembersResult, AdminErr> {
     let (node, _) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node).await?;
 
     let mut affiliations = state
         .pubsub_storage
@@ -1459,6 +1487,7 @@ async fn run_set_role(
 ) -> Result<SpacesSetRoleResult, AdminErr> {
     let (node, _) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node).await?;
     let exists = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node)

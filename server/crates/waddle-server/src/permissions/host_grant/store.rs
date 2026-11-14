@@ -188,7 +188,7 @@ impl HostGrantStore {
     }
 
     /// A bounded read-only snapshot.
-    async fn begin_read(&self) -> Result<Transaction<'_>, HostGrantError> {
+    pub(super) async fn begin_read(&self) -> Result<Transaction<'_>, HostGrantError> {
         let mut tx = self.db.begin().await?;
         tx.execute(
             "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
@@ -1122,7 +1122,7 @@ async fn commit(tx: EnteredTransaction<'_>, mode: CommitMode) -> Result<(), Host
     }
 }
 
-fn corrupt(field: &'static str) -> HostGrantError {
+pub(super) fn corrupt(field: &'static str) -> HostGrantError {
     HostGrantError::CorruptRow { field }
 }
 
@@ -1185,7 +1185,7 @@ fn validate_enrollment(
 }
 
 /// Whether a scope admits anything at all.
-fn scope_admits(scope: &ScopeState, current: AuthorityIncarnation) -> bool {
+pub(super) fn scope_admits(scope: &ScopeState, current: AuthorityIncarnation) -> bool {
     scope.admission == AdmissionState::Active
         && scope.authority_incarnation == current
         && scope.policy_version == HOST_GRANT_POLICY_VERSION
@@ -1210,7 +1210,7 @@ fn refuse_unusable_scope(
     Ok(())
 }
 
-async fn load_incarnation(
+pub(super) async fn load_incarnation(
     tx: &mut Transaction<'_>,
 ) -> Result<AuthorityIncarnation, HostGrantError> {
     let mut rows = tx
@@ -1224,7 +1224,7 @@ async fn load_incarnation(
         .ok_or(corrupt("authority incarnation"))
 }
 
-async fn load_scope(
+pub(super) async fn load_scope(
     tx: &mut Transaction<'_>,
     lifecycle: ScopeLifecycleId,
     lock: bool,
@@ -1331,7 +1331,7 @@ async fn load_grants(
     Ok(grants)
 }
 
-fn affiliation_column(
+pub(super) fn affiliation_column(
     row: &Row,
     index: usize,
     field: &'static str,

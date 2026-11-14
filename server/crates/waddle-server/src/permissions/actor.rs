@@ -99,6 +99,8 @@ pub struct PermissionActor {
     /// The canonical host-grant store, when this deployment has one. The
     /// tuple-writing messages refuse an object that belongs to one of its
     /// enrolled scopes: only the authority's own projection writes there.
+    /// The reading messages answer nothing for such an object: only the
+    /// host-grant authority decides there.
     host_grants: Option<HostGrantStore>,
 }
 
@@ -172,6 +174,32 @@ impl PermissionActor {
             }
         }
         Ok(())
+    }
+
+    /// Whether a legacy read of `object` may answer from the tuple store.
+    ///
+    /// The channel of a managed room and the Space of an enrolled scope are
+    /// decided by the host-grant authority alone (`host_grant::HostGrantGate`),
+    /// so a legacy read of either answers nothing: a check is not allowed and
+    /// a listing is empty, whatever the projection or a stale mirror holds.
+    /// A store that cannot be read fails the read.
+    async fn legacy_read_answers(&self, object: &Object) -> Result<bool, PermissionError> {
+        let Some(store) = &self.host_grants else {
+            return Ok(true);
+        };
+        if !matches!(object.object_type, ObjectType::Channel | ObjectType::Space) {
+            return Ok(true);
+        }
+        match store.enrolled_object(object).await {
+            Ok(enrolled) => Ok(!enrolled),
+            Err(error) => {
+                tracing::warn!(
+                    kind = error.kind(),
+                    "Refusing a permission read: the host-grant authority could not be read"
+                );
+                Err(PermissionError::HostGrantAuthorityUnavailable)
+            }
+        }
     }
 
     /// The backend a host-grant projection is read from and written to.
@@ -446,6 +474,12 @@ impl kameo::message::Message<CheckPermission> for PermissionActor {
         msg: CheckPermission,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(CheckResponse {
+                allowed: false,
+                reason: None,
+            });
+        }
         self.check(&msg.subject, msg.permission.as_str(), &msg.object)
             .await
     }
@@ -639,6 +673,9 @@ impl kameo::message::Message<ListRelations> for PermissionActor {
         msg: ListRelations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(Vec::new());
+        }
         let relations = self.list_relations(&msg.subject, &msg.object).await?;
         Ok(relations.into_iter().map(Relation::new).collect())
     }
@@ -658,6 +695,9 @@ impl kameo::message::Message<ListSubjects> for PermissionActor {
         msg: ListSubjects,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(Vec::new());
+        }
         self.list_subjects(&msg.object, &msg.relation.name).await
     }
 }
@@ -677,8 +717,16 @@ impl kameo::message::Message<LookupResources> for PermissionActor {
         msg: LookupResources,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.lookup_resources(&msg.subject, msg.permission.as_str(), msg.object_type)
-            .await
+        let resources = self
+            .lookup_resources(&msg.subject, msg.permission.as_str(), msg.object_type)
+            .await?;
+        let mut answered = Vec::with_capacity(resources.len());
+        for resource in resources {
+            if self.legacy_read_answers(&resource).await? {
+                answered.push(resource);
+            }
+        }
+        Ok(answered)
     }
 }
 
@@ -697,6 +745,9 @@ impl kameo::message::Message<LookupSubjects> for PermissionActor {
         msg: LookupSubjects,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(Vec::new());
+        }
         self.lookup_subjects(&msg.object, msg.permission.as_str(), msg.subject_type)
             .await
     }

@@ -918,7 +918,9 @@ async fn attach_host_grant_store(
         return;
     };
     let served = ServedAccountDomains::new([account_domain]);
-    if !try_attach_host_grant_store(ingress, &store, &served).await {
+    let gate = state.host_grants.clone();
+    let permissions = state.permission_actor.clone();
+    if !try_attach_host_grant_store(ingress, &gate, &permissions, &store, &served).await {
         return;
     }
     let ingress = Arc::clone(ingress);
@@ -929,7 +931,7 @@ async fn attach_host_grant_store(
                 () = stop.cancelled() => return,
                 () = tokio::time::sleep(delay) => {}
             }
-            if !try_attach_host_grant_store(&ingress, &store, &served).await {
+            if !try_attach_host_grant_store(&ingress, &gate, &permissions, &store, &served).await {
                 return;
             }
             delay = delay.saturating_mul(2).min(HOST_GRANT_ATTACH_RETRY_MAX);
@@ -941,13 +943,19 @@ async fn attach_host_grant_store(
 /// only a failure that a later attempt may pass is retried.
 async fn try_attach_host_grant_store(
     ingress: &IngressAuthority,
+    gate: &crate::permissions::host_grant::HostGrantGate,
+    permissions: &kameo::actor::ActorRef<crate::permissions::PermissionActor>,
     store: &crate::permissions::host_grant::HostGrantStore,
     served: &crate::permissions::host_grant::ServedAccountDomains,
 ) -> bool {
     use crate::permissions::host_grant::{HostGrantAttachment, HostGrantError};
     match HostGrantAttachment::verify(store, served.clone()).await {
         Ok(attachment) => {
+            // The surfaces outside manifest acceptance decide managed rooms
+            // through the gate; both hold the same verified attachment.
+            gate.attach(attachment.clone());
             ingress.attach_host_grants(attachment);
+            spawn_host_grant_recovery(store.clone(), permissions.clone());
             false
         }
         Err(error) => {
@@ -959,6 +967,47 @@ async fn try_attach_host_grant_store(
             retrying
         }
     }
+}
+
+/// Project and activate every recorded host-grant change whose projection
+/// was not verified before, once this replica is attached to the store: a
+/// change recorded by an administration request whose reconciliation did
+/// not finish (a stopped replica, an unreachable projection) becomes
+/// effective here, or stays recorded and not effective. Outcomes are logged
+/// by kind, without a scope identifier.
+fn spawn_host_grant_recovery(
+    store: crate::permissions::host_grant::HostGrantStore,
+    permissions: kameo::actor::ActorRef<crate::permissions::PermissionActor>,
+) {
+    use crate::permissions::host_grant::{HostGrantAuthority, IssuancePolicy, Reconciliation};
+    tokio::spawn(async move {
+        // Recovery projects recorded intent only; it issues nothing, so it
+        // needs no issuance policy.
+        let authority = HostGrantAuthority::new(store, permissions, IssuancePolicy::default());
+        match authority.recover_pending().await {
+            Ok(outcomes) => {
+                let unresolved = outcomes
+                    .iter()
+                    .filter(|(_, outcome)| {
+                        !matches!(
+                            outcome,
+                            Ok(Reconciliation::Activated(_) | Reconciliation::AlreadyActive(_))
+                        )
+                    })
+                    .count();
+                info!(
+                    scopes = outcomes.len(),
+                    unresolved, "Host-grant projection recovery pass finished"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    kind = error.kind(),
+                    "Host-grant projection recovery pass failed"
+                );
+            }
+        }
+    });
 }
 
 /// Log a failed host-grant privilege check by its kind only. The failure
@@ -1493,13 +1542,14 @@ async fn create_websocket_state(
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,
-            &BootstrapMembershipConfig::from_env(),
+            &BootstrapMembershipConfig::from_env().serving(account_domain.as_str()),
         )
         .await;
         if let Err(error) = bootstrap_fresh_xmpp_topology(
             &state,
             Arc::clone(&pubsub_storage),
             &service_domains,
+            &account_domain,
             &room_registry,
         )
         .await

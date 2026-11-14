@@ -62,8 +62,20 @@ pub(crate) async fn bootstrap_fresh_xmpp_topology(
     state: &Arc<AppState>,
     pubsub_storage: Arc<dyn PubSubStorage>,
     services: &XmppServiceDomains,
+    account_domain: &waddle_xmpp::identity::CanonicalDomain,
     room_registry: &ActorRef<RoomRegistryActor>,
 ) -> Result<()> {
+    // The bootstrap writes Owner affiliations for the configured server
+    // owners only; a privileged seed names an account of this deployment's
+    // account domain, and no trusted home is configured for bootstrap
+    // (ADR-0020 D8).
+    let issuance =
+        crate::permissions::host_grant::IssuancePolicy::new([account_domain.clone()], [], [])
+            .map_err(|error| anyhow::anyhow!("invalid bootstrap issuance policy: {error}"))?;
+    let seed_policy = crate::spaces_pubsub_seed::OwnerSeedPolicy {
+        issuance: &issuance,
+        host_grants: &state.host_grants,
+    };
     let spaces_jid: jid::BareJid = services
         .spaces
         .parse()
@@ -77,10 +89,17 @@ pub(crate) async fn bootstrap_fresh_xmpp_topology(
         services,
         &spaces_jid,
         room_registry,
+        seed_policy,
     )
     .await?;
 
-    seed_spaces_admin_affiliations(&pubsub_storage, &spaces_jid, &state.server_owner_jids).await;
+    seed_spaces_admin_affiliations(
+        &pubsub_storage,
+        &spaces_jid,
+        &state.server_owner_jids,
+        seed_policy,
+    )
+    .await;
 
     Ok(())
 }
@@ -92,9 +111,31 @@ async fn seed_initial_xmpp_topology(
     services: &XmppServiceDomains,
     spaces_jid: &BareJid,
     room_registry: &ActorRef<RoomRegistryActor>,
+    seed_policy: crate::spaces_pubsub_seed::OwnerSeedPolicy<'_>,
 ) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
+    // Rooms and Space nodes of enrolled host-grant scopes belong to their
+    // canonical authority: the bootstrap neither rewrites their catalog
+    // rows, nor places them in the General Space, nor opens their actors
+    // other than members-only.
+    let initial_ids: Vec<&str> = INITIAL_MANAGED_CHANNELS
+        .iter()
+        .map(|channel| channel.id)
+        .collect();
+    let enrolled_initial = state
+        .host_grants
+        .enrolled_channels(&initial_ids)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let general_enrolled = state
+        .host_grants
+        .space_enrolled("general")
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     for channel in INITIAL_MANAGED_CHANNELS {
+        if enrolled_initial.contains(channel.id) {
+            continue;
+        }
         actor
             .ask(DbExecute {
                 sql: r#"
@@ -127,14 +168,16 @@ async fn seed_initial_xmpp_topology(
             .map_err(|error| anyhow::anyhow!("failed to seed channel {}: {error}", channel.id))?;
     }
 
-    pubsub_storage
-        .get_or_create_node(spaces_jid, "general")
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to create General space node: {error}"))?;
-    pubsub_storage
-        .update_node_config(spaces_jid, "general", &NodeConfig::spaces_public())
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
+    if !general_enrolled {
+        pubsub_storage
+            .get_or_create_node(spaces_jid, "general")
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to create General space node: {error}"))?;
+        pubsub_storage
+            .update_node_config(spaces_jid, "general", &NodeConfig::spaces_public())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
+    }
 
     // Community service hosts the non-space pubsub nodes (XEP-0472
     // social feed, XEP-0501 stories). Kept distinct from
@@ -206,16 +249,30 @@ async fn seed_initial_xmpp_topology(
     // the existing publisher gates accept their publishes. Mirrors
     // the spaces seed below but scoped to the community service.
     for owner in state.server_owner_jids.iter() {
-        crate::spaces_pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, &community_jid, owner)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("failed to seed community service owner affiliations: {error}")
-            })?;
+        crate::spaces_pubsub_seed::seed_owner_on_all_nodes(
+            pubsub_storage,
+            &community_jid,
+            owner,
+            seed_policy,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to seed community service owner affiliations: {error}")
+        })?;
     }
 
     let persisted_channels = list_xmpp_channels(actor.clone(), 10_000, 0)
         .await
         .map_err(|error| anyhow::anyhow!("failed to load persisted channels: {error}"))?;
+    let persisted_ids: Vec<&str> = persisted_channels
+        .iter()
+        .map(|channel| channel.id.as_str())
+        .collect();
+    let enrolled_persisted = state
+        .host_grants
+        .enrolled_channels(&persisted_ids)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     for channel_record in &persisted_channels {
         let room_jid = waddle_xmpp::managed_room_jid(&channel_record.id, &services.muc)
             .map_err(|error| anyhow::anyhow!("invalid seeded room JID: {error}"))?;
@@ -233,7 +290,8 @@ async fn seed_initial_xmpp_topology(
                 config: RoomConfig {
                     name: channel_record.name.clone(),
                     description: channel_record.description.clone(),
-                    members_only: channel_record.members_only,
+                    members_only: channel_record.members_only
+                        || enrolled_persisted.contains(&channel_record.id),
                     public_room: channel_record.public_room,
                     moderated: channel_record.channel_type == "announcement",
                     forum: channel_record.channel_type == "forum",
@@ -274,6 +332,9 @@ async fn seed_initial_xmpp_topology(
     }
 
     for channel in INITIAL_MANAGED_CHANNELS {
+        if general_enrolled || enrolled_initial.contains(channel.id) {
+            continue;
+        }
         let channel_record = get_xmpp_channel(actor.clone(), channel.id)
             .await
             .map_err(|error| anyhow::anyhow!("failed to load channel {}: {error}", channel.id))?
@@ -353,6 +414,7 @@ async fn seed_spaces_admin_affiliations(
     pubsub_storage: &Arc<dyn PubSubStorage>,
     spaces_jid: &BareJid,
     server_owner_jids: &[BareJid],
+    seed_policy: crate::spaces_pubsub_seed::OwnerSeedPolicy<'_>,
 ) {
     if server_owner_jids.is_empty() {
         return;
@@ -374,6 +436,7 @@ async fn seed_spaces_admin_affiliations(
             spaces_jid,
             node,
             server_owner_jids,
+            seed_policy,
         )
         .await;
     }
@@ -449,8 +512,16 @@ mod tests {
 
         let pubsub_storage = state.pubsub_storage.clone();
         let room_registry = state.room_registry.clone();
-        let result =
-            bootstrap_fresh_xmpp_topology(&state, pubsub_storage, &services, &room_registry).await;
+        let account_domain = waddle_xmpp::identity::CanonicalDomain::parse_exact("localhost")
+            .expect("canonical test account domain");
+        let result = bootstrap_fresh_xmpp_topology(
+            &state,
+            pubsub_storage,
+            &services,
+            &account_domain,
+            &room_registry,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "bootstrap must complete despite one room being claimed elsewhere: {result:?}"

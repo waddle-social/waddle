@@ -27,6 +27,7 @@ async fn space(state: &AppState, name: &str) -> SpaceRef {
             description: None,
             icon_url: None,
         },
+        "localhost",
     )
     .await
     .unwrap_or_else(|_| panic!("create space"))

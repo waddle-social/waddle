@@ -15,6 +15,7 @@ use tracing::warn;
 use waddle_xmpp::muc::affiliation::{DurableMembershipFuture, DurableMembershipSource};
 use waddle_xmpp::XmppError;
 
+use crate::permissions::host_grant::{HostGrantAction, HostGrantGate, RoomBinding, RoomGate};
 use crate::permissions::{
     ListSubjects, Object, ObjectType, PermissionActor, Relation, Subject, SubjectType,
 };
@@ -35,13 +36,32 @@ const MEMBERSHIP_LOOKUP_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Durable membership source reading `permission_tuples` through the
 /// shared [`PermissionActor`].
+///
+/// A room an enrolled host-grant scope manages is answered from its
+/// canonical grants instead: its durable members are the subjects whose
+/// grants allow reading the room, and nothing the legacy tuples, the parent
+/// Space or a stale mirror hold. That keeps the planner's offline audience
+/// (inbox rows, notifications, recovery items) to the subjects the
+/// acceptance would admit anyway.
 pub struct PermissionDurableMembershipSource {
     permission_actor: ActorRef<PermissionActor>,
+    host_grants: HostGrantGate,
 }
 
 impl PermissionDurableMembershipSource {
+    /// A source with no canonical host-grant store: every room is answered
+    /// from the legacy tuples.
     pub fn new(permission_actor: ActorRef<PermissionActor>) -> Self {
-        Self { permission_actor }
+        Self {
+            permission_actor,
+            host_grants: HostGrantGate::default(),
+        }
+    }
+
+    /// Answer rooms that enrolled scopes manage from `host_grants`.
+    pub fn with_host_grants(mut self, host_grants: HostGrantGate) -> Self {
+        self.host_grants = host_grants;
+        self
     }
 
     async fn subjects(&self, object: Object, relation: &str) -> Result<Vec<Subject>, XmppError> {
@@ -88,6 +108,19 @@ impl DurableMembershipSource for PermissionDurableMembershipSource {
         let waddle_id = waddle_id.to_string();
         let channel_id = channel_id.to_string();
         Box::pin(async move {
+            match self
+                .host_grants
+                .room(RoomBinding::Channel(&channel_id))
+                .await
+            {
+                RoomGate::Unmanaged => {}
+                RoomGate::Managed(room) => return Ok(room.admitted(HostGrantAction::Read)),
+                RoomGate::Unavailable => {
+                    return Err(XmppError::internal(
+                        "durable membership of a managed room is unavailable",
+                    ))
+                }
+            }
             // Mirrors the join-path affiliation derivation
             // (`AppStateAffiliationResolver`): channel- AND
             // space-level owner/admin/member all grant Member+;

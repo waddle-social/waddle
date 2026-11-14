@@ -1314,7 +1314,34 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             )]
             .into();
         };
-        match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session).await {
+        // A room an enrolled host-grant scope manages is configured by the
+        // canonical grants' `manage` and destroyed by their `delete`, which
+        // no room affiliation confers: such a room ends only when its scope
+        // is retired. The room actor's affiliations decide nothing there.
+        let authorized = {
+            use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+            let action = if has_destroy {
+                HostGrantAction::Delete
+            } else {
+                HostGrantAction::Manage
+            };
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .allows(RoomBinding::Room(&room_jid), &sender_jid.to_bare(), action)
+                .await
+            {
+                RoomGate::Unmanaged => {
+                    muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session).await
+                }
+                RoomGate::Managed(allowed) => Ok(allowed),
+                RoomGate::Unavailable => Err(waddle_xmpp::XmppError::internal(
+                    "the host-grant authority is unavailable",
+                )),
+            }
+        };
+        match authorized {
             Ok(true) => {}
             Ok(false) => {
                 return vec![build_iq_error_xml_typed(

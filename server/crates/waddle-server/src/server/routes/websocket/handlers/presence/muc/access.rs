@@ -8,7 +8,86 @@ use crate::permissions::{
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 
-pub(super) async fn resolve_managed_channel_affiliation(
+/// A managed channel's entry decision for one account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ManagedChannelAffiliation {
+    /// The affiliation the account enters with; `None` when it holds none.
+    pub(crate) affiliation: Option<Affiliation>,
+    /// Whether the room requires membership. A room an enrolled host-grant
+    /// scope manages always does, whatever its stored configuration says.
+    pub(crate) members_only: bool,
+    /// Whether an enrolled host-grant scope manages the room, so that the
+    /// affiliation is its canonical standing and nothing else.
+    pub(crate) host_grant_managed: bool,
+}
+
+pub(crate) async fn resolve_managed_channel_affiliation(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    room_jid: &BareJid,
+    channel_id: &str,
+    members_only: bool,
+    allow_repairs: bool,
+) -> Result<ManagedChannelAffiliation, ()> {
+    if let Some(affiliation) = host_grant_affiliation(state, user_jid, room_jid).await? {
+        return Ok(ManagedChannelAffiliation {
+            affiliation,
+            members_only: true,
+            host_grant_managed: true,
+        });
+    }
+    let affiliation = resolve_legacy_channel_affiliation(
+        state,
+        user_jid,
+        room_jid,
+        channel_id,
+        members_only,
+        allow_repairs,
+    )
+    .await?;
+    Ok(ManagedChannelAffiliation {
+        affiliation,
+        members_only,
+        host_grant_managed: false,
+    })
+}
+
+/// The affiliation a room that an enrolled host-grant scope manages enters
+/// `user_jid` with, decided from the canonical grants alone: `Outcast` for a
+/// recorded or effective ban, the honoured standing of a grant that allows
+/// reading the room, and `None` otherwise (the room is members-only).
+/// `Ok(None)` when no scope manages the room; `Err` when that cannot be
+/// decided, which fails the caller closed.
+///
+/// Legacy channel tuples, Space membership, deployment roles and the room
+/// actor's affiliations are not consulted, and no Space-parent repair runs
+/// for such a room.
+pub(crate) async fn host_grant_affiliation(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    room_jid: &BareJid,
+) -> Result<Option<Option<Affiliation>>, ()> {
+    use crate::permissions::host_grant::{RoomAffiliation, RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room_jid))
+        .await
+    {
+        RoomGate::Unmanaged => Ok(None),
+        RoomGate::Unavailable => Err(()),
+        RoomGate::Managed(room) => Ok(Some(match room.standing(user_jid) {
+            RoomAffiliation::Outcast => Some(Affiliation::Outcast),
+            RoomAffiliation::None => None,
+            RoomAffiliation::Member => Some(Affiliation::Member),
+            RoomAffiliation::Admin => Some(Affiliation::Admin),
+            RoomAffiliation::Owner => Some(Affiliation::Owner),
+        })),
+    }
+}
+
+async fn resolve_legacy_channel_affiliation(
     state: &WebSocketState,
     user_jid: &BareJid,
     room_jid: &BareJid,
@@ -89,6 +168,15 @@ pub async fn resolve_muc_room_archive_access(
     let Some(requester) = requester else {
         return RoomArchiveAccess::Denied;
     };
+
+    // A room an enrolled host-grant scope manages is decided from its
+    // canonical grants alone, whether or not it has a channel row or a live
+    // actor.
+    match host_grant_affiliation(state, requester, room_jid).await {
+        Ok(None) => {}
+        Ok(Some(affiliation)) => return host_grant_entry(affiliation),
+        Err(()) => return RoomArchiveAccess::Error,
+    }
 
     let snapshot = match get_room_actor(state, room_jid).await {
         Some(actor) => match actor.ask(GetSnapshot).await {
@@ -179,11 +267,57 @@ pub async fn resolve_managed_channel_entry_access(
     )
     .await
     {
-        Ok(Some(Affiliation::Outcast)) => RoomArchiveAccess::Denied,
-        Ok(Some(_)) => RoomArchiveAccess::Allowed,
-        Ok(None) if members_only => RoomArchiveAccess::Denied,
-        Ok(None) => RoomArchiveAccess::Allowed,
+        Ok(ManagedChannelAffiliation {
+            affiliation: Some(Affiliation::Outcast),
+            ..
+        }) => RoomArchiveAccess::Denied,
+        Ok(ManagedChannelAffiliation {
+            affiliation: Some(_),
+            ..
+        }) => RoomArchiveAccess::Allowed,
+        Ok(ManagedChannelAffiliation {
+            affiliation: None,
+            members_only: true,
+            ..
+        }) => RoomArchiveAccess::Denied,
+        Ok(ManagedChannelAffiliation {
+            affiliation: None,
+            members_only: false,
+            ..
+        }) => RoomArchiveAccess::Allowed,
         Err(()) => RoomArchiveAccess::Error,
+    }
+}
+
+/// Whether `requester` may still read a room an enrolled host-grant scope
+/// manages, decided again after a protected read of it: `None` for a room
+/// no scope manages, whose read keeps its single check. A response is sent
+/// only if this read is admitted, so a page read after a revoke that
+/// committed before this decision is never sent.
+pub async fn host_grant_read_still_admitted(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+) -> Option<bool> {
+    let requester = requester?;
+    match host_grant_affiliation(state, requester, room_jid).await {
+        Ok(None) => None,
+        Ok(Some(affiliation)) => Some(matches!(
+            host_grant_entry(affiliation),
+            RoomArchiveAccess::Allowed
+        )),
+        Err(()) => Some(false),
+    }
+}
+
+/// The right to enter a room an enrolled host-grant scope manages: a
+/// standing that allows reading it, never a ban and never mere presence.
+fn host_grant_entry(affiliation: Option<Affiliation>) -> RoomArchiveAccess {
+    match affiliation {
+        Some(Affiliation::Owner | Affiliation::Admin | Affiliation::Member) => {
+            RoomArchiveAccess::Allowed
+        }
+        Some(Affiliation::Outcast | Affiliation::None) | None => RoomArchiveAccess::Denied,
     }
 }
 

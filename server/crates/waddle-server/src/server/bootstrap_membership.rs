@@ -17,6 +17,10 @@ const OWNER_ENV: &str = "WADDLE_SERVER_OWNER_LOCALPARTS";
 pub struct BootstrapMembershipConfig {
     pub server_id: String,
     owner_localparts: Vec<String>,
+    /// The account domain the deployment serves. Deployment ownership is a
+    /// privileged grant, so it is provisioned only for an account of this
+    /// domain (ADR-0020 D8); bootstrap is given no trusted home.
+    account_domain: Option<String>,
 }
 
 impl BootstrapMembershipConfig {
@@ -30,6 +34,7 @@ impl BootstrapMembershipConfig {
             owner_localparts: parse_owner_localparts(
                 std::env::var(OWNER_ENV).unwrap_or_default().as_str(),
             )?,
+            account_domain: None,
         })
     }
 
@@ -44,8 +49,16 @@ impl BootstrapMembershipConfig {
             Self {
                 server_id: DEPLOYMENT_SERVER_ID.to_string(),
                 owner_localparts: Vec::new(),
+                account_domain: None,
             }
         })
+    }
+
+    /// The same configuration for a deployment whose accounts live at
+    /// `account_domain`. Every path that provisions membership passes it.
+    pub fn serving(mut self, account_domain: &str) -> Self {
+        self.account_domain = Some(account_domain.to_owned());
+        self
     }
 
     #[cfg(test)]
@@ -53,6 +66,7 @@ impl BootstrapMembershipConfig {
         Self {
             server_id: DEPLOYMENT_SERVER_ID.to_string(),
             owner_localparts,
+            account_domain: None,
         }
     }
 
@@ -61,6 +75,26 @@ impl BootstrapMembershipConfig {
     /// name differs from an entry only in case is not an owner.
     pub fn is_owner(&self, localpart: &str) -> bool {
         self.owner_localparts.iter().any(|owner| owner == localpart)
+    }
+
+    /// Whether `user_jid` may be provisioned as a deployment owner: its
+    /// stored localpart is a configured owner, the JID is that account's
+    /// bare JID, and its domain is the served account domain when one was
+    /// given. Any other subject, a remote account in particular, gets no
+    /// privileged grant from bootstrap.
+    fn owner_subject(&self, user_jid: &str, localpart: &str) -> bool {
+        if !self.is_owner(localpart) {
+            return false;
+        }
+        let Ok(jid) = AuthzUserJid::parse_exact(user_jid) else {
+            return false;
+        };
+        let jid = jid.jid();
+        jid.node().is_some_and(|node| node.as_str() == localpart)
+            && self
+                .account_domain
+                .as_deref()
+                .is_none_or(|domain| jid.domain().as_str() == domain)
     }
 
     /// All server-owner localparts, canonical and deduplicated.
@@ -112,7 +146,13 @@ pub async fn provision_user_membership(
     xmpp_localpart: &str,
 ) -> Result<(), String> {
     let subject = Subject::user(user_jid);
-    if config.is_owner(xmpp_localpart) {
+    if config.is_owner(xmpp_localpart) && !config.owner_subject(user_jid, xmpp_localpart) {
+        warn!(
+            "Refused to provision deployment ownership for an account outside the served \
+             account domain"
+        );
+    }
+    if config.owner_subject(user_jid, xmpp_localpart) {
         let object = Object::new(ObjectType::Server, config.server_id.as_str());
         let tuple = Tuple::new(object, Relation::new("owner"), subject);
         write_tuple_if_absent(permission_actor, tuple).await?;
@@ -145,7 +185,7 @@ pub async fn reconcile_user_membership(
     user_jid: &str,
     xmpp_localpart: &str,
 ) -> Result<(), String> {
-    if config.is_owner(xmpp_localpart) {
+    if config.owner_subject(user_jid, xmpp_localpart) {
         return provision_user_membership(permission_actor, config, user_jid, xmpp_localpart).await;
     }
 

@@ -3,8 +3,8 @@ use super::{
     build_iq_error_xml_typed, build_mark_read_result, build_query_form_iq, build_result_messages,
     build_upload_error, build_upload_slot_response, chrono, debug, effective_content_type,
     feature_not_implemented_iq_error, forbidden_iq_error, get_managed_channel_for_room,
-    internal_server_error_iq_error, iq_to_xml, is_inbox_iq, is_mam_query,
-    is_mam_query_form_request, is_mark_read_iq, is_muc_room_jid, is_upload_request,
+    host_grant_read_still_admitted, internal_server_error_iq_error, iq_to_xml, is_inbox_iq,
+    is_mam_query, is_mam_query_form_request, is_mark_read_iq, is_muc_room_jid, is_upload_request,
     item_not_found_iq_error, jid_malformed_iq_error, not_authorized_iq_error, parse_inbox_query,
     parse_mam_query, parse_mark_read, parse_upload_request, resolve_muc_room_archive_access,
     sanitize_filename, stanza_to_xml, warn, BareJid, CheckPermission, ConnectionPhase, DbExecute,
@@ -248,6 +248,20 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         // for MUC archives, the user's own bare JID for personal
         // archives (#1250). `target_bare` is exactly that queried
         // archive address for both cases.
+        // A page of a room an enrolled host-grant scope manages is admitted
+        // by a decision taken after it was read, so a revoke that committed
+        // before the page was read keeps it from being sent.
+        if !is_personal
+            && host_grant_read_still_admitted(state, &target_bare, sender_bare.as_ref()).await
+                == Some(false)
+        {
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                forbidden_iq_error("Operation not permitted."),
+            )];
+        }
         let archive_jid = jid::Jid::from(target_bare.clone());
         let mut responses: Vec<String> =
             build_result_messages(&query_id, &archive_jid, &recipient_jid, &result.messages)

@@ -260,10 +260,15 @@ pub async fn start_with_config_and_owner_outbox(
     // recipient set from the permission tuples, so offline channel
     // members keep receiving inbox rows / notification candidates
     // across deploys and actor respawns.
+    // Rooms that enrolled host-grant scopes manage hydrate from their
+    // canonical grants instead. The gate is the one the server state holds,
+    // so the attachment verified at startup reaches both.
+    let host_grants = crate::permissions::host_grant::HostGrantGate::new((*global_db).clone());
     let durable_membership_source: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> =
-        Arc::new(durable_membership::PermissionDurableMembershipSource::new(
-            permission_actor.clone(),
-        ));
+        Arc::new(
+            durable_membership::PermissionDurableMembershipSource::new(permission_actor.clone())
+                .with_host_grants(host_grants.clone()),
+        );
     let server_hats = waddle_xmpp::xep::xep0317::ServerHats::default();
     let room_registry_handle = waddle_xmpp::muc::RoomRegistry::spawn(
         xmpp_config.muc_domain.to_string(),
@@ -356,7 +361,7 @@ pub async fn start_with_config_and_owner_outbox(
     let owner_config = bootstrap_membership::BootstrapMembershipConfig::try_from_env()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let server_owner_jids = resolve_server_owner_jids(&owner_config, &xmpp_config.domain);
-    let state = Arc::new(AppState::new_with_deps(AppStateDeps {
+    let mut state = AppState::new_with_deps(AppStateDeps {
         db_pool: Arc::clone(&db_pool),
         blob_storage,
         inbox_storage: Arc::clone(&inbox_storage),
@@ -375,7 +380,9 @@ pub async fn start_with_config_and_owner_outbox(
         clustering_claims: clustering_handles,
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
-    }));
+    });
+    state.host_grants = host_grants;
+    let state = Arc::new(state);
     if let Some(matched) = global_adopt_matched {
         state.note_lineage_adopt_match(matched);
     }

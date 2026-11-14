@@ -63,6 +63,58 @@ use crate::server::AppState;
 /// This is the single chokepoint for admin authorization. New admin
 /// commands MUST call this (or `caller_or_forbidden` in the per-handler
 /// modules, which wraps it) before performing any work.
+/// Refuse an admin command that would read or change a room an enrolled
+/// host-grant scope manages.
+///
+/// Such a room's grants, occupants and lifecycle belong to its canonical
+/// authority: its affiliations change through the host-grant store
+/// (XEP-0045 affiliation changes by an admitted owner or admin), and the
+/// room ends only when its scope is retired. The community owner role these
+/// commands require is not one of its grants. A room whose management
+/// cannot be read is refused as well.
+pub(crate) async fn refuse_host_grant_room(
+    state: &AppState,
+    room_jid: &BareJid,
+) -> Result<(), Box<waddle_xmpp::commands::CommandResult>> {
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
+    match state.host_grants.room(RoomBinding::Room(room_jid)).await {
+        RoomGate::Unmanaged => Ok(()),
+        RoomGate::Managed(_) => Err(refused_for_enrolled_scope()),
+        RoomGate::Unavailable => Err(host_grant_store_unavailable()),
+    }
+}
+
+/// Refuse an admin command that would change the Space node of an enrolled
+/// host-grant scope, or place a channel in it.
+pub(crate) async fn refuse_host_grant_space(
+    state: &AppState,
+    node: &str,
+) -> Result<(), Box<waddle_xmpp::commands::CommandResult>> {
+    match state.host_grants.space_enrolled(node).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(refused_for_enrolled_scope()),
+        Err(_) => Err(host_grant_store_unavailable()),
+    }
+}
+
+fn refused_for_enrolled_scope() -> Box<waddle_xmpp::commands::CommandResult> {
+    Box::new(waddle_xmpp::commands::CommandResult::Error(
+        waddle_xmpp::XmppError::not_allowed(Some(
+            "This room or Space belongs to an enrolled community and is administered through \
+             its canonical grants"
+                .to_string(),
+        )),
+    ))
+}
+
+fn host_grant_store_unavailable() -> Box<waddle_xmpp::commands::CommandResult> {
+    Box::new(waddle_xmpp::commands::CommandResult::Error(
+        waddle_xmpp::XmppError::service_unavailable(Some(
+            "The host-grant authority is unavailable".to_string(),
+        )),
+    ))
+}
+
 pub async fn is_community_owner(state: &AppState, jid: &BareJid) -> bool {
     if is_owner_in(&state.server_owner_jids, jid) {
         return true;

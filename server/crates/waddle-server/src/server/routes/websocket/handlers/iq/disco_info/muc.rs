@@ -448,6 +448,17 @@ pub(super) async fn handle_muc_disco_info<'a>(
         MucDiscoTarget::Room(room_jid) => room_jid,
     };
 
+    // A room an enrolled host-grant scope manages is described only to a
+    // principal its canonical grants admit to view it; to anyone else it
+    // does not exist. The decision is taken again once the description is
+    // built, so a description read after a revoke that committed first is
+    // never sent.
+    let host_grant_room = match enrolled_room_view(state, &room_jid, req.requester).await {
+        EnrolledRoomView::Unmanaged => false,
+        EnrolledRoomView::Admitted => true,
+        hidden => return Some(hidden.refusal(req)),
+    };
+
     if let Some(room_actor) = get_room_actor(state, &room_jid).await {
         let snapshot = match room_actor.ask(GetSnapshot).await {
             Ok(snapshot) => snapshot.room,
@@ -492,7 +503,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
                 snapshot.config.persistent,
             ),
             waddle_xmpp_core::disco::info::RoomMembership::from_members_only_flag(
-                snapshot.config.members_only,
+                snapshot.config.members_only || host_grant_room,
             ),
             waddle_xmpp_core::disco::info::RoomVisibility::from_public_room_flag(
                 snapshot.config.public_room,
@@ -519,7 +530,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             None,
             &extensions,
         );
-        return Some(DiscoInfoResponse::iq(response));
+        return Some(admitted_after_read(state, &room_jid, req, host_grant_room, response).await);
     }
 
     if !is_muc_room_jid(state, &room_jid).await {
@@ -551,7 +562,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         let mut features = muc_room_features(
             waddle_xmpp_core::disco::info::RoomPersistence::Persistent,
             waddle_xmpp_core::disco::info::RoomMembership::from_members_only_flag(
-                channel.members_only,
+                channel.members_only || host_grant_room,
             ),
             waddle_xmpp_core::disco::info::RoomVisibility::from_public_room_flag(
                 channel.public_room,
@@ -583,7 +594,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             None,
             &extensions,
         );
-        return Some(DiscoInfoResponse::iq(response));
+        return Some(admitted_after_read(state, &room_jid, req, host_grant_room, response).await);
     }
 
     // #1260 / XEP-0045 §6.4: a localpart with no live actor and no
@@ -595,6 +606,76 @@ pub(super) async fn handle_muc_disco_info<'a>(
         req.response_to,
         item_not_found_iq_error("Requested item not found."),
     ))
+}
+
+/// How a room an enrolled host-grant scope manages answers a requester.
+enum EnrolledRoomView {
+    /// No enrolled scope manages the room.
+    Unmanaged,
+    /// The requester's canonical grant allows viewing the room.
+    Admitted,
+    /// The room is managed and the requester may not view it: it does not
+    /// exist for them.
+    Hidden,
+    /// Whether the requester may view the room cannot be decided.
+    Unavailable,
+}
+
+impl EnrolledRoomView {
+    fn refusal<'a>(self, req: &'a DiscoInfoRequest<'a>) -> DiscoInfoResponse<'a> {
+        let error = match self {
+            Self::Unavailable => internal_server_error_iq_error("Internal server error."),
+            Self::Unmanaged | Self::Admitted | Self::Hidden => {
+                item_not_found_iq_error("Requested item not found.")
+            }
+        };
+        DiscoInfoResponse::error(req.id, req.response_from, req.response_to, error)
+    }
+}
+
+async fn enrolled_room_view(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&FullJid>,
+) -> EnrolledRoomView {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room_jid))
+        .await
+    {
+        RoomGate::Unmanaged => EnrolledRoomView::Unmanaged,
+        RoomGate::Unavailable => EnrolledRoomView::Unavailable,
+        RoomGate::Managed(room) => {
+            if requester
+                .is_some_and(|requester| room.allows(&requester.to_bare(), HostGrantAction::View))
+            {
+                EnrolledRoomView::Admitted
+            } else {
+                EnrolledRoomView::Hidden
+            }
+        }
+    }
+}
+
+/// Send a managed room's description only if the requester is still
+/// admitted to view it once the description has been read.
+async fn admitted_after_read<'a>(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    req: &'a DiscoInfoRequest<'a>,
+    host_grant_room: bool,
+    response: xmpp_parsers::iq::Iq,
+) -> DiscoInfoResponse<'a> {
+    if !host_grant_room {
+        return DiscoInfoResponse::iq(response);
+    }
+    match enrolled_room_view(state, room_jid, req.requester).await {
+        EnrolledRoomView::Admitted => DiscoInfoResponse::iq(response),
+        other => other.refusal(req),
+    }
 }
 
 #[cfg(test)]

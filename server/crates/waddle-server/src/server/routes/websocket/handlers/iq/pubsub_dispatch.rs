@@ -63,6 +63,22 @@ pub(super) async fn handle_pubsub_iq(
 
         debug!(?request, "Handling PubSub request via WebSocket");
 
+        // The Space node of an enrolled host-grant scope is not served
+        // through PubSub: its authority is the canonical store, and PubSub
+        // affiliations, subscriptions and items there would be a second,
+        // unfenced grant store. Leaving a subscription is the one operation
+        // kept, since it only reduces what a principal receives.
+        if target_jid.as_str() == spaces_domain {
+            let enrolled = match enrolled_scope_guarded_node(&request) {
+                Ok(Some(node)) => state.deps.app_state.host_grants.space_enrolled(node).await,
+                Ok(None) => Ok(false),
+                Err(()) => Ok(true),
+            };
+            if enrolled != Ok(false) {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
+        }
+
         match request {
             PubSubRequest::Publish { node, item, .. } => {
                 if !matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
@@ -557,6 +573,30 @@ pub(super) async fn handle_pubsub_iq(
         }
     }
     Vec::new()
+}
+
+/// The node a PubSub request on the Spaces service names, when the request
+/// must be refused for the Space node of an enrolled host-grant scope;
+/// `Ok(None)` for a request that is never refused for it, and `Err` for a
+/// request kind this build does not classify, which is refused.
+fn enrolled_scope_guarded_node(request: &PubSubRequest) -> Result<Option<&str>, ()> {
+    Ok(match request {
+        PubSubRequest::Unsubscribe { .. } | PubSubRequest::Unsupported { .. } => None,
+        PubSubRequest::Publish { node, .. }
+        | PubSubRequest::Retract { node, .. }
+        | PubSubRequest::Items { node, .. }
+        | PubSubRequest::CreateNode { node }
+        | PubSubRequest::ConfigureNode { node }
+        | PubSubRequest::DeleteNode { node }
+        | PubSubRequest::Subscribe { node, .. }
+        | PubSubRequest::PurgeNode { node }
+        | PubSubRequest::ConfigureNodeSet { node, .. }
+        | PubSubRequest::AffiliationsGet { node }
+        | PubSubRequest::AffiliationsSet { node, .. }
+        | PubSubRequest::OwnerSubscriptionsGet { node }
+        | PubSubRequest::OwnerSubscriptionsSet { node, .. } => Some(node),
+        _ => return Err(()),
+    })
 }
 
 /// The item id of a bot's single-item vCard4 node, as on the vCard4 node

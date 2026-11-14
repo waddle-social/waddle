@@ -114,21 +114,6 @@ impl waddle_xmpp::AppState for XmppAppState {
         .map_err(|error| XmppError::internal(error.to_string()))
     }
 
-    async fn set_room_affiliation(
-        &self,
-        channel_id: &str,
-        jid: &jid::BareJid,
-        affiliation: waddle_xmpp::Affiliation,
-    ) -> Result<(), XmppError> {
-        super::xmpp_permission_state::set_room_affiliation(
-            &self.permission_actor,
-            channel_id,
-            jid,
-            affiliation,
-        )
-        .await
-    }
-
     /// Lookup SCRAM credentials for a native JID user.
     ///
     /// Queries the NativeUserStore for SCRAM credentials if the user exists.

@@ -104,6 +104,16 @@ pub(crate) async fn managed_channel_permission_allowed(
     channel_id: &str,
     permission: Permission,
 ) -> Result<bool, String> {
+    if let Some(allowed) = crate::server::managed_channel_policy::host_grant_channel_permission(
+        &app_state.host_grants,
+        &subject.id,
+        channel_id,
+        &permission,
+    )
+    .await?
+    {
+        return Ok(allowed);
+    }
     let policy = server_policy_for_managed_channel(channel_id, &permission);
     if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
         let server_owner = app_state

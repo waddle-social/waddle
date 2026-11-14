@@ -75,7 +75,7 @@ pub(crate) async fn register_native_user(
         Ok(user_id) => {
             provision_user_membership(
                 permission_actor,
-                &BootstrapMembershipConfig::from_env(),
+                &BootstrapMembershipConfig::from_env().serving(domain),
                 subject.jid().as_str(),
                 username,
             )

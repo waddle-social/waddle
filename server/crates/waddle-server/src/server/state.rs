@@ -87,6 +87,11 @@ pub struct AppState {
     /// startup). Used to seed `Affiliation::Owner` rows on Spaces PubSub
     /// nodes so XEP-0060 admin operations work for these accounts.
     pub server_owner_jids: Arc<[BareJid]>,
+    /// The host-grant decision for rooms that enrolled scopes manage, on
+    /// every surface outside room-manifest acceptance. Built from the
+    /// global database; it admits a managed room only once the replica has
+    /// verified its runtime role's privileges on the store.
+    pub host_grants: crate::permissions::host_grant::HostGrantGate,
     /// Sole typed authority for HTTP readiness and WebSocket admission.
     /// Cluster self-fencing moves it to `FencedRecovering`; an unexpected
     /// critical registry death latches `Failed` until this process exits.
@@ -212,6 +217,8 @@ impl AppState {
             lineage_config,
             clustering_enabled,
         } = deps;
+        let host_grants =
+            crate::permissions::host_grant::HostGrantGate::new(db_pool.global().clone());
         Self {
             db_pool,
             blob_storage,
@@ -226,6 +233,7 @@ impl AppState {
             server_hats,
             permission_actor,
             server_owner_jids,
+            host_grants,
             node_lifecycle,
             websocket_inventory: IoCustodianInventory::new(max_websocket_connections.get())
                 .expect("validated WebSocket capacity is positive"),

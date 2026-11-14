@@ -1370,6 +1370,7 @@ async fn existing_space_node(
     space_node: Option<&SpaceNode>,
 ) -> Result<(SpaceNode, BareJid), AdminErr> {
     let (node, canonical_jid) = canonical_space_jid(&state.spaces_jid, space_jid, space_node)?;
+    super::refuse_host_grant_space(state, &node).await?;
     let exists = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node)
@@ -1565,11 +1566,43 @@ fn channel_affiliation_relation(affiliation: Affiliation) -> Option<&'static str
     }
 }
 
+/// The explicit channel affiliation of each JID.
+///
+/// For a room an enrolled host-grant scope manages, it is the standing the
+/// canonical grants honour (`HostGrantGate`); the legacy relation names are
+/// not read there, since they neither subtract a ban nor know which grants
+/// are effective. Elsewhere it is read from the channel's relations.
 pub(crate) async fn explicit_channel_affiliations_for_jids(
     state: &AppState,
     channel_id: &str,
     jids: impl IntoIterator<Item = BareJid>,
 ) -> Result<Vec<(BareJid, Affiliation)>, String> {
+    use crate::permissions::host_grant::{RoomAffiliation, RoomBinding, RoomGate};
+    match state
+        .host_grants
+        .room(RoomBinding::Channel(channel_id))
+        .await
+    {
+        RoomGate::Unmanaged => {}
+        RoomGate::Unavailable => return Err("the host-grant authority is unavailable".into()),
+        RoomGate::Managed(room) => {
+            let mut seen = BTreeSet::new();
+            return Ok(jids
+                .into_iter()
+                .filter(|jid| seen.insert(jid.clone()))
+                .map(|jid| {
+                    let affiliation = match room.standing(&jid) {
+                        RoomAffiliation::Outcast => Affiliation::Outcast,
+                        RoomAffiliation::None => Affiliation::None,
+                        RoomAffiliation::Member => Affiliation::Member,
+                        RoomAffiliation::Admin => Affiliation::Admin,
+                        RoomAffiliation::Owner => Affiliation::Owner,
+                    };
+                    (jid, affiliation)
+                })
+                .collect());
+        }
+    }
     let object = Object::new(ObjectType::Channel, channel_id);
     let mut seen = BTreeSet::new();
     let mut affiliations = Vec::new();
@@ -3868,6 +3901,7 @@ pub(crate) async fn persist_group_dm_member_tuple(
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
+    refuse_enrolled_group_dm(state, group_dm_id).await?;
     persist_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
     if let Err(error) = persist_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await
     {
@@ -3897,6 +3931,27 @@ async fn persist_group_dm_member_actor_tuple(
         }
     }
     Ok(())
+}
+
+/// Refuse a group-DM member write whose identifier is the authorization
+/// object of a room an enrolled host-grant scope manages.
+///
+/// The group-DM member writers keep a mirror of the member relation in
+/// `permission_tuples` with their own SQL, beside the permission actor. The
+/// actor refuses the same object for an enrolled scope, but the mirror's
+/// statements do not pass through it, so both are refused here first: a
+/// group DM and a managed room share the channel identifier space, and the
+/// host-grant authority alone writes a managed room's grants.
+async fn refuse_enrolled_group_dm(state: &AppState, group_dm_id: &str) -> Result<(), XmppError> {
+    match state.host_grants.channel_enrolled(group_dm_id).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(XmppError::not_allowed(Some(
+            "The group DM identifier belongs to an enrolled community".to_string(),
+        ))),
+        Err(_) => Err(XmppError::service_unavailable(Some(
+            "The host-grant authority is unavailable".to_string(),
+        ))),
+    }
 }
 
 async fn persist_durable_group_dm_member_tuple(
@@ -3943,6 +3998,7 @@ async fn delete_group_dm_member_tuple(
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
+    refuse_enrolled_group_dm(state, group_dm_id).await?;
     delete_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
     match delete_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await {
         Ok(()) => Ok(()),
@@ -4103,6 +4159,7 @@ async fn run_update(
     args: &ChannelsUpdateArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelRef, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let mut actor = state
         .room_registry
         .ask(GetRoom {
@@ -4455,6 +4512,7 @@ async fn run_update(
 }
 
 async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let link = state
         .channel_space_link_store
         .get(&args.channel_jid)
@@ -4849,6 +4907,7 @@ async fn run_occupants(
     state: &AppState,
     args: &ChannelsOccupantsArgs,
 ) -> Result<ChannelsOccupantsResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -4897,6 +4956,7 @@ async fn run_affiliations(
     state: &AppState,
     args: &ChannelsAffiliationsArgs,
 ) -> Result<ChannelsAffiliationsResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -4950,6 +5010,7 @@ async fn run_set_affiliation(
     args: &ChannelsSetAffiliationArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelsSetAffiliationResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid)
         .ok_or_else(|| bad_request("channel_jid must be a managed MUC room JID"))?;
     let _config_guard = acquire_room_config_lock(&args.channel_jid).await;
@@ -5145,6 +5206,7 @@ async fn run_kick(
     args: &ChannelsKickArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelsKickResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     // XEP-0045 §9.1.1 — kicking an occupant is a role-change to "none";
     // the service MUST send `<presence type='unavailable'>` carrying
     // `<status code='307'/>` to every occupant, including the kicked

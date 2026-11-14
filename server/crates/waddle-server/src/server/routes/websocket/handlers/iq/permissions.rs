@@ -129,6 +129,19 @@ pub(crate) async fn managed_channel_permission_allowed(
     channel_id: &str,
     permission: Permission,
 ) -> Result<bool, String> {
+    let Some(resolved) = principal else {
+        return Ok(false);
+    };
+    if let Some(allowed) = crate::server::managed_channel_policy::host_grant_channel_permission(
+        &state.deps.app_state.host_grants,
+        &resolved.user_jid,
+        channel_id,
+        &permission,
+    )
+    .await?
+    {
+        return Ok(allowed);
+    }
     let policy = server_policy_for_managed_channel(channel_id, &permission);
     if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
         return server_permission_allowed(state, principal, Permission::Owner).await;
@@ -340,11 +353,24 @@ pub(super) async fn seed_spaces_node_owners(
     if owners.is_empty() {
         return;
     }
+    // A privileged seed names an account of this deployment's account
+    // domain; no trusted home is configured for it (ADR-0020 D8).
+    let issuance =
+        waddle_xmpp::identity::CanonicalDomain::parse_exact(&state.deps.auth_state.xmpp_domain)
+            .ok()
+            .and_then(|domain| {
+                crate::permissions::host_grant::IssuancePolicy::new([domain], [], []).ok()
+            })
+            .unwrap_or_default();
     crate::spaces_pubsub_seed::seed_owners_on_node(
         &state.deps.protocol.pubsub_storage,
         spaces_jid,
         node,
         &owners,
+        crate::spaces_pubsub_seed::OwnerSeedPolicy {
+            issuance: &issuance,
+            host_grants: &state.deps.app_state.host_grants,
+        },
     )
     .await;
 }
