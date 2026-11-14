@@ -1,11 +1,12 @@
 use super::permissions::{
-    delete_channel_parent_tuple, write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
+    delete_channel_parent_tuple, permission_allowed, write_channel_parent_tuple,
+    write_channel_parent_tuple_if_absent,
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::{
     build_pubsub_error, build_pubsub_publish_result, chrono, get_xmpp_channel, iq_to_xml,
-    spaces_node_mutation_allowed, spaces_service_bare_jid, warn, BareJid, PubSubError, PubSubItem,
-    WebSocketState,
+    spaces_node_mutation_allowed, spaces_service_bare_jid, warn, BareJid, Object, ObjectType,
+    Permission, PubSubError, PubSubItem, WebSocketState,
 };
 use crate::channel_space_links::ChannelSpaceLink;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
@@ -76,6 +77,23 @@ pub(super) async fn handle_spaces_publish(
                 iq,
                 PubSubError::InternalServerError,
             ))];
+        }
+    }
+    match channel_placement_allowed(
+        state,
+        principal,
+        &spaces_jid,
+        node,
+        &bookmark.jid,
+        &channel_id,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(channel_id = %channel_id, node, error = %error, "Failed to authorize channel placement in a Space");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
 
@@ -362,6 +380,57 @@ pub(super) async fn handle_spaces_publish(
             ))]
         }
     }
+}
+
+/// Whether the publisher may place the existing channel `channel_id` in the
+/// Space `node` of the Spaces service `spaces_jid`.
+///
+/// Authority over the Space node lets its owner list rooms in it, but
+/// placing a channel in a Space also moves the channel's link to that
+/// Space, makes the Space the channel's parent (so the Space's admins gain
+/// the channel's `manage`, `moderate` and `delete`), and lets deleting the
+/// Space destroy the channel. That is the channel's decision: the publisher
+/// must hold the channel's `manage` permission, or the channel must already
+/// belong to this Space, in which case the publish only updates its
+/// bookmark. A room an enrolled host-grant scope manages is placed by its
+/// canonical topology only, never by a Spaces publish.
+async fn channel_placement_allowed(
+    state: &WebSocketState,
+    principal: Option<ResolvedPrincipal<'_>>,
+    spaces_jid: &BareJid,
+    node: &str,
+    channel_jid: &BareJid,
+    channel_id: &str,
+) -> Result<bool, String> {
+    if state
+        .deps
+        .app_state
+        .host_grants
+        .channel_enrolled(channel_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    let link = state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(channel_jid)
+        .await
+        .map_err(|error| format!("channel-space link lookup failed: {error}"))?;
+    if link.is_some_and(|link| {
+        link.space_node.as_str() == node && link.space_jid.domain() == spaces_jid.domain()
+    }) {
+        return Ok(true);
+    }
+    permission_allowed(
+        state,
+        principal,
+        Object::new(ObjectType::Channel, channel_id),
+        Permission::Manage,
+    )
+    .await
 }
 
 async fn restore_channel_space_link_projection(
