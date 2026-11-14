@@ -1,4 +1,9 @@
 ---
+import penguins from "@waddle/design/assets/story-penguins.svg?url";
+import mark from "@waddle/design/assets/waddle-mark.svg?url";
+import namespaceLogo from "@waddle/design/assets/namespace-logo.svg?url";
+import { css, cx } from "../../styled-system/css";
+import { floe, iconbtn, polar, trio } from "../../styled-system/recipes";
 import WebsiteLayout from "../layouts/WebsiteLayout.astro";
 import {
 	WAITLIST_INVALID_MESSAGE,
@@ -27,127 +32,607 @@ const initialStatus =
 					: waitlistState === "retry"
 						? { tone: "error", message: WAITLIST_RETRY_MESSAGE }
 						: null;
-const waitlistStartsOpen = initialStatus !== null;
 const idleMessage = turnstileConfigured
 	? "Confirm first, launch notes later."
 	: WAITLIST_UNAVAILABLE_MESSAGE;
+
+const facts = [
+	"AGPL-3.0-or-later",
+	"XMPP-native",
+	"Rust server",
+	"Web · Apple · Android · Linux",
+	"Docs CC BY-SA 4.0",
+];
+const maturity = [
+	{
+		label: "Production",
+		tone: css({ bg: "success.subtle", color: "success.text" }),
+		items: ["Room messaging", "Direct messages", "Durable history", "Reactions"],
+	},
+	{
+		label: "Beta",
+		tone: css({ bg: "info.subtle", color: "info.text" }),
+		items: [
+			"Unread and read state",
+			"Push notifications",
+			"Search",
+			"File sharing",
+			"Threads and replies",
+			"Audio and video calls",
+			"Reconnect and resume",
+			"Spaces and administration",
+		],
+	},
+	{
+		label: "Experimental",
+		tone: css({ bg: "warning.subtle", color: "warning.text" }),
+		items: ["Moderation", "Community feed and stories"],
+	},
+];
+const makers = [
+	{ flag: "🇩🇪", country: "Germany", login: "icepuma" },
+	{ flag: "🏴󠁧󠁢󠁳󠁣󠁴󠁿", country: "Scotland", login: "rawkode" },
+	{ flag: "🇳🇴", country: "Norway", login: "randax" },
+];
+
+const container = css({
+	width: "100%",
+	maxWidth: "1200px",
+	mx: "auto",
+	boxSizing: "border-box",
+	px: "gutter",
+});
+const link = css({
+	color: "halo",
+	textDecoration: "underline",
+	textUnderlineOffset: "3px",
+	_hover: { color: "fg" },
+});
+const sponsor = css({
+	flexDirection: "row",
+	flexWrap: "wrap",
+	alignItems: "center",
+	gap: "5",
+	p: "{spacing.4} {spacing.6} {spacing.4} {spacing.4}",
+	borderRadius: "card",
+	minWidth: 0,
+});
+const sponsorArt = css({
+	display: "block",
+	width: "168px",
+	height: "64px",
+	flex: "none",
+	borderRadius: "control",
+});
+const sponsorText = css({
+	display: "flex",
+	flexDirection: "column",
+	alignItems: "flex-start",
+	gap: "0.5",
+	textAlign: "left",
+	minWidth: 0,
+	flex: "1 1 180px",
+	"& b": { font: "700 16px/1.3 {fonts.display}", color: "fg" },
+	"& span": { textStyle: "caption", color: "fg.muted" },
+});
 ---
 
 <WebsiteLayout>
-	<div class="brand">
-		<h1 class="wordmark">
-			<span class="wordmark-name">waddle</span><span class="wordmark-dot" aria-hidden="true"
-				>.</span
-			><span class="wordmark-tld">social</span>
-		</h1>
-		<p class="tagline">
-			Open-source, XMPP-native social chat — yours by default.
-		</p>
-		<div class="brand-stack">
-			<div class="logo-wrap">
+	<div
+		class={cx(
+			polar(),
+			css({ minHeight: "100dvh", display: "flex", flexDirection: "column", fontFamily: "body" }),
+		)}
+	>
+		<header
+			class={cx(
+				container,
+				css({
+					pt: "6",
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "space-between",
+					gap: "4",
+					flexWrap: "wrap",
+				}),
+			)}
+		>
+			<a
+				href="/"
+				class={css({
+					display: "flex",
+					alignItems: "center",
+					gap: "2.5",
+					color: "fg",
+					textDecoration: "none",
+				})}
+			>
+				<img
+					src={mark}
+					alt=""
+					width="32"
+					height="32"
+					class={css({ width: "32px", height: "32px", borderRadius: "pill", bg: "belly", p: "1" })}
+				/>
+				<span
+					class={css({
+						fontFamily: "display",
+						fontWeight: 700,
+						fontSize: "lg",
+						letterSpacing: "-0.01em",
+					})}>waddle.social</span
+				>
+			</a>
+			<nav
+				aria-label="Site"
+				class={css({
+					display: "flex",
+					alignItems: "center",
+					columnGap: "5",
+					rowGap: "2",
+					fontSize: "sm",
+					flexWrap: "wrap",
+				})}
+			>
+				<a class={link} href="https://github.com/waddle-social/waddle" rel="noreferrer" target="_blank"
+					>Source on GitHub</a
+				>
+				<a class={link} href="#proof-h">How it works</a>
 				<button
 					type="button"
-					class="logo-button"
-					data-toggle-waitlist
-					aria-expanded={waitlistStartsOpen ? "true" : "false"}
-					aria-controls="waitlist-panel"
-					aria-label={waitlistStartsOpen ? "Close waitlist" : "Open waitlist"}
+					class={cx(iconbtn({ size: "sm" }), css({ mx: "-1.5" }))}
+					data-theme-toggle
+					aria-label="Switch to daylight theme"
 				>
-					<img
-						src="/logo.png"
-						alt="Waddle"
-						class="logo"
-						width="1024"
-						height="1024"
-						decoding="async"
-						fetchpriority="high"
-					/>
-				</button>
-			</div>
-
-			<div
-				class:list={["waitlist", waitlistStartsOpen && "is-open"]}
-				id="waitlist-panel"
-				data-waitlist-panel
-				aria-hidden={waitlistStartsOpen ? "false" : "true"}
-			>
-				<div class="waitlist-control">
-					<form
-						id="waitlist-form"
-						class="waitlist-form"
-						method="post"
-						action="/api/waitlist"
-						autocomplete="on"
-						aria-disabled={turnstileConfigured ? "false" : "true"}
-						data-waitlist-form
-						data-state="idle"
-						data-turnstile-action={WAITLIST_TURNSTILE_ACTION}
-						data-turnstile-configured={turnstileConfigured ? "true" : "false"}
-						data-turnstile-site-key={turnstileSiteKey}
+					<svg
+						class={css({ _daylight: { display: "none" } })}
+						aria-hidden="true"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						><circle cx="12" cy="12" r="4"></circle><path
+							d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+						></path></svg
 					>
-						<div class="waitlist-form-main">
-							<label class="sr-only" for="email">Email address</label>
-							<input
-								id="email"
-								name="email"
-								type="email"
-								autocomplete="email"
-								inputmode="email"
-								placeholder="you@yourdomain.com"
-								required
-							/>
-							<span
-								class="waitlist-spinner"
-								data-waitlist-spinner
-								role="status"
-								aria-live="polite"
-								aria-label="Verifying you're human"
-							></span>
-							<button
-								type="submit"
-								class="waitlist-send"
-								aria-label="Join waitlist"
-								disabled={!turnstileConfigured}
-							>
-								<img src="/waddle-mark.svg" alt="" width="32" height="32" />
-							</button>
-						</div>
-						<input type="hidden" name="cf-turnstile-response" value="" data-turnstile-response />
-						<div
-							class="waitlist-turnstile-host"
-							data-waitlist-turnstile
-							aria-hidden="true"
-						></div>
-					</form>
+					<svg
+						class={css({ display: "none", _daylight: { display: "block" } })}
+						aria-hidden="true"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"></path></svg
+					>
+				</button>
+			</nav>
+		</header>
 
+		<main
+			class={cx(
+				container,
+				css({
+					flex: 1,
+					pt: { base: "12", _narrow: "10" },
+					pb: "16",
+					display: "flex",
+					flexWrap: "wrap",
+					alignItems: "center",
+					gap: "12",
+				}),
+			)}
+		>
+			<section
+				aria-labelledby="hero-h"
+				class={css({
+					flex: "1 1 440px",
+					minWidth: 0,
+					display: "flex",
+					flexDirection: "column",
+					gap: "6",
+				})}
+			>
+				<span
+					class={css({
+						display: "inline-flex",
+						alignItems: "center",
+						gap: "2.5",
+						textStyle: "eyebrow",
+						color: "halo",
+					})}
+					><span class={trio({ live: true })} aria-hidden="true"><i></i><i></i><i></i></span>Waitlist
+					open · built on XMPP</span
+				>
+				<h1
+					id="hero-h"
+					class={css({
+						m: 0,
+						fontFamily: "display",
+						fontSize: "clamp(2.75rem, 1.4rem + 4.2vw, 4.75rem)",
+						lineHeight: 0.96,
+						fontWeight: 800,
+						fontStretch: "90%",
+						letterSpacing: "-0.04em",
+						textWrap: "balance",
+						overflowWrap: "break-word",
+					})}
+				>
+					Social chat that's yours by default.
+				</h1>
+				<p
+					class={css({
+						m: 0,
+						fontSize: "lg",
+						lineHeight: 1.55,
+						color: "fg.muted",
+						maxWidth: "34em",
+					})}
+				>
+					Open-source rooms, huddles and discussions on an open standard. Your account, your
+					server, your people.
+				</p>
+
+				<form
+					id="waitlist-form"
+					method="post"
+					action="/api/waitlist"
+					autocomplete="on"
+					novalidate
+					aria-disabled={turnstileConfigured ? "false" : "true"}
+					data-waitlist-form
+					data-state="idle"
+					data-turnstile-action={WAITLIST_TURNSTILE_ACTION}
+					data-turnstile-configured={turnstileConfigured ? "true" : "false"}
+					data-turnstile-site-key={turnstileSiteKey}
+					class={css({ display: "flex", flexDirection: "column", gap: "2.5", maxWidth: "460px" })}
+				>
+					<label for="waitlist-email" class={css({ fontSize: "xs", fontWeight: 600 })}
+						>Get on the waitlist</label
+					>
+					<div
+						class={css({
+							display: "flex",
+							gap: "2",
+							p: "1.5",
+							borderRadius: "pill",
+							bg: "surface",
+							border: "1px solid {colors.border}",
+							transition: "box-shadow {durations.base} {easings.out}",
+							_focusWithin: {
+								outline: "3px solid {colors.focus}",
+								outlineOffset: "1px",
+								boxShadow: "0 0 0 6px color-mix(in srgb, {colors.focus} 18%, transparent)",
+							},
+							"@media (forced-colors: active)": { border: "1px solid CanvasText" },
+						})}
+					>
+						<input
+							id="waitlist-email"
+							name="email"
+							type="email"
+							autocomplete="email"
+							inputmode="email"
+							placeholder="you@yourdomain.com"
+							required
+							aria-describedby="waitlist-status"
+							class={css({
+								flex: 1,
+								minWidth: 0,
+								height: "44px",
+								border: 0,
+								bg: "transparent",
+								color: "fg",
+								textStyle: "input",
+								px: "14px",
+								outline: "none",
+								_placeholder: { color: "fg.soft" },
+								_disabled: { cursor: "not-allowed" },
+							})}
+						/>
+						<button
+							type="submit"
+							aria-label="Join waitlist"
+							disabled={!turnstileConfigured}
+							class={css({
+								width: "44px",
+								height: "44px",
+								flex: "none",
+								border: 0,
+								borderRadius: "pill",
+								bg: "action",
+								color: "action.fg",
+								bgImage: "{gradients.sheen}",
+								display: "inline-flex",
+								alignItems: "center",
+								justifyContent: "center",
+								cursor: "pointer",
+								transition:
+									"background-color {durations.fast} {easings.out}, scale {durations.base} {easings.spring.snappy}",
+								_hover: { bg: "action.hover" },
+								_active: { scale: "var(--wd-press)" },
+								_disabled: { bg: "surface.2", color: "fg.soft", bgImage: "none", cursor: "not-allowed" },
+								"[data-state=submitting] &": { cursor: "progress" },
+							})}
+						>
+							<svg
+								aria-hidden="true"
+								viewBox="0 0 24 24"
+								width="22"
+								height="22"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.75"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								><path d="M8 4h8a5 5 0 0 1 5 5v5a5 5 0 0 1-5 5h-6l-5 2v-3a4.5 4.5 0 0 1-2-4V9a5 5 0 0 1 5-5Z"
+								></path><path d="M8.5 10h.01M15.5 10h.01"></path><path d="m10 13 2 2 2-2Z"></path></svg
+							>
+						</button>
+					</div>
+					<input type="hidden" name="cf-turnstile-response" value="" />
+					<div data-waitlist-turnstile class={css({ position: "absolute" })}></div>
 					<p
-						class="waitlist-status"
+						id="waitlist-status"
+						role="status"
 						data-waitlist-status
 						data-state={initialStatus?.tone ?? "idle"}
 						data-idle-message={idleMessage}
 						data-pending-message={WAITLIST_PENDING_MESSAGE}
 						data-success-message={WAITLIST_SUCCESS_MESSAGE}
 						data-error-message={WAITLIST_RETRY_MESSAGE}
+						data-invalid-message={WAITLIST_INVALID_MESSAGE}
 						data-unavailable-message={WAITLIST_UNAVAILABLE_MESSAGE}
 						data-verification-message={WAITLIST_VERIFICATION_MESSAGE}
-						aria-live="polite"
+						class={css({
+							m: 0,
+							ml: "14px",
+							fontSize: "xs",
+							color: "fg.muted",
+							"&[data-state=error]": { color: "danger.text" },
+							"&[data-state=success]": { color: "action.text" },
+						})}
 					>
 						{initialStatus?.message ?? idleMessage}
 					</p>
+				</form>
+			</section>
 
-					<p class="waitlist-meta">
-						One pending request per inbox. Confirmation required before activation.
-						Every note carries its own unsubscribe link.
-					</p>
-				</div>
+			<section
+				class={css({ flex: "1 1 480px", minWidth: 0, display: "flex", justifyContent: "center" })}
+			>
+				<img
+					src={penguins}
+					alt="Three penguins in scarves sharing hot cocoa on an ice floe shaped like a speech bubble"
+					width="560"
+					height="560"
+					fetchpriority="high"
+					class={css({
+						width: "100%",
+						maxWidth: "560px",
+						height: "auto",
+						aspectRatio: "1 / 1",
+						objectFit: "cover",
+						borderRadius: { base: "40px", _narrow: "sheet" },
+						boxShadow: "{shadows.elev.3}, 0 0 0 1px color-mix(in srgb, {colors.halo} 18%, transparent)",
+					})}
+				/>
+			</section>
+		</main>
+
+		<section
+			aria-labelledby="proof-h"
+			class={cx(
+				container,
+				css({ pb: "72px", display: "flex", flexDirection: "column", gap: "8", scrollMarginTop: "6" }),
+			)}
+		>
+			<ul
+				aria-label="Facts"
+				class={css({
+					m: 0,
+					p: 0,
+					listStyle: "none",
+					display: "flex",
+					flexWrap: "wrap",
+					gap: "2.5",
+					font: "400 14px/1 {fonts.mono}",
+					color: "fg.muted",
+					"& li": {
+						py: "2",
+						px: "14px",
+						borderRadius: "pill",
+						bg: "color-mix(in srgb, {colors.surface} 70%, transparent)",
+						border: "1px solid {colors.border.soft}",
+					},
+				})}
+			>
+				{facts.map((fact) => <li>{fact}</li>)}
+			</ul>
+			<div
+				class={css({
+					display: "flex",
+					alignItems: "end",
+					justifyContent: "space-between",
+					gap: "6",
+					flexWrap: "wrap",
+				})}
+			>
+				<h2 id="proof-h" class={css({ m: 0, textStyle: "headline" })}>What you get today</h2>
+				<p class={css({ m: 0, maxWidth: "32em", color: "fg.muted" })}>
+					Straight from the server's capability list. Federation is not supported yet.
+				</p>
 			</div>
-		</div>
+			<div
+				class={css({
+					display: "grid",
+					gridTemplateColumns: { base: "repeat(3, minmax(0, 1fr))", _narrow: "minmax(0, 1fr)" },
+					gap: "4",
+					alignItems: "start",
+				})}
+			>
+				{
+					maturity.map((group) => (
+						<div class={cx(floe(), css({ gap: "3" }))}>
+							<span
+								class={cx(
+									group.tone,
+									css({
+										alignSelf: "flex-start",
+										display: "inline-flex",
+										alignItems: "center",
+										height: "26px",
+										px: "3",
+										borderRadius: "pill",
+										textStyle: "tag",
+									}),
+								)}
+							>
+								{group.label}
+							</span>
+							<ul
+								class={css({
+									m: 0,
+									p: 0,
+									listStyle: "none",
+									display: "flex",
+									flexDirection: "column",
+									gap: "2",
+									fontSize: "md",
+								})}
+							>
+								{group.items.map((item) => <li>{item}</li>)}
+							</ul>
+						</div>
+					))
+				}
+			</div>
+		</section>
+
+		<section
+			aria-labelledby="sponsors-h"
+			class={cx(
+				container,
+				css({
+					pb: "72px",
+					display: "flex",
+					flexDirection: "column",
+					alignItems: "center",
+					gap: "5",
+					textAlign: "center",
+				}),
+			)}
+		>
+			<h2 id="sponsors-h" class={css({ m: 0, textStyle: "eyebrow", fontFamily: "body" })}>
+				Supported by
+			</h2>
+			<div
+				class={css({
+					display: "flex",
+					flexWrap: "wrap",
+					justifyContent: "center",
+					gap: "4",
+					width: "100%",
+					"& > a": { flex: "0 1 auto", maxWidth: "100%" },
+				})}
+			>
+				<a
+					href="https://www.hetzner.com/?mtm_campaign=waddle-social&mtm_medium=referral&mtm_content=sponsoring_link"
+					rel="noreferrer"
+					target="_blank"
+					class={cx(floe(), sponsor)}
+				>
+					<img
+						src="/hetzner-logo.jpg"
+						alt="Hetzner"
+						width="168"
+						height="64"
+						loading="lazy"
+						decoding="async"
+						class={cx(sponsorArt, css({ objectFit: "cover" }))}
+					/>
+					<span class={sponsorText}>
+						<b>Infrastructure by Hetzner</b>
+						<span>Servers and hosting for waddle.social</span>
+					</span>
+				</a>
+				<a href="https://namespace.so" rel="noreferrer" target="_blank" class={cx(floe(), sponsor)}>
+					<span
+						class={cx(
+							sponsorArt,
+							css({
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								gap: "2.5",
+								boxSizing: "border-box",
+								bg: "surface.2",
+								border: "1px solid {colors.border}",
+								color: "fg",
+								font: "700 17px/1 {fonts.display}",
+								letterSpacing: "-0.01em",
+							}),
+						)}
+						><img src={namespaceLogo} alt="" width="36" height="36" />Namespace</span
+					>
+					<span class={sponsorText}>
+						<b>CI by Namespace Labs</b>
+						<span>Build runners and caches for Waddle's CI</span>
+					</span>
+				</a>
+			</div>
+		</section>
+
+		<footer
+			class={cx(
+				container,
+				css({
+					pt: "5",
+					pb: "28px",
+					borderTop: "1px solid {colors.border.soft}",
+					display: "flex",
+					justifyContent: "space-between",
+					columnGap: "3",
+					rowGap: "2",
+					flexWrap: "wrap",
+					fontSize: "xs",
+					color: "fg.muted",
+				}),
+			)}
+		>
+			<span>Waddle is open source.</span>
+			<span class={css({ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "2" })}>
+				<span>
+					Made with love in
+					<span aria-label="Germany, Scotland, and Norway" role="group">
+						{
+							makers.map((maker) => (
+								<a
+									href={`https://github.com/${maker.login}`}
+									rel="noreferrer"
+									target="_blank"
+									aria-label={`${maker.country}: ${maker.login} on GitHub`}
+									class={css({ textDecoration: "none", px: "0.5" })}
+								>
+									<span aria-hidden="true">{maker.flag}</span>
+								</a>
+							))
+						}
+					</span>
+				</span>
+				<span aria-hidden="true">·</span>
+				<a class={link} href="https://bsky.app/profile/waddle.social" rel="noreferrer" target="_blank"
+					>Bluesky</a
+				>
+				<span aria-hidden="true">·</span>
+				<span class={css({ fontFamily: "mono" })}>humans@waddle.social</span>
+			</span>
+		</footer>
 	</div>
 
 	<script>
 		const TURNSTILE_API_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-		const logoButton = document.querySelector<HTMLButtonElement>("[data-toggle-waitlist]");
-		const panel = document.querySelector<HTMLElement>("[data-waitlist-panel]");
 		const form = document.querySelector<HTMLFormElement>("[data-waitlist-form]");
 		const emailInput = form?.querySelector<HTMLInputElement>('input[name="email"]');
 		const submitButton = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
@@ -165,6 +650,7 @@ const idleMessage = turnstileConfigured
 		const verificationMessage =
 			status?.dataset.verificationMessage ??
 			"Complete the quick human check, then try again.";
+		const invalidMessage = status?.dataset.invalidMessage ?? "Add a valid email address.";
 		let widgetId: string | null = null;
 		let turnstileScriptPromise: Promise<boolean> | null = null;
 		let turnstileRenderPromise: Promise<void> | null = null;
@@ -176,17 +662,6 @@ const idleMessage = turnstileConfigured
 				return;
 			}
 			form.dataset.state = next;
-		};
-
-		const setPanelOpen = (next: boolean) => {
-			if (!logoButton || !panel) {
-				return;
-			}
-
-			logoButton.setAttribute("aria-expanded", String(next));
-			logoButton.setAttribute("aria-label", next ? "Close waitlist" : "Open waitlist");
-			panel.setAttribute("aria-hidden", String(!next));
-			panel.classList.toggle("is-open", next);
 		};
 
 		const setStatus = (tone: "idle" | "pending" | "success" | "error", message: string) => {
@@ -204,6 +679,7 @@ const idleMessage = turnstileConfigured
 			}
 
 			form.setAttribute("aria-disabled", String(busy));
+			form.setAttribute("aria-busy", String(busy));
 			emailInput.disabled = busy;
 			submitButton.disabled = busy;
 		};
@@ -245,14 +721,6 @@ const idleMessage = turnstileConfigured
 			return turnstileScriptPromise;
 		};
 
-		const waitForTurnstile = async () => {
-			if (window.turnstile) {
-				return true;
-			}
-
-			return await loadTurnstileScript();
-		};
-
 		const resetTurnstile = () => {
 			if (turnstileResponseInput) {
 				turnstileResponseInput.value = "";
@@ -273,7 +741,7 @@ const idleMessage = turnstileConfigured
 			}
 
 			turnstileRenderPromise = (async () => {
-				const ready = await waitForTurnstile();
+				const ready = await loadTurnstileScript();
 				if (!ready || !window.turnstile) {
 					setFormState("idle");
 					setStatus("error", unavailableMessage);
@@ -324,13 +792,9 @@ const idleMessage = turnstileConfigured
 			return turnstileRenderPromise;
 		};
 
+		// The challenge (and its script) loads only once someone reaches for the form.
 		const ensureTurnstileReady = async () => {
 			if (!turnstileConfigured) {
-				return;
-			}
-
-			const panelIsOpen = panel?.classList.contains("is-open") ?? false;
-			if (!panelIsOpen) {
 				return;
 			}
 
@@ -353,15 +817,10 @@ const idleMessage = turnstileConfigured
 			}
 		};
 
-		setPanelOpen(panel?.classList.contains("is-open") ?? false);
-		void ensureTurnstileReady();
+		form?.addEventListener("focusin", () => void ensureTurnstileReady(), { once: true });
 
-		logoButton?.addEventListener("click", () => {
-			const next = !(panel?.classList.contains("is-open") ?? false);
-			setPanelOpen(next);
-			if (next) {
-				void ensureTurnstileReady();
-			}
+		emailInput?.addEventListener("input", () => {
+			emailInput.removeAttribute("aria-invalid");
 		});
 
 		window.addEventListener("waddle:theme-change", () => {
@@ -379,25 +838,25 @@ const idleMessage = turnstileConfigured
 				return;
 			}
 
-			if (!form.reportValidity()) {
+			if (!emailInput.checkValidity()) {
+				emailInput.setAttribute("aria-invalid", "true");
+				emailInput.focus();
+				setStatus("error", invalidMessage);
 				return;
 			}
 
 			if (!turnstileConfigured) {
-				setPanelOpen(true);
 				setStatus("error", unavailableMessage);
 				return;
 			}
 
 			if (!turnstileResponseInput?.value) {
-				setPanelOpen(true);
 				await ensureTurnstileReady();
 				setStatus("error", verificationMessage);
 				return;
 			}
 
 			const requestBody = new FormData(form);
-			setPanelOpen(true);
 			setBusy(true);
 			setFormState("submitting");
 			setStatus("pending", status.dataset.pendingMessage ?? "Packing your confirmation note…");
