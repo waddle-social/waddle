@@ -1,0 +1,28 @@
+{
+  "name": "@waddle/design",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/preset.ts",
+    "./fonts.css": "./src/fonts.css",
+    "./assets/*": "./assets/*"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fontsource-variable/atkinson-hyperlegible-mono": "5.3.0",
+    "@fontsource-variable/atkinson-hyperlegible-next": "5.3.0",
+    "@fontsource-variable/bricolage-grotesque": "5.3.0"
+  },
+  "peerDependencies": {
+    "@pandacss/dev": "2.5.0"
+  },
+  "devDependencies": {
+    "@pandacss/dev": "2.5.0",
+    "@pandacss/preset-base": "2.5.0",
+    "@pandacss/types": "2.5.0"
+  }
+}

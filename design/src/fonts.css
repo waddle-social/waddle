@@ -1,0 +1,6 @@
+/* Self-hosted Polar Huddle families. Import once from the app layout. */
+@import '@fontsource-variable/bricolage-grotesque/standard.css'; /* wght + wdth + opsz */
+@import '@fontsource-variable/atkinson-hyperlegible-next/wght.css';
+@import '@fontsource-variable/atkinson-hyperlegible-next/wght-italic.css';
+@import '@fontsource-variable/atkinson-hyperlegible-mono/wght.css';
+@import '@fontsource-variable/atkinson-hyperlegible-mono/wght-italic.css';

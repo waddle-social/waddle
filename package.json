@@ -5,6 +5,7 @@
   "workspaces": [
     "chat",
     "colony",
+    "design",
     "website"
   ],
   "overrides": {

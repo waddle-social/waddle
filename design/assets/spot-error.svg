@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="empty-waddle-title empty-waddle-desc">
+<title id="empty-waddle-title">On the way</title>
+<desc id="empty-waddle-desc">A penguin hurries to the left, with a raised foot and three small motion dots behind it.</desc>
+<defs>
+<linearGradient id="empty-waddle-body" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#1f2733"></stop><stop offset=".42" stop-color="#1f2733"></stop><stop offset="1" stop-color="#14181e"></stop>
+    </linearGradient>
+<linearGradient id="empty-waddle-bodyScotland" href="#empty-waddle-body" gradientTransform="scale(1 0.970920701463)"></linearGradient>
+<linearGradient id="empty-waddle-belly" x1=".15" y1="0" x2=".8" y2="1">
+      <stop offset=".25" stop-color="#ffffff"></stop><stop offset="1" stop-color="#eef4f8"></stop>
+    </linearGradient>
+<linearGradient id="empty-waddle-foot" x1="0" y1="0" x2=".8" y2="1">
+      <stop offset=".3" stop-color="#ff8a3d"></stop><stop offset="1" stop-color="#e8702a"></stop>
+    </linearGradient>
+<linearGradient id="empty-waddle-headLight" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#cfeaff" stop-opacity=".14"></stop><stop offset="1" stop-color="#cfeaff" stop-opacity="0"></stop>
+    </linearGradient>
+<radialGradient id="empty-waddle-blush">
+      <stop stop-color="#ff9fb0" stop-opacity=".65"></stop><stop offset=".65" stop-color="#ff9fb0" stop-opacity=".4"></stop><stop offset="1" stop-color="#ff9fb0" stop-opacity="0"></stop>
+    </radialGradient>
+<radialGradient id="empty-waddle-shadow">
+      <stop stop-color="#14181e" stop-opacity=".22"></stop><stop offset=".55" stop-color="#14181e" stop-opacity=".1"></stop><stop offset="1" stop-color="#14181e" stop-opacity="0"></stop>
+    </radialGradient>
+<g id="empty-waddle-toe">
+      <path stroke="#14181e" d="M-10 1C-9-3-5-5 0-5S9-2 10 2C7 6-7 6-10 1Z" fill="url(#empty-waddle-foot)"></path>
+      <path fill="none" stroke-width=".8" d="M-6-1Q-3-3 0-3" stroke="#ffffff" opacity=".4"></path>
+    </g>
+<g id="empty-waddle-eyes">
+      <ellipse cx="-11.5" cy="0" rx="5.7" ry="7.3" fill="#14181e"></ellipse>
+      <ellipse cx="11.5" cy="0" rx="5.7" ry="7.3" fill="#14181e"></ellipse>
+      <g fill="#ffffff">
+        <circle cx="-13.2" cy="-2.6" r="2.1"></circle><circle cx="9.8" cy="-2.6" r="2.1"></circle>
+        <circle cx="-9.4" cy="2.8" r=".85"></circle><circle cx="13.6" cy="2.8" r=".85"></circle>
+      </g>
+    </g>
+<g id="empty-waddle-cheeksBeak">
+      <ellipse cx="-18" cy="11.5" rx="6.2" ry="4" fill="url(#empty-waddle-blush)"></ellipse>
+      <ellipse cx="18" cy="11.5" rx="6.2" ry="4" fill="url(#empty-waddle-blush)"></ellipse>
+      <path d="M-6.6 9.5Q0 6.8 6.6 9.5Q8 10.7 6.2 12.5L2.2 15.8Q0 17.5-2.2 15.8L-6.2 12.5Q-8 10.7-6.6 9.5Z" fill="#ff8a3d"></path>
+      <path d="M-7 11Q0 13.2 7 11L6.2 12.5 2.2 15.8Q0 17.5-2.2 15.8L-6.2 12.5Z" fill="#e8702a"></path>
+      <path d="M-4.7 9.9Q-2 8.8.5 9.1Q-1 9.7-4.7 10.5Z" fill="#ffffff" opacity=".4"></path>
+    </g>
+<g id="empty-waddle-snowflake" fill="none" stroke-width=".8" stroke="#9cc9ec">
+      <path d="M0-4V4M-3.5-2 3.5 2M-3.5 2 3.5-2"></path>
+    </g>
+
+</defs>
+<ellipse cx="115" cy="201" rx="84" ry="9" fill="url(#empty-waddle-shadow)"></ellipse>
+<use href="#empty-waddle-snowflake" x="44" y="74"></use><use href="#empty-waddle-snowflake" x="186" y="65"></use>
+<circle cx="180" cy="143" r="5" fill="#6b7f92"></circle><circle cx="198" cy="135" r="4" fill="#9cc9ec"></circle><circle cx="214" cy="128" r="3" fill="#cfeaff"></circle>
+<g transform="translate(-38 -20) scale(1.16) rotate(-14 120 133)" stroke-width="1.724138">
+<g transform="rotate(-8 98 184)"><use href="#empty-waddle-toe" x="98" y="184"></use></g>
+<g transform="rotate(16 141 181)"><use href="#empty-waddle-toe" x="141" y="181"></use></g>
+<path stroke="#6b7f92" d="M120 59C92 59 77 79 77 107C74 128 75 150 89 164C89.711749 164.800718 90.447245 165.561859 91.205783 166.284127L89.205783 178.284127Q88.205783 181.284127 91.205783 180.284127L104.205783 174.284127C109.30037 176.128602 114.932336 177 121 177C151 177 166 157 165 133L163 107C163 79 148 59 120 59Z" fill="url(#empty-waddle-bodyScotland)"></path>
+<path d="M80 105C81 78 95 64 120 63Q142 63 153 81C127 67 98 77 88 106Z" fill="url(#empty-waddle-headLight)"></path>
+<path d="M86 107C86 93 92 84 103 84C111 84 116 89 120 95C124 89 129 84 137 84C148 84 154 93 154 107L156 133C157 154 144 168 121 168C98 168 84 154 85 133Z" fill="url(#empty-waddle-belly)"></path>
+<g transform="translate(116 107) scale(1.1)"><use href="#empty-waddle-eyes"></use><use href="#empty-waddle-cheeksBeak"></use></g>
+<path stroke="#6b7f92" d="M84 128C77 123 67 125 64 131C62 137 75 140 90 132" fill="url(#empty-waddle-body)"></path>
+<path stroke="#6b7f92" d="M156 128C165 124 175 126 177 132C177 138 165 140 150 132" fill="url(#empty-waddle-body)"></path>
+</g>
+</svg>

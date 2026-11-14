@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="empty-cocoa-title empty-cocoa-desc">
+<title id="empty-cocoa-title">A quiet cocoa break</title>
+<desc id="empty-cocoa-desc">A sleepy, content penguin holds a blue mug with both flippers. A small wisp of steam rises from the mug.</desc>
+<defs>
+<linearGradient id="empty-cocoa-body" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#1f2733"></stop><stop offset=".42" stop-color="#1f2733"></stop><stop offset="1" stop-color="#14181e"></stop>
+    </linearGradient>
+<linearGradient id="empty-cocoa-bodyScotland" href="#empty-cocoa-body" gradientTransform="scale(1 0.970920701463)"></linearGradient>
+<linearGradient id="empty-cocoa-belly" x1=".15" y1="0" x2=".8" y2="1">
+      <stop offset=".25" stop-color="#ffffff"></stop><stop offset="1" stop-color="#eef4f8"></stop>
+    </linearGradient>
+<linearGradient id="empty-cocoa-foot" x1="0" y1="0" x2=".8" y2="1">
+      <stop offset=".3" stop-color="#ff8a3d"></stop><stop offset="1" stop-color="#e8702a"></stop>
+    </linearGradient>
+<linearGradient id="empty-cocoa-headLight" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#cfeaff" stop-opacity=".14"></stop><stop offset="1" stop-color="#cfeaff" stop-opacity="0"></stop>
+    </linearGradient>
+<radialGradient id="empty-cocoa-blush">
+      <stop stop-color="#ff9fb0" stop-opacity=".65"></stop><stop offset=".65" stop-color="#ff9fb0" stop-opacity=".4"></stop><stop offset="1" stop-color="#ff9fb0" stop-opacity="0"></stop>
+    </radialGradient>
+<radialGradient id="empty-cocoa-shadow">
+      <stop stop-color="#14181e" stop-opacity=".22"></stop><stop offset=".55" stop-color="#14181e" stop-opacity=".1"></stop><stop offset="1" stop-color="#14181e" stop-opacity="0"></stop>
+    </radialGradient>
+<g id="empty-cocoa-toe">
+      <path stroke="#14181e" d="M-10 1C-9-3-5-5 0-5S9-2 10 2C7 6-7 6-10 1Z" fill="url(#empty-cocoa-foot)"></path>
+      <path fill="none" stroke-width=".8" d="M-6-1Q-3-3 0-3" stroke="#ffffff" opacity=".4"></path>
+    </g>
+<g id="empty-cocoa-eyes">
+      <ellipse cx="-11.5" cy="0" rx="5.7" ry="7.3" fill="#14181e"></ellipse>
+      <ellipse cx="11.5" cy="0" rx="5.7" ry="7.3" fill="#14181e"></ellipse>
+      <g fill="#ffffff">
+        <circle cx="-13.2" cy="-2.6" r="2.1"></circle><circle cx="9.8" cy="-2.6" r="2.1"></circle>
+        <circle cx="-9.4" cy="2.8" r=".85"></circle><circle cx="13.6" cy="2.8" r=".85"></circle>
+      </g>
+    </g>
+<g id="empty-cocoa-cheeksBeak">
+      <ellipse cx="-18" cy="11.5" rx="6.2" ry="4" fill="url(#empty-cocoa-blush)"></ellipse>
+      <ellipse cx="18" cy="11.5" rx="6.2" ry="4" fill="url(#empty-cocoa-blush)"></ellipse>
+      <path d="M-6.6 9.5Q0 6.8 6.6 9.5Q8 10.7 6.2 12.5L2.2 15.8Q0 17.5-2.2 15.8L-6.2 12.5Q-8 10.7-6.6 9.5Z" fill="#ff8a3d"></path>
+      <path d="M-7 11Q0 13.2 7 11L6.2 12.5 2.2 15.8Q0 17.5-2.2 15.8L-6.2 12.5Z" fill="#e8702a"></path>
+      <path d="M-4.7 9.9Q-2 8.8.5 9.1Q-1 9.7-4.7 10.5Z" fill="#ffffff" opacity=".4"></path>
+    </g>
+<g id="empty-cocoa-snowflake" fill="none" stroke-width=".8" stroke="#9cc9ec">
+      <path d="M0-4V4M-3.5-2 3.5 2M-3.5 2 3.5-2"></path>
+    </g>
+<linearGradient id="empty-cocoa-mug" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#214e66"></stop><stop offset="1" stop-color="#173e54"></stop></linearGradient>
+</defs>
+<ellipse cx="120" cy="202" rx="86" ry="9" fill="url(#empty-cocoa-shadow)"></ellipse>
+<use href="#empty-cocoa-snowflake" x="44" y="84"></use><use href="#empty-cocoa-snowflake" x="197" y="66"></use>
+<g transform="translate(-28 -24) scale(1.23)" stroke-width="1.626016">
+<use href="#empty-cocoa-toe" x="103" y="181"></use><use href="#empty-cocoa-toe" x="138" y="181"></use>
+<path stroke="#6b7f92" d="M120 59C92 59 77 79 77 107C74 128 75 150 89 164C89.711749 164.800718 90.447245 165.561859 91.205783 166.284127L89.205783 178.284127Q88.205783 181.284127 91.205783 180.284127L104.205783 174.284127C109.30037 176.128602 114.932336 177 121 177C151 177 166 157 165 133L163 107C163 79 148 59 120 59Z" fill="url(#empty-cocoa-bodyScotland)"></path>
+<path d="M80 105C81 78 95 64 120 63Q142 63 153 81C127 67 98 77 88 106Z" fill="url(#empty-cocoa-headLight)"></path>
+<path d="M86 107C86 93 92 84 103 84C111 84 116 89 120 95C124 89 129 84 137 84C148 84 154 93 154 107L156 133C157 154 144 168 121 168C98 168 84 154 85 133Z" fill="url(#empty-cocoa-belly)"></path>
+<g transform="translate(120 107) scale(1.1)"><path d="M-17.2-1.5Q-11.5 8-5.8-1.5Q-5.2-3-6.8-3Q-11.5 3.2-16.2-3Q-17.8-3-17.2-1.5ZM5.8-1.5Q11.5 8 17.2-1.5Q17.8-3 16.2-3Q11.5 3.2 6.8-3Q5.2-3 5.8-1.5Z" fill="#14181e"></path><use href="#empty-cocoa-cheeksBeak"></use></g>
+<path d="M156 137H164C176 137 176 156 164 156H158" stroke="#214e66" stroke-width="5"></path>
+<path d="M156 137H164C174 137 174 151 167 154" stroke="#9cc9ec" stroke-width="1.2"></path>
+<path stroke="#6b7f92" d="M128 133H159V157Q159 167 150 167H137Q128 167 128 157Z" fill="url(#empty-cocoa-mug)"></path>
+<path d="M132 135H155" stroke="#cfeaff" stroke-width="2"></path>
+<path d="M136 140V153" stroke="#ffffff" stroke-width="1.5" opacity=".35"></path>
+<path d="M151 126C143 119 160 116 154 108" stroke="#6b7f92" stroke-width="2"></path>
+<path stroke="#6b7f92" d="M84 129C94 130 102 139 110 141L129 145Q135 146 133 151Q132 155 126 154L106 151C95 151 83 143 81 137Z" fill="url(#empty-cocoa-body)"></path>
+<path stroke="#6b7f92" d="M157 130Q168 133 166 142Q164 147 158 145L154 140Z" fill="url(#empty-cocoa-body)"></path>
+</g>
+</svg>
