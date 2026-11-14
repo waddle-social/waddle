@@ -3,9 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use jid::DomainPart;
 use minidom::Element;
 
+use crate::identity::CanonicalDomain;
 use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
 use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{StreamHeader, StreamLanguage};
@@ -36,11 +36,11 @@ pub enum DestinationStatus {
 /// to TLS and SASL, it never authenticates or authorises the peer.
 pub trait InboundAdmission: Send + Sync {
     /// Whether `destination` is a domain this process serves.
-    fn destination(&self, destination: &DomainPart) -> DestinationStatus;
+    fn destination(&self, destination: &CanonicalDomain) -> DestinationStatus;
 
     /// Whether streams from `source` to the served `destination` may be
     /// negotiated at all.
-    fn admits(&self, source: &DomainPart, destination: &DomainPart) -> bool;
+    fn admits(&self, source: &CanonicalDomain, destination: &CanonicalDomain) -> bool;
 }
 
 /// Server Dialback (XEP-0220) handling.
@@ -64,7 +64,7 @@ pub struct ReceivingConfig {
     /// Authoritative local domain used as the `from` of a stream header that
     /// only carries an error because the requested domain is not served
     /// (RFC 6120 §4.9.1.3).
-    pub default_domain: DomainPart,
+    pub default_domain: CanonicalDomain,
     pub language: StreamLanguage,
     pub sasl: SaslLimits,
     pub dialback: DialbackMode,
@@ -85,9 +85,9 @@ impl fmt::Debug for ReceivingConfig {
 #[derive(Debug, Clone)]
 pub struct InitiatingConfig {
     /// The local domain this stream authenticates as.
-    pub source: DomainPart,
+    pub source: CanonicalDomain,
     /// The remote domain this stream is addressed to.
-    pub destination: DomainPart,
+    pub destination: CanonicalDomain,
     pub language: StreamLanguage,
     pub dialback: DialbackMode,
 }
@@ -99,7 +99,7 @@ pub struct InitiatingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TlsPeer {
     /// The certificate was verified for this domain.
-    Verified(DomainPart),
+    Verified(CanonicalDomain),
     /// The peer presented no certificate usable for strong authentication.
     NoCertificate,
 }
@@ -126,8 +126,8 @@ impl ExchangeId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationRequest {
     pub exchange: ExchangeId,
-    pub source: DomainPart,
-    pub destination: DomainPart,
+    pub source: CanonicalDomain,
+    pub destination: CanonicalDomain,
 }
 
 /// The connection owner's answer to an [`AuthorizationRequest`].
@@ -142,9 +142,9 @@ pub enum AuthorizationDecision {
 pub struct NegotiatedStream {
     pub role: Role,
     /// The initiating (sending) domain.
-    pub source: DomainPart,
+    pub source: CanonicalDomain,
     /// The receiving domain.
-    pub destination: DomainPart,
+    pub destination: CanonicalDomain,
 }
 
 /// Connection-level events that end negotiation.
@@ -224,6 +224,9 @@ pub enum CloseReason {
     TlsRefused,
     /// An outbound item could not be serialised.
     LocalFailure,
+    /// The peer's first bytes were not XML, such as a TLS ClientHello sent
+    /// to the STARTTLS port; the connection closes without any XML.
+    NotXml,
 }
 
 impl CloseReason {

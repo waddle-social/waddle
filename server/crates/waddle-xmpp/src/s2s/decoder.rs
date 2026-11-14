@@ -94,13 +94,18 @@ pub enum DecodeError {
     /// before authentication completed.
     #[error("element outside the negotiation namespaces before authentication")]
     UnexpectedElement,
+    /// In the pre-authentication mode, the first byte of a stream is not
+    /// the start of XML: the peer speaks another protocol, such as TLS
+    /// sent to a STARTTLS port. The connection closes without any XML.
+    #[error("input is not XML")]
+    NotXml,
 }
 
 impl DecodeError {
     /// The stream error condition reported to the peer.
     pub fn condition(self) -> StreamErrorCondition {
         match self {
-            Self::NotWellFormed => StreamErrorCondition::NotWellFormed,
+            Self::NotWellFormed | Self::NotXml => StreamErrorCondition::NotWellFormed,
             Self::RestrictedXml => StreamErrorCondition::RestrictedXml,
             Self::UnsupportedEncoding => StreamErrorCondition::UnsupportedEncoding,
             Self::InvalidNamespace => StreamErrorCondition::InvalidNamespace,
@@ -354,6 +359,17 @@ impl StreamDecoder {
             Phase::Failed(error) => return Err(error),
             Phase::Ended => return Ok(None),
             Phase::Header | Phase::Open => {}
+        }
+        if self.phase == Phase::Header && self.pre_authentication && self.parsed == 0 {
+            // XML starts with `<`, after optional whitespace or a UTF-8
+            // byte order mark. Anything else is another protocol.
+            let first = self
+                .buffer
+                .iter()
+                .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'));
+            if first.is_some_and(|byte| *byte != b'<' && *byte != 0xEF) {
+                return Err(self.fail(DecodeError::NotXml));
+            }
         }
         loop {
             let (budget, limit_kind) = self.budget();
@@ -866,6 +882,7 @@ impl StreamDecoder {
             id: text("id").and_then(StreamId::parse),
             version,
             lang,
+            declare_dialback: false,
         })
     }
 }

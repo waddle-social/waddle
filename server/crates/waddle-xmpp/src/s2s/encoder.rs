@@ -7,7 +7,7 @@ use minidom::rxml::{xml_ncname, Encoder, Item, Namespace, NcNameStr, XmlVersion}
 use minidom::{Element, Node};
 use thiserror::Error;
 
-use crate::ns::{JABBER_SERVER, STREAM};
+use crate::ns::{JABBER_SERVER, JABBER_SERVER_DIALBACK, STREAM};
 
 use super::condition::StreamErrorCondition;
 use super::header::{HeaderAddress, StreamHeader};
@@ -26,6 +26,8 @@ pub enum EncodeError {
 pub struct StreamEncoder {
     encoder: Encoder<SimpleNamespaces>,
     closed: bool,
+    /// Whether the header declared the dialback namespace.
+    dialback: bool,
 }
 
 impl fmt::Debug for StreamEncoder {
@@ -41,7 +43,10 @@ impl StreamEncoder {
     ///
     /// The content namespace `jabber:server` is the default namespace and the
     /// stream namespace uses the `stream` prefix, the form every deployed
-    /// server accepts (RFC 6120 §4.8.5).
+    /// server accepts (RFC 6120 §4.8.5). Addresses are written with
+    /// U-labels (RFC 7622 §3.2.1), whichever spelling the peer used. When
+    /// [`StreamHeader::declare_dialback`] is set, the dialback namespace is
+    /// bound to the `db` prefix (XEP-0220 §2.1).
     pub fn open(header: &StreamHeader) -> Result<(Self, Vec<u8>), EncodeError> {
         let mut encoder = Encoder::new();
         let mut out = Vec::new();
@@ -49,7 +54,7 @@ impl StreamEncoder {
         encoder
             .encode(Item::XmlDeclaration(XmlVersion::V1_0), &mut out)
             .map_err(|_| EncodeError::Xml)?;
-        declare_stream_namespaces(encoder.ns_tracker_mut());
+        declare_stream_namespaces(encoder.ns_tracker_mut(), header.declare_dialback);
         encoder
             .encode(
                 Item::ElementHeadStart(&stream, xml_ncname!("stream")),
@@ -59,9 +64,11 @@ impl StreamEncoder {
 
         let none = Namespace::none();
         let version = header.version.map(|version| version.to_string());
+        let from = address(&header.from);
+        let to = address(&header.to);
         let attributes = [
-            (none, xml_ncname!("from"), address(&header.from)),
-            (none, xml_ncname!("to"), address(&header.to)),
+            (none, xml_ncname!("from"), from.as_deref()),
+            (none, xml_ncname!("to"), to.as_deref()),
             (
                 none,
                 xml_ncname!("id"),
@@ -88,6 +95,7 @@ impl StreamEncoder {
             Self {
                 encoder,
                 closed: false,
+                dialback: header.declare_dialback,
             },
             out,
         ))
@@ -109,7 +117,7 @@ impl StreamEncoder {
         // without output, keeps a serialisation failure from leaving the
         // stream encoder inside a half-written element.
         let mut namespaces = SimpleNamespaces::new();
-        declare_stream_namespaces(&mut namespaces);
+        declare_stream_namespaces(&mut namespaces, self.dialback);
         namespaces.push();
         let mut encoder = Encoder::from(namespaces);
         let mut out = Vec::new();
@@ -147,9 +155,15 @@ impl StreamEncoder {
 }
 
 /// Bind the namespaces declared on every outbound stream header.
-fn declare_stream_namespaces(namespaces: &mut SimpleNamespaces) {
+fn declare_stream_namespaces(namespaces: &mut SimpleNamespaces, dialback: bool) {
     namespaces.declare_fixed(None, Namespace::from(JABBER_SERVER));
     namespaces.declare_fixed(Some(xml_ncname!("stream")), Namespace::from(STREAM));
+    if dialback {
+        namespaces.declare_fixed(
+            Some(xml_ncname!("db")),
+            Namespace::from(JABBER_SERVER_DIALBACK),
+        );
+    }
 }
 
 /// Write `root` and its descendants without recursion.
@@ -203,6 +217,6 @@ fn encode(
     encoder.encode(item, out).map_err(|_| EncodeError::Xml)
 }
 
-fn address(address: &HeaderAddress) -> Option<&str> {
-    address.domain().map(|domain| domain.as_str())
+fn address(address: &HeaderAddress) -> Option<String> {
+    address.domain().map(|domain| domain.to_unicode())
 }

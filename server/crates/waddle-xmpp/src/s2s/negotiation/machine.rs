@@ -3,7 +3,7 @@
 use super::initiating::Initiating;
 use super::receiving::Receiving;
 use super::types::{
-    InitiatingConfig, NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Step, TlsPeer,
+    InitiatingConfig, NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Step,
 };
 
 /// The S2S negotiation state machine for one TCP connection.
@@ -36,21 +36,6 @@ impl Negotiation {
     /// An initiating-role machine and the steps that open its stream.
     pub fn initiating(config: InitiatingConfig) -> (Self, Vec<Step>) {
         let (machine, steps) = Initiating::start(config);
-        (
-            Self {
-                role: RoleMachine::Initiating(machine),
-            },
-            steps,
-        )
-    }
-
-    /// An initiating-role machine for a connection whose TLS handshake
-    /// completed before any XML, such as an XEP-0368 direct TLS connection,
-    /// and the steps that open its stream. `peer` is what TLS verification
-    /// established about the receiving server; STARTTLS is never requested
-    /// on such a stream.
-    pub fn initiating_after_tls(config: InitiatingConfig, peer: TlsPeer) -> (Self, Vec<Step>) {
-        let (machine, steps) = Initiating::start_after_tls(config, peer);
         (
             Self {
                 role: RoleMachine::Initiating(machine),

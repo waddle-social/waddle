@@ -13,11 +13,10 @@
 //! Peer input is written as raw wire fixtures because the codec under test
 //! is the boundary that turns bytes into typed values.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
-use jid::DomainPart;
 use minidom::Element;
+use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::ns::{SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
     AuthorizationDecision, AuthorizationRequest, CloseReason, CodecLimits, DestinationStatus,
@@ -56,8 +55,8 @@ const SUCCESS: &[u8] = b"<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
 const CONTINUATION: &[u8] = b"<stream:stream xmlns='jabber:server' \
 xmlns:stream='http://etherx.jabber.org/streams'>";
 
-fn domain(value: &str) -> DomainPart {
-    DomainPart::from_str(value).expect("valid domain")
+fn domain(value: &str) -> CanonicalDomain {
+    CanonicalDomain::parse_exact(value).expect("valid domain")
 }
 
 /// Serves `home-b.test` and `muc.home-b.test`, formerly served
@@ -65,7 +64,7 @@ fn domain(value: &str) -> DomainPart {
 struct Admission;
 
 impl InboundAdmission for Admission {
-    fn destination(&self, destination: &DomainPart) -> DestinationStatus {
+    fn destination(&self, destination: &CanonicalDomain) -> DestinationStatus {
         match destination.as_str() {
             "home-b.test" | "muc.home-b.test" => DestinationStatus::Served,
             "old.home-b.test" => DestinationStatus::Gone,
@@ -73,7 +72,7 @@ impl InboundAdmission for Admission {
         }
     }
 
-    fn admits(&self, source: &DomainPart, destination: &DomainPart) -> bool {
+    fn admits(&self, source: &CanonicalDomain, destination: &CanonicalDomain) -> bool {
         source.as_str() == "home-a.test" && destination.as_str() == "home-b.test"
     }
 }
@@ -411,7 +410,7 @@ from='alice@home-a.test' to='home-b.test' version='1.0'>",
         (
             b"<stream:stream xmlns='jabber:server' xmlns:stream='http://etherx.jabber.org/streams' \
 from='stranger.test' to='home-b.test' version='1.0'>",
-            StreamErrorCondition::InvalidFrom,
+            StreamErrorCondition::PolicyViolation,
         ),
         (
             b"<stream:stream xmlns='jabber:server' xmlns:stream='http://etherx.jabber.org/streams' \
@@ -1106,8 +1105,11 @@ from='home-b.test' to='home-a.test' id='1'>",
         ),
     ];
     for (header, condition) in cases {
+        // The failed header is held until the next element shows whether
+        // the peer is reporting its own stream error.
         let (mut stream, _) = initiator();
-        let out = stream.receive(header);
+        assert_eq!(close_reason(&stream.receive(header)), None);
+        let out = stream.receive(FEATURES_STARTTLS);
         assert_stream_error(&out, condition);
         let elements = continuation_elements(&transmitted(&out));
         assert_eq!(

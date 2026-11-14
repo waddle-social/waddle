@@ -74,19 +74,6 @@ impl S2sStream {
         Self::start(Negotiation::initiating(config), limits)
     }
 
-    /// Start an outbound stream on a connection whose TLS handshake has
-    /// already completed, such as an XEP-0368 direct TLS connection. `peer`
-    /// is what TLS verification established about the receiving server;
-    /// the output opens the stream only when it is verified for the
-    /// destination, and STARTTLS is never requested.
-    pub fn initiate_after_tls(
-        config: InitiatingConfig,
-        peer: TlsPeer,
-        limits: CodecLimits,
-    ) -> (Self, Vec<Output>) {
-        Self::start(Negotiation::initiating_after_tls(config, peer), limits)
-    }
-
     fn start(started: (Negotiation, Vec<Step>), limits: CodecLimits) -> (Self, Vec<Output>) {
         let (negotiation, steps) = started;
         let mut stream = Self {

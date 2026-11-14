@@ -1,10 +1,12 @@
 //! Receiving-role negotiation: STARTTLS, SASL EXTERNAL, authenticated
 //! restart.
 
-use jid::{DomainPart, Jid};
+use jid::Jid;
 use minidom::Element;
 
+use crate::identity::CanonicalDomain;
 use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
+use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamVersion};
 
 use super::classify::{classify, Mechanism, SaslPayload, TopLevel};
@@ -48,9 +50,9 @@ pub(crate) struct Receiving {
     outbound_open: bool,
     /// The most recent served header recipient, used as the `from` of an
     /// error-carrying response header.
-    served: Option<DomainPart>,
+    served: Option<CanonicalDomain>,
     /// The `(source, destination)` pair fixed by the first accepted header.
-    pair: Option<(DomainPart, DomainPart)>,
+    pair: Option<(CanonicalDomain, CanonicalDomain)>,
     tls_peer: Option<TlsPeer>,
     auth_starts: u8,
     aborts: u8,
@@ -106,6 +108,9 @@ impl Receiving {
                 self.on_element(element, true, &mut steps)
             }
             NegotiationInput::PeerEnd => self.close(&mut steps, CloseReason::PeerClosed),
+            NegotiationInput::DecodeFailed(DecodeError::NotXml) => {
+                self.close(&mut steps, CloseReason::NotXml)
+            }
             NegotiationInput::DecodeFailed(error) => self.fail(&mut steps, error.condition()),
             NegotiationInput::PrematureInput => {
                 self.fail(&mut steps, StreamErrorCondition::PolicyViolation)
@@ -155,15 +160,19 @@ impl Receiving {
     fn accept_header(
         &mut self,
         header: &StreamHeader,
-    ) -> Result<(DomainPart, DomainPart), StreamErrorCondition> {
+    ) -> Result<(CanonicalDomain, CanonicalDomain), StreamErrorCondition> {
         if !header.version.is_some_and(StreamVersion::supports_xmpp_1_0) {
             return Err(StreamErrorCondition::UnsupportedVersion);
         }
-        let destination = header
-            .to
-            .domain()
-            .cloned()
-            .ok_or(StreamErrorCondition::BadFormat)?;
+        // A spelling the identity profile refuses names no domain this
+        // server could serve.
+        let destination = match &header.to {
+            HeaderAddress::Domain(domain) => domain.clone(),
+            HeaderAddress::Refused => return Err(StreamErrorCondition::HostUnknown),
+            HeaderAddress::Absent | HeaderAddress::Invalid => {
+                return Err(StreamErrorCondition::BadFormat)
+            }
+        };
         match self.config.admission.destination(&destination) {
             DestinationStatus::Served => {}
             DestinationStatus::Gone => return Err(StreamErrorCondition::HostGone),
@@ -173,11 +182,15 @@ impl Receiving {
         // This profile requires `from` on every header, including the
         // plaintext one: it selects the configured pair and is the TLS
         // reference identity.
-        let source = header
-            .from
-            .domain()
-            .cloned()
-            .ok_or(StreamErrorCondition::BadFormat)?;
+        // A spelling the identity profile refuses cannot be a reference
+        // identity or an admitted domain.
+        let source = match &header.from {
+            HeaderAddress::Domain(domain) => domain.clone(),
+            HeaderAddress::Refused => return Err(StreamErrorCondition::InvalidFrom),
+            HeaderAddress::Absent | HeaderAddress::Invalid => {
+                return Err(StreamErrorCondition::BadFormat)
+            }
+        };
         if let Some((pinned_source, pinned_destination)) = &self.pair {
             if *pinned_destination != destination {
                 return Err(StreamErrorCondition::HostUnknown);
@@ -186,14 +199,16 @@ impl Receiving {
                 return Err(StreamErrorCondition::InvalidFrom);
             }
         }
+        // A refused pair receives `policy-violation`, the same condition
+        // whichever list or rule refused it.
         if !self.config.admission.admits(&source, &destination) {
-            return Err(StreamErrorCondition::InvalidFrom);
+            return Err(StreamErrorCondition::PolicyViolation);
         }
         self.pair = Some((source.clone(), destination.clone()));
         Ok((source, destination))
     }
 
-    fn offer_sasl(&mut self, source: &DomainPart, steps: &mut Vec<Step>) {
+    fn offer_sasl(&mut self, source: &CanonicalDomain, steps: &mut Vec<Step>) {
         match &self.tls_peer {
             Some(TlsPeer::Verified(verified)) if verified == source => {
                 steps.push(Step::Send(elements::external_features()));
@@ -371,10 +386,10 @@ impl Receiving {
         else {
             return Some(StreamErrorCondition::ImproperAddressing);
         };
-        if to.domain() != &**destination {
+        if CanonicalDomain::from_domain(to.domain()).ok().as_ref() != Some(destination) {
             return Some(StreamErrorCondition::HostUnknown);
         }
-        if from.domain() != &**source {
+        if CanonicalDomain::from_domain(from.domain()).ok().as_ref() != Some(source) {
             return Some(StreamErrorCondition::InvalidFrom);
         }
         None

@@ -15,8 +15,12 @@
 //! - [`Negotiation`]: the initiating and receiving negotiation state machine
 //!   (STARTTLS, SASL EXTERNAL, authenticated restart), with Server Dialback
 //!   decision points that refuse while [`DialbackMode::Disabled`];
-//! - [`S2sStream`]: a driver combining all of the above for one connection,
-//!   for STARTTLS and, in the initiating role, XEP-0368 direct TLS.
+//! - [`S2sStream`]: a driver combining all of the above for one connection.
+//!
+//! Stream header addresses are read from the raw attribute text into the
+//! identity profile's [`CanonicalDomain`](crate::identity::CanonicalDomain),
+//! so every pair and peer comparison is made in canonical form; emitted
+//! headers write U-labels.
 
 mod condition;
 mod decoder;

@@ -4,7 +4,9 @@ use std::fmt;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jid::{DomainPart, Jid};
+use jid::Jid;
+
+use crate::identity::CanonicalDomain;
 
 /// Longest stream ID accepted from a peer. Longer values are ignored as if
 /// absent; the header byte ceiling bounds them in any case.
@@ -15,18 +17,25 @@ const MAX_LANGUAGE_BYTES: usize = 64;
 
 /// A server-to-server stream header address (`from` or `to`).
 ///
-/// Server-to-server stream addresses are domain-only JIDs. A present value
-/// that is not a valid, prepared domainpart is kept as [`Self::Invalid`]
-/// without its text so the negotiation can choose the RFC 6120 error
-/// condition without reflecting peer input.
+/// Server-to-server stream addresses are domain-only JIDs. The domain is
+/// taken from the raw attribute text into the identity profile's canonical
+/// form ([`CanonicalDomain::parse_exact`]), so a U-label and an A-label
+/// spelling of one domain are the same address and every comparison is made
+/// on the canonical form. A present value that is not a domain-only JID is
+/// [`Self::Invalid`]; a domain-only JID written in a spelling the profile
+/// does not accept, such as a case-folded or compatibility form, is
+/// [`Self::Refused`]. Neither keeps the peer's text, so the negotiation can
+/// choose the RFC 6120 error condition without reflecting peer input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderAddress {
     /// The attribute was not present.
     Absent,
     /// The attribute was present but empty, not a JID, or not domain-only.
     Invalid,
-    /// A prepared domain-only address.
-    Domain(DomainPart),
+    /// A domain-only JID whose spelling the identity profile refuses.
+    Refused,
+    /// A domain in canonical form.
+    Domain(CanonicalDomain),
 }
 
 impl HeaderAddress {
@@ -40,29 +49,32 @@ impl HeaderAddress {
         }
         match Jid::new(value) {
             Ok(jid) if jid.node().is_none() && jid.resource().is_none() => {
-                Self::Domain(DomainPart::from(jid.domain()))
+                match CanonicalDomain::parse_exact(value) {
+                    Ok(domain) => Self::Domain(domain),
+                    Err(_) => Self::Refused,
+                }
             }
             _ => Self::Invalid,
         }
     }
 
-    /// The domain, when the address is a valid domain-only JID.
-    pub fn domain(&self) -> Option<&DomainPart> {
+    /// The domain, when the address is a canonical domain-only JID.
+    pub fn domain(&self) -> Option<&CanonicalDomain> {
         match self {
             Self::Domain(domain) => Some(domain),
-            Self::Absent | Self::Invalid => None,
+            Self::Absent | Self::Invalid | Self::Refused => None,
         }
     }
 }
 
-impl From<DomainPart> for HeaderAddress {
-    fn from(domain: DomainPart) -> Self {
+impl From<CanonicalDomain> for HeaderAddress {
+    fn from(domain: CanonicalDomain) -> Self {
         Self::Domain(domain)
     }
 }
 
-impl From<Option<DomainPart>> for HeaderAddress {
-    fn from(domain: Option<DomainPart>) -> Self {
+impl From<Option<CanonicalDomain>> for HeaderAddress {
+    fn from(domain: Option<CanonicalDomain>) -> Self {
         domain.map_or(Self::Absent, Self::Domain)
     }
 }
@@ -194,29 +206,40 @@ pub struct StreamHeader {
     pub id: Option<StreamId>,
     pub version: Option<StreamVersion>,
     pub lang: Option<StreamLanguage>,
+    /// Whether an emitted header declares the Server Dialback namespace
+    /// with the `db` prefix (XEP-0220 §2.1). Never set by this codec, which
+    /// does not implement dialback; ignored on received headers, whose
+    /// declarations the decoder has already checked.
+    pub declare_dialback: bool,
 }
 
 impl StreamHeader {
     /// An initial stream header sent by the initiating server.
-    pub fn initial(from: DomainPart, to: DomainPart, lang: StreamLanguage) -> Self {
+    pub fn initial(from: CanonicalDomain, to: CanonicalDomain, lang: StreamLanguage) -> Self {
         Self {
             from: HeaderAddress::Domain(from),
             to: HeaderAddress::Domain(to),
             id: None,
             version: Some(StreamVersion::V1_0),
             lang: Some(lang),
+            declare_dialback: false,
         }
     }
 
     /// A response stream header sent by the receiving server, with a fresh
     /// stream ID.
-    pub fn response(from: DomainPart, to: Option<DomainPart>, lang: StreamLanguage) -> Self {
+    pub fn response(
+        from: CanonicalDomain,
+        to: Option<CanonicalDomain>,
+        lang: StreamLanguage,
+    ) -> Self {
         Self {
             from: HeaderAddress::Domain(from),
             to: HeaderAddress::from(to),
             id: Some(StreamId::random()),
             version: Some(StreamVersion::V1_0),
             lang: Some(lang),
+            declare_dialback: false,
         }
     }
 }

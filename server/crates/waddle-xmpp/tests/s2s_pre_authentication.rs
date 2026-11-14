@@ -6,10 +6,9 @@
 //! established receiving stream can hand address-checked stanzas to its
 //! owner.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
-use jid::DomainPart;
+use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
     AuthorizationDecision, CloseReason, CodecLimits, DecodeError, DestinationStatus, DialbackMode,
     Inbound, InboundAdmission, LimitKind, NegotiationPhase, Output, ReceivingConfig, S2sStream,
@@ -25,14 +24,14 @@ const AUTH_EMPTY: &[u8] =
 const MESSAGE: &[u8] =
     b"<message from='alice@home-a.test/phone' to='bob@home-b.test'><body>hi</body></message>";
 
-fn domain(value: &str) -> DomainPart {
-    DomainPart::from_str(value).expect("valid domain")
+fn domain(value: &str) -> CanonicalDomain {
+    CanonicalDomain::parse_exact(value).expect("valid domain")
 }
 
 struct Admission;
 
 impl InboundAdmission for Admission {
-    fn destination(&self, destination: &DomainPart) -> DestinationStatus {
+    fn destination(&self, destination: &CanonicalDomain) -> DestinationStatus {
         if destination.as_str() == "home-b.test" {
             DestinationStatus::Served
         } else {
@@ -40,7 +39,7 @@ impl InboundAdmission for Admission {
         }
     }
 
-    fn admits(&self, source: &DomainPart, _destination: &DomainPart) -> bool {
+    fn admits(&self, source: &CanonicalDomain, _destination: &CanonicalDomain) -> bool {
         source.as_str() == "home-a.test"
     }
 }
@@ -186,6 +185,27 @@ fn the_mode_survives_the_tls_restart_and_ends_after_sasl() {
     assert!(matches!(decoder.next_item(), Ok(Some(Inbound::Header(_)))));
     decoder.push(MESSAGE).expect("push");
     assert!(matches!(decoder.next_item(), Ok(Some(Inbound::Element(_)))));
+}
+
+#[test]
+fn bytes_that_are_not_xml_close_without_any_xml() {
+    // A TLS ClientHello record sent to the STARTTLS port.
+    let mut decoder = StreamDecoder::pre_authentication(CodecLimits::PILOT);
+    decoder.push(b"\x16\x03\x01\x02\x00\x01").expect("push");
+    assert_eq!(decoder.next_item(), Err(DecodeError::NotXml));
+
+    let mut stream = receiver();
+    let out = stream.receive(b"\x16\x03\x01\x02\x00\x01");
+    assert_eq!(close_reason(&out), Some(CloseReason::NotXml));
+    assert!(!out
+        .iter()
+        .any(|output| matches!(output, Output::Transmit(_))));
+
+    // Leading whitespace and a byte order mark are still XML.
+    let mut decoder = StreamDecoder::pre_authentication(CodecLimits::PILOT);
+    decoder.push(b"\n ").expect("push");
+    decoder.push(HEADER).expect("push");
+    assert!(matches!(decoder.next_item(), Ok(Some(Inbound::Header(_)))));
 }
 
 #[test]
