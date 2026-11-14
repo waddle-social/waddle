@@ -58,15 +58,50 @@ A domain has exactly one canonical form, the `CanonicalDomain` type:
    §3.2). `example.org.` is `example.org`; `example.org..` is invalid.
 2. A DNS name is processed under IDNA2008 through UTS #46 non-transitional
    processing with STD3 ASCII rules (letters, digits, hyphens), the IDNA2008
-   hyphen restrictions (`CheckHyphens`) and DNS length limits. The final
-   label must not be all digits, so no DNS name can be another spelling of an
-   IPv4 address.
+   hyphen restrictions (`CheckHyphens`) and DNS length limits.
 3. **The canonical representation is the lowercase A-label form**, for example
    `xn--bcher-kva.example`. A U-label spelling and its A-label spelling are
    the same canonical domain.
 4. An IPv4 address keeps its dotted-quad text and an IPv6 address its
-   bracketed RFC 5952 text. IP literals are valid domainparts for local
-   addresses; destination classification and D3 refuse them as remote peers.
+   bracketed RFC 5952 text.
+5. Every canonical domain has exactly one kind (`DomainKind`, below). No name
+   of kind `Dns` ends in a number, so no DNS name is another spelling of an
+   IPv4 address.
+
+### Domain classification
+
+ADR-0020 D3 refuses, for server-to-server use, both IP-address forms of RFC
+7622 §3.2, every other name a resolver or address parser reads as an IPv4
+address, and unqualified single-label names. The profile performs that
+classification once, as `CanonicalDomain::kind`, a function of the canonical
+text alone:
+
+| `DomainKind` | Rule, in order | Examples | Names a peer |
+| --- | --- | --- | --- |
+| `Ipv6` | bracketed RFC 3986 `IP-literal` | `[::1]` | no |
+| `Ipv4` | dotted-quad `IPv4address` (no leading zeros) | `127.0.0.1` | no |
+| `NumericIpv4Form` | the final label is a number: non-empty and all decimal digits, or `0x` followed by zero or more hexadecimal digits | `2130706433`, `0x7f.1`, `127.1`, `0x7f000001`, `0177.0.0.1`, `01.2.3.4`, `1.2.3.0x4`, `example.123` | no |
+| `SingleLabel` | one label | `localhost`, `intranet` | no |
+| `Dns` | anything else: two or more labels, the final one not a number | `example.org`, `0x7f.example`, `example.0xg` | yes |
+
+The `NumericIpv4Form` rule is the WHATWG URL Standard's "ends in a number"
+check. It covers every form `inet_aton` and URL parsers accept (decimal,
+octal with a leading zero, hexadecimal, and the one-, two- and three-part
+abbreviations) and also refuses names such as `example.123` that a URL
+parser rejects outright. It is applied to the canonical text, which is
+lowercase; an input written `0X7F.1` is refused like any other non-canonical
+spelling, while operator configuration prepared with `CanonicalDomain::prepare`
+maps it to `0x7f.1` and classifies it. A numeric form keeps its own text and
+is never rewritten to the dotted quad a resolver would read.
+
+These domainparts are syntactically valid, so they parse: a client stanza
+addressed to `bob@0x7f.1` is not refused with `<jid-malformed/>`. Destination
+classification (`destination.rs`) maps each refused kind to an
+`InvalidDestination` and answers a request with `<remote-server-not-found/>`,
+as D3 requires. `DomainKind::names_federation_peer` is the predicate that
+admission (W4c), discovery (W4d) and S2S routing (W5a) use; none of them
+re-derive the classification from text. Configured served domains may be of
+any kind (`localhost` is the default account domain).
 
 Why A-labels rather than U-labels:
 
@@ -91,25 +126,33 @@ them correctly. Whether S2S output presents U-labels to peers that do not is
 decided in the S2S routing design (W5a); `CanonicalDomain::to_unicode` gives
 the presentation form.
 
-Two constructors express where an input comes from:
+Three constructors express where an input comes from:
 
 - `CanonicalDomain::parse_exact` is for protocol input. Each label must be
   either its canonical A-label or its canonical U-label, with at most one
   trailing dot. Any other spelling (upper case, fullwidth characters,
   `。` separators, an uppercase `XN--` prefix, non-canonical IP text) is
   refused, never mapped.
-- `CanonicalDomain::prepare` is for operator configuration. It applies the
-  UTS #46 mappings (case, width) that RFC 7622 §3.2.2 allows during
-  enforcement. An entry that cannot be prepared is an error, never skipped
-  (D1: "an entry that cannot be prepared fails configuration load").
+- `CanonicalDomain::parse_canonical` is for text that must already be
+  canonical: the deployment's own configured domains and stored identities.
+- `CanonicalDomain::prepare` is for operator lists such as D1's admission
+  lists. It applies the UTS #46 mappings (case, width) that RFC 7622 §3.2.2
+  allows during enforcement. An entry that cannot be prepared is an error,
+  never skipped (D1: "an entry that cannot be prepared fails configuration
+  load").
 
 `CanonicalDomain::is_within` compares label by label, as D1's denylist needs:
-`muc.example.net` is within `example.net`, `badexample.net` is not.
+`muc.example.net` is within `example.net`, `badexample.net` is not. Only
+`Dns` and `SingleLabel` names have subdomains; an IP literal or numeric form
+is within only itself.
 
 This deployment's own account domain and service domains
-(`WADDLE_XMPP_DOMAIN`, `WADDLE_MUC_DOMAIN`, the domain of `WADDLE_SPACES_JID`)
-must already be written canonically; startup refuses them otherwise, because
-every bound account JID and served address is built from that text.
+(`WADDLE_XMPP_DOMAIN`, `WADDLE_MUC_DOMAIN`, `WADDLE_SPACES_JID`) must already
+be written canonically. The raw configured text is checked, before any
+parser could fold it: `WADDLE_MUC_DOMAIN` and `WADDLE_SPACES_JID` when the
+configuration is loaded, and `WADDLE_XMPP_DOMAIN` with the derived service
+domains at startup. Every bound account JID and served address is built from
+that text.
 
 ## Decision 2: localparts
 
@@ -155,8 +198,15 @@ rather than refusing it, but Resourceprep's preparation is not RFC 7622's:
 OpaqueString keeps `ｗｅｂ` and `web` apart, so binding `web` would bind a
 different resource. A bind request is therefore answered `<bad-request/>`,
 which that section permits. Resourceparts identify connections and
-occupants, never accounts or grant subjects. A bind request's surrounding XML whitespace is trimmed as before,
-and a server-generated resource (`ws-<uuid>`) is always canonical.
+occupants, never accounts or grant subjects. Surrounding XML whitespace in a
+bind request's `<resource/>` is trimmed before the check, and a
+server-generated resource (`ws-<uuid>`) is always canonical.
+
+The same rule applies to the resourcepart of every stanza address, which
+includes MUC occupant nicknames (`room@service/nick`): a nickname or resource
+that Resourceprep would change (fullwidth or compatibility characters,
+ligatures, code points mapped to nothing) refuses the whole stanza with
+`<jid-malformed/>`.
 
 ## Decision 4: enforcement points
 
@@ -166,25 +216,29 @@ fold.
 
 | Boundary | Input | Rule | Refusal |
 | --- | --- | --- | --- |
-| C2S frame parser (`waddle-xmpp` `protocol/frame.rs`) | stanza `to` and `from`; every unprefixed `jid` attribute in the payload | `parse_jid`; rewritten in canonical form (trailing dot removed, A-label domain) before `xmpp_parsers` sees them | `ParseError::IdentityProfile`; the server answers `<jid-malformed/>` (modify) to an IQ get/set, a message or a presence, with the stanza `id` and no addresses echoed |
+| C2S frame parser (`waddle-xmpp` `protocol/frame.rs`, `identity/stanza.rs`) | stanza `to` and `from`; every unprefixed `jid` attribute in the payload; `to` and `from` of `muc#user` `<invite/>` and `<decline/>`; each `<value/>` of a data-form field typed `jid-single` or `jid-multi` | `parse_jid`; rewritten in canonical form (trailing dot removed, A-label domain) before `xmpp_parsers` sees them | `ParseError::IdentityProfile`; the server answers `<jid-malformed/>` (modify) to an IQ get/set, a message or a presence, with the stanza `id` and no addresses echoed. The refused stanza counts toward the XEP-0198 handled count |
 | RFC 7395 `<open/>` | `from` | canonical bare account JID | `invalid-from` stream error |
 | SASL OAUTHBEARER (`waddle-xmpp` `auth/mod.rs`) | authzid | canonical bare account JID | `invalid-authzid` |
 | SASL SCRAM | username | the exact account name; credentials are looked up under exactly that name | `not-authorized`, as for an unknown user |
 | Resource binding | requested resourcepart | `parse_resourcepart` | `<bad-request/>` (RFC 6120 §7.7.2.1) |
-| Native provisioning (`NativeUserStore::register`: configured fixed accounts and the XEP-0077 registration hook) | username, domain | account profile; canonical domain | registration error (`not-acceptable` over XEP-0077); a fixed account outside the profile fails startup |
-| OIDC provisioning (`auth/identity.rs`) | derived name | the slug generator only emits account-profile names; each candidate is checked | provisioning error |
+| Native provisioning (`NativeUserStore::register` and `validate_new_account`: configured fixed accounts, validated before the reset that precedes seeding; the XEP-0077 registration hook is compiled only into test builds) | username, domain | account profile; canonical domain | registration error (`not-acceptable` over XEP-0077 in test builds); a fixed account outside the profile fails startup |
+| OIDC provisioning (`auth/identity.rs`) | derived name | the slug generator transliterates Latin letters and only emits account-profile names; a source with nothing usable falls through to the next (custom claim, email local part, subject digest); each candidate is checked | provisioning error |
 | Directory lookup (`auth/directory.rs`) | localpart | `exact_account_jid`; a non-canonical spelling names no account | not found |
-| XEP-0055 search | query | a canonical account address matches by localpart; anything else stays free text and is never parsed into an address | — |
+| XEP-0055 search | query | a canonical account address matches by localpart; anything else stays free text and is never parsed into an address. Rows are merged only when their stored names are identical, so a legacy `Bob` row never hides the canonical `bob` | — |
+| Mediated invitations and declines (`handlers/message/muc_invite.rs`, `muc_direct.rs`) | invitee `to`, declined inviter `to` | `parse_bare_jid` / `parse_jid` exactly; a non-canonical value names no invitee or inviter | the frame parser has already answered `<jid-malformed/>` |
+| Ad-hoc admin commands (`admin/channels.rs`, `admin/spaces.rs`, `admin/push.rs`) | `member_jids`, `member_jid`, `occupant_jid`, `channel_jid`, `room_jid`, `space_jid`, `owner`, including fields submitted without a `type` | `DataForm::bare_jid` / `bare_jids` (`parse_bare_jid` after trimming whitespace) or `parse_bare_jid` | `<bad-request/>`, as for any invalid field value |
+| `WADDLE_SERVER_OWNER_LOCALPARTS` (`server/bootstrap_membership.rs`) | entries | each a canonical localpart exactly as written; owner checks compare the stored localpart exactly | startup fails |
 | Authorization codec (`permissions/authz_id.rs`) | user subjects | `AuthzUserJid` additionally requires `CanonicalBareJid` | `UserJidNotCanonical` |
 | Destination classifier (`destination.rs`) | parsed `to` | `canonical_address` = `canonical_jid`; served domains are canonical | — |
-| Startup (`server/http.rs`) | configured domains | written canonically | startup fails |
+| Configuration and startup (`server/config.rs`, `server/http.rs`) | `WADDLE_MUC_DOMAIN`, `WADDLE_SPACES_JID` as configured; `WADDLE_XMPP_DOMAIN` and derived service domains | written canonically (`parse_canonical`, `CanonicalBareJid::parse_exact`) | configuration load or startup fails |
 
 Payload `jid` attributes cover roster, MUC admin, PubSub affiliation and
-subscription items, bookmarks, blocking lists and disco items, which carry
-the identities that grants and contact lists are keyed by. Other nested
-identities (data-form `jid-single` and `jid-multi` values, addresses inside
-forwarded messages, XEP-0033 address lists without a `jid` attribute) are not
-yet checked; see open items.
+subscription items, bookmarks, blocking lists, disco items and XEP-0033
+`<address jid/>` entries, which carry the identities that grants and contact
+lists are keyed by. The nested identities the frame parser does not check
+are listed under open items; each is either never used as an identity by a
+handler or, for data forms, held to the profile by the handler that reads
+it.
 
 ## Decision 5: canonical bare-JID account binding
 
@@ -193,8 +247,9 @@ identity, never to a folded spelling of it:
 
 - **OIDC.** The stored `users.jid` must already be a canonical bare JID, and
   the stored `xmpp_localpart` at the configured domain must name exactly that
-  JID (`localpart_to_jid` no longer lowercases or slugs a stored name). The
-  authzid and stream `from`, both canonical by the rules above, must equal it.
+  JID (`localpart_to_jid` takes a stored name exactly; it neither lowercases
+  nor slugs it). The authzid and stream `from`, both canonical by the rules
+  above, must equal it.
 - **Native.** SCRAM credentials are found under exactly the presented
   username at the canonical domain, which equals the row's `jid_key`, and the
   bound JID is that same address.
@@ -209,11 +264,11 @@ consequences:
 
 | Finding | Meaning | Consequence |
 | --- | --- | --- |
-| `non_canonical_spelling` | the stored name (or an OIDC account's stored JID) is not the canonical address of the stored name | an OIDC account can no longer sign in over XMPP; a native account signs in only under the canonical spelling its `jid_key` records |
+| `non_canonical_spelling` | the stored name (or an OIDC account's stored JID) is not the canonical address of the stored name | an OIDC account cannot sign in over XMPP; a native account signs in only under the canonical spelling its `jid_key` records |
 | `outside_account_profile` | canonical, but not in the ASCII account profile (for example `josé`) | keeps signing in; no new account can be provisioned with such a name |
 | `missing_key` | no lookup key | missed by lookups and sign-in until the periodic backfill keys it |
 | `key_mismatch` | the recorded key is not the stored name's key | lookups resolve the row under another name |
-| `folded_collision` | two or more accounts' stored names fold to one address, across both stores | at most one can hold the address |
+| `folded_collision` | two or more accounts' stored names fold to one address, across both stores; rows with identical stored names (an OIDC row and the native account whose SCRAM sign-in wrote it) are one account | at most one can hold the address |
 | `foreign_domain` | a native row for another domain | not an account of this deployment |
 
 Accounts outside the account profile are kept rather than locked out: their
@@ -232,11 +287,17 @@ or migrating accounts is not part of this profile.
   `CanonicalDomain::prepare`, and a failure fails configuration load. Stream
   `from`/`to` domains are accepted with `CanonicalDomain::parse_exact`.
   Allowlist, dialback and trusted-home entries match with equality; denylist
-  entries with `is_within`. IP-literal domains are refused by kind.
+  entries with `is_within`. A list entry or stream domain whose
+  `kind().names_federation_peer()` is false (IP literal, numeric IPv4 form,
+  single label) is refused by kind.
+- **W4d discovery.** A domain whose kind does not name a peer is never
+  resolved or dialled; the check uses `CanonicalDomain::kind`, not the text.
 - **W5a S2S routing.** Inbound stanzas go through `enforce_stanza_addresses`
   (or the same `parse_jid` rule) on the decoded element before typed parsing,
   and remote principals are `CanonicalBareJid` values. The stream's
   authenticated domain is compared with the stanza's canonical `from` domain.
+  Outbound destinations are refused through the same `InvalidDestination`
+  classification the C2S classifier uses.
 - **W5b/W5c grant authority.** Grant subjects are `CanonicalBareJid` with a
   localpart (the codec's `AuthzUserJid` enforces this); SQL grant keys store
   the canonical text.
@@ -246,8 +307,17 @@ or migrating accounts is not part of this profile.
 - Full RFC 7622 conformance needs an agreed PRECIS implementation and a
   versioned migration of stored names; this profile neither claims nor blocks
   it. Validity disagreements with strict peers on non-ASCII names remain.
-- Nested identities other than `jid` attributes are not checked at C2S
-  parsing.
+- Nested identities the C2S frame parser does not check, none of which a
+  handler uses as an identity today:
+  - `to` and `from` of messages inside XEP-0297 `<forwarded/>` (carbons,
+    MAM results and client forwards);
+  - XEP-0033 `<address/>` entries that carry a `uri` instead of a `jid`;
+  - XEP-0402 bookmark item ids, which are room JIDs;
+  - XEP-0166 Jingle `initiator` and `responder` attributes;
+  - data-form fields submitted without a `type` attribute, for example
+    XEP-0313 `with`. Ad-hoc admin commands parse theirs exactly (see the
+    table); any new handler that reads an untyped field as an address must
+    use `DataForm::bare_jid` or `parse_jid`.
 - UTS #46 mapping follows the Unicode version of the linked `idna` release;
   changing `idna`, `stringprep` or `jid` changes the accepted set and needs a
   profile version change.
@@ -257,6 +327,10 @@ or migrating accounts is not part of this profile.
 - The startup report reads the two stores one after the other, not in one
   snapshot, and reads every row; the offline audit is the snapshot-consistent
   evidence tool.
+- Provisioning checks for an existing account per store: native
+  registration consults `native_users`, OIDC provisioning `users`. A native
+  name and an OIDC name that fold to one address can still both be
+  provisioned; the startup report lists them as `folded_collision`.
 
 ## Verification
 
@@ -264,18 +338,25 @@ Written with this slice and run in the verification phase:
 
 - `crates/waddle-xmpp/tests/identity_profile.rs`: trailing dot and
   U-label/A-label equivalence, IDNA2008 versus Nameprep, refused domain
-  spellings, IP literals, label-wise coverage, localpart aliasing refusals
-  (case, width, compatibility forms, `ß`, final sigma, ignorables),
-  resourceparts, the account profile, frame-parser canonicalization and
-  refusal including payload `jid` attributes and character references, and
-  the OAUTHBEARER authzid.
+  spellings, IP literals, the domain classification with the ADR-0020 D3
+  examples, label-wise coverage, localpart aliasing refusals (case, width,
+  compatibility forms, `ß`, final sigma, ignorables), resourceparts, the
+  account profile, frame-parser canonicalization and refusal including
+  payload `jid` attributes, character references, mediated invitations and
+  typed data-form fields, `DataForm::bare_jid`, and the OAUTHBEARER authzid.
 - `crates/waddle-server/tests/identity_profile_accounts.rs`: canonical
-  configured domains, account-profile provisioning, exact SCRAM and directory
-  lookup against legacy rows, and the reconciliation report.
+  configured domains, account-profile provisioning, fixed-account
+  validation, OIDC name transliteration, admin command addresses, exact SCRAM
+  and directory lookup against legacy rows, and the reconciliation report.
 - `crates/waddle-server/tests/identity_profile_ws.rs`: SCRAM login with
   non-canonical usernames, bind with a non-canonical resourcepart,
-  `<jid-malformed/>` replies, trailing-dot canonicalization and directory
-  search, through the production WebSocket server.
+  `<jid-malformed/>` replies including invitations and typed command fields,
+  `<remote-server-not-found/>` for refused peer domain forms, trailing-dot
+  canonicalization and directory search with a legacy twin, through the
+  production WebSocket server.
+- `crates/waddle-server/tests/xep0198_refused_stanza_ack_ws.rs`: stanzas
+  refused at parsing count toward the XEP-0198 handled count; non-stanza
+  input does not.
 - `crates/waddle-server/tests/destination_classifier.rs` (U-label and A-label
-  classification) and `crates/waddle-server/tests/authz_id_codec.rs`
-  (canonical user subjects).
+  classification, numeric IPv4 forms, unpreparable domains) and
+  `crates/waddle-server/tests/authz_id_codec.rs` (canonical user subjects).
