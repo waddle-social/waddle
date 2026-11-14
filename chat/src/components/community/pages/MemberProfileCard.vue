@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { MessageCircle, X } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, iconbtn } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { pageClasses as page } from "@/components/community/pages/page-classes";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { formatPepKeyword } from "@/lib/status-publication-ui";
 import { isBotJid } from "@/lib/avatars/author-jid";
@@ -68,125 +71,123 @@ const safeWebsite = computed(() => {
 
 const inHuddle = computed(() => props.member.status === "in-huddle" || props.member.status === "speaking");
 
-const ringClass = computed(() => {
-  if (props.member.status === "speaking") return "huddle-ring huddle-ring--speaking";
-  if (inHuddle.value || props.member.inCall) return "huddle-ring";
-  return "";
-});
+// ProfileCard board: centred identity, one Message action, then a
+// definition list with hairline separators.
+const root = css({ display: "flex", flexDirection: "column", gap: "3.5", padding: "16px 18px", color: "fg", minWidth: 0 });
+const topRow = css({ display: "flex", alignItems: "center", "& > :first-child": { flex: 1 } });
+const identity = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "1", textAlign: "center", minWidth: 0 });
+const nameClass = css({ mt: "2", font: "700 20px/1.25 {fonts.display}", overflowWrap: "anywhere" });
+const jidClass = css({ font: "400 13px/1.4 {fonts.mono}", color: "fg.muted", overflowWrap: "anywhere" });
+const metaClass = css({ font: "400 13px/1.4 {fonts.body}", color: "fg.muted", _firstLetter: { textTransform: "uppercase" } });
+const liveText = css({ color: "live.text" });
+const messageBtn = cx(btn({ variant: "primary" }), css({ justifyContent: "center", width: "100%" }));
+const list = css({ display: "flex", flexDirection: "column", margin: 0 });
+const field = css({ display: "flex", flexDirection: "column", gap: "1", py: "3", borderTop: "1px solid {colors.border.soft}" });
+const dd = css({ margin: 0, font: "400 14px/1.5 {fonts.body}", color: "fg", overflowWrap: "anywhere" });
+const muted = css({ color: "fg.muted" });
+const preLine = css({ whiteSpace: "pre-line" });
+const link = css({ color: "action.text", textDecoration: "underline", textUnderlineOffset: "2px", wordBreak: "break-all" });
+const skeleton = css({ display: "flex", flexDirection: "column", gap: "3" });
+const skeletonField = css({ display: "flex", flexDirection: "column", gap: "1.5", py: "3", borderTop: "1px solid {colors.border.soft}" });
+const closeBtn = iconbtn();
 </script>
 
 <template>
-  <section class="member-profile" :aria-label="`${member.name} profile`">
-    <div class="flex items-center justify-between">
-      <span class="community-kicker">Profile</span>
-      <button
-        type="button"
-        class="community-page__mobile-nav"
-        aria-label="Close profile"
-        @click="emit('close')"
-      >
-        <X class="h-4 w-4" aria-hidden="true" />
+  <section :class="root" :aria-label="`${member.name} profile`">
+    <div :class="topRow">
+      <span :class="page.kicker">Profile</span>
+      <button type="button" :class="closeBtn" aria-label="Close profile" @click="emit('close')">
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <div class="member-profile__header">
-      <span :class="ringClass">
-        <UserAvatar
-          :name="member.name"
-          :jid="member.jid"
-          :presence="member.presence"
-          :in-call="member.inCall"
-          size="lg"
-        />
-      </span>
-      <div>
-        <div class="member-profile__name">{{ member.name }}</div>
-        <div class="type-caption text-muted-foreground">{{ member.jid }}</div>
+    <div :class="identity">
+      <UserAvatar
+        :name="member.name"
+        :jid="member.jid"
+        :presence="member.presence"
+        :in-call="member.inCall"
+        :huddle="inHuddle || member.inCall"
+        :speaking="member.status === 'speaking'"
+        size="xl"
+      />
+      <div :class="nameClass">{{ member.name }}</div>
+      <div :class="jidClass">{{ member.jid }}</div>
+      <div v-if="member.affiliation || member.statusText" :class="[metaClass, inHuddle && liveText]">
+        <template v-if="member.affiliation">{{ member.affiliation }}</template>
+        <template v-if="member.affiliation && member.statusText"> · </template>
+        <template v-if="member.statusText">{{ member.statusText }}</template>
       </div>
-      <div class="flex flex-wrap items-center justify-center gap-2">
-        <span v-if="member.affiliation" class="community-kicker">{{ member.affiliation }}</span>
-        <span
-          v-if="member.statusText"
-          class="type-caption"
-          :class="inHuddle ? 'text-live-text' : 'text-muted-foreground'"
-        >{{ member.statusText }}</span>
-      </div>
-    </div>
-
-    <div v-if="inHuddle" class="member-profile__banner">
-      <span class="community-kicker community-kicker--live">
-        <span class="community-ember" aria-hidden="true" />
+      <span v-if="inHuddle" :class="page.liveKicker">
+        <span :class="page.ember" aria-hidden="true" />
         {{ member.status === "speaking" ? "Speaking now" : "In a huddle" }}
       </span>
     </div>
 
-    <div v-if="loading" class="member-profile" aria-busy="true" aria-label="Loading profile">
-      <div class="member-profile__section">
+    <button
+      v-if="!isSelf && !isBotJid(member.jid)"
+      type="button"
+      :class="messageBtn"
+      :aria-label="`Message ${member.name}`"
+      @click="emit('message', member.jid)"
+    >
+      <MessageCircle aria-hidden="true" />
+      Message
+    </button>
+
+    <div v-if="loading" :class="skeleton" aria-busy="true" aria-label="Loading profile">
+      <div :class="skeletonField">
         <Skeleton width="4rem" height="0.55rem" />
         <Skeleton width="65%" height="0.85rem" />
       </div>
-      <div class="member-profile__section">
+      <div :class="skeletonField">
         <Skeleton width="5rem" height="0.55rem" />
         <Skeleton width="50%" height="0.85rem" />
       </div>
     </div>
 
-    <template v-if="!loading">
-      <section v-if="fullNameToShow" class="member-profile__section">
-        <span class="community-kicker">Name</span>
-        <span>{{ fullNameToShow }}</span>
-      </section>
-      <section v-if="vcard?.pronouns" class="member-profile__section">
-        <span class="community-kicker">Pronouns</span>
-        <span>{{ vcard.pronouns }}</span>
-      </section>
-      <section v-if="vcard?.note" class="member-profile__section">
-        <span class="community-kicker">Bio</span>
-        <span class="whitespace-pre-line">{{ vcard.note }}</span>
-      </section>
-      <section v-if="safeWebsite" class="member-profile__section">
-        <span class="community-kicker">Website</span>
-        <a
-          :href="safeWebsite"
-          target="_blank"
-          rel="noreferrer noopener"
-          class="break-all underline underline-offset-2 hover:text-primary"
-        >{{ safeWebsite }}</a>
-      </section>
-      <section v-if="pepProfile?.mood" class="member-profile__section">
-        <span class="community-kicker">Mood</span>
-        <span>
+    <dl v-else :class="list">
+      <div v-if="fullNameToShow" :class="field">
+        <dt :class="page.kicker">Name</dt>
+        <dd :class="dd">{{ fullNameToShow }}</dd>
+      </div>
+      <div v-if="vcard?.pronouns" :class="field">
+        <dt :class="page.kicker">Pronouns</dt>
+        <dd :class="dd">{{ vcard.pronouns }}</dd>
+      </div>
+      <div v-if="vcard?.note" :class="field">
+        <dt :class="page.kicker">Bio</dt>
+        <dd :class="[dd, preLine]">{{ vcard.note }}</dd>
+      </div>
+      <div v-if="safeWebsite" :class="field">
+        <dt :class="page.kicker">Website</dt>
+        <dd :class="dd">
+          <a :href="safeWebsite" target="_blank" rel="noreferrer noopener" :class="link">{{ safeWebsite }}</a>
+        </dd>
+      </div>
+      <div v-if="pepProfile?.mood" :class="field">
+        <dt :class="page.kicker">Mood</dt>
+        <dd :class="dd">
           {{ formatPepKeyword(pepProfile.mood.kind) }}
-          <span v-if="pepProfile.mood.text" class="text-muted-foreground"> &mdash; {{ pepProfile.mood.text }}</span>
-        </span>
-      </section>
-      <section v-if="pepProfile?.activity" class="member-profile__section">
-        <span class="community-kicker">Activity</span>
-        <span>
+          <span v-if="pepProfile.mood.text" :class="muted"> &mdash; {{ pepProfile.mood.text }}</span>
+        </dd>
+      </div>
+      <div v-if="pepProfile?.activity" :class="field">
+        <dt :class="page.kicker">Activity</dt>
+        <dd :class="dd">
           {{ formatPepKeyword(pepProfile.activity.general) }}
           <span v-if="pepProfile.activity.specific"> &middot; {{ formatPepKeyword(pepProfile.activity.specific) }}</span>
-          <span v-if="pepProfile.activity.text" class="text-muted-foreground"> &mdash; {{ pepProfile.activity.text }}</span>
-        </span>
-      </section>
-      <section v-if="pepProfile?.tune" class="member-profile__section">
-        <span class="community-kicker">Listening to</span>
-        <span>
+          <span v-if="pepProfile.activity.text" :class="muted"> &mdash; {{ pepProfile.activity.text }}</span>
+        </dd>
+      </div>
+      <div v-if="pepProfile?.tune" :class="field">
+        <dt :class="page.kicker">Listening to</dt>
+        <dd :class="dd">
           <template v-if="pepProfile.tune.title">{{ pepProfile.tune.title }}</template>
           <template v-if="pepProfile.tune.artist"> &mdash; {{ pepProfile.tune.artist }}</template>
-          <span v-if="pepProfile.tune.source" class="text-muted-foreground"> ({{ pepProfile.tune.source }})</span>
-        </span>
-      </section>
-    </template>
-
-    <button
-      v-if="!isSelf && !isBotJid(member.jid)"
-      type="button"
-      class="community-pill community-pill--primary justify-center"
-      :aria-label="`Message ${member.name}`"
-      @click="emit('message', member.jid)"
-    >
-      <MessageCircle class="h-4 w-4" aria-hidden="true" />
-      Message
-    </button>
+          <span v-if="pepProfile.tune.source" :class="muted"> ({{ pepProfile.tune.source }})</span>
+        </dd>
+      </div>
+    </dl>
   </section>
 </template>
