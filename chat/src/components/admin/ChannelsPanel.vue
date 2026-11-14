@@ -2,7 +2,10 @@
 // Admin V2 — Channels panel. Mirrors `SpacesPanel.vue` plus a row of
 // space-filter chips above the search input.
 import { computed, onMounted, ref, watch } from "vue";
-import { Plus, Search } from "lucide-vue-next";
+import { Plus } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn } from "styled-system/recipes";
+import { adminClasses as a } from "@/components/admin/admin-classes";
 import type { BrowserXmppClient } from "@/lib/xmpp";
 import type {
   WasmAdminChannelListEntry,
@@ -199,6 +202,19 @@ onMounted(() => {
   void fetchFirstPage("", null);
 });
 
+const panelClass = css({ display: "flex", flexDirection: "column", gap: "4" });
+const newClass = btn({ variant: "primary" });
+const filtersClass = css({ display: "flex", gap: "2", maxWidth: "640px", _narrow: { flexDirection: "column" } });
+const spaceSelectClass = cx(a.input, css({ md: { width: "220px", flex: "none" } }));
+
+/** The space filter as a select value: the space node, or "" for all. */
+const spaceFilterNode = computed({
+  get: () => spaceFilter.value?.space_node ?? "",
+  set: (node: string) => {
+    spaceFilter.value = spaces.value.find((space) => space.space_node === node) ?? null;
+  },
+});
+
 const hasMore = computed(() => cursor.value !== null);
 const showEmptyState = computed(
   () => !isLoading.value && entries.value.length === 0 && !errorMessage.value,
@@ -213,116 +229,69 @@ const dialogSpaces = computed(() =>
 </script>
 
 <template>
-  <section class="flex flex-col gap-4 p-4 max-w-4xl mx-auto w-full" aria-labelledby="channels-panel-heading">
-    <header class="flex flex-col gap-3">
-      <div class="flex items-center justify-between gap-3">
-        <div class="flex flex-col gap-1">
-          <h2 id="channels-panel-heading" class="type-pane-title">Channels</h2>
-          <p class="type-caption text-muted-foreground max-w-prose">
-            Stored channels and locally active rooms. Click a row to edit
-            config, manage affiliations, or kick occupants. Counts reflect available local room snapshots.
-          </p>
-        </div>
-        <button
-          type="button"
-          class="chat-action-button chat-action-button--primary type-action"
-          aria-label="Create channel"
-          @click="showCreate = true"
-        >
-          <Plus class="w-4 h-4" />
-          <span>New channel</span>
-        </button>
-      </div>
-
-      <!-- Space filter chips -->
-      <div v-if="spaces.length > 0" class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by space">
-        <button
-          type="button"
-          class="rounded-full border px-2.5 py-0.5 type-caption transition-colors"
-          :class="spaceFilter === null ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-card hover:bg-muted'"
-          @click="spaceFilter = null"
-        >
-          All
-        </button>
-        <button
-          v-for="s in spaces"
-          :key="s.space_node"
-          type="button"
-          class="rounded-full border px-2.5 py-0.5 type-caption transition-colors"
-          :class="spaceFilter?.space_node === s.space_node ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-card hover:bg-muted'"
-          @click="spaceFilter = s"
-        >
-          {{ s.name }}
-        </button>
-      </div>
-
-      <div class="flex items-center gap-2 chat-field-control max-w-md">
-        <Search class="w-4 h-4 text-muted-foreground" aria-hidden="true" />
-        <input
-          v-model="prefix"
-          type="search"
-          autocomplete="off"
-          placeholder="Search channels"
-          aria-label="Filter channels by prefix"
-          class="flex-1 bg-transparent border-0 outline-none type-field"
-        />
-      </div>
-    </header>
-
-    <div
-      v-if="errorMessage"
-      class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text"
-      role="alert"
-    >
-      {{ errorMessage }}
+  <section :class="panelClass" aria-label="Channels">
+    <Teleport defer to="#admin-header-actions">
+      <button type="button" :class="newClass" aria-label="Create channel" @click="showCreate = true">
+        <Plus aria-hidden="true" />
+        <span>New channel</span>
+      </button>
+    </Teleport>
+    <div :class="filtersClass">
+      <label :class="a.srOnly" for="channels-prefix">Search channels</label>
+      <input
+        id="channels-prefix"
+        v-model="prefix"
+        :class="a.input"
+        type="search"
+        autocomplete="off"
+        placeholder="Search channels"
+        aria-label="Filter channels by prefix"
+      />
+      <select v-if="spaces.length > 0" v-model="spaceFilterNode" :class="spaceSelectClass" aria-label="Filter by space">
+        <option value="">All spaces</option>
+        <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
+      </select>
     </div>
 
-    <div v-if="isLoading && entries.length === 0" class="py-12 text-center type-caption text-muted-foreground" role="status">
+    <div v-if="errorMessage" :class="a.alert" role="alert">{{ errorMessage }}</div>
+
+    <div v-if="isLoading && entries.length === 0" :class="a.status" role="status">
       Loading channels…
     </div>
 
-    <ul v-else-if="entries.length > 0" class="flex flex-col gap-2" role="list">
+    <ul v-else-if="entries.length > 0" :class="a.list" role="list">
       <li v-for="entry in entries" :key="entry.channel_jid">
-        <button
-          type="button"
-          class="w-full flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left hover:bg-muted transition-colors"
-          :aria-label="`Open ${entry.name}`"
-          @click="openDetail(entry)"
-        >
-          <div class="flex flex-col gap-0.5 min-w-0 flex-1">
-            <div class="flex items-center gap-2 min-w-0">
-              <span class="type-control truncate">{{ entry.name }}</span>
-              <span class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">{{ channelTypeLabel(entry.channel_type) }}</span>
-              <span v-if="!entry.is_public" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Hidden</span>
-              <span v-if="entry.members_only" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Members-only</span>
-            </div>
-            <span class="type-caption text-muted-foreground truncate font-mono">{{ entry.channel_jid }}</span>
-            <span v-if="entry.topic" class="type-caption text-muted-foreground truncate">{{ entry.topic }}</span>
+        <button type="button" :class="a.row" :aria-label="`Open ${entry.name}`" @click="openDetail(entry)">
+          <div :class="a.rowMain">
+            <span :class="a.rowTitle">
+              <b :class="a.truncate">{{ entry.name }}</b>
+              <span :class="a.tag">{{ channelTypeLabel(entry.channel_type) }}</span>
+              <span v-if="!entry.is_public" :class="a.tag">Hidden</span>
+              <span v-if="entry.members_only" :class="a.tag">Members-only</span>
+            </span>
+            <span :class="a.jid">{{ entry.channel_jid }}</span>
+            <span v-if="entry.topic" :class="a.sub">{{ entry.topic }}</span>
           </div>
-          <div class="flex items-center gap-2 flex-shrink-0">
-            <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.occupant_count }} local</span>
-            <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.member_count }} mem</span>
-          </div>
+          <span :class="a.meta">{{ entry.occupant_count }} local · {{ entry.member_count }} {{ entry.member_count === 1 ? "member" : "members" }}</span>
         </button>
       </li>
     </ul>
 
-    <div v-else-if="showEmptyState" class="py-12 text-center type-caption text-muted-foreground" role="status">
+    <div v-else-if="showEmptyState" :class="a.status" role="status">
       <p v-if="prefix">No channels match “{{ prefix }}”.</p>
       <p v-else-if="spaceFilter">No channels in this space yet.</p>
       <p v-else>No channels yet. Create one to get started.</p>
     </div>
 
-    <div v-if="hasMore" class="flex justify-center pt-2">
-      <button
-        type="button"
-        class="chat-action-button chat-action-button--secondary type-control"
-        :disabled="isLoadingMore || isLoading"
-        @click="loadMore"
-      >
-        {{ isLoadingMore ? "Loading…" : "Load more" }}
-      </button>
-    </div>
+    <button
+      v-if="hasMore"
+      type="button"
+      :class="a.more"
+      :disabled="isLoadingMore || isLoading"
+      @click="loadMore"
+    >
+      {{ isLoadingMore ? "Loading…" : "Load more" }}
+    </button>
 
     <ChannelCreateDialog
       v-model:open="showCreate"

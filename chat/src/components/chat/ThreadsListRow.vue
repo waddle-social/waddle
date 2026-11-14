@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Phone, Video } from "lucide-vue-next";
-import { badge, btn, tag } from "styled-system/recipes";
+import { CheckCheck, Phone, Video } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { badge, btn } from "styled-system/recipes";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
@@ -23,9 +24,54 @@ const emit = defineEmits<{
   joinCall: [entry: WasmThreadEntry, media: CallMedia];
 }>();
 
-const channelTagClass = tag();
 const unreadCountClass = badge();
-const markReadClass = btn({ size: "sm" });
+// Phones keep the action as a 44px icon button so the title has room.
+const markReadClass = cx(btn({ size: "sm" }), css({ flex: "none", "& svg": { display: "none" }, mdDown: { width: "44px", height: "44px", px: "0", justifyContent: "center", "& svg": { display: "block" } } }));
+const markReadLabelClass = css({ mdDown: { srOnly: true } });
+
+// Disc-List board row: avatar, a one-line title (bold while unread), a
+// "#room · replies · when" line and the gold unread count.
+const rowClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "3",
+  padding: "0 16px 0 0",
+  transition: "background-color {durations.fast} {easings.out}",
+  _hover: { bg: "state.hover" },
+});
+const callOpenClass = css({ flex: 1, minWidth: 0, padding: "12px 0 12px 16px", cursor: "pointer" });
+const openClass = css({
+  display: "flex",
+  flex: 1,
+  minWidth: 0,
+  alignItems: "center",
+  gap: "3",
+  padding: "12px 0 12px 16px",
+  border: 0,
+  bg: "transparent",
+  color: "fg",
+  textAlign: "left",
+  cursor: "pointer",
+  _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "-3px", borderRadius: "control" },
+});
+const avatarClass = css({ display: "flex", flex: "none" });
+const textClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "0.5" });
+const titleRowClass = css({ display: "flex", alignItems: "center", gap: "2", minWidth: 0 });
+const titleClass = css({ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "15px", lineHeight: "1.35" });
+const titleUnreadClass = cx(titleClass, css({ fontWeight: 700 }));
+const metaClass = css({ fontSize: "13px", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const callFlagClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "20px",
+  height: "20px",
+  flex: "none",
+  borderRadius: "pill",
+  border: "1px solid {colors.live}",
+  color: "live.text",
+  "& svg": { width: "12px", height: "12px" },
+});
 
 // A MUC call-thread row shares the one live-state composable and the one
 // Join path with the in-channel anchor card and the call banner, so the
@@ -78,13 +124,11 @@ const DmCallFlagIcon = computed(() => {
 </script>
 
 <template>
-  <article
-    class="flex w-full items-stretch gap-3 rounded-xl border bg-card p-4 transition-colors hover:bg-muted"
-    :class="entry.has_unread ? 'border-live/60' : 'border-border'"
-  >
+  <article :class="rowClass">
     <div
       v-if="isCallThread && callState"
-      class="call-thread-row__open min-w-0 flex-1"
+      class="call-thread-row__open"
+      :class="callOpenClass"
       @click="emit('open', entry)"
     >
       <CallAnchorCard
@@ -96,45 +140,43 @@ const DmCallFlagIcon = computed(() => {
     <button
       v-else
       type="button"
-      class="flex min-w-0 flex-1 items-start gap-3 text-left"
+      :class="openClass"
       @click="emit('open', entry)"
     >
-      <span v-if="rootAuthor" class="mt-0.5 flex shrink-0 items-center" aria-hidden="true">
+      <span v-if="rootAuthor" :class="avatarClass" aria-hidden="true">
         <UserAvatar :name="rootAuthor" :jid="rootAuthorJid" size="sm" />
       </span>
-      <span class="min-w-0 flex-1">
-        <span class="flex min-w-0 items-center gap-2">
+      <span :class="textClass">
+        <span :class="titleRowClass">
           <span
             v-if="isDmCallThread"
-            class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-primary/40 text-primary"
+            :class="callFlagClass"
             role="img"
             :aria-label="dmCallFlagLabel"
           >
-            <component :is="DmCallFlagIcon" class="h-3 w-3" aria-hidden="true" />
+            <component :is="DmCallFlagIcon" aria-hidden="true" />
           </span>
-          <span class="min-w-0 flex-1 truncate text-[15px] font-semibold leading-snug text-foreground">{{ title }}</span>
-          <span
-            v-if="entry.has_unread"
-            :class="unreadCountClass"
-            :aria-label="`${entry.unread} unread`"
-          >{{ entry.unread }}</span>
+          <span :class="entry.has_unread ? titleUnreadClass : titleClass">{{ title }}</span>
         </span>
-        <span class="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span :class="channelTagClass">{{ channelLabel }}</span>
-          <span class="type-caption min-w-0 truncate text-muted-foreground">
-            <template v-if="rootAuthor">{{ rootAuthor }} · </template>{{ replyLabel }}<template v-if="recencyLabel"> · last active {{ recencyLabel }}</template>
-          </span>
+        <span :class="metaClass">
+          <template v-if="rootAuthor">{{ rootAuthor }} · </template>{{ channelLabel }} · {{ replyLabel }}<template v-if="recencyLabel"> · {{ recencyLabel }}</template>
         </span>
       </span>
+      <span
+        v-if="entry.has_unread"
+        :class="unreadCountClass"
+        :aria-label="`${entry.unread} unread`"
+      >{{ entry.unread }}</span>
     </button>
     <button
       v-if="entry.has_unread"
       type="button"
-      :class="[markReadClass, 'shrink-0 self-center']"
+      :class="markReadClass"
       :disabled="props.markingRead"
       @click.stop="emit('markRead', entry)"
     >
-      {{ props.markingRead ? "Marking..." : "Mark read" }}
+      <CheckCheck aria-hidden="true" />
+      <span :class="markReadLabelClass">{{ props.markingRead ? "Marking..." : "Mark read" }}</span>
     </button>
   </article>
 </template>

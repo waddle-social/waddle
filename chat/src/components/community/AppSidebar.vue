@@ -7,7 +7,6 @@ import {
   Hash,
   House,
   Inbox,
-  ListTree,
   MessagesSquare,
   Search,
   SquarePen,
@@ -48,7 +47,6 @@ const {
   version,
   openHome,
   openUnread,
-  openThreads,
   openMembers,
   openRooms,
   openCommunitySurface,
@@ -62,13 +60,11 @@ const {
   handleToggleMessageSounds,
 } = props.controller;
 
-type ViewId = "home" | "inbox" | "threads" | "calendar" | "people";
+type ViewId = "home" | "inbox" | "calendar" | "people";
 
 const views: { id: ViewId; label: string; icon: typeof House; href: string; go: () => void }[] = [
   { id: "home", label: "Home", icon: House, href: buildHref({ id: "home" } as RouteMatch), go: () => openHome() },
   { id: "inbox", label: "Inbox", icon: Inbox, href: buildHref({ id: "unread" } as RouteMatch), go: () => openUnread() },
-  // ponytail: Discussions stays a view until the Inbox page folds it in as a tab.
-  { id: "threads", label: "Discussions", icon: ListTree, href: buildHref({ id: "threads" } as RouteMatch), go: () => openThreads() },
   { id: "calendar", label: "Calendar", icon: CalendarDays, href: buildHref({ id: "events" } as RouteMatch), go: () => openCommunitySurface("events") },
   { id: "people", label: "People", icon: Users, href: buildHref({ id: "members" } as RouteMatch), go: () => openMembers() },
 ];
@@ -78,16 +74,16 @@ const activeView = computed<ViewId | null>(() => {
   if (ui.activeCommunitySurface.value === "feed") return null;
   switch (ui.activePage.value) {
     case "dashboard": return "home";
-    case "unread": return "inbox";
-    case "threads": return "threads";
+    case "unread":
+    case "threads": return "inbox";
     case "members": return "people";
     default: return null;
   }
 });
 
 function viewCount(id: ViewId): number {
-  if (id === "inbox") return channelUnread.totalMentionCount.value || channelUnread.totalUnreadCount.value;
-  if (id === "threads") return channelUnread.totalThreadUnreadCount.value;
+  // Inbox holds Unread and Discussions, so its count covers thread replies too.
+  if (id === "inbox") return channelUnread.totalMentionCount.value || channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value;
   return 0;
 }
 

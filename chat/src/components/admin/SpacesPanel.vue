@@ -3,7 +3,10 @@
 // search + paginated list) and layers in a "+" create button and a
 // click-to-open detail drawer.
 import { computed, onMounted, ref, watch } from "vue";
-import { Plus, Search } from "lucide-vue-next";
+import { Plus } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { btn } from "styled-system/recipes";
+import { adminClasses as a } from "@/components/admin/admin-classes";
 import type { BrowserXmppClient } from "@/lib/xmpp";
 import type {
   WasmAdminSpaceListEntry,
@@ -130,93 +133,66 @@ onMounted(() => {
 });
 
 const hasMore = computed(() => cursor.value !== null);
+const panelClass = css({ display: "flex", flexDirection: "column", gap: "4" });
+const newClass = btn({ variant: "primary" });
+
 const showEmptyState = computed(
   () => !isLoading.value && entries.value.length === 0 && !errorMessage.value,
 );
 </script>
 
 <template>
-  <section class="flex flex-col gap-4 p-4 max-w-4xl mx-auto w-full" aria-labelledby="spaces-panel-heading">
-    <header class="flex flex-col gap-2">
-      <div class="flex items-center justify-between gap-3">
-        <div class="flex flex-col gap-1">
-          <h2 id="spaces-panel-heading" class="type-pane-title">Spaces</h2>
-          <p class="type-caption text-muted-foreground max-w-prose">
-            Create, edit, and delete community spaces. Cascade-deletes
-            child channels.
-          </p>
-        </div>
-        <button
-          type="button"
-          class="chat-action-button chat-action-button--primary type-action"
-          aria-label="Create space"
-          @click="showCreate = true"
-        >
-          <Plus class="w-4 h-4" />
-          <span>New space</span>
-        </button>
-      </div>
-      <div class="flex items-center gap-2 chat-field-control max-w-md">
-        <Search class="w-4 h-4 text-muted-foreground" aria-hidden="true" />
-        <input
-          v-model="prefix"
-          type="search"
-          autocomplete="off"
-          placeholder="Search spaces"
-          aria-label="Filter spaces by prefix"
-          class="flex-1 bg-transparent border-0 outline-none type-field"
-        />
-      </div>
-    </header>
+  <section :class="panelClass" aria-label="Spaces">
+    <Teleport defer to="#admin-header-actions">
+      <button type="button" :class="newClass" aria-label="Create space" @click="showCreate = true">
+        <Plus aria-hidden="true" />
+        <span>New space</span>
+      </button>
+    </Teleport>
+    <label :class="a.srOnly" for="spaces-prefix">Search spaces</label>
+    <input
+      id="spaces-prefix"
+      v-model="prefix"
+      :class="a.search"
+      type="search"
+      autocomplete="off"
+      placeholder="Search spaces"
+      aria-label="Filter spaces by prefix"
+    />
 
-    <div
-      v-if="errorMessage"
-      class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text"
-      role="alert"
-    >
-      {{ errorMessage }}
-    </div>
+    <div v-if="errorMessage" :class="a.alert" role="alert">{{ errorMessage }}</div>
 
-    <div v-if="isLoading && entries.length === 0" class="py-12 text-center type-caption text-muted-foreground" role="status">
+    <div v-if="isLoading && entries.length === 0" :class="a.status" role="status">
       Loading spaces…
     </div>
 
-    <ul v-else-if="entries.length > 0" class="flex flex-col gap-2" role="list">
+    <ul v-else-if="entries.length > 0" :class="a.list" role="list">
       <li v-for="entry in entries" :key="entry.space_node">
-        <button
-          type="button"
-          class="w-full flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left hover:bg-muted transition-colors"
-          :aria-label="`Open ${entry.name}`"
-          @click="openDetail(entry)"
-        >
-          <div class="flex flex-col gap-0.5 min-w-0 flex-1">
-            <span class="type-control truncate">{{ entry.name }}</span>
-            <span class="type-caption text-muted-foreground truncate font-mono">{{ entry.space_jid }}</span>
-            <span v-if="entry.description" class="type-caption text-muted-foreground truncate">{{ entry.description }}</span>
+        <button type="button" :class="a.row" :aria-label="`Open ${entry.name}`" @click="openDetail(entry)">
+          <div :class="a.rowMain">
+            <b :class="a.truncate">{{ entry.name }}</b>
+            <span :class="a.jid">{{ entry.space_jid }}</span>
+            <span v-if="entry.description" :class="a.sub">{{ entry.description }}</span>
           </div>
-          <div class="flex items-center gap-2 flex-shrink-0">
-            <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.channel_count }} ch</span>
-            <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.member_count }} mem</span>
-          </div>
+          <span :class="a.meta">{{ entry.channel_count }} {{ entry.channel_count === 1 ? "channel" : "channels" }} · {{ entry.member_count }} {{ entry.member_count === 1 ? "member" : "members" }}</span>
         </button>
       </li>
     </ul>
 
-    <div v-else-if="showEmptyState" class="py-12 text-center type-caption text-muted-foreground" role="status">
+    <div v-else-if="showEmptyState" :class="a.status" role="status">
       <p v-if="prefix">No spaces match “{{ prefix }}”.</p>
       <p v-else>No spaces yet. Create one to get started.</p>
     </div>
 
-    <div v-if="hasMore" class="flex justify-center pt-2">
-      <button
-        type="button"
-        class="chat-action-button chat-action-button--secondary type-control"
-        :disabled="isLoadingMore || isLoading"
-        @click="loadMore"
-      >
-        {{ isLoadingMore ? "Loading…" : "Load more" }}
-      </button>
-    </div>
+    <button
+      v-if="hasMore"
+      type="button"
+      :class="a.more"
+      :disabled="isLoadingMore || isLoading"
+      @click="loadMore"
+    >
+      {{ isLoadingMore ? "Loading…" : "Load more" }}
+    </button>
 
     <SpaceCreateDialog
       v-model:open="showCreate"

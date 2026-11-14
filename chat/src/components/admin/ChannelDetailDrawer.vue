@@ -3,7 +3,10 @@
 // tabs (Config / Affiliations / Occupants) + a danger section with a
 // destroy-room confirm flow.
 import { computed, onMounted, ref, watch } from "vue";
+import { css, cx } from "styled-system/css";
+import { btn, tab as tabRecipe, tabs as tabsRecipe } from "styled-system/recipes";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
+import { adminClasses as a } from "@/components/admin/admin-classes";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import AffiliationRow from "@/components/admin/AffiliationRow.vue";
 import OccupantRow from "@/components/admin/OccupantRow.vue";
@@ -197,10 +200,14 @@ onMounted(() => {
 });
 
 const tabs: { value: Tab; label: string }[] = [
-  { value: "config", label: "Config" },
+  { value: "config", label: "Settings" },
   { value: "affiliations", label: "Affiliations" },
   { value: "occupants", label: "Occupants" },
 ];
+
+const tabsClass = cx(tabsRecipe(), css({ flexWrap: "wrap" }));
+const tabClass = tabRecipe();
+const tabPanelClass = css({ display: "flex", flexDirection: "column", gap: "14px" });
 
 const affiliationCountLabel = computed(() => {
   if (affiliations.value.length === 0) return "";
@@ -213,22 +220,20 @@ const occupantCountLabel = computed(() => {
 </script>
 
 <template>
-  <AppDrawer v-model:open="openLocal" side="right" label="Channel details" width-class="w-full max-w-md lg:max-w-lg">
+  <AppDrawer v-model:open="openLocal" side="right" label="Channel details" :width-class="a.drawerWidth">
     <template #title>
-      <span class="type-pane-title truncate">{{ channel.name }}</span>
+      <span :class="a.drawerTitle">{{ channel.name }}</span>
     </template>
 
-    <div class="flex flex-col gap-4 p-4">
-      <!-- Tabs -->
-      <div class="flex items-center gap-1 border-b border-border" role="tablist">
+    <div :class="a.drawerBody">
+      <div :class="tabsClass" role="tablist" aria-label="Channel details">
         <button
           v-for="t in tabs"
           :key="t.value"
           type="button"
           role="tab"
+          :class="tabClass"
           :aria-selected="tab === t.value"
-          class="px-3 py-1.5 type-control border-b-2 -mb-px transition-colors"
-          :class="tab === t.value ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
           @click="tab = t.value"
         >
           {{ t.label }}<template v-if="t.value === 'affiliations'">{{ affiliationCountLabel }}</template>
@@ -236,60 +241,52 @@ const occupantCountLabel = computed(() => {
         </button>
       </div>
 
-      <!-- Config tab -->
-      <section v-if="tab === 'config'" class="flex flex-col gap-3">
-        <label class="flex flex-col gap-1">
-          <span class="type-section-label text-muted-foreground">Name</span>
-          <input v-model="editName" type="text" maxlength="80" class="chat-field-control type-field" />
+      <!-- Settings tab -->
+      <section v-if="tab === 'config'" :class="tabPanelClass">
+        <label :class="a.field">
+          Name
+          <input v-model="editName" :class="a.input" type="text" maxlength="80" />
         </label>
-        <label class="flex flex-col gap-1">
-          <span class="type-section-label text-muted-foreground">Topic</span>
-          <textarea v-model="editTopic" rows="3" class="chat-field-control chat-textarea-control type-field" />
+        <label :class="a.field">
+          Topic
+          <textarea v-model="editTopic" :class="a.textarea" rows="3" />
         </label>
-        <label class="flex flex-col gap-1">
-          <span class="type-section-label text-muted-foreground">Type</span>
-          <select v-model="editChannelType" class="chat-field-control type-field">
+        <label :class="a.field">
+          Type
+          <select v-model="editChannelType" :class="a.input">
             <option value="text">Text</option>
             <option value="announcement">Announcement</option>
             <option value="forum">Forum</option>
           </select>
         </label>
-        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
-          <label class="flex items-center gap-2 cursor-pointer">
+        <div :class="a.checks">
+          <label>
             <input v-model="editIsPublic" type="checkbox" @change="handlePublicToggleChange" />
-            <span class="type-control">Listed in discovery</span>
+            Listed in discovery
           </label>
-          <label class="flex items-center gap-2 cursor-pointer">
+          <label>
             <input v-model="editMembersOnly" type="checkbox" />
-            <span class="type-control">Require explicit membership</span>
+            Require explicit membership
           </label>
-          <p class="type-caption text-muted-foreground">
-            Discovery visibility and room admission are separate XMPP room
-            settings.
-          </p>
+          <p>Discovery visibility and room admission are separate XMPP room settings.</p>
         </div>
-        <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ editError }}</div>
-        <div class="flex justify-end">
-          <button
-            type="button"
-            class="chat-action-button chat-action-button--primary type-action disabled:opacity-30"
-            :disabled="editing || !editName.trim()"
-            @click="saveConfig"
-          >
-            {{ editing ? "Saving…" : "Save changes" }}
-          </button>
-        </div>
+        <div v-if="editError" :class="a.alert" role="alert">{{ editError }}</div>
+        <button
+          type="button"
+          :class="[btn({ variant: 'primary' }), a.start]"
+          :disabled="editing || !editName.trim()"
+          @click="saveConfig"
+        >
+          {{ editing ? "Saving…" : "Save changes" }}
+        </button>
 
-        <div class="flex flex-col gap-2 border-t border-border pt-4 mt-2">
-          <h3 class="type-section-label text-destructive-text">Danger zone</h3>
-          <p class="type-caption text-muted-foreground">
-            Deleting this channel destroys the MUC room. Occupants are
-            ejected and history may be lost.
-          </p>
-          <div v-if="deleteError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ deleteError }}</div>
+        <div :class="a.danger">
+          <h3>Delete channel</h3>
+          <p>Everyone in it is removed and its history may be lost.</p>
+          <div v-if="deleteError" :class="a.alert" role="alert">{{ deleteError }}</div>
           <button
             type="button"
-            class="chat-action-button chat-action-button--destructive type-action"
+            :class="[btn({ variant: 'danger', size: 'sm' }), a.start]"
             @click="showDelete = true"
           >
             Delete channel
@@ -298,9 +295,9 @@ const occupantCountLabel = computed(() => {
       </section>
 
       <!-- Affiliations tab -->
-      <section v-else-if="tab === 'affiliations'" class="flex flex-col gap-2">
-        <div v-if="affiliationsError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ affiliationsError }}</div>
-        <p v-if="affiliationsLoading" class="type-caption text-muted-foreground">Loading…</p>
+      <section v-else-if="tab === 'affiliations'" :class="a.plain">
+        <div v-if="affiliationsError" :class="a.alert" role="alert">{{ affiliationsError }}</div>
+        <p v-if="affiliationsLoading" :class="a.sub">Loading…</p>
         <template v-else>
           <AffiliationRow
             v-for="entry in affiliations"
@@ -309,14 +306,14 @@ const occupantCountLabel = computed(() => {
             :mutating="affiliationMutating === entry.jid"
             @change="(value) => changeAffiliation(entry, value)"
           />
-          <p v-if="affiliations.length === 0" class="type-caption text-muted-foreground">No persistent affiliations set.</p>
+          <p v-if="affiliations.length === 0" :class="a.sub">No persistent affiliations set.</p>
         </template>
       </section>
 
       <!-- Occupants tab -->
-      <section v-else class="flex flex-col gap-2">
-        <div v-if="occupantsError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ occupantsError }}</div>
-        <p v-if="occupantsLoading" class="type-caption text-muted-foreground">Loading…</p>
+      <section v-else :class="a.plain">
+        <div v-if="occupantsError" :class="a.alert" role="alert">{{ occupantsError }}</div>
+        <p v-if="occupantsLoading" :class="a.sub">Loading…</p>
         <template v-else>
           <OccupantRow
             v-for="entry in occupants"
@@ -325,7 +322,7 @@ const occupantCountLabel = computed(() => {
             :kicking="occupantKicking === entry.real_jid"
             @kick="kickOccupant(entry)"
           />
-          <p v-if="occupants.length === 0" class="type-caption text-muted-foreground">No one is here right now.</p>
+          <p v-if="occupants.length === 0" :class="a.sub">No one is here right now.</p>
         </template>
       </section>
     </div>
@@ -333,7 +330,7 @@ const occupantCountLabel = computed(() => {
     <ConfirmDialog
       v-model:open="showDelete"
       title="Delete channel?"
-      :message="`This destroys the room '${channel.name}' (${channel.channel_jid}). Occupants are ejected.`"
+      :message="`Everyone in ${channel.name} is removed. This can't be undone.`"
       confirm-label="Delete"
       destructive
       :loading="deleting"

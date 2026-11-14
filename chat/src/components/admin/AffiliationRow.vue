@@ -3,7 +3,9 @@
 // Decoupled from the drawer so the mutation choice (set new
 // affiliation) is composed via a v-model-style event and the parent
 // owns the network call.
+import { css } from "styled-system/css";
 import type { WasmAdminChannelAffiliationEntry } from "@/lib/xmpp";
+import { adminClasses as a } from "@/components/admin/admin-classes";
 
 type Affiliation = "owner" | "admin" | "member" | "none" | "outcast";
 const AFFILIATIONS: Affiliation[] = ["owner", "admin", "member", "none", "outcast"];
@@ -17,6 +19,8 @@ const emit = defineEmits<{
   change: [affiliation: Affiliation];
 }>();
 
+const jidClass = css({ font: "12px {fonts.mono}", color: "fg", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+
 function onSelect(event: Event) {
   const target = event.target as HTMLSelectElement;
   const value = target.value as Affiliation;
@@ -25,19 +29,19 @@ function onSelect(event: Event) {
 </script>
 
 <template>
-  <div class="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2">
-    <div class="flex flex-col gap-0.5 min-w-0 flex-1">
-      <span class="font-mono type-caption truncate">{{ entry.jid }}</span>
-      <span v-if="entry.reason" class="type-caption text-muted-foreground truncate">{{ entry.reason }}</span>
+  <div :class="a.subRow">
+    <div :class="a.rowMain">
+      <span :class="jidClass">{{ entry.jid }}</span>
+      <span v-if="entry.reason" :class="a.sub">{{ entry.reason }}</span>
     </div>
     <select
       :value="entry.affiliation"
       :disabled="mutating"
-      class="chat-field-control type-caption"
+      :class="a.smallSelect"
       :aria-label="`Affiliation for ${entry.jid}`"
       @change="onSelect"
     >
-      <option v-for="a in AFFILIATIONS" :key="a" :value="a">{{ a }}</option>
+      <option v-for="aff in AFFILIATIONS" :key="aff" :value="aff">{{ aff }}</option>
     </select>
   </div>
 </template>

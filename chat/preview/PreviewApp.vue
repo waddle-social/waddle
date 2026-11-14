@@ -12,6 +12,9 @@ import { seedCallPreview } from "./call-fixtures";
 import CallErrorToast from "@/components/calls/CallErrorToast.vue";
 import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
 import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
+import { seedInbox } from "./inbox-preview";
+import { seedSettings } from "./settings-preview";
+import { seedAdmin } from "./admin-preview";
 
 /**
  * Scenario switch for /_preview. `screen` picks the state:
@@ -94,6 +97,10 @@ function seed(c: ChatAppController) {
   if (screen.startsWith("huddle-") || screen.startsWith("call-")) seedCallPreview(c, screen);
   if (["huddle-room", "huddle-live", "huddle-expanded"].includes(screen)) seedHuddleThread(c);
   if (screen === "call-ended") seedEndedCall(c);
+  // Area fixtures (each returns unless the screen has its prefix).
+  seedInbox(c, screen);
+  seedSettings(c, screen);
+  seedAdmin(c, screen);
 }
 
 // A live #design huddle anchor with replies on its thread (Huddle-Join, HuddlePanel).

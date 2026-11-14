@@ -2,6 +2,8 @@
 import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
 import { ArrowDown, ArrowUp, CornerDownRight } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { waddle } from "styled-system/recipes";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -343,6 +345,38 @@ const breadcrumbLabels = computed(() =>
   threadBreadcrumbLabels(props.threadStack, props.resolveEntry),
 );
 const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
+
+// ThreadPanel board: the rail-coloured side panel, a "N replies" separator
+// under the root, sub-thread links in the action colour, a waddle loader.
+const rootClass = css({ display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0, bg: "bg.rail", color: "fg", borderLeft: "1px solid {colors.border.soft}" });
+const noneClass = css({ flex: "none" });
+const noticeClass = css({ flex: "none", padding: "8px 16px", bg: "warning.subtle", borderBottom: "1px solid {colors.border.soft}", fontSize: "13px", color: "fg" });
+const separatorClass = css({ display: "flex", alignItems: "center", gap: "2.5", padding: "8px 16px", fontSize: "xs", fontWeight: 700, color: "fg.muted", "&::before, &::after": { content: '""', flex: 1, height: "1px", bg: "border.soft" } });
+const childClass = css({ position: "relative" });
+const subThreadRowClass = css({ display: "flex", padding: "0 16px 8px calc({sizes.msgAvatar} + 28px)" });
+const subThreadClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+  minHeight: "28px",
+  padding: "0 4px",
+  border: 0,
+  borderRadius: "tag",
+  bg: "transparent",
+  color: "action.text",
+  fontSize: "13px",
+  fontWeight: 600,
+  cursor: "pointer",
+  _hover: { textDecoration: "underline" },
+  _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+  _coarse: { minHeight: "44px" },
+  "& svg": { width: "16px", height: "16px" },
+});
+const loadingScrollClass = css({ flex: "1 1 0%", minHeight: 0, overflowY: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" });
+const loadingClass = css({ display: "flex", alignItems: "center", gap: "2.5", fontSize: "14px", color: "fg.muted" });
+const loaderClass = waddle();
+const jumpIconClass = css({ width: "14px", height: "14px" });
+const emptyRepliesClass = css({ flex: "none", margin: 0, padding: "16px", textAlign: "center", fontSize: "14px", color: "fg.muted" });
 const threadCallAnchorState = useCallAnchorCardState(
   () => activeEntry.value?.root ?? { body: "", author: "" },
   () => props.roomJid,
@@ -403,7 +437,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 </script>
 
 <template>
-  <div class="flex flex-col flex-1 min-h-0 bg-background border-l border-border">
+  <div :class="rootClass">
     <ThreadPanelHeader
       :breadcrumb-labels="breadcrumbLabels"
       :thread-preview="threadPreview"
@@ -419,7 +453,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     />
 
     <!-- Composer: top-pinned mode (social mode) -->
-    <div v-if="!hideComposer && isTopPinned" class="flex-shrink-0">
+    <div v-if="!hideComposer && isTopPinned" :class="noneClass">
       <MessageComposer
         :ref="setComposerRef"
         v-model:draft="draft"
@@ -456,7 +490,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 
     <div
       v-if="activeEntry && !activeEntry.root"
-      class="type-caption flex-shrink-0 bg-muted/35 px-4 py-2 text-muted-foreground"
+      :class="noticeClass"
+      role="status"
     >
       Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
     </div>
@@ -524,10 +559,10 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           />
           <div
             v-if="orderedChildren.length > 0"
-            class="chat-thread-root-divider"
+            :class="separatorClass"
             role="separator"
             aria-label="Replies"
-          />
+          >{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</div>
         </template>
         <template v-else>
           <div
@@ -541,7 +576,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <span class="chat-day-divider__label">{{ dayDividerLabel(message.createdAt) }}</span>
             <div class="chat-day-divider__rule" />
           </div>
-          <div class="relative group/thread-child">
+          <div :class="childClass">
             <!-- In ThreadPanel, the card's thread action targets an existing
                  XEP-0201 child thread when present, falling back to this row's
                  message id to start an empty child thread. -->
@@ -574,13 +609,13 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               @open-thread="onOpenThreadFromCard"
               @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
             />
-          <div v-if="replyChildHasNestedThread(message)" class="chat-thread-actions">
+          <div v-if="replyChildHasNestedThread(message)" :class="subThreadRowClass">
             <button
               type="button"
-              class="type-caption inline-flex items-center gap-1 text-primary/80 hover:text-primary transition-colors"
+              :class="subThreadClass"
               @click="onOpenThreadFromCard(replyChildThreadId(message))"
             >
-              <CornerDownRight class="w-3 h-3" />
+              <CornerDownRight aria-hidden="true" />
               <span>{{ replyChildThreadCount(message) }} in sub-thread</span>
             </button>
           </div>
@@ -597,8 +632,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       aria-label="Jump to latest message"
       @click="jumpToLive.jump"
     >
-      <ArrowUp v-if="isTopPinned" class="w-3.5 h-3.5" aria-hidden="true" />
-      <ArrowDown v-else class="w-3.5 h-3.5" aria-hidden="true" />
+      <ArrowUp v-if="isTopPinned" :class="jumpIconClass" aria-hidden="true" />
+      <ArrowDown v-else :class="jumpIconClass" aria-hidden="true" />
       <span>Latest</span>
     </button>
     </div>
@@ -606,23 +641,24 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     <div
       v-else
       :ref="setScrollContainerRef"
-      class="chat-pane-scroll flex-1 min-h-0 px-3 py-4 lg:px-4"
+      :class="loadingScrollClass"
       @scroll="onThreadScroll"
     >
-      <div class="type-caption text-center py-10 text-muted-foreground">
+      <div :class="loadingClass" role="status">
+        <span :class="loaderClass" aria-hidden="true"><i></i><i></i><i></i></span>
         Loading thread…
       </div>
     </div>
 
     <div
       v-if="activeEntry?.directChildren.length === 0 && !hideComposer"
-      class="type-caption flex-shrink-0 text-center py-3 text-muted-foreground"
+      :class="emptyRepliesClass"
     >
       No replies yet. Start the conversation.
     </div>
 
     <!-- Composer: bottom-pinned mode (chat mode) - hidden in parent context pane -->
-    <div v-if="!hideComposer && !isTopPinned" class="flex-shrink-0">
+    <div v-if="!hideComposer && !isTopPinned" :class="noneClass">
       <MessageComposer
         :ref="setComposerRef"
         v-model:draft="draft"
