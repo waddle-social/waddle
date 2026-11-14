@@ -3,7 +3,8 @@ import penguins from "@waddle/design/assets/story-penguins.svg?url";
 import mark from "@waddle/design/assets/waddle-mark.svg?url";
 import namespaceLogo from "@waddle/design/assets/namespace-logo.svg?url";
 import { css, cx } from "../../styled-system/css";
-import { floe, iconbtn, polar, trio } from "../../styled-system/recipes";
+import { floe, polar, trio } from "../../styled-system/recipes";
+import ThemeToggle from "../components/ThemeToggle.astro";
 import WebsiteLayout from "../layouts/WebsiteLayout.astro";
 import {
 	WAITLIST_INVALID_MESSAGE,
@@ -178,35 +179,7 @@ const sponsorText = css({
 					>Source on GitHub</a
 				>
 				<a class={link} href="#proof-h">How it works</a>
-				<button
-					type="button"
-					class={cx(iconbtn({ size: "sm" }), css({ mx: "-1.5" }))}
-					data-theme-toggle
-					aria-label="Switch to daylight theme"
-				>
-					<svg
-						class={css({ _daylight: { display: "none" } })}
-						aria-hidden="true"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.75"
-						stroke-linecap="round"
-						><circle cx="12" cy="12" r="4"></circle><path
-							d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
-						></path></svg
-					>
-					<svg
-						class={css({ display: "none", _daylight: { display: "block" } })}
-						aria-hidden="true"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.75"
-						stroke-linecap="round"
-						stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"></path></svg
-					>
-				</button>
+				<ThemeToggle placement="inline" />
 			</nav>
 		</header>
 

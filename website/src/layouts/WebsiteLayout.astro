@@ -64,16 +64,23 @@ const ogImageAlt =
 		<Font cssVariable="--font-body" preload />
 		<Font cssVariable="--font-mono" />
 		<script is:inline>
-			// Saved choice (older builds stored dark/light), else the OS preference; night by default.
-			let theme = null;
-			try {
-				theme = localStorage.getItem("waddle-theme");
-			} catch {}
-			theme = { dark: "night", light: "daylight" }[theme] ?? theme;
-			if (theme !== "night" && theme !== "daylight") {
-				theme = matchMedia("(prefers-color-scheme: light)").matches ? "daylight" : "night";
-			}
-			document.documentElement.dataset.theme = theme;
+			// A saved choice wins (light/dark; night/daylight also read); otherwise follow the system live.
+			const prefersLight = matchMedia("(prefers-color-scheme: light)");
+			const applyTheme = () => {
+				let saved = null;
+				try {
+					saved = localStorage.getItem("waddle-theme");
+				} catch {}
+				const isLight =
+					saved === "light" || saved === "daylight"
+						? true
+						: saved === "dark" || saved === "night"
+							? false
+							: prefersLight.matches;
+				document.documentElement.dataset.theme = isLight ? "daylight" : "night";
+			};
+			applyTheme();
+			prefersLight.addEventListener("change", applyTheme);
 		</script>
 	</head>
 	<body>
@@ -82,22 +89,23 @@ const ogImageAlt =
 		<script>
 			const root = document.documentElement;
 			const toggles = document.querySelectorAll<HTMLButtonElement>("[data-theme-toggle]");
-			const nextTheme = () => (root.dataset.theme === "daylight" ? "night" : "daylight");
-			const label = () => {
-				const next = nextTheme();
-				toggles.forEach((el) => el.setAttribute("aria-label", `Switch to ${next} theme`));
+			const sync = () => {
+				const pressed = String(root.dataset.theme === "daylight");
+				toggles.forEach((el) => el.setAttribute("aria-pressed", pressed));
 			};
-
-			label();
+			sync();
+			// The head script still switches the theme when the system setting changes.
+			new MutationObserver(() => {
+				sync();
+				window.dispatchEvent(new Event("waddle:theme-change"));
+			}).observe(root, { attributeFilter: ["data-theme"] });
 			toggles.forEach((el) => {
 				el.addEventListener("click", () => {
-					const next = nextTheme();
+					const next = root.dataset.theme === "daylight" ? "night" : "daylight";
 					root.dataset.theme = next;
 					try {
-						localStorage.setItem("waddle-theme", next);
+						localStorage.setItem("waddle-theme", next === "daylight" ? "light" : "dark");
 					} catch {}
-					label();
-					window.dispatchEvent(new Event("waddle:theme-change"));
 				});
 			});
 		</script>

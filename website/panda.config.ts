@@ -7,4 +7,12 @@ export default defineConfig({
 	include: ["./src/**/*.{ts,astro}"],
 	exclude: ["./src/**/*.test.ts"],
 	outdir: "styled-system",
+	theme: {
+		extend: {
+			keyframes: {
+				spin: { to: { transform: "rotate(360deg)" } },
+				moonBob: { "0%, 100%": { transform: "translateY(0)" }, "50%": { transform: "translateY(-6px)" } },
+			},
+		},
+	},
 });

@@ -2,6 +2,7 @@
 // Shared shell of the waitlist confirm and cancel pages: sea backdrop, wordmark, one card.
 import mark from "@waddle/design/assets/waddle-mark.svg?url";
 import { css } from "../../styled-system/css";
+import ThemeToggle from "./ThemeToggle.astro";
 
 interface Props {
 	heading: string;
@@ -25,8 +26,11 @@ const { heading, spot } = Astro.props;
 		px: "4",
 		boxSizing: "border-box",
 		gap: "6",
+		position: "relative",
+		overflow: "clip",
 	})}
 >
+	<ThemeToggle placement="corner" />
 	<a
 		href="/"
 		class={css({
