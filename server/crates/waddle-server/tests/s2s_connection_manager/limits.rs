@@ -799,7 +799,7 @@ async fn a_stream_younger_than_the_replacement_interval_is_kept() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_full_backoff_table_never_refuses_a_healthy_destination() {
+async fn a_full_backoff_table_neither_refuses_a_healthy_destination_nor_flushes_a_wait() {
     let pki = Pki::new();
     // Ports bound for the whole test without listening, so every
     // connection to them is refused.
@@ -835,19 +835,20 @@ async fn a_full_backoff_table_never_refuses_a_healthy_destination() {
         .connect(&home_a, &domain(HOME_B))
         .await
         .expect("a healthy destination");
-    // A second failing domain takes the only entry, so the first one is
-    // dialled again rather than refused.
+    // A second failing domain finds the only entry still waiting: its
+    // failure is not recorded, so it is dialled again, and the first
+    // domain's wait is kept rather than flushed.
     assert_eq!(
         a.handle.connect(&home_a, &domain("dead-2.test")).await,
         Err(ConnectError::Failed(S2sOutcome::Io))
     );
     assert_eq!(
         a.handle.connect(&home_a, &domain("dead-2.test")).await,
-        Err(ConnectError::BackingOff)
+        Err(ConnectError::Failed(S2sOutcome::Io))
     );
     assert_eq!(
         a.handle.connect(&home_a, &domain("dead-1.test")).await,
-        Err(ConnectError::Failed(S2sOutcome::Io))
+        Err(ConnectError::BackingOff)
     );
 }
 

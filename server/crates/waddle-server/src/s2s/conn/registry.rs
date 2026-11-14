@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::telemetry::attributes::S2sResource;
 
-use super::capacity::SocketCount;
+use super::capacity::{SocketCount, TokenBucket};
 use super::peer_stream::{StreamDirection, VerifiedPeerStream};
 use crate::s2s::config::{Deadlines, ResourceLimits};
 
@@ -169,7 +169,7 @@ struct Backoff {
     updated: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct State {
     streams: BTreeMap<StreamKey, Entry>,
     /// Streams negotiating with each remote domain, per direction.
@@ -179,6 +179,9 @@ struct State {
     dialing: HashSet<(CanonicalDomain, CanonicalDomain)>,
     /// Outbound backoff of failing remote domains.
     backoff: HashMap<CanonicalDomain, Backoff>,
+    /// New outbound connections across every remote domain, dialback
+    /// verification connections included.
+    dial_rate: TokenBucket,
 }
 
 /// What [`Registry::begin_dial`] found for a directional pair.
@@ -199,6 +202,8 @@ pub(super) enum DialRefusal {
     InProgress,
     /// The cap on attempts in progress is reached.
     Busy,
+    /// The global rate of new outbound connections is exhausted.
+    RateLimited,
 }
 
 /// The share of `cap` that peers outside the reserve may use: all but a
@@ -220,7 +225,13 @@ impl Registry {
         Arc::new(Self {
             limits,
             deadlines,
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                streams: BTreeMap::new(),
+                negotiating: HashMap::new(),
+                dialing: HashSet::new(),
+                backoff: HashMap::new(),
+                dial_rate: TokenBucket::new(limits.dial_rate, Instant::now()),
+            }),
         })
     }
 
@@ -507,12 +518,13 @@ impl Registry {
 
     /// The established outbound stream from `local` to `remote`, or else a
     /// new outbound attempt if the remote domain's backoff has passed, no
-    /// attempt for the pair is in progress and the cap on attempts allows
-    /// one. Both are decided under one lock: an attempt registers its
-    /// stream before it releases its dial slot, so a caller always finds
-    /// either the stream or the attempt in progress, never neither. A
-    /// domain without a backoff entry is never refused for the table's
-    /// size.
+    /// attempt for the pair is in progress, the cap on attempts allows one
+    /// and the global dial rate has a token. Both are decided under one
+    /// lock: an attempt registers its stream before it releases its dial
+    /// slot, so a caller always finds either the stream or the attempt in
+    /// progress, never neither. A domain without a backoff entry is never
+    /// refused for the table's size; the dial rate bounds how often such
+    /// domains are dialled.
     pub(super) fn begin_dial(
         self: &Arc<Self>,
         local: &CanonicalDomain,
@@ -542,11 +554,20 @@ impl Registry {
         if state.dialing.len() >= self.limits.max_dialing {
             return Err(DialRefusal::Busy);
         }
+        if !state.dial_rate.try_take(now) {
+            return Err(DialRefusal::RateLimited);
+        }
         state.dialing.insert(pair.clone());
         Ok(DialStart::Dial(DialSlot {
             registry: Arc::clone(self),
             pair,
         }))
+    }
+
+    /// Take a token of the global dial rate for a connection that is not
+    /// an attempt for a pair, such as a dialback verification connection.
+    pub(super) fn take_dial_token(&self) -> bool {
+        self.state().dial_rate.try_take(Instant::now())
     }
 
     /// Record a failed outbound attempt to `remote` that the peer or the
@@ -555,10 +576,14 @@ impl Registry {
     ///
     /// An entry whose wait passed longer ago than the maximum backoff is
     /// forgotten first, so a later failure starts again from the initial
-    /// wait. When the table is full, a new domain's entry replaces the
-    /// entry updated longest ago among those whose wait has passed, or
-    /// else the entry updated longest ago: the table bounds memory, never
-    /// which domains can be dialled.
+    /// wait. An entry is kept at least until its wait has passed: when the
+    /// table is full, a new domain's entry replaces only the entry updated
+    /// longest ago among those whose wait has passed, and when every entry
+    /// is still waiting the new failure is not recorded. Failures that
+    /// local users cause, to as many domains as they like, therefore never
+    /// shorten another domain's wait; a domain whose failure was not
+    /// recorded is dialled again only within the global dial rate. The
+    /// table bounds memory, never which domains can be dialled.
     pub(super) fn record_failure(&self, remote: &CanonicalDomain) {
         let now = Instant::now();
         let horizon = self.deadlines.backoff_max;
@@ -569,10 +594,16 @@ impl Registry {
         if !state.backoff.contains_key(remote)
             && state.backoff.len() >= self.limits.max_backoff_destinations
         {
-            let victim = oldest_backoff(&state.backoff, Some(now))
-                .or_else(|| oldest_backoff(&state.backoff, None));
-            if let Some(victim) = victim {
-                state.backoff.remove(&victim);
+            match oldest_backoff(&state.backoff, now) {
+                Some(victim) => {
+                    state.backoff.remove(&victim);
+                }
+                None => {
+                    tracing::debug!(
+                        "s2s backoff table full of waiting entries; failure not recorded"
+                    );
+                    return;
+                }
             }
         }
         let failures = state
@@ -601,15 +632,15 @@ impl Registry {
     }
 }
 
-/// The backoff entry updated longest ago; with `waited_by`, only among
-/// entries whose wait has passed by then.
+/// The backoff entry updated longest ago among those whose wait has passed
+/// by `now`.
 fn oldest_backoff(
     backoff: &HashMap<CanonicalDomain, Backoff>,
-    waited_by: Option<Instant>,
+    now: Instant,
 ) -> Option<CanonicalDomain> {
     backoff
         .iter()
-        .filter(|(_, entry)| waited_by.is_none_or(|now| entry.retry_at <= now))
+        .filter(|(_, entry)| entry.retry_at <= now)
         .min_by_key(|(_, entry)| entry.updated)
         .map(|(domain, _)| domain.clone())
 }

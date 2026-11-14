@@ -2,11 +2,11 @@
 //!
 //! The connection manager asks an [`EndpointResolver`] for the endpoints of
 //! a remote domain and tries them in order. An endpoint selects a socket
-//! only: the remote domain stays the TLS server name and the certificate's
-//! reference identity, whatever the endpoint is. This release resolves only
-//! explicitly configured endpoints ([`ConfiguredEndpoints`]) and reaches
-//! every endpoint with STARTTLS; DNS discovery, with XEP-0368 direct TLS
-//! targets, implements the same trait.
+//! and how to reach TLS on it only: the remote domain stays the TLS server
+//! name and the certificate's reference identity, whatever the endpoint
+//! is. [`ConfiguredEndpoints`] resolves the endpoints the configuration
+//! lists; DNS discovery (`crate::s2s::discovery`) implements the same trait
+//! and is consulted only for a domain without configured endpoints.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use thiserror::Error;
 use waddle_xmpp::identity::CanonicalDomain;
 
 use crate::s2s::config::S2sConfig;
+use crate::s2s::verify::OutboundTransport;
 
 /// How an endpoint was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,13 +24,31 @@ pub enum EndpointOrigin {
     /// Operator configuration (RFC 6120 §3.2.3); exempt from the address
     /// checks DNS-derived addresses get.
     Configured,
+    /// An `_xmpps-server` or `_xmpp-server` SRV target's address.
+    Srv,
+    /// The domain's own A or AAAA record on port 5269, after both SRV
+    /// lookups answered that no record exists.
+    Fallback,
 }
 
-/// One address to try with STARTTLS.
+impl EndpointOrigin {
+    /// Whether the address came from DNS, so the connection manager checks
+    /// it against the blocked address classes again on the address it
+    /// connects to.
+    pub fn is_dns(self) -> bool {
+        matches!(self, Self::Srv | Self::Fallback)
+    }
+}
+
+/// One address to try, and how to reach TLS on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint {
     pub address: SocketAddr,
     pub origin: EndpointOrigin,
+    /// STARTTLS for `_xmpp-server` targets, the A/AAAA fallback and
+    /// configured STARTTLS endpoints; direct TLS (XEP-0368) for
+    /// `_xmpps-server` targets and configured direct-TLS endpoints.
+    pub transport: OutboundTransport,
 }
 
 /// The endpoints of one remote domain, in the order they are tried.
@@ -57,12 +76,21 @@ impl Endpoints {
 /// Why a remote domain has no endpoint to try.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ResolveError {
-    /// Nothing is configured or published for the domain.
+    /// Nothing is configured or published for the domain, or DNS says the
+    /// service is not offered (a "." SRV target without usable records).
     #[error("the remote domain has no endpoint")]
     NoEndpoints,
-    /// A lookup failed; this is not the absence of records.
+    /// A lookup failed; this is not the absence of records. The attempt
+    /// fails and is retried later with backoff, without A/AAAA fallback.
     #[error("the endpoint lookup failed")]
     LookupFailed,
+    /// DNS returned addresses, and every one is in a blocked class.
+    #[error("every address of the remote domain is in a blocked class")]
+    Blocked,
+    /// The domain is an IP address, a numeric IPv4 form or a single-label
+    /// name, which is never resolved or dialled.
+    #[error("the remote domain cannot be resolved")]
+    NotAPeerDomain,
 }
 
 /// Finds the endpoints of a remote domain.
@@ -93,6 +121,7 @@ impl EndpointResolver for ConfiguredEndpoints {
             .map(|endpoint| Endpoint {
                 address: endpoint.address,
                 origin: EndpointOrigin::Configured,
+                transport: endpoint.transport,
             })
             .collect();
         if endpoints.is_empty() {

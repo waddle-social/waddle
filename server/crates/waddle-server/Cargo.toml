@@ -115,6 +115,11 @@ rustls-acme = { workspace = true }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
 webpki-roots = "1"
 x509-parser = "0.18.1"
+# S2S DNS discovery (`s2s::discovery`, ADR-0020 D3): SRV and A/AAAA lookups
+# that tell a negative answer from a failed lookup. Already in Cargo.lock at
+# this version through libp2p-dns; only its Tokio runtime and system
+# configuration features are used, which that version already enables.
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 p256 = { workspace = true }

@@ -7753,6 +7753,7 @@ dependencies = [
  "elliptic-curve",
  "futures",
  "hex",
+ "hickory-resolver",
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "html-escape",

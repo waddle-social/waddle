@@ -23,6 +23,7 @@ pub enum ConfigSection {
     Endpoints,
     Listen,
     Limits,
+    Dialback,
 }
 
 impl ConfigSection {
@@ -40,6 +41,7 @@ impl ConfigSection {
             Self::Endpoints => "endpoints",
             Self::Listen => "listen",
             Self::Limits => "limits",
+            Self::Dialback => "dialback",
         }
     }
 }
@@ -87,7 +89,7 @@ pub enum ConfigError {
         index: usize,
     },
     #[error(
-        "entry {index} of `{section}` is outside the `.test` domain, which this release requires"
+        "entry {index} of `{section}` is outside the `.test` domain, which `peer_scope = \"test\"` requires"
     )]
     OutsideTestDomain {
         section: ConfigSection,
@@ -135,7 +137,7 @@ pub enum ConfigError {
     Trust { index: usize, error: TrustError },
     #[error("the private-CA profile for entry {index} of `private_ca` lists no domain")]
     EmptyProfile { index: usize },
-    #[error("`listen` and every endpoint must be a loopback address in this release")]
+    #[error("`{0}` must be a loopback address while `peer_scope` is `test`")]
     NotLoopback(ConfigSection),
     #[error("`{0}` is not a socket address")]
     InvalidAddress(ConfigSection),
@@ -149,4 +151,8 @@ pub enum ConfigError {
     InconsistentLimit(&'static str),
     #[error("the clock cannot tell the current time")]
     ClockUnavailable,
+    #[error("`dialback.outbound` requires `dialback.secret_file`")]
+    DialbackSecretMissing,
+    #[error("the dialback secret is shorter than {0} bytes")]
+    DialbackSecretTooShort(usize),
 }

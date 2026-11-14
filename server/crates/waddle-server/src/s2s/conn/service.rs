@@ -1,5 +1,5 @@
 //! The running S2S service: the inbound STARTTLS listener, the outbound
-//! STARTTLS dialer and the shutdown join.
+//! dialer (STARTTLS or XEP-0368 direct TLS) and the shutdown join.
 //!
 //! Every connection runs in its own task on a task tracker. S2S tasks hold
 //! no lock, permit or registry shared with C2S or any local service, so a
@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
-    DialbackMode, InitiatingConfig, ReceivingConfig, S2sStream, SaslLimits, StreamLanguage,
+    DialbackKeys, DialbackMode, InitiatingConfig, ReceivingConfig, S2sStream, SaslLimits,
+    StreamLanguage, TlsEntry,
 };
 use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 
@@ -34,7 +35,8 @@ use super::sink::{RefuseAllStanzas, StanzaSink};
 use super::telemetry;
 use super::transport::Transport;
 use crate::s2s::config::{AdmissionRefusal, S2sConfig, STREAM_CODEC_LIMITS};
-use crate::s2s::verify::VerifierWorkers;
+use crate::s2s::discovery::address;
+use crate::s2s::verify::{OutboundTransport, VerifierWorkers};
 
 /// Pause after a failed `accept`, such as when the process is out of file
 /// descriptors, so the loop does not spin.
@@ -43,6 +45,8 @@ const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(100);
 /// What the service runs with besides its configuration.
 pub struct ServiceOptions {
     /// Where outbound connections go; the configured endpoints by default.
+    /// A deployment that enables discovery passes
+    /// `crate::s2s::discovery::PeerEndpoints`.
     pub resolver: Option<Arc<dyn EndpointResolver>>,
     /// Where stanzas from established inbound streams go.
     pub sink: Arc<dyn StanzaSink>,
@@ -112,7 +116,7 @@ impl Shared {
 
     /// Spawn `task` on the tracker unless shutdown has begun; `false` when
     /// it was not spawned.
-    fn spawn<F>(&self, task: F) -> bool
+    pub(super) fn spawn<F>(&self, task: F) -> bool
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -157,6 +161,8 @@ impl Shared {
     /// without traffic as [`Shared::admit_inbound`] does for inbound ones.
     /// The remote domain is known, so a reserved peer's attempt may evict
     /// another reserved peer's stream when no other stream can be evicted.
+    /// An attempt calls this only once its TCP connection is open, so a
+    /// destination that never answers cannot cost another stream its place.
     fn admit_outbound(&self, remote: &CanonicalDomain) -> Result<OutboundSlot, S2sResource> {
         match self.capacity.admit_outbound() {
             Err(S2sResource::Sockets) => {
@@ -187,6 +193,8 @@ pub enum ConnectError {
     InProgress,
     #[error("the cap on outbound attempts in progress is reached")]
     Busy,
+    #[error("the global rate of new outbound connections is exhausted")]
+    RateLimited,
     #[error("no endpoint: {0}")]
     Resolve(ResolveError),
     #[error("the attempt failed: {}", outcome_code(*.0))]
@@ -337,16 +345,27 @@ impl S2sHandle {
                 DialRefusal::BackingOff => ConnectError::BackingOff,
                 DialRefusal::InProgress => ConnectError::InProgress,
                 DialRefusal::Busy => ConnectError::Busy,
+                DialRefusal::RateLimited => {
+                    telemetry::capacity_refused(StreamDirection::Outbound, S2sResource::DialRate);
+                    ConnectError::RateLimited
+                }
             })?;
         let dial = match start {
             DialStart::Established(stream) => return Ok(stream),
             DialStart::Dial(dial) => dial,
         };
-        let endpoints = shared
-            .resolver
-            .resolve(remote)
-            .await
-            .map_err(ConnectError::Resolve)?;
+        let endpoints = match shared.resolver.resolve(remote).await {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                // A failed lookup or a domain whose every address is blocked
+                // backs off like a failed connection; it is retried later,
+                // never answered by falling back to other records.
+                if matches!(error, ResolveError::LookupFailed | ResolveError::Blocked) {
+                    shared.registry.record_failure(remote);
+                }
+                return Err(ConnectError::Resolve(error));
+            }
+        };
         let (sender, receiver) = oneshot::channel();
         let attempt = Attempt {
             local: local.clone(),
@@ -450,12 +469,26 @@ fn receiving_stream(shared: &Arc<Shared>) -> Option<(S2sStream, Arc<ConnectionAd
             default_domain,
             language: StreamLanguage::english(),
             sasl: SaslLimits::PILOT,
-            dialback: DialbackMode::Disabled,
+            dialback: dialback_mode(&shared.config),
         },
         STREAM_CODEC_LIMITS,
     );
     stream.deliver_stanzas();
     Some((stream, admission))
+}
+
+/// The dialback mode of this deployment's streams: the Initiating and
+/// Authoritative Server roles with the deployment's secret when
+/// `dialback.outbound` is on. Inbound dialback is decided per pair by
+/// [`ConnectionAdmission`].
+fn dialback_mode(config: &S2sConfig) -> DialbackMode {
+    match config.dialback().secret() {
+        Some(secret) => {
+            let keys: Arc<dyn DialbackKeys> = Arc::clone(secret) as Arc<dyn DialbackKeys>;
+            DialbackMode::Enabled(keys)
+        }
+        None => DialbackMode::Disabled,
+    }
 }
 
 /// One outbound attempt.
@@ -476,10 +509,19 @@ fn fail_attempt(shared: &Shared, attempt: Attempt, outcome: S2sOutcome) {
     let _ = attempt.sender.send(Err(outcome));
 }
 
-/// Dial the attempt's endpoints in order and run a STARTTLS stream on the
-/// first one that accepts the TCP connection. Any failure after a
-/// connection is open, including a `see-other-host` redirect, ends the
-/// attempt: the redirect is never followed.
+/// Dial the attempt's endpoints in order and run a stream, with STARTTLS
+/// or direct TLS as the endpoint says, on the first one that accepts the
+/// TCP connection. A DNS-derived address in a blocked class is skipped
+/// here, on the exact address connected to. Any failure after a connection
+/// is open, including a `see-other-host` redirect, ends the attempt: the
+/// redirect is never followed.
+///
+/// The attempt takes an outbound socket without eviction before it
+/// connects. When the outbound socket cap is full it connects first and
+/// evicts a stream without traffic only once its own TCP connection is
+/// open, so an unreachable destination never displaces a stream. Until
+/// then the connecting socket is outside the socket counts; the cap on
+/// attempts in progress bounds how many such sockets exist.
 async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
     let started = Instant::now();
     let deadlines = *shared.config.deadlines();
@@ -494,20 +536,24 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
             return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
         }
     };
-    let slot = match shared.admit_outbound(&attempt.remote) {
-        Ok(slot) => slot,
+    let mut slot = match shared.capacity.admit_outbound() {
+        Ok(slot) => Some(slot),
+        Err(S2sResource::Sockets) => None,
         Err(resource) => {
             telemetry::capacity_refused(StreamDirection::Outbound, resource);
             return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
         }
     };
-    let addresses: Vec<SocketAddr> = attempt
+    let endpoints: Vec<(SocketAddr, OutboundTransport)> = attempt
         .endpoints
         .iter()
-        .map(|endpoint| endpoint.address)
+        .filter(|endpoint| {
+            !(endpoint.origin.is_dns() && address::is_blocked(endpoint.address.ip()))
+        })
+        .map(|endpoint| (endpoint.address, endpoint.transport))
         .collect();
-    let mut connected: Option<TcpStream> = None;
-    for address in addresses {
+    let mut connected: Option<(TcpStream, OutboundTransport)> = None;
+    for (address, transport) in endpoints {
         let deadline = (Instant::now() + deadlines.connect).min(negotiation_deadline);
         let connect = tokio::time::timeout_at(deadline.into(), TcpStream::connect(address));
         // A drain does not wait for a TCP connect.
@@ -519,16 +565,29 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
             connect = connect => connect,
         };
         if let Ok(Ok(socket)) = connect {
-            connected = Some(socket);
+            connected = Some((socket, transport));
             break;
         }
     }
-    let Some(socket) = connected else {
+    let Some((socket, transport)) = connected else {
         return fail_attempt(&shared, attempt, S2sOutcome::Io);
+    };
+    if slot.is_none() {
+        match shared.admit_outbound(&attempt.remote) {
+            Ok(admitted) => slot = Some(admitted),
+            Err(resource) => {
+                drop(socket);
+                telemetry::capacity_refused(StreamDirection::Outbound, resource);
+                return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
+            }
+        }
+    }
+    let Some(slot) = slot else {
+        return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
     };
     let _ = socket.set_nodelay(true);
     let activity = Activity::new();
-    let transport = Transport::new(
+    let transport_layer = Transport::new(
         socket,
         shared.config.limits().input_rate_per_socket,
         Arc::clone(&shared.capacity),
@@ -538,9 +597,13 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
         source: attempt.local.clone(),
         destination: attempt.remote.clone(),
         language: StreamLanguage::english(),
-        dialback: DialbackMode::Disabled,
+        dialback: dialback_mode(&shared.config),
     };
-    let (stream, initial) = S2sStream::initiate(config, STREAM_CODEC_LIMITS);
+    let (entry, tls_transport) = match transport {
+        OutboundTransport::StartTls => (TlsEntry::StartTls, S2sTransport::StartTls),
+        OutboundTransport::DirectTls => (TlsEntry::DirectTls, S2sTransport::DirectTls),
+    };
+    let (stream, initial) = S2sStream::initiate_with(config, entry, STREAM_CODEC_LIMITS);
     let connection = shared.next_connection();
     let Attempt {
         local,
@@ -553,7 +616,7 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
         Arc::clone(&shared),
         SessionStart {
             connection,
-            transport,
+            transport: transport_layer,
             stream,
             role: Role::Outbound {
                 local,
@@ -564,7 +627,7 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
             },
             activity,
             started,
-            tls_transport: S2sTransport::StartTls,
+            tls_transport,
         },
     )
     .with_negotiation(negotiation);

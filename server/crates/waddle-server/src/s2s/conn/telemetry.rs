@@ -3,10 +3,13 @@
 
 use std::time::Duration;
 
-use waddle_xmpp::telemetry::attributes::{S2sDirection, S2sOutcome, S2sResource, S2sTransport};
+use waddle_xmpp::telemetry::attributes::{
+    S2sDialbackResult, S2sDialbackRole, S2sDirection, S2sOutcome, S2sResource, S2sStrength,
+    S2sTransport,
+};
 use waddle_xmpp::{counter_add, gauge_record, histogram_record};
 
-use super::peer_stream::StreamDirection;
+use super::peer_stream::{AuthenticationStrength, StreamDirection};
 use super::registry::Registry;
 
 fn attribute(direction: StreamDirection) -> S2sDirection {
@@ -44,16 +47,22 @@ pub(super) fn capacity_refused(direction: StreamDirection, resource: S2sResource
 pub(super) fn established(
     direction: StreamDirection,
     transport: S2sTransport,
+    strength: AuthenticationStrength,
     elapsed: Duration,
     registry: &Registry,
 ) {
+    let strength = match strength {
+        AuthenticationStrength::Pkix => S2sStrength::Pkix,
+        AuthenticationStrength::Dialback => S2sStrength::Dialback,
+    };
     counter_add!(
         "waddle.s2s.established",
         "{stream}",
-        "S2S streams that completed TLS, SASL EXTERNAL and the authenticated restart.",
+        "S2S streams that completed negotiation over TLS, by how the pair authenticated.",
         1,
         attribute(direction),
         transport,
+        strength,
     );
     histogram_record!(
         "waddle.s2s.negotiation.duration",
@@ -77,4 +86,16 @@ pub(super) fn stream_counts(registry: &Registry) {
             attribute(direction),
         );
     }
+}
+
+/// A dialback exchange in `role` concluded with `result`.
+pub(super) fn dialback(role: S2sDialbackRole, result: S2sDialbackResult) {
+    counter_add!(
+        "waddle.s2s.dialback",
+        "{exchange}",
+        "S2S Server Dialback exchanges, by this server's role and the result.",
+        1,
+        role,
+        result,
+    );
 }

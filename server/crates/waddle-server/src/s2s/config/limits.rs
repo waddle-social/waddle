@@ -119,6 +119,11 @@ pub struct ResourceLimits {
     /// Outbound attempts in progress at once, each for a distinct
     /// directional domain pair.
     pub max_dialing: usize,
+    /// New outbound connections, every remote domain and dialback
+    /// verification connections together. Local users can make this server
+    /// dial arbitrary domains once discovery is on; the rate bounds how
+    /// fast attempts that fail quickly can follow one another.
+    pub dial_rate: RateLimit,
     /// Remote domains whose outbound backoff is remembered. Only failing
     /// destinations have an entry; a domain without one is never refused.
     /// When the table is full, recording a new failure replaces the entry
@@ -165,6 +170,10 @@ impl ResourceLimits {
         },
         max_tracked_addresses: 256,
         max_dialing: 8,
+        dial_rate: RateLimit {
+            per_second: 4,
+            burst: 8,
+        },
         max_backoff_destinations: 256,
         input_rate_per_socket: RateLimit {
             per_second: 64 * 1024,
@@ -194,6 +203,11 @@ pub struct Deadlines {
     /// The SASL phase, from the post-TLS stream header; never renewed by
     /// replacement or aborted exchanges.
     pub sasl: Duration,
+    /// A dialback exchange: from the post-TLS features until an inbound
+    /// peer's key is verified, or until an outbound stream's key is
+    /// answered. It covers a verification connection to the Authoritative
+    /// Server and is still bounded by the whole negotiation.
+    pub dialback: Duration,
     /// Everything from TCP accept or connect to the established stream.
     pub negotiation: Duration,
     /// An unfinished first-level element on an established stream,
@@ -233,6 +247,7 @@ impl Deadlines {
         connect: Duration::from_secs(5),
         stage: Duration::from_secs(5),
         sasl: Duration::from_secs(5),
+        dialback: Duration::from_secs(15),
         negotiation: Duration::from_secs(20),
         incomplete_element: Duration::from_secs(5),
         idle: Duration::from_secs(300),
@@ -253,6 +268,7 @@ impl Deadlines {
         connect: Duration::from_secs(5),
         stage: Duration::from_secs(5),
         sasl: Duration::from_secs(5),
+        dialback: Duration::from_secs(15),
         negotiation: Duration::from_secs(20),
         incomplete_element: Duration::from_secs(5),
         idle: Duration::from_secs(3600),

@@ -94,4 +94,11 @@ impl InboundAdmission for ConnectionAdmission {
             }
         }
     }
+
+    /// Inbound dialback for the pair: the Receiving Server role runs, the
+    /// destination is local, and the source is on the dialback list and
+    /// admitted (ADR-0020 D2).
+    fn permits_dialback(&self, source: &CanonicalDomain, destination: &CanonicalDomain) -> bool {
+        self.config.is_local(destination) && self.config.permits_inbound_dialback(source)
+    }
 }
