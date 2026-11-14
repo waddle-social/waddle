@@ -5,10 +5,6 @@
 //! Clients authenticate with SASL SCRAM-SHA-256 against native accounts and
 //! bind a resource, as a deployed client does. Stanzas are built and parsed
 //! as typed values.
-//!
-//! Several test binaries include this module and each uses part of it, so
-//! the helpers a binary leaves unused are not dead code of that suite.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -19,7 +15,7 @@ use waddle_server::test_support::{router, seed_local_account, WebSocketState};
 use waddle_ws_test_support::WsXmppClient;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
-use xmpp_parsers::stanza_error::{DefinedCondition, StanzaError};
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 /// The test state pins its account domain (`test_state.rs`).
 pub const DOMAIN: &str = "example.com";
@@ -130,14 +126,6 @@ pub fn room(channel_id: &str) -> BareJid {
 /// Send `iq` and wait for its reply.
 pub async fn round_trip(client: &mut WsXmppClient, iq: Iq) -> Iq {
     waddle_ws_test_support::iq::round_trip(client, iq).await
-}
-
-/// The stanza error of an IQ reply, or a panic naming what came instead.
-pub fn iq_error(reply: &Iq) -> &StanzaError {
-    match reply {
-        Iq::Error { error, .. } => error,
-        other => panic!("expected an IQ error, got {other:?}"),
-    }
 }
 
 /// Whether an IQ reply is a result.
