@@ -1,0 +1,707 @@
+# Generated from ci/cache-benchmark/workflow.cue; do not edit manually.
+# Regenerate with: bash scripts/sync-cache-benchmark.sh
+
+name: waddle-ci-cache-benchmark
+"on":
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Compare all providers, or retry only the Namespace seed/warm pair
+        type: choice
+        default: all
+        required: true
+        options:
+          - all
+          - namespace
+permissions: {}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  normal-ci:
+    permissions:
+      contents: read
+      actions: read
+    name: Wait for normal CI before cache qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Validate qualification contracts
+        run: python3 scripts/test-ci-cache-benchmark.py
+      - name: Wait for existing workflows to finish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BENCHMARK_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/ci-cache-benchmark.py wait-for-ci --sha "$BENCHMARK_HEAD_SHA"
+  existing:
+    name: cache-benchmark/existing/${{ matrix.variant }}
+    needs:
+      - normal-ci
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: fh-h2
+            provider: fh-h2
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+          - variant: fh
+            provider: fh
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+          - variant: h2
+            provider: h2
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+          - variant: h3
+            provider: h3
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+          - variant: fh-h3
+            provider: fh-h3
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+      max-parallel: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Start setup measurement
+        run: python3 scripts/ci-cache-benchmark.py mark --output .ci/cache-benchmark
+      - name: Mount isolated Namespace Nix volume
+        if: ${{ matrix.variant == 'namespace' }}
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
+      - name: Restore or seed isolated Nix store snapshot
+        if: ${{ matrix.variant == 'cache-nix' }}
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: waddle-nix-benchmark-${{ github.run_id }}
+          paths: |-
+            !/nix
+            /nix/store
+            /nix/var/nix/db
+          purge: false
+          save: false
+      - name: Setup FlakeHub Cache
+        if: ${{ matrix.provider == 'fh' || matrix.provider == 'fh-h2' || matrix.provider == 'fh-h3' }}
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia 2
+        if: ${{ matrix.provider == 'h2' || matrix.provider == 'fh-h2' }}
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+          drain-timeout: 300
+      - name: Setup Hestia 3
+        if: ${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' || matrix.variant == 'h3-seeded' }}
+        uses: Mic92/hestia@f1f4df2801140a36398ed423533c8460618539df
+        with:
+          drain-timeout: 300
+          version: v3.0.1
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+      - name: Setup Magic GHA cache
+        if: ${{ matrix.variant == 'magic' }}
+        uses: DeterminateSystems/magic-nix-cache-action@2cdbb78a6eed25b3bc8b97f863549be5f6567e55
+        with:
+          use-gha-cache: enabled
+          use-flakehub: disabled
+          diff-store: false
+          listen: "127.0.0.1:37515"
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Restore dependencies, vendor and exact prior archive without building
+        env:
+          BENCHMARK_PROVIDER: ${{ matrix.provider }}
+          BENCHMARK_VARIANT: ${{ matrix.variant }}
+        run: |-
+          set +e
+          python3 scripts/ci-cache-benchmark.py restore --provider "$BENCHMARK_PROVIDER" --variant "$BENCHMARK_VARIANT" --phase existing --output .ci/cache-benchmark
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "Cache miss recorded; this candidate is unqualified, and no build was attempted."
+            exit 0
+          fi
+          exit "$status"
+      - name: Upload cache measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cache-benchmark-existing-${{ matrix.variant }}
+          path: .ci/cache-benchmark
+          include-hidden-files: true
+          if-no-files-found: error
+  seed:
+    name: cache-benchmark/seed/${{ matrix.variant }}
+    needs:
+      - normal-ci
+      - existing
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.scope == 'all') && '[{"provider":"fh","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb"],"variant":"namespace"},{"provider":"fh","variant":"cache-nix","runner":["nscloud-ubuntu-24.04-amd64-8x16"]},{"provider":"magic-seed","variant":"magic","runner":["nscloud-ubuntu-24.04-amd64-8x16"]}]' || '[{"provider":"fh","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb"],"variant":"namespace"}]') }}
+      max-parallel: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Start setup measurement
+        run: python3 scripts/ci-cache-benchmark.py mark --output .ci/cache-benchmark
+      - name: Mount isolated Namespace Nix volume
+        if: ${{ matrix.variant == 'namespace' }}
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
+      - name: Restore or seed isolated Nix store snapshot
+        if: ${{ matrix.variant == 'cache-nix' }}
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: waddle-nix-benchmark-${{ github.run_id }}
+          paths: |-
+            !/nix
+            /nix/store
+            /nix/var/nix/db
+          purge: false
+          save: true
+      - name: Setup FlakeHub Cache
+        if: ${{ matrix.provider == 'fh' || matrix.provider == 'fh-h2' || matrix.provider == 'fh-h3' }}
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia 2
+        if: ${{ matrix.provider == 'h2' || matrix.provider == 'fh-h2' }}
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+          drain-timeout: 300
+      - name: Setup Hestia 3
+        if: ${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' || matrix.variant == 'h3-seeded' }}
+        uses: Mic92/hestia@f1f4df2801140a36398ed423533c8460618539df
+        with:
+          drain-timeout: 300
+          version: v3.0.1
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+      - name: Setup Magic GHA cache
+        if: ${{ matrix.variant == 'magic' }}
+        uses: DeterminateSystems/magic-nix-cache-action@2cdbb78a6eed25b3bc8b97f863549be5f6567e55
+        with:
+          use-gha-cache: enabled
+          use-flakehub: enabled
+          diff-store: true
+          listen: "127.0.0.1:37515"
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Restore dependencies, vendor and exact prior archive without building
+        env:
+          BENCHMARK_PROVIDER: ${{ matrix.provider }}
+          BENCHMARK_VARIANT: ${{ matrix.variant }}
+        run: |-
+          set +e
+          python3 scripts/ci-cache-benchmark.py restore --provider "$BENCHMARK_PROVIDER" --variant "$BENCHMARK_VARIANT" --phase seed --output .ci/cache-benchmark
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "Cache miss recorded; this candidate is unqualified, and no build was attempted."
+            exit 0
+          fi
+          exit "$status"
+      - name: Upload cache measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cache-benchmark-seed-${{ matrix.variant }}
+          path: .ci/cache-benchmark
+          include-hidden-files: true
+          if-no-files-found: error
+  warm:
+    name: cache-benchmark/warm/${{ matrix.variant }}
+    needs:
+      - normal-ci
+      - seed
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.scope == 'all') && '[{"provider":"namespace","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb","nscloud-cache-exp-do-not-commit"],"variant":"namespace"},{"provider":"cache-nix","variant":"cache-nix","runner":["nscloud-ubuntu-24.04-amd64-8x16"]},{"provider":"magic","variant":"magic","runner":["nscloud-ubuntu-24.04-amd64-8x16"]}]' || '[{"provider":"namespace","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb","nscloud-cache-exp-do-not-commit"],"variant":"namespace"}]') }}
+      max-parallel: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Start setup measurement
+        run: python3 scripts/ci-cache-benchmark.py mark --output .ci/cache-benchmark
+      - name: Mount isolated Namespace Nix volume
+        if: ${{ matrix.variant == 'namespace' }}
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
+      - name: Restore or seed isolated Nix store snapshot
+        if: ${{ matrix.variant == 'cache-nix' }}
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: waddle-nix-benchmark-${{ github.run_id }}
+          paths: |-
+            !/nix
+            /nix/store
+            /nix/var/nix/db
+          purge: false
+          save: false
+      - name: Setup FlakeHub Cache
+        if: ${{ matrix.provider == 'fh' || matrix.provider == 'fh-h2' || matrix.provider == 'fh-h3' }}
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia 2
+        if: ${{ matrix.provider == 'h2' || matrix.provider == 'fh-h2' }}
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+          drain-timeout: 300
+      - name: Setup Hestia 3
+        if: ${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' || matrix.variant == 'h3-seeded' }}
+        uses: Mic92/hestia@f1f4df2801140a36398ed423533c8460618539df
+        with:
+          drain-timeout: 300
+          version: v3.0.1
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+      - name: Setup Magic GHA cache
+        if: ${{ matrix.variant == 'magic' }}
+        uses: DeterminateSystems/magic-nix-cache-action@2cdbb78a6eed25b3bc8b97f863549be5f6567e55
+        with:
+          use-gha-cache: enabled
+          use-flakehub: disabled
+          diff-store: false
+          listen: "127.0.0.1:37515"
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Restore dependencies, vendor and exact prior archive without building
+        env:
+          BENCHMARK_PROVIDER: ${{ matrix.provider }}
+          BENCHMARK_VARIANT: ${{ matrix.variant }}
+        run: |-
+          set +e
+          python3 scripts/ci-cache-benchmark.py restore --provider "$BENCHMARK_PROVIDER" --variant "$BENCHMARK_VARIANT" --phase warm --output .ci/cache-benchmark
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "Cache miss recorded; this candidate is unqualified, and no build was attempted."
+            exit 0
+          fi
+          exit "$status"
+      - name: Upload cache measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cache-benchmark-warm-${{ matrix.variant }}
+          path: .ci/cache-benchmark
+          include-hidden-files: true
+          if-no-files-found: error
+  h3-seed:
+    name: cache-benchmark/seed/${{ matrix.variant }}
+    needs:
+      - normal-ci
+      - warm
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
+    outputs:
+      manifest-version: ${{ steps.hestia-seed.outputs.manifest-version }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: fh
+            variant: h3-seeded
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+      max-parallel: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Start setup measurement
+        run: python3 scripts/ci-cache-benchmark.py mark --output .ci/cache-benchmark
+      - name: Mount isolated Namespace Nix volume
+        if: ${{ matrix.variant == 'namespace' }}
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
+      - name: Restore or seed isolated Nix store snapshot
+        if: ${{ matrix.variant == 'cache-nix' }}
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: waddle-nix-benchmark-${{ github.run_id }}
+          paths: |-
+            !/nix
+            /nix/store
+            /nix/var/nix/db
+          purge: false
+          save: true
+      - name: Setup FlakeHub Cache
+        if: ${{ matrix.provider == 'fh' || matrix.provider == 'fh-h2' || matrix.provider == 'fh-h3' }}
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia 2
+        if: ${{ matrix.provider == 'h2' || matrix.provider == 'fh-h2' }}
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+          drain-timeout: 300
+      - name: Setup Hestia 3
+        if: ${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' || matrix.variant == 'h3-seeded' }}
+        uses: Mic92/hestia@f1f4df2801140a36398ed423533c8460618539df
+        with:
+          drain-timeout: 30
+          version: v3.0.1
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+      - name: Setup Magic GHA cache
+        if: ${{ matrix.variant == 'magic' }}
+        uses: DeterminateSystems/magic-nix-cache-action@2cdbb78a6eed25b3bc8b97f863549be5f6567e55
+        with:
+          use-gha-cache: enabled
+          use-flakehub: enabled
+          diff-store: true
+          listen: "127.0.0.1:37515"
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Restore dependencies, vendor and exact prior archive without building
+        env:
+          BENCHMARK_PROVIDER: ${{ matrix.provider }}
+          BENCHMARK_VARIANT: ${{ matrix.variant }}
+        run: |-
+          set +e
+          python3 scripts/ci-cache-benchmark.py restore --provider "$BENCHMARK_PROVIDER" --variant "$BENCHMARK_VARIANT" --phase seed --output .ci/cache-benchmark
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "Cache miss recorded; this candidate is unqualified, and no build was attempted."
+            exit 0
+          fi
+          exit "$status"
+      - name: Register and upload the exact Hestia seed outputs
+        id: hestia-seed
+        run: python3 scripts/ci-cache-benchmark.py seed-hestia --output .ci/cache-benchmark
+      - name: Upload cache measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cache-benchmark-seed-${{ matrix.variant }}
+          path: .ci/cache-benchmark
+          include-hidden-files: true
+          if-no-files-found: error
+  h3-warm:
+    name: cache-benchmark/warm/${{ matrix.variant }}
+    needs:
+      - normal-ci
+      - h3-seed
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: h3
+            variant: h3-seeded
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x16
+      max-parallel: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Start setup measurement
+        run: python3 scripts/ci-cache-benchmark.py mark --output .ci/cache-benchmark
+      - name: Mount isolated Namespace Nix volume
+        if: ${{ matrix.variant == 'namespace' }}
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
+      - name: Restore or seed isolated Nix store snapshot
+        if: ${{ matrix.variant == 'cache-nix' }}
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: waddle-nix-benchmark-${{ github.run_id }}
+          paths: |-
+            !/nix
+            /nix/store
+            /nix/var/nix/db
+          purge: false
+          save: false
+      - name: Setup FlakeHub Cache
+        if: ${{ matrix.provider == 'fh' || matrix.provider == 'fh-h2' || matrix.provider == 'fh-h3' }}
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia 2
+        if: ${{ matrix.provider == 'h2' || matrix.provider == 'fh-h2' }}
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+          drain-timeout: 300
+      - name: Setup Hestia 3
+        if: ${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' || matrix.variant == 'h3-seeded' }}
+        uses: Mic92/hestia@f1f4df2801140a36398ed423533c8460618539df
+        with:
+          drain-timeout: 300
+          version: v3.0.1
+          listen: "127.0.0.1:37516"
+          upstream-cache-filter: true
+          wait-manifest-version: ${{ needs.h3-seed.outputs.manifest-version || '0' }}
+      - name: Setup Magic GHA cache
+        if: ${{ matrix.variant == 'magic' }}
+        uses: DeterminateSystems/magic-nix-cache-action@2cdbb78a6eed25b3bc8b97f863549be5f6567e55
+        with:
+          use-gha-cache: enabled
+          use-flakehub: disabled
+          diff-store: false
+          listen: "127.0.0.1:37515"
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Restore dependencies, vendor and exact prior archive without building
+        env:
+          BENCHMARK_PROVIDER: ${{ matrix.provider }}
+          BENCHMARK_VARIANT: ${{ matrix.variant }}
+        run: |-
+          set +e
+          python3 scripts/ci-cache-benchmark.py restore --provider "$BENCHMARK_PROVIDER" --variant "$BENCHMARK_VARIANT" --phase warm --output .ci/cache-benchmark
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "Cache miss recorded; this candidate is unqualified, and no build was attempted."
+            exit 0
+          fi
+          exit "$status"
+      - name: Upload cache measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cache-benchmark-warm-${{ matrix.variant }}
+          path: .ci/cache-benchmark
+          include-hidden-files: true
+          if-no-files-found: error
+  summary:
+    permissions:
+      contents: read
+      actions: read
+    name: Cache qualification report
+    needs:
+      - existing
+      - seed
+      - warm
+      - h3-seed
+      - h3-warm
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Download measurements
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: cache-benchmark-*
+          path: .ci/cache-results
+          digest-mismatch: error
+      - name: Include cache post-job and queue timings
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-cache-benchmark.py summarize --input .ci/cache-results --output .ci/cache-summary
+      - name: Upload qualification report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cache-qualification-summary
+          path: .ci/cache-summary
+          include-hidden-files: true
+          if-no-files-found: error
