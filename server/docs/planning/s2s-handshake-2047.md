@@ -10,6 +10,25 @@ authorize protected dispatch, or authorize production activation. Blocking
 questions below must be resolved before transport implementation. Changes to
 ADR-0020, including the separate authority work in PR #2067, remain separate.
 
+**Amended by ADR-0020 decisions D1–D3 (accepted 2026-11-13).** Where this
+document conflicts with them, they control:
+
+- Peer admission uses the `closed`, `allowlist` and `open` modes of D1. The
+  explicit pair configuration below remains the fixture profile; the
+  configuration for the D1 modes is defined with the connection manager.
+- Inbound XEP-0220 dialback is permitted under D2's restricted policy, and
+  Waddle implements the outbound dialback roles. This supersedes the statement
+  below that the profile has no dialback.
+- `open` mode uses a public-WebPKI trust profile and accepts serverAuth-only
+  certificates in both roles (see [the verifier design](s2s-verifier-2047.md)).
+  This supersedes, for that mode, the rule below that only the selected peer's
+  explicit trust anchors are used.
+- DNS discovery follows D3 and still never authorizes a peer.
+
+The loopback and `.test` restriction on enabled listeners and endpoints stays
+until a reviewed change removes it. [Status after ADR-0020](#status-after-adr-0020)
+records which blocking decisions the ADR settled and which remain open.
+
 The slice establishes and tears down authenticated, directional domain streams
 between two native Waddle processes on isolated test domains. It accepts no
 application work, creates no remote account, grants no membership, and takes no
@@ -93,7 +112,8 @@ A pair uses one initiating connection. Its reverse is a separately configured,
 independently authenticated connection. A stream authenticated from
 `home-a.test` cannot carry `muc.home-a.test` traffic even when both names occur
 in its certificate. Components need their own pairs. There is no XEP-0288,
-dialback, multiplexed domain authentication or arbitrary relay.
+dialback, multiplexed domain authentication or arbitrary relay. ADR-0020 D2
+later admits restricted dialback; see the status amendment.
 
 The configured endpoint selects the socket only. It never replaces the remote
 destination domain as the certificate reference identity or TLS SNI. The fixture
@@ -128,7 +148,8 @@ reference identity is the claimed stream `from` domain, which must also select
 an allowed inbound pair. Verify certificate path, signatures, current validity,
 constraints/key usage, applicable EKUs and revocation before accepting identity.
 Use only the selected peer's explicit trust anchors, never a fallback system
-root store. Verify SAN service identity against the reference domain, not the
+root store; ADR-0020 D2 adds a separately selected public-WebPKI profile for
+`open` mode. Verify SAN service identity against the reference domain, not the
 endpoint IP, SNI alone, subject Common Name or any certificate-supplied redirect.
 
 DNS-ID and `_xmpp-server` SRV-ID verification coverage must be demonstrated;
@@ -324,6 +345,19 @@ separate blockers for remote grants and protected dispatch even if B1-B4 pass.
 No two-process handshake result relaxes those gates or the production window and
 runbook requirement. Remote IQ correlation, delivery custody/deduplication,
 ordering, unknown outcomes and recipient-set preservation require later slices.
+
+### Status after ADR-0020
+
+ADR-0020's accepted decisions settle part of B1 and B2. Nothing in this table
+is implemented or proven; every remaining item is still a blocking
+implementation gate.
+
+| ID | Decided by ADR-0020 | Remaining implementation gate |
+| --- | --- | --- |
+| B1 | D2: TLS on every stream; PKIX and SASL EXTERNAL as the primary path; serverAuth-only certificates in both roles; inbound dialback policy and outbound dialback roles. D3: discovery, the source domain as the only reference identity, DNS never authorizes. D1: admission modes. | Updates and errata disposition; TLS version profile (RFC 9325 section 3.1.1 requires TLS 1.2 support, while this fixture is TLS 1.3 only); DNS-ID, SRV-ID, XmppAddr and wildcard matrix; IDNA and address preparation; remaining SASL conformance; malformed-header and error behavior; dialback wire profile, including which certificate outcomes count as an active failure. |
+| B2 | D2: a public-WebPKI profile for `open` mode that accepts serverAuth-only EKU; hard CRL checks only for configured private CAs. | Concrete verifier for both profiles; revocation handling for public chains; algorithm intersection; parser and CRL ceilings; cancellation and resource proofs; two-process evidence. |
+| B3 | Nothing. | Unchanged. |
+| B4 | Nothing; accepting the ADR is not a review of an implementation. | Independent review of the implementation head and its B1–B3 evidence. |
 
 ## Acceptance evidence required of the future implementation
 
