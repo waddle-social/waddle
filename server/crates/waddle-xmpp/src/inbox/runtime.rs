@@ -1,5 +1,7 @@
 //! Shared runtime helpers for projecting live message traffic into Waddle inbox rows.
 
+use std::borrow::Cow;
+
 use jid::BareJid;
 use xmpp_parsers::message::Message;
 
@@ -11,6 +13,24 @@ use crate::xep::{
     has_file_sharing, is_moderation_result_message, is_reaction_message, is_sticker_message,
     should_skip_storage,
 };
+
+/// Longest preview, thread title or author label an inbox row carries, in
+/// characters.
+///
+/// These labels travel as XML attribute values, and an attribute value over
+/// the parser's token limit (8192 bytes) makes the whole stanza unparseable.
+pub const MAX_INBOX_LABEL_CHARS: usize = 256;
+
+/// Cut `text` to at most [`MAX_INBOX_LABEL_CHARS`] characters, ending a cut
+/// label with an ellipsis.
+pub fn bounded_label(text: &str) -> Cow<'_, str> {
+    match text.char_indices().nth(MAX_INBOX_LABEL_CHARS - 1) {
+        Some((cut, last)) if cut + last.len_utf8() < text.len() => {
+            Cow::Owned(format!("{}…", &text[..cut]))
+        }
+        _ => Cow::Borrowed(text),
+    }
+}
 
 pub fn should_project_message(msg: &Message) -> bool {
     if should_skip_storage(msg) {
@@ -42,7 +62,7 @@ pub fn preview_text(msg: &Message) -> Option<String> {
                 .or_else(|| msg.subjects.values().next())
                 .cloned()
         })
-        .map(|text| text.trim().to_string())
+        .map(|text| bounded_label(text.trim()).into_owned())
         .filter(|text| !text.is_empty())
 }
 
@@ -103,10 +123,10 @@ pub fn groupchat_thread_entry(
     );
     entry.thread_id = Some(thread_id.to_owned());
     if let Some(title) = thread_title {
-        entry.thread_title = Some(title.to_owned());
+        entry.thread_title = Some(bounded_label(title).into_owned());
     }
     if let Some(author) = author {
-        entry.author = Some(author.to_owned());
+        entry.author = Some(bounded_label(author).into_owned());
     }
     if let Some(preview) = preview_text(msg) {
         entry.preview = Some(preview);
@@ -166,6 +186,40 @@ mod tests {
 
         assert!(should_project_message(&msg));
         assert!(preview_text(&msg).is_none());
+    }
+
+    #[test]
+    fn bounded_label_keeps_short_text_and_cuts_long_text_on_a_char_boundary() {
+        let exact = "å".repeat(MAX_INBOX_LABEL_CHARS);
+        assert_eq!(bounded_label("hello"), "hello");
+        assert_eq!(bounded_label(&exact), exact.as_str());
+
+        let cut = bounded_label(&"å".repeat(MAX_INBOX_LABEL_CHARS + 1)).into_owned();
+        assert_eq!(cut.chars().count(), MAX_INBOX_LABEL_CHARS);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn runtime_bounds_the_preview_of_a_long_message() {
+        let mut msg = Message::new(Some(jid::Jid::from(jid("bob@example.com"))));
+        msg.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            format!("  {}  ", "å".repeat(9000)),
+        );
+
+        let entry = groupchat_thread_entry(
+            jid("room@muc.example.com"),
+            &msg,
+            1,
+            "thread-1",
+            preview_text(&msg).as_deref(),
+            Some(&"n".repeat(9000)),
+        );
+
+        for label in [entry.preview, entry.thread_title, entry.author] {
+            let label = label.expect("label is projected");
+            assert_eq!(label.chars().count(), MAX_INBOX_LABEL_CHARS);
+        }
     }
 
     #[test]
