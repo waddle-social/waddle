@@ -1,0 +1,51 @@
+---
+// NotFound board: unknown routes land here. A static page in the app's
+// look (no shell or session), with one way back: Home.
+import { Font } from "astro:assets";
+import "@/styles/global.css";
+import { css, cx } from "styled-system/css";
+import { btn } from "styled-system/recipes";
+import mark from "@waddle/design/assets/waddle-mark.svg?url";
+
+export const prerender = true;
+
+const page = css({ minHeight: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "4", padding: "24px", textAlign: "center", bg: "bg", color: "fg", fontFamily: "body" });
+const belly = css({ position: "relative", display: "inline-flex", alignItems: "center", justifyContent: "center", width: "120px", height: "120px", borderRadius: "pill", bg: "belly" });
+const markClass = css({ width: "84px", height: "84px", rotate: "-12deg" });
+const question = css({ position: "absolute", top: "4px", right: "-6px", display: "inline-flex", alignItems: "center", justifyContent: "center", width: "44px", height: "44px", borderRadius: "pill", bg: "surface", border: "1px solid {colors.border}", font: "700 22px/1 {fonts.display}", color: "action.text" });
+const title = css({ margin: 0, maxWidth: "640px", font: "700 28px/1.15 {fonts.display}", letterSpacing: "-0.01em", md: { fontSize: "30px", lineHeight: "1.2" } });
+const body = css({ margin: 0, maxWidth: "520px", fontSize: "15px", lineHeight: "1.5", color: "fg.muted" });
+const action = cx(btn({ variant: "primary" }), css({ textDecoration: "none", justifyContent: "center", minWidth: "180px", mdDown: { height: "48px" } }));
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="/waddle-logo.svg" />
+    <meta name="color-scheme" content="dark light" />
+    <Font cssVariable="--font-display" preload />
+    <Font cssVariable="--font-body" preload />
+    <script is:inline>
+      (function () {
+        try {
+          if (localStorage.getItem("waddle:theme") === "daylight") {
+            document.documentElement.setAttribute("data-theme", "daylight");
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <title>Page not found · Waddle</title>
+  </head>
+  <body>
+    <main class={page}>
+      <span class={belly} aria-hidden="true">
+        <img class={markClass} src={mark} alt="" />
+        <span class={question}>?</span>
+      </span>
+      <h1 class={title}>This page waddled off.</h1>
+      <p class={body}>The link may be old or mistyped. Everything else is right where you left it.</p>
+      <a class={action} href="/">Go to Home</a>
+    </main>
+  </body>
+</html>
