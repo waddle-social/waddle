@@ -53,7 +53,10 @@ fn assert_remote_error(response: &Iq, request: &Iq, bound: &Jid) {
         panic!("foreign Carbons must be denied: {response:?}")
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
     let Iq::Set {
         payload: original, ..

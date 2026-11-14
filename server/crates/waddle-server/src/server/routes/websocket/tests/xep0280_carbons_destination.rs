@@ -69,7 +69,10 @@ fn assert_remote_error(reply: &Iq, request: &Iq) {
         panic!("foreign Carbons request must not be acknowledged: {reply:?}")
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
     let original = match request {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
@@ -329,7 +332,7 @@ async fn carbons_results_and_errors_do_not_reply_or_change_state() {
 }
 
 #[tokio::test]
-async fn foreign_carbons_before_binding_retains_authentication_error() {
+async fn foreign_carbons_before_binding_is_refused_as_not_authorized() {
     let state = create_test_websocket_state().await;
     for phase in [
         ConnectionPhase::new(),
@@ -344,10 +347,10 @@ async fn foreign_carbons_before_binding_retains_authentication_error() {
         )
         .await;
         let [Iq::Error { error, .. }] = replies.as_slice() else {
-            panic!("authentication error: {replies:?}")
+            panic!("RFC 6120 §7.1 not-authorized refusal: {replies:?}")
         };
         assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
-        assert!(error.by.is_none(), "routing gate runs after binding");
+        assert!(error.by.is_none(), "an unbound stream has nothing routed");
         assert_state(&state, &conn, false);
     }
 }
@@ -361,12 +364,11 @@ async fn unregistered_carbons_namespace_keeps_feature_fallback_without_mutation(
         .protocol
         .dispatcher = Arc::new(StanzaDispatcher::new());
     let (mut conn, _rx) = connection(&state, false).await;
-    let replies = dispatch(
-        &state,
-        &mut conn,
-        request(Some("remote.test"), true, true, Some(ORIGIN)),
-    )
-    .await;
+    // A server-addressed request reaches namespace dispatch; with no Carbons
+    // handler registered it gets the generic fallback. (A request to an
+    // unserved domain is refused by destination before any namespace is
+    // consulted, registered or not.)
+    let replies = dispatch(&state, &mut conn, request(None, true, true, Some(ORIGIN))).await;
     let [Iq::Error { error, .. }] = replies.as_slice() else {
         panic!("unregistered feature fallback: {replies:?}")
     };
@@ -376,7 +378,7 @@ async fn unregistered_carbons_namespace_keeps_feature_fallback_without_mutation(
     );
     assert!(
         error.by.is_none(),
-        "preflight requires a registered handler"
+        "a local fallback is not a routing error"
     );
     assert_state(&state, &conn, false);
 }

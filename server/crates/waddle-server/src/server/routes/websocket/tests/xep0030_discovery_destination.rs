@@ -1,6 +1,6 @@
-//! Parser-valid bound discovery requests must not borrow a foreign identity.
-//! The existing parser checks IQ type/query name/namespace, not a full XML schema.
-//! Pre-bind foreign discovery policy is deliberately outside this slice.
+//! Parser-valid discovery requests must not borrow a foreign identity, before
+//! or after resource binding. The existing parser checks IQ type/query
+//! name/namespace, not a full XML schema.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,12 +54,15 @@ fn assert_remote_error(reply: &Iq, request: &Iq) {
         panic!("foreign discovery cannot return local identity/items: {reply:?}")
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
     assert!(error
         .texts
         .values()
-        .any(|text| text == "Remote service discovery routing is not allowed by this server."));
+        .any(|text| text == "Routing to remote domains is not enabled on this server."));
     let Iq::Get {
         payload: original, ..
     } = request
@@ -309,7 +312,7 @@ async fn malformed_payloads_and_iq_sets_keep_parser_errors() {
     let (mut conn, _rx) = connection(&state).await;
     for kind in [Discovery::Info, Discovery::Items] {
         for set in [false, true] {
-            let iq = request(kind, Some("remote.test"), None, None);
+            let iq = request(kind, Some(DOMAIN), None, None);
             let Iq::Get {
                 from,
                 to,
@@ -337,6 +340,46 @@ async fn malformed_payloads_and_iq_sets_keep_parser_errors() {
             let replies = dispatch(&state, &mut conn, iq).await;
             assert!(
                 matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::BadRequest && error.by.is_none())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn foreign_malformed_payloads_and_iq_sets_are_routed_not_parsed() {
+    // The payload belongs to the remote entity; the home server refuses the
+    // route before any local discovery parser sees it.
+    let state = create_test_websocket_state().await;
+    let (mut conn, _rx) = connection(&state).await;
+    for kind in [Discovery::Info, Discovery::Items] {
+        for set in [false, true] {
+            let Iq::Get {
+                from,
+                to,
+                id,
+                payload,
+            } = request(kind, Some("remote.test"), None, None)
+            else {
+                panic!("get")
+            };
+            let iq = if set {
+                Iq::Set {
+                    from,
+                    to,
+                    id,
+                    payload,
+                }
+            } else {
+                Iq::Get {
+                    from,
+                    to,
+                    id,
+                    payload: Element::builder("not-query", kind.namespace()).build(),
+                }
+            };
+            let replies = dispatch(&state, &mut conn, iq).await;
+            assert!(
+                matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::RemoteServerNotFound && error.by.is_some())
             );
         }
     }
@@ -388,7 +431,7 @@ async fn disco_results_and_errors_never_generate_a_reply() {
 }
 
 #[tokio::test]
-async fn prebind_discovery_keeps_local_component_support_and_no_bound_attribution() {
+async fn prebind_discovery_keeps_local_components_and_refuses_unserved_domains() {
     let state = create_test_websocket_state().await;
     for phase in [
         ConnectionPhase::new(),
@@ -410,10 +453,16 @@ async fn prebind_discovery_keeps_local_component_support_and_no_bound_attributio
                 request(kind, Some("remote.test"), None, None),
             )
             .await;
-            // This slice does not define or fix pre-bind foreign discovery.
-            assert!(!replies
-                .iter()
-                .any(|reply| matches!(reply, Iq::Error { error, .. } if error.by.is_some())));
+            // RFC 6120 §7.1: refused before binding, never answered locally
+            // and never addressed to a bound JID.
+            assert_eq!(replies.len(), 1, "{replies:?}");
+            let Iq::Error { to, error, .. } = &replies[0] else {
+                panic!("pre-bind foreign discovery must be refused: {replies:?}")
+            };
+            assert_eq!(*to, None);
+            assert_eq!(error.type_, ErrorType::Auth);
+            assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
+            assert_eq!(error.by, None);
         }
     }
 }

@@ -7,6 +7,7 @@ use super::{
 use crate::call_teardown_outbox::CallTeardownOutboxStore;
 use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
 use crate::config::LinkPreviewConfig;
+use crate::destination::{RemoteRoute, ServedDomains, ServedService};
 use crate::dnd_projection::DndProjectionStore;
 use crate::dnd_reader::PepDndReader;
 use crate::ingress::IngressAuthority;
@@ -26,8 +27,11 @@ use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
 use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
 use crate::server::routes::interpret::effects::ClientRoomOrigin;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
+use jid::DomainPart;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::str::FromStr;
+use waddle_xmpp::protocol::handlers::jingle::MIXER_LOCALPART;
 
 #[derive(Debug, Clone)]
 pub struct ActiveCallThread {
@@ -1415,6 +1419,37 @@ impl XmppServiceDomains {
             community: format!("community.{xmpp_domain}"),
         }
     }
+
+    /// The exact typed domain inventory for destination classification:
+    /// `local` plus every configured service and the call mixer. Returns
+    /// `None` only when `local` is not a valid domainpart; a service domain
+    /// that does not parse cannot match any parsed address and is skipped.
+    pub(crate) fn served_domains(&self, local: &str) -> Option<ServedDomains> {
+        let local_part = DomainPart::from_str(local).ok()?;
+        let mixer = format!("{MIXER_LOCALPART}.{local}");
+        let services = [
+            (ServedService::Muc, self.muc.as_str()),
+            (ServedService::Spaces, self.spaces.as_str()),
+            (ServedService::Upload, self.upload.as_str()),
+            (ServedService::Community, self.community.as_str()),
+            (ServedService::Extensions, self.extensions.as_str()),
+            (ServedService::Push, self.push.as_str()),
+            (ServedService::CallsMixer, mixer.as_str()),
+        ];
+        Some(
+            services
+                .into_iter()
+                .filter_map(|(service, domain)| {
+                    DomainPart::from_str(domain)
+                        .ok()
+                        .map(|domain| (service, domain))
+                })
+                .fold(
+                    ServedDomains::new(local_part),
+                    |served, (service, domain)| served.with_service(service, domain),
+                ),
+        )
+    }
 }
 
 /// WebSocket route dependencies kept narrower than the full server graph.
@@ -1447,6 +1482,11 @@ pub struct WebSocketDeps {
     pub auth_state: Arc<AuthState>,
     /// Authoritative XMPP component/service JIDs used by this deployment.
     pub service_domains: XmppServiceDomains,
+    /// Egress for client stanzas addressed to unserved domains. Production
+    /// wires [`FederationDisabled`] until server-to-server transport exists.
+    ///
+    /// [`FederationDisabled`]: crate::destination::FederationDisabled
+    pub remote_route: Arc<dyn RemoteRoute>,
     /// Protocol/runtime services used by the WebSocket C2S path.
     pub protocol: ProtocolServices,
     /// Per-deployment XEP-0421 occupant-id HMAC key. Cheap-clone via the
