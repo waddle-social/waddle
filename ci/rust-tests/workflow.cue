@@ -59,7 +59,7 @@ workflow: {
 			// Namespace documents privileged runner containers for Nix mount
 			// and user namespaces. Each job still has its own ephemeral VM.
 			"runs-on": [
-				"nscloud-ubuntu-24.04-amd64-16x32-with-features",
+				"nscloud-ubuntu-24.04-amd64-32x64-with-features",
 				"namespace-features:container.privileged=true;job.priority=1",
 			]
 			"timeout-minutes": 60
