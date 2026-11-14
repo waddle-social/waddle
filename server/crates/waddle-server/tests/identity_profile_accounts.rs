@@ -1,7 +1,9 @@
 //! The identity profile at the account stores: canonical configured
 //! domains, exact provisioning and lookup, OIDC name derivation, admin
-//! command addresses, and the reconciliation report for accounts written
-//! before the profile. In-memory SQLite, no server process.
+//! command addresses, and the reconciliation reports for accounts and
+//! bookmark items written before the profile. In-memory SQLite, no server
+//! process. Fixed-account seeding is a `test-support` API.
+#![cfg(feature = "test-support")]
 
 use kameo::actor::{ActorRef, Spawn};
 use waddle_server::admin::channels::{
@@ -9,15 +11,18 @@ use waddle_server::admin::channels::{
 };
 use waddle_server::admin::spaces::parse_set_role_args;
 use waddle_server::auth::identity_profile::{
-    reconcile_identity_profile, require_canonical_domains, AccountFinding, AccountRecord,
+    reconcile_bookmark_item_ids, reconcile_identity_profile, require_canonical_domains,
+    AccountFinding, AccountRecord, BookmarkCarrier,
 };
 use waddle_server::auth::{
     local_account_exists, username_to_localpart, AuthError, NativeUserStore, RegisterRequest,
 };
 use waddle_server::db::actor::{DbActor, DbExecute};
 use waddle_server::db::{Database, MigrationRunner, Value};
+use waddle_server::pubsub::DatabasePubSubStorage;
 use waddle_server::server::{seed_fixed_test_account, FixedTestAccountConfig};
 use waddle_xmpp::identity::{AccountLocalpart, CanonicalDomain, IdentityError};
+use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 
 const DOMAIN: &str = "localhost";
@@ -474,4 +479,76 @@ fn admin_command_jids_are_taken_exactly() {
     };
     assert!(role("bob@localhost").is_ok());
     assert!(role("BOB@localhost").is_err());
+}
+
+/// Bookmark items stored under a non-canonical id are counted per carrier;
+/// items of other nodes are not read as bookmarks.
+#[tokio::test]
+async fn bookmark_item_report_counts_non_canonical_ids_per_carrier() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("PubSub store");
+    let spaces: jid::BareJid = "spaces.localhost".parse().expect("Spaces service");
+    let alice: jid::BareJid = "alice@localhost".parse().expect("owner");
+    for (owner, node) in [
+        (&spaces, "general"),
+        (&alice, "urn:xmpp:bookmarks:1"),
+        (&alice, "urn:waddle:dm-bookmarks:0"),
+        (&alice, "urn:xmpp:microblog:0"),
+    ] {
+        storage
+            .get_or_create_node(owner, node)
+            .await
+            .expect("create node");
+    }
+    let database = storage.database();
+    for (owner, node, item_id) in [
+        ("spaces.localhost", "general", "chat@muc.localhost"),
+        ("spaces.localhost", "general", "Chat@muc.localhost"),
+        (
+            "alice@localhost",
+            "urn:xmpp:bookmarks:1",
+            "room@muc.localhost",
+        ),
+        (
+            "alice@localhost",
+            "urn:xmpp:bookmarks:1",
+            "Room@muc.localhost",
+        ),
+        (
+            "alice@localhost",
+            "urn:xmpp:bookmarks:1",
+            "room@muc.localhost.",
+        ),
+        (
+            "alice@localhost",
+            "urn:waddle:dm-bookmarks:0",
+            "Bob@localhost",
+        ),
+        ("alice@localhost", "urn:xmpp:microblog:0", "Not-A-JID"),
+    ] {
+        database
+            .guard()
+            .await
+            .expect("connection")
+            .execute(
+                &format!(
+                    "INSERT INTO pubsub_items \
+                 (owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms) \
+                 VALUES ('{owner}', '{node}', '{item_id}', NULL, NULL, 0)"
+                ),
+                (),
+            )
+            .await
+            .expect("seed item");
+    }
+
+    let report = reconcile_bookmark_item_ids(&database, &spaces)
+        .await
+        .expect("report");
+    assert_eq!(report.items, 6);
+    assert!(!report.is_clean());
+    assert_eq!(report.non_canonical(BookmarkCarrier::Spaces), 1);
+    assert_eq!(report.non_canonical(BookmarkCarrier::PepBookmarks), 2);
+    assert_eq!(report.non_canonical(BookmarkCarrier::DmBookmarks), 1);
 }

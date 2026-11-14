@@ -11,17 +11,26 @@
 //! it changes nothing. Startup logs the counts only
 //! ([`log_identity_profile_report`]); the report itself carries account
 //! identifiers and is for an operator's private use.
+//!
+//! Bookmark items (XEP-0503 Space items, XEP-0402 and Waddle DM bookmarks)
+//! are keyed by a bare JID taken exactly as well. [`reconcile_bookmark_item_ids`]
+//! counts the stored items whose id is not canonical, which only a retract
+//! of that exact id removes; startup logs those counts too
+//! ([`log_bookmark_item_report`]).
 
 use std::collections::BTreeMap;
 
+use jid::BareJid;
 use kameo::actor::ActorRef;
 use tracing::{info, warn};
 use waddle_xmpp::identity::{
     AccountLocalpart, CanonicalBareJid, CanonicalDomain, IdentityError, IDENTITY_PROFILE,
 };
+use waddle_xmpp::xep::xep0402::PEP_NODE as PEP_BOOKMARKS_NODE;
+use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
 use crate::db::actor::{DbActor, DbQuery};
-use crate::db::{row_value, Value, ValueExt};
+use crate::db::{row_value, Database, Value, ValueExt};
 
 use super::directory::{canonical_account_jid, canonical_localpart};
 use super::AuthError;
@@ -332,6 +341,137 @@ pub fn log_identity_profile_report(report: &IdentityProfileReport) {
         folded_collision = report.count(AccountFinding::FoldedCollision),
         foreign_domain = report.count(AccountFinding::ForeignDomain),
         "local accounts outside the identity profile; see docs/operations/identity-profile-rollout.md"
+    );
+}
+
+/// A PubSub carrier whose item ids are bare JIDs that key grants, links or
+/// notification settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BookmarkCarrier {
+    /// XEP-0503 Space nodes on the Spaces service: each item id is a room,
+    /// and the item gives that channel a parent grant on the node.
+    Spaces,
+    /// XEP-0402 PEP bookmarks (`urn:xmpp:bookmarks:1`): each item id is a
+    /// room, and the item feeds the owner's notification settings for it.
+    PepBookmarks,
+    /// Waddle DM bookmarks (`urn:waddle:dm-bookmarks:0`): each item id is a
+    /// contact, and the item feeds the owner's notification settings for it.
+    DmBookmarks,
+}
+
+impl BookmarkCarrier {
+    /// Every carrier, in report order.
+    pub const ALL: [BookmarkCarrier; 3] = [
+        BookmarkCarrier::Spaces,
+        BookmarkCarrier::PepBookmarks,
+        BookmarkCarrier::DmBookmarks,
+    ];
+
+    /// A stable code for logs and reports.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Spaces => "spaces",
+            Self::PepBookmarks => "pep_bookmarks",
+            Self::DmBookmarks => "dm_bookmarks",
+        }
+    }
+}
+
+/// Stored bookmark items whose id is not the canonical text of a bare JID,
+/// from one pass over the PubSub store.
+///
+/// Such an item was stored as written before item ids were held to the
+/// identity profile. Publishing it again under that id is refused; its
+/// owner (or a Space owner, for a Space item) removes it by retracting that
+/// exact id, which also removes the Space parent grant or notification
+/// setting it held unless an item under the canonical id still holds it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BookmarkItemReport {
+    /// Items read across every carrier.
+    pub items: usize,
+    non_canonical: BTreeMap<BookmarkCarrier, usize>,
+}
+
+impl BookmarkItemReport {
+    /// Whether every item id is canonical.
+    pub fn is_clean(&self) -> bool {
+        self.non_canonical.is_empty()
+    }
+
+    /// How many items of `carrier` have a non-canonical id.
+    pub fn non_canonical(&self, carrier: BookmarkCarrier) -> usize {
+        self.non_canonical.get(&carrier).copied().unwrap_or(0)
+    }
+}
+
+/// Read the item ids of every bookmark carrier from the PubSub store
+/// `pubsub` and count those [`CanonicalBareJid::parse_exact`] refuses.
+/// `spaces_service` is the Spaces service that owns the Space nodes. Read
+/// only; nothing is changed.
+pub async fn reconcile_bookmark_item_ids(
+    pubsub: &Database,
+    spaces_service: &BareJid,
+) -> Result<BookmarkItemReport, AuthError> {
+    let spaces_service = spaces_service.to_string();
+    let connection = pubsub
+        .guard()
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+    let mut rows = connection
+        .query(
+            "SELECT owner_jid, node_name, item_id FROM pubsub_items \
+             WHERE owner_jid = ? OR node_name = ? OR node_name = ?",
+            vec![
+                Value::from(spaces_service.as_str()),
+                Value::from(PEP_BOOKMARKS_NODE),
+                Value::from(PEP_NODE_WADDLE_DM_BOOKMARKS),
+            ],
+        )
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+    let mut report = BookmarkItemReport::default();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))?
+    {
+        let column = |index| {
+            row.get::<String>(index)
+                .map_err(|error| AuthError::DatabaseError(error.to_string()))
+        };
+        let (owner, node, item_id) = (column(0)?, column(1)?, column(2)?);
+        let carrier = if owner == spaces_service {
+            BookmarkCarrier::Spaces
+        } else if node == PEP_BOOKMARKS_NODE {
+            BookmarkCarrier::PepBookmarks
+        } else {
+            BookmarkCarrier::DmBookmarks
+        };
+        report.items += 1;
+        if CanonicalBareJid::parse_exact(&item_id).is_err() {
+            *report.non_canonical.entry(carrier).or_default() += 1;
+        }
+    }
+    Ok(report)
+}
+
+/// Log a bookmark item report's counts. No item id or owner is logged.
+pub fn log_bookmark_item_report(report: &BookmarkItemReport) {
+    if report.is_clean() {
+        info!(
+            profile = IDENTITY_PROFILE,
+            items = report.items,
+            "every stored bookmark item id is canonical"
+        );
+        return;
+    }
+    warn!(
+        profile = IDENTITY_PROFILE,
+        items = report.items,
+        spaces = report.non_canonical(BookmarkCarrier::Spaces),
+        pep_bookmarks = report.non_canonical(BookmarkCarrier::PepBookmarks),
+        dm_bookmarks = report.non_canonical(BookmarkCarrier::DmBookmarks),
+        "stored bookmark items with non-canonical ids; see docs/operations/identity-profile-rollout.md"
     );
 }
 

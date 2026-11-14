@@ -339,3 +339,123 @@ async fn dm_malformed_notify_is_bad_request_and_writes_no_row() {
         "a rejected malformed publish must not leave a pubsub_items row"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DM items stored under a non-canonical id. Earlier releases stored the
+// contact id as written, so the node can hold `Bob@example.com` beside
+// `bob@example.com`; both feed the projection row of `bob@example.com`.
+// Retracting the stray item keeps the row the canonical item carries;
+// retracting a stray item alone clears the row it fed.
+// ---------------------------------------------------------------------------
+
+/// Store a DM item under `item_id` exactly as written, bypassing publish.
+async fn seed_dm_item(storage: &DatabasePubSubStorage, owner: &str, item_id: &str, notify: &str) {
+    storage
+        .database()
+        .guard()
+        .await
+        .expect("connection")
+        .execute(
+            &format!(
+                "INSERT INTO pubsub_items \
+             (owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms) \
+             VALUES ('{owner}', '{PEP_NODE_WADDLE_DM_BOOKMARKS}', '{item_id}', \
+                     '<dm-bookmark xmlns=\"urn:waddle:dm-bookmarks:0\">{notify}</dm-bookmark>', \
+                     '{owner}', 0)"
+            ),
+            (),
+        )
+        .await
+        .expect("seed DM item");
+}
+
+#[tokio::test]
+async fn retracting_a_non_canonical_dm_item_keeps_the_canonical_items_row() {
+    let owner = bare_jid("alice@example.com");
+    let contact = bare_jid("bob@example.com");
+    let (storage, projection) = setup_owner_node(&owner).await;
+    storage
+        .publish_item(
+            &owner,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &dm_bookmark_item(&contact, NOTIFY_NEVER),
+            Some(&owner),
+            false,
+        )
+        .await
+        .expect("publish canonical DM override");
+    seed_dm_item(
+        &storage,
+        "alice@example.com",
+        "Bob@example.com",
+        "<notify xmlns=\"urn:xmpp:notification-settings:1\"><on-mention/></notify>",
+    )
+    .await;
+
+    assert!(storage
+        .retract_item(&owner, PEP_NODE_WADDLE_DM_BOOKMARKS, "Bob@example.com")
+        .await
+        .expect("retract stray DM item"));
+    let row = projection
+        .get(&owner, &contact)
+        .await
+        .expect("read projection")
+        .expect("the canonical item's row remains");
+    assert_eq!(row.mode, NotificationLevel::Never);
+
+    assert!(storage
+        .retract_item(&owner, PEP_NODE_WADDLE_DM_BOOKMARKS, "bob@example.com")
+        .await
+        .expect("retract canonical DM item"));
+    assert!(projection
+        .get(&owner, &contact)
+        .await
+        .expect("read projection")
+        .is_none());
+}
+
+#[tokio::test]
+async fn retracting_a_lone_non_canonical_dm_item_clears_its_row() {
+    let owner = bare_jid("alice@example.com");
+    let contact = bare_jid("carol@example.com");
+    let (storage, projection) = setup_owner_node(&owner).await;
+    // Publishing the canonical item writes the row the stray item fed;
+    // the canonical item is then replaced by the stray one.
+    storage
+        .publish_item(
+            &owner,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &dm_bookmark_item(&contact, NOTIFY_NEVER),
+            Some(&owner),
+            false,
+        )
+        .await
+        .expect("publish DM override");
+    storage
+        .database()
+        .guard()
+        .await
+        .expect("connection")
+        .execute(
+            "UPDATE pubsub_items SET item_id = 'Carol@example.com' \
+             WHERE owner_jid = 'alice@example.com' AND item_id = 'carol@example.com'",
+            (),
+        )
+        .await
+        .expect("rename item");
+    assert!(projection
+        .get(&owner, &contact)
+        .await
+        .expect("read projection")
+        .is_some());
+
+    assert!(storage
+        .retract_item(&owner, PEP_NODE_WADDLE_DM_BOOKMARKS, "Carol@example.com")
+        .await
+        .expect("retract stray DM item"));
+    assert!(projection
+        .get(&owner, &contact)
+        .await
+        .expect("read projection")
+        .is_none());
+}

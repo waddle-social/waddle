@@ -479,8 +479,30 @@ pub(super) async fn handle_pubsub_iq(
                 if node == waddle_xmpp::xep::xep0402::PEP_NODE
                     && !is_valid_xep0402_bookmark_item_id(&item_id)
                 {
-                    let error = build_pubsub_error(iq, PubSubError::InvalidJid);
-                    return vec![iq_to_xml(error)];
+                    // The store can hold bookmarks under an id that is not
+                    // canonical (`Room@muc.example.com`): earlier releases
+                    // stored ids as written. Such an item is retracted by
+                    // its exact id so its owner can remove it; any other
+                    // non-canonical id is refused.
+                    let item_filter = [item_id.clone()];
+                    match state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .get_items(&target_jid, &node, Some(1), &item_filter)
+                        .await
+                    {
+                        Ok(items) if !items.is_empty() => {}
+                        Ok(_) => {
+                            let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                            return vec![iq_to_xml(error)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub bookmark lookup before retract failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::InternalServerError);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
                 }
 
                 let result = state

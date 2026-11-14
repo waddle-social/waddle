@@ -1378,6 +1378,15 @@ async fn create_websocket_state(
             Ok(report) => crate::auth::identity_profile::log_identity_profile_report(&report),
             Err(error) => warn!(%error, "identity profile reconciliation failed"),
         }
+        match crate::auth::identity_profile::reconcile_bookmark_item_ids(
+            &pubsub_database_storage.database(),
+            &state.spaces_jid,
+        )
+        .await
+        {
+            Ok(report) => crate::auth::identity_profile::log_bookmark_item_report(&report),
+            Err(error) => warn!(%error, "bookmark item id reconciliation failed"),
+        }
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,

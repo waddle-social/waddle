@@ -258,6 +258,212 @@ async fn pep_bookmark_item_ids_must_be_canonical() {
     client.close().await.expect("close");
 }
 
+fn bookmarks_payload(mode: &str) -> Element {
+    Element::builder("conference", "urn:xmpp:bookmarks:1")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Room")
+        .append(
+            Element::builder("extensions", "urn:xmpp:bookmarks:1")
+                .append(
+                    Element::builder("notify", "urn:xmpp:notification-settings:1")
+                        .append(Element::builder(mode, "urn:xmpp:notification-settings:1").build())
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn bookmarks_iq(id: &str, operation: &str, item_id: &str, payload: Option<Element>) -> String {
+    let mut item = Element::builder("item", "http://jabber.org/protocol/pubsub")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id);
+    if let Some(payload) = payload {
+        item = item.append(payload);
+    }
+    let request = Iq::Set {
+        from: None,
+        to: None,
+        id: id.into(),
+        payload: Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+            .append(
+                Element::builder(operation, "http://jabber.org/protocol/pubsub")
+                    .attr(
+                        minidom::rxml::xml_ncname!("node").to_owned(),
+                        "urn:xmpp:bookmarks:1",
+                    )
+                    .append(item.build())
+                    .build(),
+            )
+            .build(),
+    };
+    String::from(&Element::from(request))
+}
+
+/// Store a bookmark under `item_id` exactly as written, bypassing publish.
+async fn seed_bookmark(pool: &SqlitePool, item_id: &str, mode: &str) {
+    sqlx::query(
+        "INSERT INTO pubsub_items \
+         (owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms) \
+         VALUES ('admin@localhost', 'urn:xmpp:bookmarks:1', ?, ?, 'admin@localhost', 0)",
+    )
+    .bind(item_id)
+    .bind(String::from(&bookmarks_payload(mode)))
+    .execute(pool)
+    .await
+    .expect("seed bookmark item");
+}
+
+/// Write the notification-settings row a publish of `mode` for
+/// `conversation` writes.
+async fn seed_projection(pool: &SqlitePool, conversation: &str, mode: &str) {
+    sqlx::query(
+        "INSERT OR REPLACE INTO notification_settings_projection \
+         (owner_bare_jid, conversation_jid, conversation_kind, mode, rich_payload_opt_in, \
+          source_version, updated_at_ms, source_node, source_item_id) \
+         VALUES ('admin@localhost', ?, 'private_group', ?, 0, 1000000, 0, \
+                 'urn:xmpp:bookmarks:1', ?)",
+    )
+    .bind(conversation)
+    .bind(mode)
+    .bind(conversation)
+    .execute(pool)
+    .await
+    .expect("seed projection row");
+}
+
+async fn projection_mode(pool: &SqlitePool, conversation: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT mode FROM notification_settings_projection \
+         WHERE owner_bare_jid = 'admin@localhost' AND conversation_jid = ?",
+    )
+    .bind(conversation)
+    .fetch_optional(pool)
+    .await
+    .expect("read projection row")
+}
+
+async fn bookmark_ids(client: &mut WsXmppClient, id: &str) -> Vec<String> {
+    let items = round_trip(
+        client,
+        &format!(
+            r#"<iq type="get" id="{id}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="urn:xmpp:bookmarks:1"/></pubsub></iq>"#
+        ),
+        id,
+    )
+    .await;
+    items
+        .get_child("pubsub", "http://jabber.org/protocol/pubsub")
+        .and_then(|pubsub| pubsub.get_child("items", "http://jabber.org/protocol/pubsub"))
+        .map(|list| {
+            list.children()
+                .filter_map(|item| item.attr("id").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The store can hold XEP-0402 bookmarks under an id that is not canonical,
+/// written as given by earlier releases. Their owner removes one by
+/// retracting that exact id, which clears the notification setting it fed
+/// unless a bookmark under the canonical id still carries one; then that
+/// bookmark's setting applies again.
+#[tokio::test]
+async fn pep_bookmark_retract_removes_a_stored_non_canonical_bookmark() {
+    let directory = tempfile::tempdir().expect("database directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("bookmarks.sqlite3").display()
+    );
+    let server = TestServer::start_persistent_with_extra_envs(
+        &url,
+        &[],
+        &[("WADDLE_XMPP_PUBSUB_DATABASE_URL", &url)],
+    );
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        server.fixed_account_password(),
+        "bookmarks",
+    )
+    .await
+    .expect("authenticated client");
+    let pool = SqlitePool::connect(&url).await.expect("seed database");
+
+    let published = round_trip(
+        &mut client,
+        &bookmarks_iq(
+            "publish-room",
+            "publish",
+            "room@muc.localhost",
+            Some(bookmarks_payload("never")),
+        ),
+        "publish-room",
+    )
+    .await;
+    assert!(
+        matches!(
+            Iq::try_from(published).expect("typed IQ"),
+            Iq::Result { .. }
+        ),
+        "the canonical bookmark is published"
+    );
+    assert_eq!(
+        projection_mode(&pool, "room@muc.localhost")
+            .await
+            .as_deref(),
+        Some("never")
+    );
+
+    // A stray bookmark for another room, with the row it fed.
+    seed_bookmark(&pool, "Other@muc.localhost", "never").await;
+    seed_projection(&pool, "other@muc.localhost", "never").await;
+    // A stray spelling of the published room, published after it.
+    seed_bookmark(&pool, "Room@muc.localhost", "on-mention").await;
+    seed_projection(&pool, "room@muc.localhost", "on-mention").await;
+
+    for (item_id, id) in [
+        ("Other@muc.localhost", "retract-other"),
+        ("Room@muc.localhost", "retract-room"),
+    ] {
+        let response =
+            round_trip(&mut client, &bookmarks_iq(id, "retract", item_id, None), id).await;
+        assert!(
+            matches!(Iq::try_from(response).expect("typed IQ"), Iq::Result { .. }),
+            "{item_id} is retracted by its exact stored id"
+        );
+    }
+    assert_eq!(
+        bookmark_ids(&mut client, "bookmark-items-after-retract").await,
+        vec!["room@muc.localhost".to_owned()]
+    );
+    assert_eq!(
+        projection_mode(&pool, "other@muc.localhost").await,
+        None,
+        "the stray bookmark's setting is cleared"
+    );
+    assert_eq!(
+        projection_mode(&pool, "room@muc.localhost")
+            .await
+            .as_deref(),
+        Some("never"),
+        "the canonical bookmark's setting applies again"
+    );
+
+    // A non-canonical id naming no stored bookmark is still refused.
+    let response = round_trip(
+        &mut client,
+        &bookmarks_iq("retract-unstored", "retract", "ROOM@muc.localhost", None),
+        "retract-unstored",
+    )
+    .await;
+    let Iq::Error { error, .. } = Iq::try_from(response).expect("typed IQ") else {
+        panic!("expected an IQ error");
+    };
+    assert_eq!(error.defined_condition, DefinedCondition::BadRequest);
+    client.close().await.expect("close");
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn refused_peer_domain_forms_are_unroutable_not_malformed() {
     let server = TestServer::start();
