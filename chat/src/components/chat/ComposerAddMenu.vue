@@ -3,6 +3,7 @@ import { computed, type Component } from "vue";
 import { Menu } from "@ark-ui/vue/menu";
 import type { MenuInteractOutsideEvent, MenuOpenChangeDetails, MenuSelectionDetails } from "@ark-ui/vue/menu";
 import { ImagePlay, Puzzle, Upload } from "lucide-vue-next";
+import { css } from "styled-system/css";
 import { menuClasses, menuItemHintClass, menuItemIconClass, menuItemStackClass } from "@/ui/menu-classes";
 
 /**
@@ -14,6 +15,8 @@ import { menuClasses, menuItemHintClass, menuItemIconClass, menuItemStackClass }
  * lives in `MessageComposer`; the composer mounts this component while
  * the menu is open and unmounts it on `close`.
  */
+const tallItem = css({ py: "2" });
+
 const props = defineProps<{
   anchorEl: HTMLElement | null;
   showExtensions: boolean;
@@ -91,7 +94,7 @@ function onContentKeydown(event: KeyboardEvent) {
   >
     <Menu.Positioner>
       <Menu.Content
-        :class="[menuClasses.content, 'chat-composer-add-menu animate-fade-in']"
+        :class="menuClasses.content"
         aria-label="Add to message"
         @keydown="onContentKeydown"
       >
@@ -99,14 +102,13 @@ function onContentKeydown(event: KeyboardEvent) {
           v-for="item in items"
           :key="item.id"
           :value="item.id"
-          :class="[menuClasses.item, 'chat-composer-add-menu__item']"
-          style="height: auto"
+          :class="[menuClasses.item, tallItem]"
         >
           <span :class="menuItemIconClass" aria-hidden="true">
-            <component :is="item.icon" class="h-4 w-4" />
+            <component :is="item.icon" />
           </span>
           <span :class="menuItemStackClass">
-            <Menu.ItemText class="type-control text-foreground">{{ item.label }}</Menu.ItemText>
+            <Menu.ItemText>{{ item.label }}</Menu.ItemText>
             <span :class="menuItemHintClass">{{ item.hint }}</span>
           </span>
         </Menu.Item>

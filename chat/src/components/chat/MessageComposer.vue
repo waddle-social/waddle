@@ -3,6 +3,8 @@ import { ref, computed, watch, onBeforeUnmount, nextTick, inject } from "vue";
 import { mentionDirectoryKey } from "@/shell/controllers/use-mention-directory";
 import { AtSign, CaseSensitive, CornerDownLeft, FileText, Loader2, Plus, SendHorizontal, Smile, SquareSlash, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
+import { css } from "styled-system/css";
+import { composer, iconbtn, kicker } from "styled-system/recipes";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import ComposerAddMenu from "@/components/chat/ComposerAddMenu.vue";
@@ -32,6 +34,7 @@ import {
   type PendingAttachment,
 } from "./composer-attachments";
 import { composerPlaceholder } from "./composer-placeholder";
+import { spin } from "./composer-classes";
 import { useComposerAutocomplete } from "./composables/use-composer-autocomplete";
 import type { BuiltinSlashOutcome } from "@/lib/slash-builtins";
 import { rewriteBuiltinSendDoc } from "@/lib/slash-builtin-doc";
@@ -511,17 +514,63 @@ watch(isPreparingSend, (preparing) => {
   if (preparing) showAddMenu.value = false;
 });
 
+
+const cls = {
+  // The composer row under the timeline (Room / DM / Mobile Room boards).
+  root: css({ position: "relative", flex: "none", px: "6", _narrow: { px: "3", bg: "bg.rail" } }),
+  rootBottom: css({ pb: "5", _narrow: { pt: "2", pb: "max(12px, env(safe-area-inset-bottom))", borderTop: "1px solid {colors.border.soft}" } }),
+  rootTop: css({ pt: "4", _narrow: { pt: "2", pb: "2", borderBottom: "1px solid {colors.border.soft}" } }),
+  aux: css({ display: "flex", flexDirection: "column", gap: "2", pb: "2" }),
+  chip: css({
+    display: "flex",
+    minWidth: 0,
+    alignItems: "center",
+    gap: "2",
+    px: "3",
+    py: "1.5",
+    borderRadius: "control",
+    border: "1px solid {colors.border.soft}",
+    bg: "surface",
+    textStyle: "caption",
+    animation: "wd-fade {durations.base} {easings.out} backwards",
+  }),
+  reply: css({ boxShadow: "inset 3px 0 0 {colors.action.text}" }),
+  replyIcon: css({ width: "14px", height: "14px", flex: "none", color: "action.text" }),
+  replyName: css({ fontWeight: 700, color: "action.text" }),
+  replyPreview: css({ flex: 1, minWidth: 0, fontStyle: "italic", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+  muted: css({ margin: 0, color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+  pushEnd: css({ ml: "auto" }),
+  previewIcon: css({ display: "flex", alignItems: "center", justifyContent: "center", width: "32px", height: "32px", flex: "none", borderRadius: "sm", bg: "surface.2", color: "fg.muted", "& svg": { width: "16px", height: "16px" } }),
+  previewText: css({ minWidth: 0, flex: 1 }),
+  previewTitle: css({ fontWeight: 700, color: "fg", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+  topic: css({ flexDirection: "column", alignItems: "stretch", gap: "1", py: "2.5" }),
+  topicInput: css({ width: "100%", border: 0, bg: "transparent", color: "fg", font: "700 17px/1.3 {fonts.display}", outline: "none", _placeholder: { color: "fg.soft" } }),
+  status: css({ display: "flex", alignItems: "center", gap: "2", textStyle: "caption", color: "fg.muted", "& svg": { width: "14px", height: "14px" } }),
+  uploadName: css({ maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+  track: css({ flex: 1, height: "4px", borderRadius: "pill", bg: "surface.2", overflow: "hidden" }),
+  bar: css({ height: "100%", borderRadius: "pill", bg: "action", transition: "width {durations.slow} {easings.out}" }),
+  num: css({ fontVariantNumeric: "tabular-nums", fontWeight: 700, fontSize: "xs" }),
+  // The field: formatting bar and attachments wrap onto their own rows above the editor.
+  card: css({ flexWrap: "wrap", "& button:disabled": { opacity: 0.4, cursor: "default" } }),
+  cardDisabled: css({ opacity: 0.7 }),
+  editor: css({ flex: "1 1 0", minWidth: 0, alignSelf: "center" }),
+  add: css({ order: -1, "& svg": { transition: "rotate {durations.base} {easings.spring.bouncy}" }, _expanded: { bg: "state.selected", color: "fg", "& svg": { rotate: "45deg" } } }),
+  // Phones keep +, emoji and send (Mobile Room board); @, / and the selection toolbar cover the rest.
+  wide: css({ _narrow: { display: "none" } }),
+  tool: css({ _expanded: { bg: "state.selected", color: "fg" } }),
+  // Send sleeps until there is something to send.
+  sendIdle: css({ bg: "transparent", bgImage: "none", boxShadow: "none", color: "fg.soft", _hover: { bg: "state.hover", bgImage: "none", color: "fg.muted" } }),
+};
 </script>
 
 <template>
   <div
-    class="chat-composer relative flex-shrink-0 bg-background/75"
-    :class="isTopPinned ? 'border-b border-border' : 'border-t border-border'"
+    :class="['chat-composer', cls.root, isTopPinned ? cls.rootTop : cls.rootBottom]"
     @keydown.capture="onKeydown"
   >
     <div
       v-if="replyingTo || showForumTitleInput || linkPreview.showCard.value || uploadProgress.uploading || pendingPastes > 0"
-      class="chat-composer-aux-stack"
+      :class="cls.aux"
     >
       <!-- Reply context chip — appears above the composer when the
            user has clicked Reply on a message. Adds a CornerDownLeft
@@ -532,99 +581,99 @@ watch(isPreparingSend, (preparing) => {
            fragment, not just more chrome. -->
       <div
         v-if="replyingTo"
-        class="type-caption flex items-center gap-2 rounded-lg border border-border border-l-[3px] border-l-primary/60 bg-muted/70 px-3 py-1.5 animate-fade-in"
+        :class="[cls.chip, cls.reply]"
       >
-        <CornerDownLeft class="w-3.5 h-3.5 flex-shrink-0 text-primary/75" aria-hidden="true" />
-        <span class="text-muted-foreground">Replying to</span>
-        <span class="type-emphasis text-primary/90">@{{ replyAuthorName }}</span>
+        <CornerDownLeft :class="cls.replyIcon" aria-hidden="true" />
+        <span :class="cls.muted">Replying to</span>
+        <span :class="cls.replyName">@{{ replyAuthorName }}</span>
         <span
           v-if="replyingTo.preview"
-          class="italic truncate flex-1 text-muted-foreground/85"
+          :class="cls.replyPreview"
         >{{ replyingTo.preview }}</span>
         <AppTooltip label="Cancel reply">
           <button
             type="button"
-            class="ml-auto h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            :class="[iconbtn({ size: 'sm' }), cls.pushEnd]"
             aria-label="Cancel reply"
             :disabled="isPreparingSend"
             @click="emit('cancelReply')"
           >
-            <X class="w-3.5 h-3.5" />
+            <X aria-hidden="true" />
           </button>
         </AppTooltip>
       </div>
 
       <div
         v-if="linkPreview.showCard.value"
-        class="type-caption flex min-w-0 items-center gap-3 rounded-lg border border-border bg-card/70 px-3 py-2 animate-fade-in"
+        :class="cls.chip"
         :aria-busy="linkPreview.state.value.kind === 'loading'"
       >
-        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <div :class="cls.previewIcon">
           <Loader2
             v-if="linkPreview.state.value.kind === 'loading'"
-            class="h-4 w-4 motion-safe:animate-spin"
+            :class="spin"
             aria-hidden="true"
           />
-          <FileText v-else class="h-4 w-4" aria-hidden="true" />
+          <FileText v-else aria-hidden="true" />
         </div>
-        <div class="min-w-0 flex-1">
-          <div class="type-emphasis truncate text-foreground">{{ linkPreview.title.value }}</div>
-          <div class="truncate text-muted-foreground">{{ linkPreview.description.value }}</div>
+        <div :class="cls.previewText">
+          <div :class="cls.previewTitle">{{ linkPreview.title.value }}</div>
+          <div :class="cls.muted">{{ linkPreview.description.value }}</div>
         </div>
         <AppTooltip v-if="linkPreview.canDismiss.value" label="Remove preview">
           <button
             type="button"
-            class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            :class="iconbtn({ size: 'sm' })"
             aria-label="Remove preview"
             :disabled="isPreparingSend"
             @click="linkPreview.dismiss"
           >
-            <X class="h-3.5 w-3.5" aria-hidden="true" />
+            <X aria-hidden="true" />
           </button>
         </AppTooltip>
       </div>
 
       <div
         v-if="showForumTitleInput"
-        class="chat-field-stack rounded-lg border border-border bg-card/60 px-3 py-2.5 animate-fade-in"
+        :class="[cls.chip, cls.topic]"
       >
-        <div class="type-section-label text-muted-foreground">
+        <div :class="kicker()">
           New topic
         </div>
         <input
           v-model="forumTitle"
           type="text"
-          class="type-card-title w-full bg-transparent placeholder:text-muted-foreground/45 focus:outline-none"
+          :class="cls.topicInput"
           :disabled="disabled || isSendBusy"
           placeholder="Add a clear title"
           aria-label="Topic title"
         />
-        <p class="type-caption text-muted-foreground">
+        <p :class="cls.muted">
           Top-level forum posts need a title.
         </p>
       </div>
 
       <output
         v-if="pendingPastes > 0"
-        class="type-caption flex items-center gap-2 text-muted-foreground animate-fade-in"
+        :class="cls.status"
       >
-        <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+        <Loader2 :class="spin" aria-hidden="true" />
         <span>Preparing pasted image…</span>
       </output>
 
       <!-- Upload progress bar -->
       <div
         v-if="uploadProgress.uploading"
-        class="type-caption flex items-center gap-2 text-muted-foreground animate-fade-in"
+        :class="cls.status"
       >
-        <span class="truncate max-w-40">Uploading {{ uploadProgress.filename }}…</span>
-        <div class="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+        <span :class="cls.uploadName">Uploading {{ uploadProgress.filename }}…</span>
+        <div :class="cls.track">
           <div
-            class="h-full bg-primary rounded-full transition-all duration-300"
+            :class="cls.bar"
             :style="{ width: `${Math.round(uploadProgress.progress * 100)}%` }"
           />
         </div>
-        <span class="type-numeric">{{ Math.round(uploadProgress.progress * 100) }}%</span>
+        <span :class="cls.num">{{ Math.round(uploadProgress.progress * 100) }}%</span>
       </div>
     </div>
 
@@ -667,12 +716,12 @@ watch(isPreparingSend, (preparing) => {
     <!-- Slack-style card: optional formatting row, the editor, pending
          attachments, then one action row (add, format, emoji, mention,
          command on the left; send on the right). -->
-    <div class="chat-composer-card" :class="{ 'chat-composer-card--disabled': disabled }">
+    <div :class="[composer(), cls.card, disabled && cls.cardDisabled]">
       <input
         :ref="setFileInputRef"
         type="file"
         multiple
-        class="hidden"
+        hidden
         :disabled="disabled || isPreparingSend"
         @change="onFileInputChange"
       />
@@ -681,10 +730,9 @@ watch(isPreparingSend, (preparing) => {
         :editor="tiptapEditor"
         :disabled="disabled || isPreparingSend"
       />
-      <div class="chat-composer-editor-slot">
         <ChatEditor
           :ref="setEditorRef"
-          class="min-w-0"
+          :class="cls.editor"
           embedded
           :placeholder="editorPlaceholder"
           :disabled="disabled || slowModeCooldown > 0 || isPreparingSend"
@@ -695,13 +743,11 @@ watch(isPreparingSend, (preparing) => {
           @cancel="onEditorCancel"
           :paste-handler="onEditorPaste"
         />
-      </div>
-      <div v-if="pendingAttachments.length > 0" class="chat-composer-card-attachments">
-        <ComposerAttachmentGrid
-          :attachments="pendingAttachments"
-          @remove="removeAttachment"
-        />
-      </div>
+      <ComposerAttachmentGrid
+        v-if="pendingAttachments.length > 0"
+        :attachments="pendingAttachments"
+        @remove="removeAttachment"
+      />
       <ComposerAddMenu
         v-if="showAddMenu"
         :anchor-el="addButtonRef"
@@ -712,88 +758,83 @@ watch(isPreparingSend, (preparing) => {
         @extensions="onAddMenuExtensions"
         @close="onAddMenuClose"
       />
-      <div class="chat-composer-toolbar">
         <AppTooltip label="Attach">
           <button
             :ref="setAddButtonRef"
             type="button"
-            class="chat-composer-add"
-            :class="{ 'chat-composer-add--open': showAddMenu }"
+            :class="[iconbtn(), cls.add]"
             aria-label="Attach"
             aria-haspopup="menu"
             :aria-expanded="showAddMenu"
             :disabled="disabled || isPreparingSend"
             @click="toggleAddMenu"
           >
-            <Plus class="h-4 w-4" aria-hidden="true" />
+            <Plus aria-hidden="true" />
           </button>
         </AppTooltip>
         <AppTooltip :label="showFormatting ? 'Hide formatting' : 'Show formatting'">
           <button
             type="button"
-            class="chat-composer-tool"
-            :class="{ 'chat-composer-tool--active': showFormatting }"
+            :class="[iconbtn(), cls.wide]"
             :aria-label="showFormatting ? 'Hide formatting' : 'Show formatting'"
             :aria-pressed="showFormatting"
             :disabled="disabled || isPreparingSend"
             @click="toggleFormatting"
           >
-            <CaseSensitive class="h-5 w-5" aria-hidden="true" />
+            <CaseSensitive aria-hidden="true" />
           </button>
         </AppTooltip>
         <AppTooltip label="Emoji">
           <button
             :ref="setEmojiButtonRef"
             type="button"
-            class="chat-composer-tool"
-            :class="{ 'chat-composer-tool--active': showEmojiPicker }"
+            :class="[iconbtn(), cls.tool]"
             aria-label="Emoji"
             aria-haspopup="dialog"
             :aria-expanded="showEmojiPicker"
             :disabled="disabled || isPreparingSend"
             @click="toggleEmojiPicker"
           >
-            <Smile class="h-4 w-4" aria-hidden="true" />
+            <Smile aria-hidden="true" />
           </button>
         </AppTooltip>
         <AppTooltip label="Mention someone">
           <button
             type="button"
-            class="chat-composer-tool"
+            :class="[iconbtn(), cls.wide]"
             aria-label="Mention someone"
             :disabled="disabled || isPreparingSend"
             @click="startMention"
           >
-            <AtSign class="h-4 w-4" aria-hidden="true" />
+            <AtSign aria-hidden="true" />
           </button>
         </AppTooltip>
         <AppTooltip label="Run a command">
           <button
             type="button"
-            class="chat-composer-tool"
+            :class="[iconbtn(), cls.wide]"
             aria-label="Run a command"
             :disabled="disabled || isPreparingSend"
             @click="startSlashCommand"
           >
-            <SquareSlash class="h-4 w-4" aria-hidden="true" />
+            <SquareSlash aria-hidden="true" />
           </button>
         </AppTooltip>
         <AppTooltip :label="isSendBusy ? 'Sending message' : 'Send now'">
           <button
             type="button"
-            class="chat-composer-send"
-            :class="{ 'chat-composer-send--armed': canSend }"
+            :class="[iconbtn({ variant: 'send' }), !canSend && cls.sendIdle]"
+            :data-armed="canSend || undefined"
             :disabled="!canSend"
             :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
             :aria-busy="isSendBusy"
             @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
           >
-            <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
-            <Loader2 v-else-if="isSendBusy" class="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" />
-            <SendHorizontal v-else class="h-4 w-4" aria-hidden="true" />
+            <span v-if="slowModeCooldown > 0" :class="cls.num">{{ slowModeCooldown }}</span>
+            <Loader2 v-else-if="isSendBusy" :class="spin" aria-hidden="true" />
+            <SendHorizontal v-else aria-hidden="true" />
           </button>
         </AppTooltip>
-      </div>
     </div>
     <EmojiPicker
       :open="showEmojiPicker"

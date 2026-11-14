@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } from "vue";
+import { css } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import { Search, SearchX, X } from "lucide-vue-next";
 import { searchEmoji } from "@/lib/emoji";
+import { pickerSearch } from "./composer-classes";
 
 const props = withDefaults(
   defineProps<{
@@ -185,6 +188,40 @@ watch(
 );
 
 onBeforeUnmount(detachWindowListeners);
+
+const panel = css({ display: "flex", flexDirection: "column", overflow: "hidden", color: "fg" });
+const panelPopover = css({
+  position: "fixed",
+  zIndex: "dropdown",
+  width: "min(352px, calc(100vw - 32px))",
+  maxHeight: "384px",
+  bg: "surface",
+  border: "1px solid {colors.border}",
+  borderRadius: "panel",
+  boxShadow: "overlay",
+  animation: "wd-pop {durations.base} {easings.spring.snappy} backwards",
+});
+const panelSheet = css({ width: "100%", maxHeight: "60vh" });
+const body = css({ flex: 1, overflow: "auto", p: "2" });
+const sectionLabel = css({ display: "flex", alignItems: "center", height: "24px", px: "1", textStyle: "eyebrow" });
+const gridClass = css({ display: "grid", gap: "1", mb: "2" });
+const gridSheet = css({ gridTemplateColumns: "repeat(7, minmax(0, 1fr))" });
+const gridPopover = css({ gridTemplateColumns: "repeat(8, minmax(0, 1fr))" });
+const cell = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  border: 0,
+  borderRadius: "sm",
+  bg: "transparent",
+  lineHeight: 1,
+  cursor: "pointer",
+  transition: "background-color {durations.fast} {easings.out}",
+  _hover: { bg: "state.hover" },
+  _active: { bg: "state.press" },
+});
+const cellSheet = css({ height: "48px", fontSize: "28px" });
+const cellPopover = css({ width: "36px", height: "36px", fontSize: "22px" });
 </script>
 
 <template>
@@ -194,94 +231,73 @@ onBeforeUnmount(detachWindowListeners);
       ref="panelEl"
       :role="variant === 'popover' ? 'dialog' : 'group'"
       :aria-label="panelLabel"
-      :class="[
-        'flex flex-col overflow-hidden',
-        variant === 'popover'
-          ? 'z-popover fixed w-[var(--chat-reaction-popover-width)] glass-panel border border-border rounded-lg shadow-2xl animate-fade-in max-h-96'
-          : 'w-full max-h-[60vh]',
-      ]"
+      :class="[panel, variant === 'popover' ? panelPopover : panelSheet]"
       :style="variant === 'popover' ? popoverStyle : undefined"
       @pointerdown.stop
     >
-      <div class="border-b border-border p-2">
-        <div class="relative min-w-0 rounded-lg bg-muted/60 transition-colors focus-within:bg-muted/75 focus-within:ring-1 focus-within:ring-inset focus-within:ring-primary/20">
-          <Search
-            class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
+      <div :class="pickerSearch.bar">
+        <div :class="pickerSearch.box">
+          <Search :class="pickerSearch.icon" aria-hidden="true" />
           <input
             ref="searchInputEl"
             v-model="query"
             type="text"
             placeholder="Search emoji…"
             aria-label="Search emoji"
-            class="type-field min-h-10 w-full rounded-lg border-none bg-transparent py-2.5 pl-9 pr-11 placeholder:text-muted-foreground/40 focus:outline-none"
+            :class="pickerSearch.input"
           />
           <button
             type="button"
-            class="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            :class="[iconbtn({ size: 'sm' }), pickerSearch.close]"
             aria-label="Close emoji picker"
             @click="emit('close', 'button')"
           >
-            <X class="w-3.5 h-3.5" aria-hidden="true" />
+            <X aria-hidden="true" />
           </button>
         </div>
       </div>
 
-      <div class="flex-1 overflow-auto p-2">
+      <div :class="body">
         <template v-if="searchResults.length > 0">
-          <div class="type-section-label flex h-6 items-center px-1 text-muted-foreground/70">Results</div>
-          <div :class="['grid gap-1', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
+          <div :class="sectionLabel">Results</div>
+          <div :class="[gridClass, variant === 'sheet' ? gridSheet : gridPopover]">
             <button
               v-for="e in searchResults"
               :key="`s-${e}`"
               type="button"
-              :class="[
-                'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
-                variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
-              ]"
+              :class="[cell, variant === 'sheet' ? cellSheet : cellPopover]"
               :aria-label="emojiLabel(e)"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>
         </template>
         <template v-else-if="query.trim().length >= 2">
-          <!-- Empty search state — SearchX glyph stacked above the
-               caption matches the iter-47 channel-search empty state
-               so every "your query had no hits" surface in the app
-               speaks one visual language. -->
-          <div class="flex h-24 flex-col items-center justify-center gap-1.5 rounded-lg text-center">
-            <SearchX class="h-5 w-5 text-muted-foreground/60" aria-hidden="true" />
-            <span class="type-caption text-muted-foreground">No emoji found</span>
+          <div :class="pickerSearch.state">
+            <SearchX aria-hidden="true" />
+            <span>No emoji found</span>
           </div>
         </template>
         <template v-else>
           <template v-if="recents.length > 0">
-            <div class="type-section-label flex h-6 items-center px-1 text-muted-foreground/70">Recent</div>
-            <div :class="['grid gap-1 mb-2', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
+            <div :class="sectionLabel">Recent</div>
+            <div :class="[gridClass, variant === 'sheet' ? gridSheet : gridPopover]">
               <button
                 v-for="e in recents"
                 :key="`r-${e}`"
                 type="button"
-                :class="[
-                  'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
-                  variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
-                ]"
+              :class="[cell, variant === 'sheet' ? cellSheet : cellPopover]"
                 :aria-label="emojiLabel(e)"
                 @click="onSelect(e)"
               >{{ e }}</button>
             </div>
           </template>
-          <div class="type-section-label flex h-6 items-center px-1 text-muted-foreground/70">Common</div>
-          <div :class="['grid gap-1', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
+          <div :class="sectionLabel">Common</div>
+          <div :class="[gridClass, variant === 'sheet' ? gridSheet : gridPopover]">
             <button
               v-for="e in COMMON_EMOJIS"
               :key="`c-${e}`"
               type="button"
-              :class="[
-                'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
-                variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
-              ]"
+              :class="[cell, variant === 'sheet' ? cellSheet : cellPopover]"
               :aria-label="emojiLabel(e)"
               @click="onSelect(e)"
             >{{ e }}</button>

@@ -29,8 +29,7 @@ describe("Slack-style composer layout", () => {
       import.meta.url,
     );
 
-    expect(html).toContain("chat-composer-card");
-    expect(html).toContain("chat-composer-toolbar");
+    expect(html).toContain("wd-composer");
     const order = [
       'aria-label="Attach"',
       'aria-label="Show formatting"',
@@ -76,9 +75,9 @@ const showExtensionsDefault = (MessageComposer as { props: Record<string, { defa
       import.meta.url,
     );
 
-    const send = html.slice(html.indexOf('class="chat-composer-send'));
+    const send = html.slice(html.lastIndexOf("<button", html.indexOf('aria-label="Send message"')));
     expect(send.slice(0, send.indexOf(">"))).toContain("disabled");
-    expect(html).not.toContain("chat-composer-send--armed");
+    expect(html).not.toContain("data-armed");
   });
 
   test("send arms once the draft has text", async () => {
@@ -88,7 +87,7 @@ const showExtensionsDefault = (MessageComposer as { props: Record<string, { defa
       import.meta.url,
     );
 
-    expect(html).toContain("chat-composer-send--armed");
+    expect(html).toContain('data-armed="true"');
   });
 });
 

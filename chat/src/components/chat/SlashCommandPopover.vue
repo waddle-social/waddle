@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { css } from "styled-system/css";
+import { tag } from "styled-system/recipes";
+import { composerPopover } from "./composer-classes";
 import { Slash, AlertCircle } from "lucide-vue-next";
 import type { SlashCandidate } from "@/lib/slash-candidates";
 
@@ -14,6 +17,11 @@ const emit = defineEmits<{
   pick: [candidate: SlashCandidate];
 }>();
 
+const blockedClass = css({ display: "flex", alignItems: "center", gap: "2", px: "3", py: "2", textStyle: "caption", color: "danger.text", "& svg": { width: "14px", height: "14px", flex: "none" } });
+const slashIcon = css({ width: "16px", height: "16px", flex: "none", color: "action.text" });
+const nameClass = css({ fontWeight: 700, flex: "none" });
+const builtinTag = css({ ml: "auto", flex: "none" });
+
 function candidateKey(candidate: SlashCandidate): string {
   return candidate.kind === "builtin"
     ? `builtin:${candidate.command.name}`
@@ -23,35 +31,32 @@ function candidateKey(candidate: SlashCandidate): string {
 
 <template>
   <div
-    class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
-    :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
+    :class="[composerPopover.root, isTopPinned ? composerPopover.below : composerPopover.above]"
   >
-    <div v-if="blocked" class="type-caption flex items-center gap-2 px-3 py-2 text-destructive-text">
-      <AlertCircle class="h-3.5 w-3.5" aria-hidden="true" />
-      <span>No command <span class="type-emphasis">/{{ prefix }}</span>. Press Esc, then Enter to send as text.</span>
+    <div v-if="blocked" :class="blockedClass">
+      <AlertCircle aria-hidden="true" />
+      <span>No command <b>/{{ prefix }}</b>. Press Esc, then Enter to send as text.</span>
     </div>
-    <div v-else class="flex flex-col gap-1">
+    <template v-else>
       <button
         v-for="(candidate, i) in candidates"
         :key="candidateKey(candidate)"
         type="button"
-        class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
-        :class="i === selectedIndex
-          ? 'bg-primary/15 hover:bg-primary/20'
-          : 'hover:bg-muted'"
+        :class="composerPopover.option"
+        :data-selected="i === selectedIndex || undefined"
         @mousedown.prevent="emit('pick', candidate)"
       >
-        <Slash class="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+        <Slash :class="slashIcon" aria-hidden="true" />
         <template v-if="candidate.kind === 'builtin'">
-          <span class="type-emphasis shrink-0">{{ candidate.command.usage }}</span>
-          <span class="type-caption text-muted-foreground truncate">{{ candidate.command.description }}</span>
-          <span class="type-caption ml-auto shrink-0 rounded border border-border px-1.5 text-muted-foreground">Built-in</span>
+          <span :class="nameClass">{{ candidate.command.usage }}</span>
+          <span :class="composerPopover.hint">{{ candidate.command.description }}</span>
+          <span :class="[tag(), builtinTag]">Built-in</span>
         </template>
         <template v-else>
-          <span class="type-emphasis">/{{ candidate.command.composerPrefix }}</span>
-          <span class="type-caption text-muted-foreground truncate">{{ candidate.command.name }}</span>
+          <span :class="nameClass">/{{ candidate.command.composerPrefix }}</span>
+          <span :class="composerPopover.hint">{{ candidate.command.name }}</span>
         </template>
       </button>
-    </div>
+    </template>
   </div>
 </template>

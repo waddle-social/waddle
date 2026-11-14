@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { css } from "styled-system/css";
+import { btn, iconbtn, input } from "styled-system/recipes";
 import {
   AlertCircle,
   ArrowLeft,
@@ -20,6 +22,7 @@ import {
   type ExtensionCommandFormField,
 } from "@/lib/xmpp/extension-commands";
 import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
+import { spin } from "./composer-classes";
 
 const props = defineProps<{
   state: "idle" | "loading" | "error";
@@ -131,95 +134,121 @@ function actionLabel(action: ExtensionCommandAction): string {
       return "Complete";
   }
 }
+
+const root = css({ maxHeight: "min(72dvh, 704px)", overflowY: "auto", overscrollBehavior: "contain", bg: "bg.rail", px: "6", py: "3", _narrow: { px: "3" } });
+const edgeTop = css({ borderTop: "1px solid {colors.border.soft}" });
+const edgeBottom = css({ borderBottom: "1px solid {colors.border.soft}" });
+const lane = css({ display: "grid", gap: "3", maxWidth: "read", mx: "auto" });
+const head = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "3" });
+const minw = css({ minWidth: 0 });
+const title = css({ margin: 0, font: "700 16px/1.3 {fonts.display}", color: "fg" });
+const muted = css({ margin: 0, textStyle: "caption", color: "fg.muted", overflowWrap: "anywhere" });
+const danger = css({ margin: 0, textStyle: "caption", color: "danger.text" });
+const inline = css({ display: "inline-flex", alignItems: "center", gap: "2" });
+const icon = css({ width: "16px", height: "16px", flex: "none" });
+const accent = css({ color: "action.text" });
+const success = css({ color: "success.text" });
+const dangerFg = css({ color: "danger.text" });
+const warningFg = css({ color: "warning.text" });
+const stack2 = css({ display: "grid", gap: "2", border: 0, p: 0, m: 0, minWidth: 0 });
+const stack3 = css({ display: "grid", gap: "3" });
+const eyebrow = css({ margin: 0, textStyle: "eyebrow" });
+const wrapRow = css({ display: "flex", flexWrap: "wrap", gap: "2" });
+const cmdBtn = css({ maxWidth: "100%", height: "auto", py: "2", _disabled: { opacity: 0.6 } });
+const label = css({ minWidth: 0, overflowWrap: "anywhere", textAlign: "left" });
+const formCard = css({ display: "grid", gap: "3", p: "4", borderRadius: "panel", border: "1px solid {colors.border.soft}", bg: "surface" });
+const formTitle = css({ margin: 0, fontWeight: 700, fontSize: "sm", color: "fg", overflowWrap: "anywhere" });
+const check = css({ display: "flex", alignItems: "center", gap: "2", minHeight: "40px", fontSize: "sm", color: "fg" });
+const checkbox = css({ width: "16px", height: "16px", accentColor: "action" });
+const fieldClass = css({ display: "grid", gap: "1", textStyle: "caption", color: "fg.muted" });
+const textarea = css({ height: "auto", minHeight: "96px", py: "2" });
 </script>
 
 <template>
   <section
-    class="chat-extension-palette max-h-[min(72dvh,44rem)] overflow-y-auto overscroll-contain border-border bg-background/95 px-[var(--chat-content-inline)] py-3"
-    :class="isTopPinned ? 'border-b' : 'border-t'"
+    :class="[root, isTopPinned ? edgeBottom : edgeTop]"
     role="region"
     aria-label="Extensions"
   >
-    <div class="chat-message-lane grid gap-3">
-      <header class="flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <h2 class="type-card-title text-foreground">Extensions</h2>
-          <p class="type-caption text-muted-foreground">
+    <div :class="lane">
+      <header :class="head">
+        <div :class="minw">
+          <h2 :class="title">Extensions</h2>
+          <p :class="muted">
             Waddle-native actions available in this conversation.
           </p>
         </div>
         <button
           :ref="setCloseButtonRef"
           type="button"
-          class="chat-icon-button h-9 w-9"
+          :class="iconbtn()"
           title="Close extensions"
           aria-label="Close extensions"
           @click="emit('close')"
         >
-          <X class="h-4 w-4" aria-hidden="true" />
+          <X aria-hidden="true" />
         </button>
       </header>
 
-      <div v-if="state === 'loading'" class="type-caption inline-flex items-center gap-2 text-muted-foreground" role="status">
-        <LoaderCircle class="h-4 w-4 animate-spin" aria-hidden="true" />
+      <div v-if="state === 'loading'" :class="[muted, inline]" role="status">
+        <LoaderCircle :class="[icon, spin]" aria-hidden="true" />
         Loading extensions
       </div>
 
-      <p v-else-if="state === 'error'" class="type-caption text-destructive-text" role="alert">
+      <p v-else-if="state === 'error'" :class="danger" role="alert">
         {{ detail || "Could not load extensions." }}
       </p>
 
-      <p v-else-if="commands.length === 0" class="type-caption text-muted-foreground">
+      <p v-else-if="commands.length === 0" :class="muted">
         {{ detail || "No extensions are available here." }}
       </p>
 
-      <div v-else class="grid gap-3">
-        <div v-if="memberCommands.length > 0" class="grid gap-2">
-          <h3 class="type-section-label text-muted-foreground">Available here</h3>
-          <div class="flex flex-wrap gap-2">
+      <div v-else :class="stack3">
+        <div v-if="memberCommands.length > 0" :class="stack2">
+          <h3 :class="eyebrow">Available here</h3>
+          <div :class="wrapRow">
             <button
               v-for="command in memberCommands"
               :key="command.node"
               type="button"
-              class="type-control inline-flex min-h-10 max-w-full items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-foreground transition-colors hover:bg-muted/70 disabled:opacity-60"
+              :class="[btn(), cmdBtn]"
               :disabled="commandStates[command.node]?.state === 'loading'"
               @click="emit('invokeCommand', command)"
             >
               <LoaderCircle
                 v-if="commandStates[command.node]?.state === 'loading'"
-                class="h-4 w-4 animate-spin"
+                :class="[icon, spin]"
                 aria-hidden="true"
               />
               <CheckCircle2
                 v-else-if="commandStates[command.node]?.state === 'success'"
-                class="h-4 w-4 text-success"
+                :class="[icon, success]"
                 aria-hidden="true"
               />
               <AlertCircle
                 v-else-if="commandStates[command.node]?.state === 'warning' || commandStates[command.node]?.state === 'error'"
-                class="h-4 w-4"
-                :class="commandStates[command.node]?.state === 'error' ? 'text-destructive-text' : 'text-warning'"
+                :class="[icon, commandStates[command.node]?.state === 'error' ? dangerFg : warningFg]"
                 aria-hidden="true"
               />
-              <Play v-else class="h-4 w-4 text-primary" aria-hidden="true" />
-              <span class="min-w-0 break-words text-left">{{ command.name }}</span>
+              <Play v-else :class="[icon, accent]" aria-hidden="true" />
+              <span :class="label">{{ command.name }}</span>
             </button>
           </div>
         </div>
 
-        <div v-if="adminCommands.length > 0" class="grid gap-2">
-          <h3 class="type-section-label text-muted-foreground">Admin</h3>
-          <div class="flex flex-wrap gap-2">
+        <div v-if="adminCommands.length > 0" :class="stack2">
+          <h3 :class="eyebrow">Admin</h3>
+          <div :class="wrapRow">
             <button
               v-for="command in adminCommands"
               :key="command.node"
               type="button"
-              class="type-control inline-flex min-h-10 max-w-full items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-foreground transition-colors hover:bg-muted disabled:opacity-60"
+              :class="[btn(), cmdBtn]"
               :disabled="commandStates[command.node]?.state === 'loading'"
               @click="emit('invokeCommand', command)"
             >
-              <ShieldCheck class="h-4 w-4 text-primary" aria-hidden="true" />
-              <span class="min-w-0 break-words text-left">{{ command.name }}</span>
+              <ShieldCheck :class="[icon, accent]" aria-hidden="true" />
+              <span :class="label">{{ command.name }}</span>
             </button>
           </div>
         </div>
@@ -227,7 +256,7 @@ function actionLabel(action: ExtensionCommandAction): string {
 
       <p
         v-if="detail || Object.values(commandStates).some((commandState) => commandState.detail)"
-        class="type-caption text-muted-foreground"
+        :class="muted"
         role="status"
       >
         {{ detail || Object.values(commandStates).find((commandState) => commandState.detail)?.detail }}
@@ -236,36 +265,36 @@ function actionLabel(action: ExtensionCommandAction): string {
       <article
         v-for="command in commands.filter((item) => commandForms[item.node])"
         :key="`form:${command.node}`"
-        class="grid gap-3 rounded-lg border border-border bg-muted/30 p-3"
+        :class="formCard"
       >
-        <div class="min-w-0">
-          <h3 class="type-control break-words text-foreground">{{ command.name }}</h3>
-          <p v-if="stateDetail(command)" class="type-caption break-words text-muted-foreground">{{ stateDetail(command) }}</p>
+        <div :class="minw">
+          <h3 :class="formTitle">{{ command.name }}</h3>
+          <p v-if="stateDetail(command)" :class="muted">{{ stateDetail(command) }}</p>
         </div>
 
-        <p v-if="blockedReason(command)" class="type-caption text-destructive-text" role="alert">
+        <p v-if="blockedReason(command)" :class="danger" role="alert">
           {{ blockedReason(command) }}
         </p>
-        <p v-else-if="missingRequiredFields(command).length > 0" class="type-caption text-muted-foreground">
+        <p v-else-if="missingRequiredFields(command).length > 0" :class="muted">
           Complete required fields to continue.
         </p>
 
-        <div class="grid gap-3">
+        <div :class="stack3">
           <template
             v-for="field in visibleFields(command)"
             :key="`${command.node}:${field.name}`"
           >
-            <p v-if="field.type === 'fixed'" class="type-caption text-muted-foreground">
+            <p v-if="field.type === 'fixed'" :class="muted">
               {{ field.value || field.label }}
             </p>
 
             <label
               v-else-if="field.type === 'boolean'"
-              class="type-control flex min-h-10 items-center gap-2 text-foreground"
+              :class="check"
             >
               <input
                 type="checkbox"
-                class="h-4 w-4 accent-primary"
+                :class="checkbox"
                 :checked="field.value === '1' || field.value === 'true'"
                 :disabled="!!blockedReason(command)"
                 @change="setBooleanValueFromEvent(command, field, $event)"
@@ -275,11 +304,11 @@ function actionLabel(action: ExtensionCommandAction): string {
 
             <label
               v-else-if="field.type === 'list-single'"
-              class="type-caption grid gap-1 text-muted-foreground"
+              :class="fieldClass"
             >
               <span>{{ field.label }}<span v-if="field.required" aria-hidden="true"> *</span></span>
               <select
-                class="min-h-10 rounded-md border border-border bg-background px-2 text-foreground"
+                :class="input()"
                 :value="field.value"
                 :required="field.required"
                 :disabled="!!blockedReason(command)"
@@ -290,80 +319,79 @@ function actionLabel(action: ExtensionCommandAction): string {
                   {{ option.label }}
                 </option>
               </select>
-              <span v-if="field.description" class="text-muted-foreground/75">{{ field.description }}</span>
+              <span v-if="field.description" :class="muted">{{ field.description }}</span>
             </label>
 
             <fieldset
               v-else-if="field.type === 'list-multi'"
-              class="grid gap-2"
+              :class="stack2"
             >
-              <legend class="type-caption text-muted-foreground">
+              <legend :class="muted">
                 {{ field.label }}<span v-if="field.required"> (required)</span>
               </legend>
               <label
                 v-for="option in field.options"
                 :key="option.value"
-                class="type-control flex min-h-9 items-center gap-2 text-foreground"
+                :class="check"
               >
                 <input
                   type="checkbox"
-                  class="h-4 w-4 accent-primary"
+                  :class="checkbox"
                   :checked="field.values.includes(option.value)"
                   :disabled="!!blockedReason(command)"
                   @change="toggleMultiValueFromEvent(command, field, option.value, $event)"
                 />
                 <span>{{ option.label }}</span>
               </label>
-              <p v-if="field.description" class="type-caption text-muted-foreground/75">{{ field.description }}</p>
+              <p v-if="field.description" :class="muted">{{ field.description }}</p>
             </fieldset>
 
             <label
               v-else-if="field.type === 'text-multi' || field.type === 'jid-multi'"
-              class="type-caption grid gap-1 text-muted-foreground"
+              :class="fieldClass"
             >
               <span>{{ field.label }}<span v-if="field.required" aria-hidden="true"> *</span></span>
               <textarea
-                class="min-h-24 rounded-md border border-border bg-background px-2 py-2 text-foreground"
+                :class="[input(), textarea]"
                 :value="field.values.join('\n')"
                 :required="field.required"
                 :disabled="!!blockedReason(command)"
                 @input="setMultiLineValueFromEvent(command, field, $event)"
               />
-              <span v-if="field.description" class="text-muted-foreground/75">{{ field.description }}</span>
+              <span v-if="field.description" :class="muted">{{ field.description }}</span>
             </label>
 
             <label
               v-else
-              class="type-caption grid gap-1 text-muted-foreground"
+              :class="fieldClass"
             >
               <span>{{ field.label }}<span v-if="field.required" aria-hidden="true"> *</span></span>
               <input
-                class="min-h-10 rounded-md border border-border bg-background px-2 text-foreground"
+                :class="input()"
                 :type="field.type === 'text-private' ? 'password' : 'text'"
                 :value="field.value"
                 :required="field.required"
                 :disabled="field.blocked || !!blockedReason(command)"
                 @input="setSingleValueFromEvent(command, field, $event)"
               />
-              <span v-if="field.description" class="text-muted-foreground/75">{{ field.description }}</span>
+              <span v-if="field.description" :class="muted">{{ field.description }}</span>
             </label>
           </template>
         </div>
 
-        <div class="flex flex-wrap gap-2">
+        <div :class="wrapRow">
           <button
             v-for="action in allowedActions(command)"
             :key="`${command.node}:${action}`"
             type="button"
-            class="type-control inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 disabled:opacity-60"
-            :class="action === 'cancel' || action === 'prev' ? 'border border-border bg-background text-foreground hover:bg-muted' : 'bg-primary text-primary-foreground'"
+            :class="action === 'cancel' || action === 'prev' ? btn() : btn({ variant: 'primary' })"
             :disabled="!canSubmitAction(command, action)"
             @click="emit('submitForm', command, action)"
           >
-            <ArrowLeft v-if="action === 'prev'" class="h-4 w-4" aria-hidden="true" />
-            <Square v-else-if="action === 'cancel'" class="h-4 w-4" aria-hidden="true" />
-            <ArrowRight v-else-if="action === 'next'" class="h-4 w-4" aria-hidden="true" />
-            <CheckCircle2 v-else class="h-4 w-4" aria-hidden="true" />
+            <ArrowLeft v-if="action === 'prev'" aria-hidden="true" />
+            <Square v-else-if="action === 'cancel'" aria-hidden="true" />
+            <ArrowRight v-else-if="action === 'next'" aria-hidden="true" />
+            <CheckCircle2 v-else aria-hidden="true" />
             {{ actionLabel(action) }}
           </button>
         </div>
@@ -372,17 +400,17 @@ function actionLabel(action: ExtensionCommandAction): string {
       <div
         v-for="command in commands.filter((item) => commandActions[item.node]?.length)"
         :key="`actions:${command.node}`"
-        class="flex flex-wrap gap-2"
+        :class="wrapRow"
       >
         <button
           v-for="action in commandActions[command.node]"
           :key="`${command.node}:${action.route}`"
           type="button"
-          class="type-control inline-flex min-h-10 max-w-full min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-foreground hover:bg-muted disabled:opacity-60"
+          :class="[btn(), cmdBtn]"
           :disabled="commandStates[command.node]?.state === 'loading'"
           @click="emit('invokeAction', command, action)"
         >
-          <span class="min-w-0 break-words text-left">{{ action.label }}</span>
+          <span :class="label">{{ action.label }}</span>
         </button>
       </div>
     </div>
