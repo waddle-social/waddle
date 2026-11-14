@@ -5,18 +5,21 @@ name: waddle-server-pullRequest
 on:
   pull_request:
     paths:
+    - '*.cue'
+    - .github/workflows/**
     - .github/workflows/hestia-cache-gc.yml
     - .github/workflows/hestia-cache-gc.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
     - .github/workflows/waddle-integration.yml
     - .github/workflows/waddle-integration.yml/**
-    - .github/workflows/waddle-server-*.yml
     - .github/workflows/waddle-server-pullrequest.yml
-    - apps/apple/**/Tests/**
+    - apps/apple/**
     - apps/apple/Waddle/RustClient/Generated/**
     - chat/tests/**
+    - ci/*.cue
     - ci/cache-benchmark/**
+    - ci/contributors/**
     - ci/contributors/*.cue
     - ci/rust-tests/**
     - cue.mod/**
@@ -42,18 +45,18 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
-    - infrastructure/waddle.cloud/rules/mimir/*.yaml
+    - infrastructure/waddle.cloud/rules/mimir/**
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
-    - scripts/*cache-benchmark*
-    - scripts/integration-ci*
+    - scripts/**
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
     - scripts/test_cuenv_bootstrap.py
     - scripts/test_cuenv_bootstrap.py/**
     - scripts/test_integration_ci_project.py
     - scripts/test_integration_ci_project.py/**
-    - server/**/env.cue
+    - server/**
+    - server/*.cue
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
     - server/Cargo.lock
@@ -64,7 +67,6 @@ on:
     - server/capabilities.toml/**
     - server/charts/waddle-server/**
     - server/crates/**
-    - server/crates/**/tests/**
     - server/crates/waddle-server/src/clustering/alert_metric_contract.json
     - server/crates/waddle-server/src/clustering/alert_metric_contract.json/**
     - server/crates/waddle-server/src/server/routes/websocket/tests/**
@@ -83,10 +85,7 @@ on:
     - server/observer-release.json/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
-    - server/schema/**
     - server/scripts/**
-    - server/scripts/*cutover*.py
-    - server/scripts/*publish_chart.py
     - server/scripts/observer_release.py
     - server/scripts/observer_release.py/**
     - server/scripts/test_chart_shutdown_budget.py
@@ -98,7 +97,7 @@ on:
     - server/vendor/**
     - server/wit/**
     - tests/**
-    - xeps/xep-*.xml
+    - xeps/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -131,8 +130,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.74.0"
+        if [ "$cuenv_version" != "0.74.0" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -140,15 +139,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -167,7 +166,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.74.0" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi
@@ -213,8 +212,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.74.0"
+        if [ "$cuenv_version" != "0.74.0" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -222,15 +221,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -249,7 +248,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.74.0" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi
@@ -295,8 +294,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.74.0"
+        if [ "$cuenv_version" != "0.74.0" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -304,15 +303,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -331,7 +330,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.74.0" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi
@@ -377,8 +376,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.74.0"
+        if [ "$cuenv_version" != "0.74.0" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -386,15 +385,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -413,7 +412,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.74.0" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi
@@ -657,8 +656,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.74.0"
+        if [ "$cuenv_version" != "0.74.0" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -666,15 +665,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -693,7 +692,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.74.0" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi

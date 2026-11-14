@@ -84,7 +84,7 @@ cryptographic evidence against arbitrary candidate code forging its own files.
 
 ## Verified release bootstrap
 
-The CLI is explicitly pinned to **cuenv 0.63.2** through the shared
+The CLI is explicitly pinned to **cuenv 0.74.0** through the shared
 `#CuenvVersion` in `ci/contributors/cuenv.cue` and root
 `config.ci.cuenv.version`. Each of the seven projects is checked separately for
 that resolved configuration. The separately pinned CUE schema remains 0.57.3;
@@ -92,18 +92,22 @@ cuenv prints a version-mismatch warning. Configuration, inventory and drift
 checks exercise this deliberately retained schema rather than claiming blanket
 cross-version compatibility.
 
-[Release 0.63.2](https://github.com/cuenv/cuenv/releases/tag/0.63.2) contains the
-supported `ci --all` fix. The downloaded release artifacts have these SHA-256 pins:
+[Release 0.74.0](https://github.com/cuenv/cuenv/releases/tag/0.74.0) selects
+affected tasks fail-closed: a run with no comparable base (scheduled and manual
+runs, tag pushes, a branch's first push) runs its whole pipeline, and derived
+path filters are coarser (`<dir>/**` for any glob). Workflows therefore start
+more often than under 0.63.2. The downloaded release artifacts have these
+SHA-256 pins, which match the digests GitHub records for the release assets:
 
 | Asset | SHA-256 |
 | --- | --- |
-| `cuenv-darwin-arm64` | `8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba` |
-| `cuenv-linux-arm64` | `0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519` |
-| `cuenv-linux-x64` | `5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa` |
+| `cuenv-darwin-arm64` | `3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7` |
+| `cuenv-linux-arm64` | `1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769` |
+| `cuenv-linux-x64` | `35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f` |
 
 The CUE-owned contributor checks OS/architecture, rejects any other version or
 missing digest, downloads to a temporary file, verifies SHA-256 before chmod or
-execution, then requires exact `cuenv 0.63.2` version output. Only then does it
+execution, then requires exact `cuenv 0.74.0` version output. Only then does it
 install into a private `RUNNER_TEMP` directory, append that directory to
 `GITHUB_PATH`, and run that installed binary for VCS materialization. There is no
 `latest` or unverified fallback and no `/usr/local` installation. The integration
@@ -170,7 +174,8 @@ server `checkCiDrift` task, which pull requests run. Omitting
 FlakeHub cache can increase compile and download time; no verification commands,
 runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
-warnings in `crates/ci/src/executor/reporting.rs` of cuenv (now CLI 0.63.2). Generated
+warnings in cuenv's CI reporter (`crates/ci/src/executor/reporting.rs` as of
+0.63.2). Generated
 integration jobs rely on Actions job results rather than those notifications.
 
 ## Open trusted-gate boundary

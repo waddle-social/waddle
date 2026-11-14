@@ -584,8 +584,9 @@ the 34 paused in #2046 that does not return.
 lane that builds the default features, and it is a publish gate on `main`.
 The nightly lanes need a scheduled run or a dispatch to report a regression;
 a failure there no longer points at a single push. Android `deviceTests` runs
-`cuenv ci` without `--all`, so a nightly run whose head commit touches none of
-`gmdCheck`'s inputs reports green after "No affected tasks".
+`cuenv ci` without `--all`; since cuenv 0.74.0 a scheduled or manual run has no
+comparable base, so it runs the whole pipeline rather than reporting "No
+affected tasks".
 
 ### Concurrency
 

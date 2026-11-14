@@ -203,7 +203,6 @@ schema.#Project & {
 				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result != '' && fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
-					packages:        "write"
 					"pull-requests": "none"
 				}
 			}
@@ -1461,6 +1460,9 @@ schema.#Project & {
 		}
 
 		publishContainerImage: schema.#Task & {
+			// The only job that writes to GHCR (image, chart, extensions and
+			// the GitOps artifact). cuenv grants packages access per task, so
+			// the pipeline-level permissions leave it out.
 			ci: github: permissions: packages: "write"
 			// Reads sibling projects through ../ inputs and shells out to cuenv,
 			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
