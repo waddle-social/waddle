@@ -6,15 +6,13 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 
 /**
  * The Polar Huddle shell (App-Home board): no top navigation. The sidebar
- * on the left (from `md`; on phones it opens as the navigation drawer),
+ * on the left (from `md`; on phones it is the home screen instead),
  * the page in the middle (default slot) and an optional right-hand panel
  * (`#context` slot, from `xl`). `#live` and `#dock` pass through to the
  * sidebar's live-now and current-huddle areas.
  */
 defineProps<{
   controller: ChatAppController;
-  /** Admin bypasses the shell; settings keeps it. */
-  hideSidebar?: boolean;
 }>();
 
 const rootClass = css({ display: "flex", flex: "1 1 0%", minWidth: 0, minHeight: 0, overflow: "hidden", bg: "bg", color: "fg" });
@@ -38,7 +36,7 @@ const contextClass = css({ display: "none", xl: { display: "flex", overflowY: "a
 
 <template>
   <div :class="rootClass">
-    <aside v-if="!hideSidebar" :class="sidebarClass">
+    <aside :class="sidebarClass">
       <AppSidebar :controller="controller">
         <template #live><slot name="live" /></template>
         <template #dock><slot name="dock" /></template>

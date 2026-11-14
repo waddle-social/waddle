@@ -2,12 +2,12 @@
 // Admin shell (App-Admin / Mobile-Admin boards): one column with the
 // "Admin" heading, a per-panel caption, the panel's New action (teleported
 // into `#admin-header-actions` by the panel) and Users / Spaces / Channels
-// as one segmented switch. Below `md` a top bar with a drawer replaces the
-// heading and the switch.
+// as one segmented switch, inside the sidebar shell. Below `md` a top bar
+// with a drawer (and Back to chat) replaces the heading and the switch.
 import { computed, ref } from "vue";
-import { ChevronLeft, Menu, X } from "lucide-vue-next";
+import { Menu, X } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
-import { btn, empty, iconbtn, seg } from "styled-system/recipes";
+import { empty, iconbtn, seg } from "styled-system/recipes";
 import spotError from "@waddle/design/assets/spot-error.svg?url";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import type { AdminMatch, AdminPanel } from "@/router";
@@ -52,7 +52,7 @@ const active = computed(() => PANELS.find((p) => p.slug === props.activePanel));
 const activeLabel = computed(() => active.value?.label ?? "Admin");
 const isStub = computed(() => !active.value || !active.value.enabled);
 
-const rootClass = css({ height: "100dvh", overflowY: "auto", bg: "bg", color: "fg" });
+const rootClass = css({ flex: 1, minHeight: 0, overflowY: "auto", bg: "bg", color: "fg" });
 const topBarClass = css({
   position: "sticky",
   top: 0,
@@ -78,7 +78,6 @@ const mainClass = css({
   padding: "16px 12px 32px",
   md: { padding: "32px 40px" },
 });
-const backClass = cx(btn({ size: "sm" }), css({ alignSelf: "flex-start", display: "none", md: { display: "inline-flex" } }));
 const headClass = css({ display: "flex", alignItems: "flex-start", gap: "4" });
 const headTextClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1.5" });
 const titleClass = css({ display: "none", margin: 0, font: "700 30px/1.2 {fonts.display}", letterSpacing: "-0.01em", md: { display: "block" } });
@@ -138,10 +137,6 @@ const stubClass = cx(empty(), css({ pt: "16", "& h2": { margin: 0, font: "700 24
     </AppDrawer>
 
     <main :class="mainClass">
-      <button type="button" :class="backClass" aria-label="Back to chat" @click="emit('back')">
-        <ChevronLeft aria-hidden="true" />
-        <span>Back to chat</span>
-      </button>
       <header :class="headClass">
         <div :class="headTextClass">
           <h1 :class="titleClass">Admin</h1>
