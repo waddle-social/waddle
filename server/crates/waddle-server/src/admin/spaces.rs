@@ -456,10 +456,13 @@ fn parse_required_text(form: &DataForm, var: &str) -> Result<String, String> {
     parse_optional_text(form, var).ok_or_else(|| format!("'{var}' is required"))
 }
 
+/// A required bare-JID field, taken exactly under the identity profile
+/// ([`DataForm::bare_jid`]): a spelling preparation would change is refused
+/// rather than folded onto another space or member.
 fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String> {
-    let raw = parse_required_text(form, var)?;
-    raw.parse()
-        .map_err(|e| format!("'{var}' is not a valid bare JID '{raw}': {e}"))
+    form.bare_jid(var)
+        .ok_or_else(|| format!("'{var}' is required"))?
+        .map_err(|error| format!("'{var}' is not a bare JID in canonical form: {error}"))
 }
 
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {

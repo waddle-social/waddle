@@ -1,0 +1,107 @@
+# Identity profile rollout (#2047)
+
+This release enforces the identity profile `waddle-identity-v1`
+([design](../../server/docs/planning/identity-profile-2047.md)). It changes
+behaviour with server-to-server federation off: client stanzas, sign-in,
+provisioning and account lookup no longer fold a spelling onto another
+account, and configured domains must be canonical. It is the identity
+profile's part of the rollout gate G24 of
+[ADR-0020](../../server/docs/adrs/0020-independent-community-federation.md);
+the federation rollout runbook collects it with the other parts. The
+[authorization ID codec cutover](authz-codec-cutover.md) ships in the same
+rollout and narrows the codec's user subjects to the same canonical form.
+
+## What changes for clients and accounts
+
+| Area | Before | After |
+| --- | --- | --- |
+| Stanza `to`/`from`, payload `jid` attributes, MUC invitation and decline `to`/`from`, and data-form fields typed `jid-single`/`jid-multi` | case, width and compatibility forms folded by the JID parser | refused with `<jid-malformed/>`; a trailing dot is removed and a U-label domain becomes its A-label form |
+| MUC nicknames and other resourceparts in stanza addresses | Resourceprep (NFKC) folded fullwidth and compatibility characters, ligatures and code points mapped to nothing (`room@muc/ｎｉｃｋ` joined as `nick`) | the whole stanza is refused with `<jid-malformed/>`; a client must use the nickname exactly as it is to appear |
+| Stanzas to numeric IPv4 domains (`2130706433`, `0x7f.1`, `127.1`) | classified as remote or unqualified domains | classified as numeric IPv4 forms, never routable; requests are answered `<remote-server-not-found/>` as for IP literals and single-label names |
+| XEP-0198 handled count | a stanza refused at parsing was not counted, so a client replayed it after resumption and later acknowledgements named the wrong stanza | every well-formed stanza refused at parsing counts as handled |
+| RFC 7395 `<open from>` | folded | a non-canonical hint closes the stream with `invalid-from` |
+| SCRAM username | `ALICE` signed in as `alice` | only the exact canonical name signs in |
+| OAUTHBEARER | the stored localpart was re-slugged and lowercased | the stored bare JID and localpart must name the account exactly; authzid must be canonical |
+| Resource binding | `ｗｅｂ` bound as `web` | `<bad-request/>` |
+| New accounts (fixed accounts, OIDC; XEP-0077 registration exists only in test builds) | any valid localpart; OIDC slugs kept Unicode letters | 1–64 bytes of `a-z`, `0-9`, `.`, `_`, `-`, `+`; OIDC slugs transliterate Latin letters (`José` → `jose`, `Øyvind` → `oyvind`) and drop other characters; a name with nothing left falls back to the email local part, then to `ext_<provider>_<digest>` |
+| Admin ad-hoc commands (`group-dm:create`, `channels:set-affiliation`, `channels:kick`, `spaces:set-role`, push operator commands) | JID fields folded by the parser | a JID that is not canonical is refused: `<jid-malformed/>` for a field submitted with type `jid-single` or `jid-multi`, `<bad-request/>` for one submitted without a type |
+| Account lookups (roster, presence, group DMs, XEP-0055) | the input was folded before the key lookup | the input is taken exactly; a non-canonical spelling names no account |
+| XEP-0055 results | stored names folded into addresses | rows whose stored name is not canonical are left out; a legacy `Bob` row does not hide the canonical `bob` |
+| Configured domains | any JID-valid spelling | `WADDLE_XMPP_DOMAIN`, `WADDLE_MUC_DOMAIN` and `WADDLE_SPACES_JID` must be written lowercase, without a trailing dot and in A-label form, or configuration load or startup fails |
+| `WADDLE_SERVER_OWNER_LOCALPARTS` | entries lowercased; `@name` and `name@domain` accepted | each entry must be the exact canonical localpart (no `@`, no domain), or startup fails; an account is an owner only when its stored name equals an entry exactly |
+
+Nothing is written to the account stores by this release beyond what it
+already wrote; there is no migration and no schema change.
+
+## Existing accounts outside the profile
+
+At startup each replica reads both account stores and logs, without account
+identifiers, either `every local account is inside the identity profile` or
+`local accounts outside the identity profile` with a count per finding:
+
+- `non_canonical_spelling`: the stored name is one preparation would change
+  (for example `Bob`, `straße`, or an OIDC account whose stored JID is not
+  its name's canonical address). **OIDC accounts with this finding can no
+  longer sign in over XMPP.** Native accounts with it sign in only under the
+  canonical spelling their lookup key records (`bob`), and receive no
+  bootstrap membership from the authorization store reseed, as before.
+- `outside_account_profile`: canonical but not ASCII-profile (for example
+  `josé`). These accounts keep working. No new account can take such a name,
+  and each needs an operator decision before remote identities or grants are
+  enrolled (S2S routing and grant authority).
+- `missing_key`: rows a node predating lookup keys wrote. The periodic
+  backfill keys them within five minutes; until then they are not found.
+- `key_mismatch`: a recorded key that is not the stored name's key. Lookups
+  resolve the row under another name; investigate before activation.
+- `folded_collision`: two or more accounts whose names fold to one address,
+  across the OIDC and native stores. At most one of them holds the address.
+  An OIDC row and a native row with the identical name are one account (a
+  native SCRAM sign-in writes the OIDC row) and are not reported.
+- `foreign_domain`: native rows for another domain; not accounts of this
+  deployment.
+
+For the per-account evidence behind the counts, run the read-only
+[`waddle-identity-audit`](../../server/docs/operations/identity-audit.md)
+against the same database and keep its report private. Its findings
+correspond to these categories: `changed_by_current_parser` and
+`invalid_current_parser_identity` to `non_canonical_spelling`;
+`unicode_input` and `candidate_localpart` on an otherwise canonical name to
+`outside_account_profile`; its collision groups to `folded_collision`;
+`missing_prepared_key` to `missing_key`; and `incompatible_prepared_key` to
+`key_mismatch`. Its diagnostic candidate differs from this profile in two
+ways: it excludes `+`, which this profile allows, and it flags A-label
+domains, which are this profile's canonical domain form.
+
+## Procedure
+
+1. Before the window, confirm the configured domains and owner entries are
+   canonical. A replica refuses to start otherwise, naming the variable:
+   `WADDLE_MUC_DOMAIN` or `WADDLE_SPACES_JID` at configuration load,
+   `WADDLE_XMPP_DOMAIN, WADDLE_MUC_DOMAIN and WADDLE_SPACES_JID must be
+   canonical domains` at startup, or a `WADDLE_SERVER_OWNER_LOCALPARTS
+   entry` error. Owner entries are bare localparts exactly as the accounts
+   are named (`rawkode`, not `Rawkode` or `rawkode@waddle.social`).
+2. Run `waddle-identity-audit` against the account database of the running
+   release and decide, for every `non_canonical_spelling` OIDC account, how
+   its owner will continue (this release does not rename accounts). Record
+   the counts so the startup log can be compared.
+3. Roll out with the authorization codec cutover. Every replica must run this
+   release before any client relies on the refusals: a replica of the
+   previous release still folds inputs, accepts `ALICE` at sign-in and
+   provisions Unicode OIDC names. Accounts such a replica provisions during
+   the rollout appear in the next startup report.
+4. After the rollout, compare each replica's startup counts with step 2. The
+   counts are the same on every replica of one database.
+5. Before enabling remote identities or grants (S2S routing, grant
+   authority), resolve or explicitly accept every account the report lists.
+
+## Rollback
+
+The previous release reads the same stores and nothing this release writes is
+incompatible with it, so a binary rollback needs no data change. Rolling back
+re-enables folding at every boundary listed above; accounts provisioned by
+this release remain valid under the previous one. A rollback of this release
+alone is constrained by the authorization codec cutover it ships with; follow
+that runbook's rollback section.
+
+These instructions do not authorize or assert a deployment.

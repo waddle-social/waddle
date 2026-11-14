@@ -1,3 +1,5 @@
+use waddle_xmpp::identity::parse_resourcepart;
+
 use super::frame::ResponseFrame;
 use super::handlers::iq::errors::resource_constraint_iq_error;
 use super::{
@@ -61,26 +63,33 @@ pub(super) fn handle_resource_binding(
     }
 
     let bare_jid = bare_jid.clone();
-    let resource = match iq {
+    let requested = match iq {
         xmpp_parsers::iq::Iq::Set { payload: e, .. }
         | xmpp_parsers::iq::Iq::Get { payload: e, .. } => e
             .get_child("resource", waddle_xmpp::ns::BIND)
             .map(|r| r.text().trim().to_string())
             .filter(|v| !v.is_empty()),
         _ => None,
-    }
-    .unwrap_or_else(|| format!("ws-{}", uuid::Uuid::new_v4()));
+    };
 
-    let full_jid_str = format!("{}/{}", bare_jid, resource);
-
-    if let Ok(full_jid) = full_jid_str.parse::<FullJid>() {
+    // A client-requested resourcepart is bound only when preparation leaves
+    // it unchanged. RFC 6120 §7.7.2.1 allows `<bad-request/>` for one the
+    // server cannot process. Preparing it instead would bind a different
+    // resource from the one RFC 7622 (OpaqueString) names: Resourceprep folds
+    // `ｗｅｂ` into `web`, which OpaqueString keeps apart.
+    let resource = match requested {
+        Some(requested) => parse_resourcepart(&requested),
+        None => parse_resourcepart(&format!("ws-{}", uuid::Uuid::new_v4())),
+    };
+    if let Ok(resource) = resource {
+        let full_jid: FullJid = bare_jid.with_resource(&resource);
         info!(jid = %full_jid, id = %id, "Resource bound");
         *phase = ConnectionPhase::ready(full_jid.clone(), false);
         vec![ResponseFrame::from(build_bind_result_element(
             &id, &full_jid,
         ))]
     } else {
-        warn!(jid = %full_jid_str, "Invalid JID during resource binding");
+        warn!(id = %id, "Resource binding refused: resourcepart outside the identity profile");
         vec![ResponseFrame::from(build_iq_error_xml_typed(
             &id,
             None,

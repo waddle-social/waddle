@@ -16,12 +16,15 @@
 //!   folding, Unicode normalization, IDNA mapping or delimiter splitting;
 //!   `e\u{301}` and `é` are different identifiers. User subjects must
 //!   additionally be bare account JIDs that the `jid` parser leaves
-//!   byte-for-byte unchanged (see [`AuthzUserJid`]), so a spelling that the
-//!   parser would rewrite is rejected rather than silently aliased. That
-//!   acceptance set is defined by the `jid` parser and by the `stringprep`
-//!   and `idna` versions it resolves to. This crate pins `jid` exactly in its
-//!   manifest and Cargo.lock fixes the other two; changing any of them is a
-//!   codec version change.
+//!   byte-for-byte unchanged and that are in the identity profile's
+//!   canonical form (see [`AuthzUserJid`] and
+//!   [`waddle_xmpp::identity::CanonicalBareJid`]): no trailing dot and an
+//!   A-label domain. A spelling that the parser would rewrite, or a second
+//!   spelling of an accepted principal, is rejected rather than silently
+//!   aliased. That acceptance set is defined by the `jid` parser and by the
+//!   `stringprep` and `idna` versions it resolves to. This crate pins `jid`
+//!   exactly in its manifest and Cargo.lock fixes the other two; changing any
+//!   of them is a codec version change.
 //! - Length: at most [`MAX_AUTHZ_ID_BYTES`] source bytes, which encode to at
 //!   most 1023 wire bytes. Longer identifiers, including some valid JIDs, are
 //!   unsupported and rejected.
@@ -46,10 +49,13 @@
 //! only a store proven empty of Waddle relationships and refuses any other.
 //! Existing relationships are never decoded to reconstruct grants.
 //!
-//! Canonical encoding establishes uniqueness over accepted source spellings,
-//! not over logical principals: `a@example.org` and `a@example.org.` are both
-//! accepted and remain different subjects. Principal canonicalization belongs
-//! to the account directory and identity boundary, not to this codec.
+//! Canonical encoding establishes uniqueness over accepted source spellings.
+//! Because a user subject is accepted only in its canonical spelling, that is
+//! also uniqueness over principals as the identity profile defines them:
+//! `a@example.org.` and `a@bücher.example` are refused, while
+//! `a@example.org` and `a@xn--bcher-kva.example` are accepted. Mapping a
+//! spelling to its canonical form belongs to the identity boundary, never to
+//! this codec.
 //!
 //! Errors carry no identifier material. Identifiers are not credentials, but
 //! they are personal data and must not be used as metric attributes.
@@ -58,6 +64,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jid::{BareJid, DomainPart, NodePart};
 use thiserror::Error;
+use waddle_xmpp::identity::{CanonicalBareJid, CanonicalDomain};
 
 use super::tuple::{Object, ObjectType, Subject, SubjectType};
 
@@ -88,24 +95,31 @@ pub enum AuthzIdError {
     InvalidUserJid,
     #[error("user subject changes when parsed as a JID")]
     UserJidChangedByParser,
+    #[error("user subject is not in the identity profile's canonical form")]
+    UserJidNotCanonical,
 }
 
 /// A bare account JID used as a `user` subject.
 ///
 /// The text must parse as a bare JID with a localpart, without a resource,
-/// and survive parsing unchanged. This establishes syntax only; it neither
-/// resolves an account nor authenticates anyone.
+/// survive parsing unchanged and be in the identity profile's canonical form
+/// ([`CanonicalBareJid`]). This establishes syntax only; it neither resolves
+/// an account nor authenticates anyone.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AuthzUserJid(BareJid);
 
 impl AuthzUserJid {
-    /// Accept an already parsed bare JID.
+    /// Accept an already parsed bare JID in canonical form. A parsed JID
+    /// that still carries a trailing dot or a U-label domain is refused; the
+    /// identity boundary maps it first.
     pub fn new(jid: BareJid) -> Result<Self, AuthzIdError> {
         validate_source(jid.as_str())?;
         if jid.node().is_none() {
             return Err(AuthzIdError::InvalidUserJid);
         }
-        Ok(Self(jid))
+        let canonical =
+            CanonicalBareJid::new(jid).map_err(|_| AuthzIdError::UserJidNotCanonical)?;
+        Ok(Self(canonical.into_bare_jid()))
     }
 
     /// Parse text that the `jid` parser must leave byte-for-byte unchanged.
@@ -122,15 +136,21 @@ impl AuthzUserJid {
     /// domain. Each part must already be in the form the `jid` parser
     /// produces, so a stored username that the parser would rewrite (for
     /// example one with upper-case letters) is rejected instead of naming a
-    /// different account.
+    /// different account, and the domain must be canonical.
     pub fn from_account_parts(username: &str, domain: &str) -> Result<Self, AuthzIdError> {
         let node = NodePart::new(username).map_err(|_| AuthzIdError::InvalidUserJid)?;
         let host = DomainPart::new(domain).map_err(|_| AuthzIdError::InvalidUserJid)?;
         if node.as_str() != username || host.as_str() != domain {
             return Err(AuthzIdError::UserJidChangedByParser);
         }
+        let host = CanonicalDomain::parse_exact(domain)
+            .ok()
+            .filter(|canonical| canonical.as_str() == domain)
+            .ok_or(AuthzIdError::UserJidNotCanonical)?;
+        let jid = CanonicalBareJid::from_parts(username, &host)
+            .map_err(|_| AuthzIdError::UserJidChangedByParser)?;
         // Re-parse so the result is exactly what `from_wire` accepts back.
-        Self::parse_exact(BareJid::from_parts(Some(&node), &host).as_str())
+        Self::parse_exact(jid.as_str())
     }
 
     /// Decode a SpiceDB subject ID, with no legacy fallback.

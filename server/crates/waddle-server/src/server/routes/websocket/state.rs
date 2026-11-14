@@ -30,7 +30,7 @@ use crate::server::routes::interpret::SmInboundCompletionTracker;
 use jid::DomainPart;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::str::FromStr;
+use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::protocol::handlers::jingle::MIXER_LOCALPART;
 
 #[derive(Debug, Clone)]
@@ -1421,11 +1421,14 @@ impl XmppServiceDomains {
     }
 
     /// The exact typed domain inventory for destination classification:
-    /// `local` plus every configured service and the call mixer. Returns
-    /// `None` only when `local` is not a valid domainpart; a service domain
-    /// that does not parse cannot match any parsed address and is skipped.
+    /// `local` plus every configured service and the call mixer, each in the
+    /// identity profile's canonical domain form so that it compares equal to
+    /// canonical addresses. Returns `None` only when `local` cannot be
+    /// prepared; a service domain that cannot be prepared cannot match any
+    /// canonical address and is skipped. Startup refuses such configuration
+    /// before any connection is accepted.
     pub(crate) fn served_domains(&self, local: &str) -> Option<ServedDomains> {
-        let local_part = DomainPart::from_str(local).ok()?;
+        let local_part = canonical_domain_part(local)?;
         let mixer = format!("{MIXER_LOCALPART}.{local}");
         let services = [
             (ServedService::Muc, self.muc.as_str()),
@@ -1440,9 +1443,7 @@ impl XmppServiceDomains {
             services
                 .into_iter()
                 .filter_map(|(service, domain)| {
-                    DomainPart::from_str(domain)
-                        .ok()
-                        .map(|domain| (service, domain))
+                    canonical_domain_part(domain).map(|domain| (service, domain))
                 })
                 .fold(
                     ServedDomains::new(local_part),
@@ -1450,6 +1451,13 @@ impl XmppServiceDomains {
                 ),
         )
     }
+}
+
+/// `domain` in the identity profile's canonical form, as a typed domainpart.
+fn canonical_domain_part(domain: &str) -> Option<DomainPart> {
+    CanonicalDomain::prepare(domain)
+        .ok()
+        .map(CanonicalDomain::into_domain_part)
 }
 
 /// WebSocket route dependencies kept narrower than the full server graph.

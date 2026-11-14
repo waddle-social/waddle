@@ -9,6 +9,7 @@
 //! [`ParseError`] if the frame is malformed. Internal callers that already
 //! have one complete top-level element can also reuse the same classifier.
 
+use crate::identity::{enforce_stanza_addresses, parse_bare_jid, IdentityError};
 use crate::ns::SASL;
 use crate::Stanza;
 use jid::BareJid;
@@ -114,6 +115,14 @@ pub enum ParseError {
     /// into the expected stanza type.
     #[error("invalid {kind} stanza: {err}")]
     InvalidStanza { kind: &'static str, err: String },
+    /// A stanza address or payload `jid` attribute is outside the identity
+    /// profile (see [`crate::identity`]). The stanza was refused before any
+    /// address in it was prepared; the error carries no address text.
+    #[error("{kind} stanza address outside the identity profile: {error}")]
+    IdentityProfile {
+        kind: &'static str,
+        error: IdentityError,
+    },
 }
 
 /// Classify a raw inbound frame into a typed [`InboundFrame`].
@@ -270,12 +279,12 @@ fn parse_open(frame: &str) -> Result<ParsedFrame, ParseError> {
     require_namespace(&element, "open", "urn:ietf:params:xml:ns:xmpp-framing")
         .map_err(|_| ParseError::InvalidOpenNamespace)?;
     require_empty_element(&element, "open").map_err(|_| ParseError::InvalidOpenContent)?;
+    // The stream hint names an account, so it must already be a canonical
+    // bare account JID; the decoded text is checked before any preparation.
     let from = element
         .attr("from")
         .map(|value| {
-            let jid = value
-                .parse::<BareJid>()
-                .map_err(|_| ParseError::InvalidOpenFrom)?;
+            let jid = parse_bare_jid(value).map_err(|_| ParseError::InvalidOpenFrom)?;
             if jid.node().is_none() {
                 return Err(ParseError::InvalidOpenFrom);
             }
@@ -335,7 +344,20 @@ fn require_text_only_element(element: &Element, name: &'static str) -> Result<()
 }
 
 fn parse_stanza(frame: &str, kind: &str) -> Result<ParsedFrame, ParseError> {
-    parse_stanza_element(decode_stanza(frame)?, kind)
+    let mut element = decode_stanza(frame)?;
+    enforce_stanza_addresses(&mut element).map_err(|error| ParseError::IdentityProfile {
+        kind: stanza_kind(kind),
+        error,
+    })?;
+    parse_stanza_element(element, kind)
+}
+
+fn stanza_kind(kind: &str) -> &'static str {
+    match kind {
+        "iq" => "iq",
+        "message" => "message",
+        _ => "presence",
+    }
 }
 
 fn decode_stanza(frame: &str) -> Result<Element, ParseError> {

@@ -5,6 +5,7 @@ use jid::{BareJid, DomainPart};
 use std::path::PathBuf;
 use std::str::FromStr;
 use url::Url;
+use waddle_xmpp::identity::{CanonicalBareJid, CanonicalDomain, IdentityError};
 
 /// Resolved XMPP storage location for one store.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -253,8 +254,11 @@ impl XmppConfig {
     /// Load XMPP configuration from environment variables.
     ///
     /// Returns an error when `WADDLE_SPACES_JID` or `WADDLE_MUC_DOMAIN`
-    /// is set but cannot be parsed into a typed `BareJid` / `DomainPart`
-    /// respectively. Both env vars are optional — when unset the
+    /// is set but is not already written in the identity profile's canonical
+    /// form (a canonical bare JID and a canonical domain respectively:
+    /// lowercase, no trailing dot, A-labels). The text is checked as
+    /// configured, before any parser could fold it, because every served
+    /// address is built from it. Both env vars are optional — when unset the
     /// conventional `spaces.<domain>` / `muc.<domain>` derivations from
     /// `WADDLE_XMPP_DOMAIN` are used.
     pub fn from_env() -> anyhow::Result<Self> {
@@ -265,12 +269,16 @@ impl XmppConfig {
         let domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
-        let spaces_jid = parse_optional_env_value::<BareJid>("WADDLE_SPACES_JID")?
-            .map(Ok)
-            .unwrap_or_else(|| derived_spaces_jid(&domain))?;
-        let muc_domain = parse_optional_env_value::<DomainPart>("WADDLE_MUC_DOMAIN")?
-            .map(Ok)
-            .unwrap_or_else(|| derived_muc_domain(&domain))?;
+        let spaces_jid = parse_optional_canonical_env("WADDLE_SPACES_JID", |raw| {
+            CanonicalBareJid::parse_exact(raw).map(CanonicalBareJid::into_bare_jid)
+        })?
+        .map(Ok)
+        .unwrap_or_else(|| derived_spaces_jid(&domain))?;
+        let muc_domain = parse_optional_canonical_env("WADDLE_MUC_DOMAIN", |raw| {
+            CanonicalDomain::parse_canonical(raw).map(CanonicalDomain::into_domain_part)
+        })?
+        .map(Ok)
+        .unwrap_or_else(|| derived_muc_domain(&domain))?;
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let mam_owner_claim_handoff = MamOwnerClaimHandoff::from_env()?;
@@ -373,11 +381,13 @@ fn parse_public_websocket_url(raw: Option<&str>, xmpp_domain: &str) -> anyhow::R
 /// unset (or empty after trimming); `Ok(Some(value))` when set and
 /// parsed successfully; `Err` with a clear context when set but
 /// unparseable.
-fn parse_optional_env_value<T>(env_key: &str) -> anyhow::Result<Option<T>>
-where
-    T: FromStr,
-    <T as FromStr>::Err: std::fmt::Display,
-{
+/// Read an optional env value that must already be written in the identity
+/// profile's canonical form. Surrounding whitespace is ignored; any other
+/// spelling the profile would change is refused rather than folded.
+fn parse_optional_canonical_env<T>(
+    env_key: &str,
+    parse: impl FnOnce(&str) -> Result<T, IdentityError>,
+) -> anyhow::Result<Option<T>> {
     let raw = match std::env::var(env_key) {
         Ok(value) => value.trim().to_string(),
         Err(_) => return Ok(None),
@@ -385,9 +395,13 @@ where
     if raw.is_empty() {
         return Ok(None);
     }
-    raw.parse::<T>()
+    parse(&raw)
         .map(Some)
-        .map_err(|error| anyhow::anyhow!("{env_key}='{raw}' failed to parse: {error}"))
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{env_key}='{raw}' is not in canonical form (lowercase, no trailing dot, A-labels): {error}"
+            )
+        })
         .with_context(|| format!("invalid {env_key} environment variable"))
 }
 
