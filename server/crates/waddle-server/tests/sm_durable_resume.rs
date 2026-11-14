@@ -699,3 +699,158 @@ async fn a_resume_after_owner_loss_carries_the_enabled_occupancy_generation() {
         "the unhandled frames are replayed once, in order"
     );
 }
+
+/// A delivery to a detached session that races a resume lands in the
+/// session's custody whether it reaches the authority before the resume
+/// commits, between the commit and the completion, or after it: before, it
+/// is replayed; in between, it is returned in the completion's tail, which
+/// is written before any live frame. Only a delivery that read the row
+/// before the resume committed is refused, as a stale generation, so the
+/// caller reads the row again instead of dropping the frame.
+#[tokio::test]
+async fn a_detached_delivery_during_hydration_joins_the_completion_tail() {
+    let store = store("sm-durable-resume-hydrating-delivery").await;
+    let commit = enabled(&store, &binding()).await;
+    admit_owned(&store, commit.fence(), "one").await;
+    store
+        .detach(commit.fence(), None, snapshot(1), at(10))
+        .await
+        .expect("detach");
+    let detached = |generation| AdmissionRequest {
+        authority: AdmissionAuthority::Detached {
+            session: commit.fence().session,
+            generation,
+        },
+        claim: None,
+        now: at(21),
+    };
+
+    let resumed = resume(&store, &commit, &binding(), 0, at(20))
+        .await
+        .expect("resume commits");
+    assert_eq!(
+        resumed
+            .replay()
+            .iter()
+            .map(|frame| frame.ordinal)
+            .collect::<Vec<_>>(),
+        vec![ordinal(1)]
+    );
+
+    // Read before the resume committed: refused, nothing retained.
+    assert!(matches!(
+        store
+            .admit(detached(commit.fence().generation), &frame("stale"))
+            .await,
+        Err(AdmissionError::Rejected(AdmissionRejection::Fence(
+            FenceError::StaleGeneration { .. }
+        )))
+    ));
+    // Read while the resume hydrates: retained above the replay range.
+    let during = store
+        .admit(detached(resumed.fence().generation), &frame("two"))
+        .await
+        .expect("a hydrating session admits a detached delivery");
+    assert_eq!(
+        (during.ordinal(), during.exposure()),
+        (ordinal(2), Exposure::Retained)
+    );
+
+    let tail = store
+        .complete_resume(&resumed, None, at(22))
+        .await
+        .expect("completion");
+    assert_eq!(
+        tail.frames
+            .iter()
+            .map(|frame| frame.ordinal)
+            .collect::<Vec<_>>(),
+        vec![ordinal(2)]
+    );
+    // Once live, the connection owns delivery: a detached offer is refused.
+    assert!(matches!(
+        store
+            .admit(detached(resumed.fence().generation), &frame("late"))
+            .await,
+        Err(AdmissionError::Rejected(AdmissionRejection::NotAdmitting(
+            DurableSmState::Live
+        )))
+    ));
+}
+
+/// The routing view of the same race: the session registry lists a session
+/// whose resume committed but has not completed as a detached recipient,
+/// and a stanza offered to it is admitted to its custody and returned in the
+/// completion's tail. A refusal here used to drop the stanza, because the
+/// resuming connection was not yet published for live delivery.
+#[tokio::test]
+async fn a_hydrating_session_stays_a_routing_recipient_until_its_resume_completes() {
+    use waddle_server::sm_authority::DurableDetachedRecipients;
+    use waddle_xmpp::stream_management::{
+        DurableDetachedAdmission, DurableDetachedFrame, DurableDetachedSessions,
+        InMemorySmSessionRegistry,
+    };
+
+    let store = store("sm-durable-resume-hydrating-recipient").await;
+    let commit = enabled(&store, &binding()).await;
+    admit_owned(&store, commit.fence(), "one").await;
+    store
+        .detach(commit.fence(), None, snapshot(1), Utc::now())
+        .await
+        .expect("detach");
+    let resumed = resume(&store, &commit, &binding(), 0, Utc::now())
+        .await
+        .expect("resume commits");
+
+    let registry = InMemorySmSessionRegistry::new();
+    let recipients = DurableDetachedRecipients::new(store.clone());
+    let listed = recipients
+        .detached_resources(&registry, &alice_phone().to_bare())
+        .await
+        .expect("list recipients");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|resource| resource.jid.clone())
+            .collect::<Vec<_>>(),
+        vec![alice_phone()]
+    );
+
+    let mut message = Message::new(Some(alice_phone().into()));
+    message.bodies.insert(Lang::new(), "two".to_owned());
+    let stanza = Stanza::Message(message);
+    let admitted = recipients
+        .admit(
+            &registry,
+            DurableDetachedFrame {
+                resource: &alice_phone(),
+                stanza: &stanza,
+                original_receipt_at: Utc::now(),
+                key: None,
+            },
+        )
+        .await
+        .expect("admission outcome is known");
+    assert!(matches!(
+        admitted,
+        DurableDetachedAdmission::Admitted { .. }
+    ));
+
+    let tail = store
+        .complete_resume(&resumed, None, Utc::now())
+        .await
+        .expect("completion");
+    assert_eq!(
+        tail.frames
+            .iter()
+            .map(|frame| frame.ordinal)
+            .collect::<Vec<_>>(),
+        vec![ordinal(2)]
+    );
+    // A live session is the connection's: routing no longer lists it.
+    assert!(recipients
+        .detached_resources(&registry, &alice_phone().to_bare())
+        .await
+        .expect("list recipients")
+        .is_empty());
+}

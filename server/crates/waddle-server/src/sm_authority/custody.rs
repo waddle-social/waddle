@@ -48,8 +48,10 @@ pub enum AdmissionAuthority<'a> {
         fence: &'a OwnerFence,
         principal: &'a AuthenticatedPrincipalRef,
     },
-    /// A delivery to a detached session. No binding owns it; the generation
-    /// keeps a delivery routed before a resume from landing after it.
+    /// A delivery to a session no connection writes to: one that is
+    /// `Detached`, or one whose resume committed but has not completed
+    /// (`TransferHydrating`). The generation must be the one read with the
+    /// row, so a delivery routed before a resume never lands after it.
     Detached {
         session: SmSessionKey,
         generation: SessionGeneration,
@@ -425,7 +427,12 @@ fn admission_exposure(
                 .into());
             }
             match stored.state {
-                DurableSmState::Detached => Ok(Exposure::Retained),
+                // A hydrating session has written nothing since it detached:
+                // completing its resume returns this frame in the tail that
+                // is written after the replay and before any live frame.
+                DurableSmState::Detached | DurableSmState::TransferHydrating => {
+                    Ok(Exposure::Retained)
+                }
                 state => Err(AdmissionRejection::NotAdmitting(state)),
             }
         }

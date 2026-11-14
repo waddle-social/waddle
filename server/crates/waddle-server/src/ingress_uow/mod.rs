@@ -350,8 +350,12 @@ impl IngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(None, EpochPreparation::InstalledGuard)
-            .await
+        self.begin_inner(
+            None,
+            EpochPreparation::InstalledGuard,
+            IngressEntryAcquisition::WriterDefault,
+        )
+        .await
     }
 
     /// Verify the dark candidate guard on this UOW's exact attested database
@@ -380,6 +384,7 @@ impl IngressUnitOfWork {
         self.begin_inner(
             Some((Duration::from_secs(3), Duration::from_secs(5))),
             EpochPreparation::RelationGuard(capability),
+            IngressEntryAcquisition::WriterDefault,
         )
         .await
     }
@@ -393,8 +398,32 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement)), EpochPreparation::InstalledGuard)
-            .await
+        self.begin_inner(
+            Some((lock, statement)),
+            EpochPreparation::InstalledGuard,
+            IngressEntryAcquisition::WriterDefault,
+        )
+        .await
+    }
+
+    /// A transaction that only reads, with the same bounds as
+    /// [`Self::begin_with_timeouts`]. On SQLite it does not take the
+    /// database write lock: SQLite does not queue writers fairly, so a read
+    /// that waited for that lock could be starved by a steady stream of
+    /// short writers. In WAL mode the read sees every transaction committed
+    /// before its first statement. On PostgreSQL it is the same plain begin
+    /// as a writer's.
+    pub async fn begin_read_with_timeouts(
+        &self,
+        lock: Duration,
+        statement: Duration,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        self.begin_inner(
+            Some((lock, statement)),
+            EpochPreparation::InstalledGuard,
+            IngressEntryAcquisition::Deferred,
+        )
+        .await
     }
 
     /// Fresh source rediscovery must see parents committed after an earlier
@@ -404,8 +433,12 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement)), EpochPreparation::InstalledGuard)
-            .await
+        self.begin_inner(
+            Some((lock, statement)),
+            EpochPreparation::InstalledGuard,
+            IngressEntryAcquisition::WriterDefault,
+        )
+        .await
     }
 
     /// The fixture's sealed marker binds this experiment to its attested
@@ -436,6 +469,7 @@ impl IngressUnitOfWork {
         &self,
         bounds: Option<(Duration, Duration)>,
         preparation: EpochPreparation<'_>,
+        acquisition: IngressEntryAcquisition,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
         let (authority, explicit_timeouts, clamp) = match (preparation, &self.attested_pg_writer) {
             (EpochPreparation::InstalledGuard, None) => (
@@ -461,7 +495,7 @@ impl IngressUnitOfWork {
             &self.db,
             IngressEntryRequest {
                 authority,
-                acquisition: IngressEntryAcquisition::WriterDefault,
+                acquisition,
                 acquisition_deadline: bounds.map(|(lock, _)| lock),
                 explicit_timeouts,
                 clamp,

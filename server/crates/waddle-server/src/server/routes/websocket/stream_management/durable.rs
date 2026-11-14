@@ -1834,7 +1834,14 @@ pub(super) async fn resume(
         .await
     {
         Ok(Some(checkpoint)) => checkpoint.to_storage(),
-        Ok(None) | Err(_) => return failed(stream_id, SmResumeOutcome::Storage),
+        Ok(None) => {
+            warn!(%stream_id, "durable SM resume refused: the session's ingress stream has no checkpoint");
+            return failed(stream_id, SmResumeOutcome::Storage);
+        }
+        Err(error) => {
+            warn!(%stream_id, %error, "durable SM resume refused: the ingress checkpoint could not be read");
+            return failed(stream_id, SmResumeOutcome::Storage);
+        }
     };
     let resolution = state
         .deps
@@ -1843,6 +1850,7 @@ pub(super) async fn resume(
         .resolve_principal(&candidate.principal)
         .await;
     let Some(standing) = crate::sm_authority::principal_standing(&resolution) else {
+        warn!(%stream_id, "durable SM resume refused: the stored principal's standing could not be resolved");
         return failed(stream_id, SmResumeOutcome::Storage);
     };
 
@@ -1908,7 +1916,15 @@ pub(super) async fn resume(
             DurableResumeStep::Staged
         }
         Err(ResumeError::Rejected(rejection)) => {
-            info!(%stream_id, error = %rejection, "durable SM resume rejected");
+            if matches!(
+                rejection.reason(),
+                ResumeRejectionReason::PrincipalStandingUnavailable
+                    | ResumeRejectionReason::Store(_)
+            ) {
+                warn!(%stream_id, error = %rejection, "durable SM resume rejected: the authority could not decide it");
+            } else {
+                info!(%stream_id, error = %rejection, "durable SM resume rejected");
+            }
             let terminal =
                 rejection_terminal(stream_id, Some(&candidate.full_jid), resume.h, &rejection);
             durable_sm.release_resume_hold(&rejection.fresh_bind_permit());
@@ -2124,7 +2140,14 @@ pub(in crate::server::routes::websocket) async fn inline_resume(
         .await
     {
         Ok(Some(checkpoint)) => checkpoint.to_storage(),
-        Ok(None) | Err(_) => return undecided(),
+        Ok(None) => {
+            warn!(%stream_id, "inline durable SM resume refused: the session's ingress stream has no checkpoint");
+            return undecided();
+        }
+        Err(error) => {
+            warn!(%stream_id, %error, "inline durable SM resume refused: the ingress checkpoint could not be read");
+            return undecided();
+        }
     };
     let resolution = state
         .deps
@@ -2133,6 +2156,7 @@ pub(in crate::server::routes::websocket) async fn inline_resume(
         .resolve_principal(attempt.stored_principal())
         .await;
     let Some(standing) = crate::sm_authority::principal_standing(&resolution) else {
+        warn!(%stream_id, "inline durable SM resume refused: the stored principal's standing could not be resolved");
         return undecided();
     };
 

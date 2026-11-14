@@ -55,11 +55,9 @@ pub enum IngressRetirementOutcome {
 
 pub(in crate::ingress) const RETIREMENT_BATCH_SIZE: u32 = 256;
 
-// SQLite resume still needs BEGIN IMMEDIATE to observe prior checkpoint writes
-// and retirement. Give this single acquisition more room under writer contention;
-// this mitigates starvation without guaranteeing fairness. The resume claim and
-// authority admission remain held during this wait.
-const SQLITE_RESUME_CHECKPOINT_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a resume waits for an enrollment or retirement of its stream on
+/// this node to finish before it reads the checkpoint.
+const RESUME_CHECKPOINT_STREAM_WAIT: Duration = Duration::from_secs(1);
 
 /// Boot-owned handle. Shutdown blocks new work and joins admitted operations and GC.
 pub struct IngressAuthority {
@@ -849,13 +847,25 @@ impl IngressAuthority {
         if self.cancellation.is_cancelled() || !*admission {
             return Err(IngressUowError::AuthorityStopped);
         }
-        let acquisition_timeout = match self.uow.database().driver() {
-            DatabaseDriver::Sqlite => SQLITE_RESUME_CHECKPOINT_ACQUISITION_TIMEOUT,
-            DatabaseDriver::Postgres => Duration::from_millis(100),
-        };
+        // An enrollment or retirement of this stream on this node holds the
+        // stream exclusively, so the read below observes its outcome.
+        let _stream_guard = tokio::time::timeout(
+            RESUME_CHECKPOINT_STREAM_WAIT,
+            self.stream_activity(stream_id).read_owned(),
+        )
+        .await
+        .map_err(|_| IngressUowError::Timeout)?;
+        // A read transaction: on SQLite it does not wait for the database
+        // write lock, which SQLite does not hand out in arrival order, so a
+        // steady stream of short delivery writers could keep a resume from
+        // it past any bound. The read sees every checkpoint committed before
+        // it starts. A checkpoint is flushed only when the connection answers
+        // an `<r/>`, so the stored value already trails the stanzas ingress
+        // has handled, and a resume that reads it just before a concurrent
+        // flush commits is the same as one that arrives before that `<r/>`.
         let mut transaction = self
             .uow
-            .begin_with_timeouts(acquisition_timeout, Duration::from_millis(250))
+            .begin_read_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
             .await?;
         let checkpoint =
             match SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await? {

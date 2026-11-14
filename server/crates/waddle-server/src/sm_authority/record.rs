@@ -424,17 +424,17 @@ async fn load_resource_with(
     Ok(sessions)
 }
 
-/// Every `Detached` session of one account, in session-key order, without
-/// locking the rows.
-pub(super) async fn load_detached_account(
+/// Every session of one account that awaits a resume, `Detached` or
+/// `TransferHydrating`, in session-key order, without locking the rows.
+pub(super) async fn load_awaiting_resume_account(
     tx: &mut Transaction<'_>,
     account: &jid::BareJid,
 ) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
     let mut rows = tx
         .query(
             &format!(
-                "SELECT {COLUMNS} FROM sm_durable_sessions WHERE bare_jid = ? AND state = 2 \
-                 ORDER BY session_id"
+                "SELECT {COLUMNS} FROM sm_durable_sessions WHERE bare_jid = ? \
+                 AND state IN (2, 3) ORDER BY session_id"
             ),
             crate::db_params![account.to_string()],
         )
