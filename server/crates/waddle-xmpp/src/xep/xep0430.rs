@@ -61,6 +61,7 @@ use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
+use crate::inbox::runtime::bounded_label;
 use crate::inbox::{ConversationKind, InboxEntry};
 use crate::xep::xep0059::{
     build_rsm_request_element, build_rsm_response_element, parse_rsm_request, parse_rsm_response,
@@ -271,7 +272,7 @@ pub fn build_inbox_metadata_element(entry: &InboxEntry) -> Element {
     if let Some(title) = &entry.thread_title {
         builder = builder.attr(
             minidom::rxml::xml_ncname!("thread-title").to_owned(),
-            title.as_str(),
+            bounded_label(title).as_ref(),
         );
     }
     if entry.reply_count > 0 {
@@ -283,13 +284,13 @@ pub fn build_inbox_metadata_element(entry: &InboxEntry) -> Element {
     if let Some(author) = &entry.author {
         builder = builder.attr(
             minidom::rxml::xml_ncname!("author").to_owned(),
-            author.as_str(),
+            bounded_label(author).as_ref(),
         );
     }
     if let Some(preview) = &entry.preview {
         builder = builder.attr(
             minidom::rxml::xml_ncname!("preview").to_owned(),
-            preview.as_str(),
+            bounded_label(preview).as_ref(),
         );
     }
     builder.build()
@@ -717,6 +718,42 @@ mod tests {
         assert_eq!(metadata.attr("preview"), Some("hi there"));
         let parsed = parse_inbox_entry_with_metadata(&elem, Some(&metadata)).expect("entry parses");
         assert_eq!(parsed, entry);
+    }
+
+    /// A row stored before labels were bounded can hold a whole message
+    /// body. An attribute value over the parser's 8192-byte token limit
+    /// makes the stanza unparseable, so the builder must bound it.
+    #[test]
+    fn inbox_push_with_oversized_stored_labels_stays_parseable() {
+        use crate::inbox::runtime::MAX_INBOX_LABEL_CHARS;
+
+        let long = "å".repeat(9000);
+        let entry = InboxEntry::new(
+            "room@muc.example.com".parse().unwrap(),
+            ConversationKind::MucRoom,
+            "sid-long",
+            1_700_000,
+        )
+        .with_preview(long.as_str())
+        .with_thread_title(long.as_str())
+        .with_author(long.as_str());
+
+        let push = build_inbox_push("me@example.com/res".parse().unwrap(), &entry);
+        let mut xml = Vec::new();
+        Element::from(push).write_to(&mut xml).expect("serializes");
+        let parsed: Element = String::from_utf8(xml)
+            .expect("utf-8")
+            .parse()
+            .expect("the pushed stanza parses again");
+
+        let metadata = parsed
+            .get_child("push", NS_WADDLE_INBOX)
+            .and_then(|push| push.get_child("metadata", NS_WADDLE_INBOX))
+            .expect("metadata element");
+        for name in ["preview", "thread-title", "author"] {
+            let value = metadata.attr(name).expect("label attribute");
+            assert_eq!(value.chars().count(), MAX_INBOX_LABEL_CHARS, "{name}");
+        }
     }
 
     #[test]
