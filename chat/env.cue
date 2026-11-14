@@ -7,25 +7,27 @@ import (
 	"list"
 )
 
+// The Bun workspace manifest and lockfile at the repository root.
+let _workspaceManifest = schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]}
+
 // These source inputs can change the generated wasm-bindgen glue or WebAssembly
 // binary. The three crate paths are the complete local dependency graph of the
 // browser binding crate.
 let _WasmSourceInputs = [
-	"../.cargo/**",
-	"../flake.lock",
-	"../flake.nix",
-	"../server/.cargo/**",
-	"../server/Cargo.lock",
-	"../server/Cargo.toml",
-	"../server/vendor/**",
-	"../server/crates/waddle-xmpp-client-wasm/**",
-	"../server/crates/waddle-xmpp-client/**",
-	"../server/crates/waddle-xmpp-core/**",
-	"../server/rust-toolchain.toml",
+	schema.#ModuleFiles & {paths: [
+		"flake.lock",
+		"flake.nix",
+		"server/Cargo.lock",
+		"server/Cargo.toml",
+		"server/vendor/**",
+		"server/crates/waddle-xmpp-client-wasm/**",
+		"server/crates/waddle-xmpp-client/**",
+		"server/crates/waddle-xmpp-core/**",
+		"server/rust-toolchain.toml",
+	]},
 ]
 
 // The local UI builder also depends on its invocation and package contract.
-// The task-level sentinel below handles cuenv's cross-project affected match.
 let _WasmBuildInputs = list.Concat([_WasmSourceInputs, [
 	"env.cue",
 	"package.json",
@@ -33,21 +35,20 @@ let _WasmBuildInputs = list.Concat([_WasmSourceInputs, [
 ]])
 
 let _NativeTelemetryContractInputs = [
-	"../.cargo/**",
 	"env.cue",
 	"package.json",
 	"tests/native-telemetry-off.test.ts",
-	"../flake.nix",
-	"../apps/android/**/build.gradle.kts",
-	"../apps/android/gradle/libs.versions.toml",
-	"../apps/android/settings.gradle.kts",
-	"../scripts/check-native-remote-telemetry.sh",
-	"../scripts/native-telemetry-cargo-closure.py",
-	"../server/.cargo/**",
-	"../server/crates/**",
-	"../server/vendor/**",
-	"../server/crates/**/.cargo/**",
-	"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
+	schema.#ModuleFiles & {paths: [
+		"flake.nix",
+		"apps/android/**/build.gradle.kts",
+		"apps/android/gradle/libs.versions.toml",
+		"apps/android/settings.gradle.kts",
+		"scripts/check-native-remote-telemetry.sh",
+		"scripts/native-telemetry-cargo-closure.py",
+		"server/crates/**",
+		"server/vendor/**",
+		"server/wasm-pkg/waddle-xmpp-client-wasm/**",
+	]},
 ]
 
 schema.#Project & {
@@ -109,10 +110,9 @@ schema.#Project & {
 	}
 
 	tasks: {
-		// cuenv 0.54 generates correct repository-relative workflow filters for
-		// ../server inputs but normalizes those paths differently during runtime
-		// affected-task matching. A task without path inputs is always affected;
-		// its dependency edge keeps a triggered WASM workflow from being skipped.
+		// A task without path inputs is always affected; its dependency edge
+		// keeps a triggered WASM workflow from being skipped when only the
+		// server crates the WASM build reads have changed.
 		wasmPipelineTrigger: schema.#Task & {
 			command: "true"
 		}
@@ -133,8 +133,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "generate-types"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"wrangler.jsonc",
 			]
@@ -150,8 +149,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "panda:codegen"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"panda.config.ts",
 			]
@@ -172,8 +170,7 @@ schema.#Project & {
 			args: ["run", "knip"]
 			dependsOn: [buildWasm, generateTypes, pandaCodegen]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"knip.json",
 				"tsconfig.json",
@@ -191,14 +188,18 @@ schema.#Project & {
 			command: "bun"
 			args: ["../scripts/generate-design-tokens.mjs", "--check"]
 			inputs: [
-				"../scripts/generate-design-tokens.mjs",
-				"../scripts/design-tokens/**",
+				schema.#ModuleFiles & {paths: [
+					"scripts/generate-design-tokens.mjs",
+					"scripts/design-tokens/**",
+				]},
 				"src/styles/global/tokens.css",
 				"src/styles/huddle-tokens.ts",
 				"panda.config.ts",
-				"../website/src/styles/global/brand-palette.css",
-				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
-				"../apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
+				schema.#ModuleFiles & {paths: [
+					"website/src/styles/global/brand-palette.css",
+					"apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
+					"apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
+				]},
 			]
 		}
 
@@ -207,7 +208,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["test", "../scripts/design-tokens"]
 			inputs: [
-				"../scripts/design-tokens/**",
+				schema.#ModuleFiles & {paths: ["scripts/design-tokens/**"]},
 			]
 		}
 
@@ -216,13 +217,14 @@ schema.#Project & {
 			args: ["test"]
 			dependsOn: [build]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"tsconfig.json",
-				"../scripts/check-native-remote-telemetry.sh",
-				"../server/crates/waddle-xmpp-client-wasm/Cargo.toml",
-				"../server/crates/waddle-xmpp-client-wasm/src/**",
+				schema.#ModuleFiles & {paths: [
+					"scripts/check-native-remote-telemetry.sh",
+					"server/crates/waddle-xmpp-client-wasm/Cargo.toml",
+					"server/crates/waddle-xmpp-client-wasm/src/**",
+				]},
 				"src/**",
 				"tests/**",
 				"dist/**",
@@ -240,9 +242,11 @@ schema.#Project & {
 			args: ["-c", "bun run generate-service-worker && bun run copy-background-assets && ./node_modules/.bin/astro check && ./node_modules/.bin/astro build"]
 			dependsOn: [buildWasm, generateTypes, pandaCodegen]
 			inputs: [
-				"../env.cue",
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: [
+					"env.cue",
+					"package.json",
+					"bun.lock",
+				]},
 				"package.json",
 				"astro.config.mjs",
 				"panda.config.ts",
@@ -289,7 +293,7 @@ schema.#Project & {
 			args: ["x", "wrangler", "deploy"]
 			dependsOn: [stripSourcemaps]
 			inputs: [
-				"../env.cue",
+				schema.#ModuleFiles & {paths: ["env.cue"]},
 				"wrangler.jsonc",
 				"dist/**",
 			]

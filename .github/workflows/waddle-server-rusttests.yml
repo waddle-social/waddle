@@ -145,7 +145,6 @@ name: waddle-server-rustTests
       - tests/**
       - tests/ci-timings-test.py
       - tests/ci-timings-test.py/**
-      - xeps/xep-*.xml
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true

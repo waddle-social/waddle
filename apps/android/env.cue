@@ -70,21 +70,20 @@ let _AndroidTestReports = schema.#Contributor & {
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
-	"../../.cargo/**",
-	"../../server/.cargo/**",
-	"../../server/Cargo.toml",
-	"../../server/Cargo.lock",
-	"../../server/vendor/**",
-	"../../server/rust-toolchain.toml",
-	"../../server/crates/**",
-	"../../server/crates/**/.cargo/**",
-	"../../scripts/build-android-rust.sh",
-	"../../scripts/check-android-ffi-bindings.sh",
+	schema.#ModuleFiles & {paths: [
+		"server/Cargo.toml",
+		"server/Cargo.lock",
+		"server/vendor/**",
+		"server/rust-toolchain.toml",
+		"server/crates/**",
+		"scripts/build-android-rust.sh",
+		"scripts/check-android-ffi-bindings.sh",
+	]},
 ]
 
 let _gradleInputs = [
 	"env.cue",
-	"../../scripts/android-ci-gradle.sh",
+	schema.#ModuleFiles & {paths: ["scripts/android-ci-gradle.sh"]},
 	"**/build.gradle.kts",
 	"settings.gradle.kts",
 	"build.gradle.kts",
@@ -157,12 +156,9 @@ schema.#Project & {
 		// crates, beside the lanes that gate merging and publishing.
 		// /dev/kvm + GMD on the Namespace
 		// runner were proven by a real pull_request execution (PR #1366).
-		// Caveat: the generated job runs `cuenv ci` without --all, so
-		// cuenv's affectedness gate still applies. Without a pull-request
-		// base it compares against the previous commit, so a scheduled or
-		// manual run whose head commit touches none of gmdCheck's inputs
-		// reports green after "No affected tasks": green then means
-		// "skipped", not "passed".
+		// The generated job runs `cuenv ci` without --all. A scheduled or
+		// manual run has no base to compare with, so cuenv runs the whole
+		// pipeline rather than skipping it as unaffected.
 		deviceTests: {
 			when: {
 				scheduled: "37 4 * * *"
@@ -179,7 +175,7 @@ schema.#Project & {
 		setupSdk: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/setup-android-sdk.sh"]
-			inputs: ["../../scripts/setup-android-sdk.sh"]
+			inputs: [schema.#ModuleFiles & {paths: ["scripts/setup-android-sdk.sh"]}]
 		}
 
 		// Cross-compiles libwaddle_xmpp_client_ffi.so for arm64-v8a and
@@ -216,7 +212,7 @@ schema.#Project & {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
-			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml"]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: [".github/workflows/waddle-android-*.yml"]}]
 		}
 
 		telemetryContract: schema.#Task & {
@@ -224,9 +220,11 @@ schema.#Project & {
 			args: ["../../scripts/check-native-remote-telemetry.sh", "--android"]
 			inputs: list.Concat([_gradleInputs, _ffiInputs, [
 				"env.cue",
-				"../../flake.nix",
-				"../../scripts/check-native-remote-telemetry.sh",
-				"../../scripts/native-telemetry-cargo-closure.py",
+				schema.#ModuleFiles & {paths: [
+					"flake.nix",
+					"scripts/check-native-remote-telemetry.sh",
+					"scripts/native-telemetry-cargo-closure.py",
+				]},
 			]])
 		}
 
@@ -275,7 +273,7 @@ schema.#Project & {
 		ciGradleContract: schema.#Task & {
 			command: "python3"
 			args: ["../../scripts/test_android_ci_gradle.py"]
-			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py", "../../.github/workflows/waddle-android-*.yml"]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: ["scripts/android-ci-gradle.sh", "scripts/test_android_ci_gradle.py", ".github/workflows/waddle-android-*.yml"]}]
 		}
 
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).

@@ -87,22 +87,6 @@ schema.#Project & {
 	}
 
 	tasks: {
-		namespaceServerRustInputs: schema.#Task & {
-			command: "bash"
-			args: ["-euo", "pipefail", "-c", #"""
-					mkdir -p target/cuenv/server-rust-inputs/gitops/waddle-server
-					mkdir -p target/cuenv/server-rust-inputs/rules/mimir
-					cp gitops/waddle-server/postgresql-monitoring-ingress.yaml target/cuenv/server-rust-inputs/gitops/waddle-server/
-					cp rules/mimir/*.yaml target/cuenv/server-rust-inputs/rules/mimir/
-				"""#]
-			inputs: [
-				"gitops/waddle-server/postgresql-monitoring-ingress.yaml",
-				"rules/mimir/*.yaml",
-			]
-			outputs: ["target/cuenv/server-rust-inputs/**"]
-			hermetic: sandbox: "dir"
-		}
-
 		helmPush: schema.#Task & {
 			ci: github: permissions: packages: "write"
 			command: "bash"
@@ -271,11 +255,8 @@ schema.#Project & {
 		// unit tests for every Mimir rule file, then the real-translator
 		// OTLP contract over the Rust-pinned name fixtures under server/.
 		// Gates rulesSync on main. It reads those fixtures from the live
-		// checkout, so it is not hermetic. Inputs are project-local on
-		// purpose: this pipeline is not expanded, and `cuenv ci` selects
-		// tasks by matching repo-relative changed paths against inputs
-		// without resolving ../, so ../ inputs here would never select it.
-		// Fixture, unit and flake changes are covered by server's
+		// checkout, so it is not hermetic. Inputs are project-local:
+		// fixture, unit and flake changes are covered by server's
 		// checkAlertRules, which gates the image publish.
 		rulesTest: schema.#Task & {
 			hermetic: false

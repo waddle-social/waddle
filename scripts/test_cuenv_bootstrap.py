@@ -13,11 +13,11 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.74.0"
+VERSION = "0.76.1"
 DIGESTS = {
-    "cuenv-darwin-arm64": "3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7",
-    "cuenv-linux-arm64": "1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769",
-    "cuenv-linux-x64": "35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f",
+    "cuenv-darwin-arm64": "e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160",
+    "cuenv-linux-arm64": "653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4",
+    "cuenv-linux-x64": "3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102",
 }
 
 

@@ -6,6 +6,9 @@ import (
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
+// The Bun workspace manifest and lockfile at the repository root.
+let _workspaceManifest = schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]}
+
 schema.#Project & {
 	name: "waddle-website"
 
@@ -62,8 +65,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "generate-types"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"wrangler.jsonc",
 			]
@@ -75,8 +77,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "db:generate"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"drizzle.config.ts",
 				"src/db/schema.ts",
@@ -90,8 +91,7 @@ schema.#Project & {
 			args: ["run", "build"]
 			dependsOn: [tasks.generateTypes]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"astro.config.ts",
 				"tsconfig.json",

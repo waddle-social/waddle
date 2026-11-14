@@ -14,13 +14,19 @@ import (
 let _testTask = server.tasks.nixTestShards
 
 // Retain the old workflow's task inputs and cuenv's implicit schema/module
-// triggers. Normalize parent-relative paths before passing them to GitHub.
+// triggers. String inputs are relative to server/; schema.#ModuleFiles
+// references carry paths from the repository root.
+let _inputPaths = list.Concat([for input in _testTask.inputs {
+	[
+		if (input & string) != _|_ {path.Clean("server/\(input)")},
+		if (input & string) == _|_ for p in input.paths {p},
+	]
+}])
 let _paths = {
-	for input in _testTask.inputs {
-		let normalized = path.Clean("server/\(input)")
-		(normalized): true
-		if !strings.Contains(input, "*") {
-			"\(normalized)/**": true
+	for p in _inputPaths {
+		(p): true
+		if !strings.Contains(p, "*") {
+			"\(p)/**": true
 		}
 	}
 	".github/workflows/waddle-server-rusttests.yml": true

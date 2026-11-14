@@ -7,6 +7,7 @@ from unittest.mock import patch
 import sys
 import os
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,12 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("integration_ci_project", Path(__file__).with_name("integration-ci-project.py"))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+
+# Fixture modules pin the repository's own cuenv schema, so the CLI under test
+# reads the schema it ships with.
+SCHEMA_VERSION = re.search(r'"github.com/cuenv/cuenv@v0":\s*\{\s*v:\s*"(v[0-9.]+)"', (Path(__file__).resolve().parents[1] / "cue.mod/module.cue").read_text()).group(1)
+FIXTURE_MODULE = 'module: "example.test/integration"\nlanguage: version: "v0.14.0"\ndeps: "github.com/cuenv/cuenv@v0": v: "' + SCHEMA_VERSION + '"\n'
 
 
 def local_fixture_environment(environment):
@@ -140,7 +147,7 @@ class PinnedCuenvContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="waddle-discovery-pinned-") as temporary:
             root = Path(temporary)
             (root / "cue.mod").mkdir()
-            (root / "cue.mod/module.cue").write_text('module: "example.test/integration"\nlanguage: version: "v0.14.0"\ndeps: "github.com/cuenv/cuenv@v0": v: "v0.57.3"\n')
+            (root / "cue.mod/module.cue").write_text(FIXTURE_MODULE)
             false_command = json.dumps(shutil.which("false"))
             true_command = json.dumps(shutil.which("true"))
             inline = 'package cuenv\nimport "github.com/cuenv/cuenv/schema"\nschema.#Project & {name: "fixture", ci: pipelines: pullRequest: tasks: [{command: ' + false_command + ', hermetic: false}], tasks: unused: {command: ' + true_command + ', hermetic: false}}\n'
@@ -157,7 +164,16 @@ class PinnedCuenvContracts(unittest.TestCase):
             self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             attest = [sys.executable, str(helper), "--path", ".", "--pipeline", "pullRequest"]
             self.assertNotEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
-            bound_inline = inline.replace('hermetic: false}], tasks: unused:', 'hermetic: false, stdout: cuenvTask: "reject", stderr: cuenvTask: "reject", exitCode: cuenvTask: "reject"}], tasks: reject:').replace(true_command, false_command)
+            # Forge every reference the schema stamps on a named task (its
+            # project and name, its outputs and output files), so the adapter
+            # sees an inline entry identical to the named binding; the real
+            # runner must still refuse it.
+            forged = ", ".join([
+                'cuenvRef: {project: "fixture", name: "reject"}',
+                'outputFiles: {cuenvProject: "fixture", cuenvTask: "reject"}',
+                *(key + ': {cuenvProject: "fixture", cuenvTask: "reject"}' for key in ("stdout", "stderr", "exitCode")),
+            ])
+            bound_inline = inline.replace('hermetic: false}], tasks: unused:', 'hermetic: false, ' + forged + '}], tasks: reject:').replace(true_command, false_command)
             (root / "env.cue").write_text(bound_inline)
             self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
@@ -224,7 +240,7 @@ class PinnedCuenvContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="waddle-report-all-") as temporary:
             root = Path(temporary)
             (root / "cue.mod").mkdir()
-            (root / "cue.mod/module.cue").write_text('module: "example.test/integration"\nlanguage: version: "v0.14.0"\ndeps: "github.com/cuenv/cuenv@v0": v: "v0.57.3"\n')
+            (root / "cue.mod/module.cue").write_text(FIXTURE_MODULE)
             shell = json.dumps(shutil.which("sh"))
             source = 'package cuenv\nimport "github.com/cuenv/cuenv/schema"\nschema.#Project & {\n  let _tasks = tasks\n  name: "fixture"\n  hooks: onEnter: observe: {\n    command: SHELL\n    args: ["-c", #"printf \'export OBSERVED_EVENT=%s\\n\' "$GITHUB_EVENT_NAME""#]\n    source: true\n  }\n  ci: pipelines: pullRequest: tasks: [_tasks.check]\n  tasks: check: {\n    command: SHELL\n    args: ["-c", #"test "$OBSERVED_EVENT" = merge_group && printf checked > checked"#]\n    hermetic: false\n  }\n}\n'.replace("SHELL", shell)
             (root / "env.cue").write_text(source)

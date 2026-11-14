@@ -84,30 +84,35 @@ cryptographic evidence against arbitrary candidate code forging its own files.
 
 ## Verified release bootstrap
 
-The CLI is explicitly pinned to **cuenv 0.74.0** through the shared
+The CLI is explicitly pinned to **cuenv 0.76.1** through the shared
 `#CuenvVersion` in `ci/contributors/cuenv.cue` and root
 `config.ci.cuenv.version`. Each of the seven projects is checked separately for
-that resolved configuration. The separately pinned CUE schema remains 0.57.3;
-cuenv prints a version-mismatch warning. Configuration, inventory and drift
-checks exercise this deliberately retained schema rather than claiming blanket
-cross-version compatibility.
+that resolved configuration. The CUE schema in `cue.mod/module.cue` is pinned
+to the same release, v0.76.1: the binary reads the project stamps and file
+references that schema writes, so the two move together.
 
-[Release 0.74.0](https://github.com/cuenv/cuenv/releases/tag/0.74.0) selects
+Since [0.74.0](https://github.com/cuenv/cuenv/releases/tag/0.74.0) cuenv selects
 affected tasks fail-closed: a run with no comparable base (scheduled and manual
 runs, tag pushes, a branch's first push) runs its whole pipeline, and derived
-path filters are coarser (`<dir>/**` for any glob). Workflows therefore start
-more often than under 0.63.2. The downloaded release artifacts have these
-SHA-256 pins, which match the digests GitHub records for the release assets:
+path filters are coarser (`<dir>/**` for any glob), so workflows start more
+often than under 0.63.2. Since
+[0.75.0](https://github.com/cuenv/cuenv/releases/tag/0.75.0) a task input can
+no longer leave its project with `..`; files outside a project are named with
+`schema.#ModuleFiles & {paths: [...]}`, from the module root. Every such path
+must match at least one file when cuenv builds a graph that reaches the task,
+and a file reference cannot enter a nested repository such as the `xeps` VCS
+dependency. The downloaded release artifacts have these SHA-256 pins, which
+match the digests GitHub records for the release assets:
 
 | Asset | SHA-256 |
 | --- | --- |
-| `cuenv-darwin-arm64` | `3c2402f031b13c24ce75b8990decf2c498c067463699d801af047e3ae7f04dc7` |
-| `cuenv-linux-arm64` | `1ebf6c56590dcd980ed3dfe59c70f026cc3111cfc631171622729c068af9f769` |
-| `cuenv-linux-x64` | `35b1b64475d70606bad0e8c2dd0657478200d503294f1ff04db97bdf220c1f0f` |
+| `cuenv-darwin-arm64` | `e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160` |
+| `cuenv-linux-arm64` | `653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4` |
+| `cuenv-linux-x64` | `3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102` |
 
 The CUE-owned contributor checks OS/architecture, rejects any other version or
 missing digest, downloads to a temporary file, verifies SHA-256 before chmod or
-execution, then requires exact `cuenv 0.74.0` version output. Only then does it
+execution, then requires exact `cuenv 0.76.1` version output. Only then does it
 install into a private `RUNNER_TEMP` directory, append that directory to
 `GITHUB_PATH`, and run that installed binary for VCS materialization. There is no
 `latest` or unverified fallback and no `/usr/local` installation. The integration

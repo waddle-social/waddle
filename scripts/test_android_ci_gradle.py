@@ -11,7 +11,8 @@ import unittest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HELPER_INPUT = "../../scripts/android-ci-gradle.sh"
+# The shared Gradle entrypoint, read from the module root (schema.#ModuleFiles).
+HELPER_PATH = "scripts/android-ci-gradle.sh"
 POLICY = {
     "--no-daemon",
     "--no-parallel",
@@ -168,7 +169,8 @@ class AndroidCiGradleTests(unittest.TestCase):
             with self.subTest(task=name):
                 inputs = self.tasks[name]["inputs"]
                 self.assertIn("env.cue", inputs)
-                self.assertIn(HELPER_INPUT, inputs)
+                module_paths = {path for item in inputs if isinstance(item, dict) and item.get("cuenvFiles") == "module" for path in item.get("paths", [])}
+                self.assertIn(HELPER_PATH, module_paths)
 
     def test_publisher_uses_shared_policy_without_executing_release_actions(self):
         task = self.tasks["publishApk"]

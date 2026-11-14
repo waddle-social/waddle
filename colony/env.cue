@@ -6,6 +6,9 @@ import (
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
+// The Bun workspace manifest and lockfile at the repository root.
+let _workspaceManifest = schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]}
+
 schema.#Project & {
 	name: "waddle-colony"
 
@@ -62,8 +65,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "build"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"astro.config.ts",
 				"tsconfig.json",
@@ -85,8 +87,7 @@ schema.#Project & {
 			args: ["run", "scripts/smoke-oidc.mjs"]
 			dependsOn: [tasks.build]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				_workspaceManifest,
 				"package.json",
 				"scripts/smoke-oidc.mjs",
 				"scripts/oidc-smoke-worker.mjs",

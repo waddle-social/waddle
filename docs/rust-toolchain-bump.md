@@ -95,25 +95,14 @@ The cuenv version is less obvious, and worth knowing before you regenerate
 anything. There are two separate values:
 
 - `cue.mod/module.cue` pins the cuenv **CUE schema** dependency.
-- `cuenv_version` in the generated workflows is the cuenv **binary** CI
-  installs. It is not read from `module.cue`. `cuenv sync ci` stamps in the
-  version of the cuenv binary that runs it, because no project sets
-  `config.ci.cuenv.version` and cuenv then falls back to its own
-  `CARGO_PKG_VERSION`.
+- `#CuenvVersion` in `ci/contributors/cuenv.cue` pins the cuenv **binary** CI
+  installs. The root `env.cue` sets `config.ci.cuenv.version` from it, and the
+  release contributor beside it carries the SHA-256 of each release asset.
+  `scripts/test_cuenv_bootstrap.py` repeats the version and digests.
 
-They agree at 0.57.3 today only because both were set together. Two
-consequences:
-
-- Bumping `module.cue` alone does not move the CI pin, even after
-  `cuenv sync ci`.
-- Running `cuenv sync ci` with a newer cuenv installed locally rewrites
-  `cuenv_version` across every generated workflow with no `module.cue`
-  change. The `cuenv sync -A` in step 3 does the same, because it runs the
-  CI provider too, so the "only `digest` lines" expectation there holds only
-  when your local cuenv matches the pin. Check
-  `git diff .github/workflows` before committing a regeneration.
-
-Move the two together deliberately, or set `config.ci.cuenv.version` to a
-concrete version so the CI pin lives in the repo instead of on whoever
-regenerates. That field is read per project, so it has to be set in each
-project's `env.cue` rather than once at the root.
+They agree at 0.76.1. Move them together: the binary reads the stamps and
+file references its own schema writes, and an older binary cannot read a
+newer schema. Bump the schema with `cue mod get github.com/cuenv/cuenv@v<x>`,
+the binary by changing `#CuenvVersion`, the three digests and the test, and
+regenerate with a cuenv binary of that same version, then check
+`git diff .github/workflows` before committing.
