@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ".github/workflows/waddle-server-default.yml"
 RUNNER = (
     "${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' "
-    "&& '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\","
+    "&& '[\"nscloud-ubuntu-24.04-amd64-16x32-with-features\","
     "\"namespace-features:container.privileged=true;job.priority=1\"]' "
     "|| '[\"namespace-profile-linux-x86\"]') }}"
 )
