@@ -80,7 +80,7 @@ pub fn validate_xep0402_bookmark_publish(
     item_id: &str,
     payload: &Element,
 ) -> Result<waddle_xmpp::xep::xep0402::Bookmark, NotificationSettingsProjectionError> {
-    let item_jid: BareJid = item_id.parse().map_err(|_| {
+    let item_jid = waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id).map_err(|_| {
         NotificationSettingsProjectionError::InvalidConversationJid(item_id.to_string())
     })?;
     if item_jid.node().is_none() {

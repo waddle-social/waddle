@@ -1,7 +1,7 @@
 use super::permissions::{delete_channel_parent_tuple, write_channel_parent_tuple};
 use super::{
     build_pubsub_error, build_pubsub_success, iq_to_xml, spaces_node_mutation_allowed,
-    spaces_service_bare_jid, warn, BareJid, PubSubError, WebSocketState,
+    spaces_service_bare_jid, warn, PubSubError, WebSocketState,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 
@@ -23,7 +23,9 @@ pub(super) async fn handle_spaces_retract(
         }
     }
 
-    let Ok(room_jid) = item_id.parse::<BareJid>() else {
+    // The item id keys the stored item, the channel-space link and the
+    // channel's parent grant; only the room's canonical text names all three.
+    let Ok(room_jid) = waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
     if room_jid.domain().as_str() != muc_domain {

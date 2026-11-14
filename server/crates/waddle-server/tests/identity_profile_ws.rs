@@ -1,7 +1,7 @@
 //! The identity profile through the production WebSocket server: SCRAM
 //! login and resource binding with non-canonical input, stanza addresses
-//! the frame parser refuses or canonicalizes, and directory search that
-//! never folds a name onto another account.
+//! the frame parser refuses or canonicalizes, XEP-0402 bookmark item ids,
+//! and directory search that never folds a name onto another account.
 
 use minidom::Element;
 use sqlx::SqlitePool;
@@ -179,6 +179,82 @@ async fn stanzas_with_addresses_outside_the_profile_get_jid_malformed() {
         Iq::try_from(pong).expect("typed IQ"),
         Iq::Result { .. }
     ));
+    client.close().await.expect("close");
+}
+
+/// XEP-0402 bookmark item ids are room JIDs stored and matched as written,
+/// so a spelling the `jid` parser would fold onto another room is refused on
+/// publish and on retract instead of keying a second bookmark for the room.
+#[tokio::test]
+async fn pep_bookmark_item_ids_must_be_canonical() {
+    let server = TestServer::start();
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        server.fixed_account_password(),
+        "web",
+    )
+    .await
+    .expect("authenticated client");
+
+    let published = round_trip(
+        &mut client,
+        r#"<iq type="set" id="bookmark-canonical"><pubsub xmlns="http://jabber.org/protocol/pubsub"><publish node="urn:xmpp:bookmarks:1"><item id="room@muc.localhost"><conference xmlns="urn:xmpp:bookmarks:1" name="Room"/></item></publish></pubsub></iq>"#,
+        "bookmark-canonical",
+    )
+    .await;
+    assert!(
+        matches!(
+            Iq::try_from(published).expect("typed IQ"),
+            Iq::Result { .. }
+        ),
+        "a canonical room item id is accepted"
+    );
+
+    for (frame, id) in [
+        (
+            r#"<iq type="set" id="bookmark-publish-case"><pubsub xmlns="http://jabber.org/protocol/pubsub"><publish node="urn:xmpp:bookmarks:1"><item id="Room@muc.localhost"><conference xmlns="urn:xmpp:bookmarks:1" name="Room"/></item></publish></pubsub></iq>"#,
+            "bookmark-publish-case",
+        ),
+        (
+            r#"<iq type="set" id="bookmark-publish-dot"><pubsub xmlns="http://jabber.org/protocol/pubsub"><publish node="urn:xmpp:bookmarks:1"><item id="room@muc.localhost."><conference xmlns="urn:xmpp:bookmarks:1" name="Room"/></item></publish></pubsub></iq>"#,
+            "bookmark-publish-dot",
+        ),
+        (
+            r#"<iq type="set" id="bookmark-retract-case"><pubsub xmlns="http://jabber.org/protocol/pubsub"><retract node="urn:xmpp:bookmarks:1"><item id="Room@muc.localhost"/></retract></pubsub></iq>"#,
+            "bookmark-retract-case",
+        ),
+    ] {
+        let response = round_trip(&mut client, frame, id).await;
+        let Iq::Error { error, .. } = Iq::try_from(response).expect("typed IQ") else {
+            panic!("{id}: expected an IQ error");
+        };
+        assert_eq!(error.type_, ErrorType::Modify, "{id}");
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::BadRequest,
+            "{id}"
+        );
+    }
+
+    // Only the canonical bookmark is stored.
+    let items = round_trip(
+        &mut client,
+        r#"<iq type="get" id="bookmark-items"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="urn:xmpp:bookmarks:1"/></pubsub></iq>"#,
+        "bookmark-items",
+    )
+    .await;
+    let ids: Vec<String> = items
+        .get_child("pubsub", "http://jabber.org/protocol/pubsub")
+        .and_then(|pubsub| pubsub.get_child("items", "http://jabber.org/protocol/pubsub"))
+        .map(|list| {
+            list.children()
+                .filter_map(|item| item.attr("id").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(ids, vec!["room@muc.localhost".to_owned()]);
     client.close().await.expect("close");
 }
 

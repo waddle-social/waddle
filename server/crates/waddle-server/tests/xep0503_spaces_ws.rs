@@ -1,4 +1,5 @@
-//! XEP-0503 Spaces wire-conformance integration tests over WebSocket.
+//! XEP-0503 Spaces wire-conformance integration tests over WebSocket,
+//! including the identity profile for XEP-0402 room item ids.
 
 use waddle_ws_test_support as ws_common;
 
@@ -223,6 +224,163 @@ async fn room_disco_advertises_parent_space_metadata() {
             && info.contains("muc#roomconfig_pubsub")
             && info.contains("xmpp:spaces.localhost?;node=general"),
         "expected MUC roominfo pubsub compatibility field: {info}"
+    );
+    let _ = admin.close().await;
+}
+
+fn is_bad_request_error(frame: &str) -> bool {
+    let Ok(response) = frame.parse::<Element>() else {
+        return false;
+    };
+    response.attr("type") == Some("error")
+        && response
+            .get_child("error", "jabber:client")
+            .is_some_and(|error| {
+                error
+                    .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                    .is_some()
+            })
+}
+
+fn general_space_publish(item_id: &str) -> Element {
+    Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+        .append(
+            Element::builder("publish", "http://jabber.org/protocol/pubsub")
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+                .append(
+                    Element::builder("item", "http://jabber.org/protocol/pubsub")
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                        .append(
+                            Element::builder("conference", "urn:xmpp:bookmarks:1")
+                                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Chat")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn general_space_retract(item_id: &str) -> Element {
+    Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+        .append(
+            Element::builder("retract", "http://jabber.org/protocol/pubsub")
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+                .append(
+                    Element::builder("item", "http://jabber.org/protocol/pubsub")
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+async fn general_space_items(admin: &mut WsXmppClient, id: &str) -> String {
+    iq_get_to(
+        admin,
+        id,
+        "spaces.localhost",
+        Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
+            .append(
+                Element::builder("items", "http://jabber.org/protocol/pubsub")
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+                    .build(),
+            )
+            .build(),
+    )
+    .await
+}
+
+/// Spellings of the seeded `chat@muc.localhost` that the `jid` parser
+/// would fold onto it. The item id is stored and matched as written, so
+/// each would otherwise key a second item for the same room.
+const NON_CANONICAL_CHAT_IDS: [&str; 3] = [
+    "Chat@muc.localhost",
+    "chat@MUC.localhost",
+    "chat@muc.localhost.",
+];
+
+#[tokio::test]
+async fn spaces_publish_refuses_a_non_canonical_room_item_id() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-publish-non-canonical").await;
+
+    for (index, item_id) in NON_CANONICAL_CHAT_IDS.iter().enumerate() {
+        let id = format!("spaces-publish-non-canonical-{index}");
+        let response = iq_set_to(
+            &mut admin,
+            &id,
+            "spaces.localhost",
+            general_space_publish(item_id),
+        )
+        .await;
+        assert!(
+            is_bad_request_error(&response),
+            "publishing {item_id:?} must be refused with <bad-request/>: {response}"
+        );
+    }
+
+    let items = general_space_items(&mut admin, "spaces-items-after-publish").await;
+    assert!(
+        items.contains("chat@muc.localhost"),
+        "the canonical room item must remain: {items}"
+    );
+    for item_id in NON_CANONICAL_CHAT_IDS {
+        assert!(
+            !items.contains(&format!("id='{item_id}'"))
+                && !items.contains(&format!("id=\"{item_id}\"")),
+            "no item may be stored under {item_id:?}: {items}"
+        );
+    }
+
+    // The channel keeps exactly one parent space.
+    let info = iq_get_to(
+        &mut admin,
+        "chat-info-after-publish",
+        "chat@muc.localhost",
+        Element::builder("query", "http://jabber.org/protocol/disco#info").build(),
+    )
+    .await;
+    assert!(
+        info.contains("xmpp:spaces.localhost?;node=general"),
+        "the room must keep its general parent: {info}"
+    );
+    assert_eq!(
+        info.matches("xmpp:spaces.localhost?;node=").count(),
+        info.matches("xmpp:spaces.localhost?;node=general").count(),
+        "the room must name no parent space besides general: {info}"
+    );
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn spaces_retract_refuses_a_non_canonical_room_item_id() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-retract-non-canonical").await;
+
+    for (index, item_id) in NON_CANONICAL_CHAT_IDS.iter().enumerate() {
+        let id = format!("spaces-retract-non-canonical-{index}");
+        let response = iq_set_to(
+            &mut admin,
+            &id,
+            "spaces.localhost",
+            general_space_retract(item_id),
+        )
+        .await;
+        assert!(
+            is_bad_request_error(&response),
+            "retracting {item_id:?} must be refused with <bad-request/>: {response}"
+        );
+    }
+
+    let items = general_space_items(&mut admin, "spaces-items-after-retract").await;
+    assert!(
+        items.contains("chat@muc.localhost"),
+        "the canonical room item must remain: {items}"
     );
     let _ = admin.close().await;
 }

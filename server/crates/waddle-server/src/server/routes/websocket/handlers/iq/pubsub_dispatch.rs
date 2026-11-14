@@ -634,10 +634,11 @@ fn validate_xep0402_bookmark_publish_request(
     Ok(())
 }
 
+/// A XEP-0402 item id must be a room's canonical bare JID with a localpart.
+/// The id is stored and matched as written, so a spelling the `jid` parser
+/// would fold is refused rather than stored as a second key for one room.
 fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
-    item_id
-        .parse::<BareJid>()
-        .is_ok_and(|jid| jid.node().is_some())
+    waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id).is_ok_and(|jid| jid.node().is_some())
 }
 
 fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSubError {

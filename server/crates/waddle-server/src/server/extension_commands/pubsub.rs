@@ -47,9 +47,11 @@ async fn authorize_extension_pubsub_publish(
         }
         return Err("requester cannot write extension-owned PubSub state".to_string());
     };
-    let room_jid: jid::BareJid = room
-        .as_str()
-        .parse()
+    // The node is written as named while the permission checks run on the
+    // parsed room, so the room segment must already be the room's canonical
+    // text; a spelling the `jid` parser would fold is refused.
+    let room_jid = waddle_xmpp::identity::CanonicalBareJid::parse_exact(room.as_str())
+        .map(waddle_xmpp::identity::CanonicalBareJid::into_bare_jid)
         .map_err(|error| format!("invalid channel JID in PubSub node: {error}"))?;
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
         return Err("PubSub node is not bound to a managed channel".to_string());
