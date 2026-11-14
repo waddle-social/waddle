@@ -112,7 +112,9 @@ pub fn is_blocked_v6(address: Ipv6Addr) -> bool {
         return true;
     }
     // Documentation 2001:db8::/32 (RFC 3849) and 3fff::/20 (RFC 9637).
-    if (segments[0] == 0x2001 && segments[1] == 0x0db8) || segments[0] & 0xfff0 == 0x3ff0 {
+    if (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
+    {
         return true;
     }
     // 6to4 2002::/16 (RFC 3056): the embedded IPv4 address decides.
