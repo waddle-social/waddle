@@ -21,7 +21,11 @@
 //! after a given stage, and another starts afterwards and recovers.
 #![cfg(feature = "test-support")]
 
+// The shared fixtures serve several host-grant suites; this binary uses a
+// subset of each.
+#[allow(dead_code)]
 mod host_grant_support;
+#[allow(dead_code)]
 mod ingress_support;
 
 use std::sync::Arc;
@@ -307,7 +311,6 @@ async fn live_spicedb_first_projection_activates_the_bootstrap_grants() {
     let live = Live::start("hg_first_projection").await;
     let authority = live.replica().await;
     let lifecycle = live.fixture.scope.lifecycle;
-    let actor = live.actor(&live.fixture.store).await;
     let channel = live.channel();
 
     // Recorded, not projected, not effective.
@@ -361,7 +364,6 @@ async fn live_spicedb_a_grant_is_effective_only_after_its_projection_is_verified
     let live = Live::start("hg_grant_projection").await;
     let authority = live.replica().await;
     let lifecycle = live.fixture.scope.lifecycle;
-    let actor = live.actor(&live.fixture.store).await;
     let channel = live.channel();
     authority.reconcile(lifecycle).await.expect("first pass");
 
