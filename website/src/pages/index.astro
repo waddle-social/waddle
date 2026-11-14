@@ -790,7 +790,8 @@ const sponsorText = css({
 			}
 		};
 
-		form?.addEventListener("focusin", () => void ensureTurnstileReady(), { once: true });
+		// Prepare the invisible check on load so a fast first submit already has a token.
+		void ensureTurnstileReady();
 
 		emailInput?.addEventListener("input", () => {
 			emailInput.removeAttribute("aria-invalid");
