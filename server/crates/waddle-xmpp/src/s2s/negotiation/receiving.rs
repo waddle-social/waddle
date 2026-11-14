@@ -1,6 +1,8 @@
 //! Receiving-role negotiation: STARTTLS, SASL EXTERNAL, authenticated
 //! restart.
 
+use std::borrow::Cow;
+
 use jid::Jid;
 use minidom::rxml::Namespace;
 use minidom::Element;
@@ -378,9 +380,18 @@ impl Receiving {
     /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order. Each
     /// address is read from its raw text with the identity profile's parser
     /// ([`parse_jid`]), never through JID preparation, which would fold some
-    /// spellings and refuse labels outside Unicode 3.2. A stanza that passes
-    /// is returned with both addresses rewritten in canonical form, so its
-    /// domains compare equal to the stream's pair wherever it goes next.
+    /// spellings and refuse labels outside Unicode 3.2; ASCII uppercase in
+    /// the domainpart is mapped to lowercase first, as in stream headers. A
+    /// stanza that passes is returned with both addresses rewritten in
+    /// canonical form, so its domains compare equal to the stream's pair
+    /// wherever it goes next.
+    ///
+    /// Any address the profile refuses closes the stream with
+    /// `improper-addressing`, including one that is a syntactically valid
+    /// JID in a spelling the profile does not accept, such as an uppercase
+    /// localpart. The handshake design records that the routing slice is
+    /// to answer such a stanza with a `jid-malformed` stanza error instead
+    /// and keep the stream.
     fn check_stanza(&self, mut stanza: Element) -> Result<Element, StreamErrorCondition> {
         let Some((source, destination)) = &self.pair else {
             return Err(StreamErrorCondition::InternalServerError);
@@ -446,7 +457,28 @@ fn stanza_address(stanza: &Element, name: &str) -> Option<Jid> {
     stanza
         .attr(name)
         .filter(|value| !value.is_empty())
-        .and_then(|value| parse_jid(value).ok())
+        .and_then(|value| parse_jid(&lowercase_domainpart(value)).ok())
+}
+
+/// `address` with ASCII uppercase letters in its domainpart mapped to
+/// lowercase. DNS treats names that differ only in ASCII case as one name,
+/// so the mapping joins nothing DNS keeps apart; no other mapping is
+/// applied, and the localpart and resourcepart are left exactly as sent.
+/// The parts are split as [`parse_jid`] splits them (RFC 7622 §3.2): the
+/// first `/` starts the resourcepart, and an `@` before it ends the
+/// localpart.
+fn lowercase_domainpart(address: &str) -> Cow<'_, str> {
+    let bare_end = address.find('/').unwrap_or(address.len());
+    let domain_start = address[..bare_end].find('@').map_or(0, |at| at + 1);
+    let domain = &address[domain_start..bare_end];
+    if !domain.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Cow::Borrowed(address);
+    }
+    let mut mapped = String::with_capacity(address.len());
+    mapped.push_str(&address[..domain_start]);
+    mapped.push_str(&domain.to_ascii_lowercase());
+    mapped.push_str(&address[bare_end..]);
+    Cow::Owned(mapped)
 }
 
 /// Replace the unprefixed attribute `name`, which is present, with the

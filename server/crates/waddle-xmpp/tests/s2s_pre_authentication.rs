@@ -300,20 +300,47 @@ fn an_established_stream_hands_address_checked_stanzas_to_its_owner() {
     );
 }
 
+/// The stanza `stream` handed to its owner in `out`, if any.
+fn delivered(out: &[Output]) -> Option<minidom::Element> {
+    out.iter().find_map(|output| match output {
+        Output::Stanza(stanza) => Some(stanza.clone()),
+        _ => None,
+    })
+}
+
 #[test]
-fn a_delivered_stanza_carries_its_addresses_in_canonical_form() {
+fn ascii_case_in_a_stanza_domain_is_mapped_and_nowhere_else() {
+    // DNS does not distinguish ASCII case, so a mixed-case domain in `to`
+    // or `from` is the stream's domain, handed on in canonical form.
     let mut stream = established(true);
     let out = stream.receive(
-        b"<message from='alice@HOME-A.test.' to='bob@home-b.test.'><body>hi</body></message>",
+        b"<message from='alice@HOME-A.Test./phone' to='bob@Home-B.TEST'><body>hi</body></message>",
     );
-    // An uppercase domain is outside the profile for a stanza address.
-    assert_eq!(
-        close_reason(&out),
-        Some(CloseReason::StreamError(
-            StreamErrorCondition::ImproperAddressing
-        ))
-    );
+    let stanza = delivered(&out).expect("the stanza is handed over");
+    assert_eq!(stanza.attr("from"), Some("alice@home-a.test/phone"));
+    assert_eq!(stanza.attr("to"), Some("bob@home-b.test"));
 
+    // The localpart and resourcepart are read exactly: an uppercase
+    // localpart is a spelling the profile refuses, and so is a fullwidth
+    // domain, which only a width mapping would fold.
+    for raw in [
+        b"<message from='Alice@home-a.test' to='bob@home-b.test'/>".as_slice(),
+        "<message from='alice@home-a.test' to='bob@\u{ff48}ome-b.test'/>".as_bytes(),
+    ] {
+        let mut stream = established(true);
+        let out = stream.receive(raw);
+        assert!(delivered(&out).is_none());
+        assert_eq!(
+            close_reason(&out),
+            Some(CloseReason::StreamError(
+                StreamErrorCondition::ImproperAddressing
+            ))
+        );
+    }
+}
+
+#[test]
+fn a_delivered_stanza_carries_its_addresses_in_canonical_form() {
     let mut stream = established(true);
     let out = stream.receive(
         b"<message from='alice@home-a.test./phone' to='bob@home-b.test.'><body>hi</body></message>",
