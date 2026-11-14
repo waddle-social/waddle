@@ -26,6 +26,14 @@ the runtime role when a PostgreSQL replica starts, and the refusal of a room
 address that is not in canonical form (see
 [Rollout part](#rollout-part-g24)).
 
+The restore slice (W5r in the plan, condition B7) is implemented as well
+(`permissions/host_grant/restore`, migration 2002). Its decisions are
+recorded under
+[Restore incarnation decisions](#restore-incarnation-decisions), and its
+operator procedure is the
+[restore runbook](../../../docs/operations/authz-host-grant-restore.md).
+Like the first slice's, its evidence has not been run.
+
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
 for its scope, records the decision here and has it independently reviewed
@@ -396,10 +404,12 @@ Restoring older PostgreSQL can restore an old generation and `active` flag.
 Restore/startup therefore needs an independently enforced authority-incarnation
 transition, invalidation of old credentials/work, and verified reconstruction
 before admission. An epoch stored only inside the restored database is
-insufficient. The mechanism surviving rollback and excluding the previous
-deployment is unresolved (B7); the restore-incarnation slice (W5r in the plan)
-owns it. Graph loss also requires closed admission before reconstruction;
-silent active corruption is not covered by an old marker.
+insufficient. The restore slice (W5r in the plan) decided the mechanism that
+survives rollback and excludes the previous deployment for the first slice's
+scope; see [Restore incarnation decisions](#restore-incarnation-decisions),
+including what it leaves open. Graph loss also requires closed admission
+before reconstruction; silent active corruption is not covered by an old
+marker.
 
 Home-account deletion does not automatically revoke remote grants. Waddle homes
 enforce durable non-reuse of retired account JIDs across their provisioning
@@ -517,7 +527,13 @@ S2S.
 | Exact retry and key reuse with changed input | Original outcome versus typed conflict; no new authorization. | W5b |
 | Generation and lifecycle-identity exhaustion in the enrolled scope | Stale identity fails; exhaustion fails closed; identities are never reused. | W5b |
 | Space, room or node deletion and recreation | Old witnesses, grants and markers do not apply to the new lifecycle. | W5c (step 4) |
-| Restored older PostgreSQL state | Restore cannot reopen old authority; old credentials and work are invalid; admission stays closed until verified reconstruction. | W5r (step 4) |
+| Restored older PostgreSQL state | Restore cannot reopen old authority; old credentials and work are invalid; admission stays closed until verified reconstruction. The rows below are its cases. | W5r (step 4) |
+| Undeclared restore that lost projected operations; projection of an incarnation the journal does not record; projection of a scope the store does not hold; adopted lineage; configured restore epoch other than the recorded one | No replica starts, and the owner phase refuses an adopted lineage and an older epoch, each naming only the refusal's kind. A database without a scope beside a projection without a marker is not refused. | W5r (step 4) |
+| Declared restore with an active, a never-activated and a retired scope | One owner-phase transaction: new incarnation, epoch and lineage recorded, every scope not retired or exhausted closed as `restored` at its next generation; nothing admits; a rerun with the same epoch changes nothing; an older epoch and the runtime role are refused. | W5r (step 4) |
+| Command, activation, projection pass and replica attachment from before a declared restore | Stale generation, superseded activation, no takeover from a plan of the earlier incarnation, and no acceptance on a replica whose attachment names another incarnation, epoch or PostgreSQL server start; a replica configured for the earlier epoch does not attach. | W5r (step 4) |
+| Reconstruction after a restore that lost a projected revoke, ban or grant; after one that lost nothing; beside relationships no canonical row names | Lost revokes and bans stay in force; lost grants are not recreated; recorded increases are kept; subjects only the projection held are recorded at `none` or `outcast` and dropped from it; the scope reopens only after the rebuilt projection is read back and activated. | W5r (step 4) |
+| Restore to before an earlier declared restore, with and without the configuration rolled back | Refused by the configured epoch, and by the projection's unknown incarnation; a new declaration reconstructs over the projection of the lost incarnation. | W5r (step 4) |
+| Reconstruction that does not fit one projection write | The scope stays closed with a contradiction; nothing is recorded or written. | W5r (step 4) |
 | Initiator revoked while mutation prepared | Target mutation cannot use stale administrator authority. | W5b |
 | Negative override/private config/alternate grant | Action policy, especially outcast precedence, not merely positive-path success. | W5b |
 | #2052 accepted-child regressions | Frozen target/payload, occupancy and lifecycle remain unchanged. | W5b |
@@ -587,7 +603,7 @@ Migration 2001 creates seven relations.
 
 | Relation | Holds |
 | --- | --- |
-| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. The restore slice owns how it changes. |
+| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. Migration 2002 adds the restore epoch the incarnation was established under and the database lineage it is bound to; only a declared restore changes the incarnation (see [Restore incarnation decisions](#restore-incarnation-decisions)). |
 | `host_grant_scope_lifecycles` | One row per enrollment: lifecycle identity and scope key, both unique. Never deleted, and updated once at most: retirement stamps `retired_at_ms`. Only the schema owner writes it. |
 | `host_grant_scopes` | The latest state of a scope: incarnation, policy version, generation, the operation that recorded it, the latest generation whose projection was verified and activated, and `closed` or `active` with the reason for `closed` (`enrolled`, `retired`, `exhausted`). Its row lock is the scope's authority guard. |
 | `host_grant_rooms` | The rooms a scope manages and each room's authorization object. A binding is immutable. |
@@ -912,9 +928,10 @@ grants keep admitting, and a revoke still takes effect at its commit. Nothing
 in the projection can make a revoked grant effective, because admission does
 not read it.
 
-Not decided here: repair of a contradiction and reconstruction of a
-projection (the restore slice), projections larger than one request, and any
-admission that reads the projection. A retired or exhausted scope has no
+Not decided here: repair of a contradiction, projections larger than one
+request, and any admission that reads the projection. Reconstruction of a
+projection after a restore is decided by the restore slice (see
+[Verified reconstruction](#verified-reconstruction-g15-part)). A retired or exhausted scope has no
 projection plan; its relationships and marker stay as they were.
 
 ### B2: policy for the action this slice protects (G14, part)
@@ -1128,6 +1145,270 @@ datastore, so the `live_spicedb_` and `host_grant_projection` cases are
 evidence against SpiceDB's API and consistency semantics, not against a
 PostgreSQL-backed SpiceDB datastore.
 
+## Restore incarnation decisions
+
+These are the decisions the restore slice (W5r in the plan) made for B7
+(ADR-0020 gate G13) and for bounded reconstruction, its part of B3 (G15),
+over the first slice's scope. They are decisions, not evidence: the W5r rows
+of the [acceptance matrix](#required-native-acceptance-matrix) are their
+evidence and have not been run. They change the first slice's decisions only
+where stated. The operator procedure is the
+[restore runbook](../../../docs/operations/authz-host-grant-restore.md).
+
+### Where the incarnation lives (G13)
+
+A restore brings the incarnation back together with the grants it governs,
+so the incarnation stored in PostgreSQL cannot by itself tell a restored
+database from the live one. It is bound to three witnesses that a restore of
+the database does not bring back:
+
+1. **The declared restore epoch.** `WADDLE_HOST_GRANT_RESTORE_EPOCH`, an
+   unsigned integer in the deployment configuration (`0` when unset), read
+   by the owner phase and by every replica. The operator raises it once for
+   each restore; it is never lowered. `host_grant_authority.restore_epoch`
+   (migration 2002) records the epoch the current incarnation was
+   established under. This is the operator-supplied restore epoch: a
+   database restored to before the latest declared restore records an older
+   epoch than the replicas carry.
+2. **The database lineage.** `host_grant_authority.lineage_uuid` binds the
+   incarnation to `_lineage`. A restore into another cluster or database
+   fails lineage attestation and must be adopted, which rotates the lineage
+   ([lineage runbook](../operations/db-lineage.md)); the authority then no
+   longer matches it.
+3. **The projection markers.** Each scope's marker in SpiceDB names the
+   incarnation and the generation its projection was last written for, and
+   SpiceDB is not restored with PostgreSQL. A marker the canonical journal
+   does not record shows that the database lost operations that were
+   projected.
+
+| Event | Caught by |
+| --- | --- |
+| Declared restore (epoch raised) | The owner phase's restore transition. |
+| Restore into another cluster or database | The lineage: refused until the restore is declared. |
+| Restore to before the latest declared restore | The epoch the replicas carry; with the configuration rolled back too, the markers' incarnation, which the restored journal does not record. |
+| Undeclared restore, or asynchronous failover, that lost projected operations | A marker ahead of the journal. |
+| Undeclared restore that lost a projected enrollment | A marker of a scope the store does not hold. |
+| Undeclared restore that lost only operations never projected, or a retirement | Not caught (see [What stays open](#what-stays-open)). |
+
+Two alternatives were rejected. A witness written synchronously with every
+revoke (a SpiceDB write or an external counter in the revoke's commit path)
+would put another store on revocation's path, which D5's first slice keeps
+in PostgreSQL alone. PostgreSQL's own identity (system identifier, timeline)
+does not change for an in-place restore of a volume snapshot, changes on a
+failover that lost nothing, and needs a catalog privilege the runtime role
+does not hold; the lineage covers what of it is attested.
+
+A database that holds no scope, beside a projection that holds no marker,
+has no authority a restore could reopen. The fence and the owner phase do
+not refuse it for its lineage or epoch, and the owner phase binds its new
+lineage.
+
+### Declaring a restore
+
+The owner phase (`prepare_restricted_runtime_owner`, after the migrations and
+before the runtime grants) calls `HostGrantStore::prepare_restore_incarnation`
+with the configured epoch. One transaction, on the guarded store entry: the
+authority row `FOR UPDATE`, then, for a transition, every scope's state row
+`FOR UPDATE` in lifecycle order. No acceptance or mutation takes the
+authority row's lock, and a store transaction takes one scope guard, so no
+cycle arises; the owner phase runs while no server runs.
+
+- Configured epoch below the recorded one: refused (`epoch_mismatch`),
+  nothing changed.
+- Equal: the lineage is bound if it is not yet (the first owner phase after
+  migration 2002). A database that holds a scope and whose lineage differs
+  from the bound one is refused (`lineage_changed`).
+- Above: a restore transition. A new incarnation is minted and recorded with
+  the epoch and the live lineage. Every scope that is not retired or
+  exhausted moves to its next generation under a fresh operation of kind
+  `restore`, bound to the new incarnation and closed as `restored`; one with
+  no generation left is closed as exhausted. Grant rows are not touched.
+  Retired and exhausted scopes admit nothing and keep their incarnation.
+
+Locking the authority row needs `UPDATE` on it, which the runtime role does
+not hold (B1's grant matrix is unchanged), so a runtime handle is refused
+with `OwnerPhaseRequired` at the first statement. A rerun after a commit
+whose acknowledgement was lost finds the epoch recorded and changes nothing.
+
+A scope closed as `restored` accepts mutations as a never-activated scope
+does: a reduction takes effect at its commit, an increase waits for
+activation. Retirement accepts it too.
+
+### Detection at startup and before admission
+
+- **Startup.** Before a replica serves anything, after the authorization
+  store's schema, codec and version steps, `verify_restore_fence` runs on
+  PostgreSQL deployments. It reads the authority row, then every projection
+  marker (one streamed, fully consistent read, at most 60 s), then for each
+  well-formed marker the scope it names. It refuses (`lineage_changed`,
+  `epoch_mismatch`, `projection_ahead`, `unknown_incarnation`,
+  `orphaned_projection`) as the runbook's table describes, and the server
+  does not start. Canonical state is read after the marker, so an operation
+  another replica recorded and projected meanwhile is found in the journal.
+  For a scope closed as `restored`, a marker of another incarnation is
+  expected and reconstruction replaces it; a marker of its own incarnation
+  must be in the journal. A retired or exhausted scope's marker is not
+  compared. A malformed marker is not evidence of a restore and is left to
+  reconciliation. With the local permission backend, which holds no
+  projection, only the epoch and the lineage are compared. Startup already
+  depends on SpiceDB (schema, codec and version), so the fence adds no
+  dependency, but it makes startup read every marker.
+- **Attachment.** `HostGrantAttachment::verify` also requires the recorded
+  epoch to be the replica's configured one, and binds the attachment to an
+  `AuthorityBinding`: the incarnation, the epoch and the start of the
+  PostgreSQL server (`pg_postmaster_start_time()`, in microseconds), read in
+  one snapshot. A mismatched epoch is not retried.
+- **Admission.** Every acceptance for a managed room reads the authority row
+  and the server start under the scope's guard, in the acceptance
+  transaction, and compares them with the attachment's binding. On any
+  difference it is refused (`AdmissionDenial::AuthorityChanged`:
+  `service-unavailable`, type `cancel`, a committed denial like the others)
+  and an error of kind `authority_changed` is logged at most once a minute.
+  A restore restarts PostgreSQL, so a replica left running across a restore
+  admits nothing afterwards, declared or not. So does every other restart of
+  PostgreSQL, including a failover: the replica must be restarted to attach
+  again. The attachment is set once per process; re-verifying in place is
+  not built.
+
+### Invalidating old credentials and work
+
+- **Commands.** The transition advances every restored scope's generation,
+  so a command decided before it is refused as stale. The exact retry of an
+  operation the restore lost carries its old expected generation and is
+  refused too; it is not re-applied.
+- **Activations and witnesses.** Activation compares the incarnation and
+  the generation under the guard, so an activation prepared before the
+  transition is superseded. An admission witness is valid only inside its
+  transaction.
+- **Projection passes.** A pass that read its plan before the transition
+  writes only conditioned on the exact marker it saw, and its activation is
+  superseded; such a write can change the projection, never what admission
+  reads, and reconstruction then takes the projection over from it. Only a
+  plan of a `restored` scope, which exists only under the incarnation the
+  transition minted, may take a projection over from another incarnation.
+- **Replicas.** A replica attached before the transition, or to the PostgreSQL
+  server before a restart, admits nothing. A replica configured with an
+  earlier epoch does not attach, and does not start while the database holds
+  a scope. A binary built before migration 2002 refuses the ledger.
+- **Accepted children.** The ingress acceptance contract is unchanged:
+  children accepted before the restore point are in the restored database
+  and replay as accepted; those accepted after it are gone with it. A restore
+  revokes no accepted child, as a revoke does not.
+- **Credentials.** Not enforced by the server. A physical restore brings
+  back the roles with their old passwords; the runbook stops every server
+  before the restore, rotates the runtime login's password before any server
+  starts, and rotates the SpiceDB key where a holder may survive. Code-level
+  exclusion covers this deployment's processes and their work, not an
+  arbitrary holder of a credential.
+
+### Verified reconstruction (G15, part)
+
+A restored scope reopens only through reconciliation
+(`HostGrantAuthority::reconcile`, and `recover_pending`, which pages through
+restored scopes like other pending ones). No production caller runs either
+yet, as for every activation in the first slice; a restored scope therefore
+stays closed until the slice that integrates the authority runs them.
+
+When the scope's marker was written under another incarnation, the pass:
+
+1. refuses a projection family that holds a relationship the projection
+   never writes (`MalformedFamily`);
+2. decides whether the restored database lost projected operations: it did
+   when the journal does not record the marker exactly;
+3. records, as one operation of kind `reconstruct` at the next generation
+   (`restore::reconstruction_targets`): every subject the projection holds
+   that no canonical row names, at `outcast` if the projection bans it and
+   at `none` otherwise; and, only when operations were lost, every canonical
+   grant lowered to what the projection holds for its subject, `none` where
+   it holds nothing. Nothing is raised: a revoke or ban the restore lost
+   stays in force and a grant it lost is not recreated. When nothing was
+   lost, the canonical rows are at least as new as the projection and are
+   kept, including increases recorded and not yet activated. An affiliation
+   issuance refuses for its subject is recorded no higher than `none`;
+4. takes the projection over: one `WriteRelationships` request that states
+   the whole affiliation family of every canonical row, deletes the old
+   marker and touches the new one, conditioned on the exact old marker. A
+   failed precondition stops the pass;
+5. reads the projection back, compares it exactly with the canonical rows
+   and activates the exact operation under the new incarnation.
+
+A marker missing after an activation (`MarkerMissing`) or malformed leaves
+the scope closed: without a projection there is no witness, and
+missing-marker initialization is allowed only in a fresh namespace. A
+restored scope that was never activated is projected into its fresh
+namespace as at enrollment.
+
+Bounds. A scope holds at most 8 rooms and 200 grant rows. An observation is
+at most 33 reads within 20 s; the `reconstruct` operation records at most
+200 rows in one store transaction; the takeover is one request of at most
+802 updates. A reconstruction whose rows would exceed 200 is refused before
+anything is recorded (`ReconstructionTooLarge`) and the scope stays closed.
+Each scope is reconstructed independently, and a scope that cannot progress
+is visited once per recovery pass without holding back another. The startup
+fence reads every marker in one bounded stream and then up to two
+PostgreSQL snapshots per marker, so its cost grows with the number of
+enrolled scopes.
+
+Declaring a restore is also how an operator has a scope whose projection
+contradicts it with a well-formed marker (`ForeignIncarnation`,
+`AheadOfCanonical`, `UnknownMarker`, `ContentMismatch`) rebuilt: the scope
+closes and is reconstructed. Other repair of a contradiction is not decided.
+
+### What stays open
+
+- An undeclared restore that lost only operations whose projection was never
+  written is not detected, and their effect is lost: the runbook re-applies
+  revokes and bans acknowledged after the restore point. The window is the
+  projection lag.
+- A retirement writes nothing to the projection; a lost retirement is not
+  detected and the scope reopens after reconstruction. The runbook retires
+  it again.
+- A lost enrollment refuses every replica's start, declared or not, and no
+  tool retires a scope the database no longer knows.
+- PostgreSQL and SpiceDB restored or lost together leave no witness; a scope
+  whose projection was activated stays closed with no tool to reopen it.
+- Credential rotation is operational, not enforced.
+- Any PostgreSQL restart stops running replicas admitting managed rooms
+  until they restart; re-verification in place is not built.
+- The attested runtime's pinned catalog profile does not cover the
+  host-grant relations, as in the first slice.
+
+### Restore rollout part (G24)
+
+- Migration 2002 adds `restore_epoch` (default `0`) and `lineage_uuid` to
+  `host_grant_authority`, the `restored` closed reason, the `restore` and
+  `reconstruct` operation kinds, and an index on the journal by lifecycle
+  and incarnation. It creates no relation, so B1's grant matrix is
+  unchanged. The owner phase applies it; a server of the previous release
+  refuses the ledger, so the owner phase runs before any server of the
+  release starts. On SQLite it creates nothing.
+- The first owner phase after the migration binds the authority to the
+  database lineage and changes nothing else.
+- `WADDLE_HOST_GRANT_RESTORE_EPOCH` is new and defaults to `0`, the value
+  the migration records; the owner phase and every server must read the
+  same value.
+- Behavior with no scope enrolled: startup reads the authority row and lists
+  the projection markers (none exist); acceptance is unchanged. After a
+  lineage adoption of a database without a scope, the owner phase binds the
+  new lineage.
+
+### Running the restore slice's cases
+
+`tests/host_grant_restore.rs`, from `server/`, with the environment of the
+[first slice's focused set](#running-the-first-slices-focused-set):
+
+```sh
+cargo nextest run -p waddle-server --features test-support --locked \
+    --run-ignored all -E 'binary(host_grant_restore)'
+```
+
+The cases without a `live_spicedb_` prefix need PostgreSQL only; the
+`live_spicedb_` cases need both stores and run in the `spicedb-live` group.
+A restore is simulated by copying the host-grant relations into a schema of
+their own and rewriting them from it in one transaction; PostgreSQL is not
+restarted, so the attachment's server-start comparison is covered only by
+reading, not by a case.
+
 ## Blocking review ledger
 
 Slice names refer to [the federation plan](../../../docs/planning/federation-2047.md),
@@ -1138,11 +1419,11 @@ evidence.
 | --- | --- | --- | --- |
 | B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation: [recorded](#b1-store-capabilities-and-credential-separation-g11)) and W5c (writer inventory and exclusion); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
 | B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part). |
-| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences, W5o decides the fenced schema transition and W5r bounded reconstruction. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
+| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences, W5o decides the fenced schema transition and W5r bounded reconstruction ([recorded](#verified-reconstruction-g15-part)). Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences. |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c; W5d's #2056 control is its evidence. |
 | B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |
-| B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r. |
+| B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r ([recorded](#restore-incarnation-decisions), with the limits it leaves open); its evidence runs in verification step 4. |
 
 The coarse fence's availability cost is a non-blocking tradeoff once bounded
 resources and independent progress are proved. Fine-grained fences can follow
