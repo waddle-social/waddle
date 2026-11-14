@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
-// The generated token outputs (apple AccentColor asset, website
-// brand-palette.css, Android WaddleTokens.kt) must stay in sync with the
+// The generated token outputs (apple AccentColor asset, Android
+// WaddleTokens.kt) must stay in sync with the
 // sources of truth, chat/src/styles/global/tokens.css and
 // chat/src/styles/huddle-tokens.ts. The generator's --check mode exits
 // non-zero when any output is stale.
