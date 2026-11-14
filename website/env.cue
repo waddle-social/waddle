@@ -100,6 +100,9 @@ schema.#Project & {
 				"wrangler.jsonc",
 				"src/**",
 				"public/**",
+				"../design/package.json",
+				"../design/src/**",
+				"../design/assets/**",
 			]
 			outputs: [
 				"dist/**",

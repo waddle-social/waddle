@@ -11,6 +11,11 @@ on:
     - bun.lock
     - bun.lock/**
     - cue.mod/**
+    - design/**
+    - design/assets/**
+    - design/package.json
+    - design/package.json/**
+    - design/src/**
     - package.json
     - package.json/**
     - website/astro.config.ts
