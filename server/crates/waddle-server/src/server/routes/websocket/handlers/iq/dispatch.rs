@@ -3,7 +3,6 @@
 use super::build_iq_error_xml_typed;
 use super::handle_archive_inbox_upload_iq;
 use super::handle_blocking_iq;
-use super::handle_caps_disco_info_result;
 use super::handle_disco_info_iq;
 use super::handle_disco_items_iq;
 use super::handle_last_activity_iq;
@@ -17,6 +16,7 @@ use super::handle_sans_io_iq;
 use super::is_muc_admin_iq;
 
 use super::route_full_jid_iq;
+use super::warn;
 use super::ConnectionPhase;
 use super::IqConnState;
 use super::ResolvedPrincipal;
@@ -28,7 +28,7 @@ use super::{
     bad_request_iq_error, feature_not_implemented_iq_error, forbidden_iq_error,
     internal_server_error_iq_error, item_not_found_iq_error,
 };
-use super::{debug, warn};
+use super::{classify_iq_destination, route_iq_response, route_unserved_request, unclassified_iq};
 use super::{handle_channel_search_iq, handle_user_search_iq};
 use super::{handle_command_iq, CommandTargets};
 use super::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
@@ -38,6 +38,7 @@ use super::{handle_private_storage_iq, handle_vcard_iq};
 use super::{is_last_activity_query, is_search_request};
 use super::{is_push_disable, is_push_enable};
 use super::{StanzaErrorCondition, XmppError};
+use crate::destination::Destination;
 
 pub(in crate::server::routes::websocket::handlers) fn response_batch_from_inline_room_effect_frames(
     frames: crate::room_effect_outbox::drain::InlineRoomEffectDrain,
@@ -109,34 +110,33 @@ pub async fn handle_iq_with_conn_state(
     let response_from = to.as_deref();
     let response_to = from.as_deref();
 
+    // RFC 6120 §10: classify the destination before any namespace handler can
+    // answer for it. Results and errors are routed by address alone, so a
+    // peer reply cannot be consumed by a handler or by a server-issued CAPS
+    // query whose ID it happens to share.
+    let Some(destination) = classify_iq_destination(&iq, domain, state) else {
+        return unclassified_iq(&iq, response_from);
+    };
     if matches!(
         &iq,
         xmpp_parsers::iq::Iq::Result { .. } | xmpp_parsers::iq::Iq::Error { .. }
     ) {
-        if let Some(full) = phase.bound_jid() {
-            // A peer reply belongs to the addressed resource, even if its ID
-            // collides with a server-issued CAPS query. Route it before the
-            // CAPS matcher can consume an unrelated pending request.
-            if let Some(target) = iq.to().and_then(|jid| {
-                (jid.node().is_some() && jid.domain().as_str() == domain)
-                    .then(|| jid.clone().try_into_full().ok())
-                    .flatten()
-            }) {
-                return route_full_jid_iq(
-                    iq,
-                    state,
-                    Some(full),
-                    target,
-                    response_from,
-                    conn_state.ordered_relay_origin.clone(),
-                )
-                .await
-                .into();
-            }
-            handle_caps_disco_info_result(&iq, full, state);
-        }
-        debug!(id = %id, "Ignoring IQ result/error stanza");
-        return ResponseBatch::default();
+        return route_iq_response(
+            iq,
+            destination,
+            state,
+            phase,
+            conn_state.ordered_relay_origin.clone(),
+            response_from,
+        )
+        .await;
+    }
+    // A request to an unserved domain goes to the remote route, never to a
+    // local handler that could fabricate the remote entity's answer. Before
+    // resource binding there is no bound address to stamp or to answer, so
+    // those requests keep the namespace handlers' authentication errors.
+    if let (Some(sender), Some(unserved)) = (phase.bound_jid(), destination.unserved()) {
+        return route_unserved_request(iq, unserved, sender, state).await;
     }
 
     let payload_ns = match &iq {
@@ -192,29 +192,28 @@ pub async fn handle_iq_with_conn_state(
     // the peer — e.g. XEP-0166 Jingle stamping a LiveKit join token
     // onto the Waddle transport in the rewrite path. For other
     // handler-registered namespaces (XEP-0199 ping, XEP-0030
-    // disco#info, etc.) the historical contract is that IQs
-    // addressed to another user's full JID are forwarded verbatim
-    // and answered by that user's real client, not by our local
-    // handler — preserve that.
+    // disco#info, etc.) a request addressed to another resource is
+    // forwarded verbatim and answered by that resource's client, not
+    // by a local handler (RFC 6120 §10.5.4). A server-domain resource
+    // takes the same route: no client can bind it, so the peer route
+    // answers `service-unavailable` (§10.5.2).
     let payload_mediates_peer_routing = matches!(
         payload_ns.as_str(),
         s if s == waddle_xmpp::xep::xep0166::NS_JINGLE
             || s == waddle_xmpp::xep::xep0215::NS_EXT_DISCO
     );
     if !payload_mediates_peer_routing {
-        if let Some(target) = iq.to().and_then(|jid| jid.clone().try_into_full().ok()) {
-            if target.domain().as_str() == domain {
-                return route_full_jid_iq(
-                    iq,
-                    state,
-                    phase.bound_jid(),
-                    target,
-                    response_from,
-                    conn_state.ordered_relay_origin.clone(),
-                )
-                .await
-                .into();
-            }
+        if let Destination::LocalFull(target) | Destination::ServerResource(target) = destination {
+            return route_full_jid_iq(
+                iq,
+                state,
+                phase.bound_jid(),
+                target,
+                response_from,
+                conn_state.ordered_relay_origin.clone(),
+            )
+            .await
+            .into();
         }
     }
 

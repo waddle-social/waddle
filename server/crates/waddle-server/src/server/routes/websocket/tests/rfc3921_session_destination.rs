@@ -40,9 +40,9 @@ fn assert_remote_error(reply: &Iq, request: &Iq) {
     };
     let mut expected = StanzaError::new(
         ErrorType::Cancel,
-        DefinedCondition::NotAllowed,
+        DefinedCondition::RemoteServerNotFound,
         "en",
-        "Remote Session routing is not allowed by this server.",
+        "Routing to remote domains is not enabled on this server.",
     );
     expected.by = Some(DOMAIN.parse().expect("home domain"));
     // Compare every error field, including the exact diagnostic language/text.

@@ -54,12 +54,15 @@ fn assert_remote_error(reply: &Iq, request: &Iq) {
         panic!("foreign discovery cannot return local identity/items: {reply:?}")
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
     assert!(error
         .texts
         .values()
-        .any(|text| text == "Remote service discovery routing is not allowed by this server."));
+        .any(|text| text == "Routing to remote domains is not enabled on this server."));
     let Iq::Get {
         payload: original, ..
     } = request
@@ -309,7 +312,7 @@ async fn malformed_payloads_and_iq_sets_keep_parser_errors() {
     let (mut conn, _rx) = connection(&state).await;
     for kind in [Discovery::Info, Discovery::Items] {
         for set in [false, true] {
-            let iq = request(kind, Some("remote.test"), None, None);
+            let iq = request(kind, Some(DOMAIN), None, None);
             let Iq::Get {
                 from,
                 to,
@@ -337,6 +340,46 @@ async fn malformed_payloads_and_iq_sets_keep_parser_errors() {
             let replies = dispatch(&state, &mut conn, iq).await;
             assert!(
                 matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::BadRequest && error.by.is_none())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn foreign_malformed_payloads_and_iq_sets_are_routed_not_parsed() {
+    // The payload belongs to the remote entity; the home server refuses the
+    // route before any local discovery parser sees it.
+    let state = create_test_websocket_state().await;
+    let (mut conn, _rx) = connection(&state).await;
+    for kind in [Discovery::Info, Discovery::Items] {
+        for set in [false, true] {
+            let Iq::Get {
+                from,
+                to,
+                id,
+                payload,
+            } = request(kind, Some("remote.test"), None, None)
+            else {
+                panic!("get")
+            };
+            let iq = if set {
+                Iq::Set {
+                    from,
+                    to,
+                    id,
+                    payload,
+                }
+            } else {
+                Iq::Get {
+                    from,
+                    to,
+                    id,
+                    payload: Element::builder("not-query", kind.namespace()).build(),
+                }
+            };
+            let replies = dispatch(&state, &mut conn, iq).await;
+            assert!(
+                matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::RemoteServerNotFound && error.by.is_some())
             );
         }
     }

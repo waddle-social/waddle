@@ -56,7 +56,10 @@ async fn foreign_discovery_denials_preserve_local_discovery_and_real_peer_forwar
                 panic!("foreign request cannot return local identity/services")
             };
             assert_eq!(error.type_, ErrorType::Cancel);
-            assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+            assert_eq!(
+                error.defined_condition,
+                DefinedCondition::RemoteServerNotFound
+            );
             assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
             let Iq::Get {
                 payload: original, ..

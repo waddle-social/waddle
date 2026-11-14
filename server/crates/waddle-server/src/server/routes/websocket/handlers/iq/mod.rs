@@ -82,6 +82,7 @@ mod community_publish;
 mod community_retract;
 mod community_rsvp;
 mod conn_state;
+mod destination_route;
 mod disco_info;
 mod disco_items;
 pub(crate) mod errors;
@@ -115,7 +116,6 @@ mod pin_query;
 mod pubsub_admin;
 mod pubsub_dispatch;
 mod push;
-mod remote_destination;
 pub(crate) mod roster;
 mod sans_io;
 mod search;
@@ -140,6 +140,9 @@ use community_retract::handle_community_retract;
 pub use conn_state::IqConnState;
 #[cfg(test)]
 pub(crate) use conn_state::RESOURCE_METADATA_WRITE_GATE;
+use destination_route::{
+    classify_iq_destination, route_iq_response, route_unserved_request, unclassified_iq,
+};
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
 use extension_forms::{
@@ -184,8 +187,8 @@ pub(super) use errors::{
 };
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
-use remote_destination::handle_sans_io_iq_with_remote_preflight as handle_sans_io_iq;
 use roster::handle_roster_iq;
+use sans_io::handle_sans_io_iq;
 use search::{handle_channel_search_iq, handle_user_search_iq};
 use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 

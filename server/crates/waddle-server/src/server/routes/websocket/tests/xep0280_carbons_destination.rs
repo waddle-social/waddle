@@ -69,7 +69,10 @@ fn assert_remote_error(reply: &Iq, request: &Iq) {
         panic!("foreign Carbons request must not be acknowledged: {reply:?}")
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
     let original = match request {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,

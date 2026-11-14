@@ -14,6 +14,9 @@ pub mod channel_space_links;
 pub mod clustering;
 pub mod config;
 pub mod db;
+/// Typed destination classification and the remote-route hook for
+/// client-originated stanzas (RFC 6120 §10).
+pub mod destination;
 pub mod dnd_projection;
 pub mod dnd_reader;
 pub mod inbox;
