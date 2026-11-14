@@ -200,12 +200,33 @@ fn bytes_that_are_not_xml_close_without_any_xml() {
     assert!(!out
         .iter()
         .any(|output| matches!(output, Output::Transmit(_))));
+}
 
-    // Leading whitespace and a byte order mark are still XML.
-    let mut decoder = StreamDecoder::pre_authentication(CodecLimits::PILOT);
-    decoder.push(b"\n ").expect("push");
-    decoder.push(HEADER).expect("push");
-    assert!(matches!(decoder.next_item(), Ok(Some(Inbound::Header(_)))));
+#[test]
+fn text_before_the_header_is_xml_and_receives_a_stream_error() {
+    // RFC 6120 §11.6: a leading U+FEFF is a zero width no-break space, not
+    // a byte order mark. Like leading whitespace, it is character data
+    // before the stream header: the input is XML, so it is refused with a
+    // stream error rather than closed silently as another protocol.
+    let bom = [b"\xEF\xBB\xBF".as_slice(), HEADER].concat();
+    let whitespace = [b"\n ".as_slice(), HEADER].concat();
+    for input in [bom, whitespace] {
+        let mut decoder = StreamDecoder::pre_authentication(CodecLimits::PILOT);
+        decoder.push(&input).expect("push");
+        assert_eq!(decoder.next_item(), Err(DecodeError::NotWellFormed));
+
+        let mut stream = receiver();
+        let out = stream.receive(&input);
+        assert_eq!(
+            close_reason(&out),
+            Some(CloseReason::StreamError(
+                StreamErrorCondition::NotWellFormed
+            ))
+        );
+        assert!(out
+            .iter()
+            .any(|output| matches!(output, Output::Transmit(_))));
+    }
 }
 
 #[test]
@@ -277,6 +298,35 @@ fn an_established_stream_hands_address_checked_stanzas_to_its_owner() {
             StreamErrorCondition::PolicyViolation
         ))
     );
+}
+
+#[test]
+fn a_delivered_stanza_carries_its_addresses_in_canonical_form() {
+    let mut stream = established(true);
+    let out = stream.receive(
+        b"<message from='alice@HOME-A.test.' to='bob@home-b.test.'><body>hi</body></message>",
+    );
+    // An uppercase domain is outside the profile for a stanza address.
+    assert_eq!(
+        close_reason(&out),
+        Some(CloseReason::StreamError(
+            StreamErrorCondition::ImproperAddressing
+        ))
+    );
+
+    let mut stream = established(true);
+    let out = stream.receive(
+        b"<message from='alice@home-a.test./phone' to='bob@home-b.test.'><body>hi</body></message>",
+    );
+    let stanza = out
+        .iter()
+        .find_map(|output| match output {
+            Output::Stanza(stanza) => Some(stanza.clone()),
+            _ => None,
+        })
+        .expect("the stanza is handed over");
+    assert_eq!(stanza.attr("from"), Some("alice@home-a.test/phone"));
+    assert_eq!(stanza.attr("to"), Some("bob@home-b.test"));
 }
 
 #[test]

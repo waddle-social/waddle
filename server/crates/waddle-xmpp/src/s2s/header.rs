@@ -4,9 +4,8 @@ use std::fmt;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jid::Jid;
 
-use crate::identity::CanonicalDomain;
+use crate::identity::{CanonicalDomain, IdentityError};
 
 /// Longest stream ID accepted from a peer. Longer values are ignored as if
 /// absent; the header byte ceiling bounds them in any case.
@@ -21,18 +20,20 @@ const MAX_LANGUAGE_BYTES: usize = 64;
 /// taken from the raw attribute text into the identity profile's canonical
 /// form ([`CanonicalDomain::parse_exact`]), so a U-label and an A-label
 /// spelling of one domain are the same address and every comparison is made
-/// on the canonical form. A present value that is not a domain-only JID is
-/// [`Self::Invalid`]; a domain-only JID written in a spelling the profile
-/// does not accept, such as a case-folded or compatibility form, is
-/// [`Self::Refused`]. Neither keeps the peer's text, so the negotiation can
-/// choose the RFC 6120 error condition without reflecting peer input.
+/// on the canonical form. A present value that is empty, names a localpart
+/// or a resourcepart, or is not a domain is [`Self::Invalid`]; a domain
+/// written in a spelling the profile does not accept, such as a width or
+/// compatibility form, is [`Self::Refused`]. Neither keeps the peer's text,
+/// so the negotiation can choose the RFC 6120 error condition without
+/// reflecting peer input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderAddress {
     /// The attribute was not present.
     Absent,
-    /// The attribute was present but empty, not a JID, or not domain-only.
+    /// The attribute was present but empty, not domain-only, or not a
+    /// domain.
     Invalid,
-    /// A domain-only JID whose spelling the identity profile refuses.
+    /// A domain whose spelling the identity profile refuses.
     Refused,
     /// A domain in canonical form.
     Domain(CanonicalDomain),
@@ -40,21 +41,29 @@ pub enum HeaderAddress {
 
 impl HeaderAddress {
     /// Classify a raw attribute value.
+    ///
+    /// The value is never passed through JID preparation: Nameprep uses the
+    /// Unicode 3.2 tables and would refuse IDNA2008 labels made of later
+    /// code points, such as Tifinagh or N'Ko, whose A-label it accepts. A
+    /// value is domain-only exactly when it contains neither `@` nor `/`,
+    /// the separators that end a localpart and start a resourcepart.
+    ///
+    /// ASCII uppercase letters are mapped to lowercase before the domain is
+    /// read: DNS treats names that differ only in ASCII case as one name, so
+    /// the mapping joins nothing DNS keeps apart. No other mapping is
+    /// applied, so a spelling that needs width, compatibility or non-ASCII
+    /// case folding is [`Self::Refused`].
     pub fn parse(value: Option<&str>) -> Self {
         let Some(value) = value else {
             return Self::Absent;
         };
-        if value.is_empty() {
+        if value.is_empty() || value.contains(['@', '/']) {
             return Self::Invalid;
         }
-        match Jid::new(value) {
-            Ok(jid) if jid.node().is_none() && jid.resource().is_none() => {
-                match CanonicalDomain::parse_exact(value) {
-                    Ok(domain) => Self::Domain(domain),
-                    Err(_) => Self::Refused,
-                }
-            }
-            _ => Self::Invalid,
+        match CanonicalDomain::parse_exact(&value.to_ascii_lowercase()) {
+            Ok(domain) => Self::Domain(domain),
+            Err(IdentityError::NonCanonicalDomain) => Self::Refused,
+            Err(_) => Self::Invalid,
         }
     }
 

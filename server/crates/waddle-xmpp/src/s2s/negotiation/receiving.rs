@@ -2,9 +2,10 @@
 //! restart.
 
 use jid::Jid;
+use minidom::rxml::Namespace;
 use minidom::Element;
 
-use crate::identity::CanonicalDomain;
+use crate::identity::{parse_jid, CanonicalDomain};
 use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
 use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamVersion};
@@ -249,14 +250,12 @@ impl Receiving {
             }
             (_, TopLevel::ClientStanza) => self.fail(steps, StreamErrorCondition::InvalidNamespace),
             (_, TopLevel::Dialback) => self.on_dialback(steps),
-            (State::Established, TopLevel::Stanza(stanza)) => {
-                match self.stanza_condition(&stanza) {
-                    Some(condition) => self.fail(steps, condition),
-                    None if self.deliver => steps.push(Step::Deliver(stanza)),
-                    // Application dispatch is not enabled on this stream.
-                    None => self.fail(steps, StreamErrorCondition::PolicyViolation),
-                }
-            }
+            (State::Established, TopLevel::Stanza(stanza)) => match self.check_stanza(stanza) {
+                Err(condition) => self.fail(steps, condition),
+                Ok(stanza) if self.deliver => steps.push(Step::Deliver(stanza)),
+                // Application dispatch is not enabled on this stream.
+                Ok(_) => self.fail(steps, StreamErrorCondition::PolicyViolation),
+            },
             (State::Established, TopLevel::Other) => {
                 self.fail(steps, StreamErrorCondition::UnsupportedStanzaType)
             }
@@ -376,23 +375,31 @@ impl Receiving {
         }
     }
 
-    /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order. `None`
-    /// when the stanza passes all three.
-    fn stanza_condition(&self, stanza: &Element) -> Option<StreamErrorCondition> {
+    /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order. Each
+    /// address is read from its raw text with the identity profile's parser
+    /// ([`parse_jid`]), never through JID preparation, which would fold some
+    /// spellings and refuse labels outside Unicode 3.2. A stanza that passes
+    /// is returned with both addresses rewritten in canonical form, so its
+    /// domains compare equal to the stream's pair wherever it goes next.
+    fn check_stanza(&self, mut stanza: Element) -> Result<Element, StreamErrorCondition> {
         let Some((source, destination)) = &self.pair else {
-            return Some(StreamErrorCondition::InternalServerError);
+            return Err(StreamErrorCondition::InternalServerError);
         };
-        let (Some(to), Some(from)) = (stanza_address(stanza, "to"), stanza_address(stanza, "from"))
-        else {
-            return Some(StreamErrorCondition::ImproperAddressing);
+        let (Some(to), Some(from)) = (
+            stanza_address(&stanza, "to"),
+            stanza_address(&stanza, "from"),
+        ) else {
+            return Err(StreamErrorCondition::ImproperAddressing);
         };
-        if CanonicalDomain::from_domain(to.domain()).ok().as_ref() != Some(destination) {
-            return Some(StreamErrorCondition::HostUnknown);
+        if to.domain().as_str() != destination.as_str() {
+            return Err(StreamErrorCondition::HostUnknown);
         }
-        if CanonicalDomain::from_domain(from.domain()).ok().as_ref() != Some(source) {
-            return Some(StreamErrorCondition::InvalidFrom);
+        if from.domain().as_str() != source.as_str() {
+            return Err(StreamErrorCondition::InvalidFrom);
         }
-        None
+        set_address(&mut stanza, "to", to);
+        set_address(&mut stanza, "from", from);
+        Ok(stanza)
     }
 
     fn next_exchange(&mut self) -> ExchangeId {
@@ -433,11 +440,19 @@ impl Receiving {
     }
 }
 
-/// A stanza `to` or `from` address, or `None` when absent, empty or not a
-/// valid JID.
+/// A stanza `to` or `from` address in canonical form, or `None` when it is
+/// absent, empty or outside the identity profile.
 fn stanza_address(stanza: &Element, name: &str) -> Option<Jid> {
     stanza
         .attr(name)
         .filter(|value| !value.is_empty())
-        .and_then(|value| Jid::new(value).ok())
+        .and_then(|value| parse_jid(value).ok())
+}
+
+/// Replace the unprefixed attribute `name`, which is present, with the
+/// canonical text of `address`.
+fn set_address(stanza: &mut Element, name: &str, address: Jid) {
+    if let Some(value) = stanza.attrs_mut().get_mut(&Namespace::NONE, name) {
+        *value = address.into_inner();
+    }
 }

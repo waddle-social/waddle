@@ -1,7 +1,9 @@
 //! Stream header addresses in the identity profile's canonical domain
 //! form, in both roles: a U-label and an A-label spelling are one domain,
-//! a spelling the profile refuses closes the stream, and emitted headers
-//! use U-labels (RFC 7622 §3.2.1). Also: the initiating role reads a
+//! labels made of code points newer than Unicode 3.2 are read without JID
+//! preparation, ASCII case is mapped, any other spelling the profile
+//! refuses closes the stream, and emitted headers use U-labels (RFC 7622
+//! §3.2.1). Also: the initiating role reads a
 //! peer's stream error that follows an unusable response header, reads
 //! only the STARTTLS and EXTERNAL offers of a features element, and a
 //! header can declare the dialback namespace.
@@ -20,11 +22,22 @@ use waddle_xmpp::s2s::{
 const A_LABEL: &str = "xn--bcher-kva.test";
 const U_LABEL: &str = "bücher.test";
 
+/// A domain whose label is three Tifinagh letters (U+2D30, U+2D31,
+/// U+2D33), assigned in Unicode 4.1. IDNA2008 permits them; Nameprep's
+/// Unicode 3.2 tables treat them as unassigned.
+const TIFINAGH_U_LABEL: &str = "\u{2d30}\u{2d31}\u{2d33}.test";
+const TIFINAGH_A_LABEL: &str = "xn--4ljcg.test";
+
+/// A spelling of `home-b.test` with a fullwidth `h` (U+FF48), which IDNA
+/// would map to `h` and the profile refuses instead.
+const FULLWIDTH_HOME_B: &str = "\u{ff48}ome-b.test";
+
 fn domain(value: &str) -> CanonicalDomain {
     CanonicalDomain::parse_exact(value).expect("valid domain")
 }
 
-/// Serves `home-b.test` and admits only `bücher.test`.
+/// Serves `home-b.test` and admits only `bücher.test` and the Tifinagh
+/// domain.
 struct Admission;
 
 impl InboundAdmission for Admission {
@@ -37,7 +50,7 @@ impl InboundAdmission for Admission {
     }
 
     fn admits(&self, source: &CanonicalDomain, _destination: &CanonicalDomain) -> bool {
-        *source == domain(A_LABEL)
+        *source == domain(A_LABEL) || *source == domain(TIFINAGH_A_LABEL)
     }
 }
 
@@ -114,18 +127,48 @@ fn header_addresses_are_parsed_from_the_raw_text_into_canonical_form() {
         HeaderAddress::Domain(domain("faß.test"))
     );
     assert_ne!(domain("faß.test"), domain("fass.test"));
-    // Spellings the profile would have to map are refused, not folded.
-    for refused in ["Home-B.test", "BÜCHER.test"] {
+    // ASCII case is mapped: DNS does not distinguish it.
+    for spelling in ["Home-B.test", "HOME-B.TEST"] {
+        assert_eq!(
+            HeaderAddress::parse(Some(spelling)),
+            HeaderAddress::Domain(domain("home-b.test")),
+            "{spelling}"
+        );
+    }
+    assert_eq!(
+        HeaderAddress::parse(Some("XN--BCHER-KVA.test")),
+        HeaderAddress::Domain(domain(A_LABEL))
+    );
+    // Every other spelling the profile would have to map is refused, not
+    // folded: width, compatibility and non-ASCII case.
+    for refused in [FULLWIDTH_HOME_B, "BÜCHER.test", "\u{fb00}.test"] {
         assert_eq!(
             HeaderAddress::parse(Some(refused)),
             HeaderAddress::Refused,
             "{refused}"
         );
     }
+    // Labels outside Unicode 3.2 are read without JID preparation.
     assert_eq!(
-        HeaderAddress::parse(Some("alice@home-b.test")),
-        HeaderAddress::Invalid
+        HeaderAddress::parse(Some(TIFINAGH_U_LABEL)),
+        HeaderAddress::Domain(domain(TIFINAGH_A_LABEL))
     );
+    assert_eq!(
+        HeaderAddress::parse(Some(TIFINAGH_A_LABEL)),
+        HeaderAddress::Domain(domain(TIFINAGH_A_LABEL))
+    );
+    for invalid in [
+        "alice@home-b.test",
+        "home-b.test/resource",
+        "\u{2d30}@home-b.test",
+        "home b.test",
+    ] {
+        assert_eq!(
+            HeaderAddress::parse(Some(invalid)),
+            HeaderAddress::Invalid,
+            "{invalid}"
+        );
+    }
     assert_eq!(HeaderAddress::parse(Some("")), HeaderAddress::Invalid);
     assert_eq!(HeaderAddress::parse(None), HeaderAddress::Absent);
 }
@@ -177,7 +220,7 @@ fn a_refused_spelling_closes_the_receiving_stream() {
             StreamErrorCondition::InvalidFrom,
         ),
         (
-            header(A_LABEL, "Home-B.test"),
+            header(A_LABEL, FULLWIDTH_HOME_B),
             StreamErrorCondition::HostUnknown,
         ),
     ];
@@ -199,6 +242,71 @@ fn a_pair_admission_refuses_receives_policy_violation() {
             StreamErrorCondition::PolicyViolation
         ))
     );
+}
+
+#[test]
+fn ascii_case_in_a_received_header_is_mapped() {
+    let mut stream = receiver();
+    let out = stream.receive(&header("XN--BCHER-KVA.TEST", "Home-B.test"));
+    assert_eq!(close_reason(&out), None);
+    let response = first_header(&transmitted(&out));
+    assert_eq!(response.from, HeaderAddress::Domain(domain("home-b.test")));
+    assert_eq!(response.to, HeaderAddress::Domain(domain(A_LABEL)));
+}
+
+#[test]
+fn a_receiving_stream_accepts_a_label_outside_unicode_3_2_through_sasl() {
+    for from in [TIFINAGH_U_LABEL, TIFINAGH_A_LABEL] {
+        let mut stream = receiver();
+        let out = stream.receive(&header(from, "home-b.test"));
+        assert_eq!(close_reason(&out), None, "{from}");
+        let sent = String::from_utf8(transmitted(&out)).expect("UTF-8");
+        assert!(sent.contains(TIFINAGH_U_LABEL), "answered in U-labels");
+        stream.receive(b"<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>");
+        stream.tls_established(TlsPeer::Verified(domain(TIFINAGH_A_LABEL)));
+        let out = stream.receive(&header(TIFINAGH_U_LABEL, "home-b.test"));
+        assert_eq!(close_reason(&out), None, "{from}");
+        assert_eq!(stream.phase(), NegotiationPhase::SaslAwaitAuth);
+        // An authorization identity naming the verified source in U-label
+        // form, base64 of the UTF-8 text, is tolerated.
+        let out = stream.receive(
+            b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>\
+4rSw4rSx4rSzLnRlc3Q=</auth>",
+        );
+        assert_eq!(close_reason(&out), None, "{from}");
+        let request = out
+            .iter()
+            .find_map(|output| match output {
+                Output::Authorize(request) => Some(request.clone()),
+                _ => None,
+            })
+            .expect("authorization requested");
+        assert_eq!(request.source, domain(TIFINAGH_A_LABEL));
+    }
+}
+
+#[test]
+fn an_initiating_stream_reaches_a_label_outside_unicode_3_2() {
+    let config = InitiatingConfig {
+        source: domain("home-b.test"),
+        destination: domain(TIFINAGH_U_LABEL),
+        language: StreamLanguage::english(),
+        dialback: DialbackMode::Disabled,
+    };
+    let (_, out) = S2sStream::initiate(config.clone(), CodecLimits::PILOT);
+    let sent = String::from_utf8(transmitted(&out)).expect("UTF-8");
+    assert!(sent.contains(TIFINAGH_U_LABEL), "addressed in U-labels");
+
+    for from in [TIFINAGH_U_LABEL, TIFINAGH_A_LABEL] {
+        let (mut stream, _) = S2sStream::initiate(config.clone(), CodecLimits::PILOT);
+        let mut input = response(from, "home-b.test");
+        input.extend_from_slice(
+            b"<stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/></stream:features>",
+        );
+        let out = stream.receive(&input);
+        assert_eq!(close_reason(&out), None, "{from}");
+        assert_eq!(stream.phase(), NegotiationPhase::PreTls);
+    }
 }
 
 fn initiator() -> S2sStream {
@@ -263,6 +371,20 @@ fn an_initiating_stream_refuses_a_response_spelling_the_profile_refuses() {
     assert_eq!(
         close_reason(&out),
         Some(CloseReason::StreamError(StreamErrorCondition::InvalidFrom))
+    );
+}
+
+#[test]
+fn an_initiating_stream_refuses_a_response_to_spelling_the_profile_refuses() {
+    let mut stream = initiator();
+    assert_eq!(
+        close_reason(&stream.receive(&response(A_LABEL, FULLWIDTH_HOME_B))),
+        None
+    );
+    let out = stream.receive(b"<stream:features/>");
+    assert_eq!(
+        close_reason(&out),
+        Some(CloseReason::StreamError(StreamErrorCondition::HostUnknown))
     );
 }
 

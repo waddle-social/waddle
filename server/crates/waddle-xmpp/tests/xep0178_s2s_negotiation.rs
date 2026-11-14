@@ -659,11 +659,18 @@ fn omitted_initial_response_gets_one_empty_challenge() {
 
 #[test]
 fn matching_authorization_identity_is_tolerated() {
-    let mut stream = receiver_at_sasl();
-    let out = stream.receive(
-        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>aG9tZS1hLnRlc3Q=</auth>",
-    );
-    assert_eq!(authorization_request(&out).source, domain("home-a.test"));
+    // `home-a.test`, and `HOME-A.test`, whose ASCII case is mapped as in a
+    // stream header.
+    for auth in [
+        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>aG9tZS1hLnRlc3Q=</auth>"
+            .as_slice(),
+        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>SE9NRS1BLnRlc3Q=</auth>"
+            .as_slice(),
+    ] {
+        let mut stream = receiver_at_sasl();
+        let out = stream.receive(auth);
+        assert_eq!(authorization_request(&out).source, domain("home-a.test"));
+    }
 }
 
 #[test]
@@ -865,10 +872,21 @@ from='muc.home-a.test' to='home-b.test' version='1.0'>",
 
 #[test]
 fn established_stream_checks_addresses_then_refuses_dispatch() {
-    let cases: [(&[u8], StreamErrorCondition); 13] = [
+    let cases: [(&[u8], StreamErrorCondition); 15] = [
         (
             b"<message to='bob@home-b.test'/>",
             StreamErrorCondition::ImproperAddressing,
+        ),
+        // Addresses are read with the identity profile, not folded by JID
+        // preparation: a localpart preparation would change is refused.
+        (
+            b"<message from='Alice@home-a.test' to='bob@home-b.test'/>",
+            StreamErrorCondition::ImproperAddressing,
+        ),
+        // A trailing dot is the same domain.
+        (
+            b"<message from='alice@home-a.test.' to='bob@home-b.test.'/>",
+            StreamErrorCondition::PolicyViolation,
         ),
         (
             b"<message from='alice@home-a.test'/>",

@@ -361,8 +361,12 @@ impl StreamDecoder {
             Phase::Header | Phase::Open => {}
         }
         if self.phase == Phase::Header && self.pre_authentication && self.parsed == 0 {
-            // XML starts with `<`, after optional whitespace or a UTF-8
-            // byte order mark. Anything else is another protocol.
+            // A stream of XML text starts with `<`, whitespace or U+FEFF
+            // (whose UTF-8 form starts with 0xEF). Anything else is another
+            // protocol and closes without XML. Text before the header is
+            // still refused below, with a stream error: RFC 6120 §11.6
+            // reads a leading U+FEFF as a zero width no-break space, not a
+            // byte order mark.
             let first = self
                 .buffer
                 .iter()
