@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::XmppError;
 
 use crate::auth::{AuthError, NativeUserStore, RegisterRequest};
-use crate::permissions::PermissionActor;
+use crate::permissions::{AuthzUserJid, PermissionActor};
 use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
 
 pub(crate) async fn lookup_scram_credentials(
@@ -51,6 +51,19 @@ pub(crate) async fn register_native_user(
         "Registering native user via XEP-0077"
     );
 
+    // Every account becomes an authorization subject as soon as it exists.
+    // Reject a username that cannot be one before creating the account, so a
+    // failed membership grant never leaves a registered account behind.
+    let subject = match AuthzUserJid::from_account_parts(username, domain) {
+        Ok(subject) => subject,
+        Err(error) => {
+            warn!(reason = %error, "Registration failed: username is not a valid account address");
+            return Err(XmppError::not_acceptable(Some(
+                "Username is not a normalized JID localpart".to_string(),
+            )));
+        }
+    };
+
     let request = RegisterRequest {
         username: username.to_string(),
         domain: domain.to_string(),
@@ -60,11 +73,10 @@ pub(crate) async fn register_native_user(
 
     match native_user_store.register(request).await {
         Ok(user_id) => {
-            let subject_user_id = format!("{}@{}", username, domain);
             provision_user_membership(
                 permission_actor,
                 &BootstrapMembershipConfig::from_env(),
-                &subject_user_id,
+                subject.jid().as_str(),
                 username,
             )
             .await

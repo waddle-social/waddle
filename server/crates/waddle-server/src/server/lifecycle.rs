@@ -190,6 +190,14 @@ pub async fn start_with_config_and_owner_outbox(
         .ask(crate::permissions::EnsureSchema)
         .await
         .map_err(|error| anyhow::anyhow!("Failed to ensure permission schema: {}", error))?;
+    // Refuse to serve an authorization store written by another ID encoding;
+    // see `permissions::authz_incarnation`. The error names no identifiers.
+    permission_actor
+        .ask(crate::permissions::EnsureAuthzCodecIncarnation)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Authorization store is not usable with this server: {error}")
+        })?;
     // Membership reconciliation (reads every user row and provisions
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must

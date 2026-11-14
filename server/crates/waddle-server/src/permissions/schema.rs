@@ -222,7 +222,22 @@ definition role {
   permission assign = manager + parent->admin
   permission manage = manager + parent->admin
 }
+
+definition waddle_authz_codec {
+  relation codec: waddle_authz_codec
+}
 "#;
+
+/// The name of every definition in [`SPICEDB_SCHEMA`], in schema order.
+pub(crate) fn spicedb_definition_names() -> impl Iterator<Item = &'static str> {
+    SPICEDB_SCHEMA.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("definition ")?
+            .split(|c: char| c == '{' || c.is_whitespace())
+            .next()
+            .filter(|name| !name.is_empty())
+    })
+}
 
 /// Schema for deployment/server objects.
 fn server_schema() -> ObjectTypeSchema {

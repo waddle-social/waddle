@@ -64,8 +64,8 @@ use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::db::actor::{DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::{
-    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError, Relation,
-    Subject, SubjectType, Tuple, WriteTuple,
+    AuthzUserJid, CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError,
+    Relation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::server::routes::websocket::WebSocketState;
 use crate::server::xmpp_state::{
@@ -1132,6 +1132,9 @@ pub fn parse_set_affiliation_args(
     let form = form.ok_or_else(|| "channels:set-affiliation requires an args form".to_string())?;
     let channel_jid = parse_required_bare_jid(form, "channel_jid")?;
     let member_jid = parse_required_bare_jid(form, "member_jid")?;
+    // Channel affiliations are stored as authorization relationships.
+    AuthzUserJid::new(member_jid.clone())
+        .map_err(|error| format!("'member_jid' must be a bare account JID: {error}"))?;
     let affiliation = WireAffiliation::parse(&parse_required_text(form, "affiliation")?)?;
     let reason = parse_optional_text(form, "reason");
     Ok(ChannelsSetAffiliationArgs {
@@ -1584,6 +1587,13 @@ pub(crate) async fn explicit_channel_affiliations_for_jids(
     let mut affiliations = Vec::new();
     for jid in jids {
         if !seen.insert(jid.clone()) {
+            continue;
+        }
+        // A JID that cannot be an authorization subject (domain-only, or over
+        // the codec's length limit) can never have been granted a channel
+        // relationship, so its explicit affiliation is `None`.
+        if AuthzUserJid::new(jid.clone()).is_err() {
+            affiliations.push((jid, Affiliation::None));
             continue;
         }
         let subject = Subject::user(jid.to_string());
