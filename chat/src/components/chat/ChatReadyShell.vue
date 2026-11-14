@@ -325,20 +325,11 @@ function threadsListRootAuthorJid(entry: WasmThreadEntry): string | null {
 function openProfileFromThread(author: string, avatarJid: string | null) {
   contentAreaRef.value?.openProfile(author, avatarJid);
 }
-const hasCallContext = computed(() => {
-  const phase = callStateStore.value.phase;
-  if (phase !== "idle" && phase !== "ended") return true;
-  if (activeChannelCallCount.value > 0 || activeDmCallCount.value > 0) return true;
-  if (Object.values(callParticipantCounts.value).some((count) => count > 0)) return true;
-  return Object.keys(dmCallActivitiesStore.value).length > 0;
-});
-/** Home / Rooms / Members always get a context column; every other page
- * gets one whenever there is call activity, so the in-call controls
- * (CurrentCallPanel / CallActivityDock) never depend on the page. */
+/** Home and Members get a context column. Live calls and the call you are
+ * in sit in the sidebar (`#live` / `#dock`), so they follow every page. */
 const contextColumnVisible = computed(() => {
-  if (hasCallContext.value) return true;
   const page = ui.activePage.value;
-  return page === "dashboard" || page === "rooms" || page === "members";
+  return page === "dashboard" || page === "members";
 });
 const nextEvent = computed<CommunityEvent | null>(() => {
   const first = sortEventsUpcomingFirst(communityEvents.events.value)[0];
@@ -1223,43 +1214,47 @@ async function recoverSupersededFromShell() {
               <span :class="contextCard.body">Pick a member to see their profile here.</span>
             </div>
           </template>
-          <template v-if="ui.activePage.value !== 'members'">
-            <CurrentCallPanel
-              :channels="waddles.sortedChannels.value"
-              :conversations="dmConversations.conversations.value"
-              :active-channel-id="waddles.activeChannelId.value"
-              :active-channel-room-jid="activeChannelRoomJid"
-              :active-peer-jid="dmConversations.activePeerJid.value"
-              @select-channel="onSelectChannelFromSidebar"
-              @select-dm="selectDm"
-            />
-            <CallActivityDock
-              :channels="waddles.sortedChannels.value"
-              :group-dms="groupDmConversations"
-              :conversations="dmConversations.conversations.value"
-              :active-channel-id="waddles.activeChannelId.value"
-              :active-channel-room-jid="activeChannelRoomJid"
-              :active-peer-jid="dmConversations.activePeerJid.value"
-              :sidebar-mode="ui.sidebarMode.value"
-              :active-channel-jids="messaging.activeChannels.value"
-              :call-participants="retainedMucCallParticipantsStore"
-              :call-media-by-room="retainedMucCallMediaStore"
-              :managed-muc-domain="managedMucDomain"
-              :self-full-jid="selfFullJid"
-              :show-dm-calls="ui.sidebarMode.value !== 'dms'"
-              hide-current-call
-              @select-channel="onSelectChannelFromSidebar"
-              @select-group-dm="selectGroupDm"
-              @join-channel-call="joinChannelCallFromActivity"
-              @join-group-dm-call="joinGroupDmCallFromActivity"
-              @leave-channel-call="leaveRetainedChannelCall"
-              @answer-dm="answerDmFromActivity"
-              @select-dm="selectDm"
-              @reconnect-dm="reconnectDmFromDock"
-              @end-dm="endRecoveredDmFromActivity"
-            />
-          </template>
         </div>
+      </template>
+
+      <!-- Sidebar: live calls ("Live now") and the call you are in. -->
+      <template #live>
+        <CallActivityDock
+          :channels="waddles.sortedChannels.value"
+          :group-dms="groupDmConversations"
+          :conversations="dmConversations.conversations.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :active-channel-room-jid="activeChannelRoomJid"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          :sidebar-mode="ui.sidebarMode.value"
+          :active-channel-jids="messaging.activeChannels.value"
+          :call-participants="retainedMucCallParticipantsStore"
+          :call-media-by-room="retainedMucCallMediaStore"
+          :managed-muc-domain="managedMucDomain"
+          :self-full-jid="selfFullJid"
+          :show-dm-calls="ui.sidebarMode.value !== 'dms'"
+          hide-current-call
+          @select-channel="onSelectChannelFromSidebar"
+          @select-group-dm="selectGroupDm"
+          @join-channel-call="joinChannelCallFromActivity"
+          @join-group-dm-call="joinGroupDmCallFromActivity"
+          @leave-channel-call="leaveRetainedChannelCall"
+          @answer-dm="answerDmFromActivity"
+          @select-dm="selectDm"
+          @reconnect-dm="reconnectDmFromDock"
+          @end-dm="endRecoveredDmFromActivity"
+        />
+      </template>
+      <template #dock>
+        <CurrentCallPanel
+          :channels="waddles.sortedChannels.value"
+          :conversations="dmConversations.conversations.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :active-channel-room-jid="activeChannelRoomJid"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          @select-channel="onSelectChannelFromSidebar"
+          @select-dm="selectDm"
+        />
       </template>
     </CommunityShell>
 
