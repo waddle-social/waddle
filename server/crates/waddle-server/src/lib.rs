@@ -60,6 +60,9 @@ pub mod push_service;
 pub mod room_effect_outbox;
 pub(crate) mod room_observation;
 pub mod room_policy;
+/// Server-to-server transport for the federation profile (ADR-0020). Only
+/// the certificate verifier exists; nothing in the running server uses it.
+pub mod s2s;
 pub mod server;
 /// The one enclosing graceful-shutdown deadline every stage derives from.
 pub mod shutdown_deadline;
