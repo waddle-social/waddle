@@ -27,29 +27,7 @@ export function rendersAsSystemBand(bands: SystemBandCard[]): boolean {
   return bands.some((band) => band.annotation.surfaceKind === "chat-bot");
 }
 
-export function systemBandToneClass(tone: string): string {
-  if (tone === "success") return "chat-system-band--tone-success";
-  if (tone === "danger") return "chat-system-band--tone-danger";
-  if (tone === "warning") return "chat-system-band--tone-warning";
-  return "";
-}
-
-/**
- * Per-kind modifier so the stylesheet can tune layout for specific
- * payload shapes — github-event cards hide their meta-item labels and
- * render as a positional chip strip (branch · commit · event) instead
- * of a labeled K/V grid.
- */
-export function systemBandKindClass(kind: string): string {
-  return kind ? `chat-system-band--kind-${kind}` : "";
-}
-
-/**
- * Branch values look like code (slashes, identifier-style suffixes)
- * and deserve the same tabular-mono treatment commit SHAs get.
- */
-export function systemBandMetaValueClass(label: string): string {
-  return label === "Commit" || label === "Branch"
-    ? "chat-system-band__meta-value--mono"
-    : "";
+/** Commit and branch values read as code. */
+export function isMonoBandMeta(label: string): boolean {
+  return label === "Commit" || label === "Branch";
 }

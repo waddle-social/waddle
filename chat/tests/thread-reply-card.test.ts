@@ -180,20 +180,16 @@ const participants = [
     const html = await renderVueComponentSource(wrapper, { post, lastReplyAt });
 
     const loaded = section(html, "loaded");
-    const cards = loaded.match(/<button[^>]*class="chat-thread-card[^"]*"/g) ?? [];
+    const cards = loaded.match(/<button[^>]*data-thread-card[^>]*>/g) ?? [];
     expect(cards).toHaveLength(1);
-    expect(cards[0]).toContain("chat-thread-card--two-line");
     expect(loaded).toContain(
       'aria-label="3 replies, latest from guzzle: Love this, watching now, 2 hours ago. Open thread"',
     );
-    expect(loaded.match(/class="chat-thread-card__face"/g) ?? []).toHaveLength(3);
+    expect(loaded.match(/data-thread-face/g) ?? []).toHaveLength(3);
     expect(loaded).toContain(">+1</span>");
-    expect(loaded).toContain('<span class="chat-thread-card__count">3 replies</span>');
-    expect(loaded).toContain('<span class="chat-thread-card__recency"> · 2 hours ago</span>');
-    expect(loaded).toMatch(
-      /<span class="chat-thread-card__latest-author">guzzle<\/span>(?:<!--\[-->)?: Love this, watching now/,
-    );
-    expect(loaded).toContain('class="chat-thread-rail chat-thread-rail--two-line"');
+    expect(loaded).toMatch(/<span class="[^"]*">3 replies<\/span>/);
+    expect(loaded).toMatch(/<span class="[^"]*"> · 2 hours ago<\/span>/);
+    expect(loaded).toMatch(/data-thread-latest><span>guzzle<\/span>(?:<!--\[-->)?: Love this, watching now/);
     // Avatar and author name open the profile with the spec's label.
     expect(loaded.match(/aria-label="rawkode, open profile"/g) ?? []).toHaveLength(2);
   }, 30_000);
@@ -202,16 +198,15 @@ const participants = [
     const html = await renderVueComponentSource(wrapper, { post, lastReplyAt: "" });
     const countOnly = section(html, "count-only");
     expect(countOnly).toContain('aria-label="1 reply. Open thread"');
-    expect(countOnly).not.toContain('class="chat-thread-card__latest"');
-    expect(countOnly).not.toContain("chat-thread-card--two-line");
+    expect(countOnly).toContain("data-thread-card");
+    expect(countOnly).not.toContain("data-thread-latest");
   }, 30_000);
 
   test("no card in the thread pane or on posts without replies", async () => {
     const html = await renderVueComponentSource(wrapper, { post, lastReplyAt: "" });
     for (const name of ["thread-pane", "no-replies"]) {
       const body = section(html, name);
-      expect(body).not.toContain('class="chat-thread-card');
-      expect(body).not.toContain('class="chat-thread-rail');
+      expect(body).not.toContain("data-thread-card");
     }
   }, 30_000);
 });

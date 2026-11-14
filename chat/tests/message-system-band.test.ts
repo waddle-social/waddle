@@ -3,9 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   eventBandsFor,
   rendersAsSystemBand,
-  systemBandKindClass,
-  systemBandMetaValueClass,
-  systemBandToneClass,
+  isMonoBandMeta,
 } from "../src/components/chat/message-system-band";
 import type { ExtensionAnnotation } from "../src/lib/chat-ui";
 
@@ -46,26 +44,11 @@ describe("rendersAsSystemBand", () => {
   });
 });
 
-describe("system band class helpers", () => {
-  test("tone classes map success/danger/warning and default to none", () => {
-    expect(systemBandToneClass("success")).toBe("chat-system-band--tone-success");
-    expect(systemBandToneClass("danger")).toBe("chat-system-band--tone-danger");
-    expect(systemBandToneClass("warning")).toBe("chat-system-band--tone-warning");
-    expect(systemBandToneClass("neutral")).toBe("");
-  });
-
-  test("kind class is per payload shape", () => {
-    expect(systemBandKindClass("github-event")).toBe("chat-system-band--kind-github-event");
-    expect(systemBandKindClass("")).toBe("");
-  });
-
-  test("commit and branch values get the tabular-mono treatment", () => {
-    expect(systemBandMetaValueClass("Commit")).toBe("chat-system-band__meta-value--mono");
-    expect(systemBandMetaValueClass("Branch")).toBe("chat-system-band__meta-value--mono");
-    expect(systemBandMetaValueClass("Event")).toBe("");
-  });
+test("commit and branch values read as code", () => {
+  expect(isMonoBandMeta("Commit")).toBe(true);
+  expect(isMonoBandMeta("Branch")).toBe(true);
+  expect(isMonoBandMeta("Event")).toBe(false);
 });
-
 
 test("system-band message cards expose the same local presentation anchor as ordinary cards", async () => {
   const html = await renderVueComponent("../src/components/chat/MessageCard.vue", {

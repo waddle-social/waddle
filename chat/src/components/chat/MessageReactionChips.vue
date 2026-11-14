@@ -2,7 +2,9 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { $desktopToolbarSuspensionEpoch } from "@/stores/message-toolbar";
-import { formatReactors, isReactor, reactionAriaLabel, reactionWarmthClass } from "./message-reaction-chips";
+import { css } from "styled-system/css";
+import { chip, reactions as reactionsRecipe } from "styled-system/recipes";
+import { formatReactors, isReactor, reactionAriaLabel } from "./message-reaction-chips";
 
 const props = defineProps<{
   reactions: Record<string, readonly string[]>;
@@ -29,7 +31,7 @@ const hoveredReaction = ref<{
   rect: DOMRect;
 } | null>(null);
 
-const REACTION_TOOLTIP_HALF_WIDTH = 144; // matches max-w-[18rem]
+const REACTION_TOOLTIP_HALF_WIDTH = 144; // half of the tooltip's 288px max width
 const REACTION_TOOLTIP_GAP = 8;
 
 function showReactionFromPointer(emoji: string, nicks: readonly string[], event: PointerEvent) {
@@ -92,6 +94,29 @@ watch(
   },
 );
 
+const rowClass = reactionsRecipe();
+const chipClass = chip();
+const tooltipClass = css({
+  position: "fixed",
+  zIndex: "tooltip",
+  pointerEvents: "none",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: "0.5",
+  maxWidth: "288px",
+  translate: "-50% -100%",
+  px: "2",
+  py: "1.5",
+  borderRadius: "sm",
+  border: "1px solid {colors.border}",
+  bg: "surface",
+  color: "fg",
+  boxShadow: "elev.2",
+  "& > :first-child": { fontSize: "lg", lineHeight: 1 },
+  "& > :last-child": { textStyle: "caption", color: "fg.muted", textAlign: "center" },
+});
+
 onBeforeUnmount(() => {
   if (typeof window === "undefined") return;
   window.removeEventListener("scroll", onReactionTooltipScroll, true);
@@ -100,16 +125,12 @@ onBeforeUnmount(() => {
 
 <template>
   <!-- Existing reactions (inline, always visible when present) -->
-  <div class="chat-message-reactions flex flex-wrap gap-1">
+  <div :class="rowClass">
     <button
       v-for="(nicks, emoji) in reactions"
       :key="emoji"
       type="button"
-      class="chat-reaction-chip type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg"
-      :class="[
-        userIsReactor(nicks) ? 'chat-reaction-chip--self' : '',
-        reactionWarmthClass(nicks.length),
-      ]"
+      :class="chipClass"
       :aria-label="reactionAriaLabel(emoji, nicks)"
       :aria-pressed="userIsReactor(nicks)"
       @click="emit('react', emoji)"
@@ -118,25 +139,23 @@ onBeforeUnmount(() => {
       @focusin="(event) => showReactionFromFocus(emoji, nicks, event)"
       @focusout="() => hideReactionTooltip(emoji)"
     >
-      <span class="chat-reaction-chip__glyph">{{ emoji }}</span>
-      <span class="type-meta type-numeric chat-reaction-chip__count">{{ nicks.length }}</span>
+      <span>{{ emoji }}</span>
+      <span class="wd-chip__n">{{ nicks.length }}</span>
     </button>
   </div>
 
-  <!-- Reaction tooltip: teleported so it escapes `.chat-pane-scroll`'s
-       `overflow-x: hidden`. Anchored above the hovered chip via the captured
-       rect. -->
+  <!-- Reaction tooltip: teleported so it escapes the pane's
+       `overflow-x: hidden`. Anchored above the hovered chip via the
+       captured rect. -->
   <Teleport to="body">
     <div
       v-if="hoveredReaction && reactionTooltipStyle"
       aria-hidden="true"
-      class="chat-reaction-tooltip pointer-events-none fixed z-popover flex max-w-[18rem] -translate-x-1/2 -translate-y-full flex-col items-center gap-0.5 rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md"
+      :class="tooltipClass"
       :style="reactionTooltipStyle"
     >
-      <span class="text-lg leading-none" aria-hidden="true">{{ hoveredReaction.emoji }}</span>
-      <span class="type-meta text-center text-muted-foreground">
-        {{ formatReactors(hoveredReaction.nicks) }}
-      </span>
+      <span aria-hidden="true">{{ hoveredReaction.emoji }}</span>
+      <span>{{ formatReactors(hoveredReaction.nicks) }}</span>
     </div>
   </Teleport>
 </template>
