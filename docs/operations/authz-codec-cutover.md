@@ -41,7 +41,11 @@ two replicas. Expect an XMPP connection interruption.
 Emptying the store deletes every grant. After the cutover the server's startup
 reconciliation re-creates only the deployment-level `server` owner and member
 grants of existing accounts, from `WADDLE_SERVER_OWNER_LOCALPARTS` and the
-account tables.
+account tables. A user subject must be the account's canonical bare JID under
+the identity profile shipped in the same rollout, so an account whose stored
+name or domain is not canonical gets no grant from that reconciliation and is
+counted as skipped; the
+[identity profile rollout](identity-profile-rollout.md) lists those accounts.
 
 Channel `parent` links of the built-in managed channels are **not** reliably
 re-created at startup. Startup writes them only when the channel's bookmark is
