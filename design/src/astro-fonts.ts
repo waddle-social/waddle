@@ -7,8 +7,11 @@ const sans = ['system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Noto Sans', '
 
 export const waddleFonts = [
   {
-    provider: fontProviders.fontsource(),
-    name: 'Bricolage Grotesque',
+    // The Fontsource API only serves the weight axis; the package's wdth.css adds
+    // the width axis the display styles use (font-stretch 87.5–90%).
+    provider: fontProviders.npm(),
+    options: { package: '@fontsource-variable/bricolage-grotesque', version: '5.3.0', file: 'wdth.css' },
+    name: 'Bricolage Grotesque Variable',
     cssVariable: '--font-display',
     weights: ['500 800'],
     styles: ['normal'],

@@ -83,6 +83,9 @@
     "design": {
       "name": "@waddle/design",
       "version": "0.1.0",
+      "dependencies": {
+        "@fontsource-variable/bricolage-grotesque": "5.3.0",
+      },
       "devDependencies": {
         "@pandacss/dev": "2.5.0",
         "@pandacss/preset-base": "2.5.0",
@@ -378,6 +381,8 @@
     "@floating-ui/dom": ["@floating-ui/dom@1.7.6", "", { "dependencies": { "@floating-ui/core": "^1.7.5", "@floating-ui/utils": "^0.2.11" } }, "sha512-9gZSAI5XM36880PPMm//9dfiEngYoC6Am2izES1FF406YFsjvyBMmeJ2g4SAju3xWwtuynNRFL2s9hgxpLI5SQ=="],
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.11", "", {}, "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg=="],
+
+    "@fontsource-variable/bricolage-grotesque": ["@fontsource-variable/bricolage-grotesque@5.3.0", "", {}, "sha512-TLi9Q4hJjS2UvoTMRSS2nHu6c4R56lAw60NR9QYtVRCHn0XtsFpiEhNffZ8Glsoxu6wEEwLKBP8lb94J52PNBA=="],
 
     "@grafana/faro-bundlers-shared": ["@grafana/faro-bundlers-shared@0.11.0", "", { "dependencies": { "ansis": "^4.0.0", "tar": "^7.1.0", "undici": "^8.1.0" } }, "sha512-hwu3dzQS+Rbkl6YKucFwXdg1s/9NAJqHaPU9xnXeSDwHqvsOrlXrKIhf7Mezjf77ium+QHccCSlRhx5RqcFytg=="],
 
