@@ -822,7 +822,7 @@ jobs:
   waddle_server_rusttests__nixtest-builder:
     name: waddle-server-rustTests / nixTest (compile and four isolated shards)
     runs-on:
-      - nscloud-ubuntu-24.04-amd64-32x64-with-features
+      - nscloud-ubuntu-24.04-amd64-16x32-with-features
       - namespace-features:container.privileged=true;job.priority=1
     timeout-minutes: 60
     permissions:
