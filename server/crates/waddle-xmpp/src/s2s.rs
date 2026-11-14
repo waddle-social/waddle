@@ -1,11 +1,13 @@
 //! Server-to-server (`jabber:server`) stream codec and negotiation.
 //!
 //! This module is I/O-agnostic: it owns no sockets, TLS sessions,
-//! certificate verification or configuration loading, and nothing in the
-//! server uses it yet. It provides:
+//! certificate verification or configuration loading; the server's S2S
+//! connection manager drives it. It provides:
 //!
 //! - [`StreamDecoder`]: a bounded incremental XML decoder enforcing
-//!   [`CodecLimits`] while parsing, with exact stream-restart boundaries;
+//!   [`CodecLimits`] while parsing, with exact stream-restart boundaries and
+//!   a pre-authentication mode that refuses non-negotiation elements before
+//!   building them;
 //! - [`StreamEncoder`]: serialisation of stream headers, first-level
 //!   elements, stream errors and the closing tag;
 //! - [`StreamHeader`] and [`StreamErrorCondition`]: typed stream headers and
@@ -13,7 +15,8 @@
 //! - [`Negotiation`]: the initiating and receiving negotiation state machine
 //!   (STARTTLS, SASL EXTERNAL, authenticated restart), with Server Dialback
 //!   decision points that refuse while [`DialbackMode::Disabled`];
-//! - [`S2sStream`]: a driver combining all of the above for one connection.
+//! - [`S2sStream`]: a driver combining all of the above for one connection,
+//!   for STARTTLS and, in the initiating role, XEP-0368 direct TLS.
 
 mod condition;
 mod decoder;

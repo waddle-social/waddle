@@ -3,7 +3,7 @@
 use super::initiating::Initiating;
 use super::receiving::Receiving;
 use super::types::{
-    InitiatingConfig, NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Step,
+    InitiatingConfig, NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Step, TlsPeer,
 };
 
 /// The S2S negotiation state machine for one TCP connection.
@@ -42,6 +42,32 @@ impl Negotiation {
             },
             steps,
         )
+    }
+
+    /// An initiating-role machine for a connection whose TLS handshake
+    /// completed before any XML, such as an XEP-0368 direct TLS connection,
+    /// and the steps that open its stream. `peer` is what TLS verification
+    /// established about the receiving server; STARTTLS is never requested
+    /// on such a stream.
+    pub fn initiating_after_tls(config: InitiatingConfig, peer: TlsPeer) -> (Self, Vec<Step>) {
+        let (machine, steps) = Initiating::start_after_tls(config, peer);
+        (
+            Self {
+                role: RoleMachine::Initiating(machine),
+            },
+            steps,
+        )
+    }
+
+    /// Hand stanzas that pass the address checks of an established
+    /// receiving stream to the connection owner as [`Step::Deliver`],
+    /// instead of refusing them with `policy-violation`. Has no effect in
+    /// the initiating role, where streams are directional and every
+    /// received stanza is refused.
+    pub fn deliver_stanzas(&mut self) {
+        if let RoleMachine::Receiving(machine) = &mut self.role {
+            machine.deliver_stanzas();
+        }
     }
 
     /// Advance the machine.

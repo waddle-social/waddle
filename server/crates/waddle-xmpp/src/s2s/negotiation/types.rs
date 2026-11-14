@@ -158,6 +158,13 @@ pub enum Signal {
     Shutdown,
     /// A resource limit outside the codec was exhausted.
     ResourceExhausted,
+    /// The connection owner refuses this stream because another stream
+    /// already carries its directional domain pair.
+    Conflict,
+    /// The connection owner refuses the stream or what it carries under
+    /// local policy, such as a stanza no service accepts or a domain that is
+    /// no longer admitted.
+    PolicyViolation,
 }
 
 impl Signal {
@@ -168,6 +175,8 @@ impl Signal {
             Self::Expired => StreamErrorCondition::Reset,
             Self::Shutdown => StreamErrorCondition::SystemShutdown,
             Self::ResourceExhausted => StreamErrorCondition::ResourceConstraint,
+            Self::Conflict => StreamErrorCondition::Conflict,
+            Self::PolicyViolation => StreamErrorCondition::PolicyViolation,
         }
     }
 }
@@ -242,6 +251,9 @@ pub enum Step {
     Authorize(AuthorizationRequest),
     /// Negotiation completed.
     Established(NegotiatedStream),
+    /// Hand an address-checked stanza from an established receiving stream
+    /// to the connection owner.
+    Deliver(Element),
     /// Close: send the stream error (if any) and closing tag where the
     /// outbound stream is open, then close the transport.
     Close(CloseReason),

@@ -18,6 +18,13 @@
 //! engine and bytes after SASL success are discarded, and neither can reach
 //! the XML parser of the next stream.
 //!
+//! In the pre-authentication mode ([`StreamDecoder::pre_authentication`]),
+//! used until SASL succeeds, only the stream, TLS, SASL and dialback
+//! namespaces may qualify a first-level element. Any other element is
+//! refused as soon as its head closes, before any of its tree is built, and
+//! every accepted first-level element is held to
+//! [`CodecLimits::max_control_element_bytes`] from its first byte.
+//!
 //! Decoding can amplify input: `minidom` stores an owned namespace name in
 //! every element, so a short element inheriting a long default namespace
 //! costs far more memory than its raw bytes. Declared namespace names are
@@ -49,6 +56,8 @@ const XMLNS: &str = "xmlns";
 const COMPACT_THRESHOLD: usize = 4096;
 /// Bytes inspected before a parser error to recognise restricted markup.
 const RESTRICTED_MARKUP_WINDOW: usize = 16;
+/// Stanza element names (RFC 6120 §8).
+const STANZA_NAMES: [&str; 3] = ["message", "presence", "iq"];
 
 /// One complete item decoded from the stream.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +87,13 @@ pub enum DecodeError {
     BadFormat,
     #[error("peer exceeded the {0} limit")]
     LimitExceeded(LimitKind),
+    /// A `jabber:server` stanza arrived before authentication completed.
+    #[error("stanza received before authentication")]
+    Unauthenticated,
+    /// A first-level element outside the negotiation namespaces arrived
+    /// before authentication completed.
+    #[error("element outside the negotiation namespaces before authentication")]
+    UnexpectedElement,
 }
 
 impl DecodeError {
@@ -90,7 +106,10 @@ impl DecodeError {
             Self::InvalidNamespace => StreamErrorCondition::InvalidNamespace,
             Self::BadNamespacePrefix => StreamErrorCondition::BadNamespacePrefix,
             Self::BadFormat => StreamErrorCondition::BadFormat,
-            Self::LimitExceeded(_) => StreamErrorCondition::PolicyViolation,
+            Self::LimitExceeded(_) | Self::UnexpectedElement => {
+                StreamErrorCondition::PolicyViolation
+            }
+            Self::Unauthenticated => StreamErrorCondition::NotAuthorized,
         }
     }
 }
@@ -214,11 +233,36 @@ pub struct StreamDecoder {
     head: Option<PendingHead>,
     stanza: Option<StanzaInProgress>,
     whitespace_bytes: u64,
+    /// Whether first-level elements are limited to the negotiation
+    /// namespaces; see [`Self::pre_authentication`].
+    pre_authentication: bool,
 }
 
 impl StreamDecoder {
-    /// A decoder awaiting a stream header.
+    /// A decoder awaiting a stream header that accepts any first-level
+    /// element within the limits.
     pub fn new(limits: CodecLimits) -> Self {
+        Self::with_mode(limits, false)
+    }
+
+    /// A decoder awaiting a stream header, in the pre-authentication mode.
+    ///
+    /// Until [`Self::restart_after_sasl`] a first-level element is accepted
+    /// only in the stream, TLS, SASL or dialback namespace, and only up to
+    /// [`CodecLimits::max_control_element_bytes`]. Any other first-level
+    /// element fails as soon as its head closes, before its attributes are
+    /// copied into a tree or any of its content is parsed: a `jabber:server`
+    /// stanza with [`DecodeError::Unauthenticated`], a `jabber:client`
+    /// stanza with [`DecodeError::InvalidNamespace`] and anything else with
+    /// [`DecodeError::UnexpectedElement`]. These are the conditions the
+    /// negotiation reports for the same elements once decoded, so the mode
+    /// changes when a refusal happens, not which one. The mode survives the
+    /// restart after `<proceed/>`.
+    pub fn pre_authentication(limits: CodecLimits) -> Self {
+        Self::with_mode(limits, true)
+    }
+
+    fn with_mode(limits: CodecLimits, pre_authentication: bool) -> Self {
         let options = Options {
             max_token_length: limits.max_token_bytes,
             ..Options::default()
@@ -241,7 +285,13 @@ impl StreamDecoder {
             head: None,
             stanza: None,
             whitespace_bytes: 0,
+            pre_authentication,
         }
+    }
+
+    /// Whether the decoder is in the pre-authentication mode.
+    pub fn is_pre_authentication(&self) -> bool {
+        self.pre_authentication
     }
 
     /// The ceilings this decoder enforces.
@@ -346,22 +396,23 @@ impl StreamDecoder {
     }
 
     /// Restart after `<proceed/>`: hand the bytes that followed it to the TLS
-    /// engine and await a new stream header.
+    /// engine and await a new stream header. The decoder keeps its mode.
     pub fn restart_after_tls(&mut self) -> TlsHandoff {
-        TlsHandoff(self.reset())
+        TlsHandoff(self.reset(self.pre_authentication))
     }
 
     /// Restart after SASL success: drop the bytes that followed the boundary
-    /// element and await a new stream header.
+    /// element and await a new stream header. Authentication has completed,
+    /// so the pre-authentication mode ends here.
     pub fn restart_after_sasl(&mut self) -> DiscardedInput {
-        let bytes = self.reset().len();
+        let bytes = self.reset(false).len();
         DiscardedInput { bytes }
     }
 
-    fn reset(&mut self) -> Vec<u8> {
+    fn reset(&mut self, pre_authentication: bool) -> Vec<u8> {
         let start = self.dead_prefix();
         let leftover = self.buffer.split_off(start);
-        *self = Self::new(self.limits);
+        *self = Self::with_mode(self.limits, pre_authentication);
         leftover
     }
 
@@ -503,10 +554,23 @@ impl StreamDecoder {
             return Err(DecodeError::LimitExceeded(LimitKind::Depth));
         }
         if depth == 1 {
+            // Before authentication every acceptable first-level element is
+            // a negotiation element, so the control ceiling applies from
+            // its first byte.
+            let (limit, limit_kind) = if self.pre_authentication {
+                (
+                    self.limits
+                        .max_control_element_bytes
+                        .min(self.limits.max_stanza_bytes),
+                    LimitKind::ControlElementBytes,
+                )
+            } else {
+                (self.limits.max_stanza_bytes, LimitKind::StanzaBytes)
+            };
             self.stanza = Some(StanzaInProgress {
                 start,
-                limit: self.limits.max_stanza_bytes,
-                limit_kind: LimitKind::StanzaBytes,
+                limit,
+                limit_kind,
                 elements: 0,
                 attribute_bytes: 0,
                 tree_bytes: 0,
@@ -597,6 +661,19 @@ impl StreamDecoder {
         let namespace = self
             .resolve_prefix(head.prefix.as_ref())
             .ok_or(DecodeError::NotWellFormed)?;
+        // Before authentication, a first-level element outside the
+        // negotiation namespaces is refused here: before its attributes are
+        // resolved and before any of its content is parsed.
+        if depth == 1
+            && self.pre_authentication
+            && ![STREAM, SASL, TLS, JABBER_SERVER_DIALBACK].contains(&namespace.as_str())
+        {
+            return Err(pre_authentication_refusal(
+                namespace.as_str(),
+                head.local.as_str(),
+            ));
+        }
+
         let attributes = self.resolve_attributes(&head.attributes)?;
 
         if depth == 0 {
@@ -790,6 +867,17 @@ impl StreamDecoder {
             version,
             lang,
         })
+    }
+}
+
+/// The error for a first-level element the pre-authentication mode refuses,
+/// matching what the negotiation reports for the decoded element.
+fn pre_authentication_refusal(namespace: &str, name: &str) -> DecodeError {
+    let stanza = STANZA_NAMES.contains(&name);
+    match namespace {
+        JABBER_SERVER if stanza => DecodeError::Unauthenticated,
+        JABBER_CLIENT if stanza => DecodeError::InvalidNamespace,
+        _ => DecodeError::UnexpectedElement,
     }
 }
 

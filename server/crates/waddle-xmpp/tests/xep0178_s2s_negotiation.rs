@@ -250,6 +250,7 @@ fn absorb(outputs: Vec<Output>, me: &mut Side, peer: &mut Side) {
             Output::Authorize(request) => me.authorizations.push(request),
             Output::Established(stream) => me.established = Some(stream),
             Output::Close(reason) => me.closes.push(reason),
+            Output::Stanza(_) => unreachable!("stanza delivery is not enabled in this suite"),
         }
     }
 }

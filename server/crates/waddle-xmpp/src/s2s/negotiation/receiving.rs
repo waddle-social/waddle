@@ -55,6 +55,9 @@ pub(crate) struct Receiving {
     auth_starts: u8,
     aborts: u8,
     last_exchange: Option<ExchangeId>,
+    /// Whether address-checked stanzas on the established stream go to the
+    /// connection owner instead of being refused here.
+    deliver: bool,
 }
 
 impl Receiving {
@@ -69,7 +72,12 @@ impl Receiving {
             auth_starts: 0,
             aborts: 0,
             last_exchange: None,
+            deliver: false,
         }
+    }
+
+    pub(crate) fn deliver_stanzas(&mut self) {
+        self.deliver = true;
     }
 
     pub(crate) fn phase(&self) -> NegotiationPhase {
@@ -227,8 +235,12 @@ impl Receiving {
             (_, TopLevel::ClientStanza) => self.fail(steps, StreamErrorCondition::InvalidNamespace),
             (_, TopLevel::Dialback) => self.on_dialback(steps),
             (State::Established, TopLevel::Stanza(stanza)) => {
-                let condition = self.stanza_condition(&stanza);
-                self.fail(steps, condition);
+                match self.stanza_condition(&stanza) {
+                    Some(condition) => self.fail(steps, condition),
+                    None if self.deliver => steps.push(Step::Deliver(stanza)),
+                    // Application dispatch is not enabled on this stream.
+                    None => self.fail(steps, StreamErrorCondition::PolicyViolation),
+                }
             }
             (State::Established, TopLevel::Other) => {
                 self.fail(steps, StreamErrorCondition::UnsupportedStanzaType)
@@ -349,24 +361,23 @@ impl Receiving {
         }
     }
 
-    /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order; a stanza
-    /// passing all three is still refused because application dispatch is
-    /// not enabled on S2S streams.
-    fn stanza_condition(&self, stanza: &Element) -> StreamErrorCondition {
+    /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order. `None`
+    /// when the stanza passes all three.
+    fn stanza_condition(&self, stanza: &Element) -> Option<StreamErrorCondition> {
         let Some((source, destination)) = &self.pair else {
-            return StreamErrorCondition::InternalServerError;
+            return Some(StreamErrorCondition::InternalServerError);
         };
         let (Some(to), Some(from)) = (stanza_address(stanza, "to"), stanza_address(stanza, "from"))
         else {
-            return StreamErrorCondition::ImproperAddressing;
+            return Some(StreamErrorCondition::ImproperAddressing);
         };
         if to.domain() != &**destination {
-            return StreamErrorCondition::HostUnknown;
+            return Some(StreamErrorCondition::HostUnknown);
         }
         if from.domain() != &**source {
-            return StreamErrorCondition::InvalidFrom;
+            return Some(StreamErrorCondition::InvalidFrom);
         }
-        StreamErrorCondition::PolicyViolation
+        None
     }
 
     fn next_exchange(&mut self) -> ExchangeId {

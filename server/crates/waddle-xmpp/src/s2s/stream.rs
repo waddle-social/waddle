@@ -1,5 +1,7 @@
 //! I/O-agnostic S2S connection driver combining codec and negotiation.
 
+use minidom::Element;
+
 use super::decoder::{Inbound, StreamDecoder, TlsHandoff};
 use super::encoder::StreamEncoder;
 use super::limits::CodecLimits;
@@ -27,6 +29,10 @@ pub enum Output {
     Authorize(AuthorizationRequest),
     /// Negotiation completed for this directional domain pair.
     Established(NegotiatedStream),
+    /// A stanza from the established receiving stream that passed the
+    /// stream's address checks, for the connection owner to accept or
+    /// refuse. Emitted only after [`S2sStream::deliver_stanzas`].
+    Stanza(Element),
     /// Close the transport after writing all earlier output.
     Close(CloseReason),
 }
@@ -36,6 +42,12 @@ pub enum Output {
 /// The connection owner feeds received plaintext with [`Self::receive`],
 /// reports TLS completion and authorization decisions, and executes the
 /// returned [`Output`]s in order.
+///
+/// The decoder runs in its pre-authentication mode
+/// ([`StreamDecoder::pre_authentication`]) until SASL succeeds: a
+/// first-level element outside the stream, TLS, SASL and dialback
+/// namespaces is refused when its head closes, and negotiation elements are
+/// held to the control-element ceiling.
 #[derive(Debug)]
 pub struct S2sStream {
     decoder: StreamDecoder,
@@ -50,7 +62,7 @@ impl S2sStream {
     /// initial stream header arrives.
     pub fn accept(config: ReceivingConfig, limits: CodecLimits) -> Self {
         Self {
-            decoder: StreamDecoder::new(limits),
+            decoder: StreamDecoder::pre_authentication(limits),
             encoder: None,
             negotiation: Negotiation::receiving(config),
             closed: false,
@@ -59,9 +71,26 @@ impl S2sStream {
 
     /// Start an outbound connection; the output opens the initial stream.
     pub fn initiate(config: InitiatingConfig, limits: CodecLimits) -> (Self, Vec<Output>) {
-        let (negotiation, steps) = Negotiation::initiating(config);
+        Self::start(Negotiation::initiating(config), limits)
+    }
+
+    /// Start an outbound stream on a connection whose TLS handshake has
+    /// already completed, such as an XEP-0368 direct TLS connection. `peer`
+    /// is what TLS verification established about the receiving server;
+    /// the output opens the stream only when it is verified for the
+    /// destination, and STARTTLS is never requested.
+    pub fn initiate_after_tls(
+        config: InitiatingConfig,
+        peer: TlsPeer,
+        limits: CodecLimits,
+    ) -> (Self, Vec<Output>) {
+        Self::start(Negotiation::initiating_after_tls(config, peer), limits)
+    }
+
+    fn start(started: (Negotiation, Vec<Step>), limits: CodecLimits) -> (Self, Vec<Output>) {
+        let (negotiation, steps) = started;
         let mut stream = Self {
-            decoder: StreamDecoder::new(limits),
+            decoder: StreamDecoder::pre_authentication(limits),
             encoder: None,
             negotiation,
             closed: false,
@@ -69,6 +98,14 @@ impl S2sStream {
         let mut out = Vec::new();
         stream.run(steps, &mut out);
         (stream, out)
+    }
+
+    /// Hand stanzas that pass an established receiving stream's address
+    /// checks to the connection owner as [`Output::Stanza`] instead of
+    /// refusing them. The owner refuses one with
+    /// [`Signal::PolicyViolation`]. Has no effect in the initiating role.
+    pub fn deliver_stanzas(&mut self) {
+        self.negotiation.deliver_stanzas();
     }
 
     pub fn role(&self) -> Role {
@@ -202,6 +239,7 @@ impl S2sStream {
                 }
                 Step::Authorize(request) => out.push(Output::Authorize(request)),
                 Step::Established(stream) => out.push(Output::Established(stream)),
+                Step::Deliver(stanza) => out.push(Output::Stanza(stanza)),
                 Step::Close(reason) => self.close(reason, out),
             }
         }

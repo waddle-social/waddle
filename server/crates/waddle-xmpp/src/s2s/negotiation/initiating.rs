@@ -56,6 +56,19 @@ impl Initiating {
         )
     }
 
+    /// Start a stream on a connection whose TLS handshake has already
+    /// completed, such as an XEP-0368 direct TLS connection. The stream
+    /// opens only when TLS verified the receiving server's certificate for
+    /// the destination; STARTTLS is never requested on it.
+    pub(crate) fn start_after_tls(config: InitiatingConfig, peer: TlsPeer) -> (Self, Vec<Step>) {
+        let mut machine = Self {
+            config,
+            state: State::TlsHandshake,
+        };
+        let steps = machine.handle(NegotiationInput::TlsEstablished(peer));
+        (machine, steps)
+    }
+
     pub(crate) fn phase(&self) -> NegotiationPhase {
         match self.state {
             State::AwaitHeader(Stage::PreTls)
