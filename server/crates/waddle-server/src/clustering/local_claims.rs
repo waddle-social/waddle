@@ -42,7 +42,7 @@ use waddle_xmpp::registry::{
 };
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
-use super::self_fence::{LocallyClaimedEntities, ReclaimedHydrationHandoff};
+use super::self_fence::{LocallyClaimedEntities, ReclaimedSettlementHandoff};
 
 /// Bound on the health-ask this impl issues against a locally-claimed
 /// room's `RoomActor` (ADR-0017 Phase 3 Slice 7's `RoomActor` counterpart
@@ -80,20 +80,6 @@ impl std::fmt::Display for LocalClaimsErrorClass {
 pub struct SmSessionLocalClaims {
     registry: OnceLock<Arc<InMemorySmSessionRegistry>>,
     connection_registry: OnceLock<Arc<ConnectionRegistry>>,
-    /// The durable stream-management authority, when it is selected.
-    durable_sm: OnceLock<crate::sm_authority::DurableSmStore>,
-}
-
-/// What a reclaimed claim's session is to the durable authority.
-enum ReclaimedDurableSession {
-    /// The authority holds no such session; the in-memory registry
-    /// hydrates it.
-    NotDurable,
-    /// The authority holds the session and its owner is recorded as lost.
-    /// The registry must not hydrate it.
-    OwnerLossRecorded,
-    /// The authority could not be read or written. The reclaim is retried.
-    Unavailable,
 }
 
 impl SmSessionLocalClaims {
@@ -102,65 +88,7 @@ impl SmSessionLocalClaims {
         Arc::new(Self {
             registry: OnceLock::new(),
             connection_registry: OnceLock::new(),
-            durable_sm: OnceLock::new(),
         })
-    }
-
-    /// Wire the durable stream-management authority. Called once, when
-    /// that authority is selected.
-    pub fn wire_durable_sm(&self, store: crate::sm_authority::DurableSmStore) {
-        if self.durable_sm.set(store).is_err() {
-            tracing::error!(
-                "SmSessionLocalClaims::wire_durable_sm called more than once; the durable \
-                 stream-management store was already wired (ignoring this call)"
-            );
-        }
-    }
-
-    /// Record the loss of a durable session's owner under the claim this
-    /// node just reclaimed from it.
-    ///
-    /// The durable authority keeps its sessions in the relations the
-    /// in-memory registry restores from, so the registry must not hydrate
-    /// one: it would become a second owner of the session's retained
-    /// frames. The authority moves the session to detached instead, where
-    /// a resume or its expiry finds it.
-    async fn record_durable_owner_lost(
-        &self,
-        entity: &Entity,
-        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
-    ) -> ReclaimedDurableSession {
-        use crate::sm_authority::{LifecycleError, LifecycleRejection};
-        let Some(store) = self.durable_sm.get() else {
-            return ReclaimedDurableSession::NotDurable;
-        };
-        let Ok(key) = uuid::Uuid::parse_str(&entity.id) else {
-            return ReclaimedDurableSession::NotDurable;
-        };
-        let session = waddle_xmpp::ownership::SmSessionKey::from_uuid(key);
-        let record = match store.session(session).await {
-            Ok(Some(record)) => record,
-            Ok(None) => return ReclaimedDurableSession::NotDurable,
-            Err(error) => {
-                tracing::warn!(entity_id = %entity.id, %error, "reclaimed durable SM session could not be read");
-                return ReclaimedDurableSession::Unavailable;
-            }
-        };
-        match store
-            .record_owner_lost(session, record.generation, fence, chrono::Utc::now())
-            .await
-        {
-            // A session that is already detached or terminal has no owner
-            // to lose.
-            Ok(())
-            | Err(LifecycleError::Rejected(
-                LifecycleRejection::Transition(_) | LifecycleRejection::UnknownSession,
-            )) => ReclaimedDurableSession::OwnerLossRecorded,
-            Err(error) => {
-                tracing::warn!(entity_id = %entity.id, %error, "durable SM owner loss could not be recorded");
-                ReclaimedDurableSession::Unavailable
-            }
-        }
     }
 
     /// Wire in the real registry once it exists. A registry is constructed
@@ -374,15 +302,14 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         }
     }
 
-    /// FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda): delegates straight
-    /// to `InMemorySmSessionRegistry::hydrate_reclaimed` — the same
-    /// targeted, per-entity-shard-locked hydration path the orphan reaper
-    /// uses (FIX 2), so `self_fence::run_node_lease`'s inline post-fence
-    /// reclaim and the general reaper share one hydration implementation.
-    /// A no-op before `wire` runs, mirroring `demote`/`owned`'s identical
-    /// unwired behavior.
-    #[tracing::instrument(name = "clustering.sm_session.hydrate_reclaimed", skip_all)]
-    async fn hydrate_reclaimed(
+    /// Delegates to `InMemorySmSessionRegistry::settle_reclaimed_claim`, the
+    /// same per-entity, shard-locked settlement the orphan reaper uses, so
+    /// `self_fence::run_node_lease`'s inline post-fence reclaim and the
+    /// general reaper record a durable session's owner loss and release the
+    /// claim the same way. A no-op before `wire` runs, mirroring
+    /// `demote`/`owned`'s identical unwired behavior.
+    #[tracing::instrument(name = "clustering.sm_session.settle_reclaimed", skip_all)]
+    async fn settle_reclaimed(
         &self,
         entities: &[(
             Entity,
@@ -390,38 +317,22 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             waddle_xmpp::ownership::ClaimEpoch,
             waddle_xmpp::stream_management::ReclaimedClaimReservation,
         )],
-    ) -> ReclaimedHydrationHandoff {
+    ) -> ReclaimedSettlementHandoff {
         let Some(registry) = self.registry.get() else {
-            return ReclaimedHydrationHandoff::NotAccepted;
+            return ReclaimedSettlementHandoff::NotAccepted;
         };
         for (entity, owner, epoch, reservation) in entities {
             let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
                 owner.clone(),
                 *epoch,
             );
-            let durable = self.record_durable_owner_lost(entity, &fence).await;
-            let hydration = match durable {
-                ReclaimedDurableSession::NotDurable => {
-                    registry
-                        .hydrate_reclaimed_typed(entity, &fence, *reservation)
-                        .await
-                }
-                // The session is detached at the durable authority and no
-                // node owns it. The claim is released like that of a
-                // session with nothing to hydrate, so the node that
-                // resumes or expires it takes a free claim.
-                ReclaimedDurableSession::OwnerLossRecorded => {
-                    Ok(waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable)
-                }
-                ReclaimedDurableSession::Unavailable => {
-                    return ReclaimedHydrationHandoff::NotAccepted;
-                }
-            };
-            match hydration {
+            let settlement = registry
+                .settle_reclaimed_claim(entity, &fence, *reservation)
+                .await;
+            match settlement {
                 Ok(
-                    waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
-                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
-                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
+                    waddle_xmpp::stream_management::ReclaimedClaimSettlement::Release
+                    | waddle_xmpp::stream_management::ReclaimedClaimSettlement::StaleIdentity,
                 ) => {
                     if let Err(_error) = registry
                         .release_reclaimed_claim(entity, &fence, *reservation)
@@ -430,33 +341,33 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                         // Internal reclaim repair failure should stay visible for postmortem
                         // analysis: leave ownership in place and let retry logic reclaim later.
                         crate::telemetry::mark_span_error(
-                            "sm_session_rehydrate: failed to release reclaimed claim",
+                            "sm_session_reclaim: failed to release reclaimed claim",
                         );
                         tracing::warn!(
                             error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                             entity_id = %entity.id,
-                            "SmSessionLocalClaims::hydrate_reclaimed: terminal exact release failed; responsibility retained for retry"
+                            "SmSessionLocalClaims::settle_reclaimed: terminal exact release failed; responsibility retained for retry"
                         );
                     }
                 }
                 Ok(_) => {}
                 Err(_error) => {
-                    // Rehydrate failed before ownership transfer: this is not protocol
+                    // Settlement failed before ownership transfer: this is not protocol
                     // failure, but it should still export a failed span for incident
                     // detection and operator alerting.
                     crate::telemetry::mark_span_error(
-                        "sm_session_rehydrate: failed to hydrate reclaimed claim",
+                        "sm_session_reclaim: failed to settle reclaimed claim",
                     );
                     tracing::warn!(
                         error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                         entity_id = %entity.id,
-                        "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
+                        "SmSessionLocalClaims::settle_reclaimed: registry settlement failed"
                     );
-                    return ReclaimedHydrationHandoff::NotAccepted;
+                    return ReclaimedSettlementHandoff::NotAccepted;
                 }
             }
         }
-        ReclaimedHydrationHandoff::Accepted
+        ReclaimedSettlementHandoff::Accepted
     }
 }
 
@@ -1321,7 +1232,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         }
     }
 
-    async fn hydrate_reclaimed(
+    async fn settle_reclaimed(
         &self,
         entities: &[(
             Entity,
@@ -1329,15 +1240,15 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
             waddle_xmpp::ownership::ClaimEpoch,
             waddle_xmpp::stream_management::ReclaimedClaimReservation,
         )],
-    ) -> ReclaimedHydrationHandoff {
+    ) -> ReclaimedSettlementHandoff {
         let (sm_entities, rest): (Vec<_>, Vec<_>) = entities
             .iter()
             .cloned()
             .partition(|(entity, _, _, _)| entity.entity_type == EntityType::SmSession);
         let sm_handoff = if sm_entities.is_empty() {
-            ReclaimedHydrationHandoff::NotAccepted
+            ReclaimedSettlementHandoff::NotAccepted
         } else {
-            self.sm.hydrate_reclaimed(&sm_entities).await
+            self.sm.settle_reclaimed(&sm_entities).await
         };
         // `RoomLocalClaims`/`UserLocalClaims` have no reclaim-hydration
         // consumer yet (they are created through their registries' own
@@ -1346,7 +1257,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         if rest.is_empty() {
             sm_handoff
         } else {
-            ReclaimedHydrationHandoff::NotAccepted
+            ReclaimedSettlementHandoff::NotAccepted
         }
     }
 
@@ -1478,7 +1389,7 @@ mod tests {
             .expect("inline reclaim reservation");
 
         local_claims
-            .hydrate_reclaimed(&[(entity.clone(), identity, epoch, reservation)])
+            .settle_reclaimed(&[(entity.clone(), identity, epoch, reservation)])
             .await;
 
         assert!(claim_store
@@ -1511,7 +1422,7 @@ mod tests {
             .expect("inline reclaim reservation");
 
         local_claims
-            .hydrate_reclaimed(&[(entity.clone(), won_identity, epoch, reservation)])
+            .settle_reclaimed(&[(entity.clone(), won_identity, epoch, reservation)])
             .await;
 
         assert!(

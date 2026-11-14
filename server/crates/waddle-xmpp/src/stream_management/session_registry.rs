@@ -29,11 +29,8 @@ pub use claim_transfer::{
     ForeignSessionClaim, ObservedSessionClaim, SessionClaimEvidence, SessionClaimTakeover,
 };
 pub use claims::{PendingPromotionRetryRetention, ShutdownSmClaimLoss, ShutdownSmDrainBatch};
-pub use core::{InMemorySmSessionRegistry, ReclaimedClaimReservation, ReclaimedHydrationOutcome};
-pub use cross_node_resume::{
-    CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,
-    StealTicket,
-};
+pub use core::{InMemorySmSessionRegistry, ReclaimedClaimReservation, ReclaimedClaimSettlement};
+pub use cross_node_resume::{RemoteResumeAskOutcome, RemoteResumeAsker};
 pub use durable_detached::{
     DurableDetachedAdmission, DurableDetachedFrame, DurableDetachedResource,
     DurableDetachedSessions,

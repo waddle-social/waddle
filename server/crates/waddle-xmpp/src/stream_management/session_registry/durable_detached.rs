@@ -22,6 +22,7 @@ use super::core::InMemorySmSessionRegistry;
 use super::resources::DetachedPresenceState;
 use super::SmRegistryError;
 use crate::pending_delivery::SmSessionId;
+use crate::stream_management::persistence::SmClaimFence;
 use crate::stream_management::SmIngressAppendKey;
 use crate::Stanza;
 
@@ -81,6 +82,19 @@ pub trait DurableDetachedSessions: Send + Sync {
         registry: &InMemorySmSessionRegistry,
         frame: DurableDetachedFrame<'_>,
     ) -> Result<DurableDetachedAdmission, SmRegistryError>;
+
+    /// Record that the owner of `session` was lost, under `claim`: the claim
+    /// this node reclaimed from that owner. A session the authority does not
+    /// hold, or one already detached or ended, needs nothing recorded.
+    ///
+    /// `Err` means the record could not be read or written; the caller keeps
+    /// the claim and retries.
+    async fn record_owner_lost(
+        &self,
+        registry: &InMemorySmSessionRegistry,
+        session: &SmSessionId,
+        claim: &SmClaimFence,
+    ) -> Result<(), SmRegistryError>;
 }
 
 impl InMemorySmSessionRegistry {

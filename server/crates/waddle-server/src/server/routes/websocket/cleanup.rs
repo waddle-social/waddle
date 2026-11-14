@@ -402,17 +402,15 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
     }
 }
 
-/// Clean up MUC room presence when a connection disconnects
-/// Public alias for the MUC-presence cleanup used by the SM expired-session
-/// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
-/// to reimplement the room traversal.
+/// Whether a MUC-presence cleanup pass completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MucCleanupOutcome {
     Completed,
     Failed,
 }
 
-#[cfg(any(not(feature = "clustering"), test))]
+/// Clean up the MUC room presence of `jid` in every local room.
+#[cfg(test)]
 pub async fn cleanup_muc_presence_for_jid(
     state: &WebSocketState,
     jid: &FullJid,
@@ -499,36 +497,6 @@ pub(crate) async fn redrive_local_muc_cleanup(
             recording: SweepFailureRecording::JanitorRequeues { remote_ceiling },
             scope: LocalRoomSweepScope::EveryRoom,
             removal,
-        },
-    )
-    .await
-    {
-        MucCleanupOutcome::Completed
-    } else {
-        MucCleanupOutcome::Failed
-    }
-}
-
-/// Same cleanup path, but with explicit ordered-relay origin provenance for
-/// clustered remote MUC leaves.
-#[cfg(feature = "clustering")]
-pub async fn cleanup_muc_presence_for_jid_with_origin(
-    state: &WebSocketState,
-    jid: &FullJid,
-    session: LeaveSessionSelector,
-    origin: OrderedRelayRouteOrigin,
-) -> MucCleanupOutcome {
-    if cleanup_muc_presence_with_origin(
-        state,
-        jid,
-        session,
-        Some(&origin),
-        LocalSweep {
-            remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-            recording: SweepFailureRecording::RecordSweep,
-            scope: LocalRoomSweepScope::EveryRoom,
-            removal: MucRemovalCause::Voluntary,
         },
     )
     .await

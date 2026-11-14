@@ -182,14 +182,6 @@ async fn displaced_completion_deletes_portable_receipts() {
 }
 
 #[tokio::test]
-async fn expiry_completion_deletes_portable_receipts() {
-    let fixture = ReceiptCompletionFixture::new("receipt-expiry").await;
-    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage(fixture.registry.clone(), fixture.pending.clone()).await;
-    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
-    fixture.assert_confirmed().await;
-}
-
-#[tokio::test]
 async fn graceful_shutdown_completion_deletes_portable_receipts() {
     let fixture = ReceiptCompletionFixture::new("receipt-shutdown").await;
     let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage(fixture.registry.clone(), fixture.pending.clone()).await;

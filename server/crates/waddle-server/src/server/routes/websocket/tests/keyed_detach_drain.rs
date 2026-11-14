@@ -137,17 +137,16 @@ async fn detach(socket: &mut DetachingSocket) -> waddle_xmpp::stream_management:
         .expect("resumable snapshot")
 }
 
-async fn reloaded_session(
+async fn stored_frames(
     socket: &DetachingSocket,
-) -> waddle_xmpp::stream_management::DetachedSession {
-    let storage = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(socket.fixture.db.database_url()))
-            .await
-            .expect("reopen SM persistence"),
-    );
-    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage);
-    assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
-    restarted.peek_session(STREAM).await.unwrap().unwrap()
+) -> Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza> {
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage as _;
+    crate::sm_persistence::DatabaseSmPersistence::open(Some(socket.fixture.db.database_url()))
+        .await
+        .expect("reopen SM persistence")
+        .list_unacked(&waddle_xmpp::pending_delivery::SmSessionId::new(STREAM))
+        .await
+        .expect("stored SM frames")
 }
 
 async fn close_socket(socket: DetachingSocket) {
@@ -284,11 +283,11 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
         socket.conn.sm_state.stanzas_to_resend(0)[0].provenance,
         expected
     );
-    let restored = reloaded_session(&socket).await;
-    assert_eq!(restored.unacked_stanzas.len(), 1);
-    assert_eq!(restored.unacked_stanzas[0].provenance, expected);
+    let restored = stored_frames(&socket).await;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].provenance, expected);
     assert_eq!(
-        restored.unacked_stanzas[0].stanza_xml,
+        restored[0].stanza.wire(),
         socket.conn.sm_state.stanzas_to_resend(0)[0].stanza_xml,
         "the second drain persists the exact frame counted by the connection"
     );
@@ -342,19 +341,13 @@ async fn peer_stanza_frames_are_keyed_after_the_recipient_pass(fixture: IngressF
         detached.unacked_stanzas[0].stanza_xml
     );
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
-    let restored = reloaded_session(&socket).await;
-    assert_eq!(restored.unacked_stanzas.len(), 1);
-    assert_eq!(
-        restored.unacked_stanzas[0].provenance,
-        SmFrameProvenance::Unknown
-    );
-    assert_eq!(
-        restored.unacked_stanzas[0].sequence,
-        detached.unacked_stanzas[0].sequence
-    );
+    let restored = stored_frames(&socket).await;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].provenance, SmFrameProvenance::Unknown);
+    assert_eq!(restored[0].sequence, detached.unacked_stanzas[0].sequence);
     assert_same_replay_stanza(
         &detached.unacked_stanzas[0].stanza_xml,
-        &restored.unacked_stanzas[0].stanza_xml,
+        restored[0].stanza.wire(),
     );
     close_socket(socket).await;
 }
@@ -399,29 +392,24 @@ async fn late_peer_stanza_keeps_unknown_provenance(fixture: IngressFixture) {
     }
     let local = socket.conn.sm_state.stanzas_to_resend(0);
     let detached = socket.sm.peek_session(STREAM).await.unwrap().unwrap();
-    let restored = reloaded_session(&socket).await;
+    let restored = stored_frames(&socket).await;
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
     assert_eq!(socket.conn.sm_state.outbound_count, 1);
     assert_eq!(detached.outbound_count, 1);
     assert_eq!(local.len(), 1);
     assert_eq!(detached.unacked_stanzas.len(), 1);
-    assert_eq!(restored.unacked_stanzas.len(), 1);
+    assert_eq!(restored.len(), 1);
     assert_eq!(local[0].provenance, SmFrameProvenance::Unknown);
     assert_eq!(
         detached.unacked_stanzas[0].provenance,
         SmFrameProvenance::Unknown
     );
-    assert_eq!(
-        restored.unacked_stanzas[0].provenance,
-        SmFrameProvenance::Unknown
-    );
-    assert!(restored.unacked_stanzas[0]
-        .stanza_xml
+    assert_eq!(restored[0].provenance, SmFrameProvenance::Unknown);
+    assert!(restored[0]
+        .stanza
+        .wire()
         .contains("by='juliet@example.com'"));
-    assert_same_replay_stanza(
-        &local[0].stanza_xml,
-        &restored.unacked_stanzas[0].stanza_xml,
-    );
+    assert_same_replay_stanza(&local[0].stanza_xml, restored[0].stanza.wire());
     close_socket(socket).await;
 }
 

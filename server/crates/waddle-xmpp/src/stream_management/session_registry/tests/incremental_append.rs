@@ -144,7 +144,7 @@ async fn a_busy_detached_stream_does_not_block_an_unrelated_stream_operation() {
 }
 
 #[tokio::test]
-async fn detached_fanout_uses_incremental_writes_and_keeps_the_original_restart_deadline() {
+async fn detached_fanout_uses_incremental_writes_and_keeps_the_original_detach_time() {
     use crate::stream_management::persistence::SmPersistenceStorage;
     let storage = std::sync::Arc::new(FailingSnapshotPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
@@ -178,19 +178,14 @@ async fn detached_fanout_uses_incremental_writes_and_keeps_the_original_restart_
             .detached_at,
         original.detached_at
     );
-    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-    assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
-    let resumed = restarted
-        .claim_session(stream.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        resumed.remaining_time() <= Duration::from_secs(20),
-        "fanout/restart must not grant a fresh max resume window"
-    );
     assert_eq!(
-        resumed.outbound_count,
+        storage
+            .inner
+            .get_session(&stream)
+            .await
+            .unwrap()
+            .unwrap()
+            .outbound_count,
         original.outbound_count.wrapping_add(3)
     );
 }

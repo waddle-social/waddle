@@ -216,10 +216,10 @@ impl InMemorySmSessionRegistry {
             // `confirm_drained`, after the caller's XEP-0198 §5 promotion
             // succeeds and the durable row is actually deleted. Releasing
             // eagerly here (the previous behavior) opened a window where a
-            // second node's `restore_from_persistence`/orphan reaper could
-            // observe the entity as unclaimed, hydrate its own in-memory
-            // copy, and then have the durable row deleted out from under it
-            // by this node's own later `confirm_drained` — the same
+            // second node's orphan reaper could observe the entity as
+            // unclaimed and settle it, and then have the durable row deleted
+            // out from under it by this node's own later `confirm_drained` —
+            // the same
             // double-ownership hazard acquire-then-hydrate exists to
             // prevent, just reached via the eviction path instead of a
             // release-before-delete race.
@@ -273,8 +273,8 @@ impl InMemorySmSessionRegistry {
         // displaced session's unacked queue (XEP-0198 §5 alt-resource
         // → offline storage → error chain) and calls
         // `confirm_drained` on success, which erases the rows. If the
-        // process crashes before promotion, restore_from_persistence
-        // rehydrates them and the SM-expiry janitor retries.
+        // process crashes before promotion, the owner phase's legacy drain
+        // moves them to offline storage before the next serving process.
         //
         // FIX 1: this now includes former `claimed_sessions` evictions too
         // — their `ClaimStore` claim stays held (re-entering `sessions` via

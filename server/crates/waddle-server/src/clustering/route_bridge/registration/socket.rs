@@ -1898,12 +1898,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_retirement_rejects_late_resume_cleanup_ack_until_sm_retirement() {
+    async fn fresh_retirement_rejects_late_resume_cleanup_ack_while_sm_snapshot_remains() {
         assert_resume_cleanup_retirement_proof(true, true).await;
     }
 
     #[tokio::test]
-    async fn fresh_retirement_rejects_pruned_detached_lifecycle_until_sm_retirement() {
+    async fn fresh_retirement_rejects_pruned_detached_lifecycle_while_sm_snapshot_remains() {
         assert_resume_cleanup_retirement_proof(false, true).await;
     }
 
@@ -2090,34 +2090,6 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty());
-            crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
-            assert!(state
-                .deps
-                .protocol
-                .sm_session_registry
-                .peek_session(stream_id)
-                .await
-                .unwrap()
-                .is_none());
-            assert_eq!(
-                state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .list(&jid.to_bare())
-                    .await
-                    .unwrap()
-                    .len(),
-                1
-            );
-            assert_eq!(
-                bridge
-                    .force_detach_remote_user_resource_on_socket(request)
-                    .await
-                    .status,
-                RelayRemoteResourceForceDetachStatus::Detached,
-                "retirement retry succeeds after owner maintenance promotes the exact old SM queue"
-            );
         }
     }
 

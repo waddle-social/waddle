@@ -32,6 +32,22 @@ enum ClaimState {
     Stale,
 }
 
+/// The replay frames stored for the detached session of `target`.
+async fn persisted_unacked(
+    fixture: &IngressFixture,
+    target: &jid::FullJid,
+) -> Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza> {
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+    crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        .await
+        .expect("SM persistence")
+        .list_unacked(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            target.to_string(),
+        ))
+        .await
+        .expect("stored SM frames")
+}
+
 async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: RecipientState) {
     #[cfg(feature = "clustering")]
     let fixture = if let RecipientState::GoneWithClaim(claim) = recipient_state {
@@ -406,30 +422,16 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
         tx.commit().await.expect("result read");
     }
     if matches!(recipient_state, RecipientState::Resumable) {
-        // Reconstitute only the ordinary XEP-0198 session. No keyed ingress
-        // append or recovery sweep may create another copy.
-        let restarted = persistent_sm(&fixture).await;
-        restarted
-            .restore_from_persistence()
-            .await
-            .expect("restore native SM custody");
-        let session = restarted
-            .peek_session(&target.to_string())
-            .await
-            .expect("restored SM")
-            .expect("session");
-        assert_eq!(session.unacked_stanzas.len(), 1);
+        // The ordinary XEP-0198 session holds exactly one stored copy. No
+        // keyed ingress append or recovery sweep may create another.
+        let rows = persisted_unacked(&fixture, &target).await;
+        assert_eq!(rows.len(), 1);
         // Native sm_unacked stores original_receipt_at_ms, not microseconds.
         assert_eq!(
-            session.unacked_stanzas[0]
-                .original_receipt_at
-                .timestamp_millis(),
+            rows[0].original_receipt_at.timestamp_millis(),
             received_at.timestamp_millis()
         );
-        let replay: minidom::Element = session.unacked_stanzas[0]
-            .stanza_xml
-            .parse()
-            .expect("replay XML");
+        let replay: minidom::Element = rows[0].stanza.wire().parse().expect("replay XML");
         assert_eq!(replay, expected.to_element());
         assert_eq!(append_count(&sm, &target).await, 1);
     }
@@ -917,32 +919,18 @@ async fn transient_live_carbons_or_offline(fixture: IngressFixture, initial: Ini
         "alias/recovery cannot resend recipient carbons"
     );
     if matches!(initial, InitialTarget::LiveThenDetached) {
-        let restored = persistent_sm(&fixture).await;
-        restored
-            .restore_from_persistence()
-            .await
-            .expect("restore raced SM custody");
-        let session = restored
-            .peek_session(&target.to_string())
-            .await
-            .expect("restored session read")
-            .expect("restored session");
+        let rows = persisted_unacked(&fixture, &target).await;
         assert_eq!(
-            session.unacked_stanzas.len(),
+            rows.len(),
             1,
             "initial live-to-detached fallback appends once, alias and maintenance do not append"
         );
         // Native sm_unacked stores original_receipt_at_ms, not microseconds.
         assert_eq!(
-            session.unacked_stanzas[0]
-                .original_receipt_at
-                .timestamp_millis(),
+            rows[0].original_receipt_at.timestamp_millis(),
             received_at.timestamp_millis()
         );
-        let replay: minidom::Element = session.unacked_stanzas[0]
-            .stanza_xml
-            .parse()
-            .expect("restored copy");
+        let replay: minidom::Element = rows[0].stanza.wire().parse().expect("stored copy");
         let replay = xmpp_parsers::message::Message::try_from(replay).expect("replayed message");
         assert_eq!(
             replay.bodies.get(&xmpp_parsers::message::Lang::default()),

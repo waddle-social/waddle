@@ -622,10 +622,6 @@ impl<'a> PromotionBatchGuard<'a> {
     pub(crate) fn pop(&mut self) -> Option<DetachedSession> {
         self.sessions.pop_front()
     }
-
-    pub(crate) fn push(&mut self, session: DetachedSession) {
-        self.sessions.push_back(session);
-    }
 }
 
 impl Drop for PromotionBatchGuard<'_> {

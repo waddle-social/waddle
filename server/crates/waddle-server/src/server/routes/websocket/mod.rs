@@ -96,11 +96,6 @@ mod transport_xml;
 
 pub mod handlers;
 
-pub(crate) use cleanup::broadcast_unavailable_if_no_replacement;
-#[cfg(not(feature = "clustering"))]
-pub use cleanup::cleanup_muc_presence_for_jid;
-#[cfg(feature = "clustering")]
-pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
 pub(crate) use cleanup::redrive_local_muc_cleanup;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
@@ -121,7 +116,6 @@ pub(crate) use cleanup::{
 /// wedged room must not stall disconnect cleanup, the departure janitor, an
 /// administrative removal, or an explicit leave's wait-class bounce.
 pub(crate) const LEAVE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-pub(crate) use cleanup::TerminalRedriveOutcome;
 pub(crate) use cleanup::{
     broadcast_muc_leave_to_remaining_resumable, broadcast_muc_muji_clear_to_remaining_resumable,
     maybe_evict_empty_room, LeaveFanOutProgress,
