@@ -874,13 +874,21 @@ pub(super) async fn deliver_muc_user_message(
     }
 }
 
+/// The invitee and `<invite/>` element of an XEP-0045 mediated invitation.
+///
+/// The invitee is taken exactly under the identity profile
+/// ([`waddle_xmpp::identity::parse_bare_jid`]), never folded onto another
+/// address: an invitation grants room membership to the address it names.
+/// `None` when the message carries no invitation or its `to` is not a
+/// canonical bare JID. The C2S frame parser has already refused a client
+/// invitation whose `to` is outside the profile with `<jid-malformed/>`.
 pub(crate) fn mediated_invitee(message: &Message) -> Option<(jid::BareJid, minidom::Element)> {
     let x = message
         .payloads
         .iter()
         .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
     let invite = x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)?;
-    let to = invite.attr("to")?.parse::<jid::BareJid>().ok()?;
+    let to = waddle_xmpp::identity::parse_bare_jid(invite.attr("to")?).ok()?;
     Some((to, invite.clone()))
 }
 

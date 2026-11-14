@@ -1,7 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+use jid::BareJid;
 use thiserror::Error;
+
+use crate::identity::{parse_bare_jid, IdentityError};
 
 /// Errors that can occur when parsing or validating a data form.
 #[derive(Debug, Error)]
@@ -415,6 +418,30 @@ impl DataForm {
     /// Get a field's value as a boolean.
     pub fn bool(&self, var: &str) -> Option<bool> {
         self.field(var).and_then(|f| f.value_as_bool())
+    }
+
+    /// A field's first value as a bare JID under the identity profile
+    /// ([`crate::identity::parse_bare_jid`]): taken exactly as submitted,
+    /// apart from surrounding whitespace, and never folded onto another
+    /// address. `None` when the field is absent or its first value is empty.
+    pub fn bare_jid(&self, var: &str) -> Option<Result<BareJid, IdentityError>> {
+        let value = self.value(var)?.trim();
+        (!value.is_empty()).then(|| parse_bare_jid(value))
+    }
+
+    /// Every non-empty value of a field as bare JIDs under the same rule as
+    /// [`DataForm::bare_jid`]. `None` when the field is absent; the first
+    /// value outside the profile refuses the field.
+    pub fn bare_jids(&self, var: &str) -> Option<Result<Vec<BareJid>, IdentityError>> {
+        let values = self.values(var)?;
+        Some(
+            values
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(parse_bare_jid)
+                .collect(),
+        )
     }
 }
 

@@ -162,9 +162,10 @@ fn parse_target(
     if form.form_type != FormType::Submit || scalar(form, "FORM_TYPE")? != operation.node() {
         return Err(invalid_form("A matching submit FORM_TYPE is required"));
     }
-    let owner: BareJid = scalar(form, "owner")?
-        .parse()
-        .map_err(|_| invalid_form("owner must be a bare JID"))?;
+    // The owner is taken exactly under the identity profile, so a spelling
+    // preparation would change never selects another account's devices.
+    let owner: BareJid = waddle_xmpp::identity::parse_bare_jid(scalar(form, "owner")?)
+        .map_err(|_| invalid_form("owner must be a bare JID in canonical form"))?;
     if owner.node().is_none() || owner.domain() != &**domain {
         return Err(invalid_form("owner must be a local user bare JID"));
     }

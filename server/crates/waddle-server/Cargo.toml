@@ -57,6 +57,10 @@ waddle-ecdysis = { path = "../waddle-ecdysis" }
 # which only Cargo.lock fixes: a lockfile update of `jid`, `stringprep` or
 # `idna` is a codec-affecting change, never a routine dependency update.
 jid = { version = "=0.12.2", features = ["serde"] }
+# Compatibility decomposition for deriving ASCII account names from OIDC
+# display names (`auth::jid::username_to_localpart`); already in the lockfile
+# through `stringprep`.
+unicode-normalization = "0.1"
 dashmap = { workspace = true, features = ["raw-api"] }
 minidom = { workspace = true }
 

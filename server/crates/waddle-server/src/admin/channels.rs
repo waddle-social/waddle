@@ -881,10 +881,17 @@ fn parse_required_text(form: &DataForm, var: &str) -> Result<String, String> {
     parse_optional_text(form, var).ok_or_else(|| format!("'{var}' is required"))
 }
 
+/// A required bare-JID field, taken exactly under the identity profile
+/// ([`DataForm::bare_jid`]): a spelling preparation would change is refused
+/// rather than folded onto another account, room or space.
 fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String> {
-    let raw = parse_required_text(form, var)?;
-    raw.parse()
-        .map_err(|e| format!("'{var}' is not a valid bare JID '{raw}': {e}"))
+    parse_optional_bare_jid(form, var)?.ok_or_else(|| format!("'{var}' is required"))
+}
+
+fn parse_optional_bare_jid(form: &DataForm, var: &str) -> Result<Option<BareJid>, String> {
+    form.bare_jid(var)
+        .transpose()
+        .map_err(|error| format!("'{var}' is not a bare JID in canonical form: {error}"))
 }
 
 fn parse_optional_bool(form: &DataForm, var: &str) -> Result<Option<bool>, String> {
@@ -959,13 +966,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
             after_cursor: None,
         });
     }
-    let space_jid = match form.value("space_jid") {
-        Some(raw) if !raw.is_empty() => Some(
-            raw.parse::<BareJid>()
-                .map_err(|e| format!("space_jid invalid: {e}"))?,
-        ),
-        _ => None,
-    };
+    let space_jid = parse_optional_bare_jid(form, "space_jid")?;
     let prefix = form
         .value("prefix")
         .map(|s| s.trim().to_lowercase())
@@ -987,13 +988,7 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
     let topic = parse_optional_text(form, "topic");
-    let space_jid = match form.value("space_jid") {
-        Some(raw) if !raw.is_empty() => Some(
-            raw.parse::<BareJid>()
-                .map_err(|e| format!("space_jid invalid: {e}"))?,
-        ),
-        _ => None,
-    };
+    let space_jid = parse_optional_bare_jid(form, "space_jid")?;
     let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let channel_type =
         parse_optional_channel_type(form, "channel_type")?.unwrap_or(ChannelType::Text);
@@ -1015,21 +1010,14 @@ pub fn parse_group_dm_create_args(form: Option<&DataForm>) -> Result<GroupDmCrea
     let form = form.ok_or_else(|| "group-dm:create requires an args form".to_string())?;
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
-    let member_values = form
-        .values("member_jids")
-        .ok_or_else(|| "member_jids is required".to_string())?;
-    let mut member_jids = Vec::with_capacity(member_values.len());
-    for value in member_values
-        .iter()
-        .filter(|value| !value.trim().is_empty())
-    {
-        member_jids.push(
-            value
-                .trim()
-                .parse::<BareJid>()
-                .map_err(|e| format!("member_jids contains invalid JID '{value}': {e}"))?,
-        );
-    }
+    // Each member is taken exactly under the identity profile; a spelling
+    // preparation would change is refused, never folded onto an account.
+    let mut member_jids = form
+        .bare_jids("member_jids")
+        .ok_or_else(|| "member_jids is required".to_string())?
+        .map_err(|error| {
+            format!("member_jids contains a JID that is not in canonical form: {error}")
+        })?;
     member_jids.sort();
     member_jids.dedup();
     if member_jids.len() < 2 {

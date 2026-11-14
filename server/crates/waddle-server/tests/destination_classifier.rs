@@ -69,6 +69,43 @@ fn missing_and_home_server_addresses_are_handled_by_the_server() {
 }
 
 #[test]
+fn u_label_and_a_label_domains_classify_identically() {
+    // The identity profile's canonical domain is the A-label form; a parsed
+    // U-label address and its A-label spelling are one destination.
+    let served = ServedDomains::new(domain("xn--bcher-kva.example"))
+        .with_service(ServedService::Muc, domain("muc.xn--bcher-kva.example"));
+    for address in [
+        "alice@bücher.example",
+        "alice@xn--bcher-kva.example",
+        "alice@bücher.example.",
+    ] {
+        assert_eq!(
+            served.classify(Some(&jid(address))),
+            Destination::LocalBare("alice@xn--bcher-kva.example".parse().expect("bare")),
+            "{address}"
+        );
+    }
+    assert_eq!(
+        served.classify(Some(&jid("room@muc.bücher.example/nick"))),
+        Destination::Service {
+            service: ServedService::Muc,
+            address: jid("room@muc.xn--bcher-kva.example/nick"),
+        }
+    );
+    for address in ["bob@münchen.test", "bob@xn--mnchen-3ya.test"] {
+        let Destination::Remote(remote) = classify(address) else {
+            panic!("{address} must be remote");
+        };
+        assert_eq!(
+            remote.address(),
+            &jid("bob@xn--mnchen-3ya.test"),
+            "{address}"
+        );
+        assert_eq!(remote.domain().as_str(), "xn--mnchen-3ya.test");
+    }
+}
+
+#[test]
 fn local_account_addresses_keep_bare_and_full_semantics() {
     assert_eq!(
         classify("bob@example.com"),
@@ -210,6 +247,52 @@ fn ip_literals_and_unqualified_hosts_are_invalid_destinations() {
 }
 
 #[test]
+fn numeric_ipv4_forms_are_invalid_destinations() {
+    // ADR-0020 D3: names a resolver or URL parser reads as an IPv4 address
+    // are refused as peers, by the identity profile's classification.
+    for address in [
+        "2130706433",
+        "0x7f.1",
+        "127.1",
+        "bob@0x7f000001",
+        "bob@0x7f.0x1/phone",
+        "1.2.3.0x4",
+        "0177.0.0.1",
+        "bob@017700000001",
+        "01.2.3.4",
+        "remote.test.123",
+    ] {
+        assert_eq!(
+            classify(address),
+            Destination::Invalid {
+                address: jid(address),
+                reason: InvalidDestination::NumericIpv4Form,
+            },
+            "{address}"
+        );
+    }
+    // A label that merely starts with digits or `0x` is a DNS label.
+    for address in ["bob@0x7f.example", "bob@example.0xg", "bob@123abc.test"] {
+        assert!(
+            matches!(classify(address), Destination::Remote(_)),
+            "{address}"
+        );
+    }
+}
+
+#[test]
+fn domains_the_profile_cannot_prepare_are_invalid_destinations() {
+    // The `jid` parser accepts `_`; IDNA2008 with STD3 rules does not.
+    assert!(matches!(
+        classify("bob@exa_mple.test"),
+        Destination::Invalid {
+            reason: InvalidDestination::UnpreparableDomain,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_single_label_home_domain_is_still_local() {
     let served = ServedDomains::new(domain("localhost"))
         .with_service(ServedService::Muc, domain("muc.localhost"));
@@ -239,7 +322,9 @@ fn unroutable_request_error_is_swapped_bounded_and_locally_attributed() {
     for reason in [
         UnroutableReason::FederationDisabled,
         UnroutableReason::InvalidDestination(InvalidDestination::IpLiteral),
+        UnroutableReason::InvalidDestination(InvalidDestination::NumericIpv4Form),
         UnroutableReason::InvalidDestination(InvalidDestination::UnqualifiedHost),
+        UnroutableReason::InvalidDestination(InvalidDestination::UnpreparableDomain),
     ] {
         let request = ping_get("room@muc.remote.test/nick");
         let reply = unroutable_iq_reply(&request, &sender, sender.domain(), reason)

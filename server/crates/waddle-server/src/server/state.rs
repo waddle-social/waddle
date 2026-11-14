@@ -28,6 +28,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use waddle_xmpp::identity::{CanonicalBareJid, CanonicalDomain};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
 use waddle_xmpp::pubsub::PubSubStorage;
@@ -431,21 +432,32 @@ pub struct AppStateDeps {
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against
-/// `xmpp_domain`. Bad localparts produce a `warn!` and are skipped; they do
-/// not block startup.
+/// `xmpp_domain`, each built exactly from its parts under the identity
+/// profile, never folded onto another account. The localparts are canonical
+/// ([`bootstrap_membership::BootstrapMembershipConfig::try_from_env`]) and
+/// startup refuses a non-canonical domain; an address that still cannot be
+/// built produces a `warn!` and is skipped.
 pub fn resolve_server_owner_jids(
     config: &bootstrap_membership::BootstrapMembershipConfig,
     xmpp_domain: &str,
 ) -> Arc<[BareJid]> {
+    let domain = match CanonicalDomain::parse_canonical(xmpp_domain) {
+        Ok(domain) => domain,
+        Err(error) => {
+            warn!(
+                %error,
+                "skipping server-owner spaces affiliation seeding: the XMPP domain is not canonical",
+            );
+            return Arc::from(Vec::new());
+        }
+    };
     let mut jids = Vec::new();
     for localpart in config.owner_localparts() {
-        let raw = format!("{localpart}@{xmpp_domain}");
-        match raw.parse::<BareJid>() {
-            Ok(jid) => jids.push(jid),
+        match CanonicalBareJid::from_parts(localpart, &domain) {
+            Ok(jid) => jids.push(jid.into_bare_jid()),
             Err(error) => warn!(
                 localpart = %localpart,
-                xmpp_domain = %xmpp_domain,
-                error = %error,
+                %error,
                 "skipping invalid server-owner localpart for spaces affiliation seeding",
             ),
         }

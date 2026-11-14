@@ -1,5 +1,8 @@
 //! Offline evidence from the same decoded-element conversion as live C2S parsing.
 //! This inspects only top-level addresses; it does not establish identity or authority.
+//! Live parsing first applies the identity profile (`crate::identity`), which
+//! refuses or rewrites these addresses; this inspector deliberately skips that
+//! step so it can show what the `jid` parser alone does with an input.
 
 use jid::Jid;
 
