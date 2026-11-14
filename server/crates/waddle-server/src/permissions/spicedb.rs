@@ -10,6 +10,7 @@ use prescience::{
 use crate::config::SpiceDbConfig;
 
 use super::actor::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
+use super::authz_id::{decode_object, decode_subject, EncodedObjectId, EncodedSubjectId};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
 };
@@ -114,6 +115,9 @@ impl SpiceDbPermissionBackend {
                 msg.subject.clone(),
             )
         };
+        // Reject unencodable identifiers even when the swap is a no-op.
+        EncodedObjectId::encode(&msg.object)?;
+        EncodedSubjectId::encode(&msg.subject)?;
         if msg.expected.as_ref().map(|relation| &relation.name)
             == msg.replacement.as_ref().map(|relation| &relation.name)
         {
@@ -123,18 +127,18 @@ impl SpiceDbPermissionBackend {
             .family
             .iter()
             .map(|relation| {
-                let filter = exact_relationship_filter(&tuple_for(relation));
+                let filter = exact_relationship_filter(&tuple_for(relation))?;
                 let is_expected = msg
                     .expected
                     .as_ref()
                     .is_some_and(|expected| expected.name == relation.name);
-                if is_expected {
+                Ok(if is_expected {
                     Precondition::must_exist(filter)
                 } else {
                     Precondition::must_not_exist(filter)
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, PermissionError>>()?;
         let mut updates = Vec::new();
         if let Some(expected) = &msg.expected {
             updates.push(RelationshipUpdate::delete(relationship_from_tuple(
@@ -168,7 +172,7 @@ impl SpiceDbPermissionBackend {
         }
 
         self.client
-            .delete_relationships(exact_relationship_filter(tuple))
+            .delete_relationships(exact_relationship_filter(tuple)?)
             .await
             .map_err(map_spicedb_error)?;
         Ok(())
@@ -181,7 +185,7 @@ impl SpiceDbPermissionBackend {
     ) -> Result<Vec<String>, PermissionError> {
         let mut stream = self
             .client
-            .read_relationships(filter_for_object_and_subject(object, subject))
+            .read_relationships(filter_for_object_and_subject(object, subject)?)
             .consistency(Consistency::FullyConsistent)
             .send()
             .await
@@ -205,7 +209,7 @@ impl SpiceDbPermissionBackend {
     ) -> Result<Vec<Subject>, PermissionError> {
         let mut stream = self
             .client
-            .read_relationships(filter_for_object_and_relation(object, relation))
+            .read_relationships(filter_for_object_and_relation(object, relation)?)
             .consistency(Consistency::FullyConsistent)
             .send()
             .await
@@ -240,10 +244,7 @@ impl SpiceDbPermissionBackend {
             let item = item.map_err(map_spicedb_error)?;
             match item.permission {
                 PermissionResult::Allowed => {
-                    resources.push(Object::new(
-                        object_type,
-                        decode_spicedb_id(&item.resource_id),
-                    ));
+                    resources.push(object_from_resource_id(object_type, &item.resource_id)?);
                 }
                 PermissionResult::Denied => {}
                 PermissionResult::Conditional { missing_fields } => {
@@ -274,11 +275,7 @@ impl SpiceDbPermissionBackend {
             let item = item.map_err(map_spicedb_error)?;
             match item.permission {
                 PermissionResult::Allowed => {
-                    subjects.push(Subject {
-                        subject_type,
-                        id: decode_spicedb_id(&item.subject_id),
-                        relation: None,
-                    });
+                    subjects.push(subject_from_lookup_id(subject_type, &item.subject_id)?);
                 }
                 PermissionResult::Denied => {}
                 PermissionResult::Conditional { missing_fields } => {
@@ -292,7 +289,7 @@ impl SpiceDbPermissionBackend {
     async fn relationship_exists(&self, tuple: &Tuple) -> Result<bool, PermissionError> {
         let mut stream = self
             .client
-            .read_relationships(exact_relationship_filter(tuple))
+            .read_relationships(exact_relationship_filter(tuple)?)
             .consistency(Consistency::FullyConsistent)
             .limit(1)
             .send()
@@ -324,51 +321,52 @@ fn map_spicedb_error(error: prescience::Error) -> PermissionError {
     }
 }
 
-/// SpiceDB object IDs allow only `[a-zA-Z0-9/_|\\-=+]`. Bare JIDs contain
-/// `@` (the node/domain separator) and `.` (in DNS domain labels), neither of
-/// which is in that set. Encode at the SpiceDB wire boundary:
-///   `@` → `|`   (pipe is allowed; `@` is not)
-///   `.` → `=`   (equals is allowed; `.` is not; DNS domains cannot contain `=`)
-/// Both transforms are lossless for any id Waddle produces.
-fn encode_spicedb_id(id: &str) -> String {
-    id.replace('@', "|").replace('.', "=")
+pub(crate) fn object_reference(object: &Object) -> Result<ObjectReference, PermissionError> {
+    let id = EncodedObjectId::encode(object)?;
+    ObjectReference::new(object.object_type.to_string(), id.as_str())
+        .map_err(|e| PermissionError::InvalidObject(e.to_string()))
 }
 
-/// Inverse of [`encode_spicedb_id`]: restore `@` and `.` for ids read back
-/// from SpiceDB.
-fn decode_spicedb_id(id: &str) -> String {
-    id.replace('|', "@").replace('=', ".")
-}
-
-fn object_reference(object: &Object) -> Result<ObjectReference, PermissionError> {
-    ObjectReference::new(
-        object.object_type.to_string(),
-        encode_spicedb_id(&object.id),
-    )
-    .map_err(|e| PermissionError::InvalidObject(e.to_string()))
-}
-
-fn subject_reference(subject: &Subject) -> Result<SubjectReference, PermissionError> {
-    let object = ObjectReference::new(
-        subject.subject_type.to_string(),
-        encode_spicedb_id(&subject.id),
-    )
-    .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+pub(crate) fn subject_reference(subject: &Subject) -> Result<SubjectReference, PermissionError> {
+    let id = EncodedSubjectId::encode(subject)?;
+    let object = ObjectReference::new(subject.subject_type.to_string(), id.as_str())
+        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
     SubjectReference::new(object, subject.relation.clone())
         .map_err(|e| PermissionError::InvalidSubject(e.to_string()))
 }
 
-fn subject_from_reference(reference: &SubjectReference) -> Result<Subject, PermissionError> {
+/// Decode a relationship subject read back from SpiceDB. An ID that is not in
+/// the current encoding fails the whole read rather than being skipped or
+/// reinterpreted.
+pub(crate) fn subject_from_reference(
+    reference: &SubjectReference,
+) -> Result<Subject, PermissionError> {
     let subject_type = SubjectType::from_str(reference.object().object_type())
         .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
-    Ok(Subject {
+    Ok(decode_subject(
         subject_type,
-        id: decode_spicedb_id(reference.object().object_id()),
-        relation: reference.optional_relation().map(ToString::to_string),
-    })
+        reference.object().object_id(),
+        reference.optional_relation().map(ToString::to_string),
+    )?)
 }
 
-fn relationship_from_tuple(tuple: &Tuple) -> Result<Relationship, PermissionError> {
+/// Decode a `LookupResources` result for the requested object type.
+pub(crate) fn object_from_resource_id(
+    object_type: ObjectType,
+    resource_id: &str,
+) -> Result<Object, PermissionError> {
+    Ok(decode_object(object_type, resource_id)?)
+}
+
+/// Decode a `LookupSubjects` result for the requested subject type.
+pub(crate) fn subject_from_lookup_id(
+    subject_type: SubjectType,
+    subject_id: &str,
+) -> Result<Subject, PermissionError> {
+    Ok(decode_subject(subject_type, subject_id, None)?)
+}
+
+pub(crate) fn relationship_from_tuple(tuple: &Tuple) -> Result<Relationship, PermissionError> {
     Ok(Relationship::new(
         object_reference(&tuple.object)?,
         tuple.relation.name.clone(),
@@ -376,80 +374,42 @@ fn relationship_from_tuple(tuple: &Tuple) -> Result<Relationship, PermissionErro
     ))
 }
 
-fn exact_relationship_filter(tuple: &Tuple) -> RelationshipFilter {
-    let subject_filter = subject_filter(&tuple.subject);
-    RelationshipFilter::new(tuple.object.object_type.to_string())
-        .resource_id(encode_spicedb_id(&tuple.object.id))
-        .relation(tuple.relation.name.clone())
-        .subject_filter(subject_filter)
+pub(crate) fn exact_relationship_filter(
+    tuple: &Tuple,
+) -> Result<RelationshipFilter, PermissionError> {
+    let subject_filter = subject_filter(&tuple.subject)?;
+    Ok(
+        RelationshipFilter::new(tuple.object.object_type.to_string())
+            .resource_id(EncodedObjectId::encode(&tuple.object)?.as_str())
+            .relation(tuple.relation.name.clone())
+            .subject_filter(subject_filter),
+    )
 }
 
-fn filter_for_object_and_subject(object: &Object, subject: &Subject) -> RelationshipFilter {
-    RelationshipFilter::new(object.object_type.to_string())
-        .resource_id(encode_spicedb_id(&object.id))
-        .subject_filter(subject_filter(subject))
+pub(crate) fn filter_for_object_and_subject(
+    object: &Object,
+    subject: &Subject,
+) -> Result<RelationshipFilter, PermissionError> {
+    Ok(RelationshipFilter::new(object.object_type.to_string())
+        .resource_id(EncodedObjectId::encode(object)?.as_str())
+        .subject_filter(subject_filter(subject)?))
 }
 
-fn filter_for_object_and_relation(object: &Object, relation: &str) -> RelationshipFilter {
-    RelationshipFilter::new(object.object_type.to_string())
-        .resource_id(encode_spicedb_id(&object.id))
-        .relation(relation.to_string())
+pub(crate) fn filter_for_object_and_relation(
+    object: &Object,
+    relation: &str,
+) -> Result<RelationshipFilter, PermissionError> {
+    Ok(RelationshipFilter::new(object.object_type.to_string())
+        .resource_id(EncodedObjectId::encode(object)?.as_str())
+        .relation(relation.to_string()))
 }
 
-fn subject_filter(subject: &Subject) -> SubjectFilter {
+fn subject_filter(subject: &Subject) -> Result<SubjectFilter, PermissionError> {
     let filter = SubjectFilter::new(subject.subject_type.to_string())
-        .subject_id(encode_spicedb_id(&subject.id));
-    if let Some(relation) = &subject.relation {
+        .subject_id(EncodedSubjectId::encode(subject)?.as_str());
+    Ok(if let Some(relation) = &subject.relation {
         filter.relation(relation.clone())
     } else {
         filter
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{decode_spicedb_id, encode_spicedb_id};
-
-    #[test]
-    fn bare_jid_round_trips_through_encoding() {
-        let jid = "alice@example.com";
-        let encoded = encode_spicedb_id(jid);
-        assert_eq!(encoded, "alice|example=com");
-        assert_eq!(decode_spicedb_id(&encoded), jid);
-    }
-
-    #[test]
-    fn ids_without_at_or_dot_are_unchanged() {
-        // Channel/space ids that carry no `@` or `.` survive the boundary intact.
-        assert_eq!(encode_spicedb_id("penguin-club"), "penguin-club");
-        assert_eq!(decode_spicedb_id("penguin-club"), "penguin-club");
-    }
-
-    #[test]
-    fn muc_room_jid_round_trips() {
-        let room = "general@conference.example.com";
-        let encoded = encode_spicedb_id(room);
-        assert_eq!(encoded, "general|conference=example=com");
-        assert_eq!(decode_spicedb_id(&encoded), room);
-    }
-
-    #[test]
-    fn encoded_id_matches_spicedb_allowed_charset() {
-        // SpiceDB allows [a-zA-Z0-9/_|\\-=+]. Verify common JID forms pass.
-        let cases = [
-            "alice@waddle.social",
-            "david@rawkode.academy",
-            "bot@sub.domain.example.com",
-        ];
-        let allowed = |c: char| {
-            c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '|' | '\\' | '-' | '=' | '+')
-        };
-        for jid in cases {
-            let encoded = encode_spicedb_id(jid);
-            assert!(
-                encoded.chars().all(allowed),
-                "encoded JID {encoded:?} contains disallowed chars (input: {jid:?})"
-            );
-        }
-    }
+    })
 }

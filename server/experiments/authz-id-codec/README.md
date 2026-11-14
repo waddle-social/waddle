@@ -2,8 +2,10 @@
 
 This isolated, unpublished crate is a testable codec contract for issue #2047.
 It has its own workspace and lockfile, no production consumer, no network or
-storage client, and no activation path. The current production permission
-backend and its existing grants remain unchanged and potentially ambiguous.
+storage client, and no activation path. The production SpiceDB backend now uses
+the same `v2_` encoding from `waddle-server`'s `permissions::authz_id` module,
+with its own integration tests in `crates/waddle-server/tests/authz_id_codec.rs`;
+this crate remains only as the original isolated contract.
 
 ## Contract
 
