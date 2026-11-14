@@ -2,7 +2,7 @@
 
 Polar Huddle, Waddle's shared design foundation: a Panda CSS 2 preset (tokens,
 semantic tokens, text styles, keyframes, `wd-*` recipes, global CSS), the
-self-hosted fonts and the brand illustrations.
+Astro font families and the brand illustrations.
 
 ## Use it in an app
 
@@ -14,7 +14,8 @@ Add the workspace and Panda (exact versions):
 "devDependencies": {
   "@pandacss/dev": "2.5.0",
   "@pandacss/preset-base": "2.5.0",
-  "@pandacss/vite": "2.5.0"
+  "@pandacss/vite": "2.5.0",
+  "astro": "~7.3.8"
 }
 ```
 
@@ -35,10 +36,17 @@ export default defineConfig({
 Astro (7) and other Vite apps use `@pandacss/vite`, which runs codegen and CSS
 generation inline:
 
+Fonts use Astro's Fonts API (self-hosted at build time from Fontsource; never
+Google Fonts). `waddleFonts` defines `--font-display`, `--font-body` and
+`--font-mono`, which the Panda `fonts.*` tokens read.
+
 ```ts
 // astro.config.ts
+import { defineConfig } from 'astro/config'
 import panda from '@pandacss/vite'
-export default defineConfig({ vite: { plugins: [panda()] } })
+import { waddleFonts } from '@waddle/design/astro-fonts'
+
+export default defineConfig({ fonts: waddleFonts, vite: { plugins: [panda()] } })
 ```
 
 ```css
@@ -48,16 +56,20 @@ export default defineConfig({ vite: { plugins: [panda()] } })
 
 ```astro
 ---
-import '@waddle/design/fonts.css'
+import { Font } from 'astro:assets'
 import '../styles/global.css'
 import { btn } from '../../styled-system/recipes'
 ---
+<head>
+  <Font cssVariable="--font-display" preload />
+  <Font cssVariable="--font-body" preload />
+  <Font cssVariable="--font-mono" />
+</head>
 <button class={btn({ variant: 'primary' })}>Join huddle</button>
 ```
 
 Assets: `import mark from '@waddle/design/assets/waddle-mark.svg?url'` (or copy
-them from `design/assets/`). Fonts come only from `@fontsource-variable/*`;
-never load Google Fonts.
+them from `design/assets/`).
 
 ## Theming contract
 

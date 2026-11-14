@@ -40,6 +40,7 @@ export default defineConfig({
   expect(out).toContain('.wd-btn--variant_primary')
   expect(out).toContain('.wd-avatar--tint_6')
   expect(out).toContain('@keyframes wd-waddle')
+  expect(out).toContain('--fonts-display: var(--font-display)')
   // Every {category.path} reference resolved to a var().
   expect(out).not.toMatch(/\{(colors|spacing|sizes|radii|durations|easings|fonts|fontSizes|shadows|gradients|borderWidths)\.[^}]*\}/)
 })

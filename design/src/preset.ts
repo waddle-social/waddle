@@ -240,11 +240,11 @@ export const waddlePreset = definePreset({
             },
           },
         },
-        // Families registered by @fontsource-variable/* (see fonts.css).
+        // CSS variables set by the Astro Fonts API (see astro-fonts.ts).
         fonts: {
-          display: { value: '"Bricolage Grotesque Variable", "Atkinson Hyperlegible Next Variable", system-ui, -apple-system, "Segoe UI", sans-serif' },
-          body: { value: '"Atkinson Hyperlegible Next Variable", system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif' },
-          mono: { value: '"Atkinson Hyperlegible Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace' },
+          display: { value: 'var(--font-display)' },
+          body: { value: 'var(--font-body)' },
+          mono: { value: 'var(--font-mono)' },
         },
         // Variable fonts: any value 400–800 is valid.
         fontWeights: {
