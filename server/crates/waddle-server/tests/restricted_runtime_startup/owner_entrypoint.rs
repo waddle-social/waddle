@@ -200,9 +200,15 @@ fn login_url(base: &str, database: &str, login: &str, password: &str) -> String 
 
 /// The runtime login's URL through `endpoint`, with `schema` as its search
 /// path.
+///
+/// The URL names its host as well as its socket directory. Without one,
+/// the host a parser records defaults to `PGHOST`, which the Nix test lanes
+/// set: the cutover record is written in this process, which has it, while
+/// the subcommands run without any `PG*` variable, so the two would record
+/// different primary endpoints and the pinned preflight would refuse.
 fn runtime_url(endpoint: &SocketEndpoint, database: &str, runtime: &str, schema: &str) -> String {
     format!(
-        "postgresql:///{database}?host={}&port={}&user={runtime}&password={RUNTIME_PASSWORD}\
+        "postgresql://localhost/{database}?host={}&port={}&user={runtime}&password={RUNTIME_PASSWORD}\
          &options=-c%20search_path%3D{schema}",
         endpoint.directory.path().display(),
         endpoint.port,

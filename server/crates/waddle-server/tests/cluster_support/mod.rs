@@ -161,6 +161,7 @@ pub async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
     conn.execute("DELETE FROM clustering_peer_allowlist", ())
         .await
         .expect("clean allowlist");
+    clear_account_resources(db).await;
     for peer in &pool.peer_ids {
         conn.execute(
             "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
@@ -169,6 +170,43 @@ pub async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
         .await
         .expect("enroll peer");
     }
+}
+
+/// Remove every account's resource bindings and stream-management sessions
+/// that earlier tests left behind.
+///
+/// The claims those rows were held under are deleted above, so the rows
+/// name nodes that no longer exist. A node's expired-binding sweep takes
+/// over any account that still has such a binding, and keeps its claim for
+/// as long as a detached session there can resume. The account would then
+/// be owned by whichever node swept it first, not by the node its test binds
+/// it on, and the tests that place accounts on chosen nodes would observe
+/// another placement. The deletes carry the protocol-epoch proof the
+/// ingress-guarded tables require.
+async fn clear_account_resources(db: &Database) {
+    let mut tx = db.begin().await.expect("begin account reset");
+    tx.execute(
+        "SELECT pg_catalog.set_config('waddle.protocol_epoch', \
+             (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1), true), \
+           pg_catalog.set_config('waddle.protocol_epoch_xid', \
+             pg_catalog.pg_current_xact_id()::text, true)",
+        (),
+    )
+    .await
+    .expect("epoch proof");
+    for statement in [
+        "DELETE FROM account_resource_operations",
+        "DELETE FROM account_resource_bindings",
+        "DELETE FROM sm_unacked WHERE stream_id IN (SELECT session_id FROM sm_durable_sessions)",
+        "DELETE FROM sm_durable_operations",
+        "DELETE FROM sm_durable_sessions",
+        "DELETE FROM sm_sessions",
+    ] {
+        tx.execute(statement, ())
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    tx.commit().await.expect("commit account reset");
 }
 
 /// Reserve an ephemeral TCP port by binding and immediately releasing it.
