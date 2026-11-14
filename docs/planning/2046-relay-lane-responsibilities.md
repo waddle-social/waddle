@@ -306,6 +306,14 @@ Decided in [`2173-direct-lanes.md`](2173-direct-lanes.md).
   the message offline, as the relay does in the same configuration. A
   writer of the "hosted elsewhere" refusal. A sweep of unconsumed
   decisions.
+- **Below epoch 2.** The relay carries a bare-JID or full-JID stanza to
+  the account owner. The hop from the node that delivers a full-JID copy to
+  the binding the account coordinator names is a bound request when another
+  node hosts that binding, and it is carried only at epoch 2: below it the
+  resource is `Unavailable` and the origin runs its fallback. A full JID
+  is therefore delivered live below epoch 2 only when the origin or the
+  account owner hosts its binding
+  ([`2173-direct-lanes.md`](2173-direct-lanes.md#below-protocol-epoch-2)).
 - **Deletion precondition.** Every clustered deployment at epoch 2 or later,
   and remote channel mirrors retired; then removal of the `BareJid` and `FullJid`
   recipients with a version bump.
@@ -339,7 +347,7 @@ mailbox-epoch receiver uses the existing `UnsupportedEnvelope` reason.
 | Configuration | Groupchat | Join, presence, Muji | Bare and full JID |
 | --- | --- | --- | --- |
 | Clustered PostgreSQL, epoch ≥ 2 | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; the relay kinds are refused by the receiver, including the leave replayed at connection end | mailbox; relay for a remote-mirror origin, an account without a claim and a request that could not be committed |
-| Clustered PostgreSQL, epoch < 2 (no restricted owner phase) | relay | relay | relay |
+| Clustered PostgreSQL, epoch < 2 (no restricted owner phase) | relay | relay | relay to the account owner; a full JID bound on a node other than the one delivering the copy is `Unavailable` (offline storage, bounce or IQ error), because the bound request that would reach it is not carried |
 | Single node | none | none | none |
 
 `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`, which once kept every lane on the

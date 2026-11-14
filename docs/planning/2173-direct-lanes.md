@@ -207,6 +207,31 @@ decision is unknown.
   (`route_remote_resource_origin`).
 - A send for which the origin could not commit a request.
 
+## Below protocol epoch 2
+
+Two hops are involved in a delivery to a user another node serves, and
+the epoch gates them differently:
+
+- **To the account owner.** A bare-JID or full-JID stanza for an account
+  whose `UserActor` claim another node holds travels on the ordered relay
+  (`deliver_seeded_direct` returns `None`, and `deliver_seeded_remote`
+  sends the envelope). The account owner's receiver delivers a full JID to
+  a connection it hosts, or to the resource's detached session, and a bare
+  JID through the recipient pipeline.
+- **To the binding.** Whichever node delivers a full-JID copy (the origin,
+  or the account owner's receiver) delivers it to the binding the account
+  coordinator names (`deliver_to_bound_resource`,
+  `try_deliver_registered_remote_resource_at`). When another node hosts
+  that binding, the hop is a bound request, which is carried only at epoch
+  2 (`deliver_bound`). Below it the resource is `Unavailable`, and the
+  caller runs its fallback: offline storage for a message, a bounce, an
+  IQ error. The relay is not used for this hop.
+
+So below epoch 2 a full JID reaches a live connection only on the node
+that delivers the copy: the origin, or the account owner when the relay
+carried it there. A full JID bound on any other node is not delivered
+live.
+
 ## Bound requests
 
 With the account coordinator selected, a stanza for a full JID whose
@@ -247,8 +272,9 @@ V1037, now in `server/crates/waddle-server/sql/baseline/postgres.sql`).
   reads every refusal as `Unavailable`.
 - **Gate.** A bound request is carried only when the mailbox carries
   direct requests (D7). Otherwise the resource on the other node is
-  reported `Unavailable` and the caller runs its fallback; the remote
-  channel mirror is not used with the coordinator selected. A cluster
+  reported `Unavailable` and the caller runs its fallback; neither the
+  relay nor the remote channel mirror is used for this hop with the
+  coordinator selected (see [Below protocol epoch 2](#below-protocol-epoch-2)). A cluster
   test that expects live delivery to a full JID bound on another node
   therefore activates protocol epoch 2 first
   (`cluster_support::activate_mailbox_epoch`): the harness nodes start
