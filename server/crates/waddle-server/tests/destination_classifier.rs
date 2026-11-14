@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use jid::{BareJid, DomainPart, FullJid, Jid};
 use minidom::Element;
 use waddle_server::destination::{
-    offer_iq, unroutable_iq_reply, without_server_minted_credentials, Destination,
-    FederationDisabled, InvalidDestination, IqOffer, RemoteDestination, RemoteOutbound,
-    RemoteRoute, RemoteRouteOutcome, ServedDomains, ServedService, UnroutableReason,
-    REMOTE_ROUTE_OFFER_TIMEOUT,
+    offer_iq, offer_stanza, unroutable_iq_reply, unroutable_reply,
+    without_server_minted_credentials, Destination, FederationDisabled, InvalidDestination,
+    IqOffer, RemoteDestination, RemoteOutbound, RemoteRoute, RemoteRouteOutcome, ServedDomains,
+    ServedService, StanzaOffer, UnroutableReason, REMOTE_ROUTE_OFFER_TIMEOUT,
 };
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0199::NS_PING;
@@ -728,4 +728,155 @@ fn server_minted_jingle_credentials_are_removed_before_leaving_the_server() {
     // Other payloads pass through untouched.
     let ping = sent_ping("bob@remote.test/phone");
     assert_eq!(without_server_minted_credentials(ping.clone()), ping);
+}
+
+#[test]
+fn routing_refusals_name_their_rfc_6120_conditions() {
+    let home = domain(HOME);
+    let cases = [
+        (
+            UnroutableReason::PeerNotAdmitted,
+            ErrorType::Cancel,
+            DefinedCondition::RemoteServerNotFound,
+        ),
+        (
+            UnroutableReason::RefusedByPolicy,
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+        ),
+        (
+            UnroutableReason::EgressBusy,
+            ErrorType::Wait,
+            DefinedCondition::ResourceConstraint,
+        ),
+        (
+            UnroutableReason::InvalidRequest,
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+        ),
+    ];
+    for (reason, type_, condition) in cases {
+        let error = reason.stanza_error(&home);
+        assert_eq!(error.type_, type_, "{reason:?}");
+        assert_eq!(error.defined_condition, condition, "{reason:?}");
+        assert_eq!(error.by, Some(jid(HOME)), "{reason:?}");
+    }
+}
+
+fn outbound_message(type_: xmpp_parsers::message::MessageType) -> Stanza {
+    let mut message = Message::new_with_type(type_, Some(jid("bob@remote.test")));
+    message.from = Some(jid(SENDER));
+    message.id = Some(xmpp_parsers::message::Id("m1".into()));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), "hi".into());
+    Stanza::Message(message)
+}
+
+fn outbound_presence(type_: xmpp_parsers::presence::Type) -> Stanza {
+    let mut presence = xmpp_parsers::presence::Presence::new(type_);
+    presence.from = Some(jid(SENDER));
+    presence.to = Some(jid("bob@remote.test"));
+    presence.id = Some("p1".into());
+    Stanza::Presence(presence)
+}
+
+#[tokio::test]
+async fn messages_and_presence_to_a_remote_domain_are_answered_while_s2s_is_off() {
+    use xmpp_parsers::message::MessageType;
+    use xmpp_parsers::presence::Type;
+    for stanza in [
+        outbound_message(MessageType::Chat),
+        outbound_message(MessageType::Normal),
+        outbound_message(MessageType::Groupchat),
+        outbound_presence(Type::Subscribe),
+        outbound_presence(Type::Unsubscribed),
+        outbound_presence(Type::None),
+        outbound_presence(Type::Unavailable),
+    ] {
+        let offer = offer_stanza(
+            &FederationDisabled,
+            remote("bob@remote.test"),
+            stanza.clone(),
+            &domain(HOME),
+            REMOTE_ROUTE_OFFER_TIMEOUT,
+        )
+        .await;
+        let StanzaOffer::Refused {
+            reason,
+            reply: Some(reply),
+        } = offer
+        else {
+            panic!("a refusal with a reply for {stanza:?}");
+        };
+        assert_eq!(reason, UnroutableReason::FederationDisabled);
+        let (payloads, from, to) = match *reply {
+            Stanza::Message(message) => {
+                assert_eq!(message.type_, MessageType::Error);
+                assert_eq!(message.id, Some(xmpp_parsers::message::Id("m1".into())));
+                assert!(message.bodies.is_empty(), "the body is not echoed");
+                (message.payloads, message.from, message.to)
+            }
+            Stanza::Presence(presence) => {
+                assert_eq!(presence.type_, Type::Error);
+                assert_eq!(presence.id.as_deref(), Some("p1"));
+                (presence.payloads, presence.from, presence.to)
+            }
+            Stanza::Iq(_) => panic!("not an IQ"),
+        };
+        assert_eq!(from, Some(jid("bob@remote.test")));
+        assert_eq!(to, Some(jid(SENDER)));
+        let error = payloads
+            .into_iter()
+            .find_map(|payload| StanzaError::try_from(payload).ok())
+            .expect("a stanza error");
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::RemoteServerNotFound
+        );
+        assert_eq!(error.by, Some(jid(HOME)));
+    }
+}
+
+#[tokio::test]
+async fn an_error_stanza_to_a_remote_domain_is_never_answered() {
+    use xmpp_parsers::message::MessageType;
+    use xmpp_parsers::presence::Type;
+    for stanza in [
+        outbound_message(MessageType::Error),
+        outbound_presence(Type::Error),
+    ] {
+        let offer = offer_stanza(
+            &FederationDisabled,
+            remote("bob@remote.test"),
+            stanza.clone(),
+            &domain(HOME),
+            REMOTE_ROUTE_OFFER_TIMEOUT,
+        )
+        .await;
+        assert!(
+            matches!(offer, StanzaOffer::Refused { reply: None, .. }),
+            "{stanza:?}"
+        );
+        assert!(unroutable_reply(
+            &stanza,
+            &jid(SENDER),
+            &domain(HOME),
+            UnroutableReason::FederationDisabled
+        )
+        .is_none());
+    }
+}
+
+#[tokio::test]
+async fn offer_stanza_leaves_iqs_to_offer_iq() {
+    let offer = offer_stanza(
+        &FederationDisabled,
+        remote("bob@remote.test"),
+        Stanza::Iq(Box::new(sent_ping("bob@remote.test"))),
+        &domain(HOME),
+        REMOTE_ROUTE_OFFER_TIMEOUT,
+    )
+    .await;
+    assert!(matches!(offer, StanzaOffer::Unattributed));
 }
