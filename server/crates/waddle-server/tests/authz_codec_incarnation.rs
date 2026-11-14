@@ -203,10 +203,7 @@ struct LiveSpiceDb {
 
 impl LiveSpiceDb {
     async fn connect() -> Self {
-        let endpoint =
-            std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-        let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-            .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+        let (endpoint, preshared_key) = disposable_spicedb_env();
         let client = Client::builder(&endpoint, &preshared_key)
             .insecure(true)
             .build()
@@ -323,7 +320,7 @@ fn incarnation_outcome<M>(
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_marks_an_empty_store() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -334,7 +331,7 @@ async fn live_spicedb_marks_an_empty_store() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_accepts_a_marked_store_with_relationships() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -357,7 +354,7 @@ async fn live_spicedb_accepts_a_marked_store_with_relationships() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_an_unmarked_store_with_legacy_rows() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -382,7 +379,7 @@ async fn live_spicedb_refuses_an_unmarked_store_with_legacy_rows() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_another_codec_version() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -415,7 +412,7 @@ async fn live_spicedb_refuses_another_codec_version() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_racing_replicas_write_one_marker() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -452,4 +449,22 @@ async fn live_spicedb_racing_replicas_write_one_marker() {
     guard(&live.actor().await)
         .await
         .expect("marked store with grants");
+}
+
+/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
+/// the operator has declared the store disposable: these tests delete every
+/// relationship of the guarded definitions and both markers.
+fn disposable_spicedb_env() -> (String, String) {
+    assert_eq!(
+        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
+        Ok("1"),
+        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
+         relationship of the guarded definitions and both markers, so they only run against a \
+         store that is safe to wipe"
+    );
+    let endpoint =
+        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
+    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
+        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    (endpoint, preshared_key)
 }

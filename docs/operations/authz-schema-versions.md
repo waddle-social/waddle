@@ -218,7 +218,10 @@ is not one this server may write` with a `reason`, and fails startup:
   the ordinary newer-version refusal. Startup fails with `Failed to ensure
   permission schema: Authorization store refused: ...`, or with `Failed to
   record the permission schema version: ...` if the later release wrote its
-  schema while this replica was starting. Abandoning the upgrade instead is a
+  schema while this replica was starting. A stale ReadSchema after a direct
+  datastore reset can also raise this refusal when no later release was
+  deployed; the remedy then is restarting SpiceDB, not starting a later
+  release. Abandoning the upgrade instead is a
   schema downgrade: with the fleet stopped, an operator writes the schema of
   version K back (`zed schema write`, from the source of the release that
   recorded K); do not touch the marker.

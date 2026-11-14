@@ -468,10 +468,7 @@ struct LiveSpiceDb {
 impl LiveSpiceDb {
     /// An empty, unversioned store holding this build's schema.
     async fn connect() -> Self {
-        let endpoint =
-            std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-        let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-            .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+        let (endpoint, preshared_key) = disposable_spicedb_env();
         let client = Client::builder(&endpoint, &preshared_key)
             .insecure(true)
             .build()
@@ -635,7 +632,7 @@ async fn start(replica: &ActorRef<PermissionActor>) -> Result<(), AuthzSchemaVer
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_records_the_version_of_an_unversioned_store() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -648,7 +645,7 @@ async fn live_spicedb_records_the_version_of_an_unversioned_store() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_restart_at_the_same_version_leaves_the_schema() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -681,7 +678,7 @@ async fn live_spicedb_restart_at_the_same_version_leaves_the_schema() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_a_newer_version_without_overwriting_it() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -728,7 +725,7 @@ async fn live_spicedb_refuses_a_newer_version_without_overwriting_it() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_schema_writes_of_releases_before_versioning() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -751,7 +748,7 @@ async fn live_spicedb_refuses_schema_writes_of_releases_before_versioning() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_an_unrecognised_marker() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -781,7 +778,7 @@ async fn live_spicedb_refuses_an_unrecognised_marker() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_codec_refusal_leaves_the_legacy_schema_untouched() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -829,7 +826,7 @@ async fn live_spicedb_codec_refusal_leaves_the_legacy_schema_untouched() {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_refuses_an_unfinished_newer_upgrade_without_overwriting_it() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -893,7 +890,7 @@ async fn live_spicedb_refuses_an_unfinished_newer_upgrade_without_overwriting_it
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_racing_replicas_record_one_version() {
     let _serial = LIVE_SPICEDB.lock().await;
     let live = LiveSpiceDb::connect().await;
@@ -909,4 +906,22 @@ async fn live_spicedb_racing_replicas_record_one_version() {
         vec![SchemaMarkerRow::for_version(AUTHZ_SCHEMA_VERSION)]
     );
     start(&live.actor().await).await.expect("recorded store");
+}
+
+/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
+/// the operator has declared the store disposable: these tests delete every
+/// relationship of the guarded definitions and both markers.
+fn disposable_spicedb_env() -> (String, String) {
+    assert_eq!(
+        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
+        Ok("1"),
+        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
+         relationship of the guarded definitions and both markers, so they only run against a \
+         store that is safe to wipe"
+    );
+    let endpoint =
+        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
+    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
+        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    (endpoint, preshared_key)
 }

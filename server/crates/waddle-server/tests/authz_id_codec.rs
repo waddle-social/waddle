@@ -524,12 +524,9 @@ fn production_backend_rejects_unencodable_identifiers_before_any_request() {
 /// Exercises the codec against a real SpiceDB through the production actor.
 /// Point it at a disposable instance only: it rewrites the schema.
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_keeps_legacy_colliding_identities_distinct() {
-    let endpoint =
-        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    let (endpoint, preshared_key) = disposable_spicedb_env();
     // Writing the schema is refused while another codec's marker, a newer
     // schema-version marker, or relationships without a codec marker are
     // stored, which the other live tests sharing this SpiceDB leave behind.
@@ -666,4 +663,22 @@ async fn live_spicedb_keeps_legacy_colliding_identities_distinct() {
             .expect("check after delete")
             .allowed
     );
+}
+
+/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
+/// the operator has declared the store disposable: these tests delete every
+/// relationship of the guarded definitions and both markers.
+fn disposable_spicedb_env() -> (String, String) {
+    assert_eq!(
+        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
+        Ok("1"),
+        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
+         relationship of the guarded definitions and both markers, so they only run against a \
+         store that is safe to wipe"
+    );
+    let endpoint =
+        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
+    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
+        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    (endpoint, preshared_key)
 }

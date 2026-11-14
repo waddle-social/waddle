@@ -27,6 +27,7 @@
 postgres = { max-threads = 1 }
 # The ignored `live_spicedb_` tests share the one disposable SpiceDB named by
 # WADDLE_TEST_SPICEDB_ENDPOINT, and some empty it, so they run one at a time.
+# They refuse to run unless WADDLE_TEST_SPICEDB_DISPOSABLE=1 marks it wipeable.
 spicedb-live = { max-threads = 1 }
 
 # The clustering e2e binaries run an in-process + spawned-server cluster

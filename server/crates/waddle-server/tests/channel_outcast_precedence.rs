@@ -451,10 +451,7 @@ static LIVE_SPICEDB: Mutex<()> = Mutex::const_new(());
 /// The production backend against the disposable SpiceDB, with the built-in
 /// schema of this build installed.
 async fn live_backend() -> ActorRef<PermissionActor> {
-    let endpoint =
-        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    let (endpoint, preshared_key) = disposable_spicedb_env();
     let raw = Client::builder(&endpoint, &preshared_key)
         .insecure(true)
         .build()
@@ -489,36 +486,54 @@ async fn live_backend() -> ActorRef<PermissionActor> {
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_outcast_overrides_direct_channel_grants() {
     let _serial = LIVE_SPICEDB.lock().await;
     outcast_overrides_direct_channel_grants(&live_backend().await).await;
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_outcast_overrides_parent_space_grants() {
     let _serial = LIVE_SPICEDB.lock().await;
     outcast_overrides_parent_space_grants(&live_backend().await).await;
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_outcast_author_loses_edit_and_delete() {
     let _serial = LIVE_SPICEDB.lock().await;
     outcast_author_loses_edit_and_delete(&live_backend().await).await;
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_banned_moderator_cannot_delete_others_messages() {
     let _serial = LIVE_SPICEDB.lock().await;
     banned_moderator_cannot_delete_others_messages(&live_backend().await).await;
 }
 
 #[tokio::test]
-#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT and WADDLE_TEST_SPICEDB_PRESHARED_KEY"]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_removing_outcast_restores_access() {
     let _serial = LIVE_SPICEDB.lock().await;
     removing_outcast_restores_access(&live_backend().await).await;
+}
+
+/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
+/// the operator has declared the store disposable: these tests delete every
+/// relationship of the guarded definitions and both markers.
+fn disposable_spicedb_env() -> (String, String) {
+    assert_eq!(
+        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
+        Ok("1"),
+        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
+         relationship of the guarded definitions and both markers, so they only run against a \
+         store that is safe to wipe"
+    );
+    let endpoint =
+        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
+    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
+        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
+    (endpoint, preshared_key)
 }
