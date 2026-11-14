@@ -194,7 +194,7 @@ schema.#Project & {
 				// and uses the normal profile. The JSON round trip permits a
 				// lookup of a dependency the job does not have; CI checks the
 				// generated graph and its default-success gates.
-				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-16x32-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
