@@ -62,6 +62,13 @@ Environment (no flag; secret values are never printed):
                                   deployment; unset otherwise.
   WADDLE_SESSION_KEY              The server's session key. The VAPID signing
                                   key is sealed under it.
+  WADDLE_HOST_GRANT_RESTORE_EPOCH The declared host-grant restore epoch
+                                  (default 0). Above the epoch the database
+                                  records, the phase declares a restore of
+                                  the host-grant authority; below it, the
+                                  phase is refused. The servers must be
+                                  started with the same value. See
+                                  docs/operations/authz-host-grant-restore.md.
   WADDLE_DB_BASELINE_ACTION       Unset or `stamp`: an empty database is built
                                   from the schema baseline, and a database
                                   that holds the complete retired migration

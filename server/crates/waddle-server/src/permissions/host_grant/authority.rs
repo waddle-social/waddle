@@ -36,22 +36,39 @@
 //! canonical state again. While SpiceDB does not answer, the pass reports
 //! [`Reconciliation::ProjectionUnknown`] and the grant stays recorded and
 //! not effective; admission, which reads PostgreSQL only, is unaffected.
+//!
+//! A scope a restore transition closed is reconstructed by the same pass.
+//! When its marker was written under another authority incarnation, the
+//! pass first records what the projection proves the restored database
+//! lost (`restore::reconstruction_targets`: only lowerings, and the
+//! subjects only the projection holds, at `none` or `outcast`), then takes
+//! the projection over: it writes the current intent conditioned on exactly
+//! that marker, reads it back and activates it, which reopens the scope
+//! under the new incarnation. A marker that is missing after an activation
+//! or malformed, a family that holds what the projection never writes, and
+//! changes beyond the scope's row bound leave the scope closed.
+
+use std::collections::BTreeSet;
 
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 
 use super::error::HostGrantError;
-use super::issuance::IssuancePolicy;
+use super::issuance::{IssuanceBasis, IssuancePolicy};
 use super::marker::ProjectionMarker;
 use super::model::{
-    EnrollScope, GrantGeneration, MutationReceipt, ScopeLifecycleId, SetAffiliation,
+    EnrollScope, GrantGeneration, GrantOperationId, GrantSubject, MutationReceipt, RoomAffiliation,
+    ScopeLifecycleId, SetAffiliation,
 };
 use super::projection::{
-    MarkerObservation, ProjectionObservation, ProjectionPlan, ProjectionWrite,
+    MarkerObservation, ProjectedRelationship, ProjectionObservation, ProjectionPlan,
+    ProjectionRefusal, ProjectionWrite,
 };
+use super::restore::{reconstruction_targets, ReconstructScope, ReconstructionChange};
 use super::store::{Activation, HostGrantStore};
 use crate::permissions::{
-    ObserveHostGrantProjection, PermissionActor, PermissionError, WriteHostGrantProjection,
+    ObserveHostGrantProjection, PermissionActor, PermissionError, TakeOverHostGrantProjection,
+    WriteHostGrantProjection,
 };
 
 /// Projection state that no reconciliation pass may write over. The scope
@@ -77,6 +94,12 @@ pub enum ProjectionContradiction {
     /// holds relationships: the namespace a first projection requires to be
     /// empty is not.
     NamespaceNotFresh,
+    /// The projection a reconstruction would replace holds a relationship
+    /// the projection never writes, so what it records cannot be read.
+    MalformedFamily,
+    /// Recording every subject the projection a reconstruction would replace
+    /// holds would exceed the scope's grant-row bound.
+    ReconstructionTooLarge,
 }
 
 /// The result of one reconciliation pass.
@@ -208,6 +231,28 @@ impl HostGrantAuthority {
             .map_err(projection_store_error)
     }
 
+    /// Replace the projection of a scope a restore transition closed:
+    /// write `plan`'s intent conditioned on exactly `previous`, a marker of
+    /// another authority incarnation. An error other than a refusal leaves
+    /// the outcome unknown.
+    pub async fn take_over(
+        &self,
+        plan: &ProjectionPlan,
+        previous: &ProjectionMarker,
+    ) -> Result<ProjectionWrite, HostGrantError> {
+        if !plan.restored {
+            return Err(ProjectionRefusal::NotATakeover.into());
+        }
+        plan.intent.check_takes_over(previous)?;
+        self.permissions
+            .ask(TakeOverHostGrantProjection {
+                previous: previous.clone(),
+                intent: plan.intent.clone(),
+            })
+            .await
+            .map_err(projection_store_error)
+    }
+
     /// Whether `observation` shows exactly `plan`'s intent.
     pub fn verified(plan: &ProjectionPlan, observation: &ProjectionObservation) -> bool {
         VerifiedProjection::of(plan, observation).is_some()
@@ -243,6 +288,16 @@ impl HostGrantAuthority {
             }
             MarkerObservation::Present(marker) => {
                 if marker.incarnation != plan.marker().incarnation {
+                    if plan.restored {
+                        return self
+                            .reconstruct(
+                                plan,
+                                &observation.relationships,
+                                observation.malformed_family,
+                                marker,
+                            )
+                            .await;
+                    }
                     return Ok(Reconciliation::Contradiction(
                         ProjectionContradiction::ForeignIncarnation,
                     ));
@@ -322,6 +377,105 @@ impl HostGrantAuthority {
         Ok(outcomes)
     }
 
+    /// Reconstruct a scope a restore transition closed whose projection
+    /// holds `previous`, a marker of another authority incarnation.
+    ///
+    /// When the canonical journal does not record `previous`, the
+    /// projection reflects operations the restored database lost, and the
+    /// canonical grants are first lowered to what it holds; a subject only
+    /// the projection holds is recorded at `none` or `outcast` either way.
+    /// Those changes are one `reconstruct` operation, after which the pass
+    /// reads the plan again, takes the projection over, reads it back and
+    /// activates it. A change issuance refuses at its affiliation is
+    /// recorded lower, at `none` or `outcast`; one it refuses even there (a
+    /// service identity) is left out, and verification then reports the
+    /// relationship it leaves as a contradiction.
+    async fn reconstruct(
+        &self,
+        plan: ProjectionPlan,
+        observed: &BTreeSet<ProjectedRelationship>,
+        malformed_family: bool,
+        previous: ProjectionMarker,
+    ) -> Result<Reconciliation, HostGrantError> {
+        if malformed_family {
+            return Ok(Reconciliation::Contradiction(
+                ProjectionContradiction::MalformedFamily,
+            ));
+        }
+        let lifecycle = plan.marker().lifecycle;
+        let lost = self
+            .store
+            .recorded_marker(lifecycle, previous.generation)
+            .await?
+            .as_ref()
+            != Some(&previous);
+        let changes: Vec<ReconstructionChange> =
+            reconstruction_targets(&plan.intent, observed, lost)
+                .into_iter()
+                .filter_map(|target| {
+                    let subject = GrantSubject::from_storage(&target.subject)?;
+                    let (affiliation, basis) = self.issuable(&subject, target.affiliation)?;
+                    Some(ReconstructionChange {
+                        channel_id: target.channel_id,
+                        subject,
+                        affiliation,
+                        basis,
+                    })
+                })
+                .collect();
+        let mut plan = plan;
+        if !changes.is_empty() {
+            let command = ReconstructScope {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: plan.marker().generation,
+                replaced: previous.clone(),
+                changes,
+            };
+            match self.store.record_reconstruction(&command).await {
+                Ok(_) => {}
+                Err(HostGrantError::StaleGeneration { .. } | HostGrantError::ScopeNotRestored) => {
+                    return Ok(Reconciliation::Superseded)
+                }
+                Err(HostGrantError::GrantLimit) => {
+                    return Ok(Reconciliation::Contradiction(
+                        ProjectionContradiction::ReconstructionTooLarge,
+                    ))
+                }
+                Err(error) => return Err(error),
+            }
+            plan = self.store.projection_plan(lifecycle).await?;
+            if !plan.restored {
+                return Ok(Reconciliation::Superseded);
+            }
+        }
+        match self.take_over(&plan, &previous).await {
+            Ok(ProjectionWrite::Applied) => self.verify_and_activate(&plan, None).await,
+            // The marker changed since it was read: another pass took the
+            // projection over, or a writer replaced it. This pass stops.
+            Ok(ProjectionWrite::PreconditionFailed) => Ok(Reconciliation::Superseded),
+            Err(HostGrantError::Projection(refusal)) => Err(refusal.into()),
+            Err(_) => Ok(Reconciliation::ProjectionUnknown),
+        }
+    }
+
+    /// The affiliation and basis a reconstruction records for a subject: the
+    /// target when issuance accepts it, else no higher than `none`.
+    fn issuable(
+        &self,
+        subject: &GrantSubject,
+        target: RoomAffiliation,
+    ) -> Option<(RoomAffiliation, IssuanceBasis)> {
+        if let Ok(basis) = self.issuance.check(subject, target) {
+            return Some((target, basis));
+        }
+        let lowered = target.min(RoomAffiliation::None);
+        self.issuance
+            .check(subject, lowered)
+            .ok()
+            .map(|basis| (lowered, basis))
+    }
+
     /// Compare the projection with the plan and activate the exact
     /// operation. `observation` is reused when the caller has just read the
     /// projection and found the plan's own marker.
@@ -360,7 +514,7 @@ impl HostGrantAuthority {
 }
 
 /// A failed ask of the permission actor: the projection's answer is unknown.
-fn projection_store_error<M>(error: SendError<M, PermissionError>) -> HostGrantError {
+pub(super) fn projection_store_error<M>(error: SendError<M, PermissionError>) -> HostGrantError {
     match error {
         SendError::HandlerError(PermissionError::HostGrantProjection(refusal)) => {
             HostGrantError::Projection(refusal)

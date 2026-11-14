@@ -36,9 +36,9 @@ use waddle_server::permissions::host_grant::{
     GrantOperationId, GrantSubject, GrantSubjectError, HostGrantAction, HostGrantAttachment,
     HostGrantCommitFault, HostGrantError, HostGrantStore, IssuanceBasis, IssuancePolicy,
     IssuanceRefusal, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome, ProjectedGrant,
-    ProjectionIntent, ProjectionMarker, ProjectionRefusal, RetireScope, RoomAffiliation, ScopeKey,
-    ScopeLifecycleId, ServedAccountDomains, SubjectHome, HOST_GRANT_POLICY_VERSION,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    ProjectionIntent, ProjectionMarker, ProjectionRefusal, RestoreEpoch, RetireScope,
+    RoomAffiliation, ScopeKey, ScopeLifecycleId, ServedAccountDomains, SubjectHome,
+    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
 use waddle_server::permissions::{Object, ObjectType, PermissionError};
 use waddle_server::test_support::activate_host_grant_marker;
@@ -1431,12 +1431,12 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             component: "runtime role"
         })
     ));
-    let attachment = HostGrantAttachment::verify(&runtime, served())
+    let attachment = HostGrantAttachment::verify(&runtime, served(), RestoreEpoch::INITIAL)
         .await
         .expect("attachment of the restricted runtime role");
     assert_eq!(attachment.served(), &served());
     assert!(matches!(
-        HostGrantAttachment::verify(&fixture.store, served()).await,
+        HostGrantAttachment::verify(&fixture.store, served(), RestoreEpoch::INITIAL).await,
         Err(HostGrantError::UnsafeRuntimePrivileges {
             component: "runtime role"
         })

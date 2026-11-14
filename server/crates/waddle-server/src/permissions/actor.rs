@@ -8,8 +8,9 @@ use crate::db::Database;
 use std::sync::Arc;
 
 use super::host_grant::{
-    HostGrantStore, ProjectionIntent, ProjectionMarker, ProjectionObservation, ProjectionWrite,
-    ScopeLifecycleId, HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT,
+    HostGrantStore, ListedProjectionMarker, ProjectionIntent, ProjectionMarker,
+    ProjectionObservation, ProjectionWrite, ScopeLifecycleId,
+    HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
 use super::schema::SPICEDB_SCHEMA;
 use super::spicedb::SpiceDbPermissionBackend;
@@ -621,6 +622,72 @@ impl kameo::message::Message<WriteHostGrantProjection> for PermissionActor {
             backend?
                 .write_host_grant_projection(msg.previous.as_ref(), &msg.intent)
                 .await
+        })
+    }
+}
+
+/// Replace the projection of a host-grant scope that a restore transition
+/// closed: write its intent conditioned on the exact marker `previous`,
+/// which another authority incarnation wrote. An error leaves the outcome
+/// unknown. See `permissions::host_grant::restore`.
+pub struct TakeOverHostGrantProjection {
+    pub previous: ProjectionMarker,
+    pub intent: ProjectionIntent,
+}
+
+/// Runs on a task of its own, like [`WriteHostGrantProjection`].
+impl kameo::message::Message<TakeOverHostGrantProjection> for PermissionActor {
+    type Reply = kameo::reply::DelegatedReply<Result<ProjectionWrite, PermissionError>>;
+
+    async fn handle(
+        &mut self,
+        msg: TakeOverHostGrantProjection,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let backend = self.host_grant_projection_backend();
+        ctx.spawn(async move {
+            backend?
+                .take_over_host_grant_projection(&msg.previous, &msg.intent)
+                .await
+        })
+    }
+}
+
+/// Read every host-grant projection marker the store holds, for the restore
+/// fence a replica verifies when it starts. `None` when the backend holds no
+/// projection (the local backend). See `permissions::host_grant::restore`.
+pub struct ListHostGrantProjectionMarkers;
+
+/// Runs on a task of its own: the read is bounded as a whole, and the
+/// mailbox does not wait for it.
+impl kameo::message::Message<ListHostGrantProjectionMarkers> for PermissionActor {
+    type Reply =
+        kameo::reply::DelegatedReply<Result<Option<Vec<ListedProjectionMarker>>, PermissionError>>;
+
+    async fn handle(
+        &mut self,
+        _msg: ListHostGrantProjectionMarkers,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let backend = match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => Some(backend.as_ref().clone()),
+            PermissionActorBackend::Local { .. } => None,
+        };
+        ctx.spawn(async move {
+            let Some(backend) = backend else {
+                return Ok(None);
+            };
+            tokio::time::timeout(
+                HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+                backend.list_host_grant_projection_markers(),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(PermissionError::SpiceDbError(
+                    "the projection marker scan exceeded its bound".to_owned(),
+                ))
+            })
+            .map(Some)
         })
     }
 }

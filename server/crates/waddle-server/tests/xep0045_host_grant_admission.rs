@@ -45,7 +45,8 @@ use waddle_server::ingress::effects::ExternalEffect;
 use waddle_server::ingress::{IngressDecision, IngressDecisionClass, RoomExecutionPath};
 use waddle_server::permissions::host_grant::{
     Activation, GrantOperationId, HostGrantAction, HostGrantAttachment, HostGrantAuthority,
-    HostGrantError, HostGrantStore, MutationReceipt, Reconciliation, RetireScope, RoomAffiliation,
+    HostGrantError, HostGrantStore, MutationReceipt, Reconciliation, RestoreEpoch, RetireScope,
+    RoomAffiliation,
 };
 use waddle_server::permissions::{
     DeleteTuple, Object, ObjectType, PermissionActor, PermissionError, Relation,
@@ -1033,7 +1034,7 @@ async fn a_replica_admits_a_managed_room_only_after_it_verified_its_privileges()
     // The schema owner's login is not the restricted runtime role, so the
     // check a server runs when it starts yields no attachment for it.
     assert!(matches!(
-        HostGrantAttachment::verify(&fixture.store, served()).await,
+        HostGrantAttachment::verify(&fixture.store, served(), RestoreEpoch::INITIAL).await,
         Err(HostGrantError::UnsafeRuntimePrivileges { .. })
     ));
 

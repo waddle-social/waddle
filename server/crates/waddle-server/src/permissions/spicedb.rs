@@ -24,10 +24,11 @@ use super::authz_schema_version::{
     AUTHZ_SCHEMA_VERSION,
 };
 use super::host_grant::{
-    MarkerObservation, ProjectedRelationship, ProjectionIntent, ProjectionMarker,
-    ProjectionObservation, ProjectionRefusal, ProjectionWrite, RoomAffiliation, ScopeLifecycleId,
-    HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
-    HOST_GRANT_PROJECTION_RPC_TIMEOUT, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    ListedProjectionMarker, MarkerObservation, ProjectedRelationship, ProjectionIntent,
+    ProjectionMarker, ProjectionObservation, ProjectionRefusal, ProjectionWrite, RoomAffiliation,
+    ScopeLifecycleId, HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
+    HOST_GRANT_PROJECTION_RPC_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -774,6 +775,74 @@ impl SpiceDbPermissionBackend {
         intent: &ProjectionIntent,
     ) -> Result<ProjectionWrite, PermissionError> {
         intent.check_replaces(previous)?;
+        self.write_projection_request(previous, intent).await
+    }
+
+    /// Replace the projection of a scope a restore transition closed: write
+    /// its intent and its marker in one request conditioned on the exact
+    /// marker `previous`, which another authority incarnation wrote. See
+    /// `permissions::host_grant::restore`.
+    ///
+    /// `Ok` is an acknowledged outcome; an error after the request was sent
+    /// leaves the outcome unknown.
+    pub async fn take_over_host_grant_projection(
+        &self,
+        previous: &ProjectionMarker,
+        intent: &ProjectionIntent,
+    ) -> Result<ProjectionWrite, PermissionError> {
+        intent.check_takes_over(previous)?;
+        self.write_projection_request(Some(previous), intent).await
+    }
+
+    /// Read every projection marker the store holds, grouped by the
+    /// lifecycle its resource names, fully consistently and within
+    /// [`HOST_GRANT_RESTORE_SCAN_TIMEOUT`]. A resource that holds more than
+    /// one relationship, or one that is not a canonical marker, is
+    /// malformed.
+    pub async fn list_host_grant_projection_markers(
+        &self,
+    ) -> Result<Vec<ListedProjectionMarker>, PermissionError> {
+        let mut stream = self
+            .client
+            .read_relationships(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
+            .consistency(Consistency::FullyConsistent)
+            .timeout(HOST_GRANT_RESTORE_SCAN_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_spicedb_error)?;
+        let mut resources: std::collections::BTreeMap<String, Vec<Relationship>> =
+            std::collections::BTreeMap::new();
+        while let Some(item) = stream.next().await {
+            let relationship = item.map_err(map_spicedb_error)?.relationship;
+            resources
+                .entry(relationship.resource.object_id().to_owned())
+                .or_default()
+                .push(relationship);
+        }
+        Ok(resources
+            .into_iter()
+            .map(|(resource, relationships)| {
+                let lifecycle = ScopeLifecycleId::from_storage(&resource);
+                let marker = match (lifecycle, relationships.as_slice()) {
+                    (Some(lifecycle), [relationship]) => {
+                        parse_grant_projection_marker(lifecycle, relationship)
+                            .map_or(MarkerObservation::Malformed, MarkerObservation::Present)
+                    }
+                    _ => MarkerObservation::Malformed,
+                };
+                ListedProjectionMarker { lifecycle, marker }
+            })
+            .collect())
+    }
+
+    /// One projection write: the marker `previous` replaced (or, without
+    /// one, a fresh namespace required), the next marker touched, and the
+    /// whole affiliation family of every grant row stated.
+    async fn write_projection_request(
+        &self,
+        previous: Option<&ProjectionMarker>,
+        intent: &ProjectionIntent,
+    ) -> Result<ProjectionWrite, PermissionError> {
         intent.check_distinct()?;
         let mut preconditions = Vec::new();
         let mut updates = Vec::new();

@@ -161,6 +161,11 @@ pub enum ProjectionRefusal {
     TooLarge,
     #[error("the projection names a room or a subject's grant in a room more than once")]
     Repeated,
+    #[error(
+        "a takeover replaces only a marker of another authority incarnation, for a scope a \
+         restore transition closed"
+    )]
+    NotATakeover,
 }
 
 impl ProjectionIntent {
@@ -181,6 +186,22 @@ impl ProjectionIntent {
         }
         if previous.generation >= self.marker.generation {
             return Err(ProjectionRefusal::GenerationRegression);
+        }
+        Ok(())
+    }
+
+    /// Refuse a takeover that would not replace a marker of the same
+    /// lifecycle written under another authority incarnation. A takeover is
+    /// how reconstruction replaces the projection of a scope a restore
+    /// transition closed; the generations of two incarnations are not
+    /// compared, because the restored database may be older than the
+    /// projection it replaces.
+    pub fn check_takes_over(&self, previous: &ProjectionMarker) -> Result<(), ProjectionRefusal> {
+        if previous.lifecycle != self.marker.lifecycle {
+            return Err(ProjectionRefusal::LifecycleMismatch);
+        }
+        if previous.incarnation == self.marker.incarnation {
+            return Err(ProjectionRefusal::NotATakeover);
         }
         Ok(())
     }
@@ -211,6 +232,9 @@ pub struct ProjectionPlan {
     pub intent: ProjectionIntent,
     /// The latest generation whose projection was verified and activated.
     pub projected_generation: Option<GrantGeneration>,
+    /// Whether a restore transition closed the scope. Only such a scope's
+    /// projection may be taken over from another authority incarnation.
+    pub restored: bool,
 }
 
 impl ProjectionPlan {

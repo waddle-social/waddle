@@ -82,6 +82,11 @@ pub struct RestrictedRuntimeOwnerPlan {
     /// Root key the VAPID signing key is sealed under. The runtime must be
     /// started with the same session key.
     pub vapid_root_key: Vec<u8>,
+    /// The deployment's declared host-grant restore epoch. Above the epoch
+    /// the database records, the phase declares a restore of the host-grant
+    /// authority; below it, the phase is refused. The runtime must be
+    /// started with the same epoch.
+    pub host_grant_restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     /// Present when the runtime serves with clustering enabled.
     #[cfg(feature = "clustering")]
     pub clustering: Option<ClusteringOwnerPlan>,
@@ -230,6 +235,8 @@ pub enum RestrictedRuntimeOwnerError {
     WebhookDeliveries(#[source] DatabaseError),
     #[error("could not activate the ingress protocol epoch")]
     ProtocolEpochActivation(#[source] DatabaseError),
+    #[error("the host-grant restore incarnation could not be prepared")]
+    HostGrantRestore(#[source] crate::permissions::host_grant::HostGrantError),
     #[error(
         "the ingress protocol epoch row is missing, or records epoch {live} beyond the \
          {supported} this binary implements"
@@ -779,6 +786,8 @@ pub async fn prepare_restricted_runtime_owner(
         .await
         .map_err(RestrictedRuntimeOwnerError::WebhookDeliveries)?;
 
+    prepare_host_grant_restore(owner, plan).await?;
+
     grant_runtime(owner, &identity, plan).await?;
     verify_runtime_role(owner, &identity, plan).await?;
     activate_ingress_protocol_epoch(owner, &identity, &expected).await?;
@@ -791,6 +800,43 @@ pub async fn prepare_restricted_runtime_owner(
     }
 
     Ok(RestrictedRuntimeOwnerEvidence { lineage: expected })
+}
+
+/// Bind the host-grant authority to the declared restore epoch and the
+/// lineage attested above, and declare a restore when the plan's epoch
+/// exceeds the recorded one: a new incarnation, with every scope that is not
+/// retired or exhausted closed until its projection is rebuilt, verified and
+/// activated. A plan below the recorded epoch, and an adopted database whose
+/// restore was not declared, are refused. See
+/// `permissions::host_grant::restore`.
+async fn prepare_host_grant_restore(
+    owner: &Database,
+    plan: &RestrictedRuntimeOwnerPlan,
+) -> Result<(), RestrictedRuntimeOwnerError> {
+    use crate::permissions::host_grant::{HostGrantStore, RestoreDeclaration};
+    let store = HostGrantStore::open(owner.clone())
+        .map_err(RestrictedRuntimeOwnerError::HostGrantRestore)?;
+    match store
+        .prepare_restore_incarnation(plan.host_grant_restore_epoch)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::HostGrantRestore)?
+    {
+        RestoreDeclaration::Unchanged => {}
+        RestoreDeclaration::LineageBound => {
+            tracing::info!("bound the host-grant authority incarnation to the database lineage");
+        }
+        RestoreDeclaration::Transitioned {
+            epoch,
+            restored_scopes,
+            ..
+        } => tracing::warn!(
+            epoch = epoch.value(),
+            restored_scopes,
+            "declared a host-grant restore: a new authority incarnation is established and \
+             every restored scope admits nothing until its reconstruction is verified"
+        ),
+    }
+    Ok(())
 }
 
 /// Advance the ingress protocol epoch to the one this binary implements.

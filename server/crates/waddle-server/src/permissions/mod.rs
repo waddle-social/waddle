@@ -13,9 +13,10 @@ mod tuple;
 
 pub use actor::{
     CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation, EnsureSchema, ExclusiveRelationSwap,
-    ListRelations, ListSubjects, LookupResources, LookupSubjects, ObserveHostGrantProjection,
-    Permission, PermissionActor, RecordAuthzSchemaVersion, ReplaceExclusiveRelation,
-    SwapExclusiveRelation, WriteHostGrantProjection, WriteTuple,
+    ListHostGrantProjectionMarkers, ListRelations, ListSubjects, LookupResources, LookupSubjects,
+    ObserveHostGrantProjection, Permission, PermissionActor, RecordAuthzSchemaVersion,
+    ReplaceExclusiveRelation, SwapExclusiveRelation, TakeOverHostGrantProjection,
+    WriteHostGrantProjection, WriteTuple,
 };
 pub use authz_id::{
     decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, EncodedObjectId,

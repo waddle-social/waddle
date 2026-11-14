@@ -110,7 +110,7 @@ pub(super) async fn admit_host_grants(
     use super::host_grant_plan::{named_principals, reduce_to_audience};
     use crate::ingress_uow::HostGrantAdmissionRepository;
     use crate::permissions::host_grant::{
-        HostGrantAction, RoomAcceptance, RoomAdmission, RoomManagement,
+        AdmissionDenial, HostGrantAction, RoomAcceptance, RoomAdmission, RoomManagement,
     };
     use crate::server::routes::interpret::effects::RoomExecutionPath;
     let RoomExecutionPath::Local {
@@ -145,11 +145,17 @@ pub(super) async fn admit_host_grants(
             action: HostGrantAction::SendMessage,
             audience: named.as_deref().unwrap_or_default(),
             served: attachment.served(),
+            binding: attachment.binding(),
         },
     )
     .await?;
     let audience = match admission {
-        RoomAdmission::Denied(denial) => return refused(HostGrantRefusal::Denied(denial)),
+        RoomAdmission::Denied(denial) => {
+            if denial == AdmissionDenial::AuthorityChanged {
+                warn_authority_changed();
+            }
+            return refused(HostGrantRefusal::Denied(denial));
+        }
         RoomAdmission::Admitted { audience, .. } => audience,
     };
     if named.is_err() || !can_seal || manifest_snapshot.is_none() {
@@ -179,28 +185,51 @@ pub(super) async fn admit_host_grants(
 /// because this replica holds no host-grant attachment. Only the kind of
 /// the refusal is logged; the room and the sender are not.
 fn warn_authority_unavailable() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::OnceLock;
-    use std::time::{Duration, Instant};
-    const INTERVAL: Duration = Duration::from_secs(60);
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    // Milliseconds after `ORIGIN` at which the next warning may be logged.
+    use std::sync::atomic::AtomicU64;
     static NEXT_MS: AtomicU64 = AtomicU64::new(0);
-    let now =
-        u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX);
-    let due = NEXT_MS.load(Ordering::Relaxed);
-    let next = now.saturating_add(u64::try_from(INTERVAL.as_millis()).unwrap_or(u64::MAX));
-    if now >= due
-        && NEXT_MS
-            .compare_exchange(due, next, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
+    if rate_limited_warning_due(&NEXT_MS) {
         tracing::warn!(
             kind = "authority_unavailable",
             "A managed room's acceptance was refused: this replica has not verified its \
              runtime role's privileges on the host-grant store"
         );
     }
+}
+
+/// Log, at most once a minute, that a managed room's acceptance was refused
+/// because the authority is no longer the one this replica attached to.
+/// Only the kind of the refusal is logged.
+fn warn_authority_changed() {
+    use std::sync::atomic::AtomicU64;
+    static NEXT_MS: AtomicU64 = AtomicU64::new(0);
+    if rate_limited_warning_due(&NEXT_MS) {
+        tracing::error!(
+            kind = "authority_changed",
+            "A managed room's acceptance was refused: the host-grant incarnation, its restore \
+             epoch or the PostgreSQL server changed since this replica attached; restart the \
+             replica so that it verifies the restore fence again \
+             (docs/operations/authz-host-grant-restore.md)"
+        );
+    }
+}
+
+/// Whether a warning gated by `next_ms` may be logged now, at most once a
+/// minute. `next_ms` holds the milliseconds after a process-wide origin at
+/// which the next one may be logged.
+fn rate_limited_warning_due(next_ms: &std::sync::atomic::AtomicU64) -> bool {
+    use std::sync::atomic::Ordering;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    const INTERVAL: Duration = Duration::from_secs(60);
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let now =
+        u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX);
+    let due = next_ms.load(Ordering::Relaxed);
+    let next = now.saturating_add(u64::try_from(INTERVAL.as_millis()).unwrap_or(u64::MAX));
+    now >= due
+        && next_ms
+            .compare_exchange(due, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
 }
 
 /// An admitted acceptance for a managed room must freeze a manifest, and

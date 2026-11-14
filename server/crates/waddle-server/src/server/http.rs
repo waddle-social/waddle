@@ -894,7 +894,10 @@ const HOST_GRANT_ATTACH_RETRY_MAX: std::time::Duration = std::time::Duration::fr
 
 /// Let the ingress authority admit rooms that enrolled host-grant scopes
 /// manage, if this replica's runtime role holds exactly the grant store's
-/// privileges.
+/// privileges and the store records the replica's configured restore epoch.
+/// The attachment binds the authority incarnation, the epoch and the start
+/// of the PostgreSQL server it read; an acceptance that reads anything else
+/// is refused until the replica restarts.
 ///
 /// The first check runs before the WebSocket state exists, so when it
 /// passes no acceptance precedes it. A failure that may pass on a later
@@ -911,6 +914,7 @@ async fn attach_host_grant_store(
     ingress: &Arc<IngressAuthority>,
     state: &AppState,
     account_domain: waddle_xmpp::identity::CanonicalDomain,
+    restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     stop: tokio_util::sync::CancellationToken,
 ) {
     use crate::permissions::host_grant::{HostGrantStore, ServedAccountDomains};
@@ -918,7 +922,7 @@ async fn attach_host_grant_store(
         return;
     };
     let served = ServedAccountDomains::new([account_domain]);
-    if !try_attach_host_grant_store(ingress, &store, &served).await {
+    if !try_attach_host_grant_store(ingress, &store, &served, restore_epoch).await {
         return;
     }
     let ingress = Arc::clone(ingress);
@@ -929,7 +933,7 @@ async fn attach_host_grant_store(
                 () = stop.cancelled() => return,
                 () = tokio::time::sleep(delay) => {}
             }
-            if !try_attach_host_grant_store(&ingress, &store, &served).await {
+            if !try_attach_host_grant_store(&ingress, &store, &served, restore_epoch).await {
                 return;
             }
             delay = delay.saturating_mul(2).min(HOST_GRANT_ATTACH_RETRY_MAX);
@@ -943,9 +947,10 @@ async fn try_attach_host_grant_store(
     ingress: &IngressAuthority,
     store: &crate::permissions::host_grant::HostGrantStore,
     served: &crate::permissions::host_grant::ServedAccountDomains,
+    restore_epoch: crate::permissions::host_grant::RestoreEpoch,
 ) -> bool {
     use crate::permissions::host_grant::{HostGrantAttachment, HostGrantError};
-    match HostGrantAttachment::verify(store, served.clone()).await {
+    match HostGrantAttachment::verify(store, served.clone(), restore_epoch).await {
         Ok(attachment) => {
             ingress.attach_host_grants(attachment);
             false
@@ -970,8 +975,9 @@ async fn log_unverified_host_grant_store(
     error: &crate::permissions::host_grant::HostGrantError,
     retrying: bool,
 ) {
-    const UNVERIFIED: &str = "The runtime role's privileges on the host-grant store are not \
-                              verified; rooms of enrolled scopes are unavailable on this replica";
+    const UNVERIFIED: &str = "The runtime role's privileges on the host-grant store, or the \
+                              restore epoch it records, are not verified; rooms of enrolled \
+                              scopes are unavailable on this replica";
     match store.holds_unretired_scope().await {
         Ok(false) => info!(kind = error.kind(), retrying, "{UNVERIFIED}"),
         Ok(true) => tracing::error!(
@@ -1734,6 +1740,7 @@ async fn create_websocket_state(
         &ingress,
         &state,
         account_domain.clone(),
+        server_config.host_grant_restore_epoch,
         shutdown_handle.stop_token(),
     )
     .await;

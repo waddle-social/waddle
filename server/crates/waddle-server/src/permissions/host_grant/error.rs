@@ -5,6 +5,7 @@ use thiserror::Error;
 use super::issuance::IssuanceRefusal;
 use super::model::{GrantGeneration, GrantSubjectError};
 use super::projection::ProjectionRefusal;
+use super::restore::RestoreFenceRefusal;
 use crate::db::DatabaseError;
 use crate::ingress_substrate::{GuardedStoreWriterError, IngressSubstrateError};
 use crate::permissions::PermissionError;
@@ -40,11 +41,12 @@ pub enum HostGrantError {
     )]
     CommitOutcomeUnknown,
     /// PostgreSQL refused a statement for the role that ran it. Enrollment
-    /// and retirement write the lifecycle ledger, which the runtime role
-    /// only reads, so this is what either returns on a runtime handle.
+    /// and retirement write the lifecycle ledger, and a restore transition
+    /// the authority incarnation, which the runtime role only reads, so this
+    /// is what each returns on a runtime handle.
     #[error(
-        "PostgreSQL refused a statement of the operation for this role; enrollment and \
-         retirement run in the owner phase"
+        "PostgreSQL refused a statement of the operation for this role; enrollment, \
+         retirement and restore transitions run in the owner phase"
     )]
     OwnerPhaseRequired,
     #[error("a stored host-grant row has an invalid {field}")]
@@ -89,6 +91,14 @@ pub enum HostGrantError {
     GrantLimit,
     #[error("the scope is bound to another authority incarnation than the current one")]
     IncarnationChanged,
+    /// A reconstruction was asked for a scope that no restore transition
+    /// closed, or whose reconstruction was already activated.
+    #[error("the scope is not closed by a restore transition")]
+    ScopeNotRestored,
+    /// The authority is not served: a restore was not declared, or the
+    /// configuration does not match the declared one.
+    #[error(transparent)]
+    RestoreFence(#[from] RestoreFenceRefusal),
     #[error("the scope was enrolled under an admission policy this build does not evaluate")]
     PolicyVersionUnsupported,
     #[error(transparent)]
@@ -156,6 +166,8 @@ impl HostGrantError {
             Self::ScopeExhausted => "scope_exhausted",
             Self::GrantLimit => "grant_limit",
             Self::IncarnationChanged => "incarnation_changed",
+            Self::ScopeNotRestored => "scope_not_restored",
+            Self::RestoreFence(_) => "restore_fence",
             Self::PolicyVersionUnsupported => "policy_version_unsupported",
             Self::Subject(_) => "subject",
             Self::Issuance(_) => "issuance",

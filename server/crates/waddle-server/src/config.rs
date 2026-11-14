@@ -1177,6 +1177,10 @@ pub struct ServerConfig {
     /// Origins a browser sign-in may return to: the origin of `base_url`
     /// plus every origin in `WADDLE_CORS_ORIGINS`.
     pub trusted_web_origins: TrustedWebOrigins,
+    /// The declared host-grant restore epoch
+    /// ([`HOST_GRANT_RESTORE_EPOCH_ENV`]). A replica serves only a canonical
+    /// grant store established under this epoch.
+    pub host_grant_restore_epoch: crate::permissions::host_grant::RestoreEpoch,
 }
 
 /// Dedicated ingress authority transaction limits.
@@ -1433,6 +1437,36 @@ fn parse_occupant_id_secret(raw: Option<&str>) -> Result<OccupantIdSecret, Strin
     })
 }
 
+/// The deployment's declared host-grant restore epoch: zero, or unset,
+/// until the first restore is declared, and raised for each later one. The
+/// owner phase and every replica must be configured with the same value. See
+/// `docs/operations/authz-host-grant-restore.md`.
+pub const HOST_GRANT_RESTORE_EPOCH_ENV: &str = "WADDLE_HOST_GRANT_RESTORE_EPOCH";
+
+/// The declared host-grant restore epoch from
+/// [`HOST_GRANT_RESTORE_EPOCH_ENV`]; [`RestoreEpoch::INITIAL`] when unset.
+///
+/// [`RestoreEpoch::INITIAL`]: crate::permissions::host_grant::RestoreEpoch::INITIAL
+pub fn host_grant_restore_epoch_from_env(
+) -> Result<crate::permissions::host_grant::RestoreEpoch, String> {
+    parse_host_grant_restore_epoch(std::env::var(HOST_GRANT_RESTORE_EPOCH_ENV).ok().as_deref())
+}
+
+fn parse_host_grant_restore_epoch(
+    raw: Option<&str>,
+) -> Result<crate::permissions::host_grant::RestoreEpoch, String> {
+    use crate::permissions::host_grant::RestoreEpoch;
+    match raw {
+        None => Ok(RestoreEpoch::INITIAL),
+        Some(value) => RestoreEpoch::parse(value).ok_or_else(|| {
+            format!(
+                "{HOST_GRANT_RESTORE_EPOCH_ENV} must be a decimal integer from 0 to {}",
+                u32::MAX
+            )
+        }),
+    }
+}
+
 const SESSION_KEY_MIN_BYTES: usize = 32;
 
 /// The session key from `WADDLE_SESSION_KEY`, under the rules the server
@@ -1683,6 +1717,7 @@ impl Default for ServerConfig {
             apns: None,
             fcm: None,
             trusted_web_origins: test_trusted_web_origins(),
+            host_grant_restore_epoch: crate::permissions::host_grant::RestoreEpoch::INITIAL,
         }
     }
 }
@@ -1728,6 +1763,7 @@ impl ServerConfig {
             std::env::var("WADDLE_CORS_ORIGINS").ok().as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        let host_grant_restore_epoch = host_grant_restore_epoch_from_env()?;
 
         Ok(Self {
             mode,
@@ -1745,6 +1781,7 @@ impl ServerConfig {
             apns,
             fcm,
             trusted_web_origins,
+            host_grant_restore_epoch,
         })
     }
 
@@ -1788,6 +1825,7 @@ impl ServerConfig {
             apns: None,
             fcm: None,
             trusted_web_origins: test_trusted_web_origins(),
+            host_grant_restore_epoch: crate::permissions::host_grant::RestoreEpoch::INITIAL,
         }
     }
 
@@ -1809,6 +1847,7 @@ impl ServerConfig {
             apns: None,
             fcm: None,
             trusted_web_origins: test_trusted_web_origins(),
+            host_grant_restore_epoch: crate::permissions::host_grant::RestoreEpoch::INITIAL,
         }
     }
 }

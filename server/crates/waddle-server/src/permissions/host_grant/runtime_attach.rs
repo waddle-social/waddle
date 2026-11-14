@@ -14,9 +14,17 @@
 //! [`HostGrantAttachment`]. An acceptance transaction admits a managed room
 //! only on a replica that holds one, so a replica whose runtime role does
 //! not match the profile treats every enrolled scope as unavailable.
+//!
+//! The attachment also binds the replica to the authority as it found it:
+//! the incarnation, the restore epoch, which must be the replica's
+//! configured one, and the start of the PostgreSQL server
+//! ([`AuthorityBinding`]). Every acceptance compares them with what it
+//! reads, so a restore transition, or a restore or restart of the database
+//! under a running replica, stops that replica admitting managed rooms.
 
 use super::error::HostGrantError;
 use super::issuance::ServedAccountDomains;
+use super::restore::{AuthorityBinding, RestoreEpoch, RestoreFenceRefusal};
 use super::store::HostGrantStore;
 use crate::db::read_only_timeout::{bound_postgres_waits, ReadOnlyTimeoutError};
 use crate::db::{runtime_store_acl, Database, DatabaseDriver, Transaction};
@@ -31,29 +39,79 @@ use crate::db::{runtime_store_acl, Database, DatabaseDriver, Transaction};
 #[derive(Clone, Debug)]
 pub struct HostGrantAttachment {
     served: ServedAccountDomains,
+    binding: Option<AuthorityBinding>,
 }
 
 impl HostGrantAttachment {
-    /// Verify the role of `store`'s handle against the runtime profile.
+    /// Verify the role of `store`'s handle against the runtime profile, and
+    /// bind the attachment to the authority it reads: the restore epoch the
+    /// authority records must be `configured`, the replica's own.
     pub async fn verify(
         store: &HostGrantStore,
         served: ServedAccountDomains,
+        configured: RestoreEpoch,
     ) -> Result<Self, HostGrantError> {
         store.verify_runtime_privileges().await?;
-        Ok(Self { served })
+        let binding = bind(store, configured).await?;
+        Ok(Self {
+            served,
+            binding: Some(binding),
+        })
     }
 
-    /// An attachment without the privilege check, for suites whose database
-    /// login owns the schema it tests.
+    /// An attachment without the privilege check and without a binding, for
+    /// suites whose database login owns the schema it tests.
     #[cfg(feature = "test-support")]
     pub fn unverified_for_test(served: ServedAccountDomains) -> Self {
-        Self { served }
+        Self {
+            served,
+            binding: None,
+        }
+    }
+
+    /// An attachment without the privilege check, bound as
+    /// [`Self::verify`] binds one, for suites whose database login owns the
+    /// schema it tests.
+    #[cfg(feature = "test-support")]
+    pub async fn bound_for_test(
+        store: &HostGrantStore,
+        served: ServedAccountDomains,
+        configured: RestoreEpoch,
+    ) -> Result<Self, HostGrantError> {
+        let binding = bind(store, configured).await?;
+        Ok(Self {
+            served,
+            binding: Some(binding),
+        })
     }
 
     /// The account domains this replica serves.
     pub fn served(&self) -> &ServedAccountDomains {
         &self.served
     }
+
+    /// The authority this replica verified, which every acceptance compares
+    /// with what it reads.
+    pub fn binding(&self) -> Option<&AuthorityBinding> {
+        self.binding.as_ref()
+    }
+}
+
+/// Read the authority's binding and refuse one established under another
+/// restore epoch than the replica's configured one.
+async fn bind(
+    store: &HostGrantStore,
+    configured: RestoreEpoch,
+) -> Result<AuthorityBinding, HostGrantError> {
+    let binding = store.authority_binding().await?;
+    if binding.restore_epoch != configured {
+        return Err(RestoreFenceRefusal::EpochMismatch {
+            configured,
+            stored: binding.restore_epoch,
+        }
+        .into());
+    }
+    Ok(binding)
 }
 
 /// Every host-grant relation, locked before the catalog is read.

@@ -184,11 +184,12 @@ pub async fn start_with_config_and_owner_outbox(
     // PostgreSQL holds the canonical grants of enrolled host-grant scopes.
     // Legacy tuple writes to their objects are refused from that store, so
     // the refusal survives a restart; SQLite holds no such scope.
-    let permission_actor_impl =
-        match crate::permissions::host_grant::HostGrantStore::open((*global_db).clone()) {
-            Ok(store) => permission_actor_impl.with_host_grant_store(store),
-            Err(_) => permission_actor_impl,
-        };
+    let host_grant_store =
+        crate::permissions::host_grant::HostGrantStore::open((*global_db).clone()).ok();
+    let permission_actor_impl = match &host_grant_store {
+        Some(store) => permission_actor_impl.with_host_grant_store(store.clone()),
+        None => permission_actor_impl,
+    };
     info!(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"
@@ -215,6 +216,31 @@ pub async fn start_with_config_and_owner_outbox(
         .map_err(|error| {
             anyhow::anyhow!("Failed to record the permission schema version: {error}")
         })?;
+    // Refuse to serve a canonical grant store that is an undeclared restore
+    // of the live one, or that was established under another restore epoch
+    // than this server's; see `permissions::host_grant::restore`. The error
+    // names no identifiers.
+    if let Some(store) = &host_grant_store {
+        let report = crate::permissions::host_grant::verify_restore_fence(
+            store,
+            &permission_actor,
+            server_config.host_grant_restore_epoch,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "The host-grant authority failed its restore fence ({}): {error}",
+                error.kind()
+            )
+        })?;
+        if report.awaiting_reconstruction > 0 {
+            info!(
+                scopes = report.awaiting_reconstruction,
+                "Host-grant scopes closed by a restore transition admit nothing until their \
+                 reconstruction is verified and activated"
+            );
+        }
+    }
     // Membership reconciliation (reads every user row and provisions
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must

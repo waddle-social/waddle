@@ -363,6 +363,13 @@ pub enum OperationKind {
     /// The scope had no working generation left for the command and was
     /// closed instead.
     Exhaust,
+    /// A restore transition bound the scope to a new authority incarnation
+    /// and closed it until a verified reconstruction.
+    Restore,
+    /// A reconstruction lowered grants to what the projection of an earlier
+    /// incarnation shows, and recorded the subjects only the projection
+    /// held, before the projection is rebuilt from the canonical rows.
+    Reconstruct,
 }
 
 impl OperationKind {
@@ -372,6 +379,8 @@ impl OperationKind {
             Self::SetAffiliation => "set_affiliation",
             Self::Retire => "retire",
             Self::Exhaust => "exhaust",
+            Self::Restore => "restore",
+            Self::Reconstruct => "reconstruct",
         }
     }
 
@@ -381,6 +390,8 @@ impl OperationKind {
             Self::SetAffiliation,
             Self::Retire,
             Self::Exhaust,
+            Self::Restore,
+            Self::Reconstruct,
         ]
         .into_iter()
         .find(|kind| kind.as_storage() == value)
@@ -439,6 +450,10 @@ pub enum ClosedReason {
     Enrolled,
     Retired,
     Exhausted,
+    /// A restore transition bound it to a new authority incarnation. It
+    /// admits nothing until its projection has been rebuilt from the
+    /// canonical rows, verified and activated under that incarnation.
+    Restored,
 }
 
 impl ClosedReason {
@@ -447,13 +462,19 @@ impl ClosedReason {
             Self::Enrolled => "enrolled",
             Self::Retired => "retired",
             Self::Exhausted => "exhausted",
+            Self::Restored => "restored",
         }
     }
 
     pub(crate) fn from_storage(value: &str) -> Option<Self> {
-        [Self::Enrolled, Self::Retired, Self::Exhausted]
-            .into_iter()
-            .find(|reason| reason.as_storage() == value)
+        [
+            Self::Enrolled,
+            Self::Retired,
+            Self::Exhausted,
+            Self::Restored,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_storage() == value)
     }
 }
 

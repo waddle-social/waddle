@@ -25,6 +25,11 @@
 //! - A replica admits a managed room only after it verified its runtime
 //!   role's privileges on the store when it started
 //!   ([`HostGrantAttachment`]).
+//! - A restore of PostgreSQL cannot reopen authority a later revoke closed:
+//!   the authority incarnation is bound to the declared restore epoch, the
+//!   database lineage and the projection markers, a declared restore closes
+//!   every scope under a new incarnation, and a closed scope reopens only
+//!   through a verified reconstruction (`restore`).
 //!
 //! The decisions behind the lock order, the store capabilities and the
 //! marker protocol are recorded in
@@ -40,6 +45,7 @@ mod marker;
 mod model;
 mod policy;
 mod projection;
+mod restore;
 mod runtime_attach;
 mod store;
 
@@ -70,6 +76,11 @@ pub use projection::{
     MarkerObservation, ProjectedGrant, ProjectedRelationship, ProjectionIntent,
     ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite,
     HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
+};
+pub use restore::{
+    reconstruction_targets, verify_restore_fence, AuthorityBinding, ListedProjectionMarker,
+    ReconstructionTarget, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal,
+    RestoreFenceReport, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
 pub use runtime_attach::HostGrantAttachment;
 #[cfg(feature = "test-support")]

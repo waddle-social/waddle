@@ -107,7 +107,9 @@ pub(super) fn host_grant_refusal_class(
         HostGrantRefusal::Denied(AdmissionDenial::SenderNotAdmitted) => {
             IngressDecisionClass::AuthorizationDenied
         }
-        HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed)
+        HostGrantRefusal::Denied(
+            AdmissionDenial::ScopeClosed | AdmissionDenial::AuthorityChanged,
+        )
         | HostGrantRefusal::AuthorityUnavailable
         | HostGrantRefusal::UnsupportedAcceptance => IngressDecisionClass::PolicyDenied,
     }
@@ -120,8 +122,9 @@ pub(super) fn host_grant_refusal_class(
 /// - The sender holds no grant that allows the send: `forbidden`, type
 ///   `auth`.
 /// - The scope admits nothing, this replica has not verified its privileges
-///   on the grant store, or the acceptance is not one a managed room takes:
-///   `service-unavailable`, type `cancel`.
+///   on the grant store or no longer reads the authority it verified, or
+///   the acceptance is not one a managed room takes: `service-unavailable`,
+///   type `cancel`.
 ///
 /// A committed denial owns the stanza's origin identity: a retransmission
 /// resolves to it and is answered with the same error whatever has changed
@@ -138,7 +141,9 @@ pub(super) fn host_grant_refused_plan(
         HostGrantRefusal::Denied(AdmissionDenial::SenderNotAdmitted) => {
             (FrozenStanzaErrorType::Auth, StanzaErrorCondition::Forbidden)
         }
-        HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed)
+        HostGrantRefusal::Denied(
+            AdmissionDenial::ScopeClosed | AdmissionDenial::AuthorityChanged,
+        )
         | HostGrantRefusal::AuthorityUnavailable
         | HostGrantRefusal::UnsupportedAcceptance => (
             FrozenStanzaErrorType::Cancel,
