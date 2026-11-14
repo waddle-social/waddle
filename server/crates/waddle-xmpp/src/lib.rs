@@ -28,6 +28,7 @@ pub mod c2s;
 pub mod carbons;
 pub mod commands;
 pub mod disco;
+pub mod identity;
 pub mod inbox;
 pub mod ingress;
 pub mod mam;

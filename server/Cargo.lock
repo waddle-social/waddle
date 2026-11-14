@@ -7878,6 +7878,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "html-escape",
+ "idna",
  "jid",
  "jsonwebtoken",
  "kameo",

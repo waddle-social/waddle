@@ -14,13 +14,34 @@ fn parses_open_frame() {
 }
 
 #[test]
-fn open_from_is_a_normalized_bare_jid() {
-    let xml = "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='Ali&#99;e@EXAMPLE.com'/>";
-    match parse_frame(xml).expect("valid stream open") {
-        InboundFrame::Open { from: Some(from) } => {
-            assert_eq!(from.to_string(), "alice@example.com")
+fn open_from_is_a_canonical_bare_jid() {
+    for from in [
+        "alice@example.com",
+        "ali&#99;e@example.com",
+        "alice@example.com.",
+    ] {
+        let xml = format!("<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='{from}'/>");
+        match parse_frame(&xml).expect("valid stream open") {
+            InboundFrame::Open { from: Some(from) } => {
+                assert_eq!(from.to_string(), "alice@example.com")
+            }
+            other => panic!("unexpected frame: {other:?}"),
         }
-        other => panic!("unexpected frame: {other:?}"),
+    }
+}
+
+#[test]
+fn open_from_refuses_spellings_preparation_would_fold() {
+    for from in [
+        "Ali&#99;e@EXAMPLE.com",
+        "alice@EXAMPLE.com",
+        "stra&#xDF;e@example.com",
+    ] {
+        let xml = format!("<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='{from}'/>");
+        assert!(
+            matches!(parse_frame(&xml), Err(ParseError::InvalidOpenFrom)),
+            "{from:?}"
+        );
     }
 }
 
