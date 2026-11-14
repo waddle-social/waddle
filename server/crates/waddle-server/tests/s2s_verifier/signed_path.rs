@@ -44,10 +44,7 @@ fn mutual_tls_authenticates_each_domain_in_its_role() {
         assert_eq!(receiver.role(), CertificateRole::TlsServer);
         assert_eq!(receiver.profile(), fixture.kind);
         assert_eq!(receiver.matched_identifier(), MatchedIdentifier::DnsId);
-        assert_eq!(
-            receiver.tls_peer(),
-            TlsPeer::Verified(domain(HOME_B).into_domain_part())
-        );
+        assert_eq!(receiver.tls_peer(), TlsPeer::Verified(domain(HOME_B)));
         let digest: [u8; 32] = Sha256::digest(home_b.leaf().as_ref()).into();
         assert_eq!(receiver.certificate_sha256(), &digest);
         // A private-CA profile's evidence ends with its CRLs, a public

@@ -313,7 +313,8 @@ cases.
 | Wrong stream/content namespace or unsupported stream version | `invalid-namespace` / `unsupported-version`, then close. |
 | Missing/invalid domain-only stream header address | `bad-format`, then close. A mandatory pre-TLS `from` is ADR-0020 D2 policy; its absence also receives `bad-format` (see [codec decisions](#codec-decisions-for-g1-and-g3)). |
 | Header recipient not served or not the selected destination | `host-unknown`, then close. |
-| Source pair not allowed, or source identity changes | `invalid-from`, then close. |
+| Source pair not admitted, whichever rule refused it | `policy-violation`, then close (see [decisions after the G4 review](#decisions-after-the-g4-review)). |
+| Source identity changes on a later header, or a source spelling the identity profile refuses | `invalid-from`, then close. |
 | Application stanza before completed authentication | `not-authorized`, then close. |
 | Peer declines/strips STARTTLS or sends another negotiation command | Attempt required STARTTLS if the feature was stripped; refuse any fallback. Unexpected command outside the defined SASL replacement/abort transitions: `policy-violation`; close. |
 | TLS/certificate/path/name/revocation failure | TLS alert when available, then TCP close; never EXTERNAL success. |
@@ -348,24 +349,21 @@ cancellation; no unbounded spawned-task or logging queue is allowed.
 | Resource | Ceiling / deadline |
 | --- | --- |
 | Open S2S sockets, all stages | 32 per process; 16 inbound and 16 outbound. |
-| Unauthenticated inbound sockets | 8 globally; 4 per source IP, before header parsing. |
-| Concurrent expensive handshakes | 4 globally; per-IP and peer limits also apply. |
-| Established streams | 1 per exact directional pair; reject duplicate, do not evict incumbent. |
+| Unauthenticated inbound sockets | 8 globally; 2 per source address (ceiling 4), before header parsing, as [the connection-manager design](s2s-connection-manager-2047.md#resource-model) sets them (gate G7). |
+| Concurrent expensive handshakes | 4 inbound and 2 outbound TLS handshakes, separately, each direction on its own verifier workers; the per-address and per-peer limits also apply ([connection-manager design](s2s-connection-manager-2047.md#resource-model), gate G7). |
+| Established streams | 1 per exact directional pair; a new authenticated stream replaces the incumbent, rate limited (see [decisions after the G4 review](#decisions-after-the-g4-review)). |
 | Inbound accept rate | Token bucket 8/second, burst 8 globally; 2/second, burst 4 per source IP. |
 | Initial/restarted header or SASL element | 8 KiB including attributes; decoded authzid at most 1 KiB. |
-| XML top-level stanza | 64 KiB raw UTF-8, bounded incrementally before DOM construction. |
-| XML shape | Depth 32 below stream root; 32 attributes per element; 1,024 elements per stanza; 8 KiB total attribute bytes per stanza. |
-| XML buffering | 128 KiB maximum per connection; reject DTDs/external entities and unsupported encodings; bounded whitespace counts toward rate/deadline. |
-| XML decoded tree | 128 KiB of retained strings per top-level stanza, charging each element's and attribute's namespace name per copy; declared namespace names at most 1 KiB; one name or attribute value at most 8 KiB (the parser's per-connection scratch buffer). Node structure is bounded by the element count, about 1.25 MiB at 1,024 elements, so resident decoder state is about 1.7 MiB per connection in the worst case. |
+| XML stanza, shape, buffering and decoded tree | Before SASL succeeds, the pre-authentication mode holds every first-level element to 8 KiB; after it, `STREAM_CODEC_LIMITS` applies (512 KiB per stanza, 4,096 elements, depth 32 and the rest), with its memory model, as the [decoding limits of the connection-manager design](s2s-connection-manager-2047.md#decoding-limits-g7) set them (gate G7). Every stage rejects DTDs, external entities and unsupported encodings and bounds input incrementally before a tree is built; whitespace counts toward the input rate. |
 | TLS handshake buffering | 128 KiB per connection, chain at most 8 certificates and 64 KiB encoded; demonstrate library enforcement under B2. |
 | Output buffer | 16 control frames and 64 KiB per connection; first exhausted bound closes. No application queue. |
 | TCP connect / initial header / TLS / each expected stream restart | 5 seconds each; 20 seconds total through authenticated post-SASL header. Timers do not reset on partial bytes. |
 | Whole SASL phase | 5 seconds from mechanisms offer, including challenges, replacements and abort/retry; never renew this or the total negotiation deadline. |
 | SASL exchanges / aborts / XML stream restarts | 3 auth starts total, 3 abort elements total; at most the expected post-TLS and post-success headers. Replacements/aborts never add a stream restart. |
-| Established incomplete element / idle | 5 seconds / 30 seconds; continuous whitespace cannot avoid the element/rate limits. |
-| Input rate | 64 KiB/second, burst 128 KiB per socket; 512 KiB/second, burst 1 MiB globally. |
+| Established incomplete element / idle | 5 seconds of time the server is willing to read, at most 30 seconds per element / 300 seconds, as [the connection-manager design](s2s-connection-manager-2047.md#deadlines) sets them (gate G7); continuous whitespace cannot avoid the element/rate limits. |
+| Input rate | 64 KiB/second, burst 128 KiB per socket; 512 KiB/second, burst 1 MiB globally; configurable down to 32 KiB/second ([connection-manager design](s2s-connection-manager-2047.md#resource-model), gate G7). |
 | Terminal write and close / operator drain | 1 second / 5 seconds, capped by the process's remaining drain budget. |
-| Reconnect | One attempt per configured pair at startup; no autonomous retry in this slice. Fixture restarts initiate fresh attempts. |
+| Outbound attempts | Made on demand through the connection manager, one in progress per directional pair, with per-domain backoff after a failure (gate G7); no autonomous retry. |
 
 Bound source-IP accounting to the admitted socket set plus at most 256 expiring
 rate-bucket entries with a 60-second inactive expiry; reject new buckets while full. Source-domain claims cannot
@@ -432,11 +430,14 @@ because input the initiator sends after `<starttls/>` without waiting for
 5.4.3.1). Bytes received between SASL success and the post-SASL stream header
 are discarded and close the stream with `policy-violation`. Each read handed
 to the decoder is at most the buffered-input ceiling minus the stanza ceiling
-(64 KiB with the fixture limits).
+(64 KiB with the pilot limits).
 
-**Codec limits.** The fixture limits match the ceilings above (8 KiB header,
-64 KiB stanza, depth 32, 32 attributes per element, 1,024 elements and 8 KiB
-of attributes per stanza, 128 KiB buffered) and add: 8 KiB for a first-level
+**Codec limits.** The codec's pilot limits (`CodecLimits::PILOT`, which the
+codec's own tests use) are an 8 KiB header, a 64 KiB stanza, depth 32, 32
+attributes per element, 1,024 elements and 8 KiB of attributes per stanza
+and 128 KiB buffered; the connection manager uses `STREAM_CODEC_LIMITS`
+after SASL instead ([connection-manager design](s2s-connection-manager-2047.md#decoding-limits-g7),
+gate G7). The pilot limits add: 8 KiB for a first-level
 STARTTLS, SASL or dialback element; 8 KiB for one name or attribute value
 while the parser assembles it; 1 KiB for a declared namespace name; and
 128 KiB for the strings retained by the decoded tree of one first-level
@@ -453,12 +454,14 @@ and closes with the first failing condition:
 | --- | --- |
 | `version` absent or below 1.0 | `unsupported-version` |
 | `to` absent, empty, not a JID or not domain-only | `bad-format` |
+| `to` spelled in a form the identity profile refuses | `host-unknown` |
 | `to` names a formerly served domain | `host-gone` |
 | `to` names a domain that is not served | `host-unknown` |
 | `from` absent, empty, not a JID or not domain-only, on any header including the pre-TLS one | `bad-format` |
+| `from` spelled in a form the identity profile refuses | `invalid-from` |
 | A later header changes the destination | `host-unknown` |
 | A later header changes the source | `invalid-from` |
-| The source and destination pair is not admitted | `invalid-from` |
+| The source and destination pair is not admitted | `policy-violation` |
 
 A certificate verified for a domain other than the header's `from` closes
 with `invalid-from`. The initiating role checks the response header in the
@@ -530,7 +533,8 @@ usable certificate, and an initiating side whose peer offers no EXTERNAL are
 explicit decision points. While dialback is disabled each closes with
 `policy-violation`; the dialback slice decides their behavior under gate G5.
 
-**Carried to the connection manager (G7).** The codec builds the full tree of
+**Carried to the connection manager (G7).** Implemented and recorded in
+[the connection-manager design](s2s-connection-manager-2047.md). The codec builds the full tree of
 a first-level stanza, up to the stanza ceilings, before the negotiation
 refuses it with `not-authorized`. The connection manager adds a
 pre-authentication decoder mode: until SASL succeeds, a first-level element
@@ -540,6 +544,149 @@ control-element ceiling. It also owns the deadlines, rate limits, per-address
 and global socket caps, the verifier-backed TLS peer, the certificate recheck
 before authorization, `VerifiedPeerStream`, and capacity planning that uses
 the resident-memory figure above.
+
+### Decisions after the G4 review
+
+The independent G4 review of this design did not pass. The owner decided
+the following on 2026-11-14, and the connection-manager slice (W4c)
+implemented them in the codec; the resource-model decisions of the same
+review are recorded in
+[the connection-manager design](s2s-connection-manager-2047.md). Nothing
+here is executed evidence; the evidence is
+`crates/waddle-xmpp/tests/s2s_stream_addresses.rs`,
+`crates/waddle-xmpp/tests/s2s_pre_authentication.rs` and the updated
+`crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs`.
+
+**Internationalized domains (B1).** A stream header's `from` and `to` are
+read from the raw attribute text into the identity profile's
+`CanonicalDomain` (`CanonicalDomain::parse_exact`), never through JID
+preparation: Nameprep folds some spellings (for example `ß` to `ss`) and,
+with its Unicode 3.2 tables, refuses IDNA2008 labels made of later code
+points (Tifinagh, N'Ko, Glagolitic and others) whose A-labels it accepts,
+so two Waddle deployments could not reach each other under such a name. A
+value is domain-only when it contains neither `@` nor `/`. ASCII uppercase
+letters are mapped to lowercase before the domain is read, which joins
+nothing DNS keeps apart; any other spelling that preparation would change,
+such as a width, compatibility or non-ASCII case form, is refused. The same
+reading applies to an authorization identity in SASL EXTERNAL. A U-label
+and an A-label spelling of one domain are the same address, and every pair,
+admission and TLS-peer comparison uses the canonical form; `TlsPeer`,
+`InboundAdmission`, `InitiatingConfig`, `AuthorizationRequest` and
+`NegotiatedStream` carry `CanonicalDomain`. A refused spelling closes the
+stream with an explicit error: `invalid-from` for `from` and
+`host-unknown` for `to`, in both roles (the table above). Emitted headers
+write U-labels, as RFC 7622 §3.2.1 asks of an address presented to a peer;
+stanza addresses sent to peers will also be U-labels when routing exists
+(W5a). A stanza's `to` and `from` on an established stream are read with
+the identity profile's address parser (`identity::parse_jid`), also without
+JID preparation, compared with the stream's pair, and handed on rewritten
+in canonical form.
+
+**Direct TLS.** Outbound XEP-0368 direct TLS is deferred to the discovery
+slice (W4d), which brings `_xmpps-server` targets. The connection manager
+dials STARTTLS only, and the codec has no direct-TLS entry point.
+
+**Admission refusals before TLS** receive `policy-violation`, whichever rule
+refused the pair (the table above). A probe can still tell an admitted
+domain from a refused one by whether STARTTLS is offered; that disclosure
+of list membership is accepted as low risk.
+
+**Pre-authentication decoding.** Besides the rules carried to the
+connection manager below, the control-element ceiling also applies to
+stream-namespace elements (features and stream errors) before SASL
+succeeds, and a connection whose first bytes are not XML, such as a TLS
+ClientHello sent to the STARTTLS port, closes without any XML
+(`CloseReason::NotXml`).
+
+**Peer features.** The initiating role reads only whether a features
+element offers STARTTLS and whether it offers the SASL EXTERNAL mechanism;
+unknown, malformed or unrelated children are ignored instead of failing the
+stream with `bad-format`.
+
+**Error responses.** When the receiving server's response header fails the
+initiating role's checks, for example because it carries `from=''` as
+RFC 6120 §4.9.1.3 allows a server that cannot serve the requested domain,
+the next element decides: a stream error from the peer closes the stream
+with that error, which the connection manager classifies for backoff (for
+example `host-unknown`), and anything else closes it with the condition the
+header check found.
+
+**Dialback namespace.** `StreamHeader::declare_dialback` binds the
+`jabber:server:dialback` namespace to the `db` prefix on an emitted header,
+for the dialback slice. Nothing sets it in this release.
+
+**Trusted homes on the public profile (D8).** A domain on the trusted-home
+list may authenticate under the public-WebPKI profile; an operator who
+wants a trusted home to count only on its own CA lists it in
+`admission.require_private_ca` with a private-CA profile. Public chains are
+not checked for revocation (verifier design, "Revocation of public
+chains"), so a trusted home's compromised key keeps its privileged
+authority until its certificate expires, at most the public leaf validity
+ceiling, unless the operator denylists the domain or removes it from the
+trusted-home list and restarts. On that profile any publicly trusted CA can
+issue a certificate for the trusted home's domain, so a mis-issued
+certificate, or one obtained by whoever gains control of the domain (an
+expired registration, a hijacked DNS zone or registrar account), carries
+the same authority for its validity. This residual risk is recorded in
+[ADR-0020 D8](../adrs/0020-independent-community-federation.md#decision-remote-authority-and-reassigned-jids-d8)
+and accepted as part of the activation decision (gate G22).
+
+**Recorded deviations and restrictions (B1).**
+
+- RFC 6120 §13.8.4 names `TLS_RSA_WITH_AES_128_CBC_SHA` as mandatory to
+  implement. It is not offered: RFC 9325 §4.2.1 recommends against static
+  RSA key transport and CBC suites, and rustls implements neither.
+- A receiving server ignores the TLS Server Name Indication of an inbound
+  connection and selects the local domain and its certificate from the
+  stream header's `to` (RFC 7590 §3.5 and RFC 6120 allow either). The
+  header is read before the handshake on a STARTTLS connection, which is
+  the only kind accepted.
+- A stream header without `version` is refused with `unsupported-version`
+  (RFC 6120 §4.7.5 reads it as version 0.9, which this profile does not
+  speak), and one without `to` with `bad-format`. Both are restrictions of
+  this profile.
+- A duplicate stream for a directional pair replaces the existing one,
+  which closes with `conflict`, rate limited as the connection-manager
+  design records; the earlier rule above, which refused the duplicate and
+  kept the incumbent, is superseded.
+- One stream per directional pair is a restriction: RFC 6120 allows more,
+  and a pooled or clustered peer, such as ejabberd with
+  `max_s2s_connections` above one, opens several. Its streams replace one
+  another about once per replacement interval (30 seconds by default), and
+  a stream refused with `conflict` in between is retried by the peer. The
+  harness slice (W10) tests clustered ejabberd with `max_s2s_connections`
+  above one.
+- ASCII uppercase letters in a stream header address or a SASL
+  authorization identity are mapped to lowercase, more liberal than the
+  identity profile's exact-spelling rule and safe because DNS does not
+  distinguish ASCII case. Other spellings that RFC 7622 preparation would
+  map (width, compatibility and non-ASCII case forms) are refused instead
+  of being folded.
+- A-labels are accepted in received headers and stanza addresses and read
+  as the same domain as their U-labels, although RFC 7622 §3.2.1 says a
+  prepared domainpart contains no A-labels; emitted headers use U-labels.
+- ASCII uppercase letters in the domainpart of a stanza's `to` or `from`
+  on an established stream are mapped to lowercase as in stream headers,
+  and the stanza is handed on with the canonical lowercase domain. The
+  localpart and resourcepart are read exactly. Any other address the
+  identity profile refuses closes the stream with `improper-addressing`.
+  For the routing slice (W5a): a syntactically valid address in a
+  spelling the profile refuses (an uppercase localpart, a width or
+  compatibility form) is to be answered with a `jid-malformed` stanza
+  error and the stream kept; stream errors stay for an absent, empty or
+  unparseable address and for a domain outside the stream's pair. This
+  release has no stanza reply path, since every stanza that passes the
+  checks is refused with `policy-violation`, so the stanza error arrives
+  with routing.
+- Whitespace (or U+FEFF) before a stream header, initial or restarted, is
+  refused with `not-well-formed`, although XML 1.0 allows whitespace before
+  the root element of a document without an XML declaration. The harness
+  slice (W10) confirms that Prosody and ejabberd send none.
+- A failed SASL EXTERNAL exchange closes the stream. RFC 6120 §6.4.5 says
+  the receiving entity SHOULD allow a reasonable number of retries where
+  appropriate for the mechanism; a certificate that failed once fails
+  again, so this profile allows none. Replacement and abort within the
+  exchange budget are the only second attempts.
 
 ## Acceptance evidence required of the future implementation
 

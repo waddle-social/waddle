@@ -124,12 +124,31 @@ pub async fn start_with_config_and_owner_outbox(
         ),
     );
 
+    // S2S is off unless configured. Its snapshot, with every credential,
+    // trust profile and limit, is loaded and validated before any S2S
+    // socket exists; while it is off nothing S2S is read, bound or dialled.
+    let s2s_config = crate::s2s::conn::load_enabled_config(&xmpp_config).await?;
+
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
+    let mut s2s_listener = None;
     let http_listener = if let Some(ref mut set) = inherited {
-        // Launcher inheritance path: all listeners MUST be inherited
+        // Launcher inheritance path: all listeners MUST be inherited. The
+        // `s2s` listener is taken only when S2S listens, and only when it
+        // is bound to the configured loopback address; an inherited `s2s`
+        // descriptor without `listen` is left over and fails startup below.
+        if let Some(address) = s2s_config.as_ref().and_then(|config| config.listen()) {
+            let listener = set.take(crate::s2s::conn::S2S_LISTENER_NAME);
+            crate::s2s::conn::check_inherited_listener(address, listener.local_addr()?)?;
+            s2s_listener = Some(listener);
+        }
         set.take("http")
     } else {
+        if let Some(address) = s2s_config.as_ref().and_then(|config| config.listen()) {
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            info!(addr = ?listener.local_addr().ok(), "Bound S2S listener");
+            s2s_listener = Some(listener);
+        }
         // Cold start path: bind listeners fresh
         let http_addr: SocketAddr = std::env::var("WADDLE_HTTP_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
@@ -494,6 +513,19 @@ pub async fn start_with_config_and_owner_outbox(
 
     info!("TCP XMPP listener disabled; serving WebSocket C2S only");
 
+    // The S2S service starts draining when the process stop token fires
+    // and is joined below. It shares no lock, permit or task with HTTP.
+    let s2s_service = s2s_config.map(|config| {
+        crate::s2s::conn::S2sService::start(
+            config,
+            s2s_listener,
+            crate::s2s::conn::ServiceOptions {
+                stop: Some(stop_token.clone()),
+                ..Default::default()
+            },
+        )
+    });
+
     // Run the Ecdysis shutdown lifecycle
     let shutdown_handle = tokio::spawn(async move {
         let signal = shutdown
@@ -543,6 +575,13 @@ pub async fn start_with_config_and_owner_outbox(
     clustering_shutdown
         .await_drain_until(shutdown_deadline.start().deadline())
         .await;
+    // Join every S2S connection task within what remains of the shutdown
+    // budget; the service has been draining since the stop token fired.
+    if let Some(service) = s2s_service {
+        service
+            .shutdown(shutdown_deadline.start().remaining())
+            .await;
+    }
 
     // Issue #1388: both drains just awaited above (SM/Q6 via `http_handle`,
     // clustering per-entity via `clustering_shutdown`) increment counters and

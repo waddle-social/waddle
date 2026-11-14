@@ -9,8 +9,8 @@ use std::sync::Arc;
 use rustls::server::ServerConnection;
 use rustls::version::TLS12;
 use rustls::{
-    CertificateError, ClientConnection, HandshakeKind, PeerIncompatible, ProtocolVersion,
-    SupportedProtocolVersion,
+    CertificateError, ClientConnection, Connection, HandshakeKind, PeerIncompatible,
+    ProtocolVersion, SupportedProtocolVersion,
 };
 use waddle_server::s2s::verify::{
     initiating_config, receiving_config, OutboundTransport, TlsConfigError, Verification,
@@ -18,8 +18,8 @@ use waddle_server::s2s::verify::{
 };
 
 use crate::harness::{
-    attempt, connect, domain, drive, raw_client_config, raw_server_config, resuming_client_config,
-    resuming_server_config, settings, verifier, Fixture, HOME_A, HOME_B,
+    attempt, connect, deliver, domain, drive, raw_client_config, raw_server_config,
+    resuming_client_config, resuming_server_config, settings, verifier, Fixture, HOME_A, HOME_B,
 };
 use crate::pki::NOW;
 
@@ -102,6 +102,72 @@ fn a_tls12_only_peer_is_admitted_and_verified_in_both_roles() {
             .domain(),
         &domain(HOME_B)
     );
+}
+
+#[test]
+fn a_tls12_handshake_establishes_evidence_only_once_it_completes() {
+    let fixture = Fixture::private();
+    let home_a = fixture.issuer.issue_for(&[HOME_A]);
+    let home_b = fixture.issuer.issue_for(&[HOME_B]);
+    let initiating = verifier(&fixture.inventory, HOME_B, NOW);
+    let receiving = verifier(&fixture.inventory, HOME_A, NOW);
+    let client = ClientConnection::new(
+        Arc::new(raw_client_config(
+            NOW,
+            TLS12_ONLY,
+            Arc::clone(&initiating),
+            &home_a,
+            &home_a,
+        )),
+        initiating.reference().server_name(),
+    )
+    .expect("an initiating connection");
+    let server = ServerConnection::new(Arc::new(
+        receiving_config(
+            &settings(NOW),
+            home_b.certified_key(),
+            Arc::clone(&receiving),
+        )
+        .expect("a receiving configuration"),
+    ))
+    .expect("a receiving connection");
+    let mut client = Connection::Client(client);
+    let mut server = Connection::Server(server);
+    let mut client_error = None;
+    let mut server_error = None;
+
+    // ClientHello.
+    assert!(deliver(&mut client, &mut server, &mut server_error) > 0);
+    // ServerHello, Certificate, ServerKeyExchange, CertificateRequest and
+    // ServerHelloDone: the initiating verifier checks the chain and the
+    // ServerKeyExchange signature, so its verification is complete while
+    // the handshake is not.
+    assert!(deliver(&mut server, &mut client, &mut client_error) > 0);
+    assert!(matches!(
+        initiating.verification(),
+        Verification::Verified(_)
+    ));
+    assert!(client.is_handshaking());
+    assert!(initiating.established(&client).is_none());
+
+    // Certificate, ClientKeyExchange, CertificateVerify and Finished: the
+    // receiving verifier checks the chain and the CertificateVerify
+    // signature. The initiating side still awaits the server's Finished.
+    assert!(deliver(&mut client, &mut server, &mut server_error) > 0);
+    assert!(matches!(
+        receiving.verification(),
+        Verification::Verified(_)
+    ));
+    assert!(client.is_handshaking());
+    assert!(initiating.established(&client).is_none());
+
+    // The server's Finished completes the handshake on both sides.
+    assert!(deliver(&mut server, &mut client, &mut client_error) > 0);
+    assert!(client_error.is_none() && server_error.is_none());
+    assert!(!client.is_handshaking() && !server.is_handshaking());
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
+    assert!(initiating.established(&client).is_some());
+    assert!(receiving.established(&server).is_some());
 }
 
 /// A TLS 1.1 ClientHello: legacy version 0x0302, no supported_versions

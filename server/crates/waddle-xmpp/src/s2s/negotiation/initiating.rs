@@ -2,9 +2,10 @@
 //! restart.
 
 use minidom::Element;
-use xmpp_parsers::stream_features::StreamFeatures;
 
+use crate::ns::{SASL, TLS};
 use crate::s2s::condition::StreamErrorCondition;
+use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamVersion};
 
 use super::classify::{classify, SaslPayload, TopLevel};
@@ -29,6 +30,12 @@ enum Stage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     AwaitHeader(Stage),
+    /// The response header failed its checks with this condition. A peer
+    /// that cannot serve the stream often answers with a header carrying
+    /// an empty or missing address followed by its own stream error (RFC
+    /// 6120 §4.9.1.3), so the next element decides: a stream error from the
+    /// peer closes with that error, anything else with this condition.
+    AwaitPeerError(Stage, StreamErrorCondition),
     AwaitFeatures(Stage),
     AwaitProceed,
     TlsHandshake,
@@ -59,14 +66,16 @@ impl Initiating {
     pub(crate) fn phase(&self) -> NegotiationPhase {
         match self.state {
             State::AwaitHeader(Stage::PreTls)
+            | State::AwaitPeerError(Stage::PreTls, _)
             | State::AwaitFeatures(Stage::PreTls)
             | State::AwaitProceed => NegotiationPhase::PreTls,
             State::TlsHandshake => NegotiationPhase::TlsHandshake,
-            State::AwaitHeader(Stage::Tls) | State::AwaitFeatures(Stage::Tls) => {
-                NegotiationPhase::TlsStream
-            }
+            State::AwaitHeader(Stage::Tls)
+            | State::AwaitPeerError(Stage::Tls, _)
+            | State::AwaitFeatures(Stage::Tls) => NegotiationPhase::TlsStream,
             State::AwaitSaslOutcome => NegotiationPhase::SaslAwaitOutcome,
             State::AwaitHeader(Stage::Authenticated)
+            | State::AwaitPeerError(Stage::Authenticated, _)
             | State::AwaitFeatures(Stage::Authenticated) => NegotiationPhase::AuthenticatedRestart,
             State::Established => NegotiationPhase::Established,
             State::Closed => NegotiationPhase::Closed,
@@ -84,6 +93,9 @@ impl Initiating {
                 self.on_element(element, &mut steps)
             }
             NegotiationInput::PeerEnd => self.close(&mut steps, CloseReason::PeerClosed),
+            NegotiationInput::DecodeFailed(DecodeError::NotXml) => {
+                self.close(&mut steps, CloseReason::NotXml)
+            }
             NegotiationInput::DecodeFailed(error) => self.fail(&mut steps, error.condition()),
             NegotiationInput::PrematureInput => {
                 self.fail(&mut steps, StreamErrorCondition::PolicyViolation)
@@ -102,7 +114,7 @@ impl Initiating {
         };
         match self.check_response_header(header) {
             Ok(()) => self.state = State::AwaitFeatures(stage),
-            Err(condition) => self.fail(steps, condition),
+            Err(condition) => self.state = State::AwaitPeerError(stage, condition),
         }
     }
 
@@ -114,14 +126,18 @@ impl Initiating {
         }
         match &header.from {
             HeaderAddress::Domain(from) if *from == self.config.destination => {}
-            HeaderAddress::Domain(_) => return Err(StreamErrorCondition::InvalidFrom),
+            HeaderAddress::Domain(_) | HeaderAddress::Refused => {
+                return Err(StreamErrorCondition::InvalidFrom)
+            }
             HeaderAddress::Absent | HeaderAddress::Invalid => {
                 return Err(StreamErrorCondition::BadFormat)
             }
         }
         match &header.to {
             HeaderAddress::Domain(to) if *to == self.config.source => {}
-            HeaderAddress::Domain(_) => return Err(StreamErrorCondition::HostUnknown),
+            HeaderAddress::Domain(_) | HeaderAddress::Refused => {
+                return Err(StreamErrorCondition::HostUnknown)
+            }
             HeaderAddress::Absent | HeaderAddress::Invalid => {
                 return Err(StreamErrorCondition::BadFormat)
             }
@@ -137,6 +153,7 @@ impl Initiating {
             (_, TopLevel::PeerStreamError(condition)) => {
                 self.close(steps, CloseReason::PeerStreamError(condition))
             }
+            (State::AwaitPeerError(_, condition), _) => self.fail(steps, condition),
             (_, TopLevel::ClientStanza) => self.fail(steps, StreamErrorCondition::InvalidNamespace),
             (_, TopLevel::Dialback) => self.on_dialback(steps),
             (State::Established, _) => self.fail(steps, StreamErrorCondition::PolicyViolation),
@@ -176,19 +193,14 @@ impl Initiating {
         }
     }
 
+    /// Post-TLS features. Only the STARTTLS and SASL EXTERNAL offers
+    /// matter; other children, including unknown or malformed ones, are
+    /// ignored.
     fn on_tls_features(&mut self, features: Element, steps: &mut Vec<Step>) {
-        let Ok(features) = StreamFeatures::try_from(features) else {
-            return self.fail(steps, StreamErrorCondition::BadFormat);
-        };
-        if features.starttls.is_some() {
+        if offers_starttls(&features) {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
-        let offers_external = features
-            .sasl_mechanisms
-            .mechanisms
-            .iter()
-            .any(|mechanism| mechanism == EXTERNAL);
-        if offers_external {
+        if offered_mechanisms(&features).any(|mechanism| mechanism == EXTERNAL) {
             steps.push(Step::Send(elements::external_auth()));
             self.state = State::AwaitSaslOutcome;
         } else {
@@ -196,11 +208,10 @@ impl Initiating {
         }
     }
 
+    /// Post-SASL features: neither STARTTLS nor a SASL mechanism may still
+    /// be offered; anything else is ignored.
     fn on_final_features(&mut self, features: Element, steps: &mut Vec<Step>) {
-        let Ok(features) = StreamFeatures::try_from(features) else {
-            return self.fail(steps, StreamErrorCondition::BadFormat);
-        };
-        if features.starttls.is_some() || !features.sasl_mechanisms.mechanisms.is_empty() {
+        if offers_starttls(&features) || offered_mechanisms(&features).next().is_some() {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
         steps.push(Step::Established(NegotiatedStream {
@@ -251,6 +262,21 @@ impl Initiating {
         steps.push(Step::Close(reason));
         self.state = State::Closed;
     }
+}
+
+/// Whether a features element offers STARTTLS (RFC 6120 §5.4.1).
+fn offers_starttls(features: &Element) -> bool {
+    features.children().any(|child| child.is("starttls", TLS))
+}
+
+/// The SASL mechanism names a features element offers (RFC 6120 §6.4.1).
+fn offered_mechanisms(features: &Element) -> impl Iterator<Item = String> + '_ {
+    features
+        .children()
+        .filter(|child| child.is("mechanisms", SASL))
+        .flat_map(|mechanisms| mechanisms.children())
+        .filter(|mechanism| mechanism.is("mechanism", SASL))
+        .map(|mechanism| mechanism.text().trim().to_owned())
 }
 
 fn initial_header(config: &InitiatingConfig) -> StreamHeader {

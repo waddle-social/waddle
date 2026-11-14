@@ -123,9 +123,9 @@ impl Handshake {
 }
 
 /// Move every pending TLS record from `from` to `to` and let `to` process
-/// it. An endpoint that has failed still sends its alert but receives
-/// nothing more.
-fn deliver(
+/// it: one flight. An endpoint that has failed still sends its alert but
+/// receives nothing more.
+pub fn deliver(
     from: &mut Connection,
     to: &mut Connection,
     to_error: &mut Option<rustls::Error>,

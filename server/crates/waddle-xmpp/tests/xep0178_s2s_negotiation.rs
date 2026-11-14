@@ -13,11 +13,10 @@
 //! Peer input is written as raw wire fixtures because the codec under test
 //! is the boundary that turns bytes into typed values.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
-use jid::DomainPart;
 use minidom::Element;
+use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::ns::{SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
     AuthorizationDecision, AuthorizationRequest, CloseReason, CodecLimits, DestinationStatus,
@@ -56,8 +55,8 @@ const SUCCESS: &[u8] = b"<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
 const CONTINUATION: &[u8] = b"<stream:stream xmlns='jabber:server' \
 xmlns:stream='http://etherx.jabber.org/streams'>";
 
-fn domain(value: &str) -> DomainPart {
-    DomainPart::from_str(value).expect("valid domain")
+fn domain(value: &str) -> CanonicalDomain {
+    CanonicalDomain::parse_exact(value).expect("valid domain")
 }
 
 /// Serves `home-b.test` and `muc.home-b.test`, formerly served
@@ -65,7 +64,7 @@ fn domain(value: &str) -> DomainPart {
 struct Admission;
 
 impl InboundAdmission for Admission {
-    fn destination(&self, destination: &DomainPart) -> DestinationStatus {
+    fn destination(&self, destination: &CanonicalDomain) -> DestinationStatus {
         match destination.as_str() {
             "home-b.test" | "muc.home-b.test" => DestinationStatus::Served,
             "old.home-b.test" => DestinationStatus::Gone,
@@ -73,7 +72,7 @@ impl InboundAdmission for Admission {
         }
     }
 
-    fn admits(&self, source: &DomainPart, destination: &DomainPart) -> bool {
+    fn admits(&self, source: &CanonicalDomain, destination: &CanonicalDomain) -> bool {
         source.as_str() == "home-a.test" && destination.as_str() == "home-b.test"
     }
 }
@@ -250,6 +249,7 @@ fn absorb(outputs: Vec<Output>, me: &mut Side, peer: &mut Side) {
             Output::Authorize(request) => me.authorizations.push(request),
             Output::Established(stream) => me.established = Some(stream),
             Output::Close(reason) => me.closes.push(reason),
+            Output::Stanza(_) => unreachable!("stanza delivery is not enabled in this suite"),
         }
     }
 }
@@ -410,7 +410,7 @@ from='alice@home-a.test' to='home-b.test' version='1.0'>",
         (
             b"<stream:stream xmlns='jabber:server' xmlns:stream='http://etherx.jabber.org/streams' \
 from='stranger.test' to='home-b.test' version='1.0'>",
-            StreamErrorCondition::InvalidFrom,
+            StreamErrorCondition::PolicyViolation,
         ),
         (
             b"<stream:stream xmlns='jabber:server' xmlns:stream='http://etherx.jabber.org/streams' \
@@ -659,11 +659,18 @@ fn omitted_initial_response_gets_one_empty_challenge() {
 
 #[test]
 fn matching_authorization_identity_is_tolerated() {
-    let mut stream = receiver_at_sasl();
-    let out = stream.receive(
-        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>aG9tZS1hLnRlc3Q=</auth>",
-    );
-    assert_eq!(authorization_request(&out).source, domain("home-a.test"));
+    // `home-a.test`, and `HOME-A.test`, whose ASCII case is mapped as in a
+    // stream header.
+    for auth in [
+        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>aG9tZS1hLnRlc3Q=</auth>"
+            .as_slice(),
+        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>SE9NRS1BLnRlc3Q=</auth>"
+            .as_slice(),
+    ] {
+        let mut stream = receiver_at_sasl();
+        let out = stream.receive(auth);
+        assert_eq!(authorization_request(&out).source, domain("home-a.test"));
+    }
 }
 
 #[test]
@@ -865,10 +872,21 @@ from='muc.home-a.test' to='home-b.test' version='1.0'>",
 
 #[test]
 fn established_stream_checks_addresses_then_refuses_dispatch() {
-    let cases: [(&[u8], StreamErrorCondition); 13] = [
+    let cases: [(&[u8], StreamErrorCondition); 15] = [
         (
             b"<message to='bob@home-b.test'/>",
             StreamErrorCondition::ImproperAddressing,
+        ),
+        // Addresses are read with the identity profile, not folded by JID
+        // preparation: a localpart preparation would change is refused.
+        (
+            b"<message from='Alice@home-a.test' to='bob@home-b.test'/>",
+            StreamErrorCondition::ImproperAddressing,
+        ),
+        // A trailing dot is the same domain.
+        (
+            b"<message from='alice@home-a.test.' to='bob@home-b.test.'/>",
+            StreamErrorCondition::PolicyViolation,
         ),
         (
             b"<message from='alice@home-a.test'/>",
@@ -1105,8 +1123,11 @@ from='home-b.test' to='home-a.test' id='1'>",
         ),
     ];
     for (header, condition) in cases {
+        // The failed header is held until the next element shows whether
+        // the peer is reporting its own stream error.
         let (mut stream, _) = initiator();
-        let out = stream.receive(header);
+        assert_eq!(close_reason(&stream.receive(header)), None);
+        let out = stream.receive(FEATURES_STARTTLS);
         assert_stream_error(&out, condition);
         let elements = continuation_elements(&transmitted(&out));
         assert_eq!(

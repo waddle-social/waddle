@@ -67,17 +67,16 @@ pub struct LeafValidityStep {
 ///
 /// The steps are those of CA/Browser Forum ballot SC-081, which amends the
 /// TLS Baseline Requirements: 398 days for certificates issued before
-/// 2026-03-15, 200 days from 2026-03-15 and 100 days from 2027-03-15. The
-/// verifier reads the step dates as 00:00 UTC. The ballot schedules a
-/// further step to 47 days from 2029-03-15, which this schedule does not
-/// enforce. The schedule is re-verified against the Baseline Requirements
-/// in force when federation is activated (ADR-0020 gate G22).
+/// 2026-03-15, 200 days from 2026-03-15, 100 days from 2027-03-15 and 47
+/// days from 2029-03-15. The verifier reads the step dates as 00:00 UTC.
+/// The schedule is re-verified against the Baseline Requirements in force
+/// when federation is activated (ADR-0020 gate G22).
 ///
 /// A publicly trusted certificate never exceeds its step, so the ceiling
 /// refuses only misissued certificates. Public chains are not checked for
 /// revocation; what the ceiling bounds is how long a certificate whose key
 /// is later compromised can be used on this profile.
-pub const PUBLIC_LEAF_VALIDITY_SCHEDULE: [LeafValidityStep; 3] = [
+pub const PUBLIC_LEAF_VALIDITY_SCHEDULE: [LeafValidityStep; 4] = [
     LeafValidityStep {
         not_before_from: i64::MIN,
         max_validity_secs: 398 * DAY_SECS,
@@ -91,6 +90,11 @@ pub const PUBLIC_LEAF_VALIDITY_SCHEDULE: [LeafValidityStep; 3] = [
     LeafValidityStep {
         not_before_from: 1_805_068_800,
         max_validity_secs: 100 * DAY_SECS,
+    },
+    // 2029-03-15T00:00:00Z.
+    LeafValidityStep {
+        not_before_from: 1_868_227_200,
+        max_validity_secs: 47 * DAY_SECS,
     },
 ];
 

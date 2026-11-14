@@ -60,6 +60,9 @@
   startup, before creating the runtime or opening unrelated descriptors, and
   register them with Tokio after entering the runtime. Cold starts bind fresh
   sockets. `waddle-ecdysis` is Unix-only.
+- The listener names are `http` and, only when S2S is enabled with a
+  `listen` address, `s2s` (the STARTTLS-only server-to-server listener). An
+  inherited descriptor the configuration does not use fails startup.
 - Process-local actors and registries are rebuilt on replacement. Determine
   resumption and delivery recovery from their durable storage and ownership
   fences; a process restart alone establishes neither loss nor completion.

@@ -122,7 +122,7 @@ impl VerifiedPeer {
     /// The negotiation input for a stream whose TLS handshake completed
     /// with this certificate.
     pub fn tls_peer(&self) -> TlsPeer {
-        TlsPeer::Verified(self.domain.clone().into_domain_part())
+        TlsPeer::Verified(self.domain.clone())
     }
 }
 

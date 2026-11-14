@@ -87,6 +87,22 @@ Which of these are recorded today:
 | `waddle.janitor.sweeps{janitor="destroy_completion"}` | Yes, as a heartbeat of the destroy-completion janitor |
 | Every other metric in the table above | Declared with its recording function; no call site yet. Until one exists only the zero-registered failure series are exported |
 
+## Server-to-server connection metrics
+
+Emitted by the S2S connection manager
+(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`) only when S2S is
+enabled, which it is not by default. Attributes are the closed enums in
+`server/crates/waddle-xmpp/src/telemetry/attributes/s2s.rs`; no metric
+carries a domain, an address or a stream id. None is zero-registered.
+
+| Metric | Type | Unit | Attributes | Derived Prometheus name | Meaning |
+|---|---|---|---|---|---|
+| `waddle.s2s.connections` | counter | `{connection}` | `direction`, `outcome` | `waddle_s2s_connections_total` | S2S connections that ended, by how they ended. |
+| `waddle.s2s.capacity.refusals` | counter | `{connection}` | `direction`, `resource` | `waddle_s2s_capacity_refusals_total` | Sockets and streams a connection limit refused. |
+| `waddle.s2s.established` | counter | `{stream}` | `direction`, `transport` | `waddle_s2s_established_total` | Streams that completed TLS, SASL EXTERNAL and the authenticated restart. |
+| `waddle.s2s.negotiation.duration` | histogram | `ms` | `direction` | `waddle_s2s_negotiation_duration_milliseconds_bucket / _sum / _count` | Time from TCP accept or connect to an established stream. |
+| `waddle.s2s.streams` | gauge | `{stream}` | `direction` | `waddle_s2s_streams` | Established streams. |
+
 ## All other metrics
 
 | Metric | Type | Unit | Attributes | Derived Prometheus name | Meaning |

@@ -116,6 +116,22 @@ impl PrivateCaProfile {
             {
                 return Err(TrustError::at(TrustErrorKind::AnchorExtendedKeyUsage, item));
             }
+            // webpki applies an intermediate's extended key usage to every
+            // path through it. On a private-CA profile the receiving role
+            // needs serverAuth and the initiating role accepts serverAuth or
+            // clientAuth, so an intermediate whose extension lists neither,
+            // such as one restricted to anyExtendedKeyUsage or to an
+            // unrelated purpose, could never verify a peer in either role.
+            if !is_anchor
+                && facts
+                    .extended_key_usage
+                    .is_some_and(|usage| !usage.server_auth && !usage.client_auth)
+            {
+                return Err(TrustError::at(
+                    TrustErrorKind::IntermediateExtendedKeyUsage,
+                    item,
+                ));
+            }
             // Subjects are unique within a profile, also across a CA
             // rotation: with two CAs of one name, which CRL applies would
             // depend on the order of the files.

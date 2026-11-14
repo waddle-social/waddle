@@ -461,7 +461,11 @@ not authenticate the source domain.
   certificate: serverAuth on the public profile, so an intermediate
   restricted to clientAuth or to anyExtendedKeyUsage without serverAuth is
   refused there, and on a private-CA profile also clientAuth in the
-  initiating role. One without the extension is not restricted by it.
+  initiating role. One without the extension is not restricted by it. A
+  private-CA profile also checks its intermediates when it is loaded: an
+  intermediate whose extension lists neither serverAuth nor clientAuth
+  could verify no peer in either role, and the profile fails to load
+  (`TrustErrorKind::IntermediateExtendedKeyUsage`).
   webpki applies this to intermediates but not to a trust anchor, whose
   extended key usage it does not keep. A private-CA profile therefore
   checks its anchors when it is loaded: an anchor that carries the
@@ -532,8 +536,9 @@ not authenticate the source domain.
   compiled-in set, or to enforce the dates.
 - **Substituted roots.** `PublicRoots::from_certificates` replaces the set.
   The verifier suite uses it; validation against the real set is activation
-  evidence (gate G22). Whether operator configuration may substitute roots
-  is decided with the configuration format (gate G7).
+  evidence (gate G22). Operator configuration cannot substitute roots
+  (decided with the configuration format under gate G7): a domain that must
+  not trust the public roots gets a private-CA profile.
 
 ### Revocation of public chains (G2)
 
@@ -552,14 +557,13 @@ What bounds the exposure instead:
 - An end-entity certificate on the public profile is refused when its
   validity period (notAfter minus notBefore) exceeds the ceiling in force
   at its notBefore (`PUBLIC_LEAF_VALIDITY_SCHEDULE`): 398 days before
-  2026-03-15, 200 days from 2026-03-15 and 100 days from 2027-03-15, the
-  dates read as 00:00 UTC. The source is CA/Browser Forum ballot SC-081,
-  which amends the TLS Baseline Requirements. A publicly trusted
-  certificate never exceeds its step, so the window is that of a public
-  certificate and not arbitrary. SC-081 also schedules 47 days from
-  2029-03-15, which is not enforced. The schedule, including that step, is
-  re-verified against the Baseline Requirements in force at activation
-  (gate G22).
+  2026-03-15, 200 days from 2026-03-15, 100 days from 2027-03-15 and 47
+  days from 2029-03-15, the dates read as 00:00 UTC. The source is
+  CA/Browser Forum ballot SC-081, which amends the TLS Baseline
+  Requirements. A publicly trusted certificate never exceeds its step, so
+  the window is that of a public certificate and not arbitrary. The
+  schedule is re-verified against the Baseline Requirements in force at
+  activation (gate G22).
 - No stream outlives its certificate or an issuer of its path, and every
   new connection verifies again, because nothing is resumed.
 - The operator's denylist (ADR-0020 D1) refuses a domain whose key is known
@@ -612,7 +616,7 @@ strict DER walk that allocates nothing, before a certificate or CRL reaches
 | Revoked-certificate entries in one CRL | 8,192 |
 | Trust anchors in a substituted public root set | 512 |
 | CRL nextUpdate minus thisUpdate on a private-CA profile | 7 days |
-| Validity period of a public end-entity certificate | 398, 200 or 100 days by notBefore |
+| Validity period of a public end-entity certificate | 398, 200, 100 or 47 days by notBefore |
 
 Every presented certificate is read, one at a time, whether or not the path
 uses it, and a certificate over a ceiling refuses the chain. `x509-parser`
@@ -647,7 +651,11 @@ model (gate G7).
   once without counting as waiting, so a limit of zero waiters means "run
   only if a worker is free". `VerifierWorkers::new` refuses a worker limit
   above what a Tokio semaphore can count (`WorkerError::LimitTooLarge`)
-  instead of panicking.
+  instead of panicking. The connection manager runs two sets of workers,
+  one per direction and each sized to that direction's handshake cap (four
+  inbound, two outbound), so inbound handshakes cannot occupy the workers
+  outbound handshakes need; see
+  [the connection-manager design](s2s-connection-manager-2047.md).
 - **Cancellation.** A job holds its worker until it has finished executing.
   A connection that times out drops the completion and closes its socket;
   the late result is discarded, the job still runs to its end, and its

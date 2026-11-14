@@ -1,10 +1,15 @@
 //! Receiving-role negotiation: STARTTLS, SASL EXTERNAL, authenticated
 //! restart.
 
-use jid::{DomainPart, Jid};
+use std::borrow::Cow;
+
+use jid::Jid;
+use minidom::rxml::Namespace;
 use minidom::Element;
 
+use crate::identity::{parse_jid, CanonicalDomain};
 use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
+use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamVersion};
 
 use super::classify::{classify, Mechanism, SaslPayload, TopLevel};
@@ -48,13 +53,16 @@ pub(crate) struct Receiving {
     outbound_open: bool,
     /// The most recent served header recipient, used as the `from` of an
     /// error-carrying response header.
-    served: Option<DomainPart>,
+    served: Option<CanonicalDomain>,
     /// The `(source, destination)` pair fixed by the first accepted header.
-    pair: Option<(DomainPart, DomainPart)>,
+    pair: Option<(CanonicalDomain, CanonicalDomain)>,
     tls_peer: Option<TlsPeer>,
     auth_starts: u8,
     aborts: u8,
     last_exchange: Option<ExchangeId>,
+    /// Whether address-checked stanzas on the established stream go to the
+    /// connection owner instead of being refused here.
+    deliver: bool,
 }
 
 impl Receiving {
@@ -69,7 +77,12 @@ impl Receiving {
             auth_starts: 0,
             aborts: 0,
             last_exchange: None,
+            deliver: false,
         }
+    }
+
+    pub(crate) fn deliver_stanzas(&mut self) {
+        self.deliver = true;
     }
 
     pub(crate) fn phase(&self) -> NegotiationPhase {
@@ -98,6 +111,9 @@ impl Receiving {
                 self.on_element(element, true, &mut steps)
             }
             NegotiationInput::PeerEnd => self.close(&mut steps, CloseReason::PeerClosed),
+            NegotiationInput::DecodeFailed(DecodeError::NotXml) => {
+                self.close(&mut steps, CloseReason::NotXml)
+            }
             NegotiationInput::DecodeFailed(error) => self.fail(&mut steps, error.condition()),
             NegotiationInput::PrematureInput => {
                 self.fail(&mut steps, StreamErrorCondition::PolicyViolation)
@@ -147,15 +163,19 @@ impl Receiving {
     fn accept_header(
         &mut self,
         header: &StreamHeader,
-    ) -> Result<(DomainPart, DomainPart), StreamErrorCondition> {
+    ) -> Result<(CanonicalDomain, CanonicalDomain), StreamErrorCondition> {
         if !header.version.is_some_and(StreamVersion::supports_xmpp_1_0) {
             return Err(StreamErrorCondition::UnsupportedVersion);
         }
-        let destination = header
-            .to
-            .domain()
-            .cloned()
-            .ok_or(StreamErrorCondition::BadFormat)?;
+        // A spelling the identity profile refuses names no domain this
+        // server could serve.
+        let destination = match &header.to {
+            HeaderAddress::Domain(domain) => domain.clone(),
+            HeaderAddress::Refused => return Err(StreamErrorCondition::HostUnknown),
+            HeaderAddress::Absent | HeaderAddress::Invalid => {
+                return Err(StreamErrorCondition::BadFormat)
+            }
+        };
         match self.config.admission.destination(&destination) {
             DestinationStatus::Served => {}
             DestinationStatus::Gone => return Err(StreamErrorCondition::HostGone),
@@ -165,11 +185,15 @@ impl Receiving {
         // This profile requires `from` on every header, including the
         // plaintext one: it selects the configured pair and is the TLS
         // reference identity.
-        let source = header
-            .from
-            .domain()
-            .cloned()
-            .ok_or(StreamErrorCondition::BadFormat)?;
+        // A spelling the identity profile refuses cannot be a reference
+        // identity or an admitted domain.
+        let source = match &header.from {
+            HeaderAddress::Domain(domain) => domain.clone(),
+            HeaderAddress::Refused => return Err(StreamErrorCondition::InvalidFrom),
+            HeaderAddress::Absent | HeaderAddress::Invalid => {
+                return Err(StreamErrorCondition::BadFormat)
+            }
+        };
         if let Some((pinned_source, pinned_destination)) = &self.pair {
             if *pinned_destination != destination {
                 return Err(StreamErrorCondition::HostUnknown);
@@ -178,14 +202,16 @@ impl Receiving {
                 return Err(StreamErrorCondition::InvalidFrom);
             }
         }
+        // A refused pair receives `policy-violation`, the same condition
+        // whichever list or rule refused it.
         if !self.config.admission.admits(&source, &destination) {
-            return Err(StreamErrorCondition::InvalidFrom);
+            return Err(StreamErrorCondition::PolicyViolation);
         }
         self.pair = Some((source.clone(), destination.clone()));
         Ok((source, destination))
     }
 
-    fn offer_sasl(&mut self, source: &DomainPart, steps: &mut Vec<Step>) {
+    fn offer_sasl(&mut self, source: &CanonicalDomain, steps: &mut Vec<Step>) {
         match &self.tls_peer {
             Some(TlsPeer::Verified(verified)) if verified == source => {
                 steps.push(Step::Send(elements::external_features()));
@@ -226,10 +252,12 @@ impl Receiving {
             }
             (_, TopLevel::ClientStanza) => self.fail(steps, StreamErrorCondition::InvalidNamespace),
             (_, TopLevel::Dialback) => self.on_dialback(steps),
-            (State::Established, TopLevel::Stanza(stanza)) => {
-                let condition = self.stanza_condition(&stanza);
-                self.fail(steps, condition);
-            }
+            (State::Established, TopLevel::Stanza(stanza)) => match self.check_stanza(stanza) {
+                Err(condition) => self.fail(steps, condition),
+                Ok(stanza) if self.deliver => steps.push(Step::Deliver(stanza)),
+                // Application dispatch is not enabled on this stream.
+                Ok(_) => self.fail(steps, StreamErrorCondition::PolicyViolation),
+            },
             (State::Established, TopLevel::Other) => {
                 self.fail(steps, StreamErrorCondition::UnsupportedStanzaType)
             }
@@ -349,24 +377,40 @@ impl Receiving {
         }
     }
 
-    /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order; a stanza
-    /// passing all three is still refused because application dispatch is
-    /// not enabled on S2S streams.
-    fn stanza_condition(&self, stanza: &Element) -> StreamErrorCondition {
+    /// RFC 6120 §4.9.3.7, §4.9.3.6 and §4.9.3.9, in that order. Each
+    /// address is read from its raw text with the identity profile's parser
+    /// ([`parse_jid`]), never through JID preparation, which would fold some
+    /// spellings and refuse labels outside Unicode 3.2; ASCII uppercase in
+    /// the domainpart is mapped to lowercase first, as in stream headers. A
+    /// stanza that passes is returned with both addresses rewritten in
+    /// canonical form, so its domains compare equal to the stream's pair
+    /// wherever it goes next.
+    ///
+    /// Any address the profile refuses closes the stream with
+    /// `improper-addressing`, including one that is a syntactically valid
+    /// JID in a spelling the profile does not accept, such as an uppercase
+    /// localpart. The handshake design records that the routing slice is
+    /// to answer such a stanza with a `jid-malformed` stanza error instead
+    /// and keep the stream.
+    fn check_stanza(&self, mut stanza: Element) -> Result<Element, StreamErrorCondition> {
         let Some((source, destination)) = &self.pair else {
-            return StreamErrorCondition::InternalServerError;
+            return Err(StreamErrorCondition::InternalServerError);
         };
-        let (Some(to), Some(from)) = (stanza_address(stanza, "to"), stanza_address(stanza, "from"))
-        else {
-            return StreamErrorCondition::ImproperAddressing;
+        let (Some(to), Some(from)) = (
+            stanza_address(&stanza, "to"),
+            stanza_address(&stanza, "from"),
+        ) else {
+            return Err(StreamErrorCondition::ImproperAddressing);
         };
-        if to.domain() != &**destination {
-            return StreamErrorCondition::HostUnknown;
+        if to.domain().as_str() != destination.as_str() {
+            return Err(StreamErrorCondition::HostUnknown);
         }
-        if from.domain() != &**source {
-            return StreamErrorCondition::InvalidFrom;
+        if from.domain().as_str() != source.as_str() {
+            return Err(StreamErrorCondition::InvalidFrom);
         }
-        StreamErrorCondition::PolicyViolation
+        set_address(&mut stanza, "to", to);
+        set_address(&mut stanza, "from", from);
+        Ok(stanza)
     }
 
     fn next_exchange(&mut self) -> ExchangeId {
@@ -407,11 +451,40 @@ impl Receiving {
     }
 }
 
-/// A stanza `to` or `from` address, or `None` when absent, empty or not a
-/// valid JID.
+/// A stanza `to` or `from` address in canonical form, or `None` when it is
+/// absent, empty or outside the identity profile.
 fn stanza_address(stanza: &Element, name: &str) -> Option<Jid> {
     stanza
         .attr(name)
         .filter(|value| !value.is_empty())
-        .and_then(|value| Jid::new(value).ok())
+        .and_then(|value| parse_jid(&lowercase_domainpart(value)).ok())
+}
+
+/// `address` with ASCII uppercase letters in its domainpart mapped to
+/// lowercase. DNS treats names that differ only in ASCII case as one name,
+/// so the mapping joins nothing DNS keeps apart; no other mapping is
+/// applied, and the localpart and resourcepart are left exactly as sent.
+/// The parts are split as [`parse_jid`] splits them (RFC 7622 §3.2): the
+/// first `/` starts the resourcepart, and an `@` before it ends the
+/// localpart.
+fn lowercase_domainpart(address: &str) -> Cow<'_, str> {
+    let bare_end = address.find('/').unwrap_or(address.len());
+    let domain_start = address[..bare_end].find('@').map_or(0, |at| at + 1);
+    let domain = &address[domain_start..bare_end];
+    if !domain.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Cow::Borrowed(address);
+    }
+    let mut mapped = String::with_capacity(address.len());
+    mapped.push_str(&address[..domain_start]);
+    mapped.push_str(&domain.to_ascii_lowercase());
+    mapped.push_str(&address[bare_end..]);
+    Cow::Owned(mapped)
+}
+
+/// Replace the unprefixed attribute `name`, which is present, with the
+/// canonical text of `address`.
+fn set_address(stanza: &mut Element, name: &str, address: Jid) {
+    if let Some(value) = stanza.attrs_mut().get_mut(&Namespace::NONE, name) {
+        *value = address.into_inner();
+    }
 }

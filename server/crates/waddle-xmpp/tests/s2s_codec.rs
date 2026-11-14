@@ -4,10 +4,8 @@
 //! into typed values, so malformed and hostile XML has to be expressed as
 //! bytes.
 
-use std::str::FromStr;
-
-use jid::DomainPart;
 use minidom::Element;
+use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::ns::{JABBER_SERVER, SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
     CodecLimits, DecodeError, HeaderAddress, Inbound, LimitKind, StreamDecoder, StreamEncoder,
@@ -21,8 +19,8 @@ from='home-a.test' to='home-b.test' version='1.0' xml:lang='en'>";
 const MESSAGE: &[u8] =
     b"<message from='alice@home-a.test/x' to='bob@home-b.test' type='chat'><body>hi</body></message>";
 
-fn domain(value: &str) -> DomainPart {
-    DomainPart::from_str(value).expect("valid domain")
+fn domain(value: &str) -> CanonicalDomain {
+    CanonicalDomain::parse_exact(value).expect("valid domain")
 }
 
 fn decoder() -> StreamDecoder {

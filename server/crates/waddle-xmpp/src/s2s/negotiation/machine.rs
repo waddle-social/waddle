@@ -44,6 +44,17 @@ impl Negotiation {
         )
     }
 
+    /// Hand stanzas that pass the address checks of an established
+    /// receiving stream to the connection owner as [`Step::Deliver`],
+    /// instead of refusing them with `policy-violation`. Has no effect in
+    /// the initiating role, where streams are directional and every
+    /// received stanza is refused.
+    pub fn deliver_stanzas(&mut self) {
+        if let RoleMachine::Receiving(machine) = &mut self.role {
+            machine.deliver_stanzas();
+        }
+    }
+
     /// Advance the machine.
     pub fn handle(&mut self, input: NegotiationInput) -> Vec<Step> {
         match &mut self.role {

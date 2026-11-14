@@ -52,6 +52,11 @@ impl TlsSettings {
         self
     }
 
+    /// The crypto provider, which also loads the local private keys.
+    pub fn provider(&self) -> &Arc<CryptoProvider> {
+        &self.provider
+    }
+
     /// The signature algorithms the provider verifies. Certificate chains,
     /// handshake signatures and configured trust material all use this one
     /// set.
