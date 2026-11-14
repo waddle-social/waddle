@@ -28,8 +28,11 @@ with them, they control:
 - A leaf whose extended key usage is serverAuth only is accepted in both TLS
   roles, in every trust profile and admission mode. This supersedes the
   explicit clientAuth usage that pipeline step 3 requires of the initiating
-  peer's certificate: the initiating role accepts a leaf whose EKU includes
-  serverAuth or clientAuth, and the receiving role still requires serverAuth.
+  peer's certificate. On the public-WebPKI profile both roles require
+  serverAuth, so a clientAuth-only public certificate authenticates no
+  domain; on a private-CA profile the initiating role accepts a leaf whose
+  EKU includes serverAuth or clientAuth, and the receiving role still
+  requires serverAuth.
   The stock client verifier's rejection of a serverAuth-only leaf in the probe
   table is library behavior, not policy. Let's Encrypt stopped issuing
   certificates with the clientAuth usage on 2026-07-08
@@ -252,6 +255,10 @@ At startup, parse each entire DER value and establish:
 - `thisUpdate <= now < nextUpdate`, with both timestamps required and ordered.
   Future, missing or expired metadata fails closed. Record `nextUpdate` for the
   live-stream deadline. A new UUID does not make an old CRL newer or trustworthy.
+- `nextUpdate - thisUpdate` is at most seven days (`MAX_CRL_VALIDITY_SECS`).
+  A CRL that may stand for longer fails startup however current it is, so a
+  profile goes stale, and its streams end, at most seven days after its
+  issuer last published.
 
 Feed the same validated CRLs into webpki; it revalidates signatures and checks
 revoked serials while building the actual chain. Construct
@@ -353,13 +360,31 @@ that govern certificate verification and TLS on S2S streams.
   with AEAD ciphers. rustls implements no RSA key transport, CBC suite,
   compression or renegotiation, which covers RFC 9325 sections 3.3, 3.5 and
   4. The extended master secret (RFC 7627) is required, not merely
-  supported; a TLS 1.2 peer without it cannot connect. This is stricter than
-  RFC 9325 section 3.5 and is a recorded restriction for the interoperability
-  harness to confirm against the pinned Prosody and ejabberd.
+  supported; a TLS 1.2 peer without it cannot connect, in either role: the
+  receiving configuration refuses a ClientHello without the extension and
+  the initiating configuration a ServerHello without it, before any
+  certificate is read. This is stricter than RFC 9325 section 3.5 and is a
+  recorded restriction for the interoperability harness to confirm against
+  the pinned Prosody and ejabberd.
 - **Handshake signatures.** Both verifier traits delegate to
   `rustls::crypto::verify_tls13_signature` and
   `rustls::crypto::verify_tls12_signature` with the provider's algorithms. A
-  verified chain without a valid handshake signature fails the handshake.
+  verified chain without a valid handshake signature fails the handshake and
+  is recorded as `Verification::Failed(HandshakeSignature)`, an active
+  certificate failure. The verifier records `Verification::Verified` only
+  after the chain and then the handshake signature over that same
+  end-entity certificate verified; a signature asked for over any other
+  certificate is refused.
+- **Evidence.** rustls checks the peer's Finished message after the
+  handshake signature, so `Verification::Verified` is not yet evidence.
+  The evidence is `PeerVerifier::established(&CommonState)`: it returns the
+  `VerifiedPeer` only when the connection is no longer handshaking and the
+  first certificate the connection received from its peer has the SHA-256
+  digest of the verified end-entity certificate. A failed, unfinished or
+  different connection yields nothing. Under TLS 1.3 an initiating
+  connection completes before the receiving server has judged its
+  certificate; what it established about the receiving server still holds,
+  and the receiving side establishes nothing.
 - **Resumption.** Off in both roles and both versions: no session store, no
   tickets, no TLS 1.2 session-ID resumption, no early data, no half-RTT
   data. RFC 9325 section 3.4 permits resumption; this profile forgoes it so
@@ -377,8 +402,9 @@ that govern certificate verification and TLS on S2S streams.
   (gate G5), that slice changes this, with its own review.
 - **Per-connection configuration.** Every connection has its own rustls
   configuration and its own verifier, which refuses a second certificate.
-  A configuration is built only for a private key that belongs to the
-  certificate it presents.
+  The refusal ends the second handshake and leaves the first connection's
+  state and evidence unchanged. A configuration is built only for a private
+  key that belongs to the certificate it presents.
 
 ### Reference identities and presented identifiers (G1)
 
@@ -393,41 +419,64 @@ whatever other names it carries.
 | --- | --- |
 | DNS-ID (`dNSName`) | Matched by webpki on the verified end-entity certificate. Labels are compared as A-labels without regard to ASCII case (RFC 9525 section 6.3). A trailing dot in a presented name does not match. |
 | Wildcard | Accepted in a DNS-ID only, and only as the complete left-most label (RFC 6120 section 13.7.1.2.1, RFC 9525 section 6.3). It stands for exactly one label, so `*.example.org` matches `muc.example.org` and neither `example.org` nor `a.muc.example.org`. At least two labels must follow it. Any other use of `*` makes that entry invalid, and an invalid entry is ignored, not an error. |
-| SRV-ID (`id-on-dnsSRV`, RFC 4985) | Accepted. The value must be exactly one IA5String inside the explicit tag, with no trailing DER. It is split at its first dot into a service label and a name. The service must be `_xmpp-server`, compared without regard to ASCII case; the name must equal the reference domain in A-label form. Nothing is stripped, so `_xmpp-server._tcp.<domain>` does not match, and neither `_xmpp-client` nor `_xmpps-server` is an S2S service (direct TLS is validated like STARTTLS, XEP-0368). No wildcard. |
-| XmppAddr (`id-on-xmppAddr`, RFC 6120 section 13.7.1.4) | Accepted for backward compatibility, as RFC 6120 section 13.7.2.1 allows. The value must be exactly one UTF8String inside the explicit tag. It names a server only when it is a bare domain: a value with a localpart or resourcepart, or with a trailing dot, never matches. Its ASCII letters are lowercased and the result must be a canonical spelling of the reference domain (`CanonicalDomain::parse_exact`), in A-labels or U-labels; no other mapping is applied. No wildcard. |
+| SRV-ID (`id-on-dnsSRV`, RFC 4985) | Accepted on a private-CA profile only (see "Public profile" below). The value must be exactly one IA5String inside the explicit tag, with no trailing DER. It is split at its first dot into a service label and a name. The service must be `_xmpp-server`, compared without regard to ASCII case; the name must equal the reference domain in A-label form. Nothing is stripped, so `_xmpp-server._tcp.<domain>` does not match, and neither `_xmpp-client` nor `_xmpps-server` is an S2S service (direct TLS is validated like STARTTLS, XEP-0368). No wildcard. |
+| XmppAddr (`id-on-xmppAddr`, RFC 6120 section 13.7.1.4) | Accepted on a private-CA profile only, for backward compatibility, as RFC 6120 section 13.7.2.1 allows. The value must be exactly one UTF8String inside the explicit tag. It names a server only when it is a bare domain: a value with a localpart or resourcepart, or with a trailing dot, never matches. Its ASCII letters are lowercased and the result must be a canonical spelling of the reference domain (`CanonicalDomain::parse_exact`), in A-labels or U-labels; no other mapping is applied. No wildcard. |
 | Common Name, URI, IP address | Never an identifier. |
-| Order | DNS-ID, then SRV-ID, then XmppAddr. The evidence records which one matched. |
-| Malformed or repeated XMPP identifier | An SRV-ID or XmppAddr entry that is not correctly encoded, an SRV-ID without a service label, an `otherName` whose type cannot be read, or the same SRV-ID or XmppAddr twice refuses the certificate, even when a DNS-ID matches. A well-formed XmppAddr that is not a bare domain, such as an account address, is not an error; it does not match. Other `otherName` types are ignored. |
-| Name-constrained path | When the trust anchor or an intermediate of the verified path carries a nameConstraints extension, only DNS-IDs are matched. webpki applies dNSName constraints to dNSName entries, and nothing applies RFC 4985 SRVName constraints, so an issuer limited to one DNS subtree could otherwise name any domain through an SRV-ID or XmppAddr. |
+| Public profile | Only DNS-IDs are matched on the public-WebPKI profile. The TLS Baseline Requirements let a publicly trusted CA put only dNSName and IP address entries in a TLS certificate's subjectAltName, so no public CA has validated an SRV-ID or XmppAddr: such an entry in a public certificate proves nothing and is not matched. A domain whose peers rely on SRV-IDs or XmppAddrs needs a private-CA profile. |
+| Order | DNS-ID, then, on a private-CA profile, SRV-ID, then XmppAddr. The evidence records which one matched. |
+| Malformed or repeated XMPP identifier | An SRV-ID or XmppAddr entry that is not correctly encoded, an SRV-ID without a service label, an `otherName` whose type cannot be read, or the same SRV-ID or XmppAddr twice refuses the certificate on either profile, even when a DNS-ID matches. A well-formed XmppAddr that is not a bare domain, such as an account address, is not an error; it does not match. Other `otherName` types are ignored. |
+| Name-constrained path | When the trust anchor or an intermediate of the verified path carries a nameConstraints extension, only DNS-IDs are matched, on a private-CA profile as well. webpki applies dNSName constraints to dNSName entries, and nothing applies RFC 4985 SRVName constraints, so an issuer limited to one DNS subtree could otherwise name any domain through an SRV-ID or XmppAddr. |
 | `otherName` constraint | A trust anchor or intermediate that constrains the `otherName` form is refused: at startup on a private-CA profile, in the handshake on the public profile. This holds even when a DNS-ID would match. |
 
 Limits of this matrix: an internationalized name in a DNS-ID or SRV-ID is
 matched in A-label form only, because both are IA5Strings; SRVName
 constraints are not implemented, so a deployment whose CA relies on them
-cannot use SRV-IDs; a certificate with only a DNS-derived name, such as an
-SRV target host, does not authenticate the source domain.
+cannot use SRV-IDs; a peer on the public profile must present a DNS-ID for
+its source domain, so a hosting provider's certificate that names a hosted
+domain only in an SRV-ID authenticates it only on a private-CA profile; a
+certificate with only a DNS-derived name, such as an SRV target host, does
+not authenticate the source domain.
 
 ### Certificate profile in both roles (G1, G2)
 
-- The end-entity certificate must not be a CA certificate, must carry an
-  extended key usage extension, and that extension must include serverAuth
-  when the certificate is presented by the receiving server, or serverAuth
-  or clientAuth when it is presented by the initiating server (ADR-0020 D2;
-  the serverAuth-only case in the initiating role is the recorded deviation
-  from RFC 5280 section 4.2.1.12). anyExtendedKeyUsage alone does not
-  satisfy either role.
+- The end-entity certificate must not be a CA certificate and must carry an
+  extended key usage extension. On the public-WebPKI profile that
+  extension must include serverAuth in both roles: a publicly trusted CA
+  attests a domain name only in a serverAuth certificate, so a
+  clientAuth-only public certificate authenticates no domain. On a
+  private-CA profile it must include serverAuth when the certificate is
+  presented by the receiving server, and serverAuth or clientAuth when it
+  is presented by the initiating server. The serverAuth-only case in the
+  initiating role is the recorded deviation from RFC 5280 section
+  4.2.1.12 (ADR-0020 D2). anyExtendedKeyUsage alone does not satisfy any
+  role.
 - A keyUsage extension, when present, must assert digitalSignature. The
   private-CA profile requires the extension; the public profile accepts its
   absence, which RFC 5280 section 4.2.1.3 defines as unrestricted.
 - Every issuer in the verified path must assert the CA basic constraint and
   carry a keyUsage extension with keyCertSign, on both profiles. webpki
-  checks the basic constraint and path length but ignores key usage. A CA
-  certificate with an extended key usage extension must include a usage the
-  role accepts; one without the extension is not restricted by it.
+  checks the basic constraint and path length but ignores key usage.
+- An intermediate with an extended key usage extension must include a
+  usage the role accepts under the same rule as the end-entity
+  certificate: serverAuth on the public profile, so an intermediate
+  restricted to clientAuth or to anyExtendedKeyUsage without serverAuth is
+  refused there, and on a private-CA profile also clientAuth in the
+  initiating role. One without the extension is not restricted by it.
+  webpki applies this to intermediates but not to a trust anchor, whose
+  extended key usage it does not keep. A private-CA profile therefore
+  checks its anchors when it is loaded: an anchor that carries the
+  extension must include serverAuth, the usage every role accepts, or the
+  profile fails to load. On the public profile the anchors' own extended
+  key usage is not applied; the compiled-in set holds the Mozilla
+  program's roots for TLS server authentication.
 - An unknown critical extension in any certificate of the path is refused.
 - These checks run on every candidate path through webpki's `verify_path`
   callback, so a path that breaks the issuer profile is refused and webpki
-  looks for another; the path that is accepted has passed them.
+  looks for another; the path that is accepted has passed them. When no
+  path passes, the failure reported is webpki's most specific one, such as
+  a revoked certificate or an exhausted search budget; the issuer-profile
+  failure is reported only when webpki's own answer is an unknown issuer,
+  which is also what a refused candidate looks like to it.
 
 ### Trust profiles (G2)
 
@@ -435,7 +484,14 @@ SRV target host, does not authenticate the source domain.
   an optional private-CA profile. A verifier takes the profile the
   inventory holds for exactly its reference domain when it is built; a
   component domain is not covered by its parent's entry. One chain is
-  verified against one profile.
+  verified against one profile. Exact matching is deliberate: a parent
+  domain's operator does not necessarily run its component domains' CA.
+  To catch an omission, `TrustInventory::summary` takes the peer domains
+  the deployment expects (such as the admission allowlist) and counts
+  those that lie within a private-CA domain without having a private-CA
+  profile themselves, such as `muc.example.org` when only `example.org` is
+  configured. `TrustInventorySummary::log` logs that count, and nothing
+  that identifies a domain, as a warning when it is not zero.
 - **Private-CA paths.** Paths are built from the profile's own validated
   intermediates. Intermediates a peer sends are read within the size
   ceilings and otherwise ignored, so a certificate issued under a CA the
@@ -468,6 +524,12 @@ SRV target host, does not authenticate the source domain.
   Mozilla distrusts a CA. `webpki-roots` carries the name constraints
   Mozilla imposes on a root but not its distrust-after dates or other
   per-root policy, which are therefore not enforced.
+- **Partially distrusted roots.** A root that Mozilla distrusts only for
+  certificates issued after a given date stays in `webpki-roots` until it
+  is removed, and a chain to it is accepted whatever its issuance date.
+  This is a recorded limitation for the activation decision (gate G22),
+  which decides whether to accept it, to exclude such roots from the
+  compiled-in set, or to enforce the dates.
 - **Substituted roots.** `PublicRoots::from_certificates` replaces the set.
   The verifier suite uses it; validation against the real set is activation
   evidence (gate G22). Whether operator configuration may substitute roots
@@ -488,9 +550,16 @@ OCSP service in 2025.
 What bounds the exposure instead:
 
 - An end-entity certificate on the public profile is refused when its
-  validity period exceeds 398 days (`MAX_PUBLIC_LEAF_VALIDITY_SECS`), the
-  ceiling of the CA/Browser Forum Baseline Requirements since 2020, so the
-  window is that of a public certificate and not arbitrary.
+  validity period (notAfter minus notBefore) exceeds the ceiling in force
+  at its notBefore (`PUBLIC_LEAF_VALIDITY_SCHEDULE`): 398 days before
+  2026-03-15, 200 days from 2026-03-15 and 100 days from 2027-03-15, the
+  dates read as 00:00 UTC. The source is CA/Browser Forum ballot SC-081,
+  which amends the TLS Baseline Requirements. A publicly trusted
+  certificate never exceeds its step, so the window is that of a public
+  certificate and not arbitrary. SC-081 also schedules 47 days from
+  2029-03-15, which is not enforced. The schedule, including that step, is
+  re-verified against the Baseline Requirements in force at activation
+  (gate G22).
 - No stream outlives its certificate or an issuer of its path, and every
   new connection verifies again, because nothing is resumed.
 - The operator's denylist (ADR-0020 D1) refuses a domain whose key is known
@@ -542,6 +611,8 @@ strict DER walk that allocates nothing, before a certificate or CRL reaches
 | DER bytes of one CRL | 1 MiB |
 | Revoked-certificate entries in one CRL | 8,192 |
 | Trust anchors in a substituted public root set | 512 |
+| CRL nextUpdate minus thisUpdate on a private-CA profile | 7 days |
+| Validity period of a public end-entity certificate | 398, 200 or 100 days by notBefore |
 
 Every presented certificate is read, one at a time, whether or not the path
 uses it, and a certificate over a ceiling refuses the chain. `x509-parser`
@@ -572,7 +643,11 @@ model (gate G7).
   four jobs execute at once (`VERIFIER_WORKERS`), each on its own
   short-lived thread, and at most sixteen callers wait for a worker
   (`VERIFIER_WAITERS`); a further request is refused immediately. No job is
-  queued without a worker.
+  queued without a worker. A caller that finds a worker free starts at
+  once without counting as waiting, so a limit of zero waiters means "run
+  only if a worker is free". `VerifierWorkers::new` refuses a worker limit
+  above what a Tokio semaphore can count (`WorkerError::LimitTooLarge`)
+  instead of panicking.
 - **Cancellation.** A job holds its worker until it has finished executing.
   A connection that times out drops the completion and closes its socket;
   the late result is discarded, the job still runs to its end, and its
@@ -599,14 +674,20 @@ connection manager (W4c):
   the `to` domain on an initiating one; the matching `receiving_config` or
   `initiating_config`; and `VerifierWorkers` for every `process_new_packets`
   call of the handshake, with the connection's deadlines around it.
-- After the handshake: `Verification::Verified` supplies the negotiation's
-  `TlsPeer` and the certificate digest and expiry that `VerifiedPeerStream`
-  records. `Verification::Failed` is an active certificate failure under
-  ADR-0020 D2, after which no dialback is offered. The expiry is checked
-  again before SASL EXTERNAL succeeds and closes the stream when it passes;
-  a clock that cannot tell the time fails the connection.
-- Telemetry. The verifier emits no metric. `VerifyError::code` and
-  `TrustErrorKind` are bounded values for logs; a metric attribute still
+- After the handshake: `PeerVerifier::established` on the connection
+  supplies the negotiation's `TlsPeer` and the certificate digest and
+  expiry that `VerifiedPeerStream` records; `Verification::Verified` alone
+  is not used as evidence. `Verification::Failed` is an active certificate
+  failure under ADR-0020 D2, after which no dialback is offered. The expiry
+  is checked again before SASL EXTERNAL succeeds and closes the stream when
+  it passes; a clock that cannot tell the time fails the connection.
+- At startup, `TrustInventory::summary` with the expected peer domains and
+  `TrustInventorySummary::log`.
+- Telemetry. The verifier emits no metric. Logs record `VerifyError::code`
+  and `TrustErrorKind`, which are bounded values, and never format a
+  `VerifyError`: the `Display` and `Debug` output of a `VerifyError::Path`
+  failure carries webpki's error, which can include values from the peer's
+  certificates such as extended key usage OIDs. A metric attribute still
   needs the telemetry allowlist.
 
 ## Standalone probe evidence and its limits
@@ -689,11 +770,11 @@ from `server/` with
 | --- | --- | --- |
 | Signed path and TLS ownership | Correct mutual TLS in both roles over an in-memory handshake; wrong CA, missing certificate, invalid certificate signature and forged CertificateVerify fail the handshake. | W4b |
 | Signed path and EXTERNAL | A valid name with an invalid chain or signature never authenticates EXTERNAL on a real connection, in either direction. | W4c (step 6) |
-| Roles/profile | Missing/wrong EKU, missing digitalSignature, CA-as-leaf, invalid issuer usages, unknown critical extensions, trailing DER and excessive certificate count/bytes fail at the defined stage. A serverAuth-only leaf authenticates in both roles. | W4b |
+| Roles/profile | Missing/wrong EKU, missing digitalSignature, CA-as-leaf, invalid issuer usages, unknown critical extensions, trailing DER and excessive certificate count/bytes fail at the defined stage. A serverAuth-only leaf authenticates in both roles; a clientAuth-only leaf authenticates an initiating server on a private-CA profile only. | W4b |
 | TLS versions | A version or feature outside the G1 TLS profile is refused; every allowed version keeps handshake signature verification (`verify_tls13_signature`, and `verify_tls12_signature` if the profile admits TLS 1.2). | W4b |
 | Trust profile | A public-CA chain for a domain configured with a private-CA profile fails; a private-CA chain for a domain on the public-WebPKI profile fails; no second profile is tried after a rejection. | W4b |
 | Trust profile at the listener | An inbound initial header without a pre-TLS `from` is refused before TLS; no inbound direct-TLS listener exists. | W4a (step 2) for the header; W4c (step 6) for the listener |
-| DNS/service identity | Wrong account/component domain, SAN alias outside the pair, CN-only leaf, SRV-only valid identity, wrong `_xmpp-server` service, inserted `_tcp`, malformed OtherName DER/IA5String and duplicate applicable entries. A certificate naming only a DNS-derived SRV target, not the source domain, fails. Reference identities in U-label and A-label form match the same names. Record positive exact-name matches and negative pair authorization separately. | W4b |
+| DNS/service identity | Wrong account/component domain, SAN alias outside the pair, CN-only leaf, SRV-only valid identity (private-CA profile; refused on the public profile), wrong `_xmpp-server` service, inserted `_tcp`, malformed OtherName DER/IA5String and duplicate applicable entries. A certificate naming only a DNS-derived SRV target, not the source domain, fails. Reference identities in U-label and A-label form match the same names. Record positive exact-name matches and negative pair authorization separately. | W4b |
 | Constraints | Enforced DNS constraints and explicitly rejected SRVName/OtherName-constrained CA/path; no retry that drops constraints or promotes an intermediate to a root. | W4b |
 | Root/inventory | Expired/not-yet-valid/non-CA/bad-self-signature anchor, duplicate subject/different key, unknown intermediate, cycle, unsupported algorithm and invalid inventory path fail snapshot construction. | W4b |
 | Root deadline on live streams | Root metadata expiry closes live streams. | W4c (step 6) |
