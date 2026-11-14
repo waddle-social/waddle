@@ -346,6 +346,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("host_grants", READ_INSERT_UPDATE),
     ("host_grant_operations", READ_INSERT),
     ("host_grant_operation_changes", READ_INSERT),
+    // S2S IQ correlation: a pending request is inserted when it is written
+    // to a stream and deleted by the response, failure or expiry that ends
+    // it; a row is never updated.
+    ("s2s_iq_correlations", READ_INSERT_DELETE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

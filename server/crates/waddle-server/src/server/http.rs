@@ -117,6 +117,8 @@ pub(crate) struct HttpServerDeps {
     pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     /// The one enclosing shutdown deadline (#2046 W1.10).
     pub(crate) shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
+    /// The S2S router, present exactly when S2S is enabled.
+    pub(crate) s2s_router: Option<crate::s2s::route::S2sRouter>,
 }
 
 const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
@@ -189,6 +191,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         sm_drain_complete,
         shutdown_deadline,
         connections_drained,
+        s2s_router,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
@@ -207,6 +210,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         sm_drain_complete: sm_drain_complete.clone(),
         connections_drained,
         shutdown_deadline: shutdown_deadline.clone(),
+        s2s_router,
     })
     .await;
     let app = match app {
@@ -642,6 +646,8 @@ pub(crate) struct RouterDeps {
     pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     /// The one enclosing shutdown deadline (#2046 W1.10).
     pub(crate) shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
+    /// The S2S router, present exactly when S2S is enabled.
+    pub(crate) s2s_router: Option<crate::s2s::route::S2sRouter>,
 }
 
 /// Create the Axum router with all routes and middleware.
@@ -659,6 +665,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         sm_drain_complete,
         shutdown_deadline,
         connections_drained,
+        s2s_router,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
@@ -678,10 +685,20 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             mam_storage,
             pubsub_database_storage,
             owner_outbox,
+            s2s_router: s2s_router.clone(),
         },
         shutdown_handle,
     )
     .await?;
+    // The router delivers correlated responses and their errors to local
+    // resources through the state it is part of.
+    if let Some(router) = &s2s_router {
+        router.attach_local(Arc::new(
+            crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery::new(
+                &websocket_state,
+            ),
+        ));
+    }
 
     // Install the OIDC → PEP profile bridge hook now that
     // `WebSocketState` (and its `pubsub_storage`) exists. The hook
@@ -1075,6 +1092,7 @@ struct WebSocketStorageDeps {
     mam_storage: Arc<dyn MamStorage>,
     pubsub_database_storage: Arc<DatabasePubSubStorage>,
     owner_outbox: Option<NotificationOutboxStore>,
+    s2s_router: Option<crate::s2s::route::S2sRouter>,
 }
 
 async fn create_websocket_state(
@@ -1089,6 +1107,7 @@ async fn create_websocket_state(
         mam_storage,
         pubsub_database_storage,
         owner_outbox,
+        s2s_router,
     } = storage;
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
@@ -1744,9 +1763,13 @@ async fn create_websocket_state(
             app_state: state.clone(),
             auth_state: auth_state.clone(),
             service_domains,
-            // Server-to-server transport is not configurable yet, so every
-            // remote destination is refused with a local stanza error.
-            remote_route: Arc::new(FederationDisabled),
+            // With S2S enabled the router takes stanzas for remote
+            // destinations; otherwise every one is refused with a local
+            // stanza error.
+            remote_route: match s2s_router {
+                Some(router) => Arc::new(router),
+                None => Arc::new(FederationDisabled),
+            },
             protocol: ProtocolServices {
                 connection_registry,
                 user_registry,

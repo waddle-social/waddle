@@ -6,11 +6,14 @@
 //! of a remote entity, and IQ results and errors are routed by address instead
 //! of being consumed by whichever handler claims their payload namespace.
 //!
-//! Remote destinations are handed to a [`RemoteRoute`] through [`offer_iq`],
-//! which bounds the wait and fails closed. Until server-to-server transport is
-//! configured the route is [`FederationDisabled`], which refuses every stanza;
-//! IQ requests then receive the error from [`unroutable_iq_reply`] and IQ
-//! results and errors are dropped.
+//! Remote destinations are handed to a [`RemoteRoute`] through [`offer_iq`]
+//! or [`offer_stanza`], which bound the wait and fail closed. Until
+//! server-to-server transport is configured the route is
+//! [`FederationDisabled`], which refuses every stanza; IQ requests then
+//! receive the error from [`unroutable_iq_reply`], messages and presence the
+//! error from [`unroutable_reply`], and IQ results, IQ errors and error
+//! stanzas are dropped. With S2S enabled the route is the S2S router
+//! (`crate::s2s::route::S2sRouter`).
 
 use std::time::Duration;
 
@@ -284,6 +287,18 @@ pub enum UnroutableReason {
     /// The remote route did not answer within [`REMOTE_ROUTE_OFFER_TIMEOUT`]
     /// and the offer was cancelled.
     RouteTimedOut,
+    /// Peer admission (ADR-0020 D1) does not admit the remote domain.
+    PeerNotAdmitted,
+    /// The stanza is refused by the routing policy: a local account's
+    /// account traffic to remote JIDs (ADR-0020 D7), or a sender that may
+    /// not address remote entities.
+    RefusedByPolicy,
+    /// The egress queue for the remote domain, or the router's bound on
+    /// pending requests, is full.
+    EgressBusy,
+    /// The request cannot be correlated: its id is empty, too long, or
+    /// already pending for the same sender and recipient.
+    InvalidRequest,
 }
 
 impl UnroutableReason {
@@ -331,6 +346,30 @@ impl UnroutableReason {
                 DefinedCondition::RemoteServerTimeout,
                 "The route to the remote domain did not respond in time.",
             ),
+            // Admission is not disclosed: the domain cannot be reached, as
+            // when no route to it resolves.
+            Self::PeerNotAdmitted => (
+                ErrorType::Cancel,
+                DefinedCondition::RemoteServerNotFound,
+                "The remote domain cannot be reached from this server.",
+            ),
+            // ADR-0020 D7 names `service-unavailable` for the refusal.
+            Self::RefusedByPolicy => (
+                ErrorType::Cancel,
+                DefinedCondition::ServiceUnavailable,
+                "This server does not route this traffic to remote domains.",
+            ),
+            // RFC 6120 §8.3.3.18: the server lacks the resources now.
+            Self::EgressBusy => (
+                ErrorType::Wait,
+                DefinedCondition::ResourceConstraint,
+                "The route to the remote domain is busy; retry later.",
+            ),
+            Self::InvalidRequest => (
+                ErrorType::Modify,
+                DefinedCondition::BadRequest,
+                "The request id is empty, too long or already pending.",
+            ),
         };
         let mut error = StanzaError::new(type_, condition, "en", text);
         error.by = Some(Jid::from(BareJid::from_parts(None, home)));
@@ -363,6 +402,47 @@ pub fn unroutable_iq_reply(
         payload: Some(payload.clone()),
         error: reason.stanza_error(home),
     })
+}
+
+/// The error reply for a message or presence that could not be routed, or
+/// `None` for an IQ (see [`unroutable_iq_reply`]) or an error stanza, which
+/// is never answered (RFC 6120 §8.3.1).
+///
+/// The reply comes from the stanza's `to`, is addressed to `sender` and
+/// carries the stanza's id; the payload is not echoed. For a client stanza
+/// `sender` is the bound full JID, never a client-supplied `from`.
+pub fn unroutable_reply(
+    stanza: &Stanza,
+    sender: &Jid,
+    home: &DomainRef,
+    reason: UnroutableReason,
+) -> Option<Stanza> {
+    let error = minidom::Element::from(reason.stanza_error(home));
+    match stanza {
+        Stanza::Iq(_) => None,
+        Stanza::Message(message) => {
+            if message.type_ == xmpp_parsers::message::MessageType::Error {
+                return None;
+            }
+            let mut reply = xmpp_parsers::message::Message::error(Some(sender.clone()));
+            reply.from = message.to.clone();
+            reply.id = message.id.clone();
+            reply.payloads.push(error);
+            Some(Stanza::Message(reply))
+        }
+        Stanza::Presence(presence) => {
+            if presence.type_ == xmpp_parsers::presence::Type::Error {
+                return None;
+            }
+            let mut reply =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Error);
+            reply.from = presence.to.clone();
+            reply.to = Some(sender.clone());
+            reply.id = presence.id.clone();
+            reply.payloads.push(error);
+            Some(Stanza::Presence(reply))
+        }
+    }
 }
 
 /// A stanza from a local entity addressed to a remote domain.
@@ -556,6 +636,57 @@ pub async fn offer_iq(
     IqOffer::Refused {
         reason,
         reply: offered.reply(returned, &sender, home, reason).map(Box::new),
+    }
+}
+
+/// The result of [`offer_stanza`].
+#[derive(Debug)]
+pub enum StanzaOffer {
+    /// The route took the stanza.
+    Accepted,
+    /// The stanza was not routed. `reply` is the error for its sender, or
+    /// `None` for an error stanza, which is never answered.
+    Refused {
+        /// Why it was not routed.
+        reason: UnroutableReason,
+        /// The error to send to the stanza's sender.
+        reply: Option<Box<Stanza>>,
+    },
+    /// The stanza has no `from` and was not offered.
+    Unattributed,
+}
+
+/// Offer a message or presence from a local entity to `route`, waiting at
+/// most `deadline`, and fail closed: a stanza that is not routed is
+/// answered with the error from [`unroutable_reply`] (RFC 6120 §10.4.3).
+///
+/// The sender is the stanza's `from`, and its `to` is set to the
+/// destination's canonical address before it is offered. An IQ is refused
+/// here; IQs go through [`offer_iq`].
+pub async fn offer_stanza(
+    route: &dyn RemoteRoute,
+    destination: RemoteDestination,
+    stanza: Stanza,
+    home: &DomainRef,
+    deadline: Duration,
+) -> StanzaOffer {
+    if matches!(stanza, Stanza::Iq(_)) {
+        return StanzaOffer::Unattributed;
+    }
+    let outbound = match RemoteOutbound::new(destination, stanza) {
+        Ok(outbound) => outbound,
+        Err(_) => return StanzaOffer::Unattributed,
+    };
+    let sender = outbound.sender().clone();
+    let offered = outbound.stanza().clone();
+    let reason = match tokio::time::timeout(deadline, route.route(outbound)).await {
+        Ok(RemoteRouteOutcome::Accepted) => return StanzaOffer::Accepted,
+        Ok(RemoteRouteOutcome::Unroutable { reason, .. }) => reason,
+        Err(_) => UnroutableReason::RouteTimedOut,
+    };
+    StanzaOffer::Refused {
+        reason,
+        reply: unroutable_reply(&offered, &sender, home, reason).map(Box::new),
     }
 }
 

@@ -1061,6 +1061,7 @@ async fn test_app_for_state(state: Arc<AppState>) -> Router {
                 std::time::Duration::ZERO,
             ),
         ),
+        s2s_router: None,
     })
     .await
     .unwrap()
