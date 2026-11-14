@@ -8,6 +8,7 @@
 
 pub mod directory;
 pub mod identity;
+pub mod identity_profile;
 pub mod jid;
 pub mod native;
 pub mod oauth2;

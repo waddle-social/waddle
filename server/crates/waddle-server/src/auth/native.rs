@@ -23,8 +23,9 @@ use waddle_xmpp::ScramCredentials;
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
-use super::directory::canonical_account_jid;
+use super::directory::{canonical_account_jid, exact_account_jid};
 use super::AuthError;
+use waddle_xmpp::identity::{AccountLocalpart, CanonicalDomain, ACCOUNT_LOCALPART_MAX_BYTES};
 
 /// Default PBKDF2 iteration count for SCRAM key derivation.
 /// 4096 is the minimum recommended by RFC 7677.
@@ -65,13 +66,19 @@ impl NativeUserStore {
     ///
     /// Returns the user ID on success.
     pub async fn register(&self, request: RegisterRequest) -> Result<i64, AuthError> {
-        // Validate username format (must be valid JID localpart)
-        validate_username(&request.username)?;
-        let jid = canonical_account_jid(&request.username, &request.domain).ok_or_else(|| {
-            AuthError::InvalidUsername("Username is not a valid JID localpart".to_string())
-        })?;
+        // A new account must be in the account profile; its canonical bare
+        // JID is its lookup key.
+        let localpart = validate_username(&request.username)?;
+        let domain = CanonicalDomain::parse_exact(&request.domain)
+            .ok()
+            .filter(|domain| domain.as_str() == request.domain)
+            .ok_or_else(|| {
+                AuthError::InvalidRequest("account domain is not in canonical form".to_string())
+            })?;
+        let jid = localpart.account_jid(&domain);
 
-        // Check if username already exists
+        // Check if the JID is already held, including by a name registered
+        // before the account profile that folds to the same key.
         if self.user_exists(&request.username, &request.domain).await? {
             return Err(AuthError::UserAlreadyExists(request.username));
         }
@@ -164,13 +171,16 @@ impl NativeUserStore {
         Ok(row.is_some() || !self.unkeyed_ids(&jid).await?.is_empty())
     }
 
-    /// Get SCRAM credentials for a user.
+    /// Get SCRAM credentials for the account holding exactly
+    /// `username@domain`. A username that preparation would change (`ALICE`
+    /// for `alice`) names no account, so it never authenticates as the
+    /// account its folded form keys.
     pub async fn get_scram_credentials(
         &self,
         username: &str,
         domain: &str,
     ) -> Result<Option<ScramCredentials>, AuthError> {
-        let Some(jid) = canonical_account_jid(username, domain) else {
+        let Some(jid) = exact_account_jid(username, domain) else {
             return Ok(None);
         };
         let row = self
@@ -404,44 +414,15 @@ fn db_err<E: std::fmt::Display>(e: E) -> AuthError {
     AuthError::DatabaseError(e.to_string())
 }
 
-/// Validate a username for JID localpart compliance.
-///
-/// Per RFC 7622, the localpart must:
-/// - Not be empty
-/// - Not exceed 1023 bytes in UTF-8
-/// - Not contain prohibited characters
-fn validate_username(username: &str) -> Result<(), AuthError> {
-    if username.is_empty() {
-        return Err(AuthError::InvalidUsername(
-            "Username cannot be empty".to_string(),
-        ));
-    }
-
-    if username.len() > 1023 {
-        return Err(AuthError::InvalidUsername("Username too long".to_string()));
-    }
-
-    // Check for prohibited characters in JID localpart
-    let prohibited = ['@', '/', '"', '&', '\'', '<', '>', ' ', '\t', '\n', '\r'];
-    for ch in prohibited {
-        if username.contains(ch) {
-            return Err(AuthError::InvalidUsername(format!(
-                "Username contains prohibited character: '{}'",
-                ch
-            )));
-        }
-    }
-
-    // Check for control characters
-    for ch in username.chars() {
-        if ch.is_control() {
-            return Err(AuthError::InvalidUsername(
-                "Username contains control characters".to_string(),
-            ));
-        }
-    }
-
-    Ok(())
+/// Validate a username for a new account: it must be in the account profile
+/// ([`AccountLocalpart`]) exactly as given. Nothing is lowercased or removed,
+/// so the account's name, its bound JID and its lookup key are one spelling.
+fn validate_username(username: &str) -> Result<AccountLocalpart, AuthError> {
+    AccountLocalpart::parse(username).map_err(|_| {
+        AuthError::InvalidUsername(format!(
+            "Username must be 1 to {ACCOUNT_LOCALPART_MAX_BYTES} lowercase ASCII letters, digits, '.', '_', '-' or '+'"
+        ))
+    })
 }
 
 #[cfg(test)]

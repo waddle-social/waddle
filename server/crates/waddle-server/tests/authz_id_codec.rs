@@ -241,24 +241,53 @@ fn user_subjects_must_be_exact_bare_account_jids() {
 }
 
 #[test]
-fn accepted_domain_spellings_are_not_canonicalized_by_the_codec() {
-    // A limitation, not a policy: principal canonicalization belongs to the
-    // identity boundary. The codec keeps parser-accepted spellings apart.
-    for (left, right) in [
+fn user_subjects_are_accepted_only_in_their_canonical_spelling() {
+    // The identity profile gives each principal one accepted spelling, so the
+    // codec's injectivity over spellings is injectivity over principals. A
+    // trailing dot or a U-label domain is refused, never mapped here.
+    for (canonical, other) in [
         ("a@example.org", "a@example.org."),
-        ("a@bücher.example", "a@xn--bcher-kva.example"),
+        ("a@xn--bcher-kva.example", "a@bücher.example"),
     ] {
-        assert_ne!(user_wire(left), user_wire(right));
-        for value in [left, right] {
-            assert_eq!(
-                AuthzUserJid::from_wire(&user_wire(value))
-                    .expect("round trip")
-                    .jid()
-                    .as_str(),
-                value
-            );
-        }
+        assert_eq!(
+            AuthzUserJid::from_wire(&user_wire(canonical))
+                .expect("round trip")
+                .jid()
+                .as_str(),
+            canonical
+        );
+        assert_eq!(
+            AuthzUserJid::parse_exact(other),
+            Err(AuthzIdError::UserJidNotCanonical),
+            "{other:?}"
+        );
+        assert_eq!(
+            AuthzUserJid::from_wire(&raw_wire(other)),
+            Err(AuthzIdError::UserJidNotCanonical),
+            "{other:?}"
+        );
+        let parsed = BareJid::new(other).expect("parser accepts");
+        assert_eq!(
+            AuthzUserJid::new(parsed),
+            Err(AuthzIdError::UserJidNotCanonical),
+            "{other:?}"
+        );
     }
+    assert_eq!(
+        AuthzUserJid::from_account_parts("a", "bücher.example"),
+        Err(AuthzIdError::UserJidNotCanonical)
+    );
+    assert_eq!(
+        AuthzUserJid::from_account_parts("a", "example.org."),
+        Err(AuthzIdError::UserJidChangedByParser)
+    );
+    assert_eq!(
+        AuthzUserJid::from_account_parts("a", "xn--bcher-kva.example")
+            .expect("canonical account")
+            .jid()
+            .as_str(),
+        "a@xn--bcher-kva.example"
+    );
 }
 
 #[test]

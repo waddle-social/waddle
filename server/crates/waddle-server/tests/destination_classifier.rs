@@ -69,6 +69,43 @@ fn missing_and_home_server_addresses_are_handled_by_the_server() {
 }
 
 #[test]
+fn u_label_and_a_label_domains_classify_identically() {
+    // The identity profile's canonical domain is the A-label form; a parsed
+    // U-label address and its A-label spelling are one destination.
+    let served = ServedDomains::new(domain("xn--bcher-kva.example"))
+        .with_service(ServedService::Muc, domain("muc.xn--bcher-kva.example"));
+    for address in [
+        "alice@bücher.example",
+        "alice@xn--bcher-kva.example",
+        "alice@bücher.example.",
+    ] {
+        assert_eq!(
+            served.classify(Some(&jid(address))),
+            Destination::LocalBare("alice@xn--bcher-kva.example".parse().expect("bare")),
+            "{address}"
+        );
+    }
+    assert_eq!(
+        served.classify(Some(&jid("room@muc.bücher.example/nick"))),
+        Destination::Service {
+            service: ServedService::Muc,
+            address: jid("room@muc.xn--bcher-kva.example/nick"),
+        }
+    );
+    for address in ["bob@münchen.test", "bob@xn--mnchen-3ya.test"] {
+        let Destination::Remote(remote) = classify(address) else {
+            panic!("{address} must be remote");
+        };
+        assert_eq!(
+            remote.address(),
+            &jid("bob@xn--mnchen-3ya.test"),
+            "{address}"
+        );
+        assert_eq!(remote.domain().as_str(), "xn--mnchen-3ya.test");
+    }
+}
+
+#[test]
 fn local_account_addresses_keep_bare_and_full_semantics() {
     assert_eq!(
         classify("bob@example.com"),

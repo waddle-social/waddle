@@ -1,6 +1,10 @@
 use crate::auth::directory::canonical_localpart;
 use crate::auth::{localpart_to_jid, username_to_localpart, AuthError, AuthProviderConfig};
 use kameo::actor::ActorRef;
+use waddle_xmpp::identity::AccountLocalpart;
+
+/// The provider part of a fallback account name such as `ext_github_…`.
+const PROVIDER_COMPONENT_MAX_BYTES: usize = 32;
 
 use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
 use crate::db::{row_value, ValueExt};
@@ -198,12 +202,10 @@ impl IdentityService {
             }
         }
 
-        let provider_slug = username_to_localpart(&provider.id);
-        let provider_component = if provider_slug.is_empty() {
-            "provider".to_string()
-        } else {
-            provider_slug
-        };
+        // Keep the fallback within the account profile's length with its
+        // digest intact: `ext_` + provider + `_` + 12 hex digits.
+        let mut provider_component = username_to_localpart(&provider.id);
+        provider_component.truncate(PROVIDER_COMPONENT_MAX_BYTES);
 
         let digest = Sha256::digest(format!("{}:{}", issuer, claims.subject.trim()).as_bytes());
         let short = hex::encode(&digest[..6]);
@@ -217,7 +219,9 @@ impl IdentityService {
         issuer: &str,
         domain: &str,
     ) -> Result<UserRecord, AuthError> {
-        let base = Self::derive_base_username(provider, claims, issuer);
+        // A slug is at most 60 bytes, so a suffix of up to three digits keeps
+        // every candidate within the account profile.
+        let base = username_to_localpart(&Self::derive_base_username(provider, claims, issuer));
 
         for i in 0..200 {
             let username = if i == 0 {
@@ -225,7 +229,15 @@ impl IdentityService {
             } else {
                 format!("{}{}", base, i)
             };
-            let xmpp_localpart = username_to_localpart(&username);
+            // New accounts are named in the account profile exactly; the
+            // localpart, its key and the bare JID are one spelling.
+            let xmpp_localpart = AccountLocalpart::parse(&username)
+                .map_err(|error| {
+                    AuthError::InvalidUsername(format!(
+                        "derived account name is outside the account profile: {error}"
+                    ))
+                })?
+                .to_string();
             // The bare JID is the immutable principal and primary key.
             let jid = localpart_to_jid(&xmpp_localpart, domain)?;
             let now = Utc::now().to_rfc3339();
