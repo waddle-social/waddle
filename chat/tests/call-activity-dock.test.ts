@@ -1425,9 +1425,11 @@ describe("CallActivityDock rendering", () => {
     expect(mobileDrawers).toContain("visibleActiveChannelCallCount");
     expect(mobileDrawers).toContain("visibleActiveDmCallCount");
     expect(mobileDrawers).toContain("visibleCallParticipants");
-    expect(mobileDrawers).toContain(":call-participants=\"visibleCallParticipants\"");
     expect(mobileDrawers).toContain("visibleCallMediaByRoom");
-    expect(mobileDrawers).toContain("<PeopleRail");
+    // The navigation drawer is the sidebar; the people rail lives in the
+    // Home right-hand panel, fed the same retained participants.
+    expect(mobileDrawers).toContain("<AppSidebar");
+    expect(readyShell).toContain("<PeopleRail :controller=\"controller\" :call-participants=\"retainedMucCallParticipantsStore\" />");
     expect(mobileDrawers).not.toContain("hide-current-call");
     expect(callActivityDock).toContain("entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase()");
 

@@ -85,7 +85,7 @@ describe("MembersPage bots", () => {
     expect(html).toContain('aria-label="Helper, bot"');
     expect(html).not.toContain('aria-label="Helper, available"');
     // Only Bob's avatar carries a presence dot.
-    expect(html.match(/data-show=/g)).toHaveLength(1);
+    expect(html.match(/data-presence=/g)).toHaveLength(1);
   });
 
   test("a declared bot is never here now, but is still listed when nobody else is", async () => {

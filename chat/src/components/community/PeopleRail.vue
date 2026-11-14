@@ -9,6 +9,7 @@ import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { filterPeople, usePeopleRail } from "@/shell/controllers/use-people-rail";
 import type { ChatAppController } from "@/shell/chat-app-controller";
+import { css } from "styled-system/css";
 import PeopleRailGroup from "@/components/community/PeopleRailGroup.vue";
 
 const props = defineProps<{
@@ -71,6 +72,24 @@ const awayAndOffline = computed(() => filterPeople(groups.value.awayAndOffline, 
 const bots = computed(() => filterPeople(groups.value.bots, query.value));
 const roomTitle = computed(() => activeRoomChannel.value ? "In this room" : "");
 
+const rootClass = css({ display: "flex", flexDirection: "column", minHeight: 0, gap: "1" });
+const searchClass = css({ padding: "0 2px 4px" });
+const inputClass = css({
+  width: "100%",
+  height: "40px",
+  boxSizing: "border-box",
+  px: "3",
+  borderRadius: "control",
+  border: "1px solid {colors.border.strong}",
+  bg: "surface",
+  color: "fg",
+  textStyle: "input",
+  _placeholder: { color: "fg.soft" },
+  _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+});
+const scrollClass = css({ display: "flex", flexDirection: "column", gap: "2", minHeight: 0, overflowY: "auto" });
+const srOnly = css({ srOnly: true });
+
 function openPerson(jid: string) {
   ui.showMobileNav.value = false;
   void handleOpenDm(jid);
@@ -78,19 +97,19 @@ function openPerson(jid: string) {
 </script>
 
 <template>
-  <div class="people-rail">
-    <div class="people-rail__search">
-      <label :for="searchId" class="sr-only">Find people</label>
+  <div :class="rootClass">
+    <div :class="searchClass">
+      <label :for="searchId" :class="srOnly">Find people</label>
       <input
         :id="searchId"
         v-model="query"
-        class="people-rail__input"
+        :class="inputClass"
         type="search"
         placeholder="Find people"
         autocomplete="off"
       />
     </div>
-    <div class="people-rail__scroll">
+    <div :class="scrollClass">
       <PeopleRailGroup
         title="In a huddle"
         :count="huddle.length"

@@ -13,6 +13,8 @@ import {
   Settings,
   Users,
 } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { badge } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
@@ -154,6 +156,46 @@ function entryIcon(entry: QuickSwitcherEntry): Component {
   }
 }
 
+const GROUP_LABEL: Record<QuickSwitcherEntry["target"]["kind"], string> = {
+  channel: "Rooms",
+  groupDm: "Group chats",
+  dm: "People",
+  page: "Pages",
+};
+/** Shell-Jump board: a group heading wherever the ranked list changes kind. */
+function groupHeading(index: number): string | null {
+  const kind = results.value[index]?.target.kind;
+  if (!kind || results.value[index - 1]?.target.kind === kind) return null;
+  return GROUP_LABEL[kind];
+}
+
+const srOnly = css({ srOnly: true });
+const searchRow = css({ display: "flex", alignItems: "center", gap: "2.5", py: "14px", px: "4", borderBottom: "1px solid {colors.border.soft}", "& > svg": { width: "20px", height: "20px", flex: "none", color: "fg.muted" } });
+const inputClass = css({ flex: 1, minWidth: 0, border: 0, bg: "transparent", color: "fg", font: "18px/1.4 {fonts.body}", outline: "none", _placeholder: { color: "fg.soft" }, _coarse: { fontSize: "base" } });
+const kbd = css({ font: "600 12px/1 {fonts.mono}", py: "5px", px: "7px", borderRadius: "tag", border: "1px solid {colors.border}", color: "fg.muted" });
+const list = css({ minHeight: 0, flex: 1, overflowY: "auto", margin: 0, listStyle: "none", pt: "1.5", px: "2", pb: "2.5" });
+const groupLabel = css({ margin: 0, pt: "2.5", px: "3", pb: "1", font: "700 13px/1.3 {fonts.body}", color: "fg.muted" });
+const optionClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "3",
+  minHeight: "44px",
+  px: "3",
+  borderRadius: "control",
+  fontSize: "md",
+  color: "fg",
+  cursor: "pointer",
+  "&[aria-selected=true]": { bg: "action.subtle" },
+});
+const iconClass = css({ display: "inline-flex", width: "28px", height: "28px", flex: "none", alignItems: "center", justifyContent: "center", color: "fg.muted", "& svg": { width: "18px", height: "18px" } });
+const textClass = css({ minWidth: 0, flex: 1, display: "flex", flexDirection: "column" });
+const titleClass = css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const hintClass = css({ fontSize: "xs", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const unreadBadge = badge({ variant: "quiet" });
+const mentionBadge = badge();
+const empty = css({ margin: 0, py: "6", px: "4", textAlign: "center", fontSize: "sm", color: "fg.muted" });
+const footer = cx(css({ display: "flex", gap: "4", py: "2.5", px: "4", borderTop: "1px solid {colors.border.soft}", fontSize: "xs", color: "fg.muted" }), css({ _coarse: { display: "none" } }));
+
 function badgeLabel(entry: QuickSwitcherEntry): string {
   const unread = entry.unread > 0 ? `${entry.unread} unread` : "";
   return entry.mentionsMe ? [unread, "mentions you"].filter(Boolean).join(", ") : unread;
@@ -162,29 +204,25 @@ function badgeLabel(entry: QuickSwitcherEntry): string {
 
 <template>
   <AppDialog v-model:open="open" :labelled-by="titleId">
-    <h2 :id="titleId" class="sr-only">Jump to a room, person or page</h2>
-    <div class="border-b border-border p-2">
-      <div class="relative min-w-0 rounded-lg bg-muted/60 transition-colors focus-within:bg-muted/75 focus-within:ring-1 focus-within:ring-inset focus-within:ring-primary/20">
-        <Search
-          class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <input
-          v-model="query"
-          type="text"
-          role="combobox"
-          aria-label="Jump to"
-          aria-autocomplete="list"
-          :aria-expanded="results.length > 0"
-          :aria-controls="results.length > 0 ? listId : undefined"
-          :aria-activedescendant="currentIndex >= 0 ? optionId(currentIndex) : undefined"
-          placeholder="Jump to a room, person or page"
-          autocomplete="off"
-          spellcheck="false"
-          class="type-field min-h-11 w-full rounded-lg border-none bg-transparent py-2.5 pl-10 pr-3 placeholder:text-muted-foreground/40 focus:outline-none"
-          @keydown="onKeydown"
-        />
-      </div>
+    <h2 :id="titleId" :class="srOnly">Jump to a room, person or page</h2>
+    <div :class="searchRow">
+      <Search aria-hidden="true" />
+      <input
+        v-model="query"
+        type="text"
+        role="combobox"
+        aria-label="Jump to"
+        aria-autocomplete="list"
+        :aria-expanded="results.length > 0"
+        :aria-controls="results.length > 0 ? listId : undefined"
+        :aria-activedescendant="currentIndex >= 0 ? optionId(currentIndex) : undefined"
+        placeholder="Search or jump to…"
+        autocomplete="off"
+        spellcheck="false"
+        :class="inputClass"
+        @keydown="onKeydown"
+      />
+      <kbd :class="kbd" aria-hidden="true">Esc</kbd>
     </div>
     <ul
       v-if="results.length > 0"
@@ -192,42 +230,36 @@ function badgeLabel(entry: QuickSwitcherEntry): string {
       ref="listEl"
       role="listbox"
       aria-label="Results"
-      class="min-h-0 flex-1 overflow-y-auto p-1"
+      :class="list"
     >
-      <li
-        v-for="(entry, index) in results"
-        :id="optionId(index)"
-        :key="entry.id"
-        role="option"
-        :aria-selected="index === currentIndex"
-        class="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-1.5 transition-colors"
-        :class="index === currentIndex ? 'bg-primary/15' : 'hover:bg-muted'"
-        @mousemove="highlighted = entry.id"
-        @mousedown.prevent
-        @click="choose(entry)"
-        @keydown.enter.prevent="choose(entry)"
-      >
-        <UserAvatar v-if="entry.target.kind === 'dm'" :jid="entry.target.peerJid" :name="entry.title" size="sm" />
-        <span
-          v-else
-          class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      <template v-for="(entry, index) in results" :key="entry.id">
+        <li v-if="groupHeading(index)" role="presentation" :class="groupLabel" aria-hidden="true">{{ groupHeading(index) }}</li>
+        <li
+          :id="optionId(index)"
+          role="option"
+          :aria-selected="index === currentIndex"
+          :class="optionClass"
+          @mousemove="highlighted = entry.id"
+          @mousedown.prevent
+          @click="choose(entry)"
+          @keydown.enter.prevent="choose(entry)"
         >
-          <component :is="entryIcon(entry)" class="h-4 w-4" aria-hidden="true" />
-        </span>
-        <span class="min-w-0 flex-1">
-          <span class="type-control block truncate">{{ entry.title }}</span>
-          <span v-if="entry.subtitle" class="type-caption block truncate text-muted-foreground">{{ entry.subtitle }}</span>
-        </span>
-        <template v-if="entry.unread > 0 || entry.mentionsMe">
-          <span
-            class="type-count-badge inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1"
-            :class="entry.mentionsMe ? 'bg-live text-live-foreground' : 'bg-primary text-primary-foreground'"
-            aria-hidden="true"
-          >{{ entry.unread > 0 ? entry.unread : "@" }}</span>
-          <span class="sr-only">{{ badgeLabel(entry) }}</span>
-        </template>
-      </li>
+          <UserAvatar v-if="entry.target.kind === 'dm'" :jid="entry.target.peerJid" :name="entry.title" size="sm" />
+          <span v-else :class="iconClass">
+            <component :is="entryIcon(entry)" aria-hidden="true" />
+          </span>
+          <span :class="textClass">
+            <span :class="titleClass">{{ entry.title }}</span>
+            <span v-if="entry.subtitle" :class="hintClass">{{ entry.subtitle }}</span>
+          </span>
+          <template v-if="entry.unread > 0 || entry.mentionsMe">
+            <span :class="entry.mentionsMe ? mentionBadge : unreadBadge" aria-hidden="true">{{ entry.unread > 0 ? entry.unread : "@" }}</span>
+            <span :class="srOnly">{{ badgeLabel(entry) }}</span>
+          </template>
+        </li>
+      </template>
     </ul>
-    <p v-else role="status" class="type-caption px-4 py-6 text-center text-muted-foreground">No matches</p>
+    <p v-else role="status" :class="empty">No matches</p>
+    <div :class="footer" aria-hidden="true"><span>↑ ↓ to move</span><span>Enter to open</span></div>
   </AppDialog>
 </template>

@@ -300,12 +300,11 @@ const memberButtonCopy = computed(() => {
     <div class="flex shrink-0 items-center gap-3">
       <div
         v-if="connectionNotice && connectionStatusClasses"
-        class="type-caption type-emphasis hidden md:inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1"
+        class="hidden md:inline-flex"
         :class="connectionStatusClasses.chip"
       >
         <component
           :is="connectionStatusIcon"
-          class="w-3.5 h-3.5"
           :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
         />
         <span>{{ connectionNotice.shortLabel }}</span>

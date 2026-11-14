@@ -12,23 +12,8 @@
   color: var(--foreground);
 }
 
-.chat-startup-sidebar-loading {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  padding-block: 2.5rem;
-  text-align: center;
-}
-
 .chat-mobile-header {
   min-height: var(--chat-mobile-header-height);
-}
-
-.chat-mobile-nav-body {
-  display: flex;
-  min-height: 0;
-  height: 100%;
-  flex-direction: column;
 }
 
 .chat-workspace {

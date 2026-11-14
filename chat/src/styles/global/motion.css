@@ -123,23 +123,6 @@
   animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* Skeleton — a flat muted placeholder with a slow opacity breath so a
- * loading surface still reads as "in progress". No gradient sweep, no
- * glow: opacity is compositor-only and the loop stops under
- * reduced motion. */
-@keyframes skeleton-pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.55; }
-}
-
-.chat-skeleton {
-  position: relative;
-  overflow: hidden;
-  background-color: var(--muted);
-  border-radius: var(--radius-sm, 6px);
-  animation: skeleton-pulse 1.8s ease-in-out infinite;
-}
-
 /* Visible flash when a user jumps to a replied-to message via the reply chip. */
 @keyframes message-jump-flash {
   0% {
@@ -191,8 +174,5 @@
   .chat-message-grid.message-jump-flash::before {
     animation: none;
     transition: none;
-  }
-  .chat-skeleton {
-    animation: none;
   }
 }

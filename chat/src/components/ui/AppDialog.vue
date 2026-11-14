@@ -1,23 +1,53 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { Dialog } from "@ark-ui/vue/dialog";
 import type { DialogOpenChangeDetails } from "@ark-ui/vue/dialog";
+import { css, cx } from "styled-system/css";
+import { dialog, scrim } from "styled-system/recipes";
 
 /**
  * Base modal dialog (Ark Dialog). Portalled to `<body>`, lazily mounted,
  * traps focus, locks scroll, closes on Escape and backdrop click.
  *
- * Consumers render their own header/body/footer inside; a close button
- * can be a plain `<button>` that sets `open = false`, or `Dialog.CloseTrigger`.
- * `labelledBy` points `aria-labelledby` at the consumer's heading id.
+ * The surface is the preset `dialog` recipe without its padding: consumers
+ * render their own header/body/footer inside (or use `dialogParts` from
+ * `@/ui/part-classes` for the board layout). `size` picks the width:
+ * sm 440, md 520 (default), lg 640px. `labelledBy` points
+ * `aria-labelledby` at the consumer's heading id.
  */
 const open = defineModel<boolean>("open", { required: true });
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     labelledBy?: string;
     role?: "dialog" | "alertdialog";
+    size?: "sm" | "md" | "lg";
   }>(),
-  { labelledBy: undefined, role: "dialog" },
+  { labelledBy: undefined, role: "dialog", size: "md" },
+);
+
+const positionerClass = css({
+  position: "fixed",
+  inset: 0,
+  zIndex: "dialog",
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "center",
+  overflow: "auto",
+  padding: "12vh 16px 16px",
+  _narrow: { paddingTop: "8vh" },
+});
+const surfaceClass = css({
+  "--pad": "0px",
+  position: "relative",
+  gap: 0,
+  maxHeight: "min(44rem, calc(100dvh - 2rem))",
+  overflow: "hidden",
+  color: "fg",
+  outline: "none",
+});
+const contentClass = computed(() =>
+  cx(dialog({ size: props.size === "md" ? undefined : props.size }), surfaceClass, "app-dialog"),
 );
 
 function onOpenChange(details: DialogOpenChangeDetails) {
@@ -28,12 +58,10 @@ function onOpenChange(details: DialogOpenChangeDetails) {
 <template>
   <Dialog.Root :open="open" :role="role" lazy-mount unmount-on-exit @open-change="onOpenChange">
     <Teleport to="body">
-      <Dialog.Backdrop class="app-dialog__backdrop z-modal fixed inset-0 bg-background/70 data-[state=open]:animate-fade-in" />
-      <Dialog.Positioner
-        class="app-dialog__positioner z-modal fixed inset-0 flex items-start justify-center overflow-auto p-3 pt-[10vh] sm:p-4 sm:pt-[12vh]"
-      >
+      <Dialog.Backdrop :class="scrim()" />
+      <Dialog.Positioner :class="positionerClass">
         <Dialog.Content
-          class="app-dialog relative flex max-h-[min(44rem,calc(100dvh-2rem))] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card text-card-foreground shadow-[var(--shadow-floating)] outline-none data-[state=open]:animate-slide-up"
+          :class="contentClass"
           v-bind="labelledBy ? { 'aria-labelledby': labelledBy } : {}"
         >
           <slot />

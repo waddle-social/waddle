@@ -49,7 +49,10 @@ import { toast } from "@/ui/toaster";
 import RoomsPage from "@/components/community/pages/RoomsPage.vue";
 import MembersPage from "@/components/community/pages/MembersPage.vue";
 import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
-import UserAvatar from "@/components/ui/UserAvatar.vue";
+import PeopleRail from "@/components/community/PeopleRail.vue";
+import { css, cx } from "styled-system/css";
+import { btn } from "styled-system/recipes";
+import { cardClasses } from "@/ui/part-classes";
 import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
@@ -64,7 +67,7 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing, sortEventsUpcomingFirst, type CommunityEvent, type FeedPostInput, type StoryPostInput } from "@/lib/xmpp-client";
 import { eventBounds } from "@/lib/xmpp/event-calendar";
-import { splitKnownPeople, type MemberCardModel } from "@/shell/controllers/use-people-rail";
+import type { MemberCardModel } from "@/shell/controllers/use-people-rail";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import { setManualActivity } from "@/presence/self-activity";
 import { $ownNotificationsSuppressed } from "@/presence/presence-store";
@@ -301,9 +304,6 @@ const threadPanelConversationActive = computed(() =>
 const conversationPageActive = computed(() =>
   ui.activePage.value === "chat" && ui.activeCommunitySurface.value === null,
 );
-const canSearchMessages = computed(() =>
-  conversationPageActive.value && (!!activeRoomChannel.value || !!activeDmPeer.value),
-);
 /** ContentArea renders `actionError` inline (with Retry) inside the
  * conversation workspace. Every other page has no renderer for it, so a
  * failure raised there (group-DM creation, reactions from a page, …)
@@ -320,26 +320,10 @@ function threadsListRootAuthorJid(entry: WasmThreadEntry): string | null {
     selfJid: connectionStore.session?.jid,
   });
 }
-/** The header Search button opens the MessageSearchPanel that
- * ContentArea owns, through its exposed handle. */
-function openMessageSearch() {
-  contentAreaRef.value?.openSearch();
-}
 /** Thread-pane avatars open the same profile drawer ContentArea owns, so
  * presence, hats and the DM action resolve exactly as in the timeline. */
 function openProfileFromThread(author: string, avatarJid: string | null) {
   contentAreaRef.value?.openProfile(author, avatarJid);
-}
-function startHuddleFromHeader() {
-  const channel = activeRoomChannel.value;
-  const roomJid = activeChannelRoomJid.value;
-  if (channel && roomJid) {
-    const media: CallMedia = { audio: true, video: false };
-    if (channel.isGroupDm) joinGroupDmCallFromActivity(roomJid, media);
-    else joinChannelCallFromActivity(channel.id, roomJid, media);
-    return;
-  }
-  openRooms();
 }
 const hasCallContext = computed(() => {
   const phase = callStateStore.value.phase;
@@ -369,13 +353,6 @@ const nextEventWhen = computed(() => {
     ? date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
     : date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 });
-/** Contacts and DM peers who are around right now, one per bare JID,
- * from the same rule and sources as the Home hero and the people rail.
- * Honest "around now" for the Home context column — nobody has a join
- * date, so there is no "new this week". */
-const aroundNow = computed(() =>
-  splitKnownPeople(rosterContacts.contacts.value, dmConversations.conversations.value).around,
-);
 /** Member picked on the Members page; MembersPage emits null on unmount. */
 const selectedMember = ref<MemberCardModel | null>(null);
 function onSelectMember(member: MemberCardModel | null) {
@@ -700,13 +677,20 @@ const supersededBannerClass = computed(() =>
     : "",
 );
 
+const adminFrameClass = css({ display: "flex", height: "100%", minHeight: 0, flexDirection: "column" });
+const adminViewClass = css({ minHeight: 0, flex: 1 });
+const supersededBannerFrameClass = css({ position: "absolute", insetInline: 0, top: 0, zIndex: "panel" });
+const contextColumnClass = css({ display: "flex", flexDirection: "column", gap: "3", padding: "4", minHeight: 0 });
+const contextCard = cardClasses("quiet");
+const seeEventsClass = cx(btn({ size: "sm" }), css({ alignSelf: "flex-start" }));
+
 async function recoverSupersededFromShell() {
   await xmppClient.value?.recoverSupersededSession();
 }
 </script>
 
 <template>
-  <div v-if="ui.activePage.value === 'admin'" class="flex h-full min-h-0 flex-col">
+  <div v-if="ui.activePage.value === 'admin'" :class="adminFrameClass">
     <!-- The admin route bypasses the chat shell entirely, so the superseded
          recovery affordance must render here as well or the sticky latch
          leaves the tab without any reconnect action. -->
@@ -716,7 +700,7 @@ async function recoverSupersededFromShell() {
       @recover="recoverSupersededFromShell"
     />
     <AdminView
-      class="min-h-0 flex-1"
+      :class="adminViewClass"
       :xmpp-client="xmppClient"
       :active-panel="adminPanelFromUrl"
       @navigate="onAdminNavigate"
@@ -769,23 +753,15 @@ async function recoverSupersededFromShell() {
       @end-dm="endRecoveredDmFromActivity"
     />
 
-    <!-- Community shell: header + people rail + page + context column -->
-    <CommunityShell
-      :controller="controller"
-      :hide-rail="ui.activePage.value === 'settings' || ui.activePage.value === 'members'"
-      :can-search="canSearchMessages"
-      :open-search="openMessageSearch"
-      :start-huddle="startHuddleFromHeader"
-      :call-participants="retainedMucCallParticipantsStore"
-    >
+    <!-- Community shell: sidebar + page + right-hand panel -->
+    <CommunityShell :controller="controller">
       <!-- Superseded recovery: the shell's main column is a flex column,
            so an in-flow banner would push the active page down. Pin it
            across the full column width instead; its own background/border
            keep it readable over any surface. -->
       <div
         v-if="supersededBannerVisible"
-        class="absolute inset-x-0 top-0 z-40"
-        :class="supersededBannerClass"
+        :class="[supersededBannerFrameClass, supersededBannerClass]"
       >
         <SupersededRecoveryBanner
           :detail="messaging.xmppStatus.value.detail"
@@ -1216,41 +1192,22 @@ async function recoverSupersededFromShell() {
         </div>
       </template>
 
-      <!-- Context column: the live thing that matters on this page. -->
+      <!-- Right-hand panel: the live thing that matters on this page. -->
       <template v-if="contextColumnVisible" #context>
-        <div class="context-column">
+        <div :class="contextColumnClass">
           <template v-if="ui.activePage.value === 'dashboard'">
-            <div class="context-card">
-              <span class="community-kicker">Next event</span>
+            <div :class="contextCard.root">
+              <span :class="contextCard.kicker">Next event</span>
               <template v-if="nextEvent">
-                <span class="context-card__title">{{ nextEvent.summary }}</span>
-                <span class="context-card__text">{{ nextEventWhen }}</span>
-                <button
-                  type="button"
-                  class="community-pill self-start"
-                  @click="openCommunitySurface('events')"
-                >
+                <span :class="contextCard.title">{{ nextEvent.summary }}</span>
+                <span :class="contextCard.body">{{ nextEventWhen }}</span>
+                <button type="button" :class="seeEventsClass" @click="openCommunitySurface('events')">
                   See events
                 </button>
               </template>
-              <span v-else class="context-card__text">Nothing scheduled yet. Events you post show up here.</span>
+              <span v-else :class="contextCard.body">Nothing scheduled yet. Events you post show up here.</span>
             </div>
-            <div class="context-card">
-              <span class="community-kicker">Around now · {{ aroundNow.length }}</span>
-              <div v-if="aroundNow.length > 0" class="context-avatars">
-                <button
-                  v-for="person in aroundNow.slice(0, 12)"
-                  :key="person.jid"
-                  type="button"
-                  class="rounded-lg"
-                  :aria-label="`Message ${person.name}`"
-                  @click="handleOpenDm(person.jid)"
-                >
-                  <UserAvatar :name="person.name" :jid="person.jid" :presence="person.presence" size="md" />
-                </button>
-              </div>
-              <span v-else class="context-card__text">Nobody around right now. Start a huddle and they will find you.</span>
-            </div>
+            <PeopleRail :controller="controller" :call-participants="retainedMucCallParticipantsStore" />
           </template>
           <template v-else-if="ui.activePage.value === 'members'">
             <MemberProfileCard
@@ -1261,9 +1218,9 @@ async function recoverSupersededFromShell() {
               @message="handleOpenDm"
               @close="selectedMember = null"
             />
-            <div v-else class="context-card">
-              <span class="community-kicker">Profile</span>
-              <span class="context-card__text">Pick a member to see their profile here.</span>
+            <div v-else :class="contextCard.root">
+              <span :class="contextCard.kicker">Profile</span>
+              <span :class="contextCard.body">Pick a member to see their profile here.</span>
             </div>
           </template>
           <template v-if="ui.activePage.value !== 'members'">

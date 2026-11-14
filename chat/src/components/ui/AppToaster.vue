@@ -1,21 +1,22 @@
 <script setup lang="ts">
 import { Toast, Toaster } from "@ark-ui/vue/toast";
 import { X } from "lucide-vue-next";
-import { toast as toastRecipe } from "styled-system/recipes";
+import { css } from "styled-system/css";
+import { toastClasses as cls } from "@/ui/part-classes";
 import { toaster, type ToastMeta } from "@/ui/toaster";
 
 /**
  * Renders the app-wide toast stack from `@/ui/toaster`. Mount it once,
- * near the root (XmppProvider). Surfaces come from the `toast` slot
- * recipe: opaque ink, hairline border, ember for `live`.
+ * near the root (XmppProvider). The surface is the preset `toast` recipe;
+ * `live` toasts get the aurora edge, `danger` the krill one.
  */
-const cls = toastRecipe();
-
 const TONE_BORDER: Record<string, string> = {
-  live: "var(--live)",
-  danger: "var(--destructive)",
-  neutral: "var(--border)",
+  live: "var(--colors-live)",
+  danger: "var(--colors-danger)",
+  neutral: "var(--colors-elev-2)",
 };
+const textClass = css({ display: "flex", minWidth: 0, flex: 1, flexDirection: "column", gap: "1" });
+const actionRowClass = css({ mt: "1.5" });
 
 function borderFor(meta: Record<string, unknown> | undefined): string {
   const tone = (meta as Partial<ToastMeta> | undefined)?.tone;
@@ -26,18 +27,18 @@ function borderFor(meta: Record<string, unknown> | undefined): string {
 <template>
   <Toaster :toaster="toaster" v-slot="item">
     <Toast.Root :class="[cls.root, 'app-toast']" :style="{ borderColor: borderFor(item.meta) }">
-      <div class="flex min-w-0 flex-1 flex-col gap-1">
+      <div :class="textClass">
         <Toast.Title :class="cls.title">{{ item.title }}</Toast.Title>
         <Toast.Description v-if="item.description" :class="cls.description">{{ item.description }}</Toast.Description>
-        <div v-if="item.action" class="mt-1.5">
-          <Toast.ActionTrigger :class="[cls.actionTrigger, 'inline-flex items-center']">{{ item.action.label }}</Toast.ActionTrigger>
+        <div v-if="item.action" :class="actionRowClass">
+          <Toast.ActionTrigger :class="cls.actionTrigger">{{ item.action.label }}</Toast.ActionTrigger>
         </div>
       </div>
       <Toast.CloseTrigger
-        :class="[cls.closeTrigger, 'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md']"
+        :class="cls.closeTrigger"
         aria-label="Dismiss"
       >
-        <X class="h-3.5 w-3.5" aria-hidden="true" />
+        <X aria-hidden="true" />
       </Toast.CloseTrigger>
     </Toast.Root>
   </Toaster>

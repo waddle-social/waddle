@@ -60,7 +60,8 @@ import {
   threadChipParticipants as threadChipParticipantsFor,
 } from "./timeline-display-meta";
 import { latestThreadReply } from "./thread-reply-card";
-import { useConnectionNotice } from "./composables/use-connection-notice";
+import { btn, waddle } from "styled-system/recipes";
+import { connectionNoticeClasses, useConnectionNotice } from "./composables/use-connection-notice";
 import { useMessageJump } from "./composables/use-message-jump";
 
 const draft = defineModel<string>("draft", { required: true });
@@ -798,40 +799,21 @@ function dayDividerLabel(createdAt: string): string {
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      class="border-b border-border/80 animate-fade-in"
-      :class="connectionStatusClasses.banner"
+      :class="[connectionNoticeClasses.card, connectionStatusClasses.banner]"
     >
-      <div class="chat-message-lane flex flex-col gap-3 px-[var(--chat-content-inline)] py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex min-w-0 items-start gap-3">
-          <div
-            class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border"
-            :class="connectionStatusClasses.iconWrap"
-          >
-            <component
-              :is="connectionStatusIcon"
-              class="h-4 w-4"
-              :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
-            />
-          </div>
-          <div class="flex min-w-0 flex-col gap-0.5">
-            <p class="type-control">
-              {{ connectionNotice.title }}
-            </p>
-            <p class="type-caption chat-copy-measure" :class="connectionStatusClasses.body">
-              {{ connectionNotice.body }}
-            </p>
-          </div>
-        </div>
-        <button
-          v-if="connectionNotice.actionLabel"
-          type="button"
-          class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
-          @click="handleConnectionNoticeAction"
-        >
-          <RefreshCw class="h-3.5 w-3.5" />
-          <span>{{ connectionNotice.actionLabel }}</span>
-        </button>
+      <span v-if="connectionNotice.tone === 'reconnecting'" :class="waddle()" aria-hidden="true"><i /><i /><i /></span>
+      <div :class="connectionNoticeClasses.text">
+        <p :class="connectionNoticeClasses.title">{{ connectionNotice.title }}</p>
+        <p :class="connectionNoticeClasses.body">{{ connectionNotice.body }}</p>
       </div>
+      <button
+        v-if="connectionNotice.actionLabel"
+        type="button"
+        :class="btn({ variant: 'primary', size: 'sm' })"
+        @click="handleConnectionNoticeAction"
+      >
+        <span>{{ connectionNotice.actionLabel }}</span>
+      </button>
     </div>
     <div
       v-if="updateAvailable"

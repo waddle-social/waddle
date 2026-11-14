@@ -28,6 +28,11 @@
  * `btn({ variant: props.tone })` works with runtime values. `css()` is
  * still extracted statically: pass it literal objects only.
  *
+ * Breakpoints: the preset defines none (preset-base has no defaults), so
+ * chat declares the usual four: `sm` 640, `md` 768 (sidebar inline),
+ * `lg` 1024, `xl` 1280 (right-hand panel inline). Mobile-first:
+ * `css({ display: "none", md: { display: "flex" } })`.
+ *
  * Theme: `data-theme="night|daylight"` on <html>, night when absent
  * (preferences/theme.ts and the head script in layouts/AppLayout.astro).
  * Conditions: `_night`/`_dark`, `_daylight`/`_light`.
@@ -41,6 +46,11 @@ export default defineConfig({
   include: ["./src/**/*.{ts,vue,astro}"],
   exclude: [],
   outdir: "styled-system",
+  theme: {
+    extend: {
+      breakpoints: { sm: "640px", md: "768px", lg: "1024px", xl: "1280px" },
+    },
+  },
   staticCss: { recipes: "*" },
   layers: { reset: "pd_reset", base: "pd_base", tokens: "pd_tokens", recipes: "pd_recipes", utilities: "pd_utilities" },
 });
