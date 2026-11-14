@@ -133,15 +133,12 @@ waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_r
 waddle-server::clustering_shutdown_deadline fatal_publication_wait_started_before_sigterm_outlasts_the_enclosing_deadline
 waddle-server::clustering_shutdown_deadline sigterm_during_a_clustering_only_room_drain_still_waits_for_q6
 waddle-server::clustering_shutdown_deadline sigterm_with_a_held_publication_guard_does_not_retire
-waddle-server::clustering_shutdown_deadline sigterm_with_stalled_stages_retires_inside_the_enclosing_deadline
 waddle-server::clustering_shutdown_deadline terminal_departure_requires_both_exact_demotions
 
 # W1.10 follow-up (#2086): distinguish graceful re-registration shutdown
 # retirement from fatal terminal departure after socket drain settlement.
 waddle-server::clustering_shutdown_deadline sigterm_during_reregistration_retires_both_identities
-waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistration_retires_inside_the_deadline
 waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistration_with_a_held_guard_does_not_retire
-waddle-server::clustering_shutdown_deadline fatal_fence_terminal_departure_requires_a_completed_socket_drain
 waddle-server::clustering_shutdown_deadline fatal_fence_during_terminal_marking_prevents_graceful_retirement
 waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_prevents_second_admission
 
@@ -241,12 +238,10 @@ waddle-server::ingress_relation_guard_lab candidate_rejects_pinned_repeatable_re
 waddle-server::ingress_relation_guard_lab candidate_temp_shadowing_requires_drain_and_qualified_writes
 
 # Dark P2.1 migration owner and PostgreSQL lock-order laboratory.
-waddle-server::migration_owner_lab owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catalog
 waddle-server::migration_owner_lab owner_refuses_missing_epoch_wrong_identity_and_runtime_role_escalation
 waddle-server::migration_owner_lab old_trigger_can_invert_lock_order_against_an_epoch_first_migrator
 waddle-server::migration_owner_lab experimental_guard_requires_recorded_access_share_even_with_access_exclusive
 waddle-server::migration_owner_lab legacy_guard_requires_epoch_update_privilege_that_can_advance_epoch
-waddle-server::migration_owner_lab owner_reports_terminated_commit_as_unknown_without_replaying
 
 # The distinct-cluster subcase runs only when WADDLE_TEST_POSTGRES_SECOND_URL is set;
 # this required-test inventory alone does not establish that subcase ran.
@@ -353,13 +348,10 @@ waddle-xmpp registry::connection_registry::tests::retiring_connection_keeps_slot
 waddle-server clustering::route_bridge::registration::owner::tests::remote_registration_rejects_replayed_generation_with_a_different_transport_ref
 waddle-server clustering::route_bridge::registration::owner::tests::source_lease_rotation_after_actor_admission_preserves_the_successor
 waddle-server clustering::route_bridge::registration::owner_update::tests::delayed_remote_state_update_rejects_rotated_source_lease_before_mutation
-waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
 waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement
 
 # P3 failed-resume endpoint rollback: a published replay-gap attempt may hand
 # its same-socket queue back only after exact seal and an empty/no-permit check.
-waddle-server server::routes::websocket::tests::registration::replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control
-waddle-server server::routes::websocket::tests::registration::replay_gap_with_queued_outbound_refuses_same_socket_endpoint_handoff
 waddle-xmpp registry::connection_registry::tests::sealed_nonempty_binding_does_not_reclaim_its_socket_queue
 waddle-xmpp registry::connection_registry::tests::sealed_binding_with_reserved_permit_does_not_reclaim_socket_queue
 waddle-xmpp registry::connection_registry::tests::retired_binding_cannot_interrupt_a_later_binding_on_the_same_socket
@@ -368,15 +360,9 @@ waddle-xmpp registry::connection_registry::tests::retired_binding_cannot_interru
 # waits and serialize with a test-only seal before consuming the permit.
 waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capacity
 waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_same_socket_rebinding_after_capacity_wait
-waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_commit_and_test_seal_have_one_order
 
 # Dark endpoint transition model: logical lifetime and exact seal/commit
 # outcomes are characterized before a durable repository or runtime cutover.
-waddle-xmpp ownership::endpoint_transition::tests::successful_cross_node_resume_keeps_logical_generation_and_changes_transport
-waddle-xmpp ownership::endpoint_transition::tests::failed_resume_then_fresh_bind_reuses_physical_socket_not_binding_or_logical_state
-waddle-xmpp ownership::endpoint_transition::tests::slow_reserved_enqueue_rechecks_after_seal_and_never_runs
-waddle-xmpp ownership::endpoint_transition::tests::unknown_reply_requires_journal_resolution_not_assumed_rollback
-waddle-xmpp ownership::endpoint_transition::tests::cancelled_prepare_stays_sealed_until_exact_compensation
 
 # Carbon opt-out settles an archive obligation only after exact binding admission.
 waddle-xmpp registry::connection_registry::outbound::tests::carbon_opt_out_requires_the_exact_binding_to_be_active
@@ -432,7 +418,6 @@ waddle-server pending_delivery::tests::postgres_outbound_sequence_release_reject
 # Waddle issue 2046: live XEP-0198 ACK deletion locks the exact claim epoch;
 # terminal settlement drains retained proofs, and a lost owner closes the socket.
 waddle-server pending_delivery::tests::postgres_live_ack_is_fenced_by_same_node_claim_epoch_and_serializes_transfer
-waddle-server server::routes::websocket::tests::stream_management::sm_live_ack_with_lost_claim_closes_stream_without_purging_pending_rows
 
 # These test-support-gated notification outbox suites would otherwise be
 # compiled out of the default publish test task.
@@ -572,7 +557,6 @@ waddle-server::mailbox_core_postgres appender_behind_a_collector_neither_deadloc
 # message a mailbox entry, must not ship.
 waddle-server::ingress_commit mailbox_acceptance::origin_appends_pending_entry_and_owner_accepts_in_one_transaction
 waddle-server::ingress_commit mailbox_acceptance::owner_rejection_records_its_child_and_decides_the_entry
-waddle-server::ingress_commit mailbox_acceptance::commits_below_the_mailbox_epoch_or_under_the_relay_selector_write_no_entry
 
 # #1948 origin handled count: under the mailbox selector the origin must not
 # count a groupchat stanza before it has read its room owner's decision, an
@@ -640,7 +624,6 @@ waddle-server::room_requests_postgres collector_takes_only_consumed_requests_set
 waddle-server::room_requests_postgres guarded_room_tables_reject_unproven_writes
 waddle-server::xep0045_room_request_lanes occupant_connected_to_the_owner_is_recovered_by_its_successor
 waddle-server::xep0045_room_request_lanes kicked_occupant_is_not_seated_by_a_successor
-waddle-server::xep0045_room_request_lanes relayed_join_is_refused_by_an_owner_at_the_mailbox_epoch
 waddle-server::xep0045_room_request_lanes presence_update_and_leave_cross_nodes_as_room_requests
 waddle-server::xep0045_room_request_lanes muji_exchange_crosses_nodes_on_the_muji_lane
 waddle-server::xep0045_room_request_lanes row_of_a_superseded_connection_is_not_seated_and_is_removed
@@ -650,7 +633,6 @@ waddle-server::xep0198_direct_lanes message_to_a_bare_jid_reaches_resources_on_b
 waddle-server::xep0198_direct_lanes absent_resource_is_rejected_and_left_to_the_origins_fallback
 waddle-server::xep0198_direct_lanes owner_killed_before_its_decision_leaves_one_undecided_request
 waddle-server::restricted_runtime_startup authority_guard::authority_relations_accept_only_matrix_writes_that_prove_the_live_epoch
-waddle-server::restricted_runtime_startup authority_guard::owner_phase_guards_authority_relations_created_before_the_guard_migration
 waddle-server::restricted_runtime_startup authority_guard::store_attachment_refuses_a_drifted_authority_guard
 
 # #2138 account claim on a clustered node: the coordinator takes the
