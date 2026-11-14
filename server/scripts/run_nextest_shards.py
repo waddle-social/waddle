@@ -458,8 +458,12 @@ def run(root, diagnostics):
                  '--option', 'sandbox-fallback', 'false']
     command(['nix', 'build', '--print-build-logs', '--no-link', *isolation,
              f'{flake}#waddle-ci-sandbox-probe'], cwd=root / 'server', capture=False)
-    archive = store_path(command(['bash', 'scripts/build-nextest-archive.sh',
-                                  f'{flake}#waddle-server-test-archive'], cwd=source / 'server').strip())
+    # Run the candidate's helper from the checkout, not from inside the source
+    # store path: Nix first resolves an installable containing '/' as a path
+    # relative to the working directory, so 'path:/nix/store/...#attr' under
+    # /nix/store/<source>/server names the source store path itself.
+    archive = store_path(command(['bash', str(source / 'server/scripts/build-nextest-archive.sh'),
+                                  f'{flake}#waddle-server-test-archive'], cwd=root / 'server').strip())
     for name in ('ci-performance/cargo-timing.html', 'partition-coverage.json', 'plan.json'):
         atomic_copy(STORE_DIR, archive, Path(name), diagnostics / Path(name).name)
     wrapper = source / 'server/scripts/qualification-shards.nix'
