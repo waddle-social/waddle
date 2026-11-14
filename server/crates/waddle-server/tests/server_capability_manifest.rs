@@ -43,6 +43,14 @@ fn load_manifest() -> Manifest {
     toml::from_str(MANIFEST_SOURCE).expect("parse embedded server capability manifest")
 }
 
+/// Whether a Rust evidence file declares a test. `#[tokio::test(` covers
+/// attributes with arguments, such as `#[tokio::test(flavor = "multi_thread")]`.
+fn contains_rust_test(source: &str) -> bool {
+    source.contains("#[test]")
+        || source.contains("#[tokio::test]")
+        || source.contains("#[tokio::test(")
+}
+
 #[test]
 fn capability_manifest_has_complete_unique_release_claims() {
     let manifest = load_manifest();
@@ -120,7 +128,7 @@ fn capability_manifest_references_vendored_xeps_and_existing_evidence() {
                 let source = fs::read_to_string(&path).expect("read capability evidence");
                 match path.extension().and_then(|extension| extension.to_str()) {
                     Some("rs") => assert!(
-                        source.contains("#[test]") || source.contains("#[tokio::test]"),
+                        contains_rust_test(&source),
                         "{} evidence for {protocol} contains no Rust test: {evidence}",
                         capability.id
                     ),
@@ -146,7 +154,7 @@ fn capability_manifest_references_vendored_xeps_and_existing_evidence() {
             let source = fs::read_to_string(&path).expect("read server evidence");
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some("rs") => assert!(
-                    source.contains("#[test]") || source.contains("#[tokio::test]"),
+                    contains_rust_test(&source),
                     "{} server evidence contains no Rust test: {evidence}",
                     capability.id
                 ),

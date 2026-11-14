@@ -261,8 +261,9 @@ async fn publish(
 /// resource's state. Routing on this node then reaches the resource through
 /// a bound request addressed to that node, as it reaches a resource that a
 /// connection on another node bound. Registry syncs leave the binding
-/// alone: no local entry carries it.
-#[cfg(test)]
+/// alone: no local entry carries it. Only clustered routing reaches another
+/// node's binding, so only clustered tests use it.
+#[cfg(all(test, feature = "clustering"))]
 pub async fn bind_remote_test_resource(
     state: &WebSocketState,
     jid: &FullJid,

@@ -1295,39 +1295,70 @@ async fn current_live_node_for_peer(db: &Database, peer_id: &str) -> String {
     node
 }
 
-async fn seed_detached_sm_session_row(
-    db: &Database,
-    stream_id: &str,
-    user_id: &str,
-    full_jid: &str,
-) {
+const DURABLE_STATE_LIVE: i64 = 1;
+const DURABLE_STATE_DETACHED: i64 = 2;
+
+/// The fields of an `sm_durable_sessions` row that the orphan reaper must
+/// leave alone when it settles a reclaimed claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableSessionRow {
+    state: i64,
+    generation: i64,
+    detached_at_ms: Option<i64>,
+}
+
+async fn durable_session_row(db: &Database, session_id: &str) -> Option<DurableSessionRow> {
     let conn = db.guard().await.expect("guard");
-    conn.execute(
-        r#"
-        INSERT INTO sm_sessions (
-            stream_id, user_id, full_jid, inbound_count, outbound_count,
-            last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
-            carbons_enabled, roster_interested, blocklist_interested,
-            presence_available, presence_priority
-        ) VALUES (
-            ?, ?, ?, 0, 0, 0, 60,
-            CAST(EXTRACT(EPOCH FROM now()) * 1000 AS BIGINT),
-            60000, 0, 0, 0, 1, 0
+    let mut rows = conn
+        .query(
+            "SELECT CAST(state AS BIGINT), CAST(generation AS BIGINT), \
+                    CAST(detached_at_ms AS BIGINT) \
+             FROM sm_durable_sessions WHERE session_id = ?",
+            waddle_server::db_params![session_id.to_owned()],
         )
-        ON CONFLICT (stream_id) DO UPDATE SET
-            user_id = EXCLUDED.user_id,
-            full_jid = EXCLUDED.full_jid,
-            detached_at_ms = EXCLUDED.detached_at_ms,
-            max_resume_duration_ms = EXCLUDED.max_resume_duration_ms
-        "#,
-        waddle_server::db_params![
-            stream_id.to_string(),
-            user_id.to_string(),
-            full_jid.to_string(),
-        ],
-    )
-    .await
-    .expect("seed detached sm_sessions row");
+        .await
+        .expect("read durable session");
+    rows.next()
+        .await
+        .expect("durable session row")
+        .map(|row| DurableSessionRow {
+            state: row.get(0).expect("state"),
+            generation: row.get(1).expect("generation"),
+            detached_at_ms: row.get(2).expect("detached_at_ms"),
+        })
+}
+
+/// Whether the durable authority stored a detached session's resource
+/// snapshot (its `sm_sessions` row).
+async fn sm_resource_snapshot_exists(db: &Database, stream_id: &str) -> bool {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sm_sessions WHERE stream_id = ?",
+            waddle_server::db_params![stream_id.to_owned()],
+        )
+        .await
+        .expect("read resource snapshot");
+    rows.next().await.expect("resource snapshot row").is_some()
+}
+
+/// Wait until the owner detached the session and stored its resource
+/// snapshot; returns the detached row.
+async fn wait_for_detached_session(db: &Database, session_id: &str) -> DurableSessionRow {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let row = durable_session_row(db, session_id).await;
+        if let Some(row) = row.filter(|row| row.state == DURABLE_STATE_DETACHED) {
+            if row.detached_at_ms.is_some() && sm_resource_snapshot_exists(db, session_id).await {
+                return row;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session {session_id} was not detached with a resource snapshot: {row:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Read `(node_id, claim_epoch)` for a `clustering_claims` row keyed by its
@@ -1813,9 +1844,15 @@ async fn cross_node_resume_live_steal_handshake() {
 /// `run_orphan_reaper_sweep` is `pub(crate)`-private to `waddle-server`, so
 /// this test cannot call it directly even if it wanted to; it can only wait
 /// for the real subprocess's own janitor tick and observe its effects
-/// through Postgres) steals and hydrates ONLY the dead node's orphaned
-/// `sm_session` claim, never re-touching the survivor's own already-claimed
-/// session.
+/// through Postgres) steals ONLY the dead node's orphaned `sm_session`
+/// claim, never re-touching the survivor's own already-claimed session.
+///
+/// A reclaimed SM claim is settled through the durable authority: the
+/// survivor records the owner loss under the stolen claim and then releases
+/// the claim, so the session stays detached and resumable on any node. The
+/// test therefore observes the claim leaving the dead node and the detached
+/// session staying exactly as its owner left it, not the survivor holding
+/// the claim.
 ///
 /// Phase 4 Slice 1a closes the earlier carried risk directly: the survivor's
 /// real orphan-reaper sweep first runs a bounded stale-node watchdog that
@@ -1962,18 +1999,29 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
         "A's clustering_nodes row must start non-expired before the kill"
     );
 
-    // Phase 4 Slice 1a hardening: the orphan reaper must only reclaim
-    // hydratable detached SM sessions, not claim-only live sessions created by
-    // `<enable resume='true'/>`. Seed the durable detached row explicitly so
-    // this capstone still exercises the production reaper path that steals and
-    // hydrates a real orphan, while the claim remains owned by node A until
-    // node B's janitor wins the CAS.
-    let full_jid_a = format!("{OWNER_USERNAME}@{DOMAIN}/{resource_a}");
-    seed_detached_sm_session_row(&db, &stream_a, OWNER_USERNAME, &full_jid_a).await;
+    // The orphan reaper reclaims only sessions with a stored resource
+    // snapshot, which the durable authority writes when a session detaches.
+    // Drop client A's socket without a stream close, so node A detaches the
+    // session exactly as production does. A detached session keeps its claim
+    // on the node that detached it, so node A still owns it until node B's
+    // janitor reclaims it.
+    drop(client_a);
+    let detached_a = wait_for_detached_session(&db, &stream_a).await;
+    let (owner_a_detached, epoch_a_detached) = sm_session_claim_owner(&db, &stream_a)
+        .await
+        .expect("A's detached session must keep its claim");
+    assert_eq!(
+        owner_a_detached, node_a,
+        "a detached session keeps its claim on the node that detached it"
+    );
+    assert!(
+        epoch_a_detached >= epoch_a_before,
+        "detaching must not move A's claim to an older epoch \
+         (was {epoch_a_before}, now {epoch_a_detached})"
+    );
 
     // Hard-kill A (SIGKILL via `Drop`, exactly like `lone_survivor_and_
-    // isolation_fencing`'s own unclean-death leg) — client A's socket goes
-    // down with it, un-gracefully, with no self-expire.
+    // isolation_fencing`'s own unclean-death leg), with no self-expire.
     drop(server_a);
 
     // Let A's heartbeat genuinely lapse past the configured node-lease TTL
@@ -1984,58 +2032,95 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
 
     // From here on, everything is B's real production
     // `spawn_orphan_reaper_janitor` loop: the stale-node watchdog flips A's
-    // node row, then the committed-expired orphan scan steals A's claim.
-    // Poll Postgres for its effect rather than driving it directly (the
-    // sweep is crate-private; this harness cannot call it).
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // node row, the committed-expired orphan scan steals A's claim, the
+    // durable authority records the owner loss under the stolen claim, and
+    // B releases the claim so whichever node resumes or expires the session
+    // takes a free one. Poll Postgres for the effect rather than driving the
+    // sweep (it is crate-private; this harness cannot call it). The reaper
+    // runs every 500ms here, so a reclaim takes a few sweeps after the
+    // lease lapses; the bound only absorbs a slow host.
+    const RECLAIM_BOUND: Duration = Duration::from_secs(60);
+    let reclaim_started = Instant::now();
     loop {
-        if let Some((owner, _epoch)) = sm_session_claim_owner(&db, &stream_a).await {
-            if owner == node_b && node_expired_flag(&db, &node_a).await == Some(true) {
-                break;
-            }
+        let reclaimed = match sm_session_claim_owner(&db, &stream_a).await {
+            None => true,
+            Some((owner, epoch)) => owner == node_b && epoch > epoch_a_detached,
+        };
+        if reclaimed && node_expired_flag(&db, &node_a).await == Some(true) {
+            break;
         }
         assert!(
-            Instant::now() < deadline,
+            reclaim_started.elapsed() < RECLAIM_BOUND,
             "node B's real orphan-reaper janitor never reclaimed A's orphaned sm_session \
-             claim within {deadline:?} of A's death"
+             claim within {RECLAIM_BOUND:?} of the wait starting \
+             (claim: {:?})",
+            sm_session_claim_owner(&db, &stream_a).await
         );
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // Targeted, exactly-once hydration, proven via Postgres alone (this
-    // harness has no in-process view into B's own SM session registry —
-    // the claims table is the shared, observable ground truth both
-    // processes and this test agree on):
-    let (owner_a_after, epoch_a_after) = sm_session_claim_owner(&db, &stream_a)
-        .await
-        .expect("A's claim must still exist, now under a new owner");
-    assert_eq!(
-        owner_a_after, node_b,
-        "B must now own A's orphaned sm_session claim"
-    );
-    assert!(
-        epoch_a_after > epoch_a_before,
-        "the steal must have bumped the claim epoch (was {epoch_a_before}, now {epoch_a_after})"
-    );
+    // Targeted, exactly-once settlement, proven via Postgres alone (this
+    // harness has no in-process view into B's own SM session registry; the
+    // claims and durable session tables are the shared, observable ground
+    // truth both processes and this test agree on). Over several further
+    // sweeps:
+    // - A's claim never returns to A, and is either released or still held
+    //   by B under the stolen epoch.
+    // - A's session stays detached with its resource snapshot, its
+    //   generation and its first detach time unchanged: the session was
+    //   already detached, so recording the owner loss writes nothing, and it
+    //   stays resumable for the rest of its window.
+    // - B's own claim keeps its owner and epoch, and B's own session stays
+    //   live: the targeted scan never touches a survivor's session.
+    let settled_until = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some((owner, epoch)) = sm_session_claim_owner(&db, &stream_a).await {
+            assert_eq!(
+                owner, node_b,
+                "A's reclaimed sm_session claim may only be held by B"
+            );
+            assert!(
+                epoch > epoch_a_detached,
+                "B can hold A's claim only under a stolen epoch \
+                 (A detached at {epoch_a_detached}, now {epoch})"
+            );
+        }
+        assert_eq!(
+            durable_session_row(&db, &stream_a).await,
+            Some(detached_a),
+            "A's detached session must be left exactly as A detached it"
+        );
+        assert!(
+            sm_resource_snapshot_exists(&db, &stream_a).await,
+            "A's resource snapshot must survive the reclaim"
+        );
 
-    // The control claim (B's own) must be COMPLETELY untouched: same
-    // owner, same epoch, byte-for-byte — proving the reaper's targeted
-    // scan never re-steals/re-hydrates a survivor's own already-claimed
-    // session a second time.
-    let (owner_b_after, epoch_b_after) = sm_session_claim_owner(&db, &stream_b)
-        .await
-        .expect("B's own claim must still exist");
-    assert_eq!(
-        owner_b_after, node_b,
-        "B's own claim must still be owned by B"
-    );
-    assert_eq!(
-        epoch_b_after, epoch_b_before,
-        "B's own claim epoch must be byte-for-byte unchanged — never re-stolen/re-hydrated"
-    );
+        let (owner_b_after, epoch_b_after) = sm_session_claim_owner(&db, &stream_b)
+            .await
+            .expect("B's own claim must still exist");
+        assert_eq!(
+            owner_b_after, node_b,
+            "B's own claim must still be owned by B"
+        );
+        assert_eq!(
+            epoch_b_after, epoch_b_before,
+            "B's own claim epoch must be unchanged: never re-stolen"
+        );
+        assert_eq!(
+            durable_session_row(&db, &stream_b)
+                .await
+                .map(|row| row.state),
+            Some(DURABLE_STATE_LIVE),
+            "B's own session must stay live"
+        );
+
+        if Instant::now() >= settled_until {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     drop(server_b);
-    drop(client_a);
     drop(client_b);
 }
 

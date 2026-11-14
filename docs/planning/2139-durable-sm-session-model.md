@@ -483,6 +483,17 @@ free claim. A failed authority write keeps the work in the registry's pending
 inventory for the janitor's retry. The orphan reaper and the inline reclaim
 both take this one path, and neither reads a session row.
 
+The orphan reaper's candidate scan lists only claims whose session has a
+stored resource snapshot (`sm_sessions` row), which the authority writes at
+detach and deletes when a resume completes. Its reclaim is therefore a
+detached session whose node died: the owner-loss write finds it already
+detached and changes nothing, and the claim is released right after the
+steal.
+`clustering_cluster_e2e::orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`
+detaches a real session on the node it then kills, and checks that the
+survivor's janitor takes the claim off the dead node, leaves the detached
+session and its snapshot unchanged, and never touches its own session.
+
 Still present, because they are not yet separable: the registry's legacy
 `DetachedSession` maps, their persistence writers (the persistence codec,
 `PostgresFencedSmPersistence`'s session writers), legacy promotion and the
