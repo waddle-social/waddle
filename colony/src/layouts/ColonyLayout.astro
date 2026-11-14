@@ -16,6 +16,44 @@ const widths = {
   md: css({ maxWidth: "440px", gap: "4" }),
   lg: css({ maxWidth: "520px", gap: "5" }),
 };
+
+// One toggle in the corner: the sun (daylight) and moon (night) swap inside it,
+// the inactive body setting below the horizon.
+const toggle = css({
+  position: "absolute",
+  top: "8%",
+  right: "10%",
+  width: "clamp(3.5rem, 6vw, 5.5rem)",
+  aspectRatio: "1",
+  p: 0,
+  border: 0,
+  bg: "transparent",
+  cursor: "pointer",
+  borderRadius: "pill",
+  _motionSafe: { transition: "scale {durations.base} {easings.out}" },
+  _hover: { scale: "1.08" },
+  _active: { scale: "0.94" },
+  _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "6px" },
+});
+const body = css({
+  position: "absolute",
+  inset: 0,
+  _motionSafe: { transition: "opacity {durations.slower} {easings.out}, transform {durations.slower} {easings.out}" },
+});
+const set = { opacity: 0, pointerEvents: "none" } as const;
+const risen = { opacity: 1, transform: "none" } as const;
+const sun = css({
+  color: "beak.300",
+  ...set,
+  transform: "translate(140px, 420px) rotate(55deg) scale(0.7)",
+  _daylight: risen,
+});
+const moon = css({
+  color: "ice.100",
+  _daylight: { ...set, transform: "translate(-140px, 420px) rotate(-55deg) scale(0.7)" },
+});
+const orbit = (animation: string) =>
+  css({ display: "block", width: "full", height: "full", _motionSafe: { animation } });
 ---
 
 <html lang="en" data-theme="night">
@@ -28,9 +66,12 @@ const widths = {
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#060f19" />
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f9fb" />
     <script is:inline>
+      // A saved choice wins; otherwise follow the system setting live.
       const light = matchMedia("(prefers-color-scheme: light)");
       const applyTheme = () => {
-        document.documentElement.dataset.theme = light.matches ? "daylight" : "night";
+        const saved = localStorage.getItem("waddle-theme");
+        const isLight = saved ? saved === "light" : light.matches;
+        document.documentElement.dataset.theme = isLight ? "daylight" : "night";
       };
       applyTheme();
       light.addEventListener("change", applyTheme);
@@ -57,6 +98,23 @@ const widths = {
         }),
       )}
     >
+      <button type="button" class={toggle} data-theme-toggle aria-label="Daylight theme" aria-pressed="false">
+        <span class={cx(body, sun)}><svg class={orbit("spin 40s linear infinite")} viewBox="0 0 100 100" aria-hidden="true">
+          <circle cx="50" cy="50" r="18" fill="currentColor" />
+          <g stroke="currentColor" stroke-width="3" stroke-linecap="round">
+            <line x1="50" y1="8" x2="50" y2="22" /><line x1="50" y1="78" x2="50" y2="92" />
+            <line x1="8" y1="50" x2="22" y2="50" /><line x1="78" y1="50" x2="92" y2="50" />
+            <line x1="20" y1="20" x2="30" y2="30" /><line x1="70" y1="70" x2="80" y2="80" />
+            <line x1="80" y1="20" x2="70" y2="30" /><line x1="30" y1="70" x2="20" y2="80" />
+          </g>
+        </svg></span>
+        <span class={cx(body, moon)}><svg class={orbit("moonBob 9s ease-in-out infinite")} viewBox="0 0 100 100" aria-hidden="true">
+          <path d="M60 8 A42 42 0 1 0 92 56 A32 32 0 0 1 60 8 Z" fill="currentColor" />
+          <circle cx="62" cy="38" r="3" fill="var(--colors-ice-300)" opacity="0.7" />
+          <circle cx="74" cy="58" r="4" fill="var(--colors-ice-300)" opacity="0.6" />
+          <circle cx="52" cy="62" r="2.5" fill="var(--colors-ice-300)" opacity="0.5" />
+        </svg></span>
+      </button>
       <section class={cx(card(), css({ borderRadius: "panel", p: "8" }), widths[width])}>
         <div class={css({ display: "flex", alignItems: "center", gap: "3" })}>
           <span
@@ -81,5 +139,18 @@ const widths = {
         <slot name="footer"><span class={css({ fontFamily: "mono" })}>{Astro.url.host}</span></slot>
       </p>
     </main>
+    <script>
+      const root = document.documentElement;
+      const toggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]")!;
+      const sync = () => toggle.setAttribute("aria-pressed", String(root.dataset.theme === "daylight"));
+      sync();
+      // The head script may still switch the theme when the system setting changes.
+      new MutationObserver(sync).observe(root, { attributeFilter: ["data-theme"] });
+      toggle.addEventListener("click", () => {
+        const next = root.dataset.theme === "night" ? "daylight" : "night";
+        root.dataset.theme = next;
+        localStorage.setItem("waddle-theme", next === "daylight" ? "light" : "dark");
+      });
+    </script>
   </body>
 </html>

@@ -6,6 +6,14 @@ export default defineConfig({
   preflight: true,
   include: ["./src/**/*.{ts,astro}"],
   outdir: "styled-system",
+  theme: {
+    extend: {
+      keyframes: {
+        spin: { to: { transform: "rotate(360deg)" } },
+        moonBob: { "0%, 100%": { transform: "translateY(0)" }, "50%": { transform: "translateY(-6px)" } },
+      },
+    },
+  },
   globalCss: {
     a: { color: "action.text", _hover: { color: "fg" } },
   },
