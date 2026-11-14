@@ -161,8 +161,8 @@ describe("call surfaces use the Participants dock", () => {
     expect(source).toContain("@focusin=\"revealImmersiveChrome\"");
     expect(source).toContain("chromeHasFocus()");
     expect(source).toContain("watch(isImmersive");
-    expect(source).toContain("visibility: hidden");
-    expect(source).toContain("position: absolute");
+    expect(source).toContain('visibility: "hidden"');
+    expect(source).toContain('position: "absolute"');
   });
 
   test("Immersive layers browser fullscreen and exits back to Expanded", () => {

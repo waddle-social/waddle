@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { css } from "styled-system/css";
 import { GripHorizontal } from "lucide-vue-next";
 
 /**
@@ -26,6 +27,28 @@ const emit = defineEmits<{
 }>();
 
 const valueNow = computed(() => Math.round(props.percent));
+
+// A thin seam between the dark stage and the chat below; a wider
+// invisible hit target (::before) makes it easy to grab.
+const rootClass = css({
+  position: "relative",
+  flex: "0 0 auto",
+  height: "10px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "row-resize",
+  bg: "bg",
+  borderBlock: "1px solid {colors.border.soft}",
+  color: "fg.soft",
+  touchAction: "none",
+  transition: "background-color {durations.fast} {easings.out}, color {durations.fast} {easings.out}",
+  _before: { content: '""', position: "absolute", inset: "-6px 0" },
+  "& svg": { width: "24px", height: "12px", pointerEvents: "none" },
+  _hover: { bg: "state.hover", color: "fg" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "-2px", color: "fg" },
+});
+const draggingClass = css({ bg: "action.subtle", color: "action.text", _hover: { bg: "action.subtle", color: "action.text" } });
 </script>
 
 <template>
@@ -37,69 +60,9 @@ const valueNow = computed(() => Math.round(props.percent));
     aria-valuemin="25"
     aria-valuemax="75"
     tabindex="0"
-    class="call-split-handle"
-    :class="{ 'call-split-handle--dragging': dragging }"
+    :class="[rootClass, dragging && draggingClass]"
     @pointerdown="emit('press', $event)"
   >
-    <GripHorizontal class="call-split-handle__grip" aria-hidden="true" />
+    <GripHorizontal aria-hidden="true" />
   </div>
 </template>
-
-<style scoped>
-.call-split-handle {
-  position: relative;
-  flex: 0 0 auto;
-  height: 0.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: row-resize;
-  border-block: 1px solid var(--border);
-  background: color-mix(in oklab, var(--background) 92%, transparent);
-  transition: background-color 160ms ease-out, border-color 160ms ease-out;
-  touch-action: none;
-}
-
-.call-split-handle::before {
-  /* Wider invisible hit-target so the strip is easier to grab than its
-   * 8px painted height implies — UX research consistently lands on a
-   * ~16px tall target for vertical resize handles. */
-  content: "";
-  position: absolute;
-  inset: -0.25rem 0;
-}
-
-.call-split-handle__grip {
-  width: 1.5rem;
-  height: 0.75rem;
-  color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
-  pointer-events: none;
-  transition: color 160ms ease-out;
-}
-
-.call-split-handle:hover,
-.call-split-handle:focus-visible {
-  background: color-mix(in oklab, var(--primary) 8%, var(--background));
-  border-color: color-mix(in oklab, var(--primary) 30%, var(--border));
-}
-
-.call-split-handle:hover .call-split-handle__grip,
-.call-split-handle:focus-visible .call-split-handle__grip {
-  color: var(--primary);
-}
-
-.call-split-handle:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 40%, transparent);
-}
-
-.call-split-handle--dragging,
-.call-split-handle--dragging:hover {
-  background: color-mix(in oklab, var(--primary) 12%, var(--background));
-  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
-}
-
-.call-split-handle--dragging .call-split-handle__grip {
-  color: var(--primary);
-}
-</style>
