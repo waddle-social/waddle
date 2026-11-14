@@ -272,6 +272,13 @@ async fn message_waits_for_ingress_commit_before_responding_or_checkpointing() {
     });
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
+    // A checkpoint read waits for the held stream as the commit does, so
+    // the checkpoint is observed only once the commit has released it.
+    drop(blocked);
+    let (conn, frames) = task.await.expect("dispatch task");
+    assert_eq!(conn.sm_state.inbound_count(), 1);
+    assert!(!frames.is_empty());
+    // The checkpoint advances with the commit, never ahead of it.
     assert_eq!(
         state
             .deps
@@ -282,12 +289,8 @@ async fn message_waits_for_ingress_commit_before_responding_or_checkpointing() {
             .expect("checkpoint")
             .expect("enrolled stream")
             .to_storage(),
-        0
+        1
     );
-    drop(blocked);
-    let (conn, frames) = task.await.expect("dispatch task");
-    assert_eq!(conn.sm_state.inbound_count(), 1);
-    assert!(!frames.is_empty());
 }
 
 #[tokio::test]
