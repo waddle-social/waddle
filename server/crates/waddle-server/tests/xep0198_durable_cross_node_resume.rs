@@ -851,15 +851,21 @@ async fn a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper(
 
     // A holder that does not answer keeps its claim while its lease is not
     // known to have lapsed. The survivor may be fencing itself in this
-    // window, so the attempt may also end without any reply.
+    // window, so the attempt may also end without any reply. The lease can
+    // also lapse while the attempt waits on the holder. The attempt then
+    // resumes the session itself and its connection is the one under test:
+    // another resume would supersede it.
     let early = async {
         let mut client = WsXmppClient::connect(&node_b.ws_url()).await?;
         client.authenticate(DOMAIN, OWNER, &owner_password).await?;
         send_element(&mut client, request.clone()).await;
-        recv_resume_reply(&mut client, Duration::from_secs(10)).await
+        let reply = recv_resume_reply(&mut client, Duration::from_secs(10)).await?;
+        Ok::<_, String>((client, reply))
     };
-    if let Ok(reply) = early.await {
-        if claim_owner(&db, &before.session_id).await.as_deref() == Some(node_a_id.as_str()) {
+    let mut early_resume = None;
+    if let Ok((client, reply)) = early.await {
+        let holder = claim_owner(&db, &before.session_id).await;
+        if holder.as_deref() == Some(node_a_id.as_str()) {
             assert!(reply.is("failed", SM_NS), "{reply:?}");
             assert!(
                 reply.get_child("resource-constraint", STANZAS_NS).is_some(),
@@ -870,20 +876,27 @@ async fn a_session_of_a_killed_node_is_taken_by_the_survivor_without_the_reaper(
                 Some(before.clone()),
                 "a refused resume leaves the session as it was"
             );
+        } else if reply.is("resumed", SM_NS) && holder.as_deref() == Some(node_b_id.as_str()) {
+            early_resume = Some((client, reply));
         }
     }
 
-    wait_for_node_lease_lapse(&db, &node_a_id).await;
-    wait_for_readiness(&node_b, true, Duration::from_secs(30)).await;
-    let (mut on_b, reply) = resume_until_claimed_by(
-        &db,
-        &node_b,
-        &node_b_id,
-        &owner_password,
-        &before.session_id,
-        &request,
-    )
-    .await;
+    let (mut on_b, reply) = match early_resume {
+        Some(resumed) => resumed,
+        None => {
+            wait_for_node_lease_lapse(&db, &node_a_id).await;
+            wait_for_readiness(&node_b, true, Duration::from_secs(30)).await;
+            resume_until_claimed_by(
+                &db,
+                &node_b,
+                &node_b_id,
+                &owner_password,
+                &before.session_id,
+                &request,
+            )
+            .await
+        }
+    };
     assert!(reply.is("resumed", SM_NS), "resume on node B: {reply:?}");
     assert_eq!(reply.attr("previd"), Some(token.as_str()));
     let after = wait_for_session(&db, &jid, |row| {
