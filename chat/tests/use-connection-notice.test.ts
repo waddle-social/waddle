@@ -33,17 +33,17 @@ describe("useConnectionNotice", () => {
     status.value = { state: "offline", detail: "" };
     await nextTick();
     expect(api.connectionNotice.value?.tone).toBe("offline");
-    expect(api.connectionStatusClasses.value?.chip).toContain("bg-muted/25");
+    expect(api.connectionStatusClasses.value?.chip).toContain("connection-chip--offline");
 
     status.value = { state: "reconnecting", detail: "" };
     await nextTick();
     expect(api.connectionNotice.value?.tone).toBe("reconnecting");
-    expect(api.connectionStatusClasses.value?.chip).toContain("chat-connection-chip-glow--warning");
+    expect(api.connectionStatusClasses.value?.chip).toContain("connection-chip--reconnecting");
 
     status.value = { state: "error", detail: "session expired" };
     await nextTick();
     expect(api.connectionNotice.value?.tone).toBe("error");
-    expect(api.connectionStatusClasses.value?.chip).toContain("chat-connection-chip-glow--destructive");
+    expect(api.connectionStatusClasses.value?.chip).toContain("connection-chip--error");
     stop();
   });
 
@@ -67,7 +67,7 @@ describe("useConnectionNotice", () => {
     status.value = { state: "online", detail: "" };
     await nextTick();
     expect(api.connectionNotice.value?.tone).toBe("reconnected");
-    expect(api.connectionStatusClasses.value?.chip).toContain("chat-connection-chip-glow--primary");
+    expect(api.connectionStatusClasses.value?.chip).toContain("connection-chip--reconnected");
 
     api.clearReconnectedNotice();
     await nextTick();

@@ -4,6 +4,8 @@ import { formatTimelineStamp } from "@/channels/timeline";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { authorAvatarJid } from "@/lib/avatars/author-jid";
 import MessageBody from "@/components/chat/MessageBody.vue";
+import { css, cx } from "styled-system/css";
+import { msg } from "styled-system/recipes";
 
 // Read-only message row for the Unread digest. Reuses `MessageBody`
 // (the same presentational component `PinnedPanel` uses) so unread
@@ -13,25 +15,24 @@ import MessageBody from "@/components/chat/MessageBody.vue";
 defineProps<{
   message: TimelineMessage;
 }>();
+
+// The board's `wd-msg` row, square-cornered inside its Inbox card.
+const rowClass = cx(msg(), css({ borderRadius: 0, padding: "10px 16px", _hover: { bg: "transparent" } }));
+const avatarClass = css({ gridRow: "span 2", alignSelf: "start", mt: "0.5" });
+const retractedClass = css({ gridColumn: 2, margin: 0, textStyle: "caption", fontStyle: "italic", color: "fg.muted" });
+const bodyClass = css({ gridColumn: 2, minWidth: 0 });
 </script>
 
 <template>
-  <div class="flex gap-2.5 rounded-[10px] px-2 py-2">
-    <span class="mt-0.5 flex-shrink-0">
-      <UserAvatar :name="message.author" :jid="authorAvatarJid(message)" size="sm" />
+  <div :class="rowClass">
+    <span :class="avatarClass">
+      <UserAvatar :name="message.author" :jid="authorAvatarJid(message)" size="message" />
     </span>
-    <div class="min-w-0 flex-1">
-      <div class="flex items-baseline justify-between gap-2">
-        <span class="type-control truncate font-semibold text-foreground">{{ message.author }}</span>
-        <span class="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
-          {{ formatTimelineStamp(message.createdAt) }}
-        </span>
-      </div>
-      <p
-        v-if="message.isRetracted"
-        class="type-caption italic text-muted-foreground"
-      >Message retracted</p>
-      <MessageBody v-else :message="message" compact />
+    <div class="wd-msg__meta">
+      <span class="wd-msg__author">{{ message.author }}</span>
+      <span class="wd-msg__time">{{ formatTimelineStamp(message.createdAt) }}</span>
     </div>
+    <p v-if="message.isRetracted" :class="retractedClass">Message retracted</p>
+    <div v-else :class="bodyClass"><MessageBody :message="message" compact /></div>
   </div>
 </template>

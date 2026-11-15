@@ -41,7 +41,7 @@ describe("CallAnchorCard", () => {
     expect(ariaLabelCount).toBe(1);
     // The button carries no aria-label, so its accessible name is the visible
     // "Join" text inside its <span>.
-    const button = html.match(/<button[^>]*bg-primary[^>]*>([\s\S]*?)<\/button>/);
+    const button = html.match(/<button[^>]*wd-btn--variant_live[^>]*>([\s\S]*?)<\/button>/);
     expect(button).not.toBeNull();
     expect(button?.[0]).not.toContain("aria-label");
     expect(button?.[1]).toContain("<span>Join</span>");

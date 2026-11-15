@@ -10,6 +10,7 @@ import {
   safetyProbabilityWidth,
   QUESTION_MARKER_THRESHOLD,
 } from "@/components/chat/message-safety-scores";
+import { css, cx } from "styled-system/css";
 
 // Server judgments fastened to a message (XEP-0422,
 // `urn:waddle:safety-scores:1`). Safety scores use the notice threshold;
@@ -35,15 +36,51 @@ const questionScore = computed(() => {
 });
 const questionPresentation = computed(() => safetyCategoryPresentation("is_question"));
 const rows = computed(() => notableSafetyScores(props.scores));
+
+// `data-tone` colours a label or bar from its category's token family.
+const tone = css({
+  "&[data-tone=info]": { color: "info.text" },
+  "&[data-tone=danger]": { color: "danger.text" },
+  "&[data-tone=warning]": { color: "warning.text" },
+  "&[data-tone=live]": { color: "live.text" },
+  "&[data-tone=gold]": { color: "gold.text" },
+  "&[data-tone=muted]": { color: "fg.muted" },
+});
+const c = {
+  root: css({ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "1" }),
+  toggle: cx(tone, css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1",
+    height: "24px",
+    px: "1.5",
+    borderRadius: "sm",
+    textStyle: "caption",
+    cursor: "pointer",
+    transition: "background-color {durations.fast} {easings.out}",
+    _hover: { bg: "state.hover" },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+    "& svg": { width: "12px", height: "12px" },
+  })),
+  panel: css({ width: "100%", maxWidth: "320px", px: "2.5", py: "2", borderRadius: "sm", border: "1px solid {colors.border.soft}", bg: "surface" }),
+  list: css({ display: "flex", flexDirection: "column", gap: "1.5" }),
+  row: css({ display: "grid", gridTemplateColumns: "minmax(0, 7.5rem) 1fr 2.5rem", alignItems: "center", gap: "2" }),
+  label: cx(tone, css({ display: "flex", minWidth: 0, alignItems: "center", gap: "1", textStyle: "caption", "& svg": { width: "12px", height: "12px", flex: "none" } })),
+  name: css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+  track: css({ height: "4px", overflow: "hidden", borderRadius: "pill", bg: "surface.3" }),
+  bar: cx(tone, css({ display: "block", height: "100%", borderRadius: "pill", bg: "currentColor" })),
+  value: css({ textStyle: "caption", textAlign: "right", color: "fg", fontVariantNumeric: "tabular-nums" }),
+  model: css({ mt: "1.5", textStyle: "caption", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+};
 </script>
 
 <template>
-  <div v-if="indicator || questionScore" class="chat-safety-scores flex flex-col items-start gap-1">
+  <div v-if="indicator || questionScore" :class="c.root">
     <button
       v-if="indicator"
       type="button"
-      class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-muted/50"
-      :class="indicator.textClass"
+      :class="c.toggle"
+      :data-tone="indicator.tone"
       :data-severity="indicator.severity"
       :aria-expanded="expanded"
       :aria-controls="panelId"
@@ -51,55 +88,55 @@ const rows = computed(() => notableSafetyScores(props.scores));
       :title="`${expanded ? 'Hide' : 'Show'} ${indicator.label} scores`"
       @click="expanded = !expanded"
     >
-      <component :is="indicator.icon" class="h-3 w-3" aria-hidden="true" />
+      <component :is="indicator.icon" aria-hidden="true" />
       <span>{{ indicator.label }}</span>
     </button>
     <button
       v-if="questionScore"
       type="button"
-      class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-muted/50"
-      :class="questionPresentation.textClass"
+      :class="c.toggle"
+      :data-tone="questionPresentation.tone"
       :aria-expanded="expanded"
       :aria-controls="panelId"
       :aria-label="`${expanded ? 'Hide' : 'Show'} question score`"
       :title="`${expanded ? 'Hide' : 'Show'} question score`"
       @click="expanded = !expanded"
     >
-      <component :is="questionPresentation.icon" class="h-3 w-3" aria-hidden="true" />
+      <component :is="questionPresentation.icon" aria-hidden="true" />
       <span>Question</span>
     </button>
     <div
       v-if="expanded"
       :id="panelId"
-      class="chat-safety-scores__panel w-full max-w-xs rounded-md border border-border bg-muted/25 px-2.5 py-2"
+      :class="c.panel"
     >
-      <ul class="flex flex-col gap-1.5">
+      <ul :class="c.list">
         <li
           v-for="score in rows"
           :key="score.category"
-          class="grid grid-cols-[minmax(0,7.5rem)_1fr_2.5rem] items-center gap-2"
+          :class="c.row"
         >
           <span
-            class="type-meta flex min-w-0 items-center gap-1"
-            :class="safetyCategoryPresentation(score.category).textClass"
+            :class="c.label"
+            :data-tone="safetyCategoryPresentation(score.category).tone"
             :title="score.taxonomyVersion"
           >
-            <component :is="safetyCategoryPresentation(score.category).icon" class="h-3 w-3 shrink-0" aria-hidden="true" />
-            <span class="truncate">{{ safetyCategoryPresentation(score.category).label }}</span>
+            <component :is="safetyCategoryPresentation(score.category).icon" aria-hidden="true" />
+            <span :class="c.name">{{ safetyCategoryPresentation(score.category).label }}</span>
           </span>
-          <span class="h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+          <span :class="c.track" aria-hidden="true">
             <span
-              class="block h-full rounded-full"
-              :class="safetyCategoryPresentation(score.category).barClass"
+              :class="c.bar"
+              :data-tone="safetyCategoryPresentation(score.category).tone"
               :style="{ width: safetyProbabilityWidth(score.probability) }"
             />
           </span>
-          <span class="type-meta type-numeric text-right text-foreground/80">
+          <span :class="c.value">
             {{ formatSafetyProbability(score.probability) }}
           </span>
         </li>
       </ul>
-      <p class="type-meta mt-1.5 truncate text-muted-foreground" :title="scores.modelVersion">
+      <p :class="c.model" :title="scores.modelVersion">
         Model {{ scores.modelVersion }}
       </p>
     </div>

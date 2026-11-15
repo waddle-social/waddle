@@ -2,7 +2,9 @@
 import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useStore } from "@nanostores/vue";
-import { AlertCircle, RefreshCw, Upload } from "lucide-vue-next";
+import { RefreshCw, Upload } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, separator } from "styled-system/recipes";
 import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
@@ -44,6 +46,7 @@ import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHead
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
 import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
 import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
+import CallChatPanel from "@/components/calls/CallChatPanel.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -60,6 +63,7 @@ import {
   threadChipParticipants as threadChipParticipantsFor,
 } from "./timeline-display-meta";
 import { latestThreadReply } from "./thread-reply-card";
+import ConnectionNotice from "./ConnectionNotice.vue";
 import { useConnectionNotice } from "./composables/use-connection-notice";
 import { useMessageJump } from "./composables/use-message-jump";
 
@@ -411,6 +415,27 @@ const callChatMessages = computed(() =>
     : [],
 );
 
+// Replies sent from the right-hand huddle thread go on the call's thread,
+// exactly as the expanded surface's Chat tab sends them.
+const callThreadDraft = ref("");
+async function onSendCallThread(
+  body: string,
+  markup: MarkupSpan[],
+  references: MessageReference[],
+  files?: Array<File | Blob>,
+  linkPreview?: ComposerLinkPreviewSendPayload,
+): Promise<void> {
+  const threadId = activeCallThreadId.value?.trim();
+  if (!threadId) return;
+  const override = { threadId };
+  if (props.sendCallChatMessage) {
+    await props.sendCallChatMessage(body, markup, references, files, undefined, override, linkPreview);
+  } else {
+    emit("sendCallChat", body, markup, references, files, undefined, override, linkPreview);
+  }
+  callThreadDraft.value = "";
+}
+
 // Drive the Chat tab's unread badge: inbound (non-self) call-thread messages
 // accumulate while the Chat tab isn't the focused dock tab and clear once it is.
 const callDockOpen = useStore($callDockOpen);
@@ -736,24 +761,174 @@ function showDayDividerBefore(message: TimelineMessage): boolean {
 function dayDividerLabel(createdAt: string): string {
   return formatTimelineDayDivider(createdAt);
 }
+
+/** DMs (1:1 and group) read as bubbles in a centred lane (App-DM); rooms use message rows. */
+const bubbleKind = computed<"direct" | "group" | undefined>(() => {
+  if (props.dmPeer) return "direct";
+  return props.channel && props.sidebarMode === "dms" ? "group" : undefined;
+});
+
+const cls = {
+  // Column-wrap flex: the call stage (`.call-split`, whose flex-basis is the
+  // persisted split percent of this box) and its thread wrap into a 400px
+  // right-hand column at xl; below xl the stage stacks above the room.
+  root: css({
+    position: "relative",
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+    minHeight: 0,
+    bg: "bg",
+    // The stage and its resize handle stack above the room below xl.
+    "& > .call-split, & > .call-split + [role=separator]": { order: { base: -1, xl: 0 } },
+    "& > [data-part=thread]": { display: { base: "none", xl: "flex" } },
+    "&:has(> .call-split)": { flexWrap: { xl: "wrap" } },
+    "&:has(> .call-split) > [data-part=main]": { flexBasis: { xl: "100%" }, width: { xl: "calc(100% - 400px)" } },
+    "&:has(> .call-split) > .call-split + [role=separator]": { width: { xl: "400px" } },
+    // HuddlePanel: the stage fills the 400px column edge to edge (no card inset).
+    "&:has(> .call-split) > .call-split": {
+      width: { xl: "400px" },
+      margin: { xl: 0 },
+      borderRadius: { xl: 0 },
+      boxShadow: { xl: "none" },
+      borderLeft: { xl: "1px solid {colors.border.soft}" },
+    },
+    "&:not(:has(> .call-split)) > [data-part=thread]": { display: "none" },
+    // Huddle-Expanded: the stage takes the main column and the thread stays
+    // in the right-hand column; immersive still covers everything.
+    "&:has(> .call-expanded:not(.call-expanded--immersive)) > [data-part=thread]": {
+      display: { xl: "flex" },
+      position: { xl: "absolute" },
+      insetBlock: { xl: 0 },
+      insetInlineEnd: { xl: 0 },
+      zIndex: { xl: 30 },
+    },
+    "& > .call-expanded:not(.call-expanded--immersive)": { insetInlineEnd: { xl: "400px" } },
+  }),
+  main: css({ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, width: "100%" }),
+  callThread: css({
+    flex: 1,
+    flexDirection: "column",
+    width: "400px",
+    minHeight: 0,
+    borderLeft: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    "& > :last-child": { flex: 1, minHeight: 0 },
+    // 400px column: keep the composer to attach, emoji and send.
+    "& [data-composer-wide]": { display: "none" },
+  }),
+  callThreadHead: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "2",
+    px: "4",
+    py: "3",
+    borderTop: "1px solid {colors.border.soft}",
+    borderBottom: "1px solid {colors.border.soft}",
+  }),
+  callThreadTitle: css({ margin: 0, font: "700 16px/1.25 {fonts.display}", color: "fg" }),
+  callThreadCount: css({ textStyle: "caption", color: "fg.muted" }),
+  // Bubbles keep a readable lane on wide screens.
+  dmLane: css({ width: "100%", maxWidth: "760px", mx: "auto" }),
+  dropZone: css({
+    position: "absolute",
+    inset: "3",
+    zIndex: "dropdown",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "2",
+    borderRadius: "panel",
+    border: "2px dashed {colors.action.text}",
+    bg: "action.subtle",
+    color: "action.text",
+    pointerEvents: "none",
+    animation: "wd-fade {durations.fast} {easings.out}",
+    "& svg": { width: "32px", height: "32px" },
+  }),
+  dropLabel: css({ font: "700 18px/1.3 {fonts.display}" }),
+  // Full-width notice rows under the header (update ready, load error, reply jump).
+  notice: css({
+    flex: "none",
+    display: "flex",
+    flexDirection: "column",
+    gap: "2",
+    px: "6",
+    py: "3",
+    borderBottom: "1px solid {colors.border.soft}",
+    textStyle: "caption",
+    color: "fg.muted",
+    sm: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+    _narrow: { px: "4" },
+  }),
+  noticeUpdate: css({ bg: "action.subtle", color: "fg" }),
+  noticeError: css({ bg: "danger.subtle", color: "danger.text", fontWeight: 600 }),
+  noticeLead: css({ display: "flex", alignItems: "flex-start", gap: "3", minWidth: 0 }),
+  noticeIcon: css({
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "32px",
+    height: "32px",
+    flex: "none",
+    borderRadius: "pill",
+    bg: "surface",
+    color: "action.text",
+    "& svg": { width: "16px", height: "16px" },
+  }),
+  noticeTitle: css({ margin: 0, fontWeight: 700, color: "fg", fontSize: "sm" }),
+  noticeBody: css({ margin: 0, color: "fg.muted", maxWidth: "measure.body" }),
+  noticeButton: css({ flex: "none" }),
+  emptyScroll: css({ flex: 1, minHeight: 0, overflowX: "hidden", overflowY: "auto", px: "6", py: "4", _narrow: { px: "4" } }),
+  // A short timeline sits on the composer, like a chat log (App-Room / App-DM).
+  liveEdgeEnd: css({ mt: "auto" }),
+  pane: css({ position: "relative", display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0 }),
+  dayMarker: css({ flex: "none", pt: "1" }),
+  // A centred caption for DMs (App-DM "Today"), a ruled divider in rooms.
+  dayCaption: css({ display: "flex", justifyContent: "center", pt: "1", pb: "3", textStyle: "caption", color: "fg.muted" }),
+  jump: css({
+    position: "absolute",
+    left: "50%",
+    translate: "-50% 0",
+    zIndex: "sticky",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1.5",
+    height: "36px",
+    px: "3.5",
+    border: "1px solid {colors.border}",
+    borderRadius: "pill",
+    bg: "surface",
+    color: "fg",
+    font: "600 13px/1 {fonts.body}",
+    boxShadow: "elev.2",
+    cursor: "pointer",
+    animation: "wd-rise {durations.base} {easings.out}",
+    transition: "background-color {durations.fast} {easings.out}",
+    _hover: { bg: "surface.2" },
+    "& svg": { width: "14px", height: "14px" },
+  }),
+  jumpTop: css({ top: "4" }),
+  jumpBottom: css({ bottom: "4" }),
+};
 </script>
 
 <template>
   <div
-    class="flex-1 flex flex-col min-w-0 min-h-0 bg-background relative"
+    :class="cls.root"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
   >
     <!-- Drop zone overlay -->
-    <div
-      v-if="isDragging"
-      class="z-popover absolute inset-3 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary bg-primary/10 pointer-events-none animate-fade-in"
-    >
-      <Upload class="w-8 h-8 text-primary" />
-      <span class="type-display-title text-primary">Drop files to upload</span>
+    <div v-if="isDragging" :class="cls.dropZone">
+      <Upload aria-hidden="true" />
+      <span :class="cls.dropLabel">Drop files to upload</span>
     </div>
+    <div data-part="main" :class="cls.main">
 
     <ChatHeader
       v-model:show-search="showSearch"
@@ -793,83 +968,34 @@ function dayDividerLabel(createdAt: string): string {
       @reconnect-dm="(peerJid, media) => emit('reconnectDm', peerJid, media)"
       @end-dm="(peerJid, sid) => emit('endDm', peerJid, sid)"
     />
-    <div
-      v-if="connectionNotice && connectionStatusClasses"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      class="border-b border-border/80 animate-fade-in"
-      :class="connectionStatusClasses.banner"
-    >
-      <div class="chat-message-lane flex flex-col gap-3 px-[var(--chat-content-inline)] py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex min-w-0 items-start gap-3">
-          <div
-            class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border"
-            :class="connectionStatusClasses.iconWrap"
-          >
-            <component
-              :is="connectionStatusIcon"
-              class="h-4 w-4"
-              :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
-            />
-          </div>
-          <div class="flex min-w-0 flex-col gap-0.5">
-            <p class="type-control">
-              {{ connectionNotice.title }}
-            </p>
-            <p class="type-caption chat-copy-measure" :class="connectionStatusClasses.body">
-              {{ connectionNotice.body }}
-            </p>
-          </div>
-        </div>
-        <button
-          v-if="connectionNotice.actionLabel"
-          type="button"
-          class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
-          @click="handleConnectionNoticeAction"
-        >
-          <RefreshCw class="h-3.5 w-3.5" />
-          <span>{{ connectionNotice.actionLabel }}</span>
-        </button>
-      </div>
-    </div>
+    <ConnectionNotice
+      v-if="connectionNotice"
+      :notice="connectionNotice"
+      @action="handleConnectionNoticeAction"
+    />
     <div
       v-if="updateAvailable"
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      class="border-b border-primary/12 bg-primary/8 text-foreground"
+      :class="cx(cls.notice, cls.noticeUpdate)"
     >
-      <div class="chat-message-lane flex flex-col gap-3 px-[var(--chat-content-inline)] py-3.5 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex min-w-0 items-start gap-3">
-          <div class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-primary/15 bg-background/75 text-primary">
-            <RefreshCw
-              class="h-4 w-4"
-              :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
-            />
-          </div>
-          <div class="flex min-w-0 flex-col gap-0.5">
-            <p class="type-control">
-              Update ready
-            </p>
-            <p class="type-caption chat-copy-measure text-foreground/75">
-              {{ updateNoticeBody }}
-            </p>
-          </div>
+      <div :class="cls.noticeLead">
+        <span :class="cls.noticeIcon" aria-hidden="true"><RefreshCw /></span>
+        <div>
+          <p :class="cls.noticeTitle">Update ready</p>
+          <p :class="cls.noticeBody">{{ updateNoticeBody }}</p>
         </div>
-        <button
-          type="button"
-          class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 disabled:cursor-wait disabled:opacity-75"
-          :disabled="isApplyingUpdate"
-          @click="emit('refreshUpdate')"
-        >
-          <RefreshCw
-            class="h-3.5 w-3.5"
-            :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
-          />
-          <span>{{ isApplyingUpdate ? "Refreshing…" : "Refresh" }}</span>
-        </button>
       </div>
+      <button
+        type="button"
+        :class="cx(btn({ variant: 'primary', size: 'sm' }), cls.noticeButton)"
+        :disabled="isApplyingUpdate"
+        @click="emit('refreshUpdate')"
+      >
+        <RefreshCw aria-hidden="true" />
+        <span>{{ isApplyingUpdate ? "Refreshing…" : "Refresh" }}</span>
+      </button>
     </div>
 
     <MessageSearchPanel
@@ -886,47 +1012,32 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Error banner -->
     <div
       v-if="actionError && !channelAccessRequired"
-      class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive-text animate-fade-in"
+      :class="cx(cls.notice, cls.noticeError)"
       role="alert"
       aria-live="assertive"
       aria-atomic="true"
     >
-      <div class="chat-message-lane flex flex-col gap-2 px-[var(--chat-content-inline)] py-3 sm:flex-row sm:items-center sm:justify-between">
-        <span>{{ actionError }}</span>
-        <button
-          v-if="errorActionLabel"
-          type="button"
-          class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-destructive/25 bg-background/80 px-3 text-destructive-text transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/30"
-          @click="emit('retryLoad')"
-        >
-          <RefreshCw class="h-3.5 w-3.5" />
-          {{ errorActionLabel }}
-        </button>
-      </div>
+      <span>{{ actionError }}</span>
+      <button
+        v-if="errorActionLabel"
+        type="button"
+        :class="cx(btn({ size: 'sm' }), cls.noticeButton)"
+        @click="emit('retryLoad')"
+      >
+        <RefreshCw aria-hidden="true" />
+        {{ errorActionLabel }}
+      </button>
     </div>
     <div
       v-if="replyJumpNotice"
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      class="type-caption text-muted-foreground bg-muted/35 border-b border-border animate-fade-in"
+      :class="cls.notice"
     >
-      <div class="chat-message-lane px-[var(--chat-content-inline)] py-2.5">
-        {{ replyJumpNotice }}
-      </div>
+      {{ replyJumpNotice }}
     </div>
 
-    <!-- Inline split-view for an active call in this conversation.
-         MUC and DM ownership gates live inside the component. -->
-    <CallSplitContainer
-      v-if="callRoomJid || dmPeer?.peerJid"
-      :room-jid="callRoomJid ?? undefined"
-      :dm-peer-jid="dmPeer?.peerJid"
-      :dm-peer-name="dmPeer?.peerUsername"
-      :xmpp-client="xmppClient"
-      :space-id="waddle?.id"
-      :channel-id="channel?.id"
-    />
 
     <!-- Composer (social / top-pinned mode) -->
     <!-- Note: the composer and typing indicator appear in two spots in the DOM
@@ -937,8 +1048,9 @@ function dayDividerLabel(createdAt: string): string {
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
+      :class="bubbleKind && cls.dmLane"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
-      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : undefined"
+      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : bubbleKind ? `Message ${channel?.name ?? 'conversation'}` : undefined"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
@@ -979,6 +1091,7 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Typing indicator (social / top-pinned mode) -->
     <TypingIndicator
       v-if="typingUsers.length > 0 && isTopPinned"
+      :class="bubbleKind && cls.dmLane"
       variant="social"
       :typing-users="typingUsers"
       :avatar-jid-for="typingAvatarJid"
@@ -987,20 +1100,18 @@ function dayDividerLabel(createdAt: string): string {
 
     <div
       v-if="currentDayMarkerLabel"
-      class="chat-current-day-marker type-section-label"
+      :class="cx(separator(), cls.dayMarker, bubbleKind && cls.dmLane)"
       role="status"
       aria-live="polite"
     >
-      <div class="chat-current-day-marker__lane">
-        <span class="chat-current-day-marker__label">{{ currentDayMarkerLabel }}</span>
-      </div>
+      <span>{{ currentDayMarkerLabel }}</span>
     </div>
 
     <!-- Messages -->
     <div
       v-if="channelAccessRequired || isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
       :ref="setMessagesContainer"
-      class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
+      :class="cls.emptyScroll"
       @scroll="onMessagesScroll"
     >
       <TimelineEmptyState
@@ -1019,19 +1130,11 @@ function dayDividerLabel(createdAt: string): string {
         :is-forum-channel="isForumChannel"
       />
 
-      <div v-else-if="errorActionLabel" class="chat-empty-state">
-        <div class="w-12 h-12 rounded-lg bg-destructive/10 flex items-center justify-center">
-          <AlertCircle class="w-5 h-5 text-destructive-text" />
-        </div>
-        <div class="chat-field-stack">
-          <p class="type-empty-title">
-            Messages are not available right now.
-          </p>
-          <p class="type-field text-muted-foreground">
-            Check the connection and try again.
-          </p>
-        </div>
-      </div>
+      <TimelineEmptyState
+        v-else-if="errorActionLabel"
+        variant="unavailable"
+        :is-forum-channel="isForumChannel"
+      />
 
       <TimelineEmptyState
         v-else-if="feedMessages.length === 0"
@@ -1043,13 +1146,14 @@ function dayDividerLabel(createdAt: string): string {
 
     </div>
 
-    <div v-else class="chat-message-pane">
+    <div v-else :class="cls.pane">
     <VirtualTimeline
       :ref="setVirtualTimelineRef"
       :items="orderedFeedMessages"
       :has-older="hasOlderMessages"
       :loading-older="isLoadingOlderMessages"
       :sentinel-position="olderSentinelPosition"
+      :content-class="cx(bubbleKind && cls.dmLane, !isTopPinned && cls.liveEdgeEnd)"
       aria-label="Messages"
       @scroll="onMessagesScroll"
       @load-older="emit('loadOlder')"
@@ -1057,28 +1161,21 @@ function dayDividerLabel(createdAt: string): string {
       <template #item="{ item: msg }">
           <div
             v-if="showDayDividerBefore(msg)"
-            class="chat-day-divider type-section-label"
+            :class="bubbleKind ? cls.dayCaption : separator()"
             :data-day-marker-created-at="msg.createdAt"
             role="separator"
             :aria-label="dayDividerLabel(msg.createdAt)"
           >
-            <div class="chat-day-divider__rule" />
-            <span class="chat-day-divider__label">{{ dayDividerLabel(msg.createdAt) }}</span>
-            <div class="chat-day-divider__rule" />
+            <span>{{ dayDividerLabel(msg.createdAt) }}</span>
           </div>
           <div
             v-if="showDividerBefore(msg)"
-            class="chat-new-messages-divider type-section-label"
+            :class="separator({ new: true })"
             data-new-messages-divider
             role="separator"
             aria-label="New messages"
           >
-            <div class="chat-new-messages-divider__rule" />
-            <span class="chat-new-messages-divider__label">
-              <span class="chat-new-messages-divider__pulse" aria-hidden="true" />
-              New messages
-            </span>
-            <div class="chat-new-messages-divider__rule" />
+            <span>New messages</span>
           </div>
           <MessageCard
             :message="msg"
@@ -1103,6 +1200,7 @@ function dayDividerLabel(createdAt: string): string {
             :link-preview-scope="linkPreviewScope"
             :call-room-jid="callAnchorConversationJid"
             :call-channel-id="channel?.id ?? null"
+            :bubble="bubbleKind"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -1116,31 +1214,25 @@ function dayDividerLabel(createdAt: string): string {
           />
           <div
             v-if="showDividerAfter(msg)"
-            class="chat-new-messages-divider type-section-label"
+            :class="separator({ new: true })"
             data-new-messages-divider
             role="separator"
             aria-label="New messages"
           >
-            <div class="chat-new-messages-divider__rule" />
-            <span class="chat-new-messages-divider__label">
-              <span class="chat-new-messages-divider__pulse" aria-hidden="true" />
-              New messages
-            </span>
-            <div class="chat-new-messages-divider__rule" />
+            <span>New messages</span>
           </div>
       </template>
     </VirtualTimeline>
     <button
       v-if="jumpToLive.shouldShow.value"
       type="button"
-      class="chat-jump-to-live"
-      :class="isTopPinned ? 'chat-jump-to-live--top' : 'chat-jump-to-live--bottom'"
-      :aria-label="isTopPinned ? 'Jump to latest message' : 'Jump to latest message'"
+      :class="cx(cls.jump, isTopPinned ? cls.jumpTop : cls.jumpBottom)"
+      aria-label="Jump to latest message"
       title="Jump to latest"
       @click="jumpToLive.jump"
     >
-      <ArrowUp v-if="isTopPinned" class="w-3.5 h-3.5" aria-hidden="true" />
-      <ArrowDown v-else class="w-3.5 h-3.5" aria-hidden="true" />
+      <ArrowUp v-if="isTopPinned" aria-hidden="true" />
+      <ArrowDown v-else aria-hidden="true" />
       <span>Latest</span>
     </button>
     </div>
@@ -1148,6 +1240,7 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Typing indicator (chat / bottom-pinned mode) -->
     <TypingIndicator
       v-if="typingUsers.length > 0 && !isTopPinned"
+      :class="bubbleKind && cls.dmLane"
       variant="chat"
       :typing-users="typingUsers"
       :avatar-jid-for="typingAvatarJid"
@@ -1160,8 +1253,9 @@ function dayDividerLabel(createdAt: string): string {
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
+      :class="bubbleKind && cls.dmLane"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
-      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : undefined"
+      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : bubbleKind ? `Message ${channel?.name ?? 'conversation'}` : undefined"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
@@ -1207,6 +1301,46 @@ function dayDividerLabel(createdAt: string): string {
       :xmpp-client="xmppClient"
       @message="openPopoverDm"
     />
+    </div>
+    <!-- Huddle-Room / HuddlePanel: the active call opens in the right-hand
+         column with its thread below; it never covers the timeline. Below xl
+         it stacks above the room. MUC and DM ownership gates live inside the
+         component. -->
+    <CallSplitContainer
+      v-if="callRoomJid || dmPeer?.peerJid"
+      :room-jid="callRoomJid ?? undefined"
+      :dm-peer-jid="dmPeer?.peerJid"
+      :dm-peer-name="dmPeer?.peerUsername"
+      :xmpp-client="xmppClient"
+      :space-id="waddle?.id"
+      :channel-id="channel?.id"
+    />
+    <section
+      v-if="callRoomJid || dmPeer?.peerJid"
+      data-part="thread"
+      :class="cls.callThread"
+      :aria-label="dmPeer ? 'Call thread' : 'Huddle thread'"
+    >
+      <header :class="cls.callThreadHead">
+        <h2 :class="cls.callThreadTitle">{{ dmPeer ? "Call thread" : "Huddle thread" }}</h2>
+        <span :class="cls.callThreadCount">{{ callChatMessages.length === 1 ? "1 reply" : `${callChatMessages.length} replies` }}</span>
+      </header>
+      <CallChatPanel
+        v-model:draft="callThreadDraft"
+        :messages="callChatMessages"
+        :visible="true"
+        :avatar-jid-for="avatarJidFor"
+        :is-sending="isSending"
+        :disabled="!canShowComposer || !activeCallThreadId"
+        :mention-candidates="mentionCandidates"
+        :slow-mode-cooldown="slowModeCooldown"
+        :upload-progress="uploadProgress"
+        :in-muc="!dmPeer"
+        :link-preview-lookup="linkPreviewLookup"
+        :link-preview-scope="linkPreviewScope"
+        @send="onSendCallThread"
+      />
+    </section>
     <!-- Expanded call surface: absolutely positioned over the chat
          content pane (this root has `position: relative`) so the
          surrounding app shell — waddles rail, channel list, thread

@@ -2,11 +2,13 @@
 // Design-token generator.
 //
 // Sources of truth (human-edited):
-//   - chat/src/styles/huddle-tokens.ts: the Huddle system's raw Panda
-//     tokens, also imported by chat/panda.config.ts. Feeds Android's
-//     `WaddleTokens.Huddle`.
-//   - chat/src/styles/global/tokens.css: the legacy sheet. Feeds the Apple
-//     accent and Android's legacy `WaddleTokens` sections.
+//   - scripts/design-tokens/huddle-tokens.ts: the pre-Polar Huddle Panda
+//     tokens. Feeds Android's `WaddleTokens.Huddle`.
+//   - scripts/design-tokens/legacy-tokens.css: the legacy chat sheet. Feeds
+//     the Apple accent and Android's legacy `WaddleTokens` sections.
+// Both are frozen copies: chat now takes its tokens from the Polar Huddle
+// preset (@waddle/design). Native apps keep these values until they move
+// to the preset too.
 // Generated outputs (never edit by hand):
 //   - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
 //   - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt
@@ -32,12 +34,12 @@ import {
   semanticTokens as huddleSemanticTokens,
   textStyles as huddleTextStyles,
   tokens as huddleTokens,
-} from "../chat/src/styles/huddle-tokens.ts";
+} from "./design-tokens/huddle-tokens.ts";
 import { createPandaTokenResolver } from "./design-tokens/panda-tokens.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const TOKENS_CSS = join(repoRoot, "chat/src/styles/global/tokens.css");
+const TOKENS_CSS = join(repoRoot, "scripts/design-tokens/legacy-tokens.css");
 const ACCENT_COLORSET = join(
   repoRoot,
   "apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
@@ -283,7 +285,7 @@ const camel = (name) =>
   name.replace(/^([0-9])/, "x$1").replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
 
 // ---------------------------------------------------------------------------
-// Huddle (chat/src/styles/huddle-tokens.ts) -> WaddleTokens.Huddle
+// Huddle (scripts/design-tokens/huddle-tokens.ts) -> WaddleTokens.Huddle
 // ---------------------------------------------------------------------------
 
 // panda.config.ts: night is the default (`_dark`), daylight is `_light`.
@@ -532,8 +534,8 @@ function androidTokensKt() {
       .map((n) => `        val ${camel(n === "2xs" ? "xxs" : n === "2xl" ? "xxl" : n === "3xl" ? "xxxl" : n)} = ${remToDp(`${prefix}-${n}`)}.${unit}`)
       .join("\n");
   return `// GENERATED — do not edit.
-// Sources: chat/src/styles/huddle-tokens.ts (Huddle),
-//          chat/src/styles/global/tokens.css (everything else)
+// Sources: scripts/design-tokens/huddle-tokens.ts (Huddle),
+//          scripts/design-tokens/legacy-tokens.css (everything else)
 // Regenerate: bun scripts/generate-design-tokens.mjs
 package social.waddle.android.theme
 

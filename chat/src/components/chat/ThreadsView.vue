@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Menu } from "lucide-vue-next";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { CallMedia } from "@/lib/calls/types";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import { resolveChannelIdForRoomJid } from "@/lib/threads-channel-resolve";
 import ThreadsListPanel from "@/components/chat/ThreadsListPanel.vue";
+import InboxTabs from "@/components/chat/InboxTabs.vue";
+import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
+import { pageClasses as pc } from "@/components/chat/inbox-classes";
 
 const props = defineProps<{
   channels: readonly ChannelSummary[];
@@ -41,18 +43,14 @@ function joinCall(entry: WasmThreadEntry, media: CallMedia) {
 </script>
 
 <template>
-  <div class="chat-content-pane chat-pane-scroll bg-background">
-    <div class="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-5 px-[var(--chat-content-inline)] py-6">
-      <header class="flex items-center gap-3">
-        <button
-          type="button"
-          class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
-        >
-          <Menu class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">Discussions</h1>
+  <SettingsMobileHeader title="Inbox" @open-nav="emit('openNav')" />
+  <div :class="pc.scroll">
+    <div :class="pc.page">
+      <header :class="pc.head">
+        <div :class="pc.headText">
+          <h1 :class="pc.title">Inbox</h1>
+          <InboxTabs current="threads" />
+        </div>
       </header>
       <ThreadsListPanel
         :xmpp-client="xmppClient"

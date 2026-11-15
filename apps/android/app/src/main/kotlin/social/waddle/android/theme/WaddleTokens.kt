@@ -1,6 +1,6 @@
 // GENERATED — do not edit.
-// Sources: chat/src/styles/huddle-tokens.ts (Huddle),
-//          chat/src/styles/global/tokens.css (everything else)
+// Sources: scripts/design-tokens/huddle-tokens.ts (Huddle),
+//          scripts/design-tokens/legacy-tokens.css (everything else)
 // Regenerate: bun scripts/generate-design-tokens.mjs
 package social.waddle.android.theme
 

@@ -20,7 +20,7 @@ const unknownHat: OccupantHat = { uri: "urn:example:hats:speaker", title: "Speak
 
 describe("authorityBadge", () => {
   test("owner outranks all other layers", () => {
-    expect(authorityBadge(owner)).toEqual({ label: "OWNER", colorClass: "text-warning/70", rank: 4 });
+    expect(authorityBadge(owner)).toEqual({ label: "OWNER", tone: "warning", rank: 4 });
   });
 
   test("admin affiliation wins over moderator role", () => {
@@ -51,7 +51,7 @@ describe("descriptiveBadge", () => {
   test("unknown hats fall back to their title and muted colour", () => {
     expect(descriptiveBadge([unknownHat])).toEqual({
       label: "Speaker",
-      colorClass: "text-muted-foreground",
+      tone: "muted",
       rank: 0,
     });
   });

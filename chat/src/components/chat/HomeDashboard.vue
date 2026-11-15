@@ -12,7 +12,13 @@ import {
   PhoneOutgoing,
   Video,
 } from "lucide-vue-next";
-import { button, card, count, kicker } from "styled-system/recipes";
+import { css, cx } from "styled-system/css";
+import { badge, btn, kicker } from "styled-system/recipes";
+import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
+import { pageClasses as pc } from "@/components/chat/inbox-classes";
+import { appController } from "@/stores/app-controller";
+import type { OccupantPresence } from "@/lib/xmpp/types";
+import { cardClasses, liveKicker } from "@/ui/part-classes";
 import type { ChannelSummary } from "@/lib/chat-types";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
@@ -97,18 +103,83 @@ const emit = defineEmits<{
 }>();
 
 // Recipe classes (Panda). Computed once; the variants are static.
-const liveCard = card({ tone: "live" });
-const warningCard = card({ tone: "warning" });
-const actionCard = card({ tone: "active" });
-const roomCard = card({ tone: "quiet" });
+const liveCard = cardClasses("live");
+const warningCard = cardClasses("warning");
+const actionCard = cardClasses("active");
+const roomCard = cardClasses("quiet");
 const kickerClass = kicker();
-const liveKickerClass = kicker({ tone: "live" });
-const countClass = count();
-const joinButtonClass = button({ variant: "live", size: "sm" });
-const enterButtonClass = button({ variant: "quiet", size: "sm" });
-const openPillClass = button({ variant: "secondary", size: "sm" });
-const leaveButtonClass = button({ variant: "danger", size: "sm" });
-const heroCtaClass = button({ variant: "primary", size: "md" });
+const liveKickerClass = liveKicker;
+const countClass = badge();
+const joinButtonClass = btn({ variant: "live", size: "sm" });
+const enterButtonClass = btn({ size: "sm" });
+const openPillClass = btn({ size: "sm" });
+const leaveButtonClass = btn({ variant: "danger", size: "sm" });
+const heroCtaClass = cx(btn({ variant: "primary" }), css({ textDecoration: "none" }));
+
+// App-Home / Empty-Home boards: a page head (date kicker, greeting, summary,
+// one primary action), then kicker-titled sections of floe cards and rows.
+const pageClass = cx(pc.page, css({ md: { gap: "8" } }));
+const greetingClass = css({ margin: 0, font: "700 24px/1.2 {fonts.display}", letterSpacing: "-0.01em", md: { fontSize: "30px" } });
+// Phones: greeting takes the full row, the CTA wraps below it.
+const heroTextClass = css({ flexBasis: "100%", md: { flexBasis: "0%" } });
+const summaryClass = cx(pc.sub, css({ maxWidth: "52ch", "& > strong": { fontWeight: 600, color: "fg", fontVariantNumeric: "tabular-nums" } }));
+const summarySepClass = css({ color: "fg.soft" });
+const liveDotClass = css({ display: "inline-block", width: "8px", height: "8px", borderRadius: "pill", bg: "live", mr: "2", verticalAlign: "middle" });
+const sectionClass = css({ display: "flex", flexDirection: "column", gap: "3" });
+const sectionHeadClass = css({ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "3" });
+const headingClass = cx(kickerClass, css({ margin: 0 }));
+const liveHeadingClass = cx(liveKickerClass, css({ margin: 0 }));
+const captionClass = css({ margin: 0, textStyle: "caption", color: "fg.muted" });
+const cardGridClass = css({ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "3" });
+const twoColClass = css({ display: "grid", gap: "2", md: { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" } });
+const listClass = css({ display: "flex", flexDirection: "column", gap: "2" });
+const cardMinClass = css({ minWidth: 0 });
+const kickerRowClass = css({ display: "flex", alignItems: "center", gap: "1.5", minWidth: 0, "& svg": { width: "14px", height: "14px", flex: "none" } });
+const ellipsisClass = css({ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const roomTitleClass = cx(roomCard.title, css({ display: "flex", alignItems: "center", gap: "1.5", minWidth: 0, "& svg": { width: "16px", height: "16px", flex: "none", color: "fg.soft" } }));
+const clampClass = css({ lineClamp: 2, overflowWrap: "anywhere" });
+const participantsClass = css({ display: "flex", alignItems: "center", gap: "2", minWidth: 0 });
+const faceStackClass = css({ display: "flex", flex: "none", "& > span": { ml: "-6px", borderRadius: "pill", boxShadow: "0 0 0 2px {colors.surface}" }, "& > span:first-child": { ml: 0 } });
+const footerWrapClass = cx(liveCard.footer, css({ flexWrap: "wrap" }));
+const metaClass = css({ flex: 1, minWidth: 0, fontSize: "xs", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const stampClass = css({ ml: "auto", fontSize: "xs", color: "fg.muted", fontVariantNumeric: "tabular-nums" });
+// A floe row: one button per room or person.
+const rowClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "3",
+  minWidth: 0,
+  minHeight: "56px",
+  padding: "10px 16px",
+  borderRadius: "panel",
+  border: "1px solid {colors.border.soft}",
+  bg: "surface",
+  color: "fg",
+  textAlign: "left",
+  cursor: "pointer",
+  transition: "background-color {durations.fast} {easings.out}",
+  _hover: { bgImage: "linear-gradient({colors.state.hover}, {colors.state.hover})" },
+  _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "2px" },
+});
+const mentionRowClass = cx(rowClass, css({ boxShadow: "inset 3px 0 0 {colors.gold}" }));
+const quietRowClass = cx(rowClass, css({ bg: "transparent", color: "fg.muted", _hover: { color: "fg" } }));
+const roomMarkClass = css({ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "36px", height: "36px", flex: "none", borderRadius: "pill", bg: "action.subtle", color: "action.text", font: "700 14px/1 {fonts.display}" });
+const rowTextClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "0.5" });
+const rowTitleLineClass = css({ display: "flex", alignItems: "center", gap: "2", minWidth: 0 });
+const rowTitleClass = css({ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "15px", fontWeight: 600, color: "fg" });
+const rowNameClass = css({ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "15px" });
+const rowNameUnreadClass = cx(rowNameClass, css({ fontWeight: 700 }));
+const rowLineClass = css({ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "13px", color: "fg.muted" });
+const rowLiveLineClass = cx(rowLineClass, css({ color: "live.text" }));
+const pillClass = css({ display: "inline-flex", alignItems: "center", gap: "1", height: "20px", px: "1.5", flex: "none", borderRadius: "pill", border: "1px solid {colors.border}", fontSize: "xs", color: "fg.muted", whiteSpace: "nowrap", "& svg": { width: "12px", height: "12px" } });
+const livePillClass = cx(pillClass, css({ borderColor: "live", color: "live.text" }));
+const openPillShapeClass = cx(openPillClass, css({ flex: "none", borderRadius: "pill" }));
+const noteClass = css({ margin: 0, padding: "24px 16px", borderRadius: "panel", border: "1px dashed {colors.border}", textStyle: "caption", color: "fg.muted", md: { gridColumn: "1 / -1" } });
+const skeletonRowClass = css({ display: "flex", alignItems: "center", gap: "3", padding: "10px 16px", borderRadius: "panel", border: "1px solid {colors.border.soft}", bg: "surface" });
+const skeletonTextClass = css({ display: "flex", flex: 1, minWidth: 0, flexDirection: "column", gap: "1.5" });
+const emptyClass = cx(pc.empty, css({ pt: "72px" }));
+const bellyClass = css({ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "120px", height: "120px", borderRadius: "pill", bg: "belly", "& img": { width: "88px", height: "88px", animation: "none" } });
+const srOnlyClass = css({ srOnly: true });
 
 const HAPPENING_NOW_LIMIT = 3;
 
@@ -466,12 +537,17 @@ const happeningNowChannels = computed(() => {
 
 const happeningNowCount = computed(() => activeCallEntries.value.length + happeningNowChannels.value.length);
 
-function dotClass(show?: "available" | "away" | "xa" | "dnd" | "offline"): string {
-  if (show === "away") return "bg-warning";
-  if (show === "dnd") return "bg-destructive";
-  if (show === "xa") return "bg-warning/70";
-  if (show === "available") return "bg-success";
-  return "bg-transparent border border-muted-foreground/60";
+/** XMPP show → the avatar's presence dot (xa reads as away). */
+function avatarPresence(show?: "available" | "away" | "xa" | "dnd" | "offline"): OccupantPresence {
+  if (show === "available") return "online";
+  if (show === "away" || show === "xa") return "away";
+  if (show === "dnd") return "dnd";
+  return "offline";
+}
+
+/** Empty-Home board: with no rooms yet, Home's one action is Browse rooms. */
+function browseRooms() {
+  appController.value?.openRooms();
 }
 
 function dmDisplayName(conversation: { peerUsername?: string; peerJid: string }): string {
@@ -625,7 +701,7 @@ const heroCtaLabel = computed(() => {
   const call = heroPrimaryCall.value;
   if (call) return heroCallCtaLabel(call);
   const channel = heroPrimaryChannel.value;
-  return channel ? `Jump into ${channel.name}` : "Browse channels";
+  return channel ? `Jump into ${channel.name}` : "Browse rooms";
 });
 
 function onHeroCta() {
@@ -651,57 +727,46 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
 </script>
 
 <template>
-  <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
-    <div class="mx-auto grid w-full max-w-5xl gap-8">
-      <section
-        class="relative grid gap-5 overflow-hidden rounded-2xl border border-border bg-card p-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:p-8"
-        :aria-label="`${heroGreeting} ${heroKicker}.`"
-      >
-        <div class="flex min-w-0 flex-col gap-3">
-          <span :class="[kickerClass, 'inline-flex items-center gap-2']">
-            <span
-              v-if="activeCallEntries.length > 0"
-              class="h-2 w-2 rounded-full bg-live shadow-[0_0_8px_var(--glow-live)]"
-              aria-hidden="true"
-            ></span>
-            {{ heroKicker }}
+  <SettingsMobileHeader title="Home" @open-nav="emit('openNav')" />
+  <div :class="pc.scroll">
+    <div :class="pageClass">
+      <header :class="pc.head" :aria-label="`${heroGreeting} ${heroKicker}.`">
+        <div :class="cx(pc.headText, heroTextClass)">
+          <span :class="kickerClass">
+            <span v-if="activeCallEntries.length > 0" :class="liveDotClass" aria-hidden="true"></span>{{ heroKicker }}
           </span>
-          <h1 class="font-display text-[38px] font-bold leading-[1.05] tracking-[-0.03em] text-foreground">{{ heroGreeting }}</h1>
-          <p class="max-w-[52ch] text-[15px] leading-relaxed text-muted-foreground [&>strong]:font-semibold [&>strong]:tabular-nums [&>strong]:text-foreground">
+          <h1 :class="greetingClass">{{ heroGreeting }}</h1>
+          <p :class="summaryClass">
             <template v-if="heroSummaryParts.length > 0">
               <template v-for="(part, idx) in heroSummaryParts" :key="`${part.label}-${idx}`">
-                <span v-if="idx > 0" class="text-muted-foreground/60"> · </span>
+                <span v-if="idx > 0" :class="summarySepClass"> · </span>
                 <strong>{{ part.count }}</strong> {{ part.label }}
               </template>
             </template>
             <template v-else>{{ heroQuietMessage }}</template>
           </p>
-          <button
-            v-if="heroPrimaryCall || heroPrimaryChannel"
-            type="button"
-            :class="[heroCtaClass, 'mt-2 self-start']"
-            :aria-label="heroCtaLabel"
-            @click="onHeroCta"
-          >
-            {{ heroCtaLabel }}
-            <ArrowRight class="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-        <div v-if="isQuiet" class="flex h-20 w-20 items-center justify-center justify-self-end md:h-28 md:w-28" aria-hidden="true">
-          <img class="h-full w-full" src="/waddle-logo.svg" alt="" />
         </div>
         <button
-          class="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
+          v-if="heroPrimaryCall || heroPrimaryChannel"
           type="button"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
+          :class="heroCtaClass"
+          :aria-label="heroCtaLabel"
+          @click="onHeroCta"
         >
-          <Hash class="h-4 w-4" aria-hidden="true" />
+          {{ heroCtaLabel }}
+          <ArrowRight aria-hidden="true" />
         </button>
-      </section>
+        <button v-else type="button" :class="heroCtaClass" @click="browseRooms">Browse rooms</button>
+      </header>
+
+      <div v-if="isQuiet && channels.length === 0" :class="emptyClass" role="status">
+        <span :class="bellyClass" aria-hidden="true"><img src="/waddle-logo.svg" alt="" /></span>
+        <h2 :class="pc.emptyTitle">Nothing here yet</h2>
+        <p>Join a room and your mentions, events and people show up here.</p>
+      </div>
 
       <section
-        class="sr-only"
+        :class="srOnlyClass"
         role="status"
         aria-live="polite"
         aria-atomic="true"
@@ -711,50 +776,49 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
 
       <section
         v-if="happeningNowCount > 0"
-        class="grid gap-3"
+        :class="sectionClass"
         aria-label="Happening now"
       >
-        <div class="flex items-baseline justify-between gap-3">
-          <h2 :class="liveKickerClass">Happening now</h2>
-          <p v-if="activeCallEntries.length > 0" class="type-caption text-muted-foreground">
+        <div :class="sectionHeadClass">
+          <h2 :class="liveHeadingClass">Happening now</h2>
+          <p v-if="activeCallEntries.length > 0" :class="captionClass">
             {{ activeCallEntries.length }} {{ activeCallEntries.length === 1 ? "live conversation" : "live conversations" }}
           </p>
         </div>
-        <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div :class="cardGridClass">
           <article
             v-for="entry in activeCallEntries"
             :key="entry.key"
-            :class="[callEntryCard(entry).root, 'min-w-0']"
+            :class="[callEntryCard(entry).root, cardMinClass]"
           >
-            <span :class="[callEntryCard(entry).kicker, 'flex items-center gap-1.5']">
-              <Video v-if="entry.kind === 'channel' && entry.media.video" class="h-3.5 w-3.5" aria-hidden="true" />
-              <PhoneCall v-else-if="entry.kind === 'channel'" class="h-3.5 w-3.5" aria-hidden="true" />
-              <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" aria-hidden="true" />
-              <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" aria-hidden="true" />
-              <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" aria-hidden="true" />
-              <Phone v-else class="h-3.5 w-3.5" aria-hidden="true" />
-              <span class="truncate">{{ callEntryEyebrow(entry) }}</span>
+            <span :class="[callEntryCard(entry).kicker, kickerRowClass]">
+              <Video v-if="entry.kind === 'channel' && entry.media.video" aria-hidden="true" />
+              <PhoneCall v-else-if="entry.kind === 'channel'" aria-hidden="true" />
+              <Video v-else-if="entry.mediaKnown !== false && entry.media.video" aria-hidden="true" />
+              <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" aria-hidden="true" />
+              <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" aria-hidden="true" />
+              <Phone v-else aria-hidden="true" />
+              <span :class="ellipsisClass">{{ callEntryEyebrow(entry) }}</span>
             </span>
-            <h3 :class="[liveCard.title, 'truncate']">{{ entry.title }}</h3>
+            <h3 :class="[liveCard.title, ellipsisClass]">{{ entry.title }}</h3>
             <p :class="liveCard.body">{{ callEntryDescription(entry) }}</p>
             <div
               v-if="entry.kind === 'channel' && callEntryParticipantPreview(entry)"
-              class="flex min-w-0 items-center gap-2"
+              :class="participantsClass"
             >
-              <span class="flex shrink-0 items-center" aria-hidden="true">
+              <span :class="faceStackClass" aria-hidden="true">
                 <span
                   v-for="label in callEntryVisibleParticipantLabels(entry)"
                   :key="`${entry.key}:${label}`"
-                  class="-ml-1.5 first:ml-0 rounded-full ring-2 ring-card"
                 >
                   <UserAvatar :name="label" :jid="callParticipantAvatarJid(entry.roomJid, label)" size="xs" />
                 </span>
               </span>
-              <span class="type-caption min-w-0 truncate text-muted-foreground">
+              <span :class="[captionClass, ellipsisClass]">
                 {{ callEntryParticipantPreview(entry) }}
               </span>
             </div>
-            <div :class="[liveCard.footer, 'flex-wrap']">
+            <div :class="footerWrapClass">
               <button
                 type="button"
                 :class="callEntryIsLive(entry) ? joinButtonClass : enterButtonClass"
@@ -762,14 +826,14 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                 @click="selectCallEntry(entry)"
               >
                 {{ callEntryActionLabel(entry) }}
-                <ArrowRight class="h-3.5 w-3.5" aria-hidden="true" />
+                <ArrowRight aria-hidden="true" />
               </button>
               <span
                 v-if="entry.kind === 'channel'"
                 :class="countClass"
                 :aria-label="`${entry.participantCount} in this call`"
               >{{ entry.participantCount }}</span>
-              <span class="type-meta min-w-0 flex-1 truncate text-muted-foreground">{{ callEntryDetail(entry) }}</span>
+              <span :class="metaClass">{{ callEntryDetail(entry) }}</span>
               <button
                 v-if="canEndCallEntry(entry)"
                 type="button"
@@ -777,7 +841,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                 :aria-label="endCallEntryLabel(entry)"
                 @click="endCallEntry(entry)"
               >
-                <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+                <PhoneOff aria-hidden="true" />
                 <span>{{ endCallEntryButtonText(entry) }}</span>
               </button>
             </div>
@@ -786,16 +850,16 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
           <article
             v-for="channel in happeningNowChannels"
             :key="channel.id"
-            :class="[roomCard.root, 'min-w-0']"
+            :class="[roomCard.root, cardMinClass]"
           >
             <span :class="channelActivity(channel).hasActivity ? liveCard.kicker : roomCard.kicker">
               {{ channelCardKicker(channel) }}
             </span>
-            <h3 :class="[roomCard.title, 'flex min-w-0 items-center gap-1.5']">
-              <component :is="isForumChannel(channel) ? MessagesSquare : Hash" class="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-              <span class="truncate">{{ channel.name }}</span>
+            <h3 :class="roomTitleClass">
+              <component :is="isForumChannel(channel) ? MessagesSquare : Hash" aria-hidden="true" />
+              <span :class="ellipsisClass">{{ channel.name }}</span>
             </h3>
-            <p v-if="channelActivityPreview(channelActivity(channel))" :class="[roomCard.body, 'line-clamp-2 break-words']">
+            <p v-if="channelActivityPreview(channelActivity(channel))" :class="[roomCard.body, clampClass]">
               {{ channelActivityPreview(channelActivity(channel)) }}
             </p>
             <div :class="roomCard.footer">
@@ -806,9 +870,9 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                 @click="selectHomeChannel(channel)"
               >
                 Enter
-                <ArrowRight class="h-3.5 w-3.5" aria-hidden="true" />
+                <ArrowRight aria-hidden="true" />
               </button>
-              <span v-if="activityStamp(channelActivity(channel).lastUpdated)" class="type-meta ml-auto tabular-nums text-muted-foreground">
+              <span v-if="activityStamp(channelActivity(channel).lastUpdated)" :class="stampClass">
                 {{ activityStamp(channelActivity(channel).lastUpdated) }}
               </span>
             </div>
@@ -818,25 +882,23 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
 
       <section
         v-if="needsSomeoneChannels.length > 0"
-        class="grid gap-3"
+        :class="sectionClass"
         aria-label="Needs someone like you"
       >
-        <h2 :class="kickerClass">Needs someone like you</h2>
-        <div class="grid gap-2">
+        <h2 :class="headingClass">Needs someone like you</h2>
+        <div :class="listClass">
           <button
             v-for="channel in needsSomeoneChannels"
             :key="channel.id"
             type="button"
-            class="chat-list-row chat-list-row--unread chat-list-row--mention flex min-w-0 items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:bg-muted"
+            :class="mentionRowClass"
             :aria-label="channelHomeAriaLabel(channel)"
             @click="selectHomeChannel(channel)"
           >
-            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 font-display text-sm font-bold text-primary" aria-hidden="true">
-              {{ channelInitial(channel) }}
-            </span>
-            <span class="min-w-0 flex-1">
-              <span class="flex min-w-0 items-center gap-2">
-                <span class="type-control truncate font-semibold text-foreground">{{ channel.name }}</span>
+            <span :class="roomMarkClass" aria-hidden="true">{{ channelInitial(channel) }}</span>
+            <span :class="rowTextClass">
+              <span :class="rowTitleLineClass">
+                <span :class="rowTitleClass">{{ channel.name }}</span>
                 <span
                   v-if="channelActivity(channel).mentions > 0"
                   :class="countClass"
@@ -844,59 +906,53 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                 >@{{ channelActivity(channel).mentions }}</span>
                 <span
                   v-if="threadUnreadCount(channelActivity(channel)) > 0"
-                  class="type-meta inline-flex h-[18px] items-center whitespace-nowrap rounded-full border border-border px-1.5 text-muted-foreground"
+                  :class="pillClass"
                   aria-hidden="true"
                 >{{ threadUnreadBadgeLabel(channelActivity(channel)) }}</span>
               </span>
               <span
                 v-if="channelActivityPreview(channelActivity(channel))"
-                class="type-caption block truncate text-muted-foreground"
+                :class="rowLineClass"
               >{{ channelActivityPreview(channelActivity(channel)) }}</span>
-              <span class="type-meta block text-live-text">{{ needsSomeoneLabel(channel) }}</span>
+              <span :class="rowLiveLineClass">{{ needsSomeoneLabel(channel) }}</span>
             </span>
-            <span :class="[openPillClass, 'shrink-0 !rounded-full']" aria-hidden="true">Open</span>
+            <span :class="openPillShapeClass" aria-hidden="true">Open</span>
           </button>
         </div>
       </section>
 
-      <section class="grid gap-3" aria-label="Direct messages">
-        <h2 :class="kickerClass">Direct messages</h2>
-        <div class="grid gap-2 md:grid-cols-2">
+      <section :class="sectionClass" aria-label="Direct messages">
+        <h2 :class="headingClass">Direct messages</h2>
+        <div :class="twoColClass">
           <button
             v-for="conversation in directMessages"
             :key="conversation.peerJid"
-            class="chat-list-row flex min-w-0 items-center gap-3 overflow-hidden rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:bg-muted"
-            :class="conversation.unreadCount > 0 ? 'chat-list-row--unread' : ''"
+            :class="rowClass"
             type="button"
             :aria-label="dmHomeAriaLabel(conversation)"
             @click="emit('selectContact', conversation.peerJid)"
           >
-            <span class="relative shrink-0">
-              <UserAvatar :name="conversation.peerUsername" :jid="conversationPeerAvatarJid(conversation.peerJid)" size="md" :in-call="peerInCall(conversation.peerJid)" />
-              <span class="absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-card" :class="dotClass(conversation.presenceShow)" />
-              <span class="sr-only">{{ dmPresenceLabel(conversation.presenceShow) }}</span>
-            </span>
-            <span class="min-w-0 flex-1">
-              <span
-                class="type-control block truncate text-foreground"
-                :class="conversation.unreadCount > 0 ? 'font-semibold' : ''"
-              >{{ dmDisplayName(conversation) }}</span>
-              <span class="type-caption block truncate text-muted-foreground">
-                {{ dmSecondaryText(conversation) }}
-              </span>
-              <span class="type-meta block text-muted-foreground">
-                {{ dmPresenceLabel(conversation.presenceShow) }}
-              </span>
+            <UserAvatar
+              :name="conversation.peerUsername"
+              :jid="conversationPeerAvatarJid(conversation.peerJid)"
+              size="md"
+              :presence="avatarPresence(conversation.presenceShow)"
+              :in-call="peerInCall(conversation.peerJid)"
+            />
+            <span :class="rowTextClass">
+              <span :class="conversation.unreadCount > 0 ? rowNameUnreadClass : rowNameClass">{{ dmDisplayName(conversation) }}</span>
+              <span :class="rowLineClass">{{ dmSecondaryText(conversation) }}</span>
+              <span :class="rowLineClass">{{ dmPresenceLabel(conversation.presenceShow) }}</span>
             </span>
             <span
               v-if="dmCallActivityFor(conversation.peerJid)"
-              class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-live-text px-1.5 text-live-text"
+              :class="livePillClass"
               aria-hidden="true"
             >
-              <PhoneCall class="h-3 w-3" />
+              <PhoneCall />
               <span>{{ dmCallActivityFor(conversation.peerJid)?.state === 'accepted' ? 'Live' : 'Ringing' }}</span>
             </span>
-            <span v-if="conversation.lastMessageAt" class="type-meta shrink-0 tabular-nums text-muted-foreground">
+            <span v-if="conversation.lastMessageAt" :class="stampClass">
               {{ formatTimelineStamp(conversation.lastMessageAt) }}
             </span>
             <span
@@ -909,77 +965,77 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
             <div
               v-for="i in 2"
               :key="`dm-skel-${i}`"
-              class="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3"
+              :class="skeletonRowClass"
               aria-hidden="true"
             >
               <Skeleton width="2rem" height="2rem" radius="9999px" />
-              <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+              <div :class="skeletonTextClass">
                 <Skeleton width="50%" height="0.7rem" />
                 <Skeleton width="75%" height="0.6rem" />
               </div>
             </div>
           </template>
-          <p v-else-if="directMessages.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
+          <p v-else-if="directMessages.length === 0" :class="noteClass">
             No direct messages yet.
           </p>
         </div>
       </section>
 
-      <section class="grid gap-3" aria-label="Around">
-        <h2 :class="kickerClass">
+      <section :class="sectionClass" aria-label="Around">
+        <h2 :class="headingClass">
           Around<template v-if="aroundPeople.length > 0"> · {{ aroundPeople.length }}</template>
         </h2>
-        <div class="grid gap-2 md:grid-cols-2">
+        <div :class="twoColClass">
           <button
             v-for="person in aroundPeople"
             :key="person.jid"
-            class="flex min-w-0 items-center gap-3 rounded-xl border border-border bg-card px-4 py-2.5 text-left transition-colors hover:bg-muted"
+            :class="rowClass"
             type="button"
             :aria-label="`${person.name}, ${dmPresenceLabel(person.presenceShow)}, open direct message`"
             @click="emit('selectContact', person.jid)"
           >
             <UserAvatar :name="person.name" :jid="person.jid" size="md" :presence="person.presence" :in-call="peerInCall(person.jid)" />
-            <span class="min-w-0 flex-1">
-              <span class="type-control block truncate text-foreground">{{ person.name }}</span>
-              <span class="type-meta block truncate text-muted-foreground">{{ dmPresenceLabel(person.presenceShow) }}</span>
+            <span :class="rowTextClass">
+              <span :class="rowNameClass">{{ person.name }}</span>
+              <span :class="rowLineClass">{{ dmPresenceLabel(person.presenceShow) }}</span>
             </span>
           </button>
           <template v-if="isLoading && contacts.length === 0">
             <div
               v-for="i in 2"
               :key="`contact-skel-${i}`"
-              class="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-2.5"
+              :class="skeletonRowClass"
               aria-hidden="true"
             >
               <Skeleton width="2rem" height="2rem" radius="9999px" />
-              <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+              <div :class="skeletonTextClass">
                 <Skeleton width="45%" height="0.7rem" />
                 <Skeleton width="30%" height="0.55rem" />
               </div>
             </div>
           </template>
-          <p v-else-if="aroundPeople.length === 0 && awayPeople.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
+          <p v-else-if="aroundPeople.length === 0 && awayPeople.length === 0" :class="noteClass">
             No contacts yet.
           </p>
-          <p v-else-if="aroundPeople.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
+          <p v-else-if="aroundPeople.length === 0" :class="noteClass">
             Nobody is around right now. Be the one who is here first.
           </p>
         </div>
         <template v-if="awayPeople.length > 0">
-          <h3 :class="kickerClass">Away and offline · {{ awayPeople.length }}</h3>
-          <div class="grid gap-2 md:grid-cols-2">
+          <h3 :class="headingClass">Away and offline · {{ awayPeople.length }}</h3>
+          <div :class="twoColClass">
             <button
               v-for="person in awayPeople"
               :key="person.jid"
-              class="flex min-w-0 items-center gap-3 rounded-xl border border-border/60 px-4 py-2.5 text-left text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              :class="quietRowClass"
               type="button"
               :aria-label="`${person.name}, ${dmPresenceLabel(person.presenceShow)}, open direct message`"
               @click="emit('selectContact', person.jid)"
             >
               <UserAvatar :name="person.name" :jid="person.jid" size="sm" :presence="person.presence" />
-              <span class="min-w-0 flex-1">
-                <span class="type-control block truncate">{{ person.name }}</span>
-                <span class="type-meta block truncate">{{ dmPresenceLabel(person.presenceShow) }}</span>
+              <span :class="rowTextClass">
+                <span :class="rowNameClass">{{ person.name }}</span>
+                <span :class="rowLineClass">{{ dmPresenceLabel(person.presenceShow) }}</span>
               </span>
             </button>
           </div>

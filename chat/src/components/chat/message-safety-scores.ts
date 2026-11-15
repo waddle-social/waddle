@@ -18,57 +18,51 @@ import {
   type SafetyScores,
 } from "@/lib/safety-scores/types";
 
-// The scores annotate a message; they are not a moderation verdict. Colour
-// and icon identify the category, while probability controls visibility and
-// the length of its bar. light-dark() follows the app's color-scheme setting.
+// The scores annotate a message; they are not a moderation verdict. The icon
+// identifies the category and its tone family colours it, while probability
+// controls visibility and the length of its bar.
 // Question is an enrichment signal, not a warning.
 interface CategoryPresentation {
   label: string;
   icon: Component;
-  textClass: string;
-  barClass: string;
+  /** Semantic colour (Polar Huddle token family) for the label and bar. */
+  tone: SafetyTone;
 }
+
+type SafetyTone = "info" | "danger" | "warning" | "live" | "gold" | "muted";
 
 const CATEGORY_PRESENTATION = {
   is_question: {
     label: "Question", icon: CircleHelp,
-    textClass: "text-[light-dark(#2563EB,#60A5FA)]",
-    barClass: "bg-[light-dark(#2563EB,#60A5FA)]",
+    tone: "info",
   },
   "safety:hate_speech": {
     label: "Hate speech", icon: UserRoundX,
-    textClass: "text-[light-dark(#DC2626,#F87171)]",
-    barClass: "bg-[light-dark(#DC2626,#F87171)]",
+    tone: "danger",
   },
   "safety:explicit": {
     label: "Explicit content", icon: EyeOff,
-    textClass: "text-[light-dark(#7C3AED,#A78BFA)]",
-    barClass: "bg-[light-dark(#7C3AED,#A78BFA)]",
+    tone: "danger",
   },
   "safety:harassment": {
     label: "Harassment", icon: MessageSquareWarning,
-    textClass: "text-[light-dark(#C2410C,#FB923C)]",
-    barClass: "bg-[light-dark(#C2410C,#FB923C)]",
+    tone: "warning",
   },
   "safety:violence": {
     label: "Violence", icon: Zap,
-    textClass: "text-[light-dark(#BE123C,#FB7185)]",
-    barClass: "bg-[light-dark(#BE123C,#FB7185)]",
+    tone: "danger",
   },
   "safety:self_harm": {
     label: "Self-harm", icon: HeartPulse,
-    textClass: "text-[light-dark(#0F766E,#2DD4BF)]",
-    barClass: "bg-[light-dark(#0F766E,#2DD4BF)]",
+    tone: "live",
   },
   "safety:spam": {
     label: "Spam", icon: Inbox,
-    textClass: "text-[light-dark(#475569,#CBD5E1)]",
-    barClass: "bg-[light-dark(#475569,#CBD5E1)]",
+    tone: "muted",
   },
   "safety:scam": {
     label: "Scam", icon: ShieldAlert,
-    textClass: "text-[light-dark(#B45309,#FBBF24)]",
-    barClass: "bg-[light-dark(#B45309,#FBBF24)]",
+    tone: "gold",
   },
 } satisfies Record<SafetyCategory, CategoryPresentation>;
 

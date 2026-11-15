@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
+import { PictureInPicture2 } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { btn } from "styled-system/recipes";
 import {
   $callState,
   $lastCallError,
@@ -229,7 +232,7 @@ const subline = computed(() => {
   if (state.value.phase !== "active") return "";
   if (connecting.value) return "Connecting…";
   if (state.value.kind === "dm") {
-    return state.value.media.video ? "Video call" : "Audio call";
+    return state.value.media.video ? "Video call" : "Voice call";
   }
   const others = remoteParticipantCount.value;
   return others === 0
@@ -528,15 +531,77 @@ async function togglePictureInPicture(): Promise<void> {
   $callPictureInPictureActive.set(true);
   $callPictureInPictureMode.set("video");
 }
+
+// HuddleStage (split): the dark stage keeps the night ground in both
+// themes. `call-split` stays as the marker the call shortcuts scope to.
+const rootClass = css({
+  position: "relative",
+  display: "flex",
+  flexDirection: "column",
+  flexGrow: 0,
+  flexShrink: 0,
+  minHeight: 0,
+  margin: "8px 12px 0",
+  borderRadius: "16px",
+  bgColor: "sea.deep",
+  boxShadow: "0 0 0 1px {colors.border.soft}",
+  color: "fg",
+  fontFamily: "body",
+  transition: "flex-basis 220ms ease-out",
+  _motionReduce: { transition: "none" },
+  _narrow: { margin: "0", borderRadius: "0" },
+});
+const draggingClass = css({ transition: "none" });
+const errorClass = css({
+  margin: "0 16px 10px",
+  padding: "10px 12px",
+  borderRadius: "12px",
+  bg: "color-mix(in srgb, {colors.danger} 14%, transparent)",
+  border: "1px solid color-mix(in srgb, {colors.danger} 40%, transparent)",
+  color: "danger.text",
+  fontSize: "13px",
+});
+const gridClass = css({ position: "relative", flex: "1 1 0%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" });
+const reactionsClass = css({ pointerEvents: "none", position: "absolute", inset: 0, zIndex: 2, overflow: "hidden" });
+const reactionClass = css({
+  position: "absolute",
+  left: "calc(14% + var(--reaction-x, 0%))",
+  bottom: "16%",
+  fontSize: "32px",
+  lineHeight: 1,
+  filter: "drop-shadow(0 4px 8px rgb(0 0 0 / 0.28))",
+  animation: "call-reaction-float 2.4s ease-out forwards",
+  _motionReduce: { animation: "wd-fade 2.4s ease-out reverse forwards" },
+});
+const pipClass = css({
+  flex: 1,
+  minHeight: "128px",
+  margin: "0 16px 12px",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "3",
+  padding: "4",
+  textAlign: "center",
+  borderRadius: "12px",
+  border: "1px dashed {colors.border}",
+  "& > svg": { width: "40px", height: "40px", color: "fg.muted", strokeWidth: 1.5 },
+  "& b": { font: "700 17px/1.3 {fonts.display}" },
+  "& span": { color: "fg.muted", fontSize: "14px" },
+});
+const pipButtonClass = btn({ variant: "primary" });
+const footerClass = css({ padding: "12px 16px 16px", _narrow: { padding: "12px 12px 20px" } });
+const parkingClass = css({ display: "none" });
 </script>
 
 <template>
   <template v-if="shouldRender">
     <section
       ref="containerRef"
-      class="call-split"
+      :class="['call-split', rootClass, isDragging && draggingClass]"
       :style="{ flexBasis: `${percent}%` }"
-      :class="{ 'call-split--dragging': isDragging }"
+      data-theme="night"
       role="region"
       aria-label="Active call"
       tabindex="-1"
@@ -544,7 +609,7 @@ async function togglePictureInPicture(): Promise<void> {
       <CallStageHeader :title="callLabel" :subline="subline" compact />
       <div
         v-if="lastError"
-        class="call-split__error"
+        :class="errorClass"
         role="alert"
       >
         {{ lastError }}
@@ -555,14 +620,17 @@ async function togglePictureInPicture(): Promise<void> {
         :presentation="selfSharePresentation"
         compact
       />
-      <div class="call-split__grid">
+      <div :class="gridClass">
         <div
           v-if="pictureInPictureMode === 'document'"
-          class="call-split__pip-placeholder"
+          :class="pipClass"
         >
+          <PictureInPicture2 aria-hidden="true" />
+          <b>The {{ isMucCall ? "huddle" : "call" }} is in Picture-in-Picture</b>
+          <span>Keep chatting while it floats above your other windows.</span>
           <button
             type="button"
-            class="chat-action-button chat-action-button--secondary"
+            :class="pipButtonClass"
             @click="togglePictureInPicture"
           >
             Return to call
@@ -581,18 +649,18 @@ async function togglePictureInPicture(): Promise<void> {
           :muted-keys="mutedIdentityKeys"
           @open-participants="enterExpandedWithDock"
         />
-        <div class="call-split__reactions" aria-live="polite" aria-atomic="false">
+        <div :class="reactionsClass" aria-live="polite" aria-atomic="false">
           <span
             v-for="reaction in activeCallReactions"
             :key="reaction.id"
-            class="call-split__reaction"
+            :class="reactionClass"
             :style="{ '--reaction-x': `${Math.abs(hashInCallReactionId(reaction.id)) % 72}%` }"
           >
             {{ reaction.emoji }}
           </span>
         </div>
       </div>
-      <footer class="call-split__footer">
+      <footer :class="footerClass">
         <CallControls
           :mic-enabled="micEnabled"
           :cam-enabled="camEnabled"
@@ -624,7 +692,7 @@ async function togglePictureInPicture(): Promise<void> {
           @hangup="onHangup"
         />
       </footer>
-      <div ref="pictureInPictureParkingRef" class="call-split__pip-parking" aria-hidden="true">
+      <div ref="pictureInPictureParkingRef" :class="parkingClass" aria-hidden="true">
         <div ref="pictureInPicturePanelRef">
           <CallPictureInPicturePanel
             :tile="pictureInPictureTile"
@@ -647,92 +715,12 @@ async function togglePictureInPicture(): Promise<void> {
   </template>
 </template>
 
-<style scoped>
-.call-split {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  flex-grow: 0;
-  flex-shrink: 0;
-  min-height: 0;
-  background: color-mix(in oklab, var(--background) 94%, transparent);
-  border-bottom: 1px solid var(--border);
-  /* Smooth open animation when the split appears (call accepted): the
-   * parent uses `transition: flex-basis` for the open/close grow but
-   * during a drag we set `--call-split-dragging` to disable the
-   * transition so the handle tracks the pointer 1:1. */
-  transition: flex-basis 220ms ease-out;
-}
-
-.call-split--dragging {
-  transition: none;
-}
-
-.call-split__error {
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid color-mix(in oklab, var(--destructive) 30%, transparent);
-  background: color-mix(in oklab, var(--destructive) 10%, transparent);
-  color: var(--destructive);
-}
-
-.call-split__grid {
-  position: relative;
-  flex: 1 1 0%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.call-split__reactions {
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  overflow: hidden;
-}
-
-.call-split__reaction {
-  position: absolute;
-  left: calc(14% + var(--reaction-x, 0%));
-  bottom: 16%;
-  font-size: 2rem;
-  line-height: 1;
-  filter: drop-shadow(0 0.25rem 0.5rem rgb(0 0 0 / 0.28));
-  animation: call-split-reaction-float 2.4s ease-out forwards;
-}
-
-@keyframes call-split-reaction-float {
-  0% {
-    opacity: 0;
-    transform: translate3d(0, 0.75rem, 0) scale(0.82);
-  }
-  12% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: translate3d(0, -8rem, 0) scale(1.18);
-  }
-}
-
-.call-split__pip-placeholder {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
-  min-height: 8rem;
-  background: var(--muted);
-  color: var(--muted-foreground);
-}
-
-.call-split__footer {
-  padding: 0.5rem 0.75rem;
-  border-top: 1px solid var(--border);
-}
-
-.call-split__pip-parking {
-  display: none;
+<style>
+/* Reaction float: Panda has no keyframe for it, so it lives here (unscoped,
+   so the Panda class can name it). */
+@keyframes call-reaction-float {
+  0% { opacity: 0; transform: translate3d(0, 0.75rem, 0) scale(0.82); }
+  12% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  100% { opacity: 0; transform: translate3d(0, -8rem, 0) scale(1.18); }
 }
 </style>

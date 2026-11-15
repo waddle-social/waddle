@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, watch } from "vue";
 import { X, ChevronLeft, ChevronRight, Download } from "lucide-vue-next";
 import { safeAttachmentUrl } from "@/lib/attachment-url";
+import { css, cx } from "styled-system/css";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 
 interface LightboxImage {
@@ -21,6 +22,34 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
   "update:index": [value: number];
 }>();
+
+// The stage is dark in both themes, like a video surface.
+const rootClass = css({ position: "fixed", inset: 0, zIndex: "dialog", display: "flex", alignItems: "center", justifyContent: "center", animation: "wd-fade {durations.base} {easings.out} backwards" });
+const backdropClass = css({ position: "absolute", inset: 0, border: 0, bg: "rgba(2, 9, 18, 0.92)", cursor: "zoom-out" });
+const toolbarClass = css({ position: "absolute", top: "3", right: "3", zIndex: "sticky", display: "flex", alignItems: "center", gap: "1" });
+const controlClass = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "44px",
+  height: "44px",
+  border: 0,
+  borderRadius: "pill",
+  bg: "material.media",
+  color: "#f3f5f7",
+  backdropFilter: "blur(20px) saturate(160%)",
+  cursor: "pointer",
+  transition: "background-color {durations.fast} {easings.out}",
+  "& svg": { width: "20px", height: "20px" },
+  _hover: { bg: "rgba(7, 12, 18, 0.9)" },
+});
+const sideClass = css({ position: "absolute", top: "50%", translate: "0 -50%", zIndex: "sticky" });
+const prevClass = cx(controlClass, sideClass, css({ left: "3" }));
+const nextClass = cx(controlClass, sideClass, css({ right: "3" }));
+const frameClass = css({ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", maxWidth: "min(92vw, 96rem)", maxHeight: "90dvh" });
+const imageClass = css({ maxWidth: "min(92vw, 96rem)", maxHeight: "82dvh", objectFit: "contain", borderRadius: "panel", boxShadow: "elev.3", animation: "wd-pop {durations.slow} {easings.spring.snappy} backwards" });
+const captionRowClass = css({ mt: "3", display: "flex", alignItems: "center", gap: "2", textStyle: "caption", color: "#c4ccd6" });
+const captionClass = css({ display: "block", minWidth: 0, maxWidth: "min(60vw, 42rem)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 
 const current = computed(() => props.images[props.index] ?? null);
 // Callers already resolve gallery entries through the attachment scheme
@@ -66,74 +95,46 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <div
-      v-if="open && current"
-      class="z-lightbox fixed inset-0 animate-fade-in flex items-center justify-center"
-      role="dialog"
-      aria-modal="true"
-    >
-      <button type="button" class="absolute inset-0 bg-background/85" aria-label="Close image" @click="close" />
+    <div v-if="open && current" :class="rootClass" role="dialog" aria-modal="true" data-theme="night">
+      <button type="button" :class="backdropClass" aria-label="Close image" @click="close" />
 
-      <div class="z-sticky absolute top-3 right-3 flex items-center gap-1">
+      <div :class="toolbarClass">
         <AppTooltip v-if="currentUrl" label="Download" placement="bottom">
           <a
             :href="currentUrl"
             :download="current.name ?? ''"
             target="_blank"
             rel="noopener noreferrer"
-            class="chat-lightbox-control h-9 w-9"
+            :class="controlClass"
             aria-label="Download original"
             @click.stop
           >
-            <Download class="w-4 h-4" />
+            <Download aria-hidden="true" />
           </a>
         </AppTooltip>
         <AppTooltip label="Close (Esc)" placement="bottom">
-          <button
-            class="chat-lightbox-control h-9 w-9"
-            type="button"
-            aria-label="Close lightbox"
-            @click="close"
-          >
-            <X class="w-4 h-4" />
+          <button :class="controlClass" type="button" aria-label="Close lightbox" @click="close">
+            <X aria-hidden="true" />
           </button>
         </AppTooltip>
       </div>
 
       <AppTooltip v-if="hasPrev" label="Previous (←)" placement="right">
-        <button
-          class="chat-lightbox-control z-sticky absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10"
-          type="button"
-          aria-label="Previous image"
-          @click.stop="prev"
-        >
-          <ChevronLeft class="w-5 h-5" />
+        <button :class="prevClass" type="button" aria-label="Previous image" @click.stop="prev">
+          <ChevronLeft aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip v-if="hasNext" label="Next (→)" placement="left">
-        <button
-          class="chat-lightbox-control z-sticky absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10"
-          type="button"
-          aria-label="Next image"
-          @click.stop="next"
-        >
-          <ChevronRight class="w-5 h-5" />
+        <button :class="nextClass" type="button" aria-label="Next image" @click.stop="next">
+          <ChevronRight aria-hidden="true" />
         </button>
       </AppTooltip>
 
-      <div class="chat-lightbox-frame relative flex flex-col items-center justify-center" @click.stop>
-        <img
-          v-if="currentUrl"
-          :src="currentUrl"
-          :alt="current.name ?? 'Image'"
-          class="chat-lightbox-image object-contain rounded-lg shadow-2xl animate-slide-up"
-        />
-        <div
-          v-if="current.name || images.length > 1"
-          class="type-caption mt-3 flex items-center gap-2 text-muted-foreground"
-        >
-          <span v-if="current.name" class="chat-lightbox-caption truncate">{{ current.name }}</span>
-          <span v-if="images.length > 1" class="type-numeric">{{ index + 1 }} / {{ images.length }}</span>
+      <div :class="frameClass" @click.stop>
+        <img v-if="currentUrl" :src="currentUrl" :alt="current.name ?? 'Image'" :class="imageClass" />
+        <div v-if="current.name || images.length > 1" :class="captionRowClass">
+          <span v-if="current.name" :class="captionClass">{{ current.name }}</span>
+          <span v-if="images.length > 1">{{ index + 1 }} / {{ images.length }}</span>
         </div>
       </div>
     </div>

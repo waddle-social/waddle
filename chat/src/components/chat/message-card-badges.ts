@@ -17,10 +17,12 @@ import { BOT_HAT_URI } from "@/lib/xmpp/types";
 // row breathable. Authority outranks descriptive: if you're an admin
 // and a bot, the badge says ADMIN. Profile drawer surfaces show the
 // full hat list separately.
+type BadgeTone = "warning" | "action" | "success" | "muted";
+
 export interface BadgeView {
   label: string;
-  /** Tailwind class for the chip's text colour. */
-  colorClass: string;
+  /** Colour family for the chip's text (`data-tone` on the badge). */
+  tone: BadgeTone;
   /** Stable sort key used to pick the senior badge when multiple
    * candidates exist (e.g., admin + bot). Higher wins. */
   rank: number;
@@ -30,15 +32,15 @@ export function authorityBadge(authority: OccupantAuthority | null | undefined):
   const affiliation: MucAffiliation = authority?.affiliation ?? "none";
   const role: MucRole = authority?.role ?? "none";
   if (affiliation === "owner") {
-    return { label: "OWNER", colorClass: "text-warning/70", rank: 4 };
+    return { label: "OWNER", tone: "warning", rank: 4 };
   }
   if (affiliation === "admin") {
-    return { label: "ADMIN", colorClass: "text-primary/75", rank: 3 };
+    return { label: "ADMIN", tone: "action", rank: 3 };
   }
   // Role=Moderator without owner/admin affiliation is the "promoted
   // for this session" case — still authoritative, still rendered.
   if (role === "moderator") {
-    return { label: "MOD", colorClass: "text-primary/75", rank: 2 };
+    return { label: "MOD", tone: "action", rank: 2 };
   }
   return null;
 }
@@ -54,9 +56,9 @@ const DESCRIPTIVE_HAT_LABELS: Record<string, string> = {
   "urn:waddle:hats:verified": "VERIFIED",
 };
 
-const DESCRIPTIVE_HAT_COLORS: Record<string, string> = {
-  [BOT_HAT_URI]: "text-success/75",
-  "urn:waddle:hats:verified": "text-primary/75",
+const DESCRIPTIVE_HAT_TONES: Record<string, BadgeTone> = {
+  [BOT_HAT_URI]: "success",
+  "urn:waddle:hats:verified": "action",
 };
 
 const DESCRIPTIVE_HAT_RANK: Record<string, number> = {
@@ -84,10 +86,10 @@ export function descriptiveBadge(hats: OccupantHat[] | null | undefined): BadgeV
   let best: BadgeView | null = null;
   for (const hat of hats) {
     const label = DESCRIPTIVE_HAT_LABELS[hat.uri] ?? hat.title;
-    const colorClass = DESCRIPTIVE_HAT_COLORS[hat.uri] ?? "text-muted-foreground";
+    const tone = DESCRIPTIVE_HAT_TONES[hat.uri] ?? "muted";
     const rank = DESCRIPTIVE_HAT_RANK[hat.uri] ?? 0;
     if (best === null || rank > best.rank) {
-      best = { label, colorClass, rank };
+      best = { label, tone, rank };
     }
   }
   return best;

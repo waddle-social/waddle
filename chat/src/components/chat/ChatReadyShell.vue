@@ -49,8 +49,13 @@ import { toast } from "@/ui/toaster";
 import RoomsPage from "@/components/community/pages/RoomsPage.vue";
 import MembersPage from "@/components/community/pages/MembersPage.vue";
 import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
-import UserAvatar from "@/components/ui/UserAvatar.vue";
+import PeopleRail from "@/components/community/PeopleRail.vue";
+import { css, cx } from "styled-system/css";
+import { btn, empty } from "styled-system/recipes";
+import spotEmpty from "@waddle/design/assets/spot-empty.svg?url";
+import { cardClasses } from "@/ui/part-classes";
 import AdminView from "@/components/admin/AdminView.vue";
+import AppSidebar from "@/components/community/AppSidebar.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
 import CurrentCallPanel from "@/components/calls/CurrentCallPanel.vue";
@@ -64,7 +69,7 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing, sortEventsUpcomingFirst, type CommunityEvent, type FeedPostInput, type StoryPostInput } from "@/lib/xmpp-client";
 import { eventBounds } from "@/lib/xmpp/event-calendar";
-import { splitKnownPeople, type MemberCardModel } from "@/shell/controllers/use-people-rail";
+import type { MemberCardModel } from "@/shell/controllers/use-people-rail";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import { setManualActivity } from "@/presence/self-activity";
 import { $ownNotificationsSuppressed } from "@/presence/presence-store";
@@ -301,9 +306,6 @@ const threadPanelConversationActive = computed(() =>
 const conversationPageActive = computed(() =>
   ui.activePage.value === "chat" && ui.activeCommunitySurface.value === null,
 );
-const canSearchMessages = computed(() =>
-  conversationPageActive.value && (!!activeRoomChannel.value || !!activeDmPeer.value),
-);
 /** ContentArea renders `actionError` inline (with Retry) inside the
  * conversation workspace. Every other page has no renderer for it, so a
  * failure raised there (group-DM creation, reactions from a page, …)
@@ -320,41 +322,16 @@ function threadsListRootAuthorJid(entry: WasmThreadEntry): string | null {
     selfJid: connectionStore.session?.jid,
   });
 }
-/** The header Search button opens the MessageSearchPanel that
- * ContentArea owns, through its exposed handle. */
-function openMessageSearch() {
-  contentAreaRef.value?.openSearch();
-}
 /** Thread-pane avatars open the same profile drawer ContentArea owns, so
  * presence, hats and the DM action resolve exactly as in the timeline. */
 function openProfileFromThread(author: string, avatarJid: string | null) {
   contentAreaRef.value?.openProfile(author, avatarJid);
 }
-function startHuddleFromHeader() {
-  const channel = activeRoomChannel.value;
-  const roomJid = activeChannelRoomJid.value;
-  if (channel && roomJid) {
-    const media: CallMedia = { audio: true, video: false };
-    if (channel.isGroupDm) joinGroupDmCallFromActivity(roomJid, media);
-    else joinChannelCallFromActivity(channel.id, roomJid, media);
-    return;
-  }
-  openRooms();
-}
-const hasCallContext = computed(() => {
-  const phase = callStateStore.value.phase;
-  if (phase !== "idle" && phase !== "ended") return true;
-  if (activeChannelCallCount.value > 0 || activeDmCallCount.value > 0) return true;
-  if (Object.values(callParticipantCounts.value).some((count) => count > 0)) return true;
-  return Object.keys(dmCallActivitiesStore.value).length > 0;
-});
-/** Home / Rooms / Members always get a context column; every other page
- * gets one whenever there is call activity, so the in-call controls
- * (CurrentCallPanel / CallActivityDock) never depend on the page. */
+/** Home and Members get a context column. Live calls and the call you are
+ * in sit in the sidebar (`#live` / `#dock`), so they follow every page. */
 const contextColumnVisible = computed(() => {
-  if (hasCallContext.value) return true;
   const page = ui.activePage.value;
-  return page === "dashboard" || page === "rooms" || page === "members";
+  return page === "dashboard" || page === "members";
 });
 const nextEvent = computed<CommunityEvent | null>(() => {
   const first = sortEventsUpcomingFirst(communityEvents.events.value)[0];
@@ -369,13 +346,6 @@ const nextEventWhen = computed(() => {
     ? date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
     : date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 });
-/** Contacts and DM peers who are around right now, one per bare JID,
- * from the same rule and sources as the Home hero and the people rail.
- * Honest "around now" for the Home context column — nobody has a join
- * date, so there is no "new this week". */
-const aroundNow = computed(() =>
-  splitKnownPeople(rosterContacts.contacts.value, dmConversations.conversations.value).around,
-);
 /** Member picked on the Members page; MembersPage emits null on unmount. */
 const selectedMember = ref<MemberCardModel | null>(null);
 function onSelectMember(member: MemberCardModel | null) {
@@ -624,6 +594,13 @@ function onAdminNavigate(match: AdminMatch) {
 function onAdminBack() {
   openHome();
 }
+/** A page header's sidebar button. On phones the sidebar is the home
+ * screen (Mobile-Home board), so it goes back there; wider screens keep
+ * the drawer, though their sidebar is always visible. */
+function openNav() {
+  if (window.matchMedia("(max-width: 767.98px)").matches) openHome();
+  else ui.showMobileNav.value = true;
+}
 let disconnectMessageToolbarLifecycle: (() => void) | null = null;
 
 onMounted(() => {
@@ -674,6 +651,7 @@ const supersededOutsideConversation = computed(() => {
     || ui.activePage.value === "rooms"
     || ui.activePage.value === "members"
     || ui.activePage.value === "settings"
+    || ui.activePage.value === "admin"
   );
 });
 
@@ -696,9 +674,49 @@ const supersededBannerClass = computed(() =>
   !supersededOutsideConversation.value
   && supersededContentPaneObscured.value
   && supersededThreadStackDepth.value < 2
-    ? "md:hidden"
+    ? hiddenFromMdClass
     : "",
 );
+
+const adminViewClass = css({ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 });
+const hiddenFromMdClass = css({ md: { display: "none" } });
+const phoneHomeClass = css({ display: "flex", flex: 1, minHeight: 0, md: { display: "none" } });
+const desktopHomeClass = css({ display: "none", md: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 } });
+const supersededBannerFrameClass = css({ position: "absolute", insetInline: 0, top: 0, zIndex: "panel" });
+// Collapsed right-hand panels: a slim vertical strip per inactive panel (lg and up).
+const accordionBarClass = css({
+  display: "none",
+  lg: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    width: "44px",
+    minHeight: 0,
+    flex: "none",
+    pt: "5",
+    border: 0,
+    borderLeft: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    color: "fg.muted",
+    cursor: "pointer",
+    transition: "background-color {durations.fast} {easings.out}, color {durations.fast} {easings.out}",
+    _hover: { bg: "state.hover", color: "fg" },
+  },
+});
+const accordionLabelClass = css({
+  writingMode: "vertical-rl",
+  maxHeight: "60%",
+  textStyle: "caption",
+  fontWeight: 600,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+});
+const contextColumnClass = css({ flex: 1, display: "flex", flexDirection: "column", gap: "3", padding: "4", minHeight: 0 });
+const contextCard = cardClasses("quiet");
+// ProfileCard board, empty state: centred in the panel.
+const noOnePickedClass = cx(empty(), css({ flex: 1, justifyContent: "center", "& h2": { margin: 0, font: "700 24px/1.25 {fonts.display}" } }));
+const seeEventsClass = cx(btn({ size: "sm" }), css({ alignSelf: "flex-start" }));
 
 async function recoverSupersededFromShell() {
   await xmppClient.value?.recoverSupersededSession();
@@ -706,24 +724,7 @@ async function recoverSupersededFromShell() {
 </script>
 
 <template>
-  <div v-if="ui.activePage.value === 'admin'" class="flex h-full min-h-0 flex-col">
-    <!-- The admin route bypasses the chat shell entirely, so the superseded
-         recovery affordance must render here as well or the sticky latch
-         leaves the tab without any reconnect action. -->
-    <SupersededRecoveryBanner
-      v-if="messaging.xmppStatus.value.kind === 'superseded'"
-      :detail="messaging.xmppStatus.value.detail"
-      @recover="recoverSupersededFromShell"
-    />
-    <AdminView
-      class="min-h-0 flex-1"
-      :xmpp-client="xmppClient"
-      :active-panel="adminPanelFromUrl"
-      @navigate="onAdminNavigate"
-      @back="onAdminBack"
-    />
-  </div>
-  <div v-else class="chat-app-shell">
+  <div class="chat-app-shell">
     <CallAudioPlaybackPrompt />
     <ChatMobileDrawers
       :controller="controller"
@@ -769,23 +770,15 @@ async function recoverSupersededFromShell() {
       @end-dm="endRecoveredDmFromActivity"
     />
 
-    <!-- Community shell: header + people rail + page + context column -->
-    <CommunityShell
-      :controller="controller"
-      :hide-rail="ui.activePage.value === 'settings' || ui.activePage.value === 'members'"
-      :can-search="canSearchMessages"
-      :open-search="openMessageSearch"
-      :start-huddle="startHuddleFromHeader"
-      :call-participants="retainedMucCallParticipantsStore"
-    >
+    <!-- Community shell: sidebar + page + right-hand panel -->
+    <CommunityShell :controller="controller">
       <!-- Superseded recovery: the shell's main column is a flex column,
            so an in-flow banner would push the active page down. Pin it
            across the full column width instead; its own background/border
            keep it readable over any surface. -->
       <div
         v-if="supersededBannerVisible"
-        class="absolute inset-x-0 top-0 z-40"
-        :class="supersededBannerClass"
+        :class="[supersededBannerFrameClass, supersededBannerClass]"
       >
         <SupersededRecoveryBanner
           :detail="messaging.xmppStatus.value.detail"
@@ -793,21 +786,37 @@ async function recoverSupersededFromShell() {
         />
       </div>
       <!-- Main content -->
-      <HomeDashboard
-        v-if="ui.activePage.value === 'dashboard'"
-        v-bind="homeDashboardProps"
-        @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
-        @select-channel-room="selectChannelByRoomJid"
-        @select-group-dm="selectGroupDm"
-        @join-channel-call="joinChannelCallFromActivity"
-        @join-group-dm-call="joinGroupDmCallFromActivity"
-        @leave-channel-call="leaveRetainedChannelCall"
-        @answer-dm="answerDmFromActivity"
-        @select-contact="handleOpenDm"
-        @reconnect-dm="reconnectDmFromDock"
-        @end-dm="endRecoveredDmFromActivity"
-        @open-nav="ui.showMobileNav.value = true"
+      <!-- Admin sits in the same sidebar shell (App-Admin board). -->
+      <AdminView
+        v-if="ui.activePage.value === 'admin'"
+        :class="adminViewClass"
+        :xmpp-client="xmppClient"
+        :active-panel="adminPanelFromUrl"
+        @navigate="onAdminNavigate"
+        @back="onAdminBack"
       />
+      <!-- Phones: the sidebar is the home screen (Mobile-Home board). -->
+      <template v-else-if="ui.activePage.value === 'dashboard'">
+        <div :class="phoneHomeClass">
+          <AppSidebar :controller="controller" follow-theme />
+        </div>
+        <div :class="desktopHomeClass">
+          <HomeDashboard
+            v-bind="homeDashboardProps"
+            @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
+            @select-channel-room="selectChannelByRoomJid"
+            @select-group-dm="selectGroupDm"
+            @join-channel-call="joinChannelCallFromActivity"
+            @join-group-dm-call="joinGroupDmCallFromActivity"
+            @leave-channel-call="leaveRetainedChannelCall"
+            @answer-dm="answerDmFromActivity"
+            @select-contact="handleOpenDm"
+            @reconnect-dm="reconnectDmFromDock"
+            @end-dm="endRecoveredDmFromActivity"
+            @open-nav="openNav"
+          />
+        </div>
+      </template>
       <FeedPane
         v-else-if="ui.activeCommunitySurface.value === 'feed'"
         :entries="socialFeed.entries.value"
@@ -834,7 +843,7 @@ async function recoverSupersededFromShell() {
         @refresh="socialFeed.refresh(); stories.refresh()"
         @story-selected="(id) => stories.markStoryRead(id)"
         @react="(id, emoji) => stories.toggleReaction(id, emoji)"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <EventsPane
         v-else-if="ui.activeCommunitySurface.value === 'events'"
@@ -854,7 +863,7 @@ async function recoverSupersededFromShell() {
         @cancel-series="(id) => communityEvents.cancel(id)"
         @cancel-instance="(uid, dtstart) => communityEvents.cancelInstance(uid, dtstart)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
@@ -862,7 +871,7 @@ async function recoverSupersededFromShell() {
         :root-author-jid="threadsListRootAuthorJid"
         :on-select-thread-entry="onSelectThreadEntry"
         :on-join-channel-call="joinChannelCallFromActivity"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <UnreadView
         v-else-if="ui.activePage.value === 'unread'"
@@ -871,7 +880,7 @@ async function recoverSupersededFromShell() {
         :on-select-channel="(id: string) => selectChannel(id)"
         :on-select-thread="onSelectThread"
         :on-refresh-inbox="channelUnread.hydrateFromInbox"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <RoomsPage
         v-else-if="ui.activePage.value === 'rooms'"
@@ -887,14 +896,14 @@ async function recoverSupersededFromShell() {
         :answer-dm="answerDmFromActivity"
         :reconnect-dm="reconnectDmFromDock"
         :end-dm="endRecoveredDmFromActivity"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <MembersPage
         v-else-if="ui.activePage.value === 'members'"
         :controller="controller"
         :call-participants="retainedMucCallParticipantsStore"
         @select-member="onSelectMember"
-        @open-nav="ui.showMobileNav.value = true"
+        @open-nav="openNav"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"
@@ -993,7 +1002,7 @@ async function recoverSupersededFromShell() {
               @load-older="loadOlderActiveMessages"
               @retry-load="retryActiveLoad"
               @edit-channel="openChannelEdit"
-              @open-nav="ui.showMobileNav.value = true"
+              @open-nav="openNav"
               @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
               @open-thread="openThread"
@@ -1013,11 +1022,11 @@ async function recoverSupersededFromShell() {
               && activeRightPanel !== 'thread'
               && activeThreadStack.length >= 1"
             type="button"
-            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :class="accordionBarClass"
             :title="getThreadLabel(activeThreadStack[activeThreadStack.length - 1] ?? '')"
             @click="activateRightPanel('thread')"
           >
-            <span class="accordion-bar-label text-muted-foreground/70">
+            <span :class="accordionLabelClass">
               {{ getThreadLabel(activeThreadStack[activeThreadStack.length - 1] ?? '') }}
             </span>
           </button>
@@ -1026,11 +1035,11 @@ async function recoverSupersededFromShell() {
             <!-- Channel / main-feed bar -->
             <button
               type="button"
-              class="chat-accordion-bar bg-muted/30 hover:bg-muted/60"
+              :class="accordionBarClass"
               title="Back to channel"
               @click="closeThreadPanel"
             >
-              <span class="accordion-bar-label text-muted-foreground/80">
+              <span :class="accordionLabelClass">
                 {{ threadPanelIsDm ? (activeDmPeer?.peerUsername ?? 'Direct message') : (waddles.currentChannel.value?.name ?? 'Channel') }}
               </span>
             </button>
@@ -1039,11 +1048,11 @@ async function recoverSupersededFromShell() {
               v-for="(threadId, i) in activeThreadStack.slice(0, -2)"
               :key="threadId"
               type="button"
-              class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+              :class="accordionBarClass"
               :title="getThreadLabel(threadId)"
               @click="popThreadTo(i)"
             >
-              <span class="accordion-bar-label text-muted-foreground/60">
+              <span :class="accordionLabelClass">
                 {{ getThreadLabel(threadId) }}
               </span>
             </button>
@@ -1055,11 +1064,11 @@ async function recoverSupersededFromShell() {
               && ui.showPinnedPanel.value
               && (activeChannelRoomJid || activeDmPeer?.peerJid)"
             type="button"
-            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :class="accordionBarClass"
             title="Pinned messages"
             @click="activateRightPanel('pinned')"
           >
-            <span class="accordion-bar-label text-muted-foreground/70">
+            <span :class="accordionLabelClass">
               Pinned
             </span>
           </button>
@@ -1069,11 +1078,11 @@ async function recoverSupersededFromShell() {
               && activeRightPanel !== 'extension'
               && activeExtensionRouteKey"
             type="button"
-            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :class="accordionBarClass"
             :title="activeExtensionRoute?.label ?? 'Extensions'"
             @click="activateRightPanel('extension')"
           >
-            <span class="accordion-bar-label text-muted-foreground/70">
+            <span :class="accordionLabelClass">
               {{ activeExtensionRoute?.label ?? 'Extensions' }}
             </span>
           </button>
@@ -1200,7 +1209,7 @@ async function recoverSupersededFromShell() {
               :room-jid="activeChannelRoomJid"
               :xmpp-client="xmppClient"
               :action-error="activeActionError"
-              @open-nav="ui.showMobileNav.value = true"
+              @open-nav="openNav"
               @close="closeExtensionRoutePanel"
               @invoke-action="invokeExtensionRouteAction"
             />
@@ -1216,41 +1225,22 @@ async function recoverSupersededFromShell() {
         </div>
       </template>
 
-      <!-- Context column: the live thing that matters on this page. -->
+      <!-- Right-hand panel: the live thing that matters on this page. -->
       <template v-if="contextColumnVisible" #context>
-        <div class="context-column">
+        <div :class="contextColumnClass">
           <template v-if="ui.activePage.value === 'dashboard'">
-            <div class="context-card">
-              <span class="community-kicker">Next event</span>
+            <div :class="contextCard.root">
+              <span :class="contextCard.kicker">Next event</span>
               <template v-if="nextEvent">
-                <span class="context-card__title">{{ nextEvent.summary }}</span>
-                <span class="context-card__text">{{ nextEventWhen }}</span>
-                <button
-                  type="button"
-                  class="community-pill self-start"
-                  @click="openCommunitySurface('events')"
-                >
+                <span :class="contextCard.title">{{ nextEvent.summary }}</span>
+                <span :class="contextCard.body">{{ nextEventWhen }}</span>
+                <button type="button" :class="seeEventsClass" @click="openCommunitySurface('events')">
                   See events
                 </button>
               </template>
-              <span v-else class="context-card__text">Nothing scheduled yet. Events you post show up here.</span>
+              <span v-else :class="contextCard.body">Nothing scheduled yet. Events you post show up here.</span>
             </div>
-            <div class="context-card">
-              <span class="community-kicker">Around now · {{ aroundNow.length }}</span>
-              <div v-if="aroundNow.length > 0" class="context-avatars">
-                <button
-                  v-for="person in aroundNow.slice(0, 12)"
-                  :key="person.jid"
-                  type="button"
-                  class="rounded-lg"
-                  :aria-label="`Message ${person.name}`"
-                  @click="handleOpenDm(person.jid)"
-                >
-                  <UserAvatar :name="person.name" :jid="person.jid" :presence="person.presence" size="md" />
-                </button>
-              </div>
-              <span v-else class="context-card__text">Nobody around right now. Start a huddle and they will find you.</span>
-            </div>
+            <PeopleRail :controller="controller" :call-participants="retainedMucCallParticipantsStore" />
           </template>
           <template v-else-if="ui.activePage.value === 'members'">
             <MemberProfileCard
@@ -1261,48 +1251,53 @@ async function recoverSupersededFromShell() {
               @message="handleOpenDm"
               @close="selectedMember = null"
             />
-            <div v-else class="context-card">
-              <span class="community-kicker">Profile</span>
-              <span class="context-card__text">Pick a member to see their profile here.</span>
+            <div v-else :class="noOnePickedClass" role="status">
+              <img :src="spotEmpty" alt="" />
+              <h2>No one picked</h2>
+              <p>Pick someone to see their profile here.</p>
             </div>
           </template>
-          <template v-if="ui.activePage.value !== 'members'">
-            <CurrentCallPanel
-              :channels="waddles.sortedChannels.value"
-              :conversations="dmConversations.conversations.value"
-              :active-channel-id="waddles.activeChannelId.value"
-              :active-channel-room-jid="activeChannelRoomJid"
-              :active-peer-jid="dmConversations.activePeerJid.value"
-              @select-channel="onSelectChannelFromSidebar"
-              @select-dm="selectDm"
-            />
-            <CallActivityDock
-              :channels="waddles.sortedChannels.value"
-              :group-dms="groupDmConversations"
-              :conversations="dmConversations.conversations.value"
-              :active-channel-id="waddles.activeChannelId.value"
-              :active-channel-room-jid="activeChannelRoomJid"
-              :active-peer-jid="dmConversations.activePeerJid.value"
-              :sidebar-mode="ui.sidebarMode.value"
-              :active-channel-jids="messaging.activeChannels.value"
-              :call-participants="retainedMucCallParticipantsStore"
-              :call-media-by-room="retainedMucCallMediaStore"
-              :managed-muc-domain="managedMucDomain"
-              :self-full-jid="selfFullJid"
-              :show-dm-calls="ui.sidebarMode.value !== 'dms'"
-              hide-current-call
-              @select-channel="onSelectChannelFromSidebar"
-              @select-group-dm="selectGroupDm"
-              @join-channel-call="joinChannelCallFromActivity"
-              @join-group-dm-call="joinGroupDmCallFromActivity"
-              @leave-channel-call="leaveRetainedChannelCall"
-              @answer-dm="answerDmFromActivity"
-              @select-dm="selectDm"
-              @reconnect-dm="reconnectDmFromDock"
-              @end-dm="endRecoveredDmFromActivity"
-            />
-          </template>
         </div>
+      </template>
+
+      <!-- Sidebar: live calls ("Live now") and the call you are in. -->
+      <template #live>
+        <CallActivityDock
+          :channels="waddles.sortedChannels.value"
+          :group-dms="groupDmConversations"
+          :conversations="dmConversations.conversations.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :active-channel-room-jid="activeChannelRoomJid"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          :sidebar-mode="ui.sidebarMode.value"
+          :active-channel-jids="messaging.activeChannels.value"
+          :call-participants="retainedMucCallParticipantsStore"
+          :call-media-by-room="retainedMucCallMediaStore"
+          :managed-muc-domain="managedMucDomain"
+          :self-full-jid="selfFullJid"
+          :show-dm-calls="ui.sidebarMode.value !== 'dms'"
+          hide-current-call
+          @select-channel="onSelectChannelFromSidebar"
+          @select-group-dm="selectGroupDm"
+          @join-channel-call="joinChannelCallFromActivity"
+          @join-group-dm-call="joinGroupDmCallFromActivity"
+          @leave-channel-call="leaveRetainedChannelCall"
+          @answer-dm="answerDmFromActivity"
+          @select-dm="selectDm"
+          @reconnect-dm="reconnectDmFromDock"
+          @end-dm="endRecoveredDmFromActivity"
+        />
+      </template>
+      <template #dock>
+        <CurrentCallPanel
+          :channels="waddles.sortedChannels.value"
+          :conversations="dmConversations.conversations.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :active-channel-room-jid="activeChannelRoomJid"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          @select-channel="onSelectChannelFromSidebar"
+          @select-dm="selectDm"
+        />
       </template>
     </CommunityShell>
 

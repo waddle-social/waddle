@@ -7,6 +7,7 @@
  * hls.js. A fatal playback error emits `failed` so the parent can show a link.
  */
 import { onMounted, onUnmounted, ref } from "vue";
+import { css } from "styled-system/css";
 import { attachNativeVideo, type VideoAttachment } from "@/lib/xmpp/hls-player";
 
 const props = defineProps<{ url: string; mediaType: string }>();
@@ -29,6 +30,8 @@ onMounted(async () => {
   attachment = handle;
 });
 
+const videoClass = css({ width: "100%", maxHeight: "288px", borderRadius: "sm", border: "1px solid {colors.border}", bg: "surface.code" });
+
 onUnmounted(() => {
   unmounted = true;
   attachment?.destroy();
@@ -39,7 +42,7 @@ onUnmounted(() => {
 <template>
   <video
     ref="videoEl"
-    class="max-h-72 w-full rounded border border-border bg-black"
+    :class="videoClass"
     controls
     autoplay
     playsinline

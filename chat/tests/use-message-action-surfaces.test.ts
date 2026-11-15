@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { effectScope, nextTick, ref } from "vue";
-import { useMessageActionSurfaces } from "../src/components/chat/composables/use-message-action-surfaces";
+import { toolbarVisibility, useMessageActionSurfaces } from "../src/components/chat/composables/use-message-action-surfaces";
 import {
   $desktopToolbarOwnerId,
   $desktopToolbarSuppressed,
@@ -128,18 +128,18 @@ describe("useMessageActionSurfaces", () => {
 
   test("visibility class tracks suppression, lock ownership, and reaction mode", async () => {
     const { surfaces, reactionModeSelected, stop } = makeHarness();
-    expect(surfaces.desktopToolbarVisibilityClass.value).toContain("group-hover:opacity-100");
+    expect(surfaces.desktopToolbarVisibilityClass.value).toBe(toolbarVisibility.reveal);
 
     reactionModeSelected.value = true;
-    expect(surfaces.desktopToolbarVisibilityClass.value).toContain("opacity-100 translate-y-0");
+    expect(surfaces.desktopToolbarVisibilityClass.value).toBe(toolbarVisibility.shown);
 
     reactionModeSelected.value = false;
     surfaces.togglePicker();
-    expect(surfaces.desktopToolbarVisibilityClass.value).toContain("opacity-100 translate-y-0");
+    expect(surfaces.desktopToolbarVisibilityClass.value).toBe(toolbarVisibility.shown);
 
     $desktopToolbarSuppressed.set(true);
     await nextTick();
-    expect(surfaces.desktopToolbarVisibilityClass.value).toContain("pointer-events-none z-sticky");
+    expect(surfaces.desktopToolbarVisibilityClass.value).toBe(toolbarVisibility.suppressed);
     stop();
   });
 });

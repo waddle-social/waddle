@@ -5,12 +5,8 @@ import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
-import {
-  systemBandKindClass,
-  systemBandMetaValueClass,
-  systemBandToneClass,
-  type SystemBandCard,
-} from "./message-system-band";
+import { isMonoBandMeta, type SystemBandCard } from "./message-system-band";
+import { actionChipClasses as chips, bandClasses as band } from "./message-band-classes";
 
 const props = defineProps<{
   card: SystemBandCard;
@@ -43,29 +39,27 @@ const {
   <section
     :data-message-id="messageId"
     :data-message-created-at="messageCreatedAt"
-    class="chat-system-band animate-message-in"
-    :class="[
-      systemBandToneClass(card.presentation.tone),
-      systemBandKindClass(card.presentation.kind),
-    ]"
+    :data-tone="card.presentation.tone || undefined"
+    :data-kind="card.presentation.kind || undefined"
+    :class="band.root"
   >
-    <div class="chat-system-band__header">
-      <span class="chat-system-band__source">
+    <div :class="band.header">
+      <span :class="band.source">
         <component :is="bandIcon" aria-hidden="true" />
         {{ card.presentation.label || messageAuthor }}
       </span>
-      <span class="chat-system-band__stamp">{{ formatTimelineTimeOfDay(messageCreatedAt) }}</span>
-      <span v-if="card.presentation.primaryValue" class="chat-system-band__tone-pill">
+      <span :class="band.stamp">{{ formatTimelineTimeOfDay(messageCreatedAt) }}</span>
+      <span v-if="card.presentation.primaryValue" :class="band.pill">
         {{ card.presentation.primaryValue }}
       </span>
     </div>
-    <div class="chat-system-band__title">
+    <div :class="band.title">
       <a
         v-if="card.presentation.primaryUrl"
         :href="card.presentation.primaryUrl"
         target="_blank"
         rel="noopener noreferrer"
-        class="chat-system-band__title-link"
+        :class="band.titleLink"
         @click.stop
       >
         <span>{{ card.presentation.title }}</span>
@@ -75,33 +69,31 @@ const {
     </div>
     <div
       v-if="card.presentation.details.length > 0 || card.presentation.secondaryValue"
-      class="chat-system-band__meta"
+      :class="band.meta"
     >
-      <span v-if="card.presentation.secondaryValue" class="chat-system-band__meta-item">
-        <span class="chat-system-band__meta-value">{{ card.presentation.secondaryValue }}</span>
+      <span v-if="card.presentation.secondaryValue" :class="band.metaItem">
+        <span :class="band.metaValue">{{ card.presentation.secondaryValue }}</span>
       </span>
       <span
         v-for="detail in card.presentation.details"
         :key="`${card.annotation.annotationId}:${detail.label}`"
-        class="chat-system-band__meta-item"
+        :class="band.metaItem"
       >
-        <span class="chat-system-band__meta-label">{{ detail.label }}</span>
+        <span :class="band.metaLabel">{{ detail.label }}</span>
         <span
-          class="chat-system-band__meta-value"
-          :class="systemBandMetaValueClass(detail.label)"
+          :class="band.metaValue"
+          :data-mono="isMonoBandMeta(detail.label) || undefined"
           :title="detail.value"
         >{{ detail.value }}</span>
       </span>
     </div>
-    <div v-if="card.annotation.actions.length > 0" class="chat-system-band__actions">
+    <div v-if="card.annotation.actions.length > 0" :class="band.actions">
       <button
         v-for="action in card.annotation.actions"
         :key="`${card.annotation.annotationId}:${action.route}`"
         type="button"
-        class="chat-extension-action-chip"
-        :class="bandActionState(card.annotation.annotationId, action)?.state
-          ? `chat-extension-action-chip--state-${bandActionState(card.annotation.annotationId, action)?.state}`
-          : ''"
+        :class="chips.chip"
+        :data-state="bandActionState(card.annotation.annotationId, action)?.state"
         :disabled="bandActionState(card.annotation.annotationId, action)?.state === 'loading' || !action.launch"
         :title="bandActionState(card.annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
         @click.stop="invokeBandAction(card.annotation.annotationId, action)"

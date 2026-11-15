@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Avatar } from "@ark-ui/vue/avatar";
-import { avatar as avatarRecipe } from "styled-system/recipes";
-import { token } from "styled-system/tokens";
+import { css, cx } from "styled-system/css";
+import { avatar, presence as presenceRecipe } from "styled-system/recipes";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
@@ -18,34 +18,45 @@ const props = defineProps<{
    * orthogonal to the Show and never replaces it. One badge for audio + video.
    */
   inCall?: boolean;
-  /** In a huddle: a teal ring around the avatar. */
+  /** In a huddle: a live (aurora) ring around the avatar. */
   huddle?: boolean;
   /** Speaking in a huddle: the ring glows. Implies `huddle`. */
   speaking?: boolean;
 }>();
 
-// One literal recipe call per variant value so Panda's static extraction
-// emits every size and ring class the component can reach at runtime.
-const SIZE_CLASSES = {
-  sm: avatarRecipe({ size: "sm" }),
-  md: avatarRecipe({ size: "md" }),
-  lg: avatarRecipe({ size: "lg" }),
-  xl: avatarRecipe({ size: "xl" }),
-} as const;
-const HUDDLE_ROOT = variantClasses(avatarRecipe({ huddle: true }).root, "--huddle_");
-const SPEAKING_ROOT = variantClasses(avatarRecipe({ speaking: true }).root, "--speaking_");
+// Avatar sizes map onto the preset `avatar` recipe: xs 20, sm 28, md 36,
+// lg 44, xl 64px. `message` follows the density-aware `msgAvatar` token.
+type RecipeSize = "xs" | "sm" | "lg" | "xl" | undefined;
+const RECIPE_SIZE: Record<NonNullable<typeof props.size>, RecipeSize> = {
+  xs: "xs",
+  sm: "sm",
+  md: undefined,
+  lg: "lg",
+  xl: "xl",
+  message: undefined,
+};
+const TINTS = ["1", "2", "3", "4", "5", "6"] as const;
 
-/** Keep only the classes of one variant so it can be layered on any size. */
-function variantClasses(classList: string, marker: string): string {
-  return classList.split(" ").filter((c) => c.includes(marker)).join(" ");
-}
-
-const TINTS = [
-  token("colors.avatarTints.1"),
-  token("colors.avatarTints.2"),
-  token("colors.avatarTints.3"),
-  token("colors.avatarTints.4"),
-];
+const messageSize = css({ width: "msgAvatar", height: "msgAvatar" });
+const huddleRing = css({ boxShadow: "0 0 0 2px {colors.live}" });
+const offline = css({ "& > img, & > [data-part=fallback]": { opacity: 0.55, filter: "grayscale(0.4)" } });
+const imageClass = css({ width: "100%", height: "100%", borderRadius: "inherit", objectFit: "cover", bg: "surface.2" });
+const fallbackClass = css({ userSelect: "none", lineHeight: 1 });
+const callBadge = css({
+  position: "absolute",
+  top: "-2px",
+  right: "-2px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "14px",
+  height: "14px",
+  borderRadius: "pill",
+  border: "2px solid var(--ring-bg, {colors.bg})",
+  bg: "live",
+  color: "live.fg",
+  "& svg": { width: "8px", height: "8px" },
+});
 
 const initials = computed(() =>
   props.name
@@ -56,48 +67,6 @@ const initials = computed(() =>
     .slice(0, 2),
 );
 
-// `xs` and `message` keep their exact legacy dimensions (the message grid
-// column is sized from `--chat-message-avatar-size`); the other sizes come
-// straight from the recipe.
-const recipeSize = computed<keyof typeof SIZE_CLASSES>(() => {
-  switch (props.size) {
-    case "xs":
-    case "sm":
-      return "sm";
-    case "lg":
-      return "lg";
-    case "xl":
-      return "xl";
-    default:
-      return "md";
-  }
-});
-
-const cls = computed(() => SIZE_CLASSES[recipeSize.value]);
-
-const fixedSize = computed(() => {
-  if (props.size === "xs") return "1.5rem";
-  if (props.size === "message") return "var(--chat-message-avatar-size)";
-  return null;
-});
-
-const rootStyle = computed(() =>
-  fixedSize.value ? { width: fixedSize.value, height: fixedSize.value } : undefined,
-);
-
-function ringClass(): string {
-  if (props.speaking) return SPEAKING_ROOT;
-  if (props.huddle) return HUDDLE_ROOT;
-  return "";
-}
-
-const rootClass = computed(() => [
-  "app-avatar",
-  cls.value.root,
-  ringClass(),
-  props.presence === "offline" ? "app-avatar--offline" : "",
-]);
-
 // Name-derived tint so a person keeps the same fallback colour everywhere.
 const tint = computed(() => {
   let hash = 5381;
@@ -105,7 +74,15 @@ const tint = computed(() => {
   return TINTS[hash % TINTS.length];
 });
 
-const presenceShow = computed(() => {
+const rootClass = computed(() => cx(
+  "app-avatar",
+  avatar({ size: RECIPE_SIZE[props.size ?? "md"], tint: tint.value }),
+  props.size === "message" && messageSize,
+  props.huddle && !props.speaking && huddleRing,
+  props.presence === "offline" && offline,
+));
+
+const presenceState = computed(() => {
   switch (props.presence) {
     case "online": return "available";
     case "away":   return "away";
@@ -150,33 +127,17 @@ const tooltipLabel = computed(() => {
 
 <template>
   <AppTooltip :label="tooltipLabel">
-    <Avatar.Root :class="rootClass" :style="rootStyle">
-      <Avatar.Image
-        v-if="src"
-        :src="src"
-        :alt="name"
-        :class="[cls.image, 'bg-muted']"
-        loading="lazy"
-      />
-      <Avatar.Fallback
-        :class="[cls.fallback, 'type-avatar-mark select-none']"
-        :style="{ background: tint }"
-      >
-        {{ initials }}
-      </Avatar.Fallback>
+    <Avatar.Root :class="rootClass" :data-speaking="speaking ? 'true' : undefined">
+      <Avatar.Image v-if="src" :src="src" :alt="name" :class="imageClass" loading="lazy" />
+      <Avatar.Fallback :class="fallbackClass">{{ initials }}</Avatar.Fallback>
       <span
-        v-if="presenceShow"
-        :class="cls.presence"
-        :data-show="presenceShow"
+        v-if="presenceState"
+        :class="presenceRecipe({ state: presenceState })"
+        :data-presence="presenceState"
         aria-hidden="true"
       />
-      <span
-        v-if="inCall"
-        class="app-avatar-call-badge absolute -top-1 -right-1 flex h-3 w-3 items-center justify-center rounded-full border-[1.5px] border-background bg-success text-white"
-        role="img"
-        aria-label="In a call"
-      >
-        <svg viewBox="0 0 24 24" fill="currentColor" class="w-2 h-2" aria-hidden="true">
+      <span v-if="inCall" :class="['app-avatar-call-badge', callBadge]" role="img" aria-label="In a call">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M6.6 10.8a15.2 15.2 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.46.57 3.6a1 1 0 0 1-.25 1z" />
         </svg>
       </span>

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { css } from "styled-system/css";
+import { composerPopover } from "./composer-classes";
 import { Megaphone, Radio } from "lucide-vue-next";
 import type { MentionCandidate } from "@/lib/mentions";
 import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
@@ -13,24 +15,23 @@ const emit = defineEmits<{
   pick: [candidate: MentionCandidate];
 }>();
 
+const mutedGlyph = css({ bg: "surface.2", color: "fg.muted" });
+const nameClass = css({ fontWeight: 700 });
+
 const avatarUrlFor = useAvatarUrls(() => props.results.map((candidate) => candidate.jid));
 </script>
 
 <template>
   <!-- @mention autocomplete -->
   <div
-    class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
-    :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
+    :class="[composerPopover.root, isTopPinned ? composerPopover.below : composerPopover.above]"
   >
-    <div class="flex flex-col gap-1">
       <button
         v-for="(candidate, i) in results"
         :key="candidate.kind === 'broadcast' ? `broadcast:${candidate.username}` : candidate.jid ?? candidate.username"
         type="button"
-        class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
-        :class="i === selectedIndex
-          ? 'bg-primary/15 hover:bg-primary/20'
-          : 'hover:bg-muted'"
+        :class="composerPopover.option"
+        :data-selected="i === selectedIndex || undefined"
         @mousedown.prevent="emit('pick', candidate)"
       >
         <!-- Broadcast mentions get distinct glyphs so @everyone vs @here
@@ -40,33 +41,32 @@ const avatarUrlFor = useAvatarUrls(() => props.results.map((candidate) => candid
              (future-proof) fall back to a generic @ mark. -->
         <span
           v-if="candidate.kind === 'broadcast' && candidate.username === 'everyone'"
-          class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary"
+          :class="composerPopover.glyph"
         >
-          <Megaphone class="h-3 w-3" aria-hidden="true" />
+          <Megaphone aria-hidden="true" />
         </span>
         <span
           v-else-if="candidate.kind === 'broadcast' && candidate.username === 'here'"
-          class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary"
+          :class="composerPopover.glyph"
         >
-          <Radio class="h-3 w-3" aria-hidden="true" />
+          <Radio aria-hidden="true" />
         </span>
         <span
           v-else-if="candidate.kind === 'broadcast'"
-          class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary type-caption"
+          :class="composerPopover.glyph"
         >@</span>
         <img
           v-else-if="avatarUrlFor(candidate.jid)"
           :src="avatarUrlFor(candidate.jid) ?? undefined"
           :alt="candidate.username"
-          class="h-5 w-5 rounded object-cover bg-muted"
+          :class="composerPopover.glyph"
           loading="lazy"
         />
         <span
           v-else
-          class="type-caption flex h-5 w-5 items-center justify-center rounded bg-muted text-muted-foreground"
+          :class="[composerPopover.glyph, mutedGlyph]"
         >@</span>
-        <span class="type-emphasis">{{ candidate.username }}</span>
+        <span :class="nameClass">{{ candidate.username }}</span>
       </button>
-    </div>
   </div>
 </template>

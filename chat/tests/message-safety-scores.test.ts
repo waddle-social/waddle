@@ -137,16 +137,13 @@ describe("safety-scores presentation helpers", () => {
     expect(safetyProbabilityWidth(1.5)).toBe("100%");
   });
 
-  test("every category has a distinct icon and light/dark colour", () => {
-    const colors = ["2563EB", "DC2626", "7C3AED", "C2410C", "BE123C", "0F766E", "475569", "B45309"];
-    const darkColors = ["60A5FA", "F87171", "A78BFA", "FB923C", "FB7185", "2DD4BF", "CBD5E1", "FBBF24"];
+  test("every category has a distinct icon and a tone", () => {
+    const tones = ["info", "danger", "danger", "warning", "danger", "live", "muted", "gold"];
     const presentations = SAFETY_CATEGORIES.map(safetyCategoryPresentation);
     expect(new Set(presentations.map(({ icon }) => icon)).size).toBe(SAFETY_CATEGORIES.length);
     presentations.forEach((presentation, index) => {
       expect(presentation.label.length).toBeGreaterThan(0);
-      const color = `light-dark(#${colors[index]},#${darkColors[index]})`;
-      expect(presentation.textClass).toBe(`text-[${color}]`);
-      expect(presentation.barClass).toBe(`bg-[${color}]`);
+      expect(presentation.tone).toBe(tones[index]);
     });
   });
 });
@@ -162,7 +159,7 @@ describe("MessageSafetyScores", () => {
     );
     expect(html).toContain("Harassment");
     expect(html).toContain('data-severity="notice"');
-    expect(html).toContain("text-[light-dark(#C2410C,#FB923C)]");
+    expect(html).toContain('data-tone="warning"');
     expect(html).toContain("lucide-message-square-warning");
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-controls="safety-scores-m-1"');
@@ -177,7 +174,7 @@ describe("MessageSafetyScores", () => {
       import.meta.url,
     );
     expect(html).toContain('data-severity="alert"');
-    expect(html).toContain("text-[light-dark(#B45309,#FBBF24)]");
+    expect(html).toContain('data-tone="gold"');
     expect(html).toContain("lucide-shield-alert");
     expect(html).toContain('aria-label="Show Scam scores"');
   });
@@ -194,8 +191,9 @@ describe("MessageSafetyScores", () => {
 
     expect(html).toContain('aria-expanded="true"');
     expect(html).toContain('id="safety-scores-m-1"');
-    const harassment = html.indexOf('class="truncate">Harassment');
-    const scam = html.indexOf('class="truncate">Scam');
+    const panel = html.slice(html.indexOf('id="safety-scores-m-1"'));
+    const harassment = panel.indexOf('>Harassment</span>');
+    const scam = panel.indexOf('>Scam</span>');
     expect(harassment).toBeGreaterThan(-1);
     expect(scam).toBeGreaterThan(harassment);
     expect(html).not.toContain("Spam");
@@ -204,8 +202,8 @@ describe("MessageSafetyScores", () => {
     expect(html).toContain("61%");
     expect(html).toContain("80%");
     expect(html).not.toContain("12%");
-    expect(html).toContain("bg-[light-dark(#C2410C,#FB923C)]");
-    expect(html).toContain("bg-[light-dark(#B45309,#FBBF24)]");
+    expect(html.match(/data-tone="warning"/g) ?? []).toHaveLength(2);
+    expect(html.match(/data-tone="gold"/g) ?? []).toHaveLength(3);
     expect(html).toContain('title="safety-scam-v1"');
     expect(html).toContain("Model typesafe/jev-1.13-20260917");
   });
@@ -218,11 +216,10 @@ describe("MessageSafetyScores", () => {
     const html = await renderVueComponentSource(source, { scores: NOTICE, messageId: "m-3" });
     expect(html).toContain('aria-label="Hide Harassment scores"');
     expect(html).toContain("Question");
-    expect(html).toContain("bg-[light-dark(#2563EB,#60A5FA)]");
-    expect(html).toContain("text-[light-dark(#2563EB,#60A5FA)]");
+    expect(html.match(/data-tone="info"/g) ?? []).toHaveLength(3);
     expect(html).toContain("lucide-circle-question-mark");
-    expect(html).toContain("bg-[light-dark(#C2410C,#FB923C)]");
-    expect(html).not.toContain("bg-[light-dark(#DC2626,#F87171)]");
+    expect(html).toContain('data-tone="warning"');
+    expect(html).not.toContain('data-tone="danger"');
   });
 });
 

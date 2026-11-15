@@ -1,7 +1,11 @@
 <script setup lang="ts">
 // Admin V2 — modal for `adminChannelsCreate`.
 import { ref, watch } from "vue";
+import { Dialog } from "@ark-ui/vue/dialog";
 import { X } from "lucide-vue-next";
+import { btn, iconbtn } from "styled-system/recipes";
+import { adminClasses as a } from "@/components/admin/admin-classes";
+import { dialogParts } from "@/ui/part-classes";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import { requireMembershipForUnlistedChannel } from "./channelAdmissionPolicy";
 import type { WasmAdminChannelType } from "@/lib/xmpp";
@@ -61,83 +65,77 @@ function onSubmit() {
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="chat-dialog-header">
-      <h2 class="type-dialog-title">New Channel</h2>
+    <div :class="dialogParts.head">
+      <Dialog.Title as-child><h2>New channel</h2></Dialog.Title>
       <button
-        class="chat-icon-button hover:bg-muted"
+        :class="iconbtn({ size: 'sm' })"
         type="button"
         aria-label="Close create-channel dialog"
         @click="open = false"
       >
-        <X class="w-4 h-4 text-muted-foreground" />
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <form class="chat-dialog-body flex flex-col gap-3" @submit.prevent="onSubmit">
-      <label class="flex flex-col gap-1">
-        <span class="type-section-label text-muted-foreground">Name</span>
+    <form :class="dialogParts.body" @submit.prevent="onSubmit">
+      <label :class="a.field">
+        Name
         <input
           v-model="name"
+          :class="a.input"
           type="text"
           required
           maxlength="80"
           autocomplete="off"
-          class="chat-field-control type-field"
           placeholder="general"
         />
       </label>
-      <label class="flex flex-col gap-1">
-        <span class="type-section-label text-muted-foreground">Topic (optional)</span>
+      <label :class="a.field">
+        Topic (optional)
         <textarea
           v-model="topic"
+          :class="a.textarea"
           rows="2"
-          class="chat-field-control chat-textarea-control type-field"
           placeholder="What's this channel for?"
         />
       </label>
-      <label v-if="spaces && spaces.length > 0" class="flex flex-col gap-1">
-        <span class="type-section-label text-muted-foreground">Space (optional)</span>
-        <select v-model="spaceNode" class="chat-field-control type-field">
-          <option value="">No space</option>
-          <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
-        </select>
-      </label>
-      <label class="flex flex-col gap-1">
-        <span class="type-section-label text-muted-foreground">Type</span>
-        <select v-model="channelType" class="chat-field-control type-field">
-          <option value="text">Text</option>
-          <option value="announcement">Announcement</option>
-          <option value="forum">Forum</option>
-        </select>
-      </label>
-      <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
-        <label class="flex items-center gap-2 cursor-pointer">
+      <div :class="a.grid2">
+        <label v-if="spaces && spaces.length > 0" :class="a.field">
+          Space (optional)
+          <select v-model="spaceNode" :class="a.input">
+            <option value="">No space</option>
+            <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
+          </select>
+        </label>
+        <label :class="a.field">
+          Type
+          <select v-model="channelType" :class="a.input">
+            <option value="text">Text</option>
+            <option value="announcement">Announcement</option>
+            <option value="forum">Forum</option>
+          </select>
+        </label>
+      </div>
+      <div :class="a.checks">
+        <label>
           <input v-model="isPublic" type="checkbox" @change="handlePublicToggleChange" />
-          <span class="type-control">Listed in discovery</span>
+          Listed in discovery
         </label>
-        <label class="flex items-center gap-2 cursor-pointer">
+        <label>
           <input v-model="membersOnly" type="checkbox" />
-          <span class="type-control">Require explicit membership</span>
+          Require explicit membership
         </label>
-        <p class="type-caption text-muted-foreground">
-          Discovery visibility and room admission are separate XMPP room
-          settings.
-        </p>
+        <p>Discovery visibility and room admission are separate XMPP room settings.</p>
       </div>
     </form>
 
-    <div class="chat-dialog-footer">
-      <button
-        type="button"
-        class="chat-action-button chat-action-button--secondary type-control"
-        :disabled="isSubmitting"
-        @click="open = false"
-      >
+    <div :class="dialogParts.foot">
+      <button type="button" :class="btn()" :disabled="isSubmitting" @click="open = false">
         Cancel
       </button>
       <button
         type="button"
-        class="chat-action-button chat-action-button--primary type-action disabled:opacity-30"
+        :class="btn({ variant: 'primary' })"
         :disabled="!name.trim() || isSubmitting"
         @click="onSubmit"
       >

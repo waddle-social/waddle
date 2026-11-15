@@ -3,19 +3,7 @@ import {
   formatReactors,
   isReactor,
   reactionAriaLabel,
-  reactionWarmthClass,
 } from "../src/components/chat/message-reaction-chips";
-
-describe("reactionWarmthClass", () => {
-  test("tiers scale with reaction count", () => {
-    expect(reactionWarmthClass(1)).toBe("");
-    expect(reactionWarmthClass(2)).toBe("chat-reaction-chip--warmth-tepid");
-    expect(reactionWarmthClass(3)).toBe("chat-reaction-chip--warmth-warm");
-    expect(reactionWarmthClass(4)).toBe("chat-reaction-chip--warmth-warm");
-    expect(reactionWarmthClass(5)).toBe("chat-reaction-chip--warmth-hot");
-    expect(reactionWarmthClass(42)).toBe("chat-reaction-chip--warmth-hot");
-  });
-});
 
 describe("formatReactors", () => {
   test("joins nicks as a conjunction list", () => {

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ExternalLink, Grid3X3, List, RefreshCw, WifiOff, X } from "lucide-vue-next";
+import spot from "@waddle/design/assets/spot-empty.svg?url";
+import { css, cx } from "styled-system/css";
+import { btn, empty, iconbtn } from "styled-system/recipes";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
@@ -106,138 +109,134 @@ watch(routeKey, () => {
 }, { immediate: true });
 
 onMounted(focusPanel);
+// App-Room extension panel: titled rail, floe item cards, the spot empty state.
+const cls = {
+  root: css({ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, bg: "bg.rail", outline: "none" }),
+  head: css({ display: "flex", alignItems: "center", gap: "2", flex: "none", minHeight: "header", px: "4", borderBottom: "1px solid {colors.border.soft}" }),
+  nav: css({ lg: { display: "none" } }),
+  sigil: css({ width: "18px", height: "18px", flex: "none", color: "fg.soft" }),
+  titles: css({ flex: 1, minWidth: 0 }),
+  title: css({ margin: 0, font: "700 16px/1.3 {fonts.display}", color: "fg", truncate: true }),
+  caption: css({ textStyle: "caption", color: "fg.muted", truncate: true }),
+  scroll: css({ flex: 1, minHeight: 0, overflowX: "hidden", overflowY: "auto", p: "3" }),
+  loading: css({ display: "flex", height: "100%", alignItems: "center", justifyContent: "center", textStyle: "caption", color: "fg.muted" }),
+  error: css({ display: "flex", alignItems: "center", gap: "3", p: "4", borderRadius: "panel", bg: "danger.subtle", color: "danger.text", fontSize: "sm", fontWeight: 600, "& svg": { width: "16px", height: "16px", flex: "none" } }),
+  empty: css({ minHeight: "100%", justifyContent: "center" }),
+  emptyTitle: css({ margin: 0, font: "700 24px/1.2 {fonts.display}", color: "fg", textWrap: "balance" }),
+  list: css({ display: "grid", gap: "2" }),
+  gallery: css({ display: "grid", gap: "3", gridTemplateColumns: "1fr", sm: { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }, xl: { gridTemplateColumns: "repeat(3, minmax(0, 1fr))" } }),
+  card: css({ minWidth: 0, display: "flex", flexDirection: "column", gap: "2", p: "4", borderRadius: "panel", bg: "surface", border: "1px solid {colors.border.soft}" }),
+  cardHead: css({ display: "flex", minWidth: 0, alignItems: "flex-start", justifyContent: "space-between", gap: "3" }),
+  cardTitle: css({ margin: 0, fontSize: "sm", fontWeight: 700, color: "fg", truncate: true }),
+  cardBody: css({ margin: 0, textStyle: "caption", color: "fg", whiteSpace: "pre-line", overflowWrap: "anywhere" }),
+  fields: css({ display: "grid", gap: "1", m: 0 }),
+  field: css({ display: "grid", gridTemplateColumns: "minmax(5.5rem, 0.45fr) 1fr", gap: "2", "& dt, & dd": { m: 0, textStyle: "caption", truncate: true, minWidth: 0 }, "& dt": { color: "fg.muted" }, "& dd": { color: "fg" } }),
+  chips: css({ display: "flex", flexWrap: "wrap", gap: "1.5" }),
+  option: css({ textStyle: "caption", px: "2", py: "1", borderRadius: "sm", bg: "surface.2", color: "fg.muted" }),
+};
 </script>
 
 <template>
   <aside
     ref="panelRef"
-    class="extension-route-panel flex min-w-0 flex-1 flex-col bg-background border-l border-border"
+    :class="cls.root"
     tabindex="-1"
     :aria-label="route?.label ? `${route.label} extension route` : 'Extension route'"
   >
-    <header class="chat-pane-header border-b border-border px-[var(--chat-content-inline)] py-0 flex flex-shrink-0 items-center justify-between gap-3 glass-panel">
-      <div class="chat-message-lane flex min-w-0 items-center gap-2">
-        <button
-          class="chat-icon-button lg:hidden"
-          type="button"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
-        >
-          <List class="h-4 w-4" />
-        </button>
-        <component :is="surfaceIcon" class="h-4 w-4 shrink-0 text-primary" />
-        <div class="min-w-0">
-          <div class="type-pane-title truncate">{{ route?.label ?? "Extension" }}</div>
-          <div class="type-caption truncate text-muted-foreground">
-            {{ channel?.name ?? "Channel" }}<span v-if="waddle"> · {{ waddle.name }}</span>
-          </div>
+    <header :class="cls.head">
+      <button
+        :class="cx(iconbtn(), cls.nav)"
+        type="button"
+        aria-label="Open navigation"
+        @click="emit('openNav')"
+      >
+        <List aria-hidden="true" />
+      </button>
+      <component :is="surfaceIcon" :class="cls.sigil" aria-hidden="true" />
+      <div :class="cls.titles">
+        <h2 :class="cls.title">{{ route?.label ?? "Extension" }}</h2>
+        <div :class="cls.caption">
+          {{ channel?.name ?? "Channel" }}<span v-if="waddle"> · {{ waddle.name }}</span>
         </div>
       </div>
-      <div class="flex items-center gap-1.5">
-        <button
-          class="chat-icon-button"
-          type="button"
-          aria-label="Refresh"
-          :disabled="state === 'loading'"
-          @click="refreshItems"
-        >
-          <RefreshCw class="h-4 w-4" :class="state === 'loading' ? 'animate-spin' : ''" />
-        </button>
-        <button
-          class="chat-icon-button"
-          type="button"
-          aria-label="Close extension route"
-          @click="emit('close')"
-        >
-          <X class="h-4 w-4" />
-        </button>
-      </div>
+      <button
+        :class="iconbtn()"
+        type="button"
+        aria-label="Refresh"
+        :disabled="state === 'loading'"
+        @click="refreshItems"
+      >
+        <RefreshCw aria-hidden="true" />
+      </button>
+      <button
+        :class="iconbtn()"
+        type="button"
+        aria-label="Close extension route"
+        @click="emit('close')"
+      >
+        <X aria-hidden="true" />
+      </button>
     </header>
 
-    <div class="chat-pane-scroll flex-1 px-[var(--chat-content-inline)] py-4">
-      <div v-if="state === 'loading'" class="type-caption flex h-full items-center justify-center text-muted-foreground">
+    <div :class="cls.scroll">
+      <div v-if="state === 'loading'" :class="cls.loading" role="status">
         Loading…
       </div>
-      <div v-else-if="state === 'error'" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive-text">
-        <WifiOff class="h-4 w-4 shrink-0" />
-        <span class="type-control">{{ detail }}</span>
+      <div v-else-if="state === 'error'" :class="cls.error">
+        <WifiOff aria-hidden="true" />
+        <span>{{ detail }}</span>
       </div>
-      <div v-else-if="actionError" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive-text">
-        <WifiOff class="h-4 w-4 shrink-0" />
-        <span class="type-control">{{ actionError }}</span>
+      <div v-else-if="actionError" :class="cls.error">
+        <WifiOff aria-hidden="true" />
+        <span>{{ actionError }}</span>
       </div>
-      <!-- Empty state — replaces the prior bare "Nothing saved yet."
-           with the iter-20 halo+glyph pattern so the panel feels
-           authored, not empty. Headline derives from the route's
-           label ("No saved links yet", "No pins yet") so any extension
-           route gets a meaningful empty state without per-route copy. -->
-      <div v-else-if="items.length === 0" class="chat-route-empty">
-        <div class="chat-empty-state__halo">
-          <div class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary"></div>
-          <div class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
-            <component :is="surfaceIcon" class="h-4 w-4 text-primary" aria-hidden="true" />
-          </div>
-        </div>
-        <div class="type-card-title text-foreground">{{ emptyHeadline }}</div>
-        <div class="type-caption text-muted-foreground max-w-[18rem]">
-          Items added through {{ route?.label ?? "this extension" }} will appear here.
-        </div>
+      <!-- Headline derives from the route's label ("No saved links yet"),
+           so any extension route gets a meaningful empty state. -->
+      <div v-else-if="items.length === 0" :class="cx(empty(), cls.empty)" role="status">
+        <img :src="spot" alt="" />
+        <h3 :class="cls.emptyTitle">{{ emptyHeadline }}</h3>
+        <p>Items added through {{ route?.label ?? "this extension" }} will appear here.</p>
       </div>
-      <div
-        v-else
-        :class="route?.surface === 'gallery' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3' : 'grid gap-2'"
-      >
+      <div v-else :class="route?.surface === 'gallery' ? cls.gallery : cls.list">
         <article
           v-for="item in items"
           :key="item.id ?? itemTitle(item)"
-          class="min-w-0 rounded-md border border-border bg-card p-3 shadow-sm"
+          :class="cls.card"
         >
-          <div class="flex min-w-0 items-start justify-between gap-3">
-            <div class="min-w-0">
-              <h2 class="type-control type-strong truncate text-card-foreground">{{ itemTitle(item) }}</h2>
-              <p v-if="item.subtitle" class="type-caption truncate text-muted-foreground">
-                {{ item.subtitle }}
-              </p>
+          <div :class="cls.cardHead">
+            <div :class="cls.titles">
+              <h3 :class="cls.cardTitle">{{ itemTitle(item) }}</h3>
+              <p v-if="item.subtitle" :class="cls.caption">{{ item.subtitle }}</p>
             </div>
             <a
               v-if="safeUrl(item.link?.href)"
-              class="chat-icon-button chat-icon-button--sm shrink-0"
+              :class="iconbtn({ size: 'sm' })"
               :href="safeUrl(item.link?.href) ?? '#'"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Open link"
             >
-              <ExternalLink class="h-3.5 w-3.5" />
+              <ExternalLink aria-hidden="true" />
             </a>
           </div>
-          <p v-if="item.description" class="type-caption mt-2 whitespace-pre-line break-words [overflow-wrap:anywhere] text-card-foreground">
-            {{ item.description }}
-          </p>
-          <dl v-if="item.fields.length > 0" class="mt-3 grid gap-1">
-            <div
-              v-for="field in item.fields"
-              :key="field.name"
-              class="grid grid-cols-[minmax(5.5rem,0.45fr)_1fr] gap-2"
-            >
-              <dt class="type-caption truncate text-muted-foreground">{{ fieldLabel(field) }}</dt>
-              <dd class="type-caption min-w-0 truncate text-card-foreground">{{ field.value }}</dd>
+          <p v-if="item.description" :class="cls.cardBody">{{ item.description }}</p>
+          <dl v-if="item.fields.length > 0" :class="cls.fields">
+            <div v-for="field in item.fields" :key="field.name" :class="cls.field">
+              <dt>{{ fieldLabel(field) }}</dt>
+              <dd>{{ field.value }}</dd>
             </div>
           </dl>
-          <div v-if="item.options.length > 0" class="mt-3 flex flex-wrap gap-1.5">
-            <span
-              v-for="option in item.options"
-              :key="option.id"
-              class="type-caption rounded-md border border-border bg-muted px-2 py-1 text-muted-foreground"
-            >
+          <div v-if="item.options.length > 0" :class="cls.chips">
+            <span v-for="option in item.options" :key="option.id" :class="cls.option">
               {{ option.label }}
             </span>
           </div>
-          <div v-if="item.actions.length > 0" class="mt-3 flex flex-wrap gap-1.5">
+          <div v-if="item.actions.length > 0" :class="cls.chips">
             <button
               v-for="action in item.actions"
               :key="action.launchId"
               type="button"
-              class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground transition-colors hover:bg-muted"
+              :class="btn({ size: 'sm' })"
               @click="emit('invokeAction', { label: action.label, route: action.launchId, launch: action.launch })"
             >
               {{ action.label }}

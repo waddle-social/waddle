@@ -1,6 +1,7 @@
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { AlertCircle, CheckCircle2, RefreshCw, WifiOff } from "lucide-vue-next";
-import { getConnectionNoticeCopy } from "@/lib/connection-notice";
+import { css, cx } from "styled-system/css";
+import { getConnectionNoticeCopy, type ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { XmppStatusSnapshot } from "@/lib/xmpp-client";
 
 /**
@@ -13,6 +14,53 @@ import type { XmppStatusSnapshot } from "@/lib/xmpp-client";
 // finds a dead socket) shows no banner at all: the banner sits in the
 // layout above the timeline, so a flash of it shifts the whole pane.
 const RECONNECTING_NOTICE_DELAY_MS = 3000;
+
+/**
+ * The notice card (Connection-Notices board), shared by ContentArea's
+ * banner and SupersededRecoveryBanner. `connectionToneClasses[tone].banner` adds the
+ * state's border colour.
+ */
+export const connectionNoticeClasses = {
+  card: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "14px",
+    mx: "gutter",
+    my: "3",
+    py: "3",
+    px: "4",
+    borderRadius: "control",
+    bg: "surface",
+    color: "fg",
+    border: "1px solid {colors.border}",
+    boxShadow: "overlay",
+    animation: "wd-rise {durations.base} {easings.out} backwards",
+    _narrow: { flexWrap: "wrap" },
+  }),
+  text: css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "0.5" }),
+  title: css({ margin: 0, font: "700 14px/1.3 {fonts.body}" }),
+  body: css({ margin: 0, font: "400 13px/1.45 {fonts.body}", color: "fg.muted" }),
+};
+
+// Literal objects per tone: Panda extracts `css()` statically.
+export const connectionToneClasses: Record<ConnectionNoticeCopy["tone"], { banner: string; chip: string }> = {
+  offline: {
+    banner: css({ borderColor: "border.strong" }),
+    chip: css({ display: "inline-flex", alignItems: "center", gap: "1.5", height: "28px", px: "2.5", borderRadius: "pill", border: "1px solid", bg: "surface", font: "600 13px/1 {fonts.body}", "& svg": { width: "14px", height: "14px" }, borderColor: "border.strong", color: "fg.muted" }),
+  },
+  reconnecting: {
+    banner: css({ borderColor: "action.text" }),
+    chip: css({ display: "inline-flex", alignItems: "center", gap: "1.5", height: "28px", px: "2.5", borderRadius: "pill", border: "1px solid", bg: "surface", font: "600 13px/1 {fonts.body}", "& svg": { width: "14px", height: "14px" }, borderColor: "action.text", color: "action.text" }),
+  },
+  error: {
+    banner: css({ borderColor: "danger.text" }),
+    chip: css({ display: "inline-flex", alignItems: "center", gap: "1.5", height: "28px", px: "2.5", borderRadius: "pill", border: "1px solid", bg: "surface", font: "600 13px/1 {fonts.body}", "& svg": { width: "14px", height: "14px" }, borderColor: "danger.text", color: "danger.text" }),
+  },
+  reconnected: {
+    banner: css({ borderColor: "success.text" }),
+    chip: css({ display: "inline-flex", alignItems: "center", gap: "1.5", height: "28px", px: "2.5", borderRadius: "pill", border: "1px solid", bg: "surface", font: "600 13px/1 {fonts.body}", "& svg": { width: "14px", height: "14px" }, borderColor: "success.text", color: "success.text" }),
+  },
+};
 
 export function useConnectionNotice(input: {
   status: () => XmppStatusSnapshot;
@@ -99,49 +147,14 @@ export function useConnectionNotice(input: {
     }
   });
 
+  // Polar Huddle connection notice (Connection-Notices board): one
+  // surface card whose border carries the state, plus a header chip in the
+  // same accent. `connection-chip--<tone>` is a stable hook for tests.
   const connectionStatusClasses = computed(() => {
-    switch (connectionNotice.value?.tone) {
-      case "offline":
-        // Passive state — user already knows they're disconnected.
-        // Keep the chip quiet: muted bg tint, no glow halo.
-        return {
-          banner: "bg-muted/35 text-foreground",
-          iconWrap: "border-border/70 bg-background/60 text-muted-foreground/80",
-          chip: "border-border/70 bg-muted/25 text-muted-foreground/80",
-          body: "text-muted-foreground",
-        };
-      case "reconnecting":
-        // Active reconnection — warning-tinted bg + warning-glow halo
-        // reach the eye without becoming an alarm. The icon's spinner
-        // carries the "moving" signal.
-        return {
-          banner: "bg-warning/10 text-foreground",
-          iconWrap: "border-warning/15 bg-background/60 text-warning/80",
-          chip: "chat-connection-chip-glow--warning border-warning/35 bg-warning/10 text-warning/90",
-          body: "text-foreground/75",
-        };
-      case "error":
-        // Wants user attention (session expired, etc.). Destructive-
-        // tinted bg + destructive-glow halo distinguish it from the
-        // reconnecting tone without escalating to a banner.
-        return {
-          banner: "bg-destructive/10 text-foreground",
-          iconWrap: "border-destructive/15 bg-background/60 text-destructive-text/80",
-          chip: "chat-connection-chip-glow--destructive border-destructive/35 bg-destructive/10 text-destructive-text/90",
-          body: "text-foreground/80",
-        };
-      case "reconnected":
-        // Brief celebration. Primary-tinted bg + --glow-strong halo
-        // so the chip reads "we're back" before the banner ages out.
-        return {
-          banner: "bg-primary/8 text-foreground",
-          iconWrap: "border-primary/12 bg-background/60 text-primary/80",
-          chip: "chat-connection-chip-glow--primary border-primary/35 bg-primary/10 text-primary/90",
-          body: "text-foreground/75",
-        };
-      default:
-        return null;
-    }
+    const tone = connectionNotice.value?.tone;
+    if (!tone) return null;
+    const accent = connectionNotice.value?.actionKind === "recover-superseded" ? connectionToneClasses.reconnecting : connectionToneClasses[tone];
+    return { ...accent, chip: cx(accent.chip, `connection-chip--${tone}`) };
   });
 
   return {

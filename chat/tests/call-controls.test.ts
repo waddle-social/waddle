@@ -817,7 +817,7 @@ describe("device-less call controls", () => {
       { dmPeerJid: "bob@waddle.test" },
       import.meta.url,
     );
-    const shellStart = readyShellSource.indexOf('<div v-else class="chat-app-shell">');
+    const shellStart = readyShellSource.indexOf('<div class="chat-app-shell">');
     const promptMount = readyShellSource.indexOf("<CallAudioPlaybackPrompt />");
     const desktopShell = readyShellSource.indexOf('<CommunityShell');
 

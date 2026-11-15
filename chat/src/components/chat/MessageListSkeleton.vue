@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import Skeleton from "@/components/ui/Skeleton.vue";
+import { css } from "styled-system/css";
+import { msg } from "styled-system/recipes";
 
 type MessageSkeletonRow = {
   id: number;
@@ -16,26 +18,27 @@ const skeletonMessageRows: ReadonlyArray<MessageSkeletonRow> = Object.freeze([
   { id: 5, grouped: true,  authorWidth: "",       lines: ["66%"] },
   { id: 6, grouped: false, authorWidth: "5.75rem", lines: ["78%", "52%"] },
 ]);
+const listClass = css({ display: "flex", flexDirection: "column", gap: "0.5", py: "4" });
+const linesClass = css({ gridColumn: 2, display: "flex", flexDirection: "column", gap: "1.5", pt: "1" });
+const metaClass = css({ display: "flex", alignItems: "center", gap: "2" });
 </script>
 
 <template>
-  <div class="chat-message-lane flex flex-col gap-1 py-6" aria-busy="true" aria-label="Loading messages">
+  <div :class="listClass" aria-busy="true" aria-label="Loading messages">
     <div
       v-for="row in skeletonMessageRows"
       :key="`msg-skel-${row.id}`"
-      class="chat-message-grid"
-      :class="row.grouped ? 'chat-message-grouped' : ''"
+      :class="msg({ cont: row.grouped })"
     >
-      <div class="chat-message-avatar-cell">
-        <Skeleton
-          v-if="!row.grouped"
-          width="var(--chat-message-avatar-size)"
-          height="var(--chat-message-avatar-size)"
-          radius="var(--radius-md)"
-        />
-      </div>
-      <div class="chat-message-body-stack flex flex-col gap-1.5">
-        <div v-if="!row.grouped" class="flex items-center gap-2">
+      <Skeleton
+        v-if="!row.grouped"
+        width="var(--sizes-msg-avatar)"
+        height="var(--sizes-msg-avatar)"
+        radius="var(--radii-pill)"
+      />
+      <span v-else />
+      <div :class="linesClass">
+        <div v-if="!row.grouped" :class="metaClass">
           <Skeleton :width="row.authorWidth" height="0.65rem" />
           <Skeleton width="2.25rem" height="0.55rem" />
         </div>

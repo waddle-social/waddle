@@ -1,18 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import {
-  Briefcase,
-  CalendarCheck,
-  Camera,
-  Film,
-  IdCard,
-  Menu,
-  Music,
-  RefreshCw,
-  Smile,
-  SmilePlus,
-  User,
-} from "lucide-vue-next";
+import { Film, Menu, RefreshCw, SmilePlus } from "lucide-vue-next";
+import spot from "@waddle/design/assets/spot-empty.svg?url";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
@@ -24,61 +13,113 @@ import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { FeedEntry, FeedPostInput, FeedSourceKind, Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import { safeExternalUrl } from "@/lib/chat-ui";
-import { button, kicker } from "styled-system/recipes";
-
-const SOURCE_ICONS = {
-  mood: Smile,
-  activity: Briefcase,
-  tune: Music,
-  avatar: User,
-  vcard: IdCard,
-  rsvp: CalendarCheck,
-} as const;
+import { css, cx } from "styled-system/css";
+import { btn, chip, empty, floe, iconbtn, seg } from "styled-system/recipes";
 
 const SOURCE_LABELS: Record<FeedSourceKind, string> = {
-  mood: "Mood update",
+  mood: "Mood",
   activity: "Activity",
-  tune: "Now listening",
+  tune: "Listening",
   avatar: "New avatar",
   vcard: "Profile update",
   rsvp: "Event RSVP",
 };
 
-/**
- * Per-kind accent, on tokens only. Teal acts, ember is live (an RSVP is
- * someone committing to show up), gold is kudos-adjacent (a mood), moss is
- * settled (a tune playing), and profile changes stay neutral.
- */
-const SOURCE_ACCENT: Record<FeedSourceKind, { chip: string; rail: string }> = {
-  mood: { chip: "text-gold-text", rail: "bg-gold" },
-  activity: { chip: "text-primary", rail: "bg-primary" },
-  tune: { chip: "text-moss", rail: "bg-moss" },
-  avatar: { chip: "text-primary", rail: "bg-primary" },
-  vcard: { chip: "text-muted-foreground", rail: "bg-border" },
-  rsvp: { chip: "text-live-text", rail: "bg-live" },
+const ui = {
+  scroll: css({ flex: 1, minHeight: 0, overflowX: "hidden", overflowY: "auto", scrollbarGutter: "stable", bg: "bg", color: "fg" }),
+  main: css({
+    boxSizing: "border-box",
+    display: "flex",
+    flexDirection: "column",
+    gap: "6",
+    width: "100%",
+    maxWidth: "1000px",
+    padding: { base: "14px 12px 32px", md: "32px 40px" },
+  }),
+  bar: css({
+    display: { base: "flex", md: "none" },
+    position: "sticky",
+    top: 0,
+    zIndex: "sticky",
+    alignItems: "center",
+    gap: "1.5",
+    padding: "2",
+    borderBottom: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    color: "fg",
+    "& b": { flex: 1, minWidth: 0, font: "700 18px/1.2 {fonts.display}" },
+    "& .wd-iconbtn": { width: "44px", height: "44px" },
+  }),
+  head: css({ display: { base: "none", md: "flex" }, alignItems: "flex-end", gap: "4", flexWrap: "wrap" }),
+  headText: css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1.5" }),
+  title: css({ margin: 0, font: "700 30px/1.2 {fonts.display}", letterSpacing: "-0.01em" }),
+  sub: css({ margin: 0, fontSize: "15px", color: "fg.muted" }),
+  filters: cx(seg(), css({ alignSelf: "flex-start", maxWidth: "100%", overflowX: "auto", flex: "none" })),
+  count: css({ fontFamily: "mono", fontSize: "11px", color: "fg.muted", fontVariantNumeric: "tabular-nums" }),
+  alert: css({ padding: "10px 12px", borderRadius: "10px", bg: "danger.subtle", border: "1px solid {colors.danger}", color: "danger.text", fontSize: "13px" }),
+  list: css({ display: "flex", flexDirection: "column", gap: "3" }),
+  card: cx(floe(), css({ "--pad": "16px", gap: "2.5" })),
+  who: css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0 }),
+  whoText: css({ display: "flex", flexDirection: "column", lineHeight: 1.3, minWidth: 0, "& b": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }),
+  caption: css({ textStyle: "caption", color: "fg.muted" }),
+  entryTitle: css({ margin: 0, font: "700 17px/1.3 {fonts.display}" }),
+  body: css({ margin: 0, fontSize: "15px", lineHeight: 1.5, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }),
+  link: css({ alignSelf: "flex-start", fontSize: "13px", color: "action.text", overflowWrap: "anywhere" }),
+  story: css({
+    position: "relative",
+    boxSizing: "border-box",
+    display: "grid",
+    gridTemplateColumns: { base: "minmax(0, 1fr)", md: "minmax(0, 1fr) 128px" },
+    gridTemplateAreas: { base: '"head" "media" "body" "foot"', md: '"head media" "body media" "foot media"' },
+    gridTemplateRows: { md: "auto auto 1fr" },
+    columnGap: "4",
+    rowGap: "2.5",
+    padding: { base: "14px", md: "16px" },
+    borderRadius: "panel",
+    bg: "surface",
+    border: "1px solid {colors.border.soft}",
+    overflow: "hidden",
+  }),
+  open: css({
+    position: "absolute",
+    inset: 0,
+    border: 0,
+    borderRadius: "inherit",
+    bg: "transparent",
+    cursor: "pointer",
+    _hover: { bg: "state.hover" },
+    _focusVisible: { outlineOffset: "-3px" },
+  }),
+  storyHead: css({ gridArea: "head", display: "flex", alignItems: "center", gap: "2", flexWrap: "wrap", minWidth: 0, "& b": { fontSize: "14px" } }),
+  newChip: css({ display: "inline-flex", alignItems: "center", height: "22px", px: "2", borderRadius: "pill", bg: "gold", color: "gold.fg", font: "700 12px/1 {fonts.body}" }),
+  storyBody: css({ gridArea: "body", margin: 0, fontSize: "15px", lineHeight: 1.5, overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }),
+  thumb: css({
+    gridArea: "media",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: { base: "100%", md: "128px" },
+    height: { md: "128px" },
+    aspectRatio: { base: "16 / 9", md: "auto" },
+    borderRadius: "control",
+    overflow: "hidden",
+    bg: "sea.shallow",
+    "& img": { width: "88%", height: "88%", objectFit: "contain" },
+  }),
+  video: css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "1.5", color: "fg.muted", fontSize: "13px", fontWeight: 600, "& svg": { width: "28px", height: "28px" } }),
+  videoThumb: css({ bg: "surface.2" }),
+  storyFoot: css({ gridArea: "foot", alignSelf: "end", display: "flex", alignItems: "center", gap: "1", flexWrap: "wrap", "& > button": { position: "relative" } }),
+  reaction: chip(),
+  skel: cx(floe(), css({ "--pad": "16px", gap: "3" })),
+  skelRow: css({ display: "flex", alignItems: "center", gap: "3" }),
+  skelText: css({ flex: 1, display: "flex", flexDirection: "column", gap: "1.5" }),
+  empty: cx(empty(), css({ pt: "10", "& h2": { margin: "{spacing.2} 0 0", font: "700 24px/1.2 {fonts.display}" } })),
 };
-
-const kickerClass = kicker();
-const refreshButtonClass = button({ variant: "quiet", size: "sm" });
-const CHIP_CLASS = "inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[11px] uppercase leading-none tracking-[0.08em]";
-const PILL_BASE = "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] font-semibold transition-colors";
-const PILL_IDLE = "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground";
-const PILL_ON = "border-primary bg-primary text-primary-foreground";
-
-function iconFor(source: FeedSourceKind | undefined) {
-  return source ? SOURCE_ICONS[source] : null;
-}
+const refreshClass = btn({ size: "sm" });
+const iconClass = iconbtn();
 
 function labelFor(source: FeedSourceKind | undefined): string {
-  return source ? SOURCE_LABELS[source] : "";
-}
-
-function chipClassFor(source: FeedSourceKind | undefined): string {
-  return source ? SOURCE_ACCENT[source].chip : "";
-}
-
-function railClassFor(source: FeedSourceKind | undefined): string {
-  return source ? SOURCE_ACCENT[source].rail : "bg-border";
+  return source ? SOURCE_LABELS[source] : "Post";
 }
 
 interface FeedPaneProps {
@@ -206,9 +247,9 @@ const feedItems = computed<FeedItem[]>(() => {
 
 const filters = computed(() => [
   { id: "all" as const, label: "All", count: props.entries.length + props.stories.length },
-  { id: "pep" as const, label: "PEP updates", count: props.entries.filter((entry) => entry.source).length },
-  { id: "stories" as const, label: "Stories", count: props.stories.length },
   { id: "posts" as const, label: "Posts", count: props.entries.filter((entry) => !entry.source).length },
+  { id: "stories" as const, label: "Stories", count: props.stories.length },
+  { id: "pep" as const, label: "Status updates", count: props.entries.filter((entry) => entry.source).length },
 ]);
 
 const activeStoryIndex = computed<number | null>(() => {
@@ -246,7 +287,7 @@ const emptyCopy = computed(() => {
   if (activeFilter.value === "stories") return props.canPost ? "Add the first story here." : "Check back later.";
   if (activeFilter.value === "pep") return "Profile, mood, activity, tune, and RSVP updates land here.";
   if (activeFilter.value === "posts") return props.canPost ? "Share the first community post." : "Check back later.";
-  return props.canPost ? "Share the first update. PEP updates, stories, and posts land here." : "Check back later.";
+  return props.canPost ? "Share the first update. Status updates, stories, and posts land here." : "Check back later.";
 });
 
 function isVideoStory(story: Story): boolean {
@@ -318,46 +359,40 @@ function selectStoryReaction(emoji: string) {
 </script>
 
 <template>
-  <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
-    <div class="mx-auto grid w-full max-w-2xl gap-5">
-      <header class="flex items-center gap-3">
-        <button
-          type="button"
-          class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
-        >
-          <Menu class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <div class="min-w-0 flex-1">
-          <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">Feed</h1>
-          <p class="type-caption mt-1.5 text-muted-foreground">What people across the community are sharing</p>
+  <div :class="ui.scroll">
+    <header :class="ui.bar" data-theme="night">
+      <button type="button" :class="iconClass" aria-label="Open navigation" @click="emit('openNav')">
+        <Menu aria-hidden="true" />
+      </button>
+      <b>Feed</b>
+      <button
+        type="button"
+        :class="iconClass"
+        :disabled="loadingAny"
+        :aria-label="loadingAny ? 'Refreshing' : 'Refresh feed'"
+        @click="emit('refresh')"
+      >
+        <RefreshCw aria-hidden="true" />
+      </button>
+    </header>
+
+    <div :class="ui.main">
+      <header :class="ui.head">
+        <div :class="ui.headText">
+          <h1 :class="ui.title">Feed</h1>
+          <p :class="ui.sub">What people across the community are sharing</p>
         </div>
         <button
           type="button"
-          :class="refreshButtonClass"
+          :class="refreshClass"
           :disabled="loadingAny"
           :aria-label="loadingAny ? 'Refreshing' : 'Refresh feed'"
           @click="emit('refresh')"
         >
-          <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingAny }" aria-hidden="true" />
-          <span class="hidden sm:inline">Refresh</span>
+          <RefreshCw aria-hidden="true" />
+          Refresh
         </button>
       </header>
-
-      <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Feed filters">
-        <button
-          v-for="filter in filters"
-          :key="filter.id"
-          type="button"
-          :class="[PILL_BASE, activeFilter === filter.id ? PILL_ON : PILL_IDLE]"
-          :aria-pressed="activeFilter === filter.id ? 'true' : 'false'"
-          @click="activeFilter = filter.id"
-        >
-          {{ filter.label }}
-          <span class="font-mono text-[11px] opacity-75">{{ filter.count }}</span>
-        </button>
-      </div>
 
       <FeedUpdateComposer
         v-if="canPost"
@@ -374,188 +409,125 @@ function selectStoryReaction(emoji: string) {
         :publish-profile="publishProfile"
       />
 
-      <div
-        v-if="error"
-        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
-      >
+      <div :class="ui.filters" role="group" aria-label="Feed filters">
+        <button
+          v-for="filter in filters"
+          :key="filter.id"
+          type="button"
+          :aria-pressed="activeFilter === filter.id ? 'true' : 'false'"
+          @click="activeFilter = filter.id"
+        >
+          {{ filter.label }}
+          <span :class="ui.count">{{ filter.count }}</span>
+        </button>
+      </div>
+
+      <div v-if="error" :class="ui.alert">
         Couldn't load the feed: {{ error }}
       </div>
-      <div
-        v-if="storiesError"
-        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
-      >
+      <div v-if="storiesError" :class="ui.alert">
         Couldn't load stories: {{ storiesError }}
       </div>
-      <div class="grid gap-3">
-        <article
-          v-for="item in feedItems"
-          :key="item.id"
-          class="group relative overflow-hidden rounded-2xl border border-border bg-card transition-colors hover:bg-muted"
-        >
-          <span
-            class="absolute inset-y-0 left-0 w-1"
-            :class="item.kind === 'story' ? (isStoryRead(item.story.id) ? 'bg-border' : 'bg-live') : railClassFor(item.entry.source)"
-            aria-hidden="true"
-          ></span>
-          <div v-if="item.kind === 'entry'" class="grid gap-2 pl-4 pr-4 py-3.5">
-            <header class="flex min-w-0 items-start gap-3">
+      <div :class="ui.list">
+        <template v-for="item in feedItems" :key="item.id">
+          <article v-if="item.kind === 'entry'" :class="ui.card">
+            <header :class="ui.who">
               <UserAvatar :name="authorLabel(item.entry.author)" :jid="item.entry.author ?? null" size="md" />
-              <div class="min-w-0 flex-1">
-                <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <p class="type-control truncate font-semibold text-foreground">
-                    {{ authorLabel(item.entry.author) }}
-                  </p>
-                  <span
-                    v-if="item.entry.source"
-                    :class="[CHIP_CLASS, chipClassFor(item.entry.source)]"
-                    :aria-label="labelFor(item.entry.source)"
-                  >
-                    <component
-                      :is="iconFor(item.entry.source)"
-                      class="h-3 w-3"
-                      aria-hidden="true"
-                    />
-                    {{ labelFor(item.entry.source) }}
-                  </span>
-                </div>
-                <p
-                  v-if="item.entry.publishedMs"
-                  class="font-mono text-xs text-muted-foreground"
-                >
-                  {{ timeAgo(item.entry.publishedMs) }}
-                </p>
+              <div :class="ui.whoText">
+                <b>{{ authorLabel(item.entry.author) }}</b>
+                <span :class="ui.caption">
+                  {{ labelFor(item.entry.source) }}<template v-if="item.entry.publishedMs"> · {{ timeAgo(item.entry.publishedMs) }}</template>
+                </span>
               </div>
             </header>
-            <h2
-              v-if="item.entry.title"
-              class="font-display text-[15px] font-semibold tracking-[-0.01em] text-foreground"
-            >
+            <h2 v-if="item.entry.title" :class="ui.entryTitle">
               {{ item.entry.title }}
             </h2>
-            <p class="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
-              {{ item.entry.body }}
-            </p>
+            <p :class="ui.body">{{ item.entry.body }}</p>
             <a
               v-if="safeExternalUrl(item.entry.link)"
               :href="safeExternalUrl(item.entry.link)"
               target="_blank"
               rel="noopener noreferrer"
-              class="type-caption inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
+              :class="ui.link"
             >
               {{ item.entry.link }}
             </a>
-          </div>
-          <template v-else>
-          <button
-            type="button"
-            class="grid w-full gap-3 p-4 text-left sm:grid-cols-[minmax(0,1fr)_8rem] sm:items-start"
-            @click="selectStory(item.storyIndex)"
-          >
-            <span class="grid min-w-0 gap-3">
-              <span class="flex min-w-0 items-start gap-3">
-                <UserAvatar :name="authorLabel(item.story.author)" :jid="item.story.author ?? null" size="md" />
-                <span class="min-w-0 flex-1">
-                  <span class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span class="type-control truncate font-semibold text-foreground">
-                      {{ authorLabel(item.story.author) }}
-                    </span>
-                    <span :class="[CHIP_CLASS, 'text-primary']">
-                      <Camera class="h-3 w-3" aria-hidden="true" />
-                      Story
-                    </span>
-                    <span
-                      v-if="!isStoryRead(item.story.id)"
-                      :class="[CHIP_CLASS, 'rounded-full border-live-text text-live-text']"
-                    >
-                      New
-                    </span>
-                  </span>
-                  <span
-                    v-if="listedAgo(item.story)"
-                    class="block font-mono text-xs text-muted-foreground"
-                  >
-                    {{ listedAgo(item.story) }}
-                  </span>
-                </span>
-              </span>
-              <span v-if="item.story.body" class="line-clamp-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
-                {{ item.story.body }}
-              </span>
-            </span>
+          </article>
+          <article v-else :class="ui.story" :aria-label="`Story from ${authorLabel(item.story.author)}`">
+            <button
+              type="button"
+              :class="ui.open"
+              :aria-label="`Open story from ${authorLabel(item.story.author)}`"
+              @click="selectStory(item.storyIndex)"
+            />
+            <div :class="ui.storyHead">
+              <UserAvatar :name="authorLabel(item.story.author)" :jid="item.story.author ?? null" size="sm" />
+              <b>{{ authorLabel(item.story.author) }}</b>
+              <span v-if="!isStoryRead(item.story.id)" :class="ui.newChip">New</span>
+              <span v-if="listedAgo(item.story)" :class="ui.caption">{{ listedAgo(item.story) }}</span>
+            </div>
+            <p v-if="item.story.body" :class="ui.storyBody">{{ item.story.body }}</p>
             <span
               v-if="item.story.mediaUrl"
-              class="flex aspect-video w-full items-center justify-center overflow-hidden rounded-[10px] bg-muted text-muted-foreground sm:aspect-square"
+              :class="[ui.thumb, isVideoStory(item.story) && ui.videoThumb]"
             >
-              <span v-if="isVideoStory(item.story)" class="inline-flex items-center gap-1 text-xs">
-                <Film class="h-4 w-4" aria-hidden="true" />
+              <span v-if="isVideoStory(item.story)" :class="ui.video">
+                <Film aria-hidden="true" />
                 Video
               </span>
               <img
                 v-else
                 :src="item.story.mediaUrl"
                 :alt="`Story media from ${authorLabel(item.story.author)}`"
-                class="h-full w-full object-cover"
                 referrerpolicy="no-referrer"
               />
             </span>
-          </button>
-          <footer class="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
-            <button
-              v-for="chip in reactionChipsFor(item.story.id)"
-              :key="chip.emoji"
-              type="button"
-              class="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-sm transition-colors"
-              :class="chip.mine ? 'border-primary bg-primary/10 text-primary' : 'border-border text-foreground hover:bg-muted'"
-              :aria-label="`React with ${chip.emoji}, ${chip.count} so far`"
-              :aria-pressed="chip.mine"
-              @click="reactToStory(item.story.id, chip.emoji)"
-            >
-              <span aria-hidden="true">{{ chip.emoji }}</span>
-              <span class="type-numeric font-mono text-xs text-muted-foreground">{{ chip.count }}</span>
-            </button>
-            <button
-              type="button"
-              class="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-              :aria-expanded="reactionPickerStoryId === item.story.id"
-              aria-haspopup="dialog"
-              aria-label="React to story"
-              @click="openStoryReactionPicker(item.story.id, $event)"
-            >
-              <SmilePlus class="h-4 w-4" aria-hidden="true" />
-            </button>
-          </footer>
-          </template>
-        </article>
+            <footer :class="ui.storyFoot">
+              <button
+                v-for="chip in reactionChipsFor(item.story.id)"
+                :key="chip.emoji"
+                type="button"
+                :class="ui.reaction"
+                :aria-label="`React with ${chip.emoji}, ${chip.count} so far`"
+                :aria-pressed="chip.mine"
+                @click="reactToStory(item.story.id, chip.emoji)"
+              >
+                <span aria-hidden="true">{{ chip.emoji }}</span>
+                <span class="wd-chip__n">{{ chip.count }}</span>
+              </button>
+              <button
+                type="button"
+                :class="iconClass"
+                :aria-expanded="reactionPickerStoryId === item.story.id"
+                aria-haspopup="dialog"
+                aria-label="React to story"
+                @click="openStoryReactionPicker(item.story.id, $event)"
+              >
+                <SmilePlus aria-hidden="true" />
+              </button>
+            </footer>
+          </article>
+        </template>
 
-        <template v-if="loadingAny && feedItems.length === 0">
-          <div
-            v-for="i in 3"
-            :key="`feed-skel-${i}`"
-            class="grid gap-3 rounded-2xl border border-border bg-card px-4 py-3.5"
-            aria-hidden="true"
-          >
-            <div class="flex items-center gap-3">
-              <Skeleton width="2.25rem" height="2.25rem" radius="9999px" />
-              <div class="flex flex-1 flex-col gap-1.5">
-                <Skeleton width="35%" height="0.75rem" />
-                <Skeleton width="20%" height="0.6rem" />
+        <div v-if="loadingAny && feedItems.length === 0" :class="ui.list" aria-busy="true" aria-label="Loading feed">
+          <div v-for="i in 3" :key="`feed-skel-${i}`" :class="ui.skel" aria-hidden="true">
+            <div :class="ui.skelRow">
+              <Skeleton width="28px" height="28px" radius="9999px" />
+              <div :class="ui.skelText">
+                <Skeleton width="35%" height="0.875rem" />
               </div>
             </div>
-            <Skeleton width="100%" height="0.8rem" />
-            <Skeleton width="80%" height="0.8rem" />
+            <Skeleton width="60%" height="0.75rem" />
+            <Skeleton width="45%" height="0.75rem" />
           </div>
-        </template>
-        <div
-          v-else-if="feedItems.length === 0"
-          class="flex flex-col items-center gap-1 rounded-2xl border border-dashed border-border px-6 py-10 text-center"
-        >
-          <p class="font-display text-lg font-semibold text-foreground">It is quiet in here.</p>
-          <p class="type-caption text-muted-foreground">
-            {{ emptyCopy }}
-          </p>
+        </div>
+        <div v-else-if="feedItems.length === 0" role="status" :class="ui.empty">
+          <img :src="spot" alt="" />
+          <h2>It is quiet in here.</h2>
+          <p>{{ emptyCopy }}</p>
         </div>
       </div>
-
     </div>
   </div>
 

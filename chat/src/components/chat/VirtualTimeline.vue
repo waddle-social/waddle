@@ -3,6 +3,8 @@ import { resolveRoomMessageTarget } from "@/lib/messaging/room-message-target";
 import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, watchEffect } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
+import { css, cx } from "styled-system/css";
+import { btn } from "styled-system/recipes";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import {
   isTopPinnedScrollDirection,
@@ -26,7 +28,7 @@ const props = withDefaults(defineProps<{
   ariaLabel: string;
   contentClass?: string;
 }>(), {
-  contentClass: "chat-message-list",
+  contentClass: "",
 });
 
 const emit = defineEmits<{
@@ -176,22 +178,38 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
 }
 
 defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
+
+// Chat panes never scroll sideways: long text wraps, <pre> scrolls itself.
+const scrollClass = css({
+  display: "flex",
+  flexDirection: "column",
+  flex: "1",
+  minHeight: 0,
+  overflowX: "hidden",
+  overflowY: "auto",
+  scrollbarGutter: "stable",
+  px: "2",
+  py: "4",
+});
+const listClass = css({ position: "relative", flex: "none" });
+const rowClass = css({ position: "absolute", left: 0, top: 0, width: "100%" });
+const sentinelClass = css({ display: "flex", alignItems: "center", justifyContent: "center", py: "3", textStyle: "caption", color: "fg.muted" });
 </script>
 
 <template>
   <div
     ref="scrollElement"
-    class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
+    :class="scrollClass"
     :aria-label="ariaLabel"
     @scroll="(event) => { emit('scroll', event); maybeLoadOlder(); }"
   >
-    <div :class="contentClass" :style="{ height: `${totalSize}px`, position: 'relative' }">
+    <div :class="cx(listClass, contentClass)" :style="{ height: `${totalSize}px` }">
       <div
         v-for="virtualRow in virtualItems"
         :key="virtualRow.key"
         :data-index="virtualRow.index"
         :ref="virtualizer.measureElement"
-        class="absolute left-0 top-0 w-full"
+        :class="rowClass"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
       >
         <slot
@@ -201,13 +219,13 @@ defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
         />
         <div
           v-else
-          class="type-caption flex items-center justify-center py-3 text-muted-foreground"
+          :class="sentinelClass"
           data-older-history-sentinel
         >
           <button
             v-if="hasOlder && !loadingOlder"
             type="button"
-            class="rounded-full border border-border bg-background px-3 py-1.5 transition-colors hover:bg-muted"
+            :class="btn({ size: 'sm' })"
             @click="emit('loadOlder')"
           >
             Load older messages

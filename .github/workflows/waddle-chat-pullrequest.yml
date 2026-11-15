@@ -39,10 +39,6 @@ on:
     - chat/scripts/resolve-commit-sha.mjs
     - chat/scripts/resolve-commit-sha.mjs/**
     - chat/src/**
-    - chat/src/styles/global/tokens.css
-    - chat/src/styles/global/tokens.css/**
-    - chat/src/styles/huddle-tokens.ts
-    - chat/src/styles/huddle-tokens.ts/**
     - chat/tests/**
     - chat/tests/native-telemetry-off.test.ts
     - chat/tests/native-telemetry-off.test.ts/**
@@ -51,6 +47,7 @@ on:
     - chat/wrangler.jsonc
     - chat/wrangler.jsonc/**
     - cue.mod/**
+    - design/**
     - env.cue
     - env.cue/**
     - flake.lock

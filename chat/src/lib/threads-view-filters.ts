@@ -16,7 +16,9 @@ const VALID_SORT = new Set<ThreadsSort>(["recent", "unread", "replies"]);
 
 const DEFAULT_THREADS_FILTERS: ThreadsFilterState = {
   status: "unread",
-  active: "7d",
+  // All time: the Disc-List board has no time-window control, so a narrower
+  // default would hide older threads with no way to widen it.
+  active: "all",
   channel: "all",
   query: "",
   sort: "recent",

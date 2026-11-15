@@ -391,12 +391,12 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
     expect(botHtml).toContain("helper");
     expect(botHtml).not.toContain("<button");
     expect(botHtml).not.toContain("Message");
-    expect(botHtml).not.toContain("data-show");
+    expect(botHtml).not.toContain("data-presence");
 
     // The same markup for a person is a Message button with a dot.
     const personHtml = await html(groups.room, false);
     expect(personHtml).toContain('aria-label="Message bob, available"');
-    expect(personHtml).toContain('data-show="available"');
+    expect(personHtml).toContain('data-presence="available"');
   });
 
   test("an avatar never shows a status for a known bot, even when handed one", async () => {
@@ -408,8 +408,8 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
         import.meta.url,
       );
 
-    expect(await avatar(`${BOT}/bot`)).not.toContain("data-show");
-    expect(await avatar("bob@example.com")).toContain('data-show="available"');
+    expect(await avatar(`${BOT}/bot`)).not.toContain("data-presence");
+    expect(await avatar("bob@example.com")).toContain('data-presence="available"');
   });
 });
 

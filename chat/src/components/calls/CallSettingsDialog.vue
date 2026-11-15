@@ -3,6 +3,9 @@ import { computed, onScopeDispose, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Activity, Check, ImagePlus, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { css, cx } from "styled-system/css";
+import { btn, iconbtn, kicker } from "styled-system/recipes";
+import { dialogParts } from "@/ui/part-classes";
 import {
   $devicePrefs,
   enumerateCallDevices,
@@ -481,141 +484,248 @@ watch(open, async (isOpen) => {
 function close(): void {
   open.value = false;
 }
+
+// Huddle-Settings board: sections split by hairlines, kicker subheads,
+// switch rows, background tiles and a mono diagnostics readout.
+const bodyClass = cx(dialogParts.body, css({ gap: 0, paddingTop: 0, paddingBottom: 0, color: "fg" }));
+const sectionClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2.5",
+  padding: "18px 0",
+  borderTop: "1px solid {colors.border.soft}",
+  "& h3": { margin: 0, display: "flex", alignItems: "center", gap: "2", font: "600 15px/1.3 {fonts.display}" },
+  "& h3 svg": { width: "16px", height: "16px", color: "fg.muted" },
+});
+const subheadClass = cx(kicker(), css({ margin: "4px 0 0" }));
+const captionClass = css({ margin: 0, fontSize: "13px", lineHeight: "1.45", color: "fg.muted" });
+const errorClass = css({ margin: 0, fontSize: "13px", lineHeight: "1.45", color: "danger.text" });
+const listClass = css({ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.5" });
+const deviceRowClass = css({
+  display: "flex",
+  width: "100%",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "3",
+  minHeight: "40px",
+  padding: "8px 12px",
+  border: "1px solid transparent",
+  borderRadius: "control",
+  bg: "transparent",
+  color: "fg",
+  font: "400 14px/1.3 {fonts.body}",
+  textAlign: "start",
+  cursor: "pointer",
+  _hover: { bg: "state.hover" },
+  _disabled: { opacity: 0.55, cursor: "not-allowed" },
+  '&[aria-checked="true"]': { bg: "state.selected", borderColor: "border" },
+  "& > span": { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  "& > svg": { width: "16px", height: "16px", flex: "none", color: "action.text" },
+});
+const optionCopyClass = css({ display: "flex", flexDirection: "column", gap: "0.5", minWidth: 0, "& > span:last-child": { fontSize: "12px", color: "fg.muted" } });
+const fieldsetClass = css({ border: 0, margin: 0, padding: 0, minWidth: 0, display: "flex", flexDirection: "column", gap: "1", _disabled: { opacity: 0.6 } });
+const legendClass = cx(kicker(), css({ padding: 0, marginBottom: "1" }));
+const switchRowClass = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "3", minHeight: "40px", fontSize: "14px", cursor: "pointer" });
+const switchCopyClass = css({ display: "flex", flexDirection: "column", gap: "0.5", minWidth: 0, "& > span + span": { fontSize: "12px", color: "fg.muted" } });
+// A native checkbox drawn as the preset switch (track + thumb).
+const switchClass = css({
+  appearance: "none",
+  flex: "none",
+  width: "44px",
+  height: "26px",
+  margin: 0,
+  boxSizing: "border-box",
+  borderRadius: "pill",
+  border: "1px solid {colors.border.strong}",
+  bg: "surface.2",
+  backgroundImage: "radial-gradient(circle at 12px 50%, {colors.fg.muted} 9px, transparent 10px)",
+  cursor: "pointer",
+  transition: "background-color {durations.base} {easings.out}, background-position {durations.slow} {easings.spring.snappy}",
+  _checked: {
+    bg: "action",
+    borderColor: "action",
+    backgroundImage: "radial-gradient(circle at 30px 50%, {colors.action.fg} 9px, transparent 10px)",
+  },
+  _disabled: { opacity: 0.5, cursor: "not-allowed" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+  "@media (forced-colors: active)": { appearance: "auto" },
+});
+const processingListClass = css({ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "2" });
+const processingRowClass = css({ display: "flex", flexDirection: "column", gap: "0.5", fontSize: "13px" });
+const processingHeadClass = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "3" });
+const stateBadgeClass = css({
+  borderRadius: "tag",
+  padding: "1px 8px",
+  font: "600 12px/1.5 {fonts.body}",
+  whiteSpace: "nowrap",
+  fontVariantNumeric: "tabular-nums",
+  bg: "surface.2",
+  color: "fg.muted",
+  '&[data-tone="on"]': { bg: "success.subtle", color: "success.text" },
+  '&[data-tone="warn"]': { bg: "warning.subtle", color: "warning.text" },
+});
+const groupClass = css({ display: "flex", flexDirection: "column", gap: "2", marginTop: "2" });
+const tilesClass = css({ listStyle: "none", margin: 0, padding: 0, display: "flex", flexWrap: "wrap", gap: "2" });
+const tileClass = css({
+  position: "relative",
+  display: "inline-flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "0.5",
+  width: "64px",
+  height: "44px",
+  boxSizing: "border-box",
+  borderRadius: "10px",
+  border: "1px solid {colors.border}",
+  bg: "surface.2",
+  backgroundSize: "cover",
+  backgroundPosition: "center",
+  color: "fg.muted",
+  fontSize: "12px",
+  cursor: "pointer",
+  overflow: "hidden",
+  _disabled: { opacity: 0.6, cursor: "not-allowed" },
+  '&:is([aria-checked="true"], [data-selected])': { boxShadow: "0 0 0 2px {colors.action}", color: "fg" },
+  "&:has(input:focus-visible)": { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+  "& svg": { width: "16px", height: "16px" },
+});
+const tileCheckClass = css({ position: "absolute", top: "2px", right: "2px", borderRadius: "pill", bg: "surface", color: "action.text", padding: "1px" });
+const srOnlyClass = css({ srOnly: true });
+const statsClass = css({ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column" });
+const statRowClass = css({ display: "flex", flexDirection: "column", gap: "1", padding: "8px 0", borderTop: "1px solid {colors.border.soft}", _first: { borderTop: 0 } });
+const statHeadClass = css({ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "3", fontSize: "13px" });
+const statMonoClass = css({ display: "flex", flexWrap: "wrap", gap: "1 3", font: "400 13px/1.5 {fonts.mono}", fontVariantNumeric: "tabular-nums", color: "fg.muted" });
+const footClass = cx(dialogParts.foot, css({ paddingTop: "14px", paddingBottom: "14px", borderTop: "1px solid {colors.border.soft}" }));
 </script>
 
 <template>
-  <AppDialog v-model:open="open">
-    <header class="chat-dialog-header">
-      <h2 class="type-chat-title">Call settings</h2>
+  <AppDialog v-model:open="open" labelled-by="call-settings-title">
+    <header :class="dialogParts.head">
+      <h2 id="call-settings-title">Call settings</h2>
       <button
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="iconbtn()"
         aria-label="Close settings"
         @click="close"
       >
-        <X class="w-4 h-4" />
+        <X aria-hidden="true" />
       </button>
     </header>
 
-    <div class="chat-dialog-body flex flex-col gap-4 overflow-y-auto">
+    <div :class="bodyClass">
       <!-- Microphone -->
-      <section class="chat-section-card">
-        <div class="flex items-center gap-2 mb-2">
-          <Mic class="w-4 h-4 text-muted-foreground" />
-          <h3 class="type-control">Microphone</h3>
-        </div>
-        <div v-if="devices.mics.length === 0" class="type-caption text-muted-foreground">
+      <section :class="sectionClass">
+        <h3><Mic aria-hidden="true" />Microphone</h3>
+        <div v-if="devices.mics.length === 0" :class="captionClass">
           No microphones detected. Grant microphone access in your browser to
           see available devices.
         </div>
-        <ul v-else class="chat-list-stack" role="radiogroup" aria-label="Microphone">
+        <ul v-else :class="listClass" role="radiogroup" aria-label="Microphone">
           <li>
             <button
               type="button"
-              class="call-device-row"
-              :class="prefs.mic === null ? 'call-device-row--active' : ''"
+              :class="deviceRowClass"
               role="radio"
               :aria-checked="prefs.mic === null"
               @click="selectMic(null)"
             >
-              <span class="truncate">System default</span>
-              <Check v-if="prefs.mic === null" class="w-4 h-4 text-primary" />
+              <span>System default</span>
+              <Check v-if="prefs.mic === null" aria-hidden="true" />
             </button>
           </li>
           <li v-for="device in devices.mics" :key="device.deviceId">
             <button
               type="button"
-              class="call-device-row"
-              :class="prefs.mic === device.deviceId ? 'call-device-row--active' : ''"
+              :class="deviceRowClass"
               role="radio"
               :aria-checked="prefs.mic === device.deviceId"
               @click="selectMic(device.deviceId)"
             >
-              <span class="truncate">{{ device.label || `Microphone (${device.deviceId.slice(0, 6)}…)` }}</span>
-              <Check v-if="prefs.mic === device.deviceId" class="w-4 h-4 text-primary" />
+              <span>{{ device.label || `Microphone (${device.deviceId.slice(0, 6)}…)` }}</span>
+              <Check v-if="prefs.mic === device.deviceId" aria-hidden="true" />
             </button>
           </li>
         </ul>
 
         <!-- Read-only verification of the audio processing the browser
              actually applied to the live mic (not what we requested). -->
-        <div class="call-processing">
+        <div :class="groupClass">
           <fieldset
-            class="call-processing-controls"
+            :class="fieldsetClass"
             :aria-describedby="micProcessing.kind === 'no-mic' ? 'call-processing-no-mic' : undefined"
             :disabled="audioProcessingDisabled"
           >
-            <legend class="type-caption call-processing__title">
+            <legend :class="legendClass">
               Requested audio processing
             </legend>
-            <label class="call-processing-toggle">
-              <span class="call-processing-toggle__copy">
-                <span class="type-caption call-processing-toggle__label">Noise cancellation</span>
+            <label :class="switchRowClass">
+              <span :class="switchCopyClass">
+                <span>Noise cancellation</span>
                 <span
                   v-if="aiFilterActive"
-                  class="type-caption text-muted-foreground call-processing-toggle__hint"
                 >
                   Handled by the AI filter
                 </span>
               </span>
               <input
-                class="call-processing-toggle__input"
+                :class="switchClass"
                 type="checkbox"
                 :checked="aiFilterActive ? false : prefs.audioProcessing.noiseSuppression"
                 :disabled="aiFilterActive"
                 @change="setAudioProcessing('noiseSuppression', ($event.target as HTMLInputElement).checked, $event)"
               />
             </label>
-            <label class="call-processing-toggle">
-              <span class="call-processing-toggle__copy">
-                <span class="type-caption call-processing-toggle__label">Echo cancellation</span>
+            <label :class="switchRowClass">
+              <span :class="switchCopyClass">
+                <span>Echo cancellation</span>
               </span>
               <input
-                class="call-processing-toggle__input"
+                :class="switchClass"
                 type="checkbox"
                 :checked="prefs.audioProcessing.echoCancellation"
                 @change="setAudioProcessing('echoCancellation', ($event.target as HTMLInputElement).checked, $event)"
               />
             </label>
-            <label class="call-processing-toggle">
-              <span class="call-processing-toggle__copy">
-                <span class="type-caption call-processing-toggle__label">Auto gain control</span>
+            <label :class="switchRowClass">
+              <span :class="switchCopyClass">
+                <span>Auto gain control</span>
               </span>
               <input
-                class="call-processing-toggle__input"
+                :class="switchClass"
                 type="checkbox"
                 :checked="prefs.audioProcessing.autoGainControl"
                 @change="setAudioProcessing('autoGainControl', ($event.target as HTMLInputElement).checked, $event)"
               />
             </label>
           </fieldset>
-          <h4 class="type-caption call-processing__title">Audio processing</h4>
+          <h4 :class="subheadClass">Audio processing</h4>
           <p
             v-if="micProcessing.kind === 'no-mic'"
             id="call-processing-no-mic"
-            class="type-caption text-muted-foreground"
+            :class="captionClass"
           >
             No microphone active — enable your mic to verify audio
             processing.
           </p>
-          <ul v-else class="call-processing__list">
+          <ul v-else :class="processingListClass">
             <li
               v-for="row in processingRows"
               :key="row.key"
-              class="call-processing__row"
+              :class="processingRowClass"
             >
-              <div class="call-processing__head">
-                <span class="type-caption">{{ row.label }}</span>
+              <div :class="processingHeadClass">
+                <span>{{ row.label }}</span>
                 <span
-                  class="call-processing__badge"
-                  :class="`call-processing__badge--${row.tone}`"
+                  :class="stateBadgeClass"
+                  :data-tone="row.tone"
                 >
                   {{ row.stateLabel }}
                 </span>
               </div>
               <p
                 v-if="row.detail"
-                class="type-caption text-muted-foreground call-processing__detail"
+                :class="captionClass"
               >
                 {{ row.detail }}
               </p>
@@ -624,64 +734,62 @@ function close(): void {
 
           <!-- Opt-in client-side AI noise filter (#914). Runs entirely in the
                browser as a WASM AudioWorklet; defaults off. -->
-          <div class="call-ai-filter">
-            <h4 class="type-caption call-processing__title">AI noise filter</h4>
+          <div :class="groupClass">
+            <h4 :class="subheadClass">AI noise filter</h4>
             <p
               v-if="!aiNoiseControlEnabled"
-              class="type-caption text-muted-foreground"
+              :class="captionClass"
             >
               Not available in this browser.
             </p>
             <template v-else>
-              <ul class="chat-list-stack" role="radiogroup" aria-label="AI noise filter">
+              <ul :class="listClass" role="radiogroup" aria-label="AI noise filter">
                 <li>
                   <button
                     type="button"
-                    class="call-device-row"
-                    :class="aiNoiseModel === null ? 'call-device-row--active' : ''"
+                    :class="deviceRowClass"
                     role="radio"
                     :aria-checked="aiNoiseModel === null"
                     :disabled="aiNoisePending"
                     @click="selectAiNoiseModel(null)"
                   >
-                    <span class="truncate">Off</span>
-                    <Check v-if="aiNoiseModel === null" class="w-4 h-4 text-primary" />
+                    <span>Off</span>
+                    <Check v-if="aiNoiseModel === null" aria-hidden="true" />
                   </button>
                 </li>
                 <li v-for="model in aiNoiseModelOptions" :key="model.id">
                   <button
                     type="button"
-                    class="call-device-row"
-                    :class="aiNoiseModel === model.id ? 'call-device-row--active' : ''"
+                    :class="deviceRowClass"
                     role="radio"
                     :aria-checked="aiNoiseModel === model.id"
                     :disabled="aiNoisePending || !model.available"
                     @click="selectAiNoiseModel(model.id)"
                   >
-                    <span class="call-ai-filter__option">
-                      <span class="truncate">{{ model.label }}</span>
-                      <span class="type-caption text-muted-foreground">{{ model.hint }}</span>
+                    <span :class="optionCopyClass">
+                      <span>{{ model.label }}</span>
+                      <span>{{ model.hint }}</span>
                     </span>
-                    <Check v-if="aiNoiseModel === model.id" class="w-4 h-4 text-primary" />
+                    <Check v-if="aiNoiseModel === model.id" aria-hidden="true" />
                   </button>
                 </li>
               </ul>
-              <p class="type-caption text-muted-foreground call-ai-filter__note">
+              <p :class="captionClass">
                 Runs entirely in your browser. Higher settings remove more noise
                 but use more CPU.
               </p>
               <p
                 v-if="aiNoiseErrorLabel"
-                class="type-caption call-ai-filter__error"
+                :class="errorClass"
               >
                 Couldn't start the {{ aiNoiseErrorLabel }} filter — using your raw mic.
               </p>
-              <div v-if="aiFilterRow" class="call-processing__row">
-                <div class="call-processing__head">
-                  <span class="type-caption">{{ aiFilterRow.label }}</span>
+              <div v-if="aiFilterRow" :class="processingRowClass">
+                <div :class="processingHeadClass">
+                  <span>{{ aiFilterRow.label }}</span>
                   <span
-                    class="call-processing__badge"
-                    :class="`call-processing__badge--${aiFilterRow.tone}`"
+                    :class="stateBadgeClass"
+                    :data-tone="aiFilterRow.tone"
                   >
                     {{ aiFilterRow.stateLabel }}
                   </span>
@@ -693,88 +801,79 @@ function close(): void {
       </section>
 
       <!-- Camera -->
-      <section class="chat-section-card">
-        <div class="flex items-center gap-2 mb-2">
-          <Video class="w-4 h-4 text-muted-foreground" />
-          <h3 class="type-control">Camera</h3>
-        </div>
-        <div v-if="devices.cams.length === 0" class="type-caption text-muted-foreground">
+      <section :class="sectionClass">
+        <h3><Video aria-hidden="true" />Camera</h3>
+        <div v-if="devices.cams.length === 0" :class="captionClass">
           No cameras detected. Grant camera access in your browser to see
           available devices.
         </div>
-        <ul v-else class="chat-list-stack" role="radiogroup" aria-label="Camera">
+        <ul v-else :class="listClass" role="radiogroup" aria-label="Camera">
           <li>
             <button
               type="button"
-              class="call-device-row"
-              :class="prefs.cam === null ? 'call-device-row--active' : ''"
+              :class="deviceRowClass"
               role="radio"
               :aria-checked="prefs.cam === null"
               @click="selectCam(null)"
             >
-              <span class="truncate">System default</span>
-              <Check v-if="prefs.cam === null" class="w-4 h-4 text-primary" />
+              <span>System default</span>
+              <Check v-if="prefs.cam === null" aria-hidden="true" />
             </button>
           </li>
           <li v-for="device in devices.cams" :key="device.deviceId">
             <button
               type="button"
-              class="call-device-row"
-              :class="prefs.cam === device.deviceId ? 'call-device-row--active' : ''"
+              :class="deviceRowClass"
               role="radio"
               :aria-checked="prefs.cam === device.deviceId"
               @click="selectCam(device.deviceId)"
             >
-              <span class="truncate">{{ device.label || `Camera (${device.deviceId.slice(0, 6)}…)` }}</span>
-              <Check v-if="prefs.cam === device.deviceId" class="w-4 h-4 text-primary" />
+              <span>{{ device.label || `Camera (${device.deviceId.slice(0, 6)}…)` }}</span>
+              <Check v-if="prefs.cam === device.deviceId" aria-hidden="true" />
             </button>
           </li>
         </ul>
 
         <!-- Opt-in virtual background / blur (#1024). MediaPipe segmentation
              runs in the browser via @livekit/track-processors; defaults off. -->
-        <div class="call-ai-filter">
-          <h4 class="type-caption call-processing__title">Background</h4>
-          <p v-if="!backgroundControlEnabled" class="type-caption text-muted-foreground">
+        <div :class="groupClass">
+          <h4 :class="subheadClass">Background</h4>
+          <p v-if="!backgroundControlEnabled" :class="captionClass">
             {{ backgroundUnavailableReason }}
           </p>
           <template v-else>
-            <ul class="chat-list-stack" role="radiogroup" aria-label="Camera background">
+            <div :class="tilesClass">
+            <ul :class="tilesClass" role="radiogroup" aria-label="Camera background">
               <li>
                 <button
                   type="button"
-                  class="call-device-row"
-                  :class="isBackgroundSelected(BACKGROUND_OFF) ? 'call-device-row--active' : ''"
+                  :class="tileClass"
                   role="radio"
                   :aria-checked="isBackgroundSelected(BACKGROUND_OFF)"
                   :disabled="backgroundPending"
                   @click="selectBackground(BACKGROUND_OFF)"
                 >
-                  <span class="truncate">Off</span>
-                  <Check v-if="isBackgroundSelected(BACKGROUND_OFF)" class="w-4 h-4 text-primary" />
+                  <span>Off</span>
                 </button>
               </li>
               <li>
                 <button
                   type="button"
-                  class="call-device-row"
-                  :class="isBackgroundSelected(BLUR_EFFECT) ? 'call-device-row--active' : ''"
+                  :class="tileClass"
                   role="radio"
                   :aria-checked="isBackgroundSelected(BLUR_EFFECT)"
                   :disabled="backgroundPending"
                   @click="selectBackground(BLUR_EFFECT)"
                 >
-                  <span class="truncate">Blur</span>
-                  <Check v-if="isBackgroundSelected(BLUR_EFFECT)" class="w-4 h-4 text-primary" />
+                  <span>Blur</span>
                 </button>
               </li>
             </ul>
-            <ul class="call-background-grid" role="radiogroup" aria-label="Background image">
+            <ul :class="tilesClass" role="radiogroup" aria-label="Background image">
               <li v-for="entry in backgroundCatalogEntries" :key="entry.id">
                 <button
                   type="button"
-                  class="call-background-tile"
-                  :class="isCatalogSelected(entry.id) ? 'call-background-tile--active' : ''"
+                  :class="tileClass"
                   role="radio"
                   :aria-checked="isCatalogSelected(entry.id)"
                   :aria-label="entry.label"
@@ -782,38 +881,33 @@ function close(): void {
                   :style="{ backgroundImage: `url(${entry.assetPath})` }"
                   @click="selectBackground({ kind: 'image', image: { source: 'catalog', id: entry.id } })"
                 >
-                  <Check
-                    v-if="isCatalogSelected(entry.id)"
-                    class="w-4 h-4 text-primary call-background-tile__check"
-                  />
+                  <Check v-if="isCatalogSelected(entry.id)" :class="tileCheckClass" aria-hidden="true" />
                 </button>
               </li>
               <li>
                 <label
-                  class="call-background-tile call-background-tile--upload"
-                  :class="isCustomSelected ? 'call-background-tile--active' : ''"
+                  :class="tileClass"
+                  :data-selected="isCustomSelected || undefined"
                 >
                   <input
                     type="file"
                     accept="image/*"
-                    class="sr-only"
+                    :class="srOnlyClass"
                     :disabled="backgroundPending"
                     @change="uploadCustomBackground"
                   />
-                  <ImagePlus class="w-4 h-4" />
-                  <span class="type-caption">Upload</span>
-                  <Check
-                    v-if="isCustomSelected"
-                    class="w-4 h-4 text-primary call-background-tile__check"
-                  />
+                  <ImagePlus aria-hidden="true" />
+                  <span>Upload</span>
+                  <Check v-if="isCustomSelected" :class="tileCheckClass" aria-hidden="true" />
                 </label>
               </li>
             </ul>
-            <p class="type-caption text-muted-foreground call-ai-filter__note">
+            </div>
+            <p :class="captionClass">
               Runs entirely in your browser. Your camera image is processed on
               your device before it's sent.
             </p>
-            <p v-if="backgroundErrorLabel" class="type-caption call-ai-filter__error">
+            <p v-if="backgroundErrorLabel" :class="errorClass">
               Couldn't start the {{ backgroundErrorLabel }} — using your raw camera.
             </p>
           </template>
@@ -821,18 +915,15 @@ function close(): void {
       </section>
 
       <!-- Speaker -->
-      <section class="chat-section-card">
-        <div class="flex items-center gap-2 mb-2">
-          <Speaker class="w-4 h-4 text-muted-foreground" />
-          <h3 class="type-control">Speaker</h3>
-        </div>
-        <div v-if="!speakerSupported" class="type-caption text-muted-foreground">
+      <section :class="sectionClass">
+        <h3><Speaker aria-hidden="true" />Speaker</h3>
+        <div v-if="!speakerSupported" :class="captionClass">
           Your browser doesn't support choosing the speaker device. Set the
           default output in your operating system instead.
         </div>
         <div
           v-else-if="devices.speakers.length === 0"
-          class="type-caption text-muted-foreground"
+          :class="captionClass"
         >
           No audio outputs detected. Grant microphone access first — most
           browsers reveal speakers only after at least one media permission is
@@ -840,34 +931,32 @@ function close(): void {
         </div>
         <ul
           v-else
-          class="chat-list-stack"
+          :class="listClass"
           role="radiogroup"
           aria-label="Speaker"
         >
           <li>
             <button
               type="button"
-              class="call-device-row"
-              :class="prefs.speaker === null ? 'call-device-row--active' : ''"
+              :class="deviceRowClass"
               role="radio"
               :aria-checked="prefs.speaker === null"
               @click="selectSpeaker(null)"
             >
-              <span class="truncate">System default</span>
-              <Check v-if="prefs.speaker === null" class="w-4 h-4 text-primary" />
+              <span>System default</span>
+              <Check v-if="prefs.speaker === null" aria-hidden="true" />
             </button>
           </li>
           <li v-for="device in devices.speakers" :key="device.deviceId">
             <button
               type="button"
-              class="call-device-row"
-              :class="prefs.speaker === device.deviceId ? 'call-device-row--active' : ''"
+              :class="deviceRowClass"
               role="radio"
               :aria-checked="prefs.speaker === device.deviceId"
               @click="selectSpeaker(device.deviceId)"
             >
-              <span class="truncate">{{ device.label || `Speaker (${device.deviceId.slice(0, 6)}…)` }}</span>
-              <Check v-if="prefs.speaker === device.deviceId" class="w-4 h-4 text-primary" />
+              <span>{{ device.label || `Speaker (${device.deviceId.slice(0, 6)}…)` }}</span>
+              <Check v-if="prefs.speaker === device.deviceId" aria-hidden="true" />
             </button>
           </li>
         </ul>
@@ -875,29 +964,26 @@ function close(): void {
 
       <!-- Diagnostics: live per-track WebRTC stats. Polled only while
            this dialog is open (see the `open` watcher). -->
-      <section class="chat-section-card">
-        <div class="flex items-center gap-2 mb-2">
-          <Activity class="w-4 h-4 text-muted-foreground" />
-          <h3 class="type-control">Diagnostics</h3>
-        </div>
+      <section :class="sectionClass">
+        <h3><Activity aria-hidden="true" />Diagnostics</h3>
         <p
           v-if="statDisplayRows.length === 0"
-          class="type-caption text-muted-foreground"
+          :class="captionClass"
         >
           No active video. Start your camera or screen share to see live
           resolution, bitrate, and packet-loss stats.
         </p>
-        <ul v-else class="call-stats">
-          <li v-for="row in statDisplayRows" :key="row.key" class="call-stats__row">
-            <div class="call-stats__head">
-              <span class="type-caption call-stats__peer">
+        <ul v-else :class="statsClass">
+          <li v-for="row in statDisplayRows" :key="row.key" :class="statRowClass">
+            <div :class="statHeadClass">
+              <span>
                 {{ row.label }} · {{ row.sourceLabel }}
               </span>
-              <span class="type-caption text-muted-foreground call-stats__res">
+              <span :class="statMonoClass">
                 {{ row.resolution }} · {{ row.fps }}
               </span>
             </div>
-            <div class="call-stats__metrics type-caption text-muted-foreground">
+            <div :class="statMonoClass">
               <span>{{ row.bitrate }}</span>
               <span>loss {{ row.loss }}</span>
               <span>{{ row.rtt }}</span>
@@ -909,240 +995,10 @@ function close(): void {
       </section>
     </div>
 
-    <footer class="chat-dialog-footer">
-      <button type="button" class="chat-action-button chat-action-button--primary" @click="close">
-        <span class="type-control">Done</span>
+    <footer :class="footClass">
+      <button type="button" :class="btn({ variant: 'primary' })" @click="close">
+        Done
       </button>
     </footer>
   </AppDialog>
 </template>
-
-<style scoped>
-.call-device-row {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  border-radius: var(--radius-sm);
-  padding: 0.5rem 0.75rem;
-  text-align: start;
-  transition: background-color 0.18s ease;
-}
-
-.call-device-row:hover {
-  background: var(--muted);
-}
-
-.call-device-row--active {
-  background: color-mix(in oklab, var(--primary) 12%, transparent);
-  color: var(--foreground);
-}
-
-.call-processing {
-  margin-top: var(--space-sm);
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--muted);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.call-processing__title {
-  color: var(--muted-foreground);
-}
-
-.call-processing-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-}
-
-.call-processing-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  min-height: 2rem;
-}
-
-.call-processing-toggle__copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
-}
-
-.call-processing-toggle__hint {
-  font-style: italic;
-}
-
-.call-ai-filter {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-
-.call-ai-filter__option {
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
-  min-width: 0;
-}
-
-.call-ai-filter__note {
-  margin-top: -0.125rem;
-}
-
-.call-ai-filter__error {
-  color: var(--destructive);
-}
-
-.call-background-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(4.5rem, 1fr));
-  gap: 0.5rem;
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.call-background-tile {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 0.125rem;
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  border-radius: var(--radius-sm);
-  border: 2px solid transparent;
-  background-color: var(--muted);
-  background-size: cover;
-  background-position: center;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  overflow: hidden;
-}
-
-.call-background-tile:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.call-background-tile--active {
-  border-color: var(--primary);
-}
-
-.call-background-tile--upload {
-  border-style: dashed;
-  border-color: color-mix(in oklab, var(--foreground) 22%, transparent);
-}
-
-.call-background-tile__check {
-  position: absolute;
-  top: 0.25rem;
-  right: 0.25rem;
-  background: color-mix(in oklab, var(--background) 70%, transparent);
-  border-radius: 9999px;
-}
-
-.call-processing-toggle__label {
-  color: var(--foreground);
-}
-
-.call-processing-toggle__input {
-  width: 2.25rem;
-  height: 1.25rem;
-  flex: 0 0 auto;
-  accent-color: var(--primary);
-}
-
-.call-processing-toggle__input:disabled {
-  opacity: 0.55;
-}
-
-.call-processing__list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.call-processing__row {
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
-}
-
-.call-processing__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-}
-
-.call-processing__badge {
-  border-radius: var(--radius-sm);
-  padding: 0.0625rem 0.5rem;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* On — calm positive: the requested processing is confirmed applied. */
-.call-processing__badge--on {
-  background: color-mix(in oklab, var(--success) 16%, transparent);
-  color: var(--success-foreground);
-}
-
-/* Off — a genuine degradation the browser reported; worth noticing. */
-.call-processing__badge--warn {
-  background: color-mix(in oklab, var(--warning) 20%, transparent);
-  color: var(--warning-foreground);
-}
-
-/* Unknown — browser doesn't report it; muted, neither pass nor fail. */
-.call-processing__badge--muted {
-  background: var(--muted);
-  color: var(--muted-foreground);
-}
-
-.call-processing__detail {
-  line-height: 1.3;
-}
-
-.call-stats {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.call-stats__row {
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
-}
-
-.call-stats__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-sm);
-}
-
-.call-stats__peer {
-  color: var(--foreground);
-}
-
-.call-stats__res {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.call-stats__metrics {
-  display: flex;
-  gap: var(--space-sm);
-  font-variant-numeric: tabular-nums;
-}
-</style>

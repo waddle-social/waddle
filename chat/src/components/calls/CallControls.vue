@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { css, cx } from "styled-system/css";
+import { btn, huddleCtl } from "styled-system/recipes";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
+import { menuClasses } from "@/ui/menu-classes";
 import {
   Check,
   LayoutGrid,
@@ -304,6 +307,106 @@ watch([moreOpen, reactionsOpen], ([moreOpenValue, reactionsOpenValue]) => {
   }
 });
 
+// HuddleStage control bar: round `huddleCtl` buttons (labelled in Expanded,
+// icon-only in Split), a Gallery/Speaker segment and a danger hang-up pill.
+// On phones every control is a 52px disc (Mobile-Huddle).
+const rootClass = css({
+  containerType: "inline-size",
+  width: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "2",
+  flexWrap: "wrap",
+  _narrow: { gap: "2.5" },
+});
+const ctlClass = cx(huddleCtl(), css({
+  position: "relative",
+  "& svg": { width: "20px", height: "20px", flex: "none" },
+  _expanded: { bg: "action.subtle", color: "action.text" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+  _narrow: { width: "52px", height: "52px", px: 0, "& svg": { width: "22px", height: "22px" } },
+}));
+// Labels drop to screen-reader text when the bar runs out of room.
+const ctlLabelClass = css({ _narrow: { srOnly: true }, "@container (max-width: 900px)": { srOnly: true } });
+const hangupLabelClass = css({ _narrow: { srOnly: true } });
+const srOnly = css({ srOnly: true });
+const segClass = css({ display: "inline-flex", padding: "3px", gap: "2px", borderRadius: "pill", bg: "surface.2" });
+const segItemClass = css({
+  display: "inline-flex",
+  width: "38px",
+  height: "38px",
+  alignItems: "center",
+  justifyContent: "center",
+  border: 0,
+  borderRadius: "pill",
+  bg: "transparent",
+  color: "fg.muted",
+  cursor: "pointer",
+  "& svg": { width: "18px", height: "18px" },
+  _hover: { color: "fg" },
+  _checked: { bg: "surface", color: "fg", boxShadow: "0 0 0 1px {colors.border}" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+  _narrow: { width: "46px", height: "46px" },
+});
+// Dividers mark nothing once the bar wraps (400px huddle column, phones).
+const dividerClass = css({ width: "1px", height: "24px", bg: "border.soft", mx: "1", _narrow: { display: "none" }, "@container (max-width: 480px)": { display: "none" } });
+const countClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minWidth: "18px",
+  height: "18px",
+  px: "1",
+  borderRadius: "pill",
+  bg: "color-mix(in srgb, {colors.fg} 14%, transparent)",
+  font: "700 11px/1 {fonts.body}",
+  fontVariantNumeric: "tabular-nums",
+  _narrow: { position: "absolute", top: "-2px", right: "-2px" },
+});
+const unreadClass = cx(countClass, css({ bg: "gold", color: "gold.fg" }));
+const hangupClass = cx(btn({ variant: "danger" }), css({
+  height: "44px",
+  minHeight: "44px",
+  borderRadius: "pill",
+  px: "4.5",
+  _narrow: { width: "68px", height: "52px", px: 0, justifyContent: "center" },
+}));
+const popWrapClass = css({ position: "relative", display: "inline-flex" });
+const reactionMenuClass = cx(menuClasses.content, css({
+  position: "absolute",
+  bottom: "calc(100% + 8px)",
+  left: "50%",
+  minWidth: 0,
+  display: "grid",
+  gridTemplateColumns: "repeat(6, 40px)",
+  gap: "0.5",
+  width: "max-content",
+  transform: "translateX(-50%)",
+  zIndex: 10,
+}));
+const reactionItemClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "40px",
+  height: "40px",
+  border: 0,
+  borderRadius: "10px",
+  bg: "transparent",
+  fontSize: "22px",
+  lineHeight: 1,
+  cursor: "pointer",
+  _hover: { bg: "state.hover" },
+  _focusVisible: { bg: "state.hover", outline: "2px solid {colors.focus}" },
+});
+const moreMenuClass = cx(menuClasses.content, css({ position: "absolute", bottom: "calc(100% + 8px)", right: 0, zIndex: 10 }));
+const moreItemClass = cx(menuClasses.item, css({
+  _hover: { bg: "state.hover" },
+  _focusVisible: { bg: "state.hover" },
+  "& svg[data-check]": { marginLeft: "auto", color: "action.text" },
+}));
+
 onBeforeUnmount(() => {
   if (typeof document !== "undefined") {
     document.removeEventListener("pointerdown", onDocumentPointerDown, true);
@@ -312,132 +415,127 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="call-controls">
+  <div :class="rootClass">
     <AppTooltip :label="micEnabled ? 'Mute' : 'Unmute'">
       <button
         type="button"
-        class="chat-action-button"
-        :class="micEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
+        :class="ctlClass"
         :aria-pressed="!micEnabled"
+        :data-off="!micEnabled"
         @click="emit('toggleMic')"
       >
-        <component :is="micEnabled ? Mic : MicOff" class="w-4 h-4" />
-        <span class="type-control sr-only sm:not-sr-only">{{ micEnabled ? "Mute" : "Unmute" }}</span>
+        <component :is="micEnabled ? Mic : MicOff" aria-hidden="true" />
+        <span :class="isExpanded ? ctlLabelClass : srOnly">{{ micEnabled ? "Mute" : "Unmute" }}</span>
       </button>
     </AppTooltip>
     <AppTooltip :label="camEnabled ? 'Camera off' : 'Camera on'">
       <button
         type="button"
-        class="chat-action-button"
-        :class="camEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
+        :class="ctlClass"
         :aria-pressed="!camEnabled"
         @click="emit('toggleCam')"
       >
-        <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
-        <span class="type-control sr-only sm:not-sr-only">{{ camEnabled ? "Off" : "On" }}</span>
+        <component :is="camEnabled ? Video : VideoOff" aria-hidden="true" />
+        <span :class="isExpanded ? ctlLabelClass : srOnly">{{ camEnabled ? "Off" : "On" }}</span>
       </button>
     </AppTooltip>
     <AppTooltip v-if="screenShareSupported" :label="screenShareEnabled ? 'Stop sharing' : 'Share screen'">
       <button
         type="button"
-        class="chat-action-button"
-        :class="screenShareEnabled ? 'chat-action-button--primary' : 'chat-action-button--secondary'"
+        :class="ctlClass"
         :aria-pressed="screenShareEnabled"
         @click="emit('toggleScreenShare')"
       >
-        <MonitorUp class="w-4 h-4" />
-        <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
+        <MonitorUp aria-hidden="true" />
+        <span :class="isExpanded ? ctlLabelClass : srOnly">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
       </button>
     </AppTooltip>
 
     <!-- Gallery ⟷ Speaker view switcher. Sticky for the call; a pin or an
          incoming screen share still overrides the chosen layout's large tile.
          A radiogroup (single-choice) rather than two independent toggles. -->
-    <div class="call-controls__view-switch" role="radiogroup" aria-label="Stage view">
+    <div :class="segClass" role="radiogroup" aria-label="Stage view">
       <AppTooltip label="Gallery view">
         <button
           type="button"
           role="radio"
-          class="chat-icon-button chat-icon-button--md hover:bg-muted"
-          :class="{ 'bg-muted text-foreground': viewMode === 'gallery' }"
+          :class="segItemClass"
           aria-label="Gallery view"
           :aria-checked="viewMode === 'gallery'"
           :tabindex="viewMode === 'gallery' ? 0 : -1"
           @click="emit('setViewMode', 'gallery')"
           @keydown="onViewKeydown"
         >
-          <LayoutGrid class="w-4 h-4" />
+          <LayoutGrid aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip label="Speaker view">
         <button
           type="button"
           role="radio"
-          class="chat-icon-button chat-icon-button--md hover:bg-muted"
-          :class="{ 'bg-muted text-foreground': viewMode === 'speaker' }"
+          :class="segItemClass"
           aria-label="Speaker view"
           :aria-checked="viewMode === 'speaker'"
           :tabindex="viewMode === 'speaker' ? 0 : -1"
           @click="emit('setViewMode', 'speaker')"
           @keydown="onViewKeydown"
         >
-          <SquareUser class="w-4 h-4" />
+          <SquareUser aria-hidden="true" />
         </button>
       </AppTooltip>
     </div>
 
-    <span class="call-controls__divider" aria-hidden="true" />
+    <span :class="dividerClass" aria-hidden="true" />
 
     <AppTooltip :label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call' : 'Expand call'">
       <button
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="ctlClass"
         :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
         @click="emit('toggleExpanded')"
       >
-        <component :is="isExpanded ? Minimize2 : Maximize2" class="w-4 h-4" />
+        <component :is="isExpanded ? Minimize2 : Maximize2" aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip v-if="isExpanded && !isImmersive" label="Make call immersive">
       <button
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="ctlClass"
         aria-label="Make call immersive"
         @click="emit('toggleImmersive')"
       >
-        <Maximize2 class="w-4 h-4" />
+        <Maximize2 aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip v-if="isImmersive" :label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'">
       <button
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="ctlClass"
         :aria-label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
         @click="emit('toggleNativeFullscreen')"
       >
-        <component :is="isNativeFullscreen ? Minimize2 : Maximize2" class="w-4 h-4" />
+        <component :is="isNativeFullscreen ? Minimize2 : Maximize2" aria-hidden="true" />
       </button>
     </AppTooltip>
-    <div ref="reactionsWrapEl" class="call-controls__reactions">
+    <div ref="reactionsWrapEl" :class="popWrapClass">
       <AppTooltip label="Reactions">
       <button
         ref="reactionsTriggerEl"
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': reactionsOpen }"
+        :class="ctlClass"
         aria-label="Reactions"
         aria-haspopup="menu"
         :aria-expanded="reactionsOpen"
         @click="reactionsOpen ? closeReactions(false) : openReactions(true)"
         @keydown="onReactionsTriggerKeydown"
       >
-        <SmilePlus class="w-4 h-4" />
+        <SmilePlus aria-hidden="true" />
       </button>
       </AppTooltip>
       <div
         v-show="reactionsOpen"
         ref="reactionsMenuEl"
-        class="call-controls__reaction-menu"
+        :class="reactionMenuClass"
         role="menu"
         aria-label="Reactions"
         @keydown="onReactionsMenuKeydown"
@@ -447,7 +545,7 @@ onBeforeUnmount(() => {
           :key="emoji"
           type="button"
           role="menuitem"
-          class="call-controls__reaction-item"
+          :class="reactionItemClass"
           @click="selectReaction(emoji)"
         >
           {{ emoji }}
@@ -457,29 +555,27 @@ onBeforeUnmount(() => {
     <AppTooltip v-if="raisedHandAvailable" :label="raisedHandActive ? 'Lower hand' : 'Raise hand'">
       <button
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': raisedHandActive }"
+        :class="ctlClass"
         :aria-label="raisedHandActive ? 'Lower hand' : 'Raise hand'"
         :aria-pressed="raisedHandActive ? 'true' : 'false'"
         @click="emit('toggleRaisedHand')"
       >
-        <Hand class="w-4 h-4" />
+        <Hand aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip :label="participantsOpen ? 'Close participants' : 'Open participants'">
       <button
         type="button"
-        class="call-controls__participants chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': participantsOpen }"
+        :class="ctlClass"
         :aria-label="participantsOpen ? 'Close participants' : 'Open participants'"
         :aria-pressed="participantsOpen"
         :aria-expanded="participantsOpen"
         @click="emit('toggleParticipants')"
       >
-        <Users class="w-4 h-4" />
+        <Users aria-hidden="true" />
         <span
           v-if="participantCount > 0"
-          class="call-controls__count"
+          :class="countClass"
           aria-hidden="true"
         >{{ participantCount }}</span>
       </button>
@@ -487,17 +583,16 @@ onBeforeUnmount(() => {
     <AppTooltip :label="chatOpen ? 'Close chat' : 'Open chat'">
       <button
         type="button"
-        class="call-controls__chat chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': chatOpen }"
+        :class="ctlClass"
         :aria-label="chatButtonLabel"
         :aria-pressed="chatOpen"
         :aria-expanded="chatOpen"
         @click="emit('toggleChat')"
       >
-        <MessageSquare class="w-4 h-4" />
+        <MessageSquare aria-hidden="true" />
         <span
           v-if="chatUnread > 0"
-          class="call-controls__unread"
+          :class="unreadClass"
           aria-hidden="true"
         >{{ chatUnread }}</span>
       </button>
@@ -505,33 +600,31 @@ onBeforeUnmount(() => {
     <AppTooltip v-if="pictureInPictureSupported" :label="pictureInPictureActive ? 'Return to call' : 'Picture-in-Picture'">
       <button
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': pictureInPictureActive }"
+        :class="ctlClass"
         :aria-label="pictureInPictureActive ? 'Return to call' : 'Open Picture-in-Picture'"
         :aria-pressed="pictureInPictureActive"
         @click="emit('togglePictureInPicture')"
       >
-        <PictureInPicture2 class="w-4 h-4" />
+        <PictureInPicture2 aria-hidden="true" />
       </button>
     </AppTooltip>
-    <div ref="moreWrapEl" class="call-controls__more">
+    <div ref="moreWrapEl" :class="popWrapClass">
       <button
         ref="moreTriggerEl"
         type="button"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': moreOpen }"
+        :class="ctlClass"
         aria-label="More options"
         aria-haspopup="menu"
         :aria-expanded="moreOpen"
         @click="moreOpen ? closeMore(false) : openMore(true)"
         @keydown="onMoreTriggerKeydown"
       >
-        <MoreHorizontal class="w-4 h-4" />
+        <MoreHorizontal aria-hidden="true" />
       </button>
       <div
         v-show="moreOpen"
         ref="moreMenuEl"
-        class="call-controls__more-menu"
+        :class="moreMenuClass"
         role="menu"
         aria-label="More options"
         @keydown="onMoreMenuKeydown"
@@ -540,176 +633,36 @@ onBeforeUnmount(() => {
           type="button"
           role="menuitemcheckbox"
           :aria-checked="!selfViewHidden"
-          class="call-controls__more-item"
+          :class="moreItemClass"
           @click="selectSelfView"
         >
-          <ScanFace class="w-4 h-4" />
+          <ScanFace aria-hidden="true" />
           <span>Self-view</span>
-          <Check v-if="!selfViewHidden" class="ml-auto w-4 h-4 text-primary" />
+          <Check v-if="!selfViewHidden" data-check aria-hidden="true" />
         </button>
         <button
           type="button"
           role="menuitem"
-          class="call-controls__more-item"
+          :class="moreItemClass"
           @click="selectSettings"
         >
-          <Settings class="w-4 h-4" />
+          <Settings aria-hidden="true" />
           <span>Call settings</span>
         </button>
       </div>
     </div>
 
-    <span class="call-controls__divider" aria-hidden="true" />
+    <span :class="dividerClass" aria-hidden="true" />
 
     <AppTooltip label="Hang up">
       <button
         type="button"
-        class="chat-action-button chat-action-button--destructive"
+        :class="hangupClass"
         @click="emit('hangup')"
       >
-        <PhoneOff class="w-4 h-4" />
-        <span class="type-control sr-only sm:not-sr-only">Hang up</span>
+        <PhoneOff aria-hidden="true" />
+        <span :class="hangupLabelClass">Hang up</span>
       </button>
     </AppTooltip>
   </div>
 </template>
-
-<style scoped>
-.call-controls {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-xs);
-  flex-wrap: wrap;
-}
-
-.call-controls__divider {
-  width: 1px;
-  height: 1.5rem;
-  background: var(--border);
-  margin-inline: var(--space-xs);
-}
-
-.call-controls__view-switch {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.call-controls__reactions {
-  position: relative;
-  display: inline-flex;
-}
-
-.call-controls__reaction-menu {
-  position: absolute;
-  bottom: calc(100% + 0.375rem);
-  left: 50%;
-  z-index: 10;
-  display: grid;
-  grid-template-columns: repeat(6, 2rem);
-  gap: 0.125rem;
-  width: max-content;
-  padding: var(--space-2xs);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--popover, var(--background));
-  box-shadow: var(--shadow-lg, 0 10px 30px rgb(0 0 0 / 0.18));
-  transform: translateX(-50%);
-}
-
-.call-controls__reaction-item {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-emoji-picker);
-  line-height: 1;
-}
-
-.call-controls__reaction-item:hover,
-.call-controls__reaction-item:focus-visible {
-  background: var(--muted);
-}
-
-/* More ▸ overflow. The menu floats above the bar (the bar sits at the
- * bottom of both surfaces), anchored to the trigger. */
-.call-controls__more {
-  position: relative;
-  display: inline-flex;
-}
-
-.call-controls__more-menu {
-  position: absolute;
-  bottom: calc(100% + 0.375rem);
-  right: 0;
-  z-index: 10;
-  min-width: 12rem;
-  padding: var(--space-2xs);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--popover, var(--background));
-  box-shadow: var(--shadow-lg, 0 10px 30px rgb(0 0 0 / 0.18));
-}
-
-.call-controls__more-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  width: 100%;
-  padding: 0.5rem 0.625rem;
-  border-radius: var(--radius-sm);
-  text-align: start;
-  color: var(--foreground);
-}
-
-.call-controls__more-item:hover,
-.call-controls__more-item:focus-visible {
-  background: var(--muted);
-}
-
-/* The participants toggle carries a live attendee count, so it widens
- * from the square icon-button into a pill with the badge beside the icon. */
-.call-controls__participants {
-  width: auto;
-  gap: 0.375rem;
-  padding-inline: 0.5rem;
-}
-
-.call-controls__count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.125rem;
-  height: 1.125rem;
-  padding: 0 0.3125rem;
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--foreground) 14%, transparent);
-  font-size: 0.6875rem;
-  font-variant-numeric: tabular-nums;
-}
-
-/* The chat toggle widens into a pill when an unread badge rides on it,
- * mirroring the participants toggle. */
-.call-controls__chat {
-  width: auto;
-  gap: 0.375rem;
-  padding-inline: 0.5rem;
-}
-
-.call-controls__unread {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.125rem;
-  height: 1.125rem;
-  padding: 0 0.3125rem;
-  border-radius: 9999px;
-  background: var(--primary);
-  color: var(--primary-foreground);
-  font-size: 0.6875rem;
-  font-variant-numeric: tabular-nums;
-}
-</style>

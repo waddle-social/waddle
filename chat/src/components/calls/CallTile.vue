@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Hand, MicOff, ScreenShare } from "lucide-vue-next";
-import { consistentColor } from "@/lib/chat-ui";
+import { css, cx } from "styled-system/css";
+import { avatar, plate } from "styled-system/recipes";
 import { useAvatarUrl } from "@/lib/avatars/use-avatar-url";
 import type { TileAttachable } from "@/lib/calls/tile-attach";
 
@@ -71,12 +72,12 @@ const initials = computed<string>(() => {
     .slice(0, 2);
 });
 
-const placeholderBackground = computed<string>(() => {
-  const base = consistentColor(props.label, 55, 45);
-  return `radial-gradient(circle at 32% 26%, ` +
-    `color-mix(in oklab, ${base}, white 22%), ` +
-    `${base} 58%, ` +
-    `color-mix(in oklab, ${base}, black 14%))`;
+// Name-derived avatar tint (same hash as AppAvatar), so a person keeps
+// one colour across the sidebar, timeline and stage.
+const tint = computed(() => {
+  let hash = 5381;
+  for (const ch of props.label) hash = (Math.imul(hash, 33) + (ch.codePointAt(0) ?? 0)) >>> 0;
+  return String((hash % 6) + 1) as "1" | "2" | "3" | "4" | "5" | "6";
 });
 
 function refVideo(el: Element | null): void {
@@ -95,16 +96,70 @@ const emit = defineEmits<{
   /** Click on the tile. Used by the parent to enter / exit speaker focus. */
   activate: [];
 }>();
+
+// HuddleStage tile: rounded, surface ground with a tinted avatar disc, a
+// live ring while speaking, plate bottom-left, raised hand top-left. The
+// tile fills its grid cell; the disc scales with the cell (`cqmin`).
+const rootClass = css({
+  position: "relative",
+  overflow: "hidden",
+  borderRadius: "12px",
+  bg: "surface",
+  boxShadow: "0 0 0 1px {colors.border.soft}",
+  width: "100%",
+  height: "100%",
+  minWidth: 0,
+  minHeight: 0,
+  containerType: "size",
+  isolation: "isolate",
+  transition: "box-shadow {durations.fast} {easings.out}",
+});
+const interactiveClass = css({
+  cursor: "pointer",
+  _hover: { boxShadow: "0 0 0 1px {colors.border.strong}" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+});
+const speakingClass = css({
+  boxShadow: "0 0 0 2px {colors.live}, 0 0 0 6px color-mix(in srgb, {colors.live} 22%, transparent)",
+  _hover: { boxShadow: "0 0 0 2px {colors.live}, 0 0 0 6px color-mix(in srgb, {colors.live} 22%, transparent)" },
+  "@media (forced-colors: active)": { outline: "3px solid Highlight" },
+});
+const placeholderClass = css({ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" });
+const discClass = css({
+  width: "min(36cqmin, 96px)",
+  height: "min(36cqmin, 96px)",
+  fontSize: "clamp(12px, 13cqmin, 34px)",
+  overflow: "hidden",
+  userSelect: "none",
+  transition: "opacity {durations.base} {easings.out}",
+});
+const discHiddenClass = css({ opacity: 0 });
+const imageClass = css({ width: "100%", height: "100%", borderRadius: "pill", objectFit: "cover" });
+const videoClass = css({ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", objectPosition: "center", bg: "transparent" });
+const mirroredClass = css({ transform: "scaleX(-1)" });
+const plateClass = cx(plate(), css({ position: "absolute", left: "8px", bottom: "8px", pointerEvents: "none", "& svg": { width: "14px", height: "14px", flex: "none" } }));
+const nameClass = css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const mutedClass = css({ display: "inline-flex", color: "danger.text" });
+const handClass = css({
+  position: "absolute",
+  top: "8px",
+  left: "8px",
+  display: "inline-flex",
+  width: "28px",
+  height: "28px",
+  borderRadius: "pill",
+  bg: "gold",
+  color: "gold.fg",
+  alignItems: "center",
+  justifyContent: "center",
+  "& svg": { width: "16px", height: "16px" },
+});
 </script>
 
 <template>
   <div
-    class="call-tile"
-    :class="{
-      'call-tile--has-video': videoTrack !== null,
-      'call-tile--interactive': interactive,
-      'call-tile--speaking': speaking,
-    }"
+    :class="[rootClass, interactive && interactiveClass, speaking && speakingClass]"
+    :data-speaking="speaking ? 'true' : undefined"
     :role="interactive ? 'button' : 'img'"
     :tabindex="interactive ? 0 : undefined"
     :aria-label="interactive ? `Open ${label} tile` : label"
@@ -113,14 +168,11 @@ const emit = defineEmits<{
     @keydown.enter="activate"
   >
     <!-- Placeholder layer — always mounted so the tile never shows a
-         bare cell while LiveKit is still subscribing to the track.
-         Fades out under the video when the track lands. -->
-    <div
-      class="call-tile__placeholder"
-      :style="{ background: placeholderBackground }"
-    >
-      <span class="call-tile__avatar-disc" aria-hidden="true">
-        <img v-if="avatarUrl" :src="avatarUrl" alt="" class="call-tile__avatar-image" />
+         bare cell while LiveKit is still subscribing to the track. The
+         disc fades out under the video when the track lands. -->
+    <div :class="placeholderClass">
+      <span :class="[avatar({ tint }), discClass, videoTrack !== null && discHiddenClass]" aria-hidden="true">
+        <img v-if="avatarUrl" :src="avatarUrl" alt="" :class="imageClass" />
         <template v-else>{{ initials }}</template>
       </span>
     </div>
@@ -128,246 +180,33 @@ const emit = defineEmits<{
     <video
       v-if="videoTrack"
       :ref="refVideo"
-      class="call-tile__video"
-      :class="{ 'call-tile__video--mirrored': mirrorVideo }"
+      :class="[videoClass, mirrorVideo && mirroredClass]"
       :data-call-tile-key="attachKey"
       autoplay
       playsinline
       :muted="isSelf"
     />
 
-    <!-- Persistent nameplate — same look whether a video is playing
-         or the placeholder is showing, so the tile reads identically
-         across states. -->
-    <div class="call-tile__nameplate">
-      <span class="call-tile__name">
-        <ScreenShare
-          v-if="showsPresentingGlyph"
-          class="call-tile__presenting-icon"
-          aria-hidden="true"
-        />
-        {{ label }}
-      </span>
-      <span
-        v-if="raisedHand"
-        class="call-tile__raised-hand"
-        aria-label="Hand raised"
-      >
-        <Hand class="w-3.5 h-3.5" />
-      </span>
+    <span
+      v-if="raisedHand"
+      :class="handClass"
+      aria-label="Hand raised"
+    >
+      <Hand aria-hidden="true" />
+    </span>
+
+    <!-- Persistent plate — same look whether a video is playing or the
+         placeholder is showing. -->
+    <span :class="plateClass">
+      <ScreenShare v-if="showsPresentingGlyph" aria-hidden="true" />
+      <span :class="nameClass">{{ label }}</span>
       <span
         v-if="!micEnabled"
-        class="call-tile__mic-off"
+        :class="mutedClass"
         :aria-label="isSelf ? 'Your mic is muted' : 'Muted'"
       >
-        <MicOff class="w-3.5 h-3.5" />
+        <MicOff aria-hidden="true" />
       </span>
-    </div>
+    </span>
   </div>
 </template>
-
-<style scoped>
-.call-tile {
-  /* The tile FILLS its grid cell (no aspect-ratio cap, no margin
-   * auto). The video inside uses `object-fit: contain` so faces are
-   * never cropped no matter how off-aspect the cell is during a
-   * splitter drag; letterbox bands show the gradient placeholder
-   * underneath, which keeps the tile visually substantial instead
-   * of revealing the muted background.
-   *
-   * Container queries on the tile scale the placeholder initial
-   * with the tile's actual rendered size. */
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--muted);
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  container-type: size;
-  isolation: isolate;
-  transition: box-shadow 160ms ease;
-}
-
-/* Thumbnail variant — fixed-width 16:9 strip preview in the
- * speaker-focus filmstrip; height derives from width via
- * aspect-ratio. */
-.call-tile.call-tile--thumb {
-  width: 9rem;
-  height: auto;
-  aspect-ratio: 16 / 9;
-  flex: 0 0 auto;
-}
-
-.call-tile--interactive {
-  cursor: pointer;
-}
-
-.call-tile--interactive:hover {
-  box-shadow: 0 0 18px var(--glow);
-}
-
-.call-tile--interactive:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-
-/* Active-speaker highlight ring. Drawn by an overlay layered ABOVE the
- * placeholder + video (both `position:absolute; inset:0` and opaque) — an inset
- * box-shadow on the tile itself paints underneath those layers and stays
- * hidden. The overlay is `inset:0` with no box size of its own, so the tile's
- * footprint is unchanged and the adaptive grid never reflows. `border-radius`
- * follows the tile so the ring is clipped to the same rounded corners. */
-.call-tile--speaking::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: inset 0 0 0 3px var(--primary);
-  pointer-events: none;
-  z-index: 2;
-}
-
-/* Soft outer glow on the tile box. It renders outside the box like the hover
- * glow, so it is never occluded and adds no clipping. */
-.call-tile--speaking {
-  box-shadow: 0 0 16px color-mix(in oklab, var(--primary) 50%, transparent);
-}
-
-/* Keep the glow consistent while hovering a speaking tile (the ring overlay is
- * unaffected by hover). */
-.call-tile--speaking.call-tile--interactive:hover {
-  box-shadow: 0 0 18px var(--glow);
-}
-
-/* The placeholder layer is ALWAYS painted underneath the video.
- * When the video lands, only the avatar disc fades out — the
- * gradient bg stays so it shows through the video's letterbox
- * bands (object-fit: contain on the video). This keeps the tile
- * visually substantial regardless of cell aspect. */
-.call-tile__placeholder {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  box-shadow: inset 0 0 120px color-mix(in oklab, black 28%, transparent);
-}
-
-.call-tile__avatar-disc {
-  transition: opacity 180ms ease-out;
-}
-
-.call-tile--has-video .call-tile__avatar-disc {
-  opacity: 0;
-}
-
-.call-tile__avatar-disc {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: min(36cqmin, 9rem);
-  height: min(36cqmin, 9rem);
-  border-radius: 9999px;
-  background: color-mix(in oklab, white 15%, transparent);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  font-size: clamp(1.25rem, 14cqmin, 4rem);
-  text-shadow: 0 1px 2px color-mix(in oklab, black 40%, transparent);
-  user-select: none;
-}
-
-.call-tile__avatar-image {
-  width: 100%;
-  height: 100%;
-  border-radius: 9999px;
-  object-fit: cover;
-}
-
-.call-tile__video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  /* `contain` so the camera's full frame is always visible — faces
-   * are never cropped, no matter the cell aspect. When the cell is
-   * off-aspect (e.g. a wide-short splitter drag), the resulting
-   * letterbox bands reveal the gradient placeholder painted in the
-   * layer below, so the tile reads as a unified frame instead of
-   * a video stranded on a muted background. */
-  object-fit: contain;
-  object-position: center;
-  /* Transparent so the placeholder gradient is visible in any
-   * letterbox region the contain-fit produces. */
-  background: transparent;
-}
-
-.call-tile__video--mirrored {
-  /* Local front-facing camera is always mirrored for natural feel.
-   * Screen-share readability is decided by the tile projection before
-   * this renderer sees the track. */
-  transform: scaleX(-1);
-}
-
-.call-tile__nameplate {
-  position: absolute;
-  inset-inline: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-xs);
-  padding: 0.375rem 0.5rem;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.55), transparent);
-  color: white;
-  pointer-events: none;
-}
-
-.call-tile__name {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  min-width: 0;
-  font-size: 0.8125rem;
-  line-height: 1;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-shadow: 0 1px 2px color-mix(in oklab, black 60%, transparent);
-}
-
-.call-tile__presenting-icon {
-  width: 0.875rem;
-  height: 0.875rem;
-  flex: 0 0 auto;
-  filter: drop-shadow(0 1px 1px color-mix(in oklab, black 55%, transparent));
-}
-
-.call-tile__mic-off {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.25rem;
-  height: 1.25rem;
-  border-radius: 9999px;
-  background: var(--destructive);
-  color: var(--destructive-foreground);
-  flex-shrink: 0;
-}
-
-.call-tile__raised-hand {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.25rem;
-  height: 1.25rem;
-  border-radius: 9999px;
-  background: oklch(0.78 0.16 85);
-  color: oklch(0.2 0.05 85);
-  flex-shrink: 0;
-}
-</style>

@@ -112,8 +112,8 @@ describe("channel access-required UI state", () => {
     );
 
     expect(html).toContain('role="status"');
-    expect(html).toContain("You need access to this channel");
-    expect(html).toContain("Ask a space admin for access");
+    expect(html).toContain("You need access to this room");
+    expect(html).toContain("Ask a room admin for access");
   });
 
   test("the channel surface replaces loading and composing with the access state", async () => {
@@ -167,7 +167,7 @@ describe("channel access-required UI state", () => {
       import.meta.url,
     );
 
-    expect(html).toContain("You need access to this channel");
+    expect(html).toContain("You need access to this room");
     expect(html).not.toContain("Generic join failure");
     expect(html).not.toContain("message-list-skeleton");
     expect(html).not.toContain("<textarea");

@@ -2,8 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { Loader2, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
+import { css } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
+import { spin } from "./composer-classes";
 import type { LinkPreview, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
@@ -22,6 +25,17 @@ const emit = defineEmits<{
   save: [newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload];
   close: [];
 }>();
+
+const form = css({ gridColumn: 2, width: "100%", alignSelf: "stretch", display: "flex", minWidth: 0, alignItems: "flex-start", gap: "1.5", mt: "1" });
+const stack = css({ display: "flex", minWidth: 0, flex: 1, flexDirection: "column", gap: "1.5" });
+const previewCard = css({ display: "flex", minWidth: 0, alignItems: "center", gap: "2", px: "2", py: "1.5", borderRadius: "sm", border: "1px solid {colors.border}", bg: "surface.2" });
+const spinner = css({ width: "16px", height: "16px", flex: "none", color: "action.text" });
+const previewText = css({ minWidth: 0, flex: 1, "& > div": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
+const previewTitle = css({ fontWeight: 700, fontSize: "sm", color: "fg" });
+const previewDesc = css({ textStyle: "caption", color: "fg.muted" });
+const hint = css({ textStyle: "caption", color: "fg.muted" });
+const hintAction = css({ border: 0, bg: "transparent", p: 0, font: "inherit", fontWeight: 700, color: "action.text", cursor: "pointer", _hover: { textDecoration: "underline" } });
+const dot = css({ mx: "1", color: "fg.soft" });
 
 const editInitialContent = richMessageToTiptap({
   body: props.body,
@@ -121,8 +135,8 @@ function submitEditFromLink() {
 </script>
 
 <template>
-  <div class="chat-message-fill flex min-w-0 items-start gap-1.5">
-    <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+  <div :class="form">
+    <div :class="stack">
       <ChatEditor
         :ref="setEditEditorRef"
         compact
@@ -134,41 +148,41 @@ function submitEditFromLink() {
       />
       <div
         v-if="editLinkPreview.showCard.value"
-        class="flex min-w-0 items-center gap-2 rounded-md border border-border bg-muted/45 px-2 py-1.5"
+        :class="previewCard"
         :aria-busy="editLinkPreview.state.value.kind === 'loading'"
       >
         <Loader2
           v-if="editLinkPreview.state.value.kind === 'loading'"
-          class="h-4 w-4 shrink-0 animate-spin text-primary"
+          :class="[spinner, spin]"
           aria-hidden="true"
         />
-        <div class="min-w-0 flex-1">
-          <div class="type-emphasis truncate text-foreground">{{ editLinkPreview.title.value }}</div>
-          <div class="type-caption truncate text-muted-foreground">{{ editLinkPreview.description.value }}</div>
+        <div :class="previewText">
+          <div :class="previewTitle">{{ editLinkPreview.title.value }}</div>
+          <div :class="previewDesc">{{ editLinkPreview.description.value }}</div>
         </div>
         <button
           v-if="editLinkPreview.canDismiss.value"
           type="button"
-          class="chat-composer-input-action h-7 w-7 shrink-0 flex items-center justify-center text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground"
+          :class="iconbtn({ size: 'sm' })"
           aria-label="Remove preview"
           @click="editLinkPreview.dismiss"
         >
-          <X class="h-4 w-4" aria-hidden="true" />
+          <X aria-hidden="true" />
         </button>
       </div>
-      <p class="type-caption text-muted-foreground/70">
+      <p :class="hint">
         escape to
         <button
           type="button"
-          class="type-emphasis text-primary/85 transition-colors hover:text-primary hover:underline"
+          :class="hintAction"
           @click="cancelEdit"
         >
           cancel
         </button>
-        <span class="mx-1 text-muted-foreground/35">•</span>
+        <span :class="dot">•</span>
         <button
           type="button"
-          class="type-emphasis text-primary/85 transition-colors hover:text-primary hover:underline"
+          :class="hintAction"
           @click="submitEditFromLink"
         >
           enter
