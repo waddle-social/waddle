@@ -25,7 +25,8 @@ use waddle_server::s2s::conn::{
     S2sService, ServiceOptions, SinkVerdict, StanzaSink, VerifiedPeerStream,
 };
 use waddle_server::s2s::route::{
-    LocalDelivery, LocalDeliveryOutcome, RouterLimits, RouterOptions, S2sRouter, SqlIqCorrelations,
+    LocalDelivery, LocalDeliveryOutcome, LocalOrigin, RouterLimits, RouterOptions, S2sRouter,
+    SqlIqCorrelations,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -89,18 +90,37 @@ pub async fn correlation_database(name: &str) -> Database {
     database
 }
 
-/// What the router delivered to local resources.
+/// What the router delivered to local resources, and who it says
+/// generated each stanza.
 #[derive(Debug, Default)]
 pub struct RecordingDelivery {
-    delivered: Mutex<Vec<(FullJid, Stanza)>>,
+    delivered: Mutex<Vec<(FullJid, Stanza, LocalOrigin)>>,
 }
 
 impl RecordingDelivery {
-    pub fn delivered(&self) -> Vec<(FullJid, Stanza)> {
+    fn recorded(&self) -> Vec<(FullJid, Stanza, LocalOrigin)> {
         match self.delivered.lock() {
             Ok(delivered) => delivered.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+
+    pub fn delivered(&self) -> Vec<(FullJid, Stanza)> {
+        self.recorded()
+            .into_iter()
+            .map(|(to, stanza, _)| (to, stanza))
+            .collect()
+    }
+
+    /// The origin of each IQ delivered with `id`.
+    pub fn origins(&self, id: &str) -> Vec<LocalOrigin> {
+        self.recorded()
+            .into_iter()
+            .filter_map(|(_, stanza, origin)| match stanza {
+                Stanza::Iq(iq) if iq.id() == id => Some(origin),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The IQs delivered with `id`.
@@ -117,10 +137,15 @@ impl RecordingDelivery {
 
 #[async_trait]
 impl LocalDelivery for RecordingDelivery {
-    async fn deliver(&self, to: &FullJid, stanza: Stanza) -> LocalDeliveryOutcome {
+    async fn deliver(
+        &self,
+        to: &FullJid,
+        stanza: Stanza,
+        origin: LocalOrigin,
+    ) -> LocalDeliveryOutcome {
         match self.delivered.lock() {
-            Ok(mut delivered) => delivered.push((to.clone(), stanza)),
-            Err(poisoned) => poisoned.into_inner().push((to.clone(), stanza)),
+            Ok(mut delivered) => delivered.push((to.clone(), stanza, origin)),
+            Err(poisoned) => poisoned.into_inner().push((to.clone(), stanza, origin)),
         }
         LocalDeliveryOutcome::Delivered
     }

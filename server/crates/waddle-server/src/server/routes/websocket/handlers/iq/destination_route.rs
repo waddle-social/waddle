@@ -16,8 +16,8 @@ use xmpp_parsers::iq::Iq;
 
 use super::{
     build_iq_error_xml_typed, handle_caps_disco_info_result, internal_server_error_iq_error,
-    not_authorized_iq_error, route_full_jid_iq, stanza_to_xml, ConnectionPhase, ResponseBatch,
-    WebSocketState,
+    not_authorized_iq_error, outgoing_block_frames, route_full_jid_iq, stanza_to_xml,
+    ConnectionPhase, DatabaseBlockingStorage, ResponseBatch, WebSocketState,
 };
 use crate::destination::{
     offer_iq, unroutable_iq_reply, Destination, IqOffer, RemoteDestination, UnroutableReason,
@@ -110,12 +110,35 @@ pub(super) async fn route_iq_response(
 
 /// Route an IQ get/set from a bound resource to an unserved domain: offer it
 /// to the remote route, and answer a refusal with the bounded stanza error.
+///
+/// A request to an address on the sender's own XEP-0191 blocking list is
+/// never routed: it is answered with `not-acceptable` and the `<blocked/>`
+/// condition (XEP-0191 §3.3), as for a local address. When the blocking
+/// list cannot be read the request is refused with
+/// `internal-server-error` rather than routed.
 pub(super) async fn route_unserved_request(
     iq: Iq,
     destination: UnservedDestination,
     sender: &FullJid,
     state: &WebSocketState,
 ) -> ResponseBatch {
+    if let Some(to) = iq.to().cloned() {
+        let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+        match blocking.is_blocked_jid(&sender.to_bare(), &to).await {
+            Ok(true) => return outgoing_block_frames(&iq, sender, &to).into(),
+            Ok(false) => {}
+            Err(error) => {
+                warn!(%error, "Failed to read the blocking list before routing an IQ to an unserved domain");
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    iq.to().map(Jid::as_str),
+                    Some(sender.as_str()),
+                    internal_server_error_iq_error("Internal server error."),
+                )]
+                .into();
+            }
+        }
+    }
     let reply = match destination {
         UnservedDestination::Remote(remote) => {
             match offer_remote(state, sender, remote, iq).await {

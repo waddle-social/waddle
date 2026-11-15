@@ -709,6 +709,11 @@ impl Session {
             CloseReason::PeerStreamError(StreamErrorCondition::SeeOtherHost) => {
                 S2sOutcome::Redirected
             }
+            // The peer keeps one stream per pair and refused or replaced
+            // this one for another stream of the same pair, such as another
+            // replica's: a local conflict seen from the other side, which
+            // says nothing about the peer's health.
+            CloseReason::PeerStreamError(StreamErrorCondition::Conflict) => S2sOutcome::Conflict,
             CloseReason::PeerStreamError(_) => S2sOutcome::PeerError,
             CloseReason::PeerClosed => S2sOutcome::PeerClosed,
             CloseReason::SaslFailure(_) if self.admission_refused => S2sOutcome::Admission,
@@ -780,8 +785,9 @@ async fn next_transmission(outbox: &mut Option<OutboxReceiver>) -> Option<Transm
 /// Whether an outbound attempt that ended with `outcome` failed because of
 /// the peer or the path to it, which backs the domain off. Local capacity
 /// and shutdown do not, nor does a refusal of the domain's own admission,
-/// which no retry changes, nor a local `conflict`, which another stream for
-/// the same pair caused and which says nothing about the peer.
+/// which no retry changes, nor a `conflict` sent by either side, which
+/// another stream for the same pair caused and which says nothing about the
+/// peer.
 pub(super) fn is_peer_failure(outcome: S2sOutcome) -> bool {
     matches!(
         outcome,

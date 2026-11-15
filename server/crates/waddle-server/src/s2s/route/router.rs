@@ -1,7 +1,8 @@
 //! The S2S router: the stanza sink of inbound streams and the remote route
 //! of local entities.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,10 +22,10 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::correlation::{
-    CorrelationDirection, CorrelationError, CorrelationKey, IqCorrelations, PendingRequest,
-    RequestKind,
+    CorrelationDirection, CorrelationError, CorrelationKey, CorrelationOwner, IqCorrelations,
+    PendingRequest, RequestKind,
 };
-use super::local::LocalDelivery;
+use super::local::{LocalDelivery, LocalOrigin};
 use super::principal::RemotePrincipal;
 use super::reach::{reach, InboundReach, LocalTarget};
 use super::replies;
@@ -38,11 +39,13 @@ use crate::s2s::conn::{
     VerifiedPeerStream,
 };
 
-/// The longest IQ id a request to a remote entity may carry. The id is part
-/// of the correlation key stored for the request.
-pub const MAX_REQUEST_ID_BYTES: usize = 256;
-
 /// Bounds on the router's queues and pending requests.
+///
+/// The per-peer and per-resource bounds are shares of the global ones, so
+/// that one remote domain, one local resource or remote senders' traffic
+/// cannot take all of them: `pending_per_peer` is below
+/// `pending_requests`, `pending_per_resource` below `queue_per_peer`, and
+/// `reply_queues` below `peer_queues`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterLimits {
     /// Stanzas waiting for one directional domain pair's stream. A full
@@ -50,8 +53,16 @@ pub struct RouterLimits {
     pub queue_per_peer: usize,
     /// Directional domain pairs with a queue at once.
     pub peer_queues: usize,
+    /// A reply to a remote sender opens a pair's queue only while fewer
+    /// than this many pairs have one, and is dropped otherwise, so remote
+    /// senders alone never hold every pair's queue. A reply on a pair that
+    /// already has a queue is not limited by it.
+    pub reply_queues: usize,
     /// Requests to remote entities pending on this replica.
     pub pending_requests: usize,
+    /// Requests to one remote domain pending on this replica, whichever
+    /// local domain and resource sent them.
+    pub pending_per_peer: usize,
     /// Requests to remote entities pending for one local resource.
     pub pending_per_resource: usize,
     /// How long a request to a remote entity waits for its response.
@@ -63,9 +74,11 @@ pub struct RouterLimits {
     pub transmit_deadline: Duration,
     /// How long an empty queue lives before its worker ends.
     pub queue_idle: Duration,
-    /// How often expired requests are answered.
+    /// How often expired requests are answered, requests another replica
+    /// completed are released, and the replica records that it is alive.
     pub sweep_interval: Duration,
-    /// How long after expiry a request left by a stopped replica is pruned.
+    /// How long after expiry a request is pruned once its replica has
+    /// stopped recording that it is alive for as long.
     pub prune_after: Duration,
 }
 
@@ -74,8 +87,10 @@ impl Default for RouterLimits {
         Self {
             queue_per_peer: 64,
             peer_queues: 64,
+            reply_queues: 32,
             pending_requests: 4096,
-            pending_per_resource: 64,
+            pending_per_peer: 1024,
+            pending_per_resource: 16,
             request_ttl: Duration::from_secs(120),
             completions: 64,
             transmit_deadline: Duration::from_secs(10),
@@ -121,6 +136,8 @@ enum Purpose {
     Request {
         sender: FullJid,
         pending: PendingRequest,
+        /// The reservation it holds on this replica.
+        generation: u64,
     },
     /// A local entity's response to a remote request: sent only if it
     /// completes that pending request.
@@ -142,6 +159,8 @@ enum Failure {
     Timeout,
     /// The same request is already pending.
     Duplicate,
+    /// The request's addresses or id are too long to correlate.
+    TooLong,
     /// The router could not record or encode the request.
     Internal,
     /// No response arrived before the request expired.
@@ -179,6 +198,11 @@ impl Failure {
                 DefinedCondition::BadRequest,
                 "A request with this id to this entity is already pending.",
             ),
+            Self::TooLong => (
+                ErrorType::Modify,
+                DefinedCondition::BadRequest,
+                "The request's addresses or id are too long to correlate.",
+            ),
             Self::Internal => (
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
@@ -199,19 +223,40 @@ impl Failure {
 #[derive(Debug)]
 struct Reserved {
     sender: FullJid,
+    peer: CanonicalDomain,
     expires_at_ms: i64,
+    /// Tells this reservation apart from a later one with the same key.
+    generation: u64,
+    /// Whether its row is in the correlation table: set after the row is
+    /// inserted, so a registered request whose row is missing was removed
+    /// by whoever completed it.
+    registered: bool,
 }
 
 #[derive(Debug, Default)]
 struct PendingRequests {
     requests: HashMap<CorrelationKey, Reserved>,
     per_resource: HashMap<FullJid, usize>,
+    per_peer: HashMap<CanonicalDomain, usize>,
+}
+
+/// Decrement `key`'s count in `counts`, forgetting it at zero.
+fn decrement<K: std::hash::Hash + Eq>(counts: &mut HashMap<K, usize>, key: &K) {
+    if let Some(count) = counts.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(key);
+        }
+    }
 }
 
 struct Inner {
     config: Arc<S2sConfig>,
     served: ServedDomains,
     correlations: Arc<dyn IqCorrelations>,
+    /// This router's name on the rows it registers.
+    owner: CorrelationOwner,
+    generations: AtomicU64,
     limits: RouterLimits,
     transport: OnceLock<S2sHandle>,
     local: OnceLock<Arc<dyn LocalDelivery>>,
@@ -258,6 +303,8 @@ impl S2sRouter {
             config: options.config,
             served: options.served,
             correlations: options.correlations,
+            owner: CorrelationOwner::generate(),
+            generations: AtomicU64::new(0),
             limits: options.limits,
             transport: OnceLock::new(),
             local: OnceLock::new(),
@@ -371,14 +418,18 @@ impl Inner {
             other => other,
         };
         let reserved = match &purpose {
-            Purpose::Request { pending, .. } => Some(pending.key.clone()),
+            Purpose::Request {
+                pending,
+                generation,
+                ..
+            } => Some((pending.key.clone(), *generation)),
             Purpose::Response { .. } | Purpose::Reply => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
             return RemoteRouteOutcome::Accepted;
         }
-        if let Some(key) = reserved {
-            self.release(&key);
+        if let Some((key, generation)) = reserved {
+            self.release_if(&key, Some(generation));
         }
         refuse(UnroutableReason::EgressBusy, outbound)
     }
@@ -411,7 +462,7 @@ impl Inner {
         let purpose = match outbound.stanza() {
             Stanza::Iq(iq) => match iq.as_ref() {
                 Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
-                    self.reserve_request(outbound, iq, payload)?
+                    self.reserve_request(outbound, iq, payload, &remote)?
                 }
                 Iq::Result { payload, .. } => Purpose::Response {
                     key: response_key(outbound, iq),
@@ -441,15 +492,13 @@ impl Inner {
         outbound: &RemoteOutbound,
         iq: &Iq,
         payload: &Element,
+        peer: &CanonicalDomain,
     ) -> Result<Purpose, UnroutableReason> {
         let Ok(sender) = outbound.sender().clone().try_into_full() else {
             return Err(UnroutableReason::RefusedByPolicy);
         };
         if *sender.domain() != *self.served.local() {
             return Err(UnroutableReason::RefusedByPolicy);
-        }
-        if iq.id().is_empty() || iq.id().len() > MAX_REQUEST_ID_BYTES {
-            return Err(UnroutableReason::InvalidRequest);
         }
         let kind = match iq {
             Iq::Set { .. } => RequestKind::Set,
@@ -461,31 +510,45 @@ impl Inner {
             remote: outbound.destination().address().clone(),
             id: iq.id().to_owned(),
         };
+        // An empty or overlong id, or an address too long for the table's
+        // key, is refused before anything is queued.
+        if !key.fits() {
+            return Err(UnroutableReason::InvalidRequest);
+        }
         let expires_at_ms = now_ms().saturating_add(duration_ms(self.limits.request_ttl));
         let mut pending = self.pending();
         if pending.requests.contains_key(&key) {
             return Err(UnroutableReason::InvalidRequest);
         }
         let per_resource = pending.per_resource.get(&sender).copied().unwrap_or(0);
+        let per_peer = pending.per_peer.get(peer).copied().unwrap_or(0);
         if pending.requests.len() >= self.limits.pending_requests
+            || per_peer >= self.limits.pending_per_peer
             || per_resource >= self.limits.pending_per_resource
         {
             return Err(UnroutableReason::EgressBusy);
         }
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
         pending.requests.insert(
             key.clone(),
             Reserved {
                 sender: sender.clone(),
+                peer: peer.clone(),
                 expires_at_ms,
+                generation,
+                registered: false,
             },
         );
         *pending.per_resource.entry(sender.clone()).or_insert(0) += 1;
+        *pending.per_peer.entry(peer.clone()).or_insert(0) += 1;
         Ok(Purpose::Request {
             sender,
+            generation,
             pending: PendingRequest {
                 key,
                 kind,
                 payload_namespace: payload.ns(),
+                owner: self.owner.clone(),
                 expires_at_ms,
             },
         })
@@ -493,14 +556,32 @@ impl Inner {
 
     /// Forget a request reserved on this replica.
     fn release(&self, key: &CorrelationKey) {
+        self.release_if(key, None);
+    }
+
+    /// Forget the request reserved under `key`, if it is still the
+    /// reservation `generation` names (any reservation when `None`).
+    fn release_if(&self, key: &CorrelationKey, generation: Option<u64>) {
         let mut pending = self.pending();
+        let current = pending
+            .requests
+            .get(key)
+            .map(|reserved| reserved.generation);
+        if current.is_none() || generation.is_some_and(|generation| current != Some(generation)) {
+            return;
+        }
         let Some(reserved) = pending.requests.remove(key) else {
             return;
         };
-        if let Some(count) = pending.per_resource.get_mut(&reserved.sender) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                pending.per_resource.remove(&reserved.sender);
+        decrement(&mut pending.per_resource, &reserved.sender);
+        decrement(&mut pending.per_peer, &reserved.peer);
+    }
+
+    /// Note that the reservation `generation` of `key` now has its row.
+    fn mark_registered(&self, key: &CorrelationKey, generation: u64) {
+        if let Some(reserved) = self.pending().requests.get_mut(key) {
+            if reserved.generation == generation {
+                reserved.registered = true;
             }
         }
     }
@@ -509,6 +590,11 @@ impl Inner {
     /// pair's worker if it has none: `false` when a full queue, too many
     /// pairs or shutdown refused it, and it was dropped.
     fn enqueue(self: &Arc<Self>, pair: Pair, queued: Queued) -> bool {
+        let opens = if matches!(queued.purpose, Purpose::Reply) {
+            self.limits.reply_queues
+        } else {
+            self.limits.peer_queues
+        };
         let mut queues = lock(&self.queues);
         let queued = match queues.get(&pair) {
             Some(sender) => match sender.try_send(queued) {
@@ -522,7 +608,7 @@ impl Inner {
             },
             None => queued,
         };
-        if queues.len() >= self.limits.peer_queues
+        if queues.len() >= opens.min(self.limits.peer_queues)
             || self.tasks.is_closed()
             || self.shutdown.is_cancelled()
         {
@@ -560,29 +646,35 @@ impl Inner {
     /// both answered and completed. Responses and replies are dropped:
     /// nothing answers them (RFC 6120 §8.3.1).
     async fn answer(&self, queued: Queued, failure: Failure, registered: bool) {
-        let Purpose::Request { sender, pending } = queued.purpose else {
+        let Purpose::Request {
+            sender,
+            pending,
+            generation,
+        } = queued.purpose
+        else {
             return;
         };
         if registered {
             match self.correlations.withdraw(&pending.key).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.release(&pending.key);
+                    self.release_if(&pending.key, Some(generation));
                     return;
                 }
                 // Unknown: the sweep answers it at expiry instead.
                 Err(_) => return,
             }
         }
-        self.release(&pending.key);
+        self.release_if(&pending.key, Some(generation));
         if let Some(reply) = replies::error_reply(&queued.stanza, failure.error(self.home())) {
-            self.deliver_local(&sender, reply).await;
+            self.deliver_local(&sender, reply, LocalOrigin::Server)
+                .await;
         }
     }
 
-    async fn deliver_local(&self, to: &FullJid, stanza: Stanza) {
+    async fn deliver_local(&self, to: &FullJid, stanza: Stanza, origin: LocalOrigin) {
         if let Some(local) = self.local.get() {
-            let _ = local.deliver(to, stanza).await;
+            let _ = local.deliver(to, stanza, origin).await;
         }
     }
 
@@ -607,6 +699,7 @@ impl Inner {
             {
                 self.reply(stream, reply);
             }
+            self.fail_unusable_response(stream, &element, &home);
             return SinkVerdict::Accepted;
         }
         let Some(stanza) = replies::parse_stanza(element.clone()) else {
@@ -635,7 +728,19 @@ impl Inner {
                     self.reply(stream, result);
                 }
             }
-            InboundReach::CorrelatedResponse => self.complete_response(&principal, stanza),
+            InboundReach::CorrelatedResponse => {
+                let payload_namespace = match &stanza {
+                    Stanza::Iq(iq) => match iq.as_ref() {
+                        Iq::Result {
+                            payload: Some(payload),
+                            ..
+                        } => Some(payload.ns()),
+                        _ => None,
+                    },
+                    Stanza::Message(_) | Stanza::Presence(_) => None,
+                };
+                self.complete_response(&principal, stanza, payload_namespace, LocalOrigin::Remote);
+            }
             InboundReach::Refused(refusal) => {
                 tracing::debug!(?refusal, "refusing a stanza from an s2s stream");
                 // RFC 6121 §8.5.1 and ADR-0020 D10: refused presence is
@@ -735,23 +840,68 @@ impl Inner {
         }
     }
 
+    /// A response this server refuses to process, because an address it
+    /// carries is outside the identity profile, still ends the request it
+    /// answers: the requester receives `service-unavailable` from this
+    /// server now, instead of `remote-server-timeout` at expiry. It
+    /// completes only what the response itself could have completed: the
+    /// same sender, recipient and id, and a payload in the request's
+    /// namespace.
+    fn fail_unusable_response(
+        self: &Arc<Self>,
+        stream: &VerifiedPeerStream,
+        element: &Element,
+        home: &DomainRef,
+    ) {
+        let payload_namespace = match (element.name(), element.attr("type")) {
+            ("iq", Some("result")) => element.children().next().map(Element::ns),
+            ("iq", Some("error")) => None,
+            _ => return,
+        };
+        let address = |name: &str| {
+            element
+                .attr(name)
+                .and_then(|value| waddle_xmpp::identity::parse_jid(value).ok())
+        };
+        let (Some(from), Some(to), Some(id)) = (address("from"), address("to"), element.attr("id"))
+        else {
+            return;
+        };
+        let Ok(principal) = RemotePrincipal::from_stream(stream, &from) else {
+            return;
+        };
+        let error = Stanza::Iq(Box::new(Iq::Error {
+            from: Some(from),
+            to: Some(to.clone()),
+            id: id.to_owned(),
+            payload: None,
+            error: replies::unusable_response(home),
+        }));
+        let Some(target) = LocalTarget::of(&self.served.classify(Some(&to))) else {
+            return;
+        };
+        if reach(target, &error) == InboundReach::CorrelatedResponse {
+            self.complete_response(&principal, error, payload_namespace, LocalOrigin::Server);
+        }
+    }
+
     /// Deliver an IQ response to the local resource it is addressed to, if
-    /// and only if it completes a request that resource sent to its sender.
-    /// Correlation runs off the connection's task; when too many responses
-    /// are being correlated, this one is dropped.
-    fn complete_response(self: &Arc<Self>, principal: &RemotePrincipal, stanza: Stanza) {
+    /// and only if it completes a request that resource sent to its sender
+    /// with a payload in `payload_namespace` (`None` for a response without
+    /// one). Correlation runs off the connection's task; when too many
+    /// responses are being correlated, this one is dropped.
+    fn complete_response(
+        self: &Arc<Self>,
+        principal: &RemotePrincipal,
+        stanza: Stanza,
+        payload_namespace: Option<String>,
+        origin: LocalOrigin,
+    ) {
         let Stanza::Iq(iq) = &stanza else {
             return;
         };
         let Some(Ok(requester)) = iq.to().map(|to| to.clone().try_into_full()) else {
             return;
-        };
-        let payload_namespace = match iq.as_ref() {
-            Iq::Result {
-                payload: Some(payload),
-                ..
-            } => Some(payload.ns()),
-            _ => None,
         };
         let key = CorrelationKey {
             direction: CorrelationDirection::Outbound,
@@ -773,7 +923,7 @@ impl Inner {
             {
                 Ok(true) => {
                     router.release(&key);
-                    router.deliver_local(&requester, stanza).await;
+                    router.deliver_local(&requester, stanza, origin).await;
                 }
                 Ok(false) => tracing::debug!("dropping an uncorrelated s2s response"),
                 Err(_) => tracing::warn!("dropping an s2s response: correlation failed"),
@@ -787,17 +937,17 @@ impl Inner {
     /// unless a response, possibly on another replica, completed it first.
     async fn sweep_expired(&self) {
         let now = now_ms();
-        let expired: Vec<(CorrelationKey, FullJid)> = self
+        let expired: Vec<(CorrelationKey, FullJid, u64)> = self
             .pending()
             .requests
             .iter()
             .filter(|(_, reserved)| reserved.expires_at_ms <= now)
-            .map(|(key, reserved)| (key.clone(), reserved.sender.clone()))
+            .map(|(key, reserved)| (key.clone(), reserved.sender.clone(), reserved.generation))
             .collect();
-        for (key, sender) in expired {
+        for (key, sender, generation) in expired {
             match self.correlations.expire(&key, now).await {
                 Ok(true) => {
-                    self.release(&key);
+                    self.release_if(&key, Some(generation));
                     let reply = Iq::Error {
                         from: Some(key.remote.clone()),
                         to: Some(Jid::from(sender.clone())),
@@ -805,13 +955,41 @@ impl Inner {
                         payload: None,
                         error: Failure::Expired.error(self.home()),
                     };
-                    self.deliver_local(&sender, Stanza::Iq(Box::new(reply)))
+                    self.deliver_local(&sender, Stanza::Iq(Box::new(reply)), LocalOrigin::Server)
                         .await;
                 }
                 // Completed, withdrawn or never registered.
-                Ok(false) => self.release(&key),
+                Ok(false) => self.release_if(&key, Some(generation)),
                 // Tried again at the next sweep.
                 Err(_) => {}
+            }
+        }
+    }
+
+    /// Release every registered request on this replica whose row another
+    /// replica removed: a response that reached that replica completed it.
+    /// The candidates are taken before the table is read, and each was
+    /// registered before it was marked, so a request missing from the
+    /// table was removed, never not yet inserted.
+    async fn sweep_completed_elsewhere(&self) {
+        let registered: Vec<(CorrelationKey, u64)> = self
+            .pending()
+            .requests
+            .iter()
+            .filter(|(_, reserved)| reserved.registered)
+            .map(|(key, reserved)| (key.clone(), reserved.generation))
+            .collect();
+        if registered.is_empty() {
+            return;
+        }
+        let Ok(outstanding) = self.correlations.outstanding(&self.owner).await else {
+            // Tried again at the next sweep.
+            return;
+        };
+        let outstanding: HashSet<CorrelationKey> = outstanding.into_iter().collect();
+        for (key, generation) in registered {
+            if !outstanding.contains(&key) {
+                self.release_if(&key, Some(generation));
             }
         }
     }
@@ -854,8 +1032,9 @@ fn server_result(stanza: &Stanza, payload: Option<Element>) -> Option<Stanza> {
     })))
 }
 
-/// Answer expired requests and prune those a stopped replica left, until
-/// shutdown.
+/// Until shutdown: answer expired requests, release those another replica
+/// completed, record that this replica is alive, and prune what stopped
+/// replicas left.
 async fn sweep(router: Arc<Inner>) {
     let period = router.limits.sweep_interval.max(Duration::from_millis(10));
     let mut interval = tokio::time::interval(period);
@@ -867,6 +1046,15 @@ async fn sweep(router: Arc<Inner>) {
             _ = interval.tick() => {}
         }
         router.sweep_expired().await;
+        router.sweep_completed_elsewhere().await;
+        if router
+            .correlations
+            .heartbeat(&router.owner, now_ms())
+            .await
+            .is_err()
+        {
+            tracing::warn!("recording the s2s router's liveness failed");
+        }
         if last_prune.elapsed() >= router.limits.prune_after {
             last_prune = Instant::now();
             let before = now_ms().saturating_sub(duration_ms(router.limits.prune_after));
@@ -942,6 +1130,26 @@ impl PairWorker {
         let Some(transport) = self.router.transport.get().cloned() else {
             return self.router.answer(queued, Failure::Timeout, false).await;
         };
+        // A local response leaves only if it completes a pending remote
+        // request, and that is settled before anything is dialled. If the
+        // stream then cannot be established the response is lost, as it
+        // would be anyway: nothing else could carry it.
+        if let Purpose::Response {
+            key,
+            payload_namespace,
+        } = &queued.purpose
+        {
+            let completed = self
+                .router
+                .correlations
+                .complete(key, payload_namespace.as_deref(), now_ms())
+                .await;
+            if !matches!(completed, Ok(true)) {
+                // Not a response to a pending remote request: dropped,
+                // never forwarded.
+                return;
+            }
+        }
         let mut stream = match self.stream(&transport).await {
             Ok(stream) => stream,
             Err(failure) => {
@@ -951,37 +1159,31 @@ impl PairWorker {
         };
         let now = now_ms();
         let registered = match &queued.purpose {
-            Purpose::Request { pending, .. } => {
+            Purpose::Request {
+                pending,
+                generation,
+                ..
+            } => {
                 if pending.expires_at_ms <= now {
                     return self.router.answer(queued, Failure::Expired, false).await;
                 }
                 match self.router.correlations.register(pending, now).await {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        self.router.mark_registered(&pending.key, *generation);
+                        true
+                    }
                     Err(CorrelationError::Duplicate) => {
                         return self.router.answer(queued, Failure::Duplicate, false).await
+                    }
+                    Err(CorrelationError::KeyTooLong) => {
+                        return self.router.answer(queued, Failure::TooLong, false).await
                     }
                     Err(CorrelationError::Storage(_)) => {
                         return self.router.answer(queued, Failure::Internal, false).await
                     }
                 }
             }
-            Purpose::Response {
-                key,
-                payload_namespace,
-            } => {
-                let completed = self
-                    .router
-                    .correlations
-                    .complete(key, payload_namespace.as_deref(), now)
-                    .await;
-                if !matches!(completed, Ok(true)) {
-                    // Not a response to a pending remote request: dropped,
-                    // never forwarded.
-                    return;
-                }
-                false
-            }
-            Purpose::Reply => false,
+            Purpose::Response { .. } | Purpose::Reply => false,
         };
         let mut element = stanza_element(&queued.stanza);
         let mut offered_again = false;

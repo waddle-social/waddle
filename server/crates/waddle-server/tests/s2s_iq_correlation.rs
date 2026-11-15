@@ -2,8 +2,13 @@
 //! shared correlation table completes a pending request at most once, by
 //! the response that matches its sender, recipient, id and payload
 //! namespace before it expires, whichever replica that response reaches;
-//! a replayed, forged or late response completes nothing; and a request
-//! without a response is answered once at expiry.
+//! a replayed, forged or late response completes nothing; a request
+//! without a response is answered once at expiry; the replica that sent a
+//! request another replica completed releases it at its next sweep; a
+//! response carrying an address outside the identity profile answers its
+//! request with an error at once; only the requests of a replica that
+//! stopped recording that it is alive are pruned; and a key too long for
+//! the table is refused.
 //!
 //! Two correlation stores over one database stand for two replicas of one
 //! deployment. The routed cases use two in-process deployments on loopback
@@ -25,10 +30,11 @@ use support::{
 };
 use waddle_server::destination::IqOffer;
 use waddle_server::s2s::route::{
-    CorrelationDirection, CorrelationError, CorrelationKey, IqCorrelations, PendingRequest,
-    RequestKind, RouterLimits, SqlIqCorrelations,
+    CorrelationDirection, CorrelationError, CorrelationKey, CorrelationOwner, IqCorrelations,
+    LocalOrigin, PendingRequest, RequestKind, RouterLimits, SqlIqCorrelations,
+    MAX_CORRELATED_ADDRESS_BYTES,
 };
-use waddle_xmpp::disco::DISCO_INFO_NS;
+use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::xep::xep0199::NS_PING;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::DefinedCondition;
@@ -46,10 +52,15 @@ fn key(id: &str) -> CorrelationKey {
 }
 
 fn pending(id: &str, expires_at_ms: i64) -> PendingRequest {
+    owned(id, expires_at_ms, "replica-1")
+}
+
+fn owned(id: &str, expires_at_ms: i64, owner: &str) -> PendingRequest {
     PendingRequest {
         key: key(id),
         kind: RequestKind::Get,
         payload_namespace: DISCO_INFO_NS.to_owned(),
+        owner: CorrelationOwner::named(owner),
         expires_at_ms,
     }
 }
@@ -201,18 +212,85 @@ async fn withdrawal_and_completion_have_one_winner() {
 #[tokio::test]
 async fn requests_left_by_a_stopped_replica_are_pruned() {
     let (first, second) = replicas("correlation-prune").await;
+    let (stopped, alive) = ("stopped", "alive");
     first
-        .register(&pending("old", NOW + 1_000), NOW)
+        .register(&owned("old", NOW + 1_000, stopped), NOW)
         .await
         .expect("registered");
     first
-        .register(&pending("live", NOW + 600_000), NOW)
+        .register(&owned("unexpired", NOW + 600_000, stopped), NOW)
         .await
         .expect("registered");
+    first
+        .register(&owned("kept", NOW + 1_000, alive), NOW)
+        .await
+        .expect("registered");
+    first
+        .heartbeat(&CorrelationOwner::named(stopped), NOW)
+        .await
+        .expect("recorded");
+    first
+        .heartbeat(&CorrelationOwner::named(alive), NOW + 2_500)
+        .await
+        .expect("recorded");
+    // Only the expired request of the replica that has not recorded since
+    // the cut-off is pruned; a live replica answers its own.
     assert_eq!(second.prune(NOW + 2_000).await, Ok(1));
     assert_eq!(
-        second.complete(&key("live"), None, NOW + 3_000).await,
+        second.complete(&key("unexpired"), None, NOW + 3_000).await,
         Ok(true)
+    );
+    assert_eq!(first.expire(&key("kept"), NOW + 3_000).await, Ok(true));
+}
+
+#[tokio::test]
+async fn a_replica_reads_which_of_its_requests_are_still_stored() {
+    let (first, second) = replicas("correlation-outstanding").await;
+    first
+        .register(&owned("o1", NOW + 60_000, "replica-1"), NOW)
+        .await
+        .expect("registered");
+    first
+        .register(&owned("o2", NOW + 60_000, "replica-1"), NOW)
+        .await
+        .expect("registered");
+    first
+        .register(&owned("o3", NOW + 60_000, "replica-2"), NOW)
+        .await
+        .expect("registered");
+    assert_eq!(second.complete(&key("o1"), None, NOW + 1).await, Ok(true));
+    let outstanding = first
+        .outstanding(&CorrelationOwner::named("replica-1"))
+        .await
+        .expect("read");
+    assert_eq!(outstanding, vec![key("o2")]);
+}
+
+#[tokio::test]
+async fn a_key_too_long_for_the_table_is_refused() {
+    let (first, _) = replicas("correlation-too-long").await;
+    let long_local = [
+        "a".repeat(MAX_CORRELATED_ADDRESS_BYTES).as_str(),
+        "@home-a.test/phone",
+    ]
+    .concat();
+    let mut request = pending("t1", NOW + 60_000);
+    request.key.local = jid(&long_local);
+    assert!(!request.key.fits());
+    assert_eq!(
+        first.register(&request, NOW).await,
+        Err(CorrelationError::KeyTooLong)
+    );
+    let mut request = pending(&"x".repeat(257), NOW + 60_000);
+    assert!(!request.key.fits());
+    assert_eq!(
+        first.register(&request, NOW).await,
+        Err(CorrelationError::KeyTooLong)
+    );
+    request.key.id = String::new();
+    assert_eq!(
+        first.register(&request, NOW).await,
+        Err(CorrelationError::KeyTooLong)
     );
 }
 
@@ -241,8 +319,10 @@ async fn a_response_reaching_another_replica_completes_the_request_there_once() 
     let (listener_a1, _) = listener().await;
     let (listener_a2, address_a2) = listener().await;
     let (listener_b, address_b) = listener().await;
+    // A lifetime far longer than the test, so only the sweep's reading of
+    // the shared table can release the sending replica's reservation.
     let limits = RouterLimits {
-        request_ttl: Duration::from_secs(3),
+        request_ttl: Duration::from_secs(120),
         sweep_interval: Duration::from_millis(200),
         ..RouterLimits::default()
     };
@@ -272,11 +352,20 @@ async fn a_response_reaching_another_replica_completes_the_request_there_once() 
         .expect("the replica that received the response delivers it");
     assert_eq!(delivered.0, full(ALICE));
     assert!(matches!(delivered.1, Iq::Result { .. }));
-    // The sending replica's expiry finds the request completed and answers
-    // nothing.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(a2.delivery.origins("x1"), vec![LocalOrigin::Remote]);
+    // The sending replica learns at its next sweep that the request was
+    // completed elsewhere and releases it, long before it would expire,
+    // without answering it.
+    assert!(
+        wait_for(Duration::from_secs(3), || (a1.router.pending_requests()
+            == 0)
+            .then_some(()))
+        .await
+        .is_some(),
+        "the sending replica releases the request promptly"
+    );
+    tokio::time::sleep(QUIET).await;
     assert!(a1.delivery.iqs("x1").is_empty());
-    assert_eq!(a1.router.pending_requests(), 0);
     assert_eq!(a2.delivery.iqs("x1").len(), 1);
 }
 
@@ -342,7 +431,69 @@ async fn a_request_without_a_response_is_answered_once_at_expiry() {
         DefinedCondition::RemoteServerTimeout
     );
     assert_eq!(from.as_ref(), Some(&jid(HOME_B)));
+    // The error is this server's, so the requester's blocking list does not
+    // drop it although it names the remote entity.
+    assert_eq!(a.delivery.origins("e1"), vec![LocalOrigin::Server]);
     tokio::time::sleep(QUIET).await;
     assert_eq!(a.delivery.iqs("e1").len(), 1);
     assert_eq!(a.router.pending_requests(), 0);
+}
+
+#[tokio::test]
+async fn a_response_with_an_address_outside_the_profile_answers_its_request_at_once() {
+    let pki = Pki::new();
+    // The default lifetime: only the refused response can answer in time.
+    let (a, b, captured) = routed_and_capturing(&pki, RouterLimits::default(), |_| {}).await;
+    let items = Iq::Get {
+        from: Some(jid(ALICE)),
+        to: None,
+        id: "u1".to_owned(),
+        payload: Element::builder("query", DISCO_ITEMS_NS).build(),
+    };
+    assert!(matches!(a.offer_iq(HOME_B, items).await, IqOffer::Accepted));
+    assert!(
+        wait_for(ARRIVES, || captured.with_id("u1").into_iter().next())
+            .await
+            .is_some()
+    );
+    // home-b.test answers with an item whose localpart is in a spelling the
+    // identity profile refuses.
+    let item = Element::builder("item", DISCO_ITEMS_NS)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "Bob@home-b.test",
+        )
+        .build();
+    let result = Iq::Result {
+        from: Some(jid(HOME_B)),
+        to: Some(jid(ALICE)),
+        id: "u1".to_owned(),
+        payload: Some(
+            Element::builder("query", DISCO_ITEMS_NS)
+                .append(item)
+                .build(),
+        ),
+    };
+    send(&b, HOME_B, HOME_A, result).await;
+    let (to, answered) = wait_for(ARRIVES, || a.delivery.iqs("u1").into_iter().next())
+        .await
+        .expect("the requester is answered");
+    assert_eq!(to, full(ALICE));
+    let Iq::Error { error, from, .. } = &answered else {
+        panic!("an error, got {answered:?}");
+    };
+    assert_eq!(from.as_ref(), Some(&jid(HOME_B)));
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::ServiceUnavailable
+    );
+    assert_eq!(error.by.as_ref(), Some(&jid(HOME_A)));
+    assert_eq!(a.delivery.origins("u1"), vec![LocalOrigin::Server]);
+    assert_eq!(a.router.pending_requests(), 0);
+    // An IQ result is never answered with an error (RFC 6120 §8.3.1).
+    tokio::time::sleep(QUIET).await;
+    assert!(captured
+        .with_id("u1")
+        .iter()
+        .all(|stanza| stanza.attr("type") != Some("error")));
 }

@@ -6,7 +6,8 @@
 //! MUC and the Spaces PubSub service, which D10 enables, refuse until their
 //! handlers are reviewed for remote principals. The identity profile
 //! applies to every address a stanza carries (gate G10): a refused spelling
-//! is answered with `jid-malformed` and the stream stays open.
+//! is answered with `jid-malformed`, with the stanza's own id, and the
+//! stream stays open.
 //!
 //! The inventory these cases follow is recorded in
 //! `server/docs/planning/s2s-routing-2047.md`. `home-a.test` runs the S2S
@@ -387,6 +388,28 @@ async fn a_refused_spelling_is_answered_with_jid_malformed_and_the_stream_stays_
     let reply = wait_for(ARRIVES, || captured.with_id("j3").into_iter().next())
         .await
         .expect("answered");
+    assert_eq!(error_condition(&reply).as_deref(), Some("jid-malformed"));
+
+    // A message in a refused spelling is answered with the message's own
+    // id, so its sender can tell which message failed.
+    let message = Element::builder("message", "jabber:server")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "j5")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "Bob@home-b.test/phone",
+        )
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), HOME_A)
+        .append(Element::builder("body", "jabber:server").append("hi"))
+        .build();
+    let bytes = peer.encode(&message);
+    peer.write(&bytes).await.expect("written");
+    let reply = wait_for(ARRIVES, || captured.with_id("j5").into_iter().next())
+        .await
+        .expect("answered with the message's id");
+    assert_eq!(reply.name(), "message");
+    assert_eq!(reply.attr("type"), Some("error"));
+    assert_eq!(reply.attr("to"), Some(BOB));
     assert_eq!(error_condition(&reply).as_deref(), Some("jid-malformed"));
 
     // A stanza that is not valid for its kind is a bad request.

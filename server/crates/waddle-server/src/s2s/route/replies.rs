@@ -42,6 +42,18 @@ pub(super) fn jid_malformed(home: &DomainRef) -> StanzaError {
     )
 }
 
+/// The error a local requester receives instead of a remote entity's
+/// response that this server refused to process because an address it
+/// carries is outside the identity profile.
+pub(super) fn unusable_response(home: &DomainRef) -> StanzaError {
+    error(
+        home,
+        ErrorType::Cancel,
+        DefinedCondition::ServiceUnavailable,
+        "The remote entity's response carried an address this server does not accept.",
+    )
+}
+
 /// RFC 6120 §8.3.3.1: a stanza that is not a valid stanza of its kind.
 pub(super) fn bad_request(home: &DomainRef) -> StanzaError {
     error(
@@ -124,6 +136,9 @@ pub(super) fn error_reply_to_element(element: &Element, error: StanzaError) -> O
             }
             let mut reply = Message::error(Some(to));
             reply.from = Some(from);
+            reply.id = element
+                .attr("id")
+                .map(|id| xmpp_parsers::message::Id(id.to_owned()));
             reply.payloads.push(Element::from(error));
             Some(Stanza::Message(reply))
         }

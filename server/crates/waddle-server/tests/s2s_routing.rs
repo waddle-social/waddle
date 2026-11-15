@@ -2,10 +2,13 @@
 //! transport, D7 and D1; gates G8 and G10): a local resource's request is
 //! queued on its pair's egress queue, written on a stream dialled on
 //! demand and its response delivered once; destinations and peers the
-//! router refuses; failures answered with `remote-server-not-found` or
-//! `remote-server-timeout`; bounded queues and pending requests; server-
-//! minted credentials stripped; local responses sent only for a pending
-//! remote request; and the remote principal a stanza is read as.
+//! router refuses, including those it refuses by its own classification
+//! when handed one the classifier would have refused; failures answered
+//! with `remote-server-not-found` or `remote-server-timeout`; bounded
+//! queues and pending requests, per resource, per remote domain and for
+//! keys too long to correlate; server-minted credentials stripped; local
+//! responses sent only for a pending remote request, and an uncorrelated
+//! one never dialled for; and the remote principal a stanza is read as.
 //!
 //! Certificates come from the connection-manager fixture's test CA, the
 //! correlation tables are in-memory SQLite databases and local resources
@@ -24,9 +27,14 @@ use support::{
     full, jid, listener, routed_and_capturing, routed_pair, start_routed, wait_for, Pki, Spec,
     ARRIVES, HOME_A, HOME_B, QUIET,
 };
-use waddle_server::destination::{IqOffer, UnroutableReason};
+use waddle_server::destination::{
+    InvalidDestination, IqOffer, RemoteDestination, RemoteOutbound, RemoteRoute,
+    RemoteRouteOutcome, UnroutableReason,
+};
 use waddle_server::s2s::conn::StreamDirection;
-use waddle_server::s2s::route::{PrincipalError, RemotePrincipal, RouterLimits};
+use waddle_server::s2s::route::{
+    PrincipalError, RemotePrincipal, RouterLimits, MAX_CORRELATED_ADDRESS_BYTES,
+};
 use waddle_server::s2s::verify::TrustProfileKind;
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0199::NS_PING;
@@ -270,6 +278,106 @@ async fn pending_requests_are_bounded_per_resource_and_ids_are_unique() {
 }
 
 #[tokio::test]
+async fn pending_requests_are_bounded_per_remote_domain() {
+    let pki = Pki::new();
+    let (listener_a, _) = listener().await;
+    let (silent, silent_address) = listener().await;
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.endpoints = vec![(HOME_B, silent_address)];
+    let limits = RouterLimits {
+        pending_per_peer: 2,
+        ..RouterLimits::default()
+    };
+    let a = start_routed(
+        &pki,
+        &spec,
+        listener_a,
+        support::correlation_database("s2s-routing-peer-share").await,
+        limits,
+    )
+    .await;
+    // Two resources share the remote domain's allowance.
+    let from = |sender: &str, id: &str| {
+        let mut request = ping(id);
+        *request.from_mut() = Some(jid(sender));
+        request
+    };
+    assert!(matches!(
+        a.offer_iq(HOME_B, from(ALICE, "s1")).await,
+        IqOffer::Accepted
+    ));
+    assert!(matches!(
+        a.offer_iq(HOME_B, from("alice@home-a.test/laptop", "s2"))
+            .await,
+        IqOffer::Accepted
+    ));
+    let (reason, reply) = refused(
+        a.offer_iq(HOME_B, from("carol@home-a.test/desk", "s3"))
+            .await,
+    );
+    assert_eq!(reason, UnroutableReason::EgressBusy);
+    assert_eq!(
+        stanza_error(&reply).defined_condition,
+        DefinedCondition::ResourceConstraint
+    );
+    assert_eq!(a.router.pending_requests(), 2);
+    drop(silent);
+}
+
+#[tokio::test]
+async fn a_request_whose_addresses_are_too_long_to_correlate_is_refused() {
+    let pki = Pki::new();
+    let (a, _b) = routed_pair(&pki, RouterLimits::default()).await;
+    let long = [
+        "a".repeat(MAX_CORRELATED_ADDRESS_BYTES).as_str(),
+        "@",
+        HOME_B,
+    ]
+    .concat();
+    let (reason, reply) = refused(a.offer_iq(&long, ping("long")).await);
+    assert_eq!(reason, UnroutableReason::InvalidRequest);
+    assert_eq!(
+        stanza_error(&reply).defined_condition,
+        DefinedCondition::BadRequest
+    );
+    assert_eq!(a.router.pending_requests(), 0);
+    assert!(a.deployment.handle.streams().is_empty(), "nothing dialled");
+}
+
+#[tokio::test]
+async fn the_router_refuses_a_destination_that_cannot_name_a_peer_by_its_own_classification() {
+    let pki = Pki::new();
+    let (a, _b) = routed_pair(&pki, RouterLimits::default()).await;
+    // Destinations the classifier refuses before any route sees them,
+    // handed to the router directly.
+    for (address, expected) in [
+        ("bob@127.0.0.1", InvalidDestination::IpLiteral),
+        ("bob@[::1]", InvalidDestination::IpLiteral),
+        ("bob@127.1", InvalidDestination::NumericIpv4Form),
+        ("bob@intranet", InvalidDestination::UnqualifiedHost),
+        ("bob@exa_mple.test", InvalidDestination::UnpreparableDomain),
+    ] {
+        let mut request = ping("classified");
+        *request.to_mut() = Some(jid(address));
+        let outbound = RemoteOutbound::new(
+            RemoteDestination::unclassified(jid(address)),
+            waddle_xmpp::Stanza::Iq(Box::new(request)),
+        )
+        .expect("the request has a sender");
+        match a.router.route(outbound).await {
+            RemoteRouteOutcome::Unroutable { reason, .. } => assert_eq!(
+                reason,
+                UnroutableReason::InvalidDestination(expected),
+                "{address}"
+            ),
+            RemoteRouteOutcome::Accepted => panic!("{address} was accepted"),
+        }
+    }
+    assert_eq!(a.router.pending_requests(), 0);
+    assert!(a.deployment.handle.streams().is_empty(), "nothing dialled");
+}
+
+#[tokio::test]
 async fn only_a_bound_resource_of_a_local_account_sends_requests_to_peers() {
     let pki = Pki::new();
     let (a, _b) = routed_pair(&pki, RouterLimits::default()).await;
@@ -390,6 +498,25 @@ async fn a_local_response_leaves_only_for_a_pending_remote_request() {
             .is_some()
     );
     assert!(captured.with_id("unsolicited").is_empty());
+}
+
+#[tokio::test]
+async fn an_uncorrelated_local_response_is_dropped_without_dialling() {
+    let pki = Pki::new();
+    let (a, _b, captured) = routed_and_capturing(&pki, RouterLimits::default(), |_| {}).await;
+    let response = Iq::Result {
+        from: Some(jid(ALICE)),
+        to: None,
+        id: "undialled".into(),
+        payload: None,
+    };
+    assert!(matches!(
+        a.offer_iq("bob@home-b.test/phone", response).await,
+        IqOffer::Accepted
+    ));
+    tokio::time::sleep(QUIET).await;
+    assert!(a.deployment.handle.streams().is_empty(), "nothing dialled");
+    assert!(captured.stanzas().is_empty());
 }
 
 #[tokio::test]

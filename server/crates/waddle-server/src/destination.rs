@@ -195,6 +195,14 @@ pub struct RemoteDestination {
 }
 
 impl RemoteDestination {
+    /// `address` as a remote destination without classifying it, so that a
+    /// suite can offer a route a destination the classifier would have
+    /// refused and observe the route's own refusal.
+    #[cfg(feature = "test-support")]
+    pub fn unclassified(address: Jid) -> Self {
+        Self { address }
+    }
+
     /// The complete destination address.
     pub fn address(&self) -> &Jid {
         &self.address
