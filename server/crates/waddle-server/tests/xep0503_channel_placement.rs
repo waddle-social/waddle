@@ -36,8 +36,8 @@ use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
 use waddle_xmpp::pubsub::{Affiliation, PubSubItem};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
-use xmpp_parsers::minidom::Element;
 use ws_loopback_support::Loopback;
+use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
 /// The test state's MUC service.
@@ -446,7 +446,9 @@ async fn a_link_that_disagrees_with_the_parent_is_moved_only_with_authority() {
     // the read lists nothing new and neither adds the linked Space as a
     // parent nor removes the parent the channel has.
     fixture.room_actor(CHANNEL).await;
-    fixture.space_affiliation(LINKED_SPACE, &fixture.mallory).await;
+    fixture
+        .space_affiliation(LINKED_SPACE, &fixture.mallory)
+        .await;
     let reply = round_trip(
         &mut mallory,
         get("backfill", SPACES, pubsub_items(LINKED_SPACE)),

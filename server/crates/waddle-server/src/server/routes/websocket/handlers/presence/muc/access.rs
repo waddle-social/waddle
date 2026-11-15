@@ -433,7 +433,8 @@ async fn restore_space_parent_tuples_for_room(
             .ask(DeleteTuple { tuple })
             .await
         {
-            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {}
+            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,
