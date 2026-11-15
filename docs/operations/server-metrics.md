@@ -138,6 +138,7 @@ Which of these are recorded today:
 | `waddle.extension.observation.publication.delay` | histogram | `ms` | — | `waddle_extension_observation_publication_delay_milliseconds_bucket / _sum / _count` | Time from committed room source to durable room result publication. |
 | `waddle.extension.observation.published` | counter | `1` | — | `waddle_extension_observation_published_total` | Saved room extension results admitted to the durable room broadcast path. |
 | `waddle.extension.observation.queue.delay` | histogram | `ms` | — | `waddle_extension_observation_queue_delay_milliseconds_bucket / _sum / _count` | Time from committed room source to its first extension invocation. |
+| `waddle.host_grant.enrolled_set.age` | gauge | `s` | — | `waddle_host_grant_enrolled_set_age_seconds` | Time since this replica last loaded the host-grant enrolled set, recorded on every refresh tick; the replica reports itself not ready once it exceeds 30 s. |
 | `waddle.janitor.sweeps` | counter | `{sweep}` | `janitor`, `outcome` | `waddle_janitor_sweeps_total` | Periodic janitor sweep ticks by janitor and outcome. |
 | `waddle.messages.delivered` | counter | `{message}` | `kind` | `waddle_messages_delivered_total` | Message stanzas delivered to a local session. |
 | `waddle.muc.admission.denied` | counter | `1` | `condition`, `deny_reason` | `waddle_muc_admission_denied_total` | MUC join admission denials by stanza error condition and refusal site. |

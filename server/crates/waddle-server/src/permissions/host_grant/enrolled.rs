@@ -23,17 +23,26 @@
 //!
 //! Enrollment only ever adds to the set: a room binding is immutable and a
 //! retired scope's objects stay enrolled. A scope enrolled on any replica is
-//! therefore managed on each replica within one refresh interval, and the
-//! owner-phase enrollment procedure waits at least that long before the
-//! scope is relied on (see the "Writer fence and sink contracts" section of
-//! `server/docs/planning/host-grant-authority-2047.md`).
+//! therefore managed on each replica within one refresh interval plus one
+//! bounded read, and the owner-phase enrollment procedure waits at least
+//! that long before the scope is relied on (see the "Writer fence and sink
+//! contracts" section of `server/docs/planning/host-grant-authority-2047.md`).
+//! A reload that finds fewer objects than the set it replaces is logged at
+//! warn with the counts only.
+//!
+//! While refreshes fail the set ages. Its age since the last successful
+//! load is recorded as the `waddle.host_grant.enrolled_set.age` gauge on
+//! every tick, and once it exceeds [`ENROLLED_SET_STALE_AFTER`] the replica
+//! reports itself not ready ([`EnrolledScopes::stale`]), so that it leaves
+//! the serving set until a reload succeeds.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use jid::BareJid;
 use tokio::sync::watch;
+use tokio::time::Instant;
 use waddle_xmpp::identity::CanonicalBareJid;
 
 use super::error::HostGrantError;
@@ -45,6 +54,10 @@ use crate::permissions::{Object, ObjectType};
 /// How often a replica reloads the enrolled set once it has loaded it.
 pub const ENROLLED_SET_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How old the loaded set may grow, while refreshes fail, before the
+/// replica reports itself not ready: six refresh intervals.
+pub const ENROLLED_SET_STALE_AFTER: Duration = Duration::from_secs(30);
+
 /// How often the first load is retried until it succeeds.
 const FIRST_LOAD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -54,6 +67,9 @@ const FIRST_LOAD_READER_WAIT: Duration = Duration::from_secs(2);
 
 /// At most one warning a minute that a refresh failed.
 static REFRESH_FAILED: RateLimitedWarning = RateLimitedWarning::new();
+/// At most one warning a minute that the set is older than
+/// [`ENROLLED_SET_STALE_AFTER`].
+static STALE: RateLimitedWarning = RateLimitedWarning::new();
 
 /// The enrolled objects of every scope, as one snapshot of the store read
 /// them, each with the lifecycle of the scope that enrolled it.
@@ -97,6 +113,19 @@ impl EnrolledSet {
         self.space_nodes.get(node).copied()
     }
 
+    /// How many rooms, channels and Space nodes of this set `newer` does
+    /// not hold.
+    fn missing_from(&self, newer: &Self) -> (usize, usize, usize) {
+        fn missing<V>(older: &BTreeMap<String, V>, newer: &BTreeMap<String, V>) -> usize {
+            older.keys().filter(|key| !newer.contains_key(*key)).count()
+        }
+        (
+            missing(&self.rooms, &newer.rooms),
+            missing(&self.channels, &newer.channels),
+            missing(&self.space_nodes, &newer.space_nodes),
+        )
+    }
+
     /// The channel identifiers of the rooms `lifecycle` manages.
     pub fn scope_channels(&self, lifecycle: ScopeLifecycleId) -> Vec<String> {
         self.channels
@@ -137,6 +166,8 @@ pub enum Enrollment {
 #[derive(Clone)]
 pub struct EnrolledScopes {
     state: Arc<watch::Sender<EnrolledState>>,
+    /// When the set was last loaded successfully.
+    last_load: Arc<Mutex<Option<Instant>>>,
     store: Option<HostGrantStore>,
 }
 
@@ -146,6 +177,7 @@ impl Default for EnrolledScopes {
     fn default() -> Self {
         Self {
             state: Arc::new(watch::Sender::new(EnrolledState::RelationsAbsent)),
+            last_load: Arc::default(),
             store: None,
         }
     }
@@ -171,12 +203,14 @@ impl EnrolledScopes {
     pub fn watch(store: HostGrantStore) -> Self {
         let scopes = Self {
             state: Arc::new(watch::Sender::new(EnrolledState::Pending)),
+            last_load: Arc::default(),
             store: Some(store.clone()),
         };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(refresh_until_dropped(
                 store,
                 Arc::downgrade(&scopes.state),
+                Arc::clone(&scopes.last_load),
                 ENROLLED_SET_REFRESH_INTERVAL,
             ));
         }
@@ -190,7 +224,31 @@ impl EnrolledScopes {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        load_into(store, &self.state).await
+        load_into(store, &self.state, &self.last_load).await
+    }
+
+    /// How long ago the set was last loaded successfully; `None` before the
+    /// first load and on a deployment without a canonical store.
+    pub fn age(&self) -> Option<Duration> {
+        self.store.as_ref()?;
+        let last = (*self.last_load.lock().ok()?)?;
+        Some(last.elapsed())
+    }
+
+    /// Whether the loaded set has grown older than
+    /// [`ENROLLED_SET_STALE_AFTER`] because its refreshes keep failing: a
+    /// scope enrolled since may not be honoured here, and the replica
+    /// reports itself not ready. A schema without the host-grant relations
+    /// and a deployment without a canonical store are never stale, nor is
+    /// a set that has not loaded yet (startup waits for that).
+    pub fn stale(&self) -> bool {
+        self.older_than(ENROLLED_SET_STALE_AFTER)
+    }
+
+    /// Like [`Self::stale`], against the bound `bound`.
+    pub fn older_than(&self, bound: Duration) -> bool {
+        matches!(*self.state.borrow(), EnrolledState::Loaded(_))
+            && self.age().is_some_and(|age| age > bound)
     }
 
     /// Wait until the first load has succeeded, for at most `limit`.
@@ -328,15 +386,33 @@ impl EnrolledScopes {
 async fn load_into(
     store: &HostGrantStore,
     state: &watch::Sender<EnrolledState>,
+    last_load: &Mutex<Option<Instant>>,
 ) -> Result<(), HostGrantError> {
     let loaded = match store.enrolled_set().await? {
-        Some(set) => EnrolledState::Loaded(Arc::new(set)),
+        Some(set) => {
+            if let EnrolledState::Loaded(previous) = &*state.borrow() {
+                let (rooms, channels, space_nodes) = previous.missing_from(&set);
+                if rooms + channels + space_nodes > 0 {
+                    tracing::warn!(
+                        rooms,
+                        channels,
+                        space_nodes,
+                        "A reload of the host-grant enrolled set holds fewer objects than the set \
+                         it replaces"
+                    );
+                }
+            }
+            EnrolledState::Loaded(Arc::new(set))
+        }
         None if matches!(*state.borrow(), EnrolledState::Loaded(_)) => {
             return Err(HostGrantError::RelationsMissing);
         }
         None => EnrolledState::RelationsAbsent,
     };
     state.send_replace(loaded);
+    if let Ok(mut last) = last_load.lock() {
+        *last = Some(Instant::now());
+    }
     Ok(())
 }
 
@@ -345,15 +421,39 @@ async fn load_into(
 async fn refresh_until_dropped(
     store: HostGrantStore,
     state: Weak<watch::Sender<EnrolledState>>,
+    last_load: Arc<Mutex<Option<Instant>>>,
     interval: Duration,
 ) {
     loop {
         let Some(sender) = state.upgrade() else {
             return;
         };
-        let outcome = load_into(&store, &sender).await;
+        let outcome = load_into(&store, &sender, &last_load).await;
         let loaded = !matches!(*sender.borrow(), EnrolledState::Pending);
+        let holds_scopes = matches!(*sender.borrow(), EnrolledState::Loaded(_));
         drop(sender);
+        // Recorded on every tick, failed or not, so that the gauge grows
+        // while refreshes fail.
+        let age = last_load
+            .lock()
+            .ok()
+            .and_then(|last| last.map(|last| last.elapsed()));
+        if let Some(age) = age {
+            waddle_xmpp::gauge_record!(
+                "waddle.host_grant.enrolled_set.age",
+                "s",
+                "Time since this replica last loaded the host-grant enrolled set.",
+                age.as_secs(),
+            );
+            if holds_scopes && age > ENROLLED_SET_STALE_AFTER && STALE.due() {
+                tracing::warn!(
+                    kind = "enrolled_set_stale",
+                    age_seconds = age.as_secs(),
+                    "The host-grant enrolled set has not been reloaded within its staleness \
+                     bound; the replica reports itself not ready"
+                );
+            }
+        }
         if let Err(error) = outcome {
             if REFRESH_FAILED.due() {
                 tracing::warn!(

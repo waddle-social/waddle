@@ -63,7 +63,10 @@ pub use admission::{AdmissionDenial, AdmissionWitness, RoomAcceptance, RoomAdmis
 pub use authority::{
     HostGrantAuthority, ProjectionContradiction, Reconciliation, VerifiedProjection,
 };
-pub use enrolled::{EnrolledScopes, EnrolledSet, Enrollment, ENROLLED_SET_REFRESH_INTERVAL};
+pub use enrolled::{
+    EnrolledScopes, EnrolledSet, Enrollment, ENROLLED_SET_REFRESH_INTERVAL,
+    ENROLLED_SET_STALE_AFTER,
+};
 pub use error::HostGrantError;
 pub use gate::{HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate};
 pub use issuance::{

@@ -334,6 +334,45 @@ async fn the_gate_reads_grants_only_for_enrolled_rooms_on_an_attached_replica() 
 }
 
 #[tokio::test]
+async fn the_set_ages_while_refreshes_fail_and_a_reload_resets_it() {
+    let Some(fixture) = GrantFixture::active("hg_set_age").await else {
+        return;
+    };
+    let scopes = loaded(&fixture.store).await;
+    scopes.refresh().await.expect("refresh");
+    let age = scopes.age().expect("a loaded set has an age");
+    assert!(age < LOAD, "a set loaded just now is {age:?} old");
+    assert!(!scopes.stale(), "a set loaded just now is stale");
+
+    // The lifecycle ledger cannot be read: the refresh fails, the set
+    // keeps aging from its last load and is past any bound it has crossed.
+    fixture
+        .ingress
+        .execute(
+            "ALTER TABLE host_grant_scope_lifecycles RENAME TO host_grant_scope_lifecycles_hidden",
+            (),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scopes.refresh().await.is_err());
+    assert!(scopes.age().expect("age") >= Duration::from_millis(50));
+    assert!(scopes.older_than(Duration::from_millis(10)));
+    assert!(!scopes.stale(), "the default bound is not yet reached");
+
+    // A successful reload makes the set fresh again.
+    fixture
+        .ingress
+        .execute(
+            "ALTER TABLE host_grant_scope_lifecycles_hidden RENAME TO host_grant_scope_lifecycles",
+            (),
+        )
+        .await;
+    scopes.refresh().await.expect("refresh");
+    assert!(!scopes.older_than(Duration::from_millis(10)));
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_schema_without_host_grant_relations_manages_nothing() {
     let Some(database) = IsolatedPostgresDatabase::create("hg_set_absent").await else {
         return;
@@ -352,6 +391,8 @@ async fn a_schema_without_host_grant_relations_manages_nothing() {
     assert_eq!(scopes.room(&room), Enrollment::Unmanaged);
     assert_eq!(scopes.space_node("space"), Enrollment::Unmanaged);
     assert!(scopes.snapshot().is_some());
+    // A schema that holds no scope has nothing to grow stale.
+    assert!(!scopes.older_than(Duration::ZERO));
     let gate = HostGrantGate::with_enrolled_scopes(store, scopes);
     assert!(matches!(
         gate.room(RoomBinding::Room(&room)).await,

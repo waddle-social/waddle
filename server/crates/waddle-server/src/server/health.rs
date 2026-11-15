@@ -286,6 +286,27 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 })),
             )
         }
+        // A replica whose host-grant enrolled set has not been reloaded
+        // within its staleness bound may not honour a scope enrolled since;
+        // it leaves the serving set until a reload succeeds.
+        Ok(Ok((Ok(health), Ok(report))))
+            if health.is_healthy()
+                && report.is_attested()
+                && state.host_grants.enrolled().stale() =>
+        {
+            warn!("Readiness check: the host-grant enrolled set is stale");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "service": "waddle-server",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "database": "ready",
+                    "lineage": "attested",
+                    "host_grant_enrolled_set": "stale"
+                })),
+            )
+        }
         Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() && report.is_attested() => (
             StatusCode::OK,
             Json(json!({
