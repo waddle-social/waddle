@@ -2072,21 +2072,6 @@ async fn replace_witness(
     assert_eq!(written, ProjectionWrite::Applied);
 }
 
-/// Commit one write to the fixture's database, which moves PostgreSQL's
-/// flushed WAL position forward.
-async fn advance_wal(fixture: &GrantFixture) {
-    let pool = owner_pool(fixture).await;
-    sqlx::query("CREATE TABLE IF NOT EXISTS wal_probe (id bigint)")
-        .execute(&pool)
-        .await
-        .expect("WAL probe table");
-    sqlx::query("INSERT INTO wal_probe VALUES (1)")
-        .execute(&pool)
-        .await
-        .expect("WAL probe row");
-    pool.close().await;
-}
-
 /// `tuple` as a SpiceDB relationship, through the production codec.
 fn wire_relationship(tuple: &Tuple) -> Relationship {
     let wire = spicedb_wire::relationship(tuple).expect("wire relationship");
@@ -2515,13 +2500,12 @@ async fn live_spicedb_the_position_witness_refuses_a_rolled_back_database() {
     );
 
     // The database went back on its own timeline: the witness is ahead of
-    // the server. The regression is latched beside the witness, and stays
-    // refused after the server has written past the witness again.
+    // the server. The regression is latched beside the witness.
     let current = store.postgres_position().await.expect("position");
     let ahead = PositionWitness {
         epoch: RestoreEpoch::INITIAL,
         position: PostgresPosition {
-            lsn: current.lsn + 1,
+            lsn: current.lsn + (1 << 40),
             ..current
         },
     };
@@ -2535,12 +2519,6 @@ async fn live_spicedb_the_position_witness_refuses_a_rolled_back_database() {
         witness: ahead,
     };
     assert_eq!(live.latch().await, Some(latched));
-    advance_wal(&live.fixture).await;
-    assert!(store.postgres_position().await.expect("position").lsn > ahead.position.lsn);
-    assert_eq!(
-        refused(fence().await),
-        RestoreFenceRefusal::PositionRegressed
-    );
     authority
         .sync_witnesses(lifecycle)
         .await
@@ -2558,13 +2536,8 @@ async fn live_spicedb_the_position_witness_refuses_a_rolled_back_database() {
         RestoreFenceRefusal::PositionRegressed
     );
     assert_eq!(memory.latch(), Some(latched));
-    replace_witness(
-        &actor,
-        latch_witness_resource(&live.authority_id().await),
-        Some(latched.stamp()),
-        None,
-    )
-    .await;
+    let latch_resource = latch_witness_resource(&live.authority_id().await);
+    replace_witness(&actor, latch_resource.clone(), Some(latched.stamp()), None).await;
     assert_eq!(
         fence_refusal(
             verify_restore_fence_with(store, &actor, RestoreEpoch::INITIAL, &memory)
@@ -2574,10 +2547,43 @@ async fn live_spicedb_the_position_witness_refuses_a_rolled_back_database() {
         RestoreFenceRefusal::PositionRegressed
     );
     assert_eq!(live.latch().await, Some(latched));
+
+    // Once the server has written past the witnessed position again, the
+    // position alone would pass; the latch keeps the regression. (The WAL of
+    // the shared test cluster cannot be driven past a chosen point, so the
+    // case stands for it with a witness below the server and its latch.)
+    let passed = PositionWitness {
+        epoch: RestoreEpoch::INITIAL,
+        position: PostgresPosition {
+            lsn: current.lsn - 1,
+            ..current
+        },
+    };
+    live.write_position_witness(&actor, passed).await;
+    let passed_latch = PositionLatch {
+        kind: LatchKind::OnTimeline,
+        witness: passed,
+    };
+    replace_witness(
+        &actor,
+        latch_resource.clone(),
+        Some(latched.stamp()),
+        Some(passed_latch.stamp()),
+    )
+    .await;
+    assert_eq!(
+        refused(fence().await),
+        RestoreFenceRefusal::PositionRegressed
+    );
+    authority
+        .sync_witnesses(lifecycle)
+        .await
+        .expect("witness writer");
+    assert_eq!(live.position_witness(&actor).await, Some(passed));
     // An acknowledgement bound to that witness clears it: the witness moves
     // to the current position and the latch goes with it.
     store
-        .acknowledge_position(ahead)
+        .acknowledge_position(passed)
         .await
         .expect("acknowledgement of the regression");
     let report = fence_and_witness(store, &actor, RestoreEpoch::INITIAL).await;
@@ -2585,16 +2591,17 @@ async fn live_spicedb_the_position_witness_refuses_a_rolled_back_database() {
     assert_eq!(live.latch().await, None);
     let rebased = live.position_witness(&actor).await.expect("witness");
     assert_eq!(rebased.position.timeline, current.timeline);
-    assert!(rebased.position.lsn > ahead.position.lsn);
+    assert!(rebased.position.lsn >= current.lsn);
 
     // Below the witness on another timeline is a regression across
-    // timelines: latched as well, and no acknowledgement clears it.
+    // timelines: latched as well, and no acknowledgement clears it, also
+    // once the server is past the witnessed position.
     let position = store.postgres_position().await.expect("position");
     let crossed = PositionWitness {
         epoch: RestoreEpoch::INITIAL,
         position: PostgresPosition {
             timeline: position.timeline - 1,
-            lsn: position.lsn + 1,
+            lsn: position.lsn + (1 << 40),
             ..position
         },
     };
@@ -2603,16 +2610,34 @@ async fn live_spicedb_the_position_witness_refuses_a_rolled_back_database() {
         refused(fence().await),
         RestoreFenceRefusal::PositionRegressed
     );
-    assert_eq!(
-        live.latch().await,
-        Some(PositionLatch {
-            kind: LatchKind::AcrossTimelines,
-            witness: crossed,
-        })
-    );
-    advance_wal(&live.fixture).await;
+    let crossed_latch = PositionLatch {
+        kind: LatchKind::AcrossTimelines,
+        witness: crossed,
+    };
+    assert_eq!(live.latch().await, Some(crossed_latch));
+    let crossed_passed = PositionWitness {
+        position: PostgresPosition {
+            lsn: position.lsn - 1,
+            ..crossed.position
+        },
+        ..crossed
+    };
+    live.write_position_witness(&actor, crossed_passed).await;
+    replace_witness(
+        &actor,
+        latch_resource,
+        Some(crossed_latch.stamp()),
+        Some(
+            PositionLatch {
+                kind: LatchKind::AcrossTimelines,
+                witness: crossed_passed,
+            }
+            .stamp(),
+        ),
+    )
+    .await;
     store
-        .acknowledge_position(crossed)
+        .acknowledge_position(crossed_passed)
         .await
         .expect("an acknowledgement for a later timeline");
     assert_eq!(

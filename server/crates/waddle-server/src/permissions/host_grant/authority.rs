@@ -538,7 +538,9 @@ impl HostGrantAuthority {
                 }
                 Err(error) => return Err(error),
             }
-            self.after_commit(lifecycle);
+            // No witness writer is started for this operation: the takeover
+            // below moves the journal witness to it, conditioned on what was
+            // read, and a writer racing it would make that condition fail.
             plan = match self.store.projection_plan(lifecycle).await?.into_restored() {
                 Some(plan) => plan,
                 None => return Ok(Reconciliation::Superseded),

@@ -17,7 +17,7 @@ use crate::permissions::host_grant::{
     sync_position_witness, GrantOperationId, HostGrantStore, OperatorRevoke, PositionStanding,
     PositionWriter, ReopenSelection, ServedAccountDomains, WitnessSync,
 };
-use crate::permissions::PermissionActor;
+use crate::permissions::{EnsureAuthzCodecIncarnation, PermissionActor};
 
 use super::args::{HostGrantActionArgs, HostGrantArgs};
 use super::connection::open_owner;
@@ -178,19 +178,29 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
 }
 
 /// A permission actor on the servers' SpiceDB, or `None` (reported) when it
-/// cannot be reached: the act is recorded either way, and the next fence
-/// pass of a server writes its witnesses.
+/// cannot be reached or its store is not one the servers' codec guard
+/// accepts: the act is recorded either way, and the next fence pass of a
+/// server writes its witnesses. The guard runs first, as at a server's
+/// start, so no witness is written into a store the guard did not mark.
 async fn connect_spicedb(config: &SpiceDbConfig) -> Option<ActorRef<PermissionActor>> {
-    match PermissionActor::connect(config).await {
-        Ok(actor) => Some(PermissionActor::spawn(actor)),
+    let actor = match PermissionActor::connect(config).await {
+        Ok(actor) => PermissionActor::spawn(actor),
         Err(_) => {
             eprintln!(
                 "warning: SpiceDB could not be reached; the next fence pass of a server writes \
                  this act's witnesses"
             );
-            None
+            return None;
         }
+    };
+    if actor.ask(EnsureAuthzCodecIncarnation).await.is_err() {
+        eprintln!(
+            "warning: the SpiceDB store is not one the servers accept; the next fence pass of a \
+             server writes this act's witnesses"
+        );
+        return None;
     }
+    Some(actor)
 }
 
 fn report_witnesses(failed: bool) {
