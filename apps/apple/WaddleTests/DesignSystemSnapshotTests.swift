@@ -120,6 +120,17 @@ final class DesignSystemSnapshotTests: XCTestCase {
         })
     }
 
+    func testToggles() {
+        assertHuddleSnapshot(of: VStack(spacing: Theme.Spacing.m) {
+            Toggle("Read receipts", isOn: .constant(true))
+            Toggle("Compact messages", isOn: .constant(false))
+            Toggle("Notification previews", isOn: .constant(true)).disabled(true)
+        }
+        .toggleStyle(.huddle)
+        .huddleText(Theme.Typography.body)
+        .foregroundStyle(Theme.Colors.fg))
+    }
+
     func testAvatarsAndPresence() {
         let people = ["Ana Lindqvist", "Jo Hartmann", "Mika", "Priya", "Theo", "Åse Ørn"]
         let states: [Availability] = [.available, .away, .doNotDisturb, .offline]
@@ -170,7 +181,9 @@ final class DesignSystemSnapshotTests: XCTestCase {
     }
 
     func testBannersAndEmptyState() {
-        assertHuddleSnapshot(of: VStack(spacing: Theme.Spacing.l) {
+        // Three detailed SF Symbols: allow for their redraws between OS releases.
+        assertHuddleSnapshot(precision: 0.95, of: VStack(spacing: Theme.Spacing.l) {
+            WaddleBrandMark(size: 72)
             ConnectionBanner(status: .offline(retryAt: nil))
             ConnectionBanner(status: .authenticationFailed)
             EmptyStateView(

@@ -17,7 +17,6 @@ enum Theme {
         static let m = WaddleTokens.Spacing.s3
         static let l = WaddleTokens.Spacing.s4
         static let xl = WaddleTokens.Spacing.s6
-        static let xxl = WaddleTokens.Spacing.s8
     }
 
     /// Concentric radii: an inner radius is the outer one minus the

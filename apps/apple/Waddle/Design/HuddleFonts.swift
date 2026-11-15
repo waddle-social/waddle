@@ -8,12 +8,6 @@ import SwiftUI
 enum HuddleFonts {
     private static let files = ["BricolageGrotesque", "AtkinsonHyperlegibleNext", "AtkinsonHyperlegibleMono"]
 
-    /// Registers the bundled fonts for this process. Safe to call more
-    /// than once; `font(_:size:weight:)` calls it for you.
-    static func register() {
-        _ = registered
-    }
-
     private static let registered: Bool = {
         for file in files {
             guard let url = Bundle.main.url(forResource: file, withExtension: "ttf") else {
@@ -27,9 +21,24 @@ enum HuddleFonts {
         return true
     }()
 
+    /// Faces already built, keyed by role, size and weight. Text styles
+    /// resolve on every body evaluation, so a timeline asks for the same
+    /// few faces again and again.
+    private static let cache = NSCache<NSString, CTFont>()
+
     /// A face of `role` at `size` points and `weight` on the `wght` axis.
     static func font(_ role: HuddleFont, size: CGFloat, weight: CGFloat) -> CTFont {
-        register()
+        let key = "\(role)|\(size)|\(weight)" as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        let face = makeFont(role, size: size, weight: weight)
+        cache.setObject(face, forKey: key)
+        return face
+    }
+
+    private static func makeFont(_ role: HuddleFont, size: CGFloat, weight: CGFloat) -> CTFont {
+        _ = registered
         var variation: [NSNumber: CGFloat] = [Axis.weight: weight]
         if role.hasOpticalSize {
             // The web sets optical size to the font size (`font-optical-sizing:

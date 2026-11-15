@@ -51,7 +51,7 @@ use (`design/src/preset.ts`).
   `.huddleText(Theme.Typography.body)`. Sizes follow Dynamic Type.
 - **Surfaces, motion, controls.** `Surfaces.swift` (`huddleSurface`,
   `HuddleCard`), `Motion.swift` (`huddleAnimation`, a fade under Reduce
-  Motion) and `Controls.swift` (button, chip, tag, segmented control).
+  Motion) and `Controls.swift` (button, chip, tag, toggle, segmented control).
 
 ## Prerequisites
 
@@ -92,7 +92,9 @@ xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination 
 and compares it with the goldens in `WaddleTests/__Snapshots__`, one set per
 platform. After an intended visual change, delete the affected goldens and
 run the tests once to record new ones (that run fails), then commit them.
-The goldens were recorded on iOS 27 and macOS 27.
+The goldens were recorded on iOS 27 and macOS 27. The bundled fonts render
+alike on older releases; SF Symbols do not, so a snapshot with detailed
+symbols passes a lower `precision`.
 
 ## Push notifications
 

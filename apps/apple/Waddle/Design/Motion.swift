@@ -5,8 +5,6 @@ import SwiftUI
 enum HuddleMotion {
     /// A control under the finger or pointer: 90ms.
     case press
-    /// Colour and border changes on hover or selection: 150ms.
-    case state
     /// Something arriving where the person put it (a sent message, a
     /// dialog, a moved thumb): a snappy spring that settles.
     case settle
@@ -23,7 +21,6 @@ enum HuddleMotion {
         }
         switch self {
         case .press: return .timingCurve(WaddleTokens.Easing.out, duration: Duration.instant)
-        case .state: return .timingCurve(WaddleTokens.Easing.out, duration: Duration.fast)
         case .settle: return .spring(duration: Duration.slow, bounce: 0.15)
         case .pop: return .spring(duration: Duration.slower, bounce: 0.35)
         }

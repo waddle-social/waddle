@@ -14,8 +14,8 @@ struct WaddleApp: App {
     var body: some Scene {
         WindowGroup {
             if Self.isHostingTests {
-                // The unit-test bundle runs inside the app: keep the host
-                // off the network and the Keychain.
+                // The unit-test bundle runs inside the app: without the root
+                // view the host never restores a session or loads providers.
                 Color.clear
             } else {
                 RootView()

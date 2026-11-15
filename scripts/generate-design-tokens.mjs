@@ -429,8 +429,9 @@ function controlHeights() {
   };
 }
 
+const indent = (lines, depth) => lines.map((l) => `${"    ".repeat(depth)}${l}`).join("\n");
+
 function huddleKt() {
-  const indent = (lines, depth) => lines.map((l) => `${"    ".repeat(depth)}${l}`).join("\n");
   const colorNames = huddleColorNames();
   const scheme = (key) =>
     indent(colorNames.map((n) => `val ${kotlinName(n)} = Color(${huddleColor(n, key)})`), 3);
@@ -528,7 +529,6 @@ const literalRgb = (literal) =>
 const swiftSpacingName = (step) => `s${String(step).replace(".", "_")}`;
 
 function appleTokensSwift() {
-  const indent = (lines, depth) => lines.map((l) => `${"    ".repeat(depth)}${l}`).join("\n");
   const swiftColor = (n) =>
     `Color(night: ${huddleColor(n, "night")}, daylight: ${huddleColor(n, "daylight")})`;
   const colorNames = huddleColorNames();

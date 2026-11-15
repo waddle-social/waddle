@@ -58,9 +58,9 @@ private struct HuddleButtonBody: View {
             .background(shape.fill(background))
             .overlay(shape.fill(Theme.Colors.fg.opacity(configuration.isPressed ? 0.1 : 0)))
             .overlay(shape.strokeBorder(border, lineWidth: WaddleTokens.BorderWidth.hair))
-            .contentShape(shape)
             .scaleEffect(configuration.isPressed && !reduceMotion ? HuddleMotion.pressScale : 1)
             .opacity(isEnabled ? 1 : 0.5)
+            .huddleTouchTarget()
             .huddleAnimation(.press, value: configuration.isPressed)
     }
 
@@ -119,6 +119,18 @@ private struct HuddleButtonBody: View {
     }
 }
 
+extension View {
+    /// Gives a control the 44pt touch target on iOS without changing how
+    /// tall it looks; a pointer keeps the control's own bounds.
+    func huddleTouchTarget() -> some View {
+        #if os(iOS)
+        frame(minHeight: Theme.Size.minHitTarget).contentShape(Rectangle())
+        #else
+        contentShape(Rectangle())
+        #endif
+    }
+}
+
 /// Type-erased insettable shape, so one view can pick a capsule or a
 /// rounded rectangle.
 struct AnyInsettableShape: InsettableShape {
@@ -172,8 +184,8 @@ private struct HuddleChipBody: View {
                     lineWidth: isSelected ? WaddleTokens.BorderWidth.strong : WaddleTokens.BorderWidth.hair
                 )
             )
-            .contentShape(Capsule())
             .scaleEffect(configuration.isPressed && !reduceMotion ? HuddleMotion.pressScale : 1)
+            .huddleTouchTarget()
             .huddleAnimation(.press, value: configuration.isPressed)
             .huddleAnimation(.pop, value: isSelected)
             .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -204,6 +216,58 @@ struct HuddleTag: View {
     }
 }
 
+// MARK: - Toggle
+
+/// Polar Huddle's switch (web `toggle`): the track fills with the action
+/// colour when on, and the thumb settles across with a spring.
+struct HuddleToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: Theme.Spacing.m) {
+            configuration.label
+            Spacer(minLength: 0)
+            HuddleSwitch(isOn: configuration.isOn)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { configuration.isOn.toggle() }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(Text(configuration.isOn ? "On" : "Off"))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { configuration.isOn.toggle() }
+    }
+}
+
+extension ToggleStyle where Self == HuddleToggleStyle {
+    static var huddle: HuddleToggleStyle { HuddleToggleStyle() }
+}
+
+private struct HuddleSwitch: View {
+    let isOn: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    private static let size = CGSize(width: 44, height: 26)
+    private static let thumb: CGFloat = 20
+
+    var body: some View {
+        Capsule()
+            .fill(isOn ? Theme.Colors.action : Theme.Colors.surface2)
+            .overlay(
+                Capsule().strokeBorder(
+                    isOn ? Theme.Colors.action : Theme.Colors.borderStrong,
+                    lineWidth: WaddleTokens.BorderWidth.hair
+                )
+            )
+            .frame(width: Self.size.width, height: Self.size.height)
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle()
+                    .fill(isOn ? Theme.Colors.actionFg : Theme.Colors.fgMuted)
+                    .frame(width: Self.thumb, height: Self.thumb)
+                    .padding(.horizontal, (Self.size.height - Self.thumb) / 2)
+            }
+            .opacity(isEnabled ? 1 : 0.5)
+            .huddleAnimation(.settle, value: isOn)
+    }
+}
+
 // MARK: - Segmented control
 
 /// A pill of mutually exclusive choices (web `seg`): Gallery / Speaker.
@@ -219,6 +283,15 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
     @Binding var selection: Value
     let segments: [Segment]
     @Namespace private var thumb
+
+    /// With the 3pt inset, touch gets a 44pt control (web `seg` size `lg`).
+    private static var segmentHeight: CGFloat {
+        #if os(iOS)
+        38
+        #else
+        WaddleTokens.ControlHeight.sm
+        #endif
+    }
 
     var body: some View {
         HStack(spacing: WaddleTokens.Spacing.s0_5) {
@@ -247,7 +320,7 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
             .lineLimit(1)
             .foregroundStyle(isSelected ? Theme.Colors.fg : Theme.Colors.fgMuted)
             .padding(.horizontal, WaddleTokens.Spacing.s3)
-            .frame(minHeight: WaddleTokens.ControlHeight.sm)
+            .frame(minHeight: Self.segmentHeight)
             .background {
                 if isSelected {
                     Color.clear

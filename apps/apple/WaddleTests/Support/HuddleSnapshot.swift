@@ -29,8 +29,13 @@ func renderHuddle<V: View>(_ view: V, theme: SnapshotTheme, width: CGFloat) -> C
 
 /// Asserts `view` against its Night and Daylight goldens. Goldens are per
 /// platform: text rasterises differently on iOS and macOS.
+///
+/// `precision` is the share of pixels that must match. Lower it for views
+/// with SF Symbols, whose glyphs change between OS releases; the bundled
+/// fonts render alike on every release.
 @MainActor
 func assertHuddleSnapshot<V: View>(
+    precision: Float = 0.99,
     of view: V,
     width: CGFloat = 390,
     file: StaticString = #filePath,
@@ -45,7 +50,7 @@ func assertHuddleSnapshot<V: View>(
         #if os(macOS)
         assertSnapshot(
             of: NSImage(cgImage: image, size: NSSize(width: image.width / 2, height: image.height / 2)),
-            as: .image(precision: 0.99, perceptualPrecision: 0.98),
+            as: .image(precision: precision, perceptualPrecision: 0.98),
             named: "\(theme.rawValue)-macOS",
             file: file,
             testName: testName,
@@ -54,7 +59,7 @@ func assertHuddleSnapshot<V: View>(
         #else
         assertSnapshot(
             of: UIImage(cgImage: image, scale: 2, orientation: .up),
-            as: .image(precision: 0.99, perceptualPrecision: 0.98),
+            as: .image(precision: precision, perceptualPrecision: 0.98),
             named: "\(theme.rawValue)-iOS",
             file: file,
             testName: testName,
