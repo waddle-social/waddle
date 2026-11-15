@@ -52,7 +52,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - name: Check graph parity and planner contracts
         run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts\npython3 scripts/test_integration_ci_project.py\npython3 scripts/test_cuenv_bootstrap.py"
       - id: plan
@@ -916,8 +916,7 @@ jobs:
         env:
           TEST_RESULT: "${{ needs['waddle_server_rusttests__nixtest-builder'].result }}"
         run: "set -euo pipefail\nif [[ \"$TEST_RESULT\" != success ]]; then\n  echo \"Compilation and all four shards must succeed; received: ${TEST_RESULT:-missing}\" >&2\n  exit 1\nfi\necho \"All four test shards and inventory checks passed.\""
-    permissions:
-      {}
+    permissions: {}
   waddle_server_xmppcompliance__nixxmppunittests:
     permissions:
       contents: read
@@ -1068,7 +1067,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - name: Require successful applicable jobs
         run: bun scripts/integration-ci.ts gate
         env:
