@@ -12,11 +12,12 @@ mod spicedb;
 mod tuple;
 
 pub use actor::{
-    CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation, EnsureSchema, ExclusiveRelationSwap,
-    ListHostGrantWitnesses, ListRelations, ListSubjects, LookupResources, LookupSubjects,
-    ObserveHostGrantProjection, Permission, PermissionActor, ReadHostGrantWitness,
-    RecordAuthzSchemaVersion, ReplaceExclusiveRelation, ReplaceHostGrantWitnesses,
-    SwapExclusiveRelation, TakeOverHostGrantProjection, WriteHostGrantProjection, WriteTuple,
+    CheckPermission, ClearHostGrantWitnesses, DeleteTuple, EnsureAuthzCodecIncarnation,
+    EnsureSchema, ExclusiveRelationSwap, ListHostGrantWitnesses, ListRelations, ListSubjects,
+    LookupResources, LookupSubjects, ObserveHostGrantProjection, Permission, PermissionActor,
+    ReadHostGrantWitness, RecordAuthzSchemaVersion, ReplaceExclusiveRelation,
+    ReplaceHostGrantWitnesses, SwapExclusiveRelation, TakeOverHostGrantProjection,
+    WriteHostGrantProjection, WriteTuple,
 };
 pub use authz_id::{
     decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, EncodedObjectId,

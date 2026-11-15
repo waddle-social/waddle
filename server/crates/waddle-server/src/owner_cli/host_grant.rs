@@ -146,10 +146,18 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                             .map_err(OwnerCliError::HostGrant)?;
                         eprintln!("applied: the position witness names the current position");
                     }
-                    Ok((_, Some(standing))) => {
-                        eprintln!("not applied yet; the position witness is {standing:?}")
+                    Ok((WitnessSync::Written, Some(_))) => {
+                        eprintln!("the position witness names the current position")
                     }
-                    Ok((_, None)) => {}
+                    Ok((sync, standing)) => {
+                        report_position(sync, standing);
+                        if standing.is_some() {
+                            eprintln!(
+                                "the acknowledgement is not applied yet; a fence pass applies it \
+                                 once it matches the witness and the timeline"
+                            );
+                        }
+                    }
                     Err(_) => report_witnesses(true),
                 }
             }
@@ -187,6 +195,9 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                 let position =
                     sync_position_witness(&store, permissions, PositionWriter::Commit, None).await;
                 report_witnesses(journal.is_err() || position.is_err());
+                if let Ok((sync, standing)) = position {
+                    report_position(sync, standing);
+                }
             }
         }
     }
@@ -217,6 +228,31 @@ async fn connect_spicedb(config: &SpiceDbConfig) -> Option<ActorRef<PermissionAc
         return None;
     }
     Some(actor)
+}
+
+/// Say why the position witness was not moved, when it was not: the
+/// writer reads the latch and never moves the witness past a latched or
+/// regressed position.
+fn report_position(sync: WitnessSync, standing: Option<PositionStanding>) {
+    match (sync, standing) {
+        (WitnessSync::Latched, _) => eprintln!(
+            "warning: the PostgreSQL position is behind its witness; the regression is now \
+             latched and the authority stays refused until a restore is declared"
+        ),
+        (_, Some(PositionStanding::Regressed)) => eprintln!(
+            "warning: the position witness was not moved: a regression is latched or the \
+             position is behind it"
+        ),
+        (_, Some(PositionStanding::Unverified)) => eprintln!(
+            "warning: the position witness was not moved: the position is unverified \
+             (another system or timeline, or a latch without its witness)"
+        ),
+        (WitnessSync::Malformed, _) => eprintln!(
+            "warning: the position witness, its latch or its epoch cannot be read; the first \
+             fence pass after a declared restore removes them"
+        ),
+        _ => {}
+    }
 }
 
 fn report_witnesses(failed: bool) {

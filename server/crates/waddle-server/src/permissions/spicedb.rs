@@ -777,22 +777,31 @@ impl SpiceDbPermissionBackend {
     ///
     /// `Ok` is an acknowledged outcome; an error after the request was sent
     /// leaves the outcome unknown.
+    ///
+    /// Without `previous` the plan is the first projection of a restored
+    /// scope that was never projected, written into a fresh namespace as
+    /// any first write is; its journal witness moves with it all the same.
     pub async fn take_over_host_grant_projection(
         &self,
-        previous: &ProjectionMarker,
+        previous: Option<&ProjectionMarker>,
         plan: &RestoredPlan,
         head: Option<&WitnessChange>,
     ) -> Result<ProjectionWrite, PermissionError> {
         let intent = &plan.plan().intent;
-        intent.check_takes_over(previous)?;
+        match previous {
+            Some(previous) => intent.check_takes_over(previous)?,
+            None if plan.plan().projected_generation.is_some() => {
+                return Err(ProjectionRefusal::NotATakeover.into())
+            }
+            None => {}
+        }
         if head.is_some_and(|head| {
             head.resource != head_witness_resource(intent.marker.lifecycle)
                 || head.next.as_deref() != Some(intent.marker.stamp().as_str())
         }) {
             return Err(ProjectionRefusal::NotATakeover.into());
         }
-        self.write_projection_request(Some(previous), intent, head)
-            .await
+        self.write_projection_request(previous, intent, head).await
     }
 
     /// Read every resource of the projection definition, markers and
@@ -843,6 +852,44 @@ impl SpiceDbPermissionBackend {
             Err(error) if is_failed_precondition(&error) => Ok(ProjectionWrite::PreconditionFailed),
             Err(error) => Err(map_spicedb_error(error)),
         }
+    }
+
+    /// Remove every relationship each of `resources` holds, one
+    /// `DeleteRelationships` request per resource in order, each
+    /// conditioned on `condition`. A failed condition stops at that
+    /// resource; an error leaves the outcome of that request unknown.
+    pub async fn clear_host_grant_witnesses(
+        &self,
+        resources: &[String],
+        condition: &WitnessChange,
+    ) -> Result<ProjectionWrite, PermissionError> {
+        if condition.previous.is_none() || condition.previous != condition.next {
+            return Err(PermissionError::InvalidTuple(
+                "a witness removal is conditioned on a witness it does not change".to_owned(),
+            ));
+        }
+        for resource in resources {
+            let mut preconditions = Vec::new();
+            let mut updates = Vec::new();
+            push_witness_change(condition, &mut preconditions, &mut updates)?;
+            match self
+                .client
+                .delete_relationships(
+                    RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION)
+                        .resource_id(resource.as_str()),
+                )
+                .preconditions(preconditions)
+                .timeout(HOST_GRANT_PROJECTION_RPC_TIMEOUT)
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if is_failed_precondition(&error) => {
+                    return Ok(ProjectionWrite::PreconditionFailed)
+                }
+                Err(error) => return Err(map_spicedb_error(error)),
+            }
+        }
+        Ok(ProjectionWrite::Applied)
     }
 
     /// The resources `filter` matches, grouped, each with its stamps and

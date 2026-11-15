@@ -626,8 +626,9 @@ impl HostGrantStore {
     /// applies: after a promotion to a later timeline whose position is not
     /// below the witness, or after a regression on the witnessed timeline.
     /// An acknowledgement that could never apply (another system, an earlier
-    /// timeline) is refused with [`HostGrantError::AcknowledgementRefused`]
-    /// and nothing is recorded.
+    /// timeline, or a later timeline whose position is below the witness, a
+    /// provable regression across timelines) is refused with
+    /// [`HostGrantError::AcknowledgementRefused`] and nothing is recorded.
     ///
     /// Owner phase only: the runtime role cannot update the authority row.
     pub async fn acknowledge_position(
@@ -640,7 +641,7 @@ impl HostGrantStore {
             system_identifier: position.system_identifier,
             timeline: position.timeline,
         };
-        if !acknowledgement.admissible() {
+        if !acknowledgement.admissible(position.lsn) {
             return Err(HostGrantError::AcknowledgementRefused);
         }
         let store = self.clone();

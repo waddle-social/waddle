@@ -286,52 +286,8 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 })),
             )
         }
-        // This replica's configured host-grant restore epoch is below the
-        // one the database records: its configuration predates a declared
-        // restore, and only a restart with the current one serves managed
-        // rooms again, so it leaves the endpoint set.
-        Ok(Ok((Ok(health), Ok(report))))
-            if health.is_healthy()
-                && report.is_attested()
-                && state
-                    .host_grant_gate
-                    .get()
-                    .is_some_and(|gate| !gate.ready()) =>
-        {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "not_ready",
-                    "service": "waddle-server",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "database": "ready",
-                    "lineage": "attested",
-                    "host_grants": "configuration_predates_restore"
-                })),
-            )
-        }
-        // Any other host-grant failure (a failover the position witness
-        // cannot verify, a refused authority, SpiceDB not answering) is
-        // shared by every replica: failing readiness would take every one
-        // out of the endpoint set, rooms no scope manages included, while
-        // managed rooms are refused either way. The replica stays ready and
-        // says so; the gate logs and counts the failure.
         Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() && report.is_attested() => {
-            let mut body = json!({
-                "status": "ready",
-                "service": "waddle-server",
-                "version": env!("CARGO_PKG_VERSION"),
-                "database": "ready",
-                "lineage": "attested"
-            });
-            if state
-                .host_grant_gate
-                .get()
-                .is_some_and(|gate| !gate.verified())
-            {
-                body["host_grants"] = json!("unverified");
-            }
-            (StatusCode::OK, Json(body))
+            attested_readiness_response(state.host_grant_gate.get().map(Arc::as_ref))
         }
         Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() => {
             lineage_not_ready_response(report)
@@ -376,6 +332,45 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
             )
         }
     }
+}
+
+/// Readiness of a replica whose database is healthy and whose lineage is
+/// attested, by what its host-grant gate says (see
+/// `permissions::host_grant::runtime_attach`, "Readiness").
+///
+/// A failure of this replica alone while an unretired scope is enrolled (a
+/// configured restore epoch the database does not record, a runtime role
+/// that does not match the profile, verifications that cannot complete)
+/// takes it out of the endpoint set, so that a broken replica does not keep
+/// receiving the managed rooms it refuses. A refusal of the whole authority
+/// is shared by every replica: failing readiness would take every one out
+/// of the endpoint set, rooms no scope manages included, while managed
+/// rooms are refused either way, so the replica stays ready and says so;
+/// the gate logs and counts the failure. A deployment with no unretired
+/// scope reports `unmanaged`.
+pub(crate) fn attested_readiness_response(
+    gate: Option<&crate::permissions::host_grant::HostGrantGate>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::permissions::host_grant::GateReadiness;
+    let readiness = gate.map(|gate| gate.readiness());
+    let ready = !matches!(readiness, Some(GateReadiness::NotReady(_)));
+    let mut body = json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "service": "waddle-server",
+        "version": env!("CARGO_PKG_VERSION"),
+        "database": "ready",
+        "lineage": "attested"
+    });
+    match readiness {
+        None | Some(GateReadiness::Verified) => {}
+        Some(readiness) => body["host_grants"] = json!(readiness.as_str()),
+    }
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body))
 }
 
 async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageStatus> {

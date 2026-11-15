@@ -641,15 +641,16 @@ impl kameo::message::Message<WriteHostGrantProjection> for PermissionActor {
     }
 }
 
-/// Replace the projection of a host-grant scope that a restore transition
-/// closed: write its plan's intent conditioned on the exact marker
-/// `previous`, which another authority incarnation wrote, and apply `head`,
-/// which moves the scope's journal witness to the plan's operation, in the
-/// same request. Only the store produces a
-/// [`RestoredPlan`], so no other plan can take a projection over. An error
-/// leaves the outcome unknown. See `permissions::host_grant::restore`.
+/// Write the projection of a host-grant scope that a restore transition
+/// closed: its plan's intent conditioned on the exact marker `previous`,
+/// which another authority incarnation wrote, or, without one, on a fresh
+/// namespace for a scope never projected; and apply `head`, which moves the
+/// scope's journal witness to the plan's operation, in the same request.
+/// Only the store produces a [`RestoredPlan`], so no other plan can take a
+/// projection over or move a journal witness with it. An error leaves the
+/// outcome unknown. See `permissions::host_grant::restore`.
 pub struct TakeOverHostGrantProjection {
-    pub previous: ProjectionMarker,
+    pub previous: Option<ProjectionMarker>,
     pub plan: RestoredPlan,
     pub head: Option<WitnessChange>,
 }
@@ -666,7 +667,11 @@ impl kameo::message::Message<TakeOverHostGrantProjection> for PermissionActor {
         let backend = self.host_grant_projection_backend();
         ctx.spawn(async move {
             backend?
-                .take_over_host_grant_projection(&msg.previous, &msg.plan, msg.head.as_ref())
+                .take_over_host_grant_projection(
+                    msg.previous.as_ref(),
+                    &msg.plan,
+                    msg.head.as_ref(),
+                )
                 .await
         })
     }
@@ -760,6 +765,38 @@ impl kameo::message::Message<ReplaceHostGrantWitnesses> for PermissionActor {
             };
             backend
                 .apply_host_grant_witness_changes(&msg.changes)
+                .await
+                .map(Some)
+        })
+    }
+}
+
+/// Remove every relationship each of `resources` holds in the host-grant
+/// projection definition, one request per resource in order, each
+/// conditioned on `condition`. `None` when the backend holds no projection.
+/// An error leaves the outcome unknown. See
+/// `permissions::host_grant::witness`.
+pub struct ClearHostGrantWitnesses {
+    pub resources: Vec<String>,
+    pub condition: WitnessChange,
+}
+
+/// Runs on a task of its own, like [`WriteHostGrantProjection`].
+impl kameo::message::Message<ClearHostGrantWitnesses> for PermissionActor {
+    type Reply = kameo::reply::DelegatedReply<Result<Option<ProjectionWrite>, PermissionError>>;
+
+    async fn handle(
+        &mut self,
+        msg: ClearHostGrantWitnesses,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let backend = self.spicedb_backend();
+        ctx.spawn(async move {
+            let Some(backend) = backend else {
+                return Ok(None);
+            };
+            backend
+                .clear_host_grant_witnesses(&msg.resources, &msg.condition)
                 .await
                 .map(Some)
         })

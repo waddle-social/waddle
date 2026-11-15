@@ -44,6 +44,10 @@
 //! (`HostGrantStore::fence_scope`), as the restore fence does.
 //!
 //! A scope a restore transition closed is reconstructed by the same pass.
+//! When it was never projected, the pass writes its first projection with
+//! the journal witness moved to the current operation in the same request,
+//! and marks the scope as one that lost operations first when the witness
+//! names an operation the journal does not record.
 //! When its marker was written under another authority incarnation, the
 //! pass first records what the projection and the journal witness prove
 //! the restored database lost (`restore::reconstruction_targets`: only
@@ -298,21 +302,24 @@ impl HostGrantAuthority {
             .map_err(projection_store_error)
     }
 
-    /// Replace the projection of a scope a restore transition closed:
-    /// write `plan`'s intent conditioned on exactly `previous`, a marker of
-    /// another authority incarnation. Only the store produces a
-    /// [`RestoredPlan`]. An error other than a refusal leaves the outcome
-    /// unknown.
+    /// Write the projection of a scope a restore transition closed:
+    /// `plan`'s intent conditioned on exactly `previous`, a marker of
+    /// another authority incarnation, or on a fresh namespace for a scope
+    /// that was never projected; `head` moves its journal witness in the
+    /// same request. Only the store produces a [`RestoredPlan`]. An error
+    /// other than a refusal leaves the outcome unknown.
     pub async fn take_over(
         &self,
         plan: &RestoredPlan,
-        previous: &ProjectionMarker,
+        previous: Option<&ProjectionMarker>,
         head: Option<WitnessChange>,
     ) -> Result<ProjectionWrite, HostGrantError> {
-        plan.plan().intent.check_takes_over(previous)?;
+        if let Some(previous) = previous {
+            plan.plan().intent.check_takes_over(previous)?;
+        }
         self.permissions
             .ask(TakeOverHostGrantProjection {
-                previous: previous.clone(),
+                previous: previous.cloned(),
                 plan: plan.clone(),
                 head,
             })
@@ -349,7 +356,12 @@ impl HostGrantAuthority {
                     ProjectionContradiction::MarkerMissing,
                 ))
             }
-            MarkerObservation::Absent => None,
+            MarkerObservation::Absent => {
+                if let Some(restored) = plan.clone().into_restored() {
+                    return self.project_restored(restored).await;
+                }
+                None
+            }
             MarkerObservation::Present(ref marker) if marker == plan.marker() => {
                 return self.verify_and_activate(&plan, Some(observation)).await;
             }
@@ -549,20 +561,50 @@ impl HostGrantAuthority {
         if lost {
             self.store.record_lost_operations(lifecycle).await?;
         }
-        // The journal witness moves with the takeover, from exactly what was
-        // read: what it showed lost is recorded by now, and a head of an
-        // incarnation this journal never held is not left to fence the
-        // scope after it is reopened. A malformed witness is left alone.
-        let head = head.previous.map(|previous| WitnessChange {
-            resource: head_witness_resource(lifecycle),
-            previous,
-            next: Some(plan.plan().marker().stamp()),
-        });
-        match self.take_over(&plan, &previous, head).await {
+        let head = head.change_to(&plan);
+        match self.take_over(&plan, Some(&previous), head).await {
             Ok(ProjectionWrite::Applied) => self.verify_and_activate(plan.plan(), None).await,
             // The marker changed since it was read: another pass took the
             // projection over, or a writer replaced it. This pass stops.
             Ok(ProjectionWrite::PreconditionFailed) => Ok(Reconciliation::Superseded),
+            Err(HostGrantError::Projection(refusal)) => Err(refusal.into()),
+            Err(_) => Ok(Reconciliation::ProjectionUnknown),
+        }
+    }
+
+    /// Write the first projection of a scope a restore transition closed
+    /// and that was never projected. Nothing was projected to lower the
+    /// canonical grants to, but the journal witness can still show that the
+    /// restored database lost operations (a revoke, a retirement): the scope
+    /// is then marked as one that lost operations, before the write, so
+    /// that only a reopen by name with the operator's confirmation reopens
+    /// it. The journal witness moves to the plan's operation in the same
+    /// request as the projection, from exactly what was read.
+    async fn project_restored(&self, plan: RestoredPlan) -> Result<Reconciliation, HostGrantError> {
+        let lifecycle = plan.plan().marker().lifecycle;
+        let Ok(head) = self.journal_witness(lifecycle).await else {
+            return Ok(Reconciliation::ProjectionUnknown);
+        };
+        if head.lost {
+            self.store.record_lost_operations(lifecycle).await?;
+        }
+        let change = head.change_to(&plan);
+        match self.take_over(&plan, None, change).await {
+            Ok(ProjectionWrite::Applied) => self.verify_and_activate(plan.plan(), None).await,
+            // Either the namespace is not fresh, or another writer moved
+            // the marker or the journal witness since they were read: an
+            // empty namespace without a marker is the latter.
+            Ok(ProjectionWrite::PreconditionFailed) => Ok(match self.observe(plan.plan()).await {
+                Ok(ProjectionObservation {
+                    marker: MarkerObservation::Absent,
+                    relationships,
+                    malformed_family,
+                }) if !relationships.is_empty() || malformed_family => {
+                    Reconciliation::Contradiction(ProjectionContradiction::NamespaceNotFresh)
+                }
+                Ok(_) => Reconciliation::Superseded,
+                Err(_) => Reconciliation::ProjectionUnknown,
+            }),
             Err(HostGrantError::Projection(refusal)) => Err(refusal.into()),
             Err(_) => Ok(Reconciliation::ProjectionUnknown),
         }
@@ -694,6 +736,22 @@ struct ObservedHead {
     previous: Option<Option<String>>,
     /// The witness names an operation the journal does not record.
     lost: bool,
+}
+
+impl ObservedHead {
+    /// The journal witness moves with the restored plan's projection, from
+    /// exactly what was read: what it showed lost is recorded by then, and
+    /// a head of an incarnation this journal never held is not left to
+    /// fence the scope after it is reopened. A malformed witness is left
+    /// alone.
+    fn change_to(self, plan: &RestoredPlan) -> Option<WitnessChange> {
+        let marker = plan.plan().marker();
+        self.previous.map(|previous| WitnessChange {
+            resource: head_witness_resource(marker.lifecycle),
+            previous,
+            next: Some(marker.stamp()),
+        })
+    }
 }
 
 /// A failed ask of the permission actor: the projection's answer is unknown.

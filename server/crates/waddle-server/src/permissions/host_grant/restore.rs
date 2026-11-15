@@ -71,12 +71,15 @@ use super::model::{
     AuthorityIncarnation, ClosedReason, Fingerprint, GrantGeneration, GrantOperationId,
     GrantSubject, RoomAffiliation, ScopeLifecycleId, ScopeState,
 };
-use super::projection::{MarkerObservation, ProjectedRelationship, ProjectionIntent};
+use super::projection::{
+    MarkerObservation, ProjectedRelationship, ProjectionIntent, ProjectionWrite,
+};
 use super::store::{FenceSnapshot, HostGrantStore};
 use super::witness::{
-    apply_witness_changes, effective_latch, latch_changes, latch_witness_resource,
-    position_standing, position_witness_resource, regression, witness_write_failed, ListedWitness,
-    PositionLatch, PositionStanding, PositionWitness, WitnessResource,
+    apply_witness_changes, clear_witnesses, effective_latch, epoch_witness_resource, latch_changes,
+    latch_witness_resource, parse_epoch_stamp, position_standing, position_witness_resource,
+    regression, witness_write_failed, ListedWitness, PositionLatch, PositionStanding,
+    PositionWitness, WitnessChange, WitnessResource,
 };
 use crate::permissions::{ListHostGrantWitnesses, PermissionActor};
 
@@ -197,8 +200,8 @@ pub enum RestoreFenceRefusal {
     )]
     PositionUnreadable,
     #[error(
-        "scopes admit and SpiceDB holds no projection marker and no position witness of this \
-         authority: the replica is connected to a SpiceDB that is empty or not this \
+        "scopes admit and SpiceDB holds no projection marker, room witness or position witness \
+         of this authority: the replica is connected to a SpiceDB that is empty or another \
          deployment's"
     )]
     ProjectionAbsent,
@@ -313,6 +316,11 @@ pub struct RestoreFenceReport {
     /// The journal witness of each scope, as the pass read it, for the
     /// witness writers that follow a pass that passed.
     pub witnessed_heads: BTreeMap<ScopeLifecycleId, String>,
+    /// Whether SpiceDB holds a marker or room witness of a lifecycle the
+    /// store holds, or a position witness, latch or witnessed epoch filed
+    /// under this authority. Only then does the witness pass after it write
+    /// the first position witness.
+    pub holds_authority: bool,
 }
 
 /// What a replica keeps between passes of its restore fence.
@@ -323,7 +331,13 @@ pub struct RestoreFenceReport {
 ///   while the authority is refused. `None` until a pass got that far.
 /// - A position regression the replica saw. It counts like a stored latch
 ///   naming the same witness, so the replica keeps refusing it when the
-///   latch could not be written to SpiceDB; it is lost on a restart.
+///   latch could not be written to SpiceDB, and every later pass tries the
+///   write again. Until a write succeeds the latch is this replica's alone:
+///   it is lost when the replica restarts, and it stops counting once the
+///   position witness it names is replaced, which a writer that does not
+///   hold it does as soon as the server has written past the witnessed
+///   position again (another replica's fence, a committed mutation, an
+///   operator's act).
 #[derive(Debug, Default)]
 pub struct FenceMemory {
     refused_rooms: RwLock<Option<Arc<BTreeSet<String>>>>,
@@ -389,11 +403,15 @@ pub enum ReopenSelection {
 ///
 /// - the database lineage differs from the one the incarnation is bound to;
 /// - the configured restore epoch is not the stored one;
-/// - scopes admit and SpiceDB holds no marker and no position witness of
-///   this authority (a SpiceDB that is empty or another deployment's);
-/// - the PostgreSQL position regressed, a regression is latched, or the
-///   system or timeline changed without an acknowledgement
-///   ([`position_standing`]).
+/// - scopes admit and SpiceDB holds no marker, room witness or position
+///   witness of this authority (a SpiceDB that is empty, or that holds only
+///   another deployment's markers); nothing is closed for it;
+/// - the PostgreSQL position regressed, a regression is latched, a latch
+///   is held without its witness, or the system or timeline changed
+///   without an acknowledgement ([`position_standing`]);
+/// - the position witness, the latch or the witnessed epoch cannot be read
+///   and no restore was declared since they were written (once one was,
+///   the pass removes them).
 ///
 /// About each scope it decides alone: a marker or journal witness the
 /// journal contradicts, or a scope that admits without a marker, closes that
@@ -555,22 +573,29 @@ async fn fence_pass(
     }
     check_lineage_and_epoch(snapshot, configured)?;
 
-    let witnessed = match witnesses.positions.get(&snapshot.authority_id) {
-        None => None,
-        Some(Some(witness)) => Some(*witness),
-        Some(None) => return Err(RestoreFenceRefusal::PositionUnverified.into()),
-    };
-    // Scopes admit, so their markers were written; a SpiceDB that holds none
-    // of them and no position witness either is not this deployment's
-    // projection. Nothing is closed for it: the refusal clears when the
-    // replica reaches the SpiceDB it belongs beside.
-    if !snapshot.admitting.is_empty() && witnesses.markers.is_empty() && witnessed.is_none() {
+    let authority_id = &snapshot.authority_id;
+    report.holds_authority = witnesses.holds_authority(&scopes, authority_id);
+    // Scopes admit, so their markers were written; a SpiceDB that holds no
+    // marker, room witness or position witness of this authority (none at
+    // all, or only another deployment's) is not this deployment's
+    // projection. Nothing is closed
+    // for it and no position witness is written into it: the refusal
+    // clears when the replica reaches the SpiceDB it belongs beside.
+    if !snapshot.admitting.is_empty() && !report.holds_authority {
         return Err(RestoreFenceRefusal::ProjectionAbsent.into());
     }
-    let stored_latch = match witnesses.latches.get(&snapshot.authority_id) {
-        None => None,
-        Some(Some(latch)) => Some(*latch),
-        Some(None) => return Err(RestoreFenceRefusal::PositionUnverified.into()),
+    let (witnessed, stored_latch) = match witnesses.readable_position(authority_id) {
+        Some(readable) => readable,
+        None => {
+            clear_unreadable_position(
+                permissions,
+                &witnesses,
+                authority_id,
+                snapshot.binding.restore_epoch,
+            )
+            .await?;
+            (None, None)
+        }
     };
     let current = PositionWitness {
         epoch: snapshot.binding.restore_epoch,
@@ -722,8 +747,101 @@ async fn latch_regression(
         &latch,
         stored.as_deref(),
     );
-    if let Err(error) = apply_witness_changes(permissions, changes).await {
-        witness_write_failed(&error, "latch");
+    // A latch that is not written is kept in this replica's memory only;
+    // every way it fails is counted like any failed witness write.
+    match apply_witness_changes(permissions, changes).await {
+        Ok(Some(ProjectionWrite::Applied)) => {}
+        Ok(Some(ProjectionWrite::PreconditionFailed)) => {
+            witness_write_failed("precondition_failed", "latch");
+        }
+        Ok(None) => witness_write_failed("no_projection", "latch"),
+        Err(error) => witness_write_failed(error.kind(), "latch"),
+    }
+}
+
+/// Remove the authority's position witness, latch and witnessed epoch when
+/// one of them cannot be read. An unreadable witness carries no epoch, so it
+/// is removed only when what can be read of the three shows a restore was
+/// declared since they were written: an epoch below `declared`. Otherwise,
+/// or when the removal does not complete, the authority is refused as
+/// unverified, and nothing is removed without a declared restore.
+///
+/// Each resource is removed in a request of its own conditioned on the
+/// resource that shows the earlier epoch, and that resource is removed
+/// last, so a pass that stops in between leaves the evidence for the next
+/// pass to finish. Removed, the three are as a declared restore leaves a
+/// readable witness: the next pass that passes writes the first witness of
+/// the declared epoch.
+async fn clear_unreadable_position(
+    permissions: &ActorRef<PermissionActor>,
+    witnesses: &Witnesses,
+    authority_id: &str,
+    declared: RestoreEpoch,
+) -> Result<(), HostGrantError> {
+    let resources = [
+        (
+            epoch_witness_resource(authority_id),
+            witnesses
+                .epochs
+                .get(authority_id)
+                .copied()
+                .flatten()
+                .map(|epoch| (epoch, epoch.to_string())),
+        ),
+        (
+            position_witness_resource(authority_id),
+            witnesses
+                .positions
+                .get(authority_id)
+                .copied()
+                .flatten()
+                .map(|witness| (witness.epoch, witness.stamp())),
+        ),
+        (
+            latch_witness_resource(authority_id),
+            witnesses
+                .latches
+                .get(authority_id)
+                .copied()
+                .flatten()
+                .map(|latch| (latch.witness.epoch, latch.stamp())),
+        ),
+    ];
+    let Some((proving, stamp)) = resources.iter().find_map(|(resource, read)| {
+        read.as_ref()
+            .filter(|(epoch, _)| *epoch < declared)
+            .map(|(_, stamp)| (resource.clone(), stamp.clone()))
+    }) else {
+        return Err(RestoreFenceRefusal::PositionUnverified.into());
+    };
+    let mut order: Vec<String> = resources
+        .iter()
+        .map(|(resource, _)| resource.clone())
+        .filter(|resource| *resource != proving)
+        .collect();
+    order.push(proving.clone());
+    let condition = WitnessChange {
+        resource: proving,
+        previous: Some(stamp.clone()),
+        next: Some(stamp),
+    };
+    match clear_witnesses(permissions, order, condition).await {
+        Ok(Some(ProjectionWrite::Applied)) => {
+            tracing::warn!(
+                "A host-grant position witness that could not be read was removed after a \
+                 declared restore (docs/operations/authz-host-grant-restore.md)"
+            );
+            Ok(())
+        }
+        Ok(Some(ProjectionWrite::PreconditionFailed)) => {
+            witness_write_failed("precondition_failed", "position");
+            Err(RestoreFenceRefusal::PositionUnverified.into())
+        }
+        Ok(None) => Err(RestoreFenceRefusal::PositionUnverified.into()),
+        Err(error) => {
+            witness_write_failed(error.kind(), "position");
+            Err(RestoreFenceRefusal::PositionUnverified.into())
+        }
     }
 }
 
@@ -804,6 +922,9 @@ pub(crate) struct Witnesses {
     pub(crate) positions: BTreeMap<String, Option<PositionWitness>>,
     /// Each authority's regression latch; `None` when it is malformed.
     pub(crate) latches: BTreeMap<String, Option<PositionLatch>>,
+    /// The epoch each authority's position witness was last written under;
+    /// `None` when it is malformed.
+    pub(crate) epochs: BTreeMap<String, Option<RestoreEpoch>>,
 }
 
 impl Witnesses {
@@ -844,6 +965,13 @@ impl Witnesses {
                     };
                     witnesses.latches.insert(authority, latch);
                 }
+                WitnessResource::Epoch(authority) => {
+                    let epoch = match listed.single_stamp() {
+                        Ok(Some(stamp)) => parse_epoch_stamp(stamp),
+                        Ok(None) | Err(_) => None,
+                    };
+                    witnesses.epochs.insert(authority, epoch);
+                }
                 WitnessResource::Unknown => {}
             }
         }
@@ -853,6 +981,47 @@ impl Witnesses {
     /// Whether any marker or witness names a scope.
     fn names_scope(&self) -> bool {
         !self.markers.is_empty() || !self.heads.is_empty() || !self.rooms.is_empty()
+    }
+
+    /// Whether SpiceDB holds what only this authority's projection writes: a
+    /// marker or room witness of a lifecycle `scopes` holds, or a position
+    /// witness, latch or witnessed epoch filed under `authority_id`. A
+    /// journal witness does not count: a committed mutation writes it into
+    /// whatever SpiceDB its replica reaches, so it shows nothing about whose
+    /// projection SpiceDB holds.
+    fn holds_authority(
+        &self,
+        scopes: &BTreeMap<ScopeLifecycleId, ScopeState>,
+        authority_id: &str,
+    ) -> bool {
+        self.markers
+            .keys()
+            .chain(self.rooms.values().flatten())
+            .any(|lifecycle| scopes.contains_key(lifecycle))
+            || self.positions.contains_key(authority_id)
+            || self.latches.contains_key(authority_id)
+            || self.epochs.contains_key(authority_id)
+    }
+
+    /// The authority's position witness and latch, when each is absent or
+    /// readable and so is the witnessed epoch; `None` when one of them
+    /// cannot be read.
+    fn readable_position(
+        &self,
+        authority_id: &str,
+    ) -> Option<(Option<PositionWitness>, Option<PositionLatch>)> {
+        let witness = match self.positions.get(authority_id) {
+            None => None,
+            Some(witness) => Some((*witness)?),
+        };
+        let latch = match self.latches.get(authority_id) {
+            None => None,
+            Some(latch) => Some((*latch)?),
+        };
+        if matches!(self.epochs.get(authority_id), Some(None)) {
+            return None;
+        }
+        Some((witness, latch))
     }
 
     /// Every lifecycle a marker, a journal witness or a room witness names.

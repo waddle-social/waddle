@@ -105,12 +105,14 @@ pub enum HostGrantError {
     #[error(transparent)]
     RestoreFence(#[from] RestoreFenceRefusal),
     /// An operator's position acknowledgement names a witness of another
-    /// PostgreSQL system, or of a later timeline than the server writes on:
+    /// PostgreSQL system, of a later timeline than the server writes on, or
+    /// of an earlier timeline at a position the server's timeline is below:
     /// it could never apply, and only a declared restore replaces such a
     /// witness.
     #[error(
-        "the position acknowledgement names another PostgreSQL system or a later timeline than \
-         the server writes on; declare a restore instead"
+        "the position acknowledgement names another PostgreSQL system, a later timeline than \
+         the server writes on, or a position the server's later timeline is below; declare a \
+         restore instead"
     )]
     AcknowledgementRefused,
     #[error("the scope was enrolled under an admission policy this build does not evaluate")]

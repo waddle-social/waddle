@@ -2,7 +2,7 @@
 //!
 //! A restore of PostgreSQL brings back everything the database records
 //! about itself, so what tells a restored database from the live one has to
-//! be kept elsewhere. Besides the projection markers, a replica keeps four
+//! be kept elsewhere. Besides the projection markers, a replica keeps five
 //! kinds of witness in SpiceDB, in the projection's own definition and
 //! relation (`waddle_grant_projection#marker`), each under a resource ID
 //! that no lifecycle identity can take:
@@ -26,18 +26,26 @@
 //!   the witnessed timeline. Once a regression is latched it is refused
 //!   until a restore is declared (or, for a regression on the witnessed
 //!   timeline, an operator acknowledges that exact witness), even after the
-//!   server has written past the witnessed position again.
+//!   server has written past the witnessed position again. A latch without
+//!   its position witness is refused as unverified, not removed.
+//! - **The witnessed epoch** of the authority, `epoch_<authority>`: the
+//!   declared restore epoch the position witness was last written under,
+//!   written in the same request as every position witness. A position
+//!   witness or latch that cannot be read carries no epoch of its own; the
+//!   fence removes one only when this epoch is below the declared one, that
+//!   is once a restore was declared since the witness was last written.
 //!
 //! Every witness is written after the PostgreSQL commit it describes, never
 //! inside it, so SpiceDB stays off the revoke's commit path (ADR-0020 D5).
 //! A write is conditioned on the exact witnesses it replaces and only moves
 //! a witness forward: a witness the database contradicts is evidence, and no
 //! writer replaces it until an operator has declared and reopened the
-//! restore (journal heads) or acknowledged the position. Witnesses are best
-//! effort: one that was never written detects nothing, and a SpiceDB that
-//! was restored or lost together with PostgreSQL leaves none.
+//! restore (journal heads) or acknowledged the position. A write that moves
+//! the position witness is also conditioned on the latch it read, or on
+//! there being none, so a latch written meanwhile stops it. Witnesses are
+//! best effort: one that was never written detects nothing, and a SpiceDB
+//! that was restored or lost together with PostgreSQL leaves none.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -48,14 +56,17 @@ use super::error::HostGrantError;
 use super::marker::ProjectionMarker;
 use super::model::{Fingerprint, ScopeLifecycleId};
 use super::projection::ProjectionWrite;
-use super::restore::RestoreEpoch;
+use super::restore::{RestoreEpoch, RestoreFenceReport};
 use super::store::HostGrantStore;
-use crate::permissions::{PermissionActor, ReadHostGrantWitness, ReplaceHostGrantWitnesses};
+use crate::permissions::{
+    ClearHostGrantWitnesses, PermissionActor, ReadHostGrantWitness, ReplaceHostGrantWitnesses,
+};
 
 const HEAD_PREFIX: &str = "head_";
 const ROOM_PREFIX: &str = "room_";
 const POSITION_PREFIX: &str = "position_";
 const LATCH_PREFIX: &str = "latch_";
+const EPOCH_PREFIX: &str = "epoch_";
 
 /// How many times a witness writer reads again after another writer
 /// replaced the witness it was conditioned on.
@@ -104,6 +115,8 @@ pub(crate) enum WitnessResource {
     Position(String),
     /// The regression latch of an authority.
     Latch(String),
+    /// The epoch an authority's position witness was last written under.
+    Epoch(String),
     /// Nothing this build writes.
     Unknown,
 }
@@ -136,6 +149,12 @@ impl WitnessResource {
             .filter(|authority| is_hex(authority, 32))
         {
             return Self::Latch(authority.to_owned());
+        }
+        if let Some(authority) = resource
+            .strip_prefix(EPOCH_PREFIX)
+            .filter(|authority| is_hex(authority, 32))
+        {
+            return Self::Epoch(authority.to_owned());
         }
         Self::Unknown
     }
@@ -174,6 +193,18 @@ pub fn position_witness_resource(authority_id: &str) -> String {
 /// The resource of an authority's regression latch.
 pub fn latch_witness_resource(authority_id: &str) -> String {
     format!("{LATCH_PREFIX}{authority_id}")
+}
+
+/// The resource of the epoch an authority's position witness was last
+/// written under.
+pub fn epoch_witness_resource(authority_id: &str) -> String {
+    format!("{EPOCH_PREFIX}{authority_id}")
+}
+
+/// The witnessed epoch exactly as it is written: decimal digits without a
+/// leading zero.
+pub(crate) fn parse_epoch_stamp(stamp: &str) -> Option<RestoreEpoch> {
+    RestoreEpoch::parse(stamp).filter(|epoch| epoch.to_string() == stamp)
 }
 
 /// Where the PostgreSQL server stands in its write-ahead log.
@@ -283,13 +314,19 @@ impl PositionAcknowledgement {
         (acknowledgement.spelling() == text).then_some(acknowledgement)
     }
 
-    /// Whether an acknowledgement of this shape can ever be honoured: on
-    /// the witnessed system, for a later timeline (a promotion) or for the
-    /// witnessed timeline itself (a regression on it). Another system, or
-    /// an earlier timeline, takes a declared restore.
-    pub fn admissible(&self) -> bool {
+    /// Whether an acknowledgement of this shape can ever be honoured while
+    /// the server writes at `lsn`: on the witnessed system, for the
+    /// witnessed timeline itself (a regression on it), or for a later
+    /// timeline (a promotion) whose position is not below the witnessed
+    /// one. A later timeline below the witnessed position cannot contain
+    /// it: that is a regression across timelines, provable from the two
+    /// positions alone. It, another system and an earlier timeline take a
+    /// declared restore.
+    pub fn admissible(&self, lsn: u64) -> bool {
         let witnessed = self.supersedes.position;
-        witnessed.system_identifier == self.system_identifier && self.timeline >= witnessed.timeline
+        witnessed.system_identifier == self.system_identifier
+            && (self.timeline == witnessed.timeline
+                || (self.timeline > witnessed.timeline && lsn >= witnessed.lsn))
     }
 }
 
@@ -423,6 +460,10 @@ pub fn regression(witness: &PositionWitness, current: &PositionWitness) -> Optio
 ///   unverified unless an operator acknowledged that exact witness for the
 ///   current, later, timeline.
 /// - Another system is unverified; only a declared restore replaces it.
+///
+/// Without a witness, a latch is the evidence that one was written: the
+/// position is unverified unless a restore was declared since the latched
+/// witness, which replaces it.
 pub fn position_standing(
     witness: Option<&PositionWitness>,
     current: &PositionWitness,
@@ -430,7 +471,11 @@ pub fn position_standing(
     latch: Option<&PositionLatch>,
 ) -> PositionStanding {
     let Some(witness) = witness else {
-        return PositionStanding::Unrecorded;
+        return match latch {
+            None => PositionStanding::Unrecorded,
+            Some(latch) if latch.witness.epoch < current.epoch => PositionStanding::Rebased,
+            Some(_) => PositionStanding::Unverified,
+        };
     };
     if witness.epoch < current.epoch {
         return PositionStanding::Rebased;
@@ -521,16 +566,18 @@ pub async fn sync_journal_witness(
         let Some(listed) = read_witness(permissions, &resource).await? else {
             return Ok(WitnessSync::Skipped);
         };
-        let Ok(stamp) = listed.single_stamp() else {
+        let previous = match listed.single_stamp() {
+            Ok(None) => None,
+            Ok(Some(stamp)) => ProjectionMarker::parse(lifecycle, stamp),
+            Err(MalformedWitness) => None,
+        };
+        if previous.is_none() && !listed.stamps.is_empty() {
+            // A head that cannot be read is left alone; nothing moves it
+            // forward, so it is counted and warned about like a failed
+            // write.
+            witness_write_failed("malformed", "journal");
             return Ok(WitnessSync::Malformed);
-        };
-        let previous = match stamp {
-            None => None,
-            Some(stamp) => match ProjectionMarker::parse(lifecycle, stamp) {
-                Some(marker) => Some(marker),
-                None => return Ok(WitnessSync::Malformed),
-            },
-        };
+        }
         let Some(head) = store.journal_head(lifecycle).await? else {
             return Ok(WitnessSync::Skipped);
         };
@@ -573,14 +620,72 @@ pub async fn sync_journal_witness(
 /// Who asks the position witness writer to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PositionWriter {
-    /// A fence pass that passed: it may write the first position witness,
+    /// A fence pass that passed and found SpiceDB holding a marker or
+    /// witness of this authority: it may write the first position witness,
     /// because the fence found the projection the witness belongs beside.
     Fence,
-    /// Any other writer: a committed mutation or an operator's act. It
-    /// moves an existing witness and never writes the first one, so a
+    /// Any other writer: a committed mutation, an operator's act, or a
+    /// fence pass beside a SpiceDB that holds nothing of this authority's.
+    /// It moves an existing witness and never writes the first one, so a
     /// SpiceDB that holds nothing of this deployment's is not given a
     /// witness by it.
     Commit,
+}
+
+/// The authority's position witness, latch and witnessed epoch as SpiceDB
+/// holds them, each with the stamp it was read as.
+struct StoredPosition {
+    witness: Option<PositionWitness>,
+    witness_stamp: Option<String>,
+    latch: Option<PositionLatch>,
+    latch_stamp: Option<String>,
+    epoch_stamp: Option<String>,
+}
+
+/// Read the authority's position witnesses. `Ok(None)` when the backend
+/// holds no projection; `Err(MalformedWitness)` inside when one of them
+/// cannot be read, which is counted and warned about.
+async fn read_stored_position(
+    permissions: &ActorRef<PermissionActor>,
+    authority_id: &str,
+) -> Result<Option<Result<StoredPosition, MalformedWitness>>, HostGrantError> {
+    let mut stamps = Vec::with_capacity(3);
+    for resource in [
+        position_witness_resource(authority_id),
+        latch_witness_resource(authority_id),
+        epoch_witness_resource(authority_id),
+    ] {
+        let Some(listed) = read_witness(permissions, &resource).await? else {
+            return Ok(None);
+        };
+        match listed.single_stamp() {
+            Ok(stamp) => stamps.push(stamp.map(str::to_owned)),
+            Err(malformed) => {
+                witness_write_failed("malformed", "position");
+                return Ok(Some(Err(malformed)));
+            }
+        }
+    }
+    let mut stamps = stamps.into_iter();
+    let (witness_stamp, latch_stamp, epoch_stamp) = (
+        stamps.next().flatten(),
+        stamps.next().flatten(),
+        stamps.next().flatten(),
+    );
+    let witness = witness_stamp.as_deref().map(PositionWitness::parse);
+    let latch = latch_stamp.as_deref().map(PositionLatch::parse);
+    let epoch = epoch_stamp.as_deref().map(parse_epoch_stamp);
+    if matches!(witness, Some(None)) || matches!(latch, Some(None)) || matches!(epoch, Some(None)) {
+        witness_write_failed("malformed", "position");
+        return Ok(Some(Err(MalformedWitness)));
+    }
+    Ok(Some(Ok(StoredPosition {
+        witness: witness.flatten(),
+        witness_stamp,
+        latch: latch.flatten(),
+        latch_stamp,
+        epoch_stamp,
+    })))
 }
 
 /// Move the authority's PostgreSQL position witness forward when the
@@ -588,10 +693,16 @@ pub enum PositionWriter {
 /// The witnesses are read before the position, so the position read is at
 /// least the one any writer recorded.
 ///
-/// A move that replaces the witness also removes the latch, in the same
-/// request; a latch is written conditioned on the exact position witness it
-/// names. `latched` is a regression this replica saw and keeps in memory;
-/// it counts like a stored latch that names the same witness.
+/// A stored latch that names the witness, and a latch without a witness,
+/// stop every move except the replacement a declared restore makes and,
+/// for a latch on the witnessed timeline, an acknowledgement bound to it.
+/// A move that replaces the witness also removes the latch it read, or is
+/// conditioned on there being none, and records the epoch it was written
+/// under, all in the same request; a latch is written conditioned on the
+/// exact position witness it names. `latched` is a regression this replica
+/// saw and keeps in memory; it counts like a stored latch that names the
+/// same witness. A witness that cannot be read is left alone, counted and
+/// warned about; the fence removes it once a restore is declared.
 pub async fn sync_position_witness(
     store: &HostGrantStore,
     permissions: &ActorRef<PermissionActor>,
@@ -603,36 +714,19 @@ pub async fn sync_position_witness(
     };
     let resource = position_witness_resource(&authority.authority_id);
     let latch_resource = latch_witness_resource(&authority.authority_id);
+    let epoch_resource = epoch_witness_resource(&authority.authority_id);
     for _ in 0..WITNESS_WRITE_ATTEMPTS {
-        let Some(listed) = read_witness(permissions, &resource).await? else {
-            return Ok((WitnessSync::Skipped, None));
+        let stored = match read_stored_position(permissions, &authority.authority_id).await? {
+            None => return Ok((WitnessSync::Skipped, None)),
+            Some(Err(MalformedWitness)) => return Ok((WitnessSync::Malformed, None)),
+            Some(Ok(stored)) => stored,
         };
-        let Some(listed_latch) = read_witness(permissions, &latch_resource).await? else {
-            return Ok((WitnessSync::Skipped, None));
-        };
-        let (Ok(stamp), Ok(latch_stamp)) = (listed.single_stamp(), listed_latch.single_stamp())
-        else {
-            return Ok((WitnessSync::Malformed, None));
-        };
-        let previous = match stamp {
-            None => None,
-            Some(stamp) => match PositionWitness::parse(stamp) {
-                Some(witness) => Some(witness),
-                None => return Ok((WitnessSync::Malformed, None)),
-            },
-        };
-        let stored_latch = match latch_stamp {
-            None => None,
-            Some(stamp) => match PositionLatch::parse(stamp) {
-                Some(latch) => Some(latch),
-                None => return Ok((WitnessSync::Malformed, None)),
-            },
-        };
+        let previous = stored.witness;
         let current = PositionWitness {
             epoch: authority.restore_epoch,
             position: store.postgres_position().await?,
         };
-        let latch = effective_latch(previous.as_ref(), stored_latch.as_ref(), latched);
+        let latch = effective_latch(previous.as_ref(), stored.latch.as_ref(), latched);
         let standing = position_standing(
             previous.as_ref(),
             &current,
@@ -640,30 +734,36 @@ pub async fn sync_position_witness(
             latch.as_ref(),
         );
         let changes = match standing {
-            PositionStanding::Unrecorded if writer == PositionWriter::Commit => {
+            standing
+                if standing.writes() && previous.is_none() && writer == PositionWriter::Commit =>
+            {
                 return Ok((WitnessSync::Skipped, Some(standing)));
             }
-            standing if standing.writes() => {
-                let mut changes = vec![WitnessChange {
+            standing if standing.writes() => vec![
+                WitnessChange {
                     resource: resource.clone(),
-                    previous: previous.as_ref().map(PositionWitness::stamp),
+                    previous: stored.witness_stamp.clone(),
                     next: Some(current.stamp()),
-                }];
-                if let Some(stored) = latch_stamp {
-                    changes.push(WitnessChange {
-                        resource: latch_resource.clone(),
-                        previous: Some(stored.to_owned()),
-                        next: None,
-                    });
-                }
-                changes
-            }
+                },
+                // The latch read is removed; when none was read, the move
+                // is conditioned on there being none.
+                WitnessChange {
+                    resource: latch_resource.clone(),
+                    previous: stored.latch_stamp.clone(),
+                    next: None,
+                },
+                WitnessChange {
+                    resource: epoch_resource.clone(),
+                    previous: stored.epoch_stamp.clone(),
+                    next: Some(current.epoch.to_string()),
+                },
+            ],
             PositionStanding::Regressed => {
                 let Some(seen) = previous else {
                     return Ok((WitnessSync::Kept, Some(standing)));
                 };
                 let stored_names_witness =
-                    stored_latch.is_some_and(|stored| stored.witness == seen);
+                    stored.latch.is_some_and(|stored| stored.witness == seen);
                 let latch = match latch {
                     Some(_) if stored_names_witness => {
                         return Ok((WitnessSync::Kept, Some(standing)))
@@ -677,7 +777,12 @@ pub async fn sync_position_witness(
                         None => return Ok((WitnessSync::Kept, Some(standing))),
                     },
                 };
-                latch_changes(&resource, &latch_resource, &latch, latch_stamp)
+                latch_changes(
+                    &resource,
+                    &latch_resource,
+                    &latch,
+                    stored.latch_stamp.as_deref(),
+                )
             }
             PositionStanding::Current => return Ok((WitnessSync::Current, Some(standing))),
             _ => return Ok((WitnessSync::Kept, Some(standing))),
@@ -696,13 +801,16 @@ pub async fn sync_position_witness(
 }
 
 /// The latch that counts for `witness`: a stored one that names it, or else
-/// the one this replica keeps in memory when it names it.
+/// the one this replica keeps in memory when it names it. Without a
+/// witness, any latch counts: it shows that a witness was written.
 pub(crate) fn effective_latch(
     witness: Option<&PositionWitness>,
     stored: Option<&PositionLatch>,
     latched: Option<&PositionLatch>,
 ) -> Option<PositionLatch> {
-    let witness = witness?;
+    let Some(witness) = witness else {
+        return stored.or(latched).copied();
+    };
     stored
         .filter(|latch| latch.witness == *witness)
         .or_else(|| latched.filter(|latch| latch.witness == *witness))
@@ -742,12 +850,12 @@ pub async fn sync_witnesses_after_commit(
     lifecycle: ScopeLifecycleId,
 ) {
     if let Err(error) = sync_journal_witness(&store, &permissions, lifecycle).await {
-        witness_write_failed(&error, "journal");
+        witness_write_failed(error.kind(), "journal");
     }
     if let Err(error) =
         sync_position_witness(&store, &permissions, PositionWriter::Commit, None).await
     {
-        witness_write_failed(&error, "position");
+        witness_write_failed(error.kind(), "position");
     }
 }
 
@@ -764,30 +872,35 @@ pub struct WitnessPass {
 }
 
 /// Bring the position witness and every stale journal witness up to date
-/// after a fence pass that passed. `witnessed` holds the journal witness
-/// stamps the pass listed; a scope whose witness already names its journal
-/// head is not visited, so a pass over a deployment whose witnesses are
-/// current costs one PostgreSQL read besides the position. Every scope
+/// after `report`'s fence pass, which passed. The report holds the journal
+/// witness stamps the pass listed; a scope whose witness already names its
+/// journal head is not visited, so a pass over a deployment whose witnesses
+/// are current costs one PostgreSQL read besides the position. Every scope
 /// counts, retired and exhausted ones included, so an operator's act on any
 /// of them (a retirement, an enrollment, a reopen, a revoke) is witnessed
-/// by the next pass that passes.
+/// by the next pass that passes. The first position witness is written only
+/// when the pass found a marker or witness of this authority in SpiceDB.
 pub async fn sync_witnesses_after_fence(
     store: &HostGrantStore,
     permissions: &ActorRef<PermissionActor>,
-    witnessed: &BTreeMap<ScopeLifecycleId, String>,
+    report: &RestoreFenceReport,
     latched: Option<&PositionLatch>,
 ) -> WitnessPass {
     let mut pass = WitnessPass::default();
-    if let Err(error) =
-        sync_position_witness(store, permissions, PositionWriter::Fence, latched).await
-    {
-        witness_write_failed(&error, "position");
+    let witnessed = &report.witnessed_heads;
+    let writer = if report.holds_authority {
+        PositionWriter::Fence
+    } else {
+        PositionWriter::Commit
+    };
+    if let Err(error) = sync_position_witness(store, permissions, writer, latched).await {
+        witness_write_failed(error.kind(), "position");
         pass.failed += 1;
     }
     let heads = match store.journal_heads().await {
         Ok(heads) => heads,
         Err(error) => {
-            witness_write_failed(&error, "journal");
+            witness_write_failed(error.kind(), "journal");
             pass.failed += 1;
             return pass;
         }
@@ -801,7 +914,7 @@ pub async fn sync_witnesses_after_fence(
             Ok(WitnessSync::Written) => pass.written += 1,
             Ok(_) => {}
             Err(error) => {
-                witness_write_failed(&error, "journal");
+                witness_write_failed(error.kind(), "journal");
                 pass.failed += 1;
             }
         }
@@ -819,7 +932,7 @@ pub async fn sync_journal_witnesses(
     let heads = match store.journal_heads().await {
         Ok(heads) => heads,
         Err(error) => {
-            witness_write_failed(&error, "journal");
+            witness_write_failed(error.kind(), "journal");
             pass.failed += 1;
             return pass;
         }
@@ -833,7 +946,7 @@ pub async fn sync_journal_witnesses(
             Ok(WitnessSync::Kept | WitnessSync::Malformed) => pass.stale_heads += 1,
             Ok(_) => {}
             Err(error) => {
-                witness_write_failed(&error, "journal");
+                witness_write_failed(error.kind(), "journal");
                 pass.failed += 1;
             }
         }
@@ -876,9 +989,9 @@ pub async fn read_position_witness(
     Ok(Some((position, latch)))
 }
 
-/// Count a failed witness write and warn about it at most once a minute,
-/// by kind only.
-pub(crate) fn witness_write_failed(error: &HostGrantError, witness: &'static str) {
+/// Count a failed witness write, or a witness found malformed, and warn
+/// about it at most once a minute, by kind only.
+pub(crate) fn witness_write_failed(kind: &'static str, witness: &'static str) {
     static LAST_WARNING_MS: AtomicI64 = AtomicI64::new(i64::MIN);
     waddle_xmpp::counter_add!(
         "waddle.host_grant.witness.write_failures",
@@ -889,7 +1002,7 @@ pub(crate) fn witness_write_failed(error: &HostGrantError, witness: &'static str
     );
     if rate_limited(&LAST_WARNING_MS, WITNESS_WARNING_INTERVAL_MS) {
         tracing::warn!(
-            kind = error.kind(),
+            kind,
             witness,
             "a host-grant witness was not brought up to date \
              (docs/operations/authz-host-grant-restore.md)"
@@ -921,12 +1034,61 @@ pub(crate) async fn read_witness(
         .map_err(projection_store_error)
 }
 
+/// Remove every relationship each of `resources` holds, in order, one
+/// request per resource, each conditioned on `condition` (a resource that
+/// must hold exactly its `previous` stamp). A resource that holds more than
+/// one stamp, or relationships that are not plain marker relationships, is
+/// removed whole. `None` when the backend holds no projection; a failed
+/// condition stops at that resource.
+pub(crate) async fn clear_witnesses(
+    permissions: &ActorRef<PermissionActor>,
+    resources: Vec<String>,
+    condition: WitnessChange,
+) -> Result<Option<ProjectionWrite>, HostGrantError> {
+    #[cfg(feature = "test-support")]
+    if WITNESS_WRITE_FAULT.try_with(|_| ()).is_ok() {
+        return Err(HostGrantError::ProjectionStore(
+            crate::permissions::PermissionError::SpiceDbError(
+                "an injected witness write failure".to_owned(),
+            ),
+        ));
+    }
+    permissions
+        .ask(ClearHostGrantWitnesses {
+            resources,
+            condition,
+        })
+        .await
+        .map_err(projection_store_error)
+}
+
 pub(crate) async fn apply_witness_changes(
     permissions: &ActorRef<PermissionActor>,
     changes: Vec<WitnessChange>,
 ) -> Result<Option<ProjectionWrite>, HostGrantError> {
+    #[cfg(feature = "test-support")]
+    if WITNESS_WRITE_FAULT.try_with(|_| ()).is_ok() {
+        return Err(HostGrantError::ProjectionStore(
+            crate::permissions::PermissionError::SpiceDbError(
+                "an injected witness write failure".to_owned(),
+            ),
+        ));
+    }
     permissions
         .ask(ReplaceHostGrantWitnesses { changes })
         .await
         .map_err(projection_store_error)
+}
+
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static WITNESS_WRITE_FAULT: ();
+}
+
+/// Run `future` so that every witness write it makes on its own task fails
+/// as a SpiceDB that does not answer would, before any request is sent.
+/// The witness reads are unaffected.
+#[cfg(feature = "test-support")]
+pub async fn with_host_grant_witness_write_fault<F: std::future::Future>(future: F) -> F::Output {
+    WITNESS_WRITE_FAULT.scope((), future).await
 }

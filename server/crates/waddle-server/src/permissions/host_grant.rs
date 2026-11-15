@@ -87,16 +87,18 @@ pub use restore::{
     HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
 pub use runtime_attach::{
-    verification_retried, GateState, HostGrantAttachment, HostGrantGate, MAX_INCOMPLETE_PASSES,
-    REVERIFY_INTERVAL,
+    verification_retried, GateReadiness, GateState, HostGrantAttachment, HostGrantGate,
+    ReplicaFailure, INCOMPLETE_READINESS_GRACE, MAX_INCOMPLETE_PASSES, REVERIFY_INTERVAL,
 };
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
 pub use store::{Activation, HostGrantStore, RESTORE_TRANSITION_BATCH};
+#[cfg(feature = "test-support")]
+pub use witness::with_host_grant_witness_write_fault;
 pub use witness::{
-    head_witness_resource, latch_witness_resource, position_standing, position_witness_resource,
-    read_position_witness, regression, room_witness_digest, room_witness_resource,
-    sync_journal_witness, sync_journal_witnesses, sync_position_witness,
+    epoch_witness_resource, head_witness_resource, latch_witness_resource, position_standing,
+    position_witness_resource, read_position_witness, regression, room_witness_digest,
+    room_witness_resource, sync_journal_witness, sync_journal_witnesses, sync_position_witness,
     sync_witnesses_after_fence, LatchKind, ListedWitness, MalformedWitness,
     PositionAcknowledgement, PositionLatch, PositionStanding, PositionWitness, PositionWriter,
     PostgresPosition, WitnessChange, WitnessPass, WitnessSync,

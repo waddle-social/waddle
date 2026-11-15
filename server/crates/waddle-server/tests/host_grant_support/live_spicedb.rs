@@ -45,18 +45,28 @@ pub fn disposable_spicedb_env() -> (String, String) {
 }
 
 /// Empty the store, markers and witnesses included, after checking that it
-/// holds no position witness a test suite did not write. A definition the
-/// stored schema lacks makes its delete fail; that is the state wanted.
+/// holds no position witness a test suite did not write. The check fails
+/// closed: a store whose schema defines the projection and whose
+/// relationships cannot be read is not emptied. A store without a schema,
+/// or whose schema lacks the projection definition, holds no witness. A
+/// definition the stored schema lacks makes its delete fail; that is the
+/// state wanted.
 pub async fn empty_disposable_store(raw: &Client) {
     let mut position_witness = false;
     let mut marked = false;
-    if let Ok(mut stream) = raw
-        .read_relationships(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
-        .consistency(Consistency::FullyConsistent)
-        .send()
-        .await
-    {
-        while let Some(Ok(item)) = stream.next().await {
+    if schema_defines_projection(raw).await {
+        let mut stream = raw
+            .read_relationships(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
+            .consistency(Consistency::FullyConsistent)
+            .send()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("refusing to empty a SpiceDB whose witnesses cannot be read: {error}")
+            });
+        while let Some(item) = stream.next().await {
+            let item = item.unwrap_or_else(|error| {
+                panic!("refusing to empty a SpiceDB whose witnesses cannot be read: {error}")
+            });
             let resource = item.relationship.resource.object_id().to_owned();
             position_witness |= resource.starts_with("position_");
             marked |= resource == TEST_STORE_RESOURCE;
@@ -74,6 +84,25 @@ pub async fn empty_disposable_store(raw: &Client) {
         let _ = raw
             .delete_relationships(RelationshipFilter::new(definition))
             .await;
+    }
+}
+
+/// Whether the stored schema defines the host-grant projection. A store
+/// without a schema answers `NotFound`; any other failure to read the
+/// schema fails the case rather than guessing.
+async fn schema_defines_projection(raw: &Client) -> bool {
+    match raw.read_schema().await {
+        Ok((schema, _)) => {
+            let words: Vec<&str> = schema
+                .split(|c: char| c.is_whitespace() || c == '{')
+                .filter(|word| !word.is_empty())
+                .collect();
+            words
+                .windows(2)
+                .any(|pair| pair == ["definition", HOST_GRANT_PROJECTION_DEFINITION])
+        }
+        Err(prescience::Error::Status { code, .. }) if format!("{code:?}") == "NotFound" => false,
+        Err(error) => panic!("refusing to empty a SpiceDB whose schema cannot be read: {error}"),
     }
 }
 
