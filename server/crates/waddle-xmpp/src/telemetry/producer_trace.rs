@@ -22,22 +22,36 @@ pub fn sampled_span_context(cx: &opentelemetry::Context) -> Option<SpanContext> 
     (span_context.is_valid() && span_context.is_sampled()).then_some(span_context)
 }
 
+tokio::task_local! {
+    /// Set while the task replays stored items; see [`replaying`].
+    static REPLAYING: ();
+}
+
+/// Run `work` with [`ProducerTrace::capture`] suppressed.
+///
+/// For work that re-sends stored items (an offline flush, a dead session's
+/// unacknowledged queue, a durable outbox drain). Its current span is the
+/// replay, not the item's producer, so capturing there would file each
+/// delivery under the wrong trace. Applies to the calling task only.
+pub async fn replaying<F: std::future::Future>(work: F) -> F::Output {
+    REPLAYING.scope((), work).await
+}
+
 /// The producer's trace context, or nothing when the producer was untraced.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerTrace(Option<SpanContext>);
 
 impl ProducerTrace {
     /// No producer context: the consumer opens no span.
     pub const NONE: Self = Self(None);
 
-    /// Capture the calling task's current span.
+    /// Capture the calling task's current span, unless the task is
+    /// [`replaying`] stored items.
     pub fn capture() -> Self {
+        if REPLAYING.try_with(|()| ()).is_ok() {
+            return Self::NONE;
+        }
         Self(sampled_span_context(&tracing::Span::current().context()))
-    }
-
-    /// Whether a producer context was captured.
-    pub fn is_traced(&self) -> bool {
-        self.0.is_some()
     }
 
     /// Open a consumer span in the producer's trace.
@@ -110,21 +124,35 @@ mod tests {
         assert!(spans.exported().is_empty());
     }
 
-    #[test]
-    fn replayed_stanzas_do_not_join_the_span_that_replays_them() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn replayed_stanzas_do_not_join_the_span_that_replays_them() {
+        use tracing::Instrument as _;
+
         let _spans = acquire_spans();
-        let flush = tracing::info_span!("flush-under-test");
-        let (pending, recovered) = flush.in_scope(|| {
-            (
-                OutboundStanza::for_pending_flush(
-                    message(),
-                    PendingRowId::new("row-1"),
-                    chrono::Utc::now(),
-                ),
-                OutboundStanza::new(message()).without_trace(),
-            )
-        });
-        assert!(!pending.trace.is_traced());
-        assert!(!recovered.trace.is_traced());
+        let registry = crate::registry::ConnectionRegistry::new();
+        let jid: jid::FullJid = "user@example.com/phone".parse().expect("jid");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        registry.register(jid.clone(), tx);
+
+        // A replay sends through the registry, which builds the stanza.
+        let replay = tracing::info_span!("replay-under-test");
+        async {
+            super::replaying(registry.send_to(&jid, message())).await;
+            registry.send_to(&jid, message()).await;
+        }
+        .instrument(replay)
+        .await;
+
+        let replayed = rx.recv().await.expect("replayed stanza");
+        assert_eq!(replayed.trace, ProducerTrace::NONE);
+        let produced = rx.recv().await.expect("produced stanza");
+        assert_ne!(produced.trace, ProducerTrace::NONE);
+
+        let pending = OutboundStanza::for_pending_flush(
+            message(),
+            PendingRowId::new("row-1"),
+            chrono::Utc::now(),
+        );
+        assert_eq!(pending.trace, ProducerTrace::NONE);
     }
 }

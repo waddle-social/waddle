@@ -251,7 +251,7 @@ where
     R: ArchiveResolver + ?Sized,
 {
     let mut failed_releases = Vec::new();
-    let mut outcome = flush_for_resource_inner(
+    let mut outcome = waddle_xmpp::telemetry::producer_trace::replaying(flush_for_resource_inner(
         storage,
         registry,
         recipient,
@@ -259,7 +259,7 @@ where
         ctx,
         &mut failed_releases,
         false,
-    )
+    ))
     .await;
     outcome.failed_releases = failed_releases;
     outcome
@@ -629,8 +629,7 @@ where
                                 row.original_receipt_at,
                             )
                         } else {
-                            // A replayed row: the flush's span is not its producer.
-                            OutboundStanza::new(stanza).without_trace()
+                            OutboundStanza::new(stanza)
                         };
                         attempt_offer(
                             storage,
@@ -813,7 +812,7 @@ where
         }
     }
     let mut failed_releases = Vec::new();
-    let mut next = flush_for_resource_inner(
+    let mut next = waddle_xmpp::telemetry::producer_trace::replaying(flush_for_resource_inner(
         storage,
         registry,
         recipient,
@@ -821,7 +820,7 @@ where
         ctx,
         &mut failed_releases,
         true,
-    )
+    ))
     .await;
     next.failed_releases = failed_releases;
     outcome.absorb(next);

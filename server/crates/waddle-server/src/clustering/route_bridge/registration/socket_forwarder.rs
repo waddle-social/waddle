@@ -35,10 +35,9 @@ impl OrderedRelayDeliveryBridge {
                     &outbound_socket_node,
                     outbound,
                 );
-                match span {
-                    Some(span) => forward.instrument(span).await,
-                    None => forward.await,
-                }
+                forward
+                    .instrument(span.unwrap_or_else(tracing::Span::none))
+                    .await;
             }
         });
         if let Some(mut force_detach_rx) = force_detach_rx {

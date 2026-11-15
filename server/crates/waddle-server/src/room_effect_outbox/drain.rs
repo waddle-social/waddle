@@ -603,11 +603,14 @@ async fn queue_local(
     };
     match tokio::time::timeout(
         timeout,
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to_with_write_acceptance(recipient, stanza, acceptance),
+        // A drained effect's producer is the room change that stored it.
+        waddle_xmpp::telemetry::producer_trace::replaying(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to_with_write_acceptance(recipient, stanza, acceptance),
+        ),
     )
     .await
     {

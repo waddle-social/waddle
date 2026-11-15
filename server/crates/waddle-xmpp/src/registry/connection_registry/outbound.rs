@@ -145,13 +145,6 @@ impl OutboundStanza {
         }
     }
 
-    /// Drop the captured trace context. For stanzas built by replay or
-    /// recovery work, whose current span is not the stanza's producer.
-    pub fn without_trace(mut self) -> Self {
-        self.trace = ProducerTrace::NONE;
-        self
-    }
-
     /// The destination connection's span for delivering this stanza, in the
     /// producer's trace. `None` when the producer was untraced, so untraced
     /// deliveries add no spans.
