@@ -5,7 +5,8 @@ type TurnstileRenderOptions = {
 	sitekey: string;
 	action?: string;
 	theme?: "auto" | "light" | "dark";
-	size?: "normal" | "compact" | "flexible" | "invisible";
+	size?: "normal" | "compact" | "flexible";
+	execution?: "render" | "execute";
 	callback?: (token: string) => void;
 	"error-callback"?: (errorCode?: string) => void;
 	"expired-callback"?: () => void;
