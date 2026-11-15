@@ -629,7 +629,8 @@ where
                                 row.original_receipt_at,
                             )
                         } else {
-                            OutboundStanza::new(stanza)
+                            // A replayed row: the flush's span is not its producer.
+                            OutboundStanza::new(stanza).without_trace()
                         };
                         attempt_offer(
                             storage,

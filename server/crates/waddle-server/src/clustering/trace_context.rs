@@ -234,8 +234,7 @@ impl RelayTraceContext {
         // and everything under it — undoing #1483 for exactly the
         // suppressed-sender traffic it protects. Falling back to the
         // empty context keeps the receiver's `parent: None` root.
-        let span_context = cx.span().span_context().clone();
-        if !span_context.is_valid() || !span_context.is_sampled() {
+        if waddle_xmpp::telemetry::producer_trace::sampled_span_context(cx).is_none() {
             return Self::default();
         }
         let mut carrier = RelayTraceCarrier::default();
@@ -282,6 +281,20 @@ impl RelayTraceContext {
             (span_context.is_valid() && span_context.is_sampled()).then_some(cx)
         }
     }
+}
+
+/// The span a queued stanza is forwarded to its socket node under, in the
+/// producer's trace; `None` when the producer was untraced.
+///
+/// The forwarder task has no span of its own, and [`RelayTraceContext::capture`]
+/// reads the current span, so the forward must run inside this one for the
+/// producer's trace to reach the socket node.
+pub fn remote_forward_span(
+    outbound: &waddle_xmpp::registry::OutboundStanza,
+) -> Option<tracing::Span> {
+    outbound
+        .trace
+        .span(|| tracing::info_span!(parent: None, "clustering.remote_socket.forward"))
 }
 
 /// A dedicated [`TraceContextPropagator`] rather than the process-global

@@ -4,6 +4,7 @@ use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
+use crate::telemetry::producer_trace::ProducerTrace;
 use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 
@@ -119,6 +120,9 @@ pub struct OutboundStanza {
     /// The live handler retains it on the unacknowledged SM entry; detach authorizes
     /// it before proving the XEP-0198 replay append. Live writes do not read canonical state.
     pub ingress_append: Option<SmRelayedAppendObligation>,
+    /// The producer's trace context, captured when the stanza is built, so
+    /// the destination's write joins the trace of the work that queued it.
+    pub trace: ProducerTrace,
 }
 
 impl OutboundStanza {
@@ -137,7 +141,27 @@ impl OutboundStanza {
             original_receipt_at: None,
             write_acceptance: None,
             ingress_append: None,
+            trace: ProducerTrace::capture(),
         }
+    }
+
+    /// Drop the captured trace context. For stanzas built by replay or
+    /// recovery work, whose current span is not the stanza's producer.
+    pub fn without_trace(mut self) -> Self {
+        self.trace = ProducerTrace::NONE;
+        self
+    }
+
+    /// The destination connection's span for delivering this stanza, in the
+    /// producer's trace. `None` when the producer was untraced, so untraced
+    /// deliveries add no spans.
+    pub fn write_span(&self) -> Option<tracing::Span> {
+        let delivery = match self.kind {
+            DeliveryKind::DirectFrame => "direct_frame",
+            DeliveryKind::PeerStanza => "peer_stanza",
+        };
+        self.trace
+            .span(|| tracing::info_span!(parent: None, "xmpp.connection.write", delivery))
     }
 
     /// Attach the delivery origin's ingress obligation.
@@ -159,6 +183,7 @@ impl OutboundStanza {
             original_receipt_at: None,
             write_acceptance: None,
             ingress_append: None,
+            trace: ProducerTrace::capture(),
         }
     }
 
@@ -184,6 +209,7 @@ impl OutboundStanza {
             original_receipt_at: Some(original_receipt_at),
             write_acceptance: None,
             ingress_append: None,
+            trace: ProducerTrace::NONE,
         }
     }
 
@@ -198,6 +224,7 @@ impl OutboundStanza {
             original_receipt_at: None,
             write_acceptance: Some(acceptance),
             ingress_append: None,
+            trace: ProducerTrace::capture(),
         }
     }
 }

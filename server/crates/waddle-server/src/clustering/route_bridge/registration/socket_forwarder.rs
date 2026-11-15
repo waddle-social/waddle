@@ -9,6 +9,7 @@ use super::super::{
     RemoteResourceSocketGeneration, RemoteResourceWriteAcceptedOutboundFrame, RemoteStanza,
 };
 use crate::ingress::identity::IngressAppendObligationRef;
+use tracing::Instrument as _;
 
 impl OrderedRelayDeliveryBridge {
     pub(super) fn spawn_remote_resource_forwarder(
@@ -25,15 +26,19 @@ impl OrderedRelayDeliveryBridge {
         let outbound_socket_node = socket_node.clone();
         tokio::spawn(async move {
             while let Some(outbound) = rx.recv().await {
-                forward_remote_resource_outbound(
+                let span = crate::clustering::trace_context::remote_forward_span(&outbound);
+                let forward = forward_remote_resource_outbound(
                     &outbound_bridge,
                     &outbound_jid,
                     registration_id,
                     socket_generation,
                     &outbound_socket_node,
                     outbound,
-                )
-                .await;
+                );
+                match span {
+                    Some(span) => forward.instrument(span).await,
+                    None => forward.await,
+                }
             }
         });
         if let Some(mut force_detach_rx) = force_detach_rx {
