@@ -89,6 +89,68 @@ workflow: {
 				},
 			]])
 		}
+		// Capture only GitHub-redacted logs, with bounded artifact size. The known
+		// failed builder makes its diagnostics available immediately on this run.
+		"nixTest-failure-diagnostics": {
+			name: "Previous Rust qualification failure diagnostics"
+			"runs-on": "ubuntu-24.04"
+			"timeout-minutes": 5
+			permissions: actions: "read"
+			steps: [
+				{
+					name: "Collect bounded GitHub-redacted failure log"
+					shell: "bash"
+					env: {
+						GH_TOKEN: "${{ github.token }}"
+						GH_REPOSITORY: "${{ github.repository }}"
+					}
+					run: #"""
+						set -euo pipefail
+						mkdir -p failure-diagnostics
+						python3 - <<'PYLOG'
+						import os
+						import pathlib
+						import urllib.request
+						import urllib.parse
+
+						class SafeRedirect(urllib.request.HTTPRedirectHandler):
+						    def redirect_request(self, req, fp, code, msg, headers, newurl):
+						        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+						        if redirected and urllib.parse.urlsplit(req.full_url).netloc != urllib.parse.urlsplit(newurl).netloc:
+						            redirected.remove_header("Authorization")
+						        return redirected
+
+						opener = urllib.request.build_opener(SafeRedirect())
+						job_id = 132946392071
+						url = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions/jobs/{job_id}/logs"
+						request = urllib.request.Request(url, headers={
+						    "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+						    "Accept": "application/vnd.github+json",
+						    "X-GitHub-Api-Version": "2022-11-28",
+						})
+						# GitHub serves an already-redacted plain-text job log through a
+						# temporary redirect. Keep only its last 200 KiB, never the token.
+						tail = bytearray()
+						with opener.open(request, timeout=60) as response:
+						    while chunk := response.read(65536):
+						        tail.extend(chunk)
+						        del tail[:-204800]
+						pathlib.Path(f"failure-diagnostics/job-{job_id}-tail.log").write_bytes(tail)
+						PYLOG
+						"""#
+				},
+				{
+					name: "Upload bounded failure log"
+					uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+					with: {
+						name: "rust-qualification-failure-log"
+						path: "failure-diagnostics"
+						"if-no-files-found": "error"
+						"retention-days": 3
+					}
+				},
+			]
+		}
 		nixTest: {
 			name:              "nixTest"
 			"runs-on":         "ubuntu-24.04"
