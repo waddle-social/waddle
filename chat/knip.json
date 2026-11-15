@@ -17,7 +17,6 @@
   "astro": true,
   "ignoreDependencies": [
     "cloudflare",
-    "events",
-    "tailwindcss"
+    "events"
   ]
 }
