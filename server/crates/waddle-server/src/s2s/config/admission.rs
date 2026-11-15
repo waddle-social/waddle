@@ -6,9 +6,9 @@
 //! entries match exactly. A denylist entry covers its domain and every
 //! subdomain, label by label, applies in every mode and overrides every
 //! other list; unlike the other lists it may name domains outside `.test`
-//! while admission is limited to `.test`. Only a fully qualified DNS name
-//! can be admitted: an IP address, a numeric IPv4 form or a single-label
-//! name never is.
+//! while [`PeerScope::Test`] limits admission to `.test`. Only a fully
+//! qualified DNS name can be admitted: an IP address, a numeric IPv4 form
+//! or a single-label name never is.
 //!
 //! Admission grants transport only. It says nothing about communities,
 //! rooms or any other protected effect, which host policy decides.
@@ -42,13 +42,38 @@ impl AdmissionMode {
     }
 }
 
+/// Which peers a deployment may have (ADR-0020 gate G6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PeerScope {
+    /// Every configured and admitted domain is within `.test`, and the
+    /// listener and every configured endpoint are loopback addresses. The
+    /// default.
+    #[default]
+    Test,
+    /// Any fully qualified DNS domain may be configured and admitted, and
+    /// the listener and configured endpoints may be any address. Discovery
+    /// still refuses DNS-derived addresses in a blocked class.
+    Public,
+}
+
+impl PeerScope {
+    /// A stable code for logs.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Public => "public",
+        }
+    }
+}
+
 /// Why a domain is not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AdmissionRefusal {
     /// The domain is an IP address, a numeric IPv4 form or a single-label
     /// name (ADR-0020 D3).
     NotAPeerDomain,
-    /// This release admits only domains within `.test` (ADR-0020 gate G6).
+    /// [`PeerScope::Test`] admits only domains within `.test` (ADR-0020
+    /// gate G6).
     OutsideTestDomain,
     /// The domain is one this deployment serves.
     LocalDomain,
@@ -82,6 +107,7 @@ pub type AdmissionDecision = Result<(), AdmissionRefusal>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionPolicy {
     mode: AdmissionMode,
+    scope: PeerScope,
     local: BTreeSet<CanonicalDomain>,
     allow: BTreeSet<CanonicalDomain>,
     deny: BTreeSet<CanonicalDomain>,
@@ -99,6 +125,7 @@ impl AdmissionPolicy {
     /// local domain and the denylist covers no entry of the other lists.
     pub(super) fn new(
         mode: AdmissionMode,
+        scope: PeerScope,
         local: BTreeSet<CanonicalDomain>,
         allow: BTreeSet<CanonicalDomain>,
         deny: BTreeSet<CanonicalDomain>,
@@ -107,6 +134,7 @@ impl AdmissionPolicy {
     ) -> Self {
         Self {
             mode,
+            scope,
             local,
             allow,
             deny,
@@ -128,6 +156,11 @@ impl AdmissionPolicy {
         self.mode
     }
 
+    /// The peer scope.
+    pub fn scope(&self) -> PeerScope {
+        self.scope
+    }
+
     /// Whether a stream with `domain` as its remote domain may be
     /// negotiated, checked at stream open and again before SASL EXTERNAL
     /// succeeds.
@@ -143,9 +176,8 @@ impl AdmissionPolicy {
         if self.is_denylisted(domain) {
             return Err(AdmissionRefusal::Denylisted);
         }
-        // The discovery slice lifts this restriction through its own
-        // reviewed change (ADR-0020 gate G6).
-        if !is_test_domain(domain) {
+        // Lifted only by `peer_scope = "public"` (ADR-0020 gate G6).
+        if self.scope == PeerScope::Test && !is_test_domain(domain) {
             return Err(AdmissionRefusal::OutsideTestDomain);
         }
         match self.mode {
@@ -163,9 +195,9 @@ impl AdmissionPolicy {
         self.deny.iter().any(|entry| domain.is_within(entry))
     }
 
-    /// Whether `domain` may authenticate by inbound dialback: it is
-    /// admitted and on the dialback list. Dialback itself is not
-    /// implemented in this release, so nothing consults this yet.
+    /// Whether `domain` is on the dialback list and admitted. Inbound
+    /// dialback also needs `dialback.inbound`, which the connection manager
+    /// checks; see `S2sConfig::permits_inbound_dialback`.
     pub fn permits_dialback(&self, domain: &CanonicalDomain) -> bool {
         self.decide(domain).is_ok() && self.dialback.contains(domain)
     }

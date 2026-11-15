@@ -66,13 +66,19 @@ enum State {
 /// As a [`ServerCertVerifier`] it verifies the receiving server on a stream
 /// this deployment initiates; as a [`ClientCertVerifier`] it verifies the
 /// initiating server on a stream this deployment receives, and requires a
-/// certificate. In both roles the reference identity is the stream's source
-/// domain, fixed when the verifier is built: the TLS server name, the socket
-/// address and the certificate's own names never replace it.
+/// certificate unless [`PeerVerifier::with_optional_client_certificate`]
+/// lets the client present none. In both roles the reference identity is
+/// the stream's source domain, fixed when the verifier is built: the TLS
+/// server name, the socket address and the certificate's own names never
+/// replace it. A presented certificate is always verified, and one that
+/// fails ends the handshake, whether or not a certificate was required.
 pub struct PeerVerifier {
     reference: ReferenceIdentity,
     profile: TrustProfile,
     algorithms: WebPkiSupportedAlgorithms,
+    /// Whether a TLS client may complete the handshake without presenting
+    /// a certificate.
+    client_certificate_optional: bool,
     /// Set by the first certificate presented. Every later one belongs to
     /// another connection and is refused without touching `state`.
     used: AtomicBool,
@@ -95,9 +101,20 @@ impl PeerVerifier {
             reference: ReferenceIdentity::new(domain)?,
             profile,
             algorithms,
+            client_certificate_optional: false,
             used: AtomicBool::new(false),
             state: Mutex::new(State::Pending),
         })
+    }
+
+    /// Let a TLS client complete the handshake without a certificate, for
+    /// a receiving connection whose peer may then authenticate by Server
+    /// Dialback or ask verification requests (ADR-0020 D2). A certificate
+    /// it does present is verified as usual, and one that fails ends the
+    /// handshake: an active certificate failure is never downgraded.
+    pub fn with_optional_client_certificate(mut self) -> Self {
+        self.client_certificate_optional = true;
+        self
     }
 
     /// The identity the peer must prove.
@@ -140,6 +157,20 @@ impl PeerVerifier {
             }
             _ => None,
         }
+    }
+
+    /// Whether the TLS handshake of `connection` completed without the
+    /// peer presenting any certificate, which only a verifier built with
+    /// [`PeerVerifier::with_optional_client_certificate`] allows. A
+    /// certificate that was presented, whether it verified or failed, is
+    /// not an absent one.
+    pub fn completed_without_certificate(&self, connection: &CommonState) -> bool {
+        !connection.is_handshaking()
+            && connection
+                .peer_certificates()
+                .is_none_or(|certificates| certificates.is_empty())
+            && !self.used.load(Ordering::SeqCst)
+            && matches!(*self.state(), State::Pending)
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -291,7 +322,7 @@ impl ClientCertVerifier for PeerVerifier {
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        true
+        !self.client_certificate_optional
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {

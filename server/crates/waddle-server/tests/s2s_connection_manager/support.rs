@@ -20,7 +20,7 @@ use rcgen::{
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::time_provider::TimeProvider;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -165,6 +165,39 @@ impl Pki {
             .expect("a client certificate")
     }
 
+    /// TLS client settings for a hand-written peer that presents no
+    /// certificate: this CA as the only root and the fixed clock.
+    pub fn client_config_without_certificate(&self) -> ClientConfig {
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(self.certificate.der().clone())
+            .expect("the test CA as a root");
+        ClientConfig::builder_with_details(Arc::new(default_provider()), Arc::new(FixedTime))
+            .with_safe_default_protocol_versions()
+            .expect("the provider's protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    }
+
+    /// TLS server settings for a hand-written receiving server for `name`:
+    /// a certificate for it from this CA, no client certificate requested,
+    /// and `alpn` as the ALPN protocols it accepts.
+    pub fn server_config(&self, name: &str, alpn: &[&[u8]]) -> ServerConfig {
+        let (certificate, key) = self.issue(&[name]);
+        let mut config =
+            ServerConfig::builder_with_details(Arc::new(default_provider()), Arc::new(FixedTime))
+                .with_safe_default_protocol_versions()
+                .expect("the provider's protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![certificate.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+                )
+                .expect("a server certificate");
+        config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+        config
+    }
+
     /// Write a file into the PKI's directory.
     pub fn file(&self, file: &str, contents: &str) -> PathBuf {
         write(&self.dir, file, contents)
@@ -193,6 +226,12 @@ pub struct Spec {
     pub endpoints: Vec<(&'static str, SocketAddr)>,
     /// Lines of the `[limits]` table.
     pub limits: Vec<String>,
+    /// Top-level lines written before the first table, such as
+    /// `peer_scope = "public"`.
+    pub top: Vec<String>,
+    /// Lines written after the `[limits]` table: further tables such as
+    /// `[dialback]` or `[[endpoints]]` entries.
+    pub tables: Vec<String>,
 }
 
 impl Spec {
@@ -211,6 +250,8 @@ impl Spec {
             private: vec![peer],
             endpoints: Vec::new(),
             limits: Vec::new(),
+            top: Vec::new(),
+            tables: Vec::new(),
         }
     }
 
@@ -226,6 +267,7 @@ impl Spec {
         if let Some(listen) = &self.listen {
             lines.push(format!("listen = {listen:?}"));
         }
+        lines.extend(self.top.iter().cloned());
         for local in &self.local {
             let (chain, key) = pki.credentials(local, &[local]);
             lines.push("[[credentials]]".to_owned());
@@ -262,6 +304,7 @@ impl Spec {
         ));
         lines.push("[limits]".to_owned());
         lines.extend(self.limits.iter().cloned());
+        lines.extend(self.tables.iter().cloned());
         lines.join("\n")
     }
 
@@ -479,6 +522,42 @@ pub async fn eventually(wait: Duration, check: impl Fn() -> bool) -> bool {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     check()
+}
+
+/// Read from `socket` into `decoder` until it yields the first-level
+/// element `name` in `namespace`, as [`RawPeer`] does; a stream error
+/// before it fails the test.
+pub async fn await_element<S: AsyncRead + Unpin>(
+    socket: &mut S,
+    decoder: &mut StreamDecoder,
+    name: &str,
+    namespace: &str,
+) -> Element {
+    expect_element(socket, decoder, name, namespace).await
+}
+
+/// Read from `socket` into `decoder` until it yields a stream header.
+pub async fn await_header<S: AsyncRead + Unpin>(
+    socket: &mut S,
+    decoder: &mut StreamDecoder,
+) -> StreamHeader {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut chunk = [0u8; 4096];
+    loop {
+        while let Some(item) = decoder.next_item().expect("well-formed input") {
+            if let Inbound::Header(header) = item {
+                return header;
+            }
+        }
+        let read = tokio::time::timeout_at(deadline, socket.read(&mut chunk))
+            .await
+            .expect("the peer answers in time")
+            .expect("read");
+        assert!(read > 0, "the peer closed while awaiting a stream header");
+        decoder
+            .push(&chunk[..read])
+            .expect("input within the limits");
+    }
 }
 
 /// Read from `socket` into `decoder` until it yields the first-level

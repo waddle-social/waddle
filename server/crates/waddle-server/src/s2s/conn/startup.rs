@@ -8,7 +8,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use waddle_xmpp::identity::CanonicalDomain;
 
-use crate::s2s::config::{ConfigError, S2sActivation, S2sConfig};
+use crate::s2s::config::{ConfigError, PeerScope, S2sActivation, S2sConfig};
 use crate::s2s::verify::TlsSettings;
 use crate::server::XmppConfig;
 
@@ -23,9 +23,7 @@ pub enum StartupError {
     Config(#[from] ConfigError),
     #[error("S2S local domain {index} is not the XMPP domain, the MUC domain or the Spaces domain this process serves")]
     UnservedLocalDomain { index: usize },
-    #[error(
-        "the inherited `s2s` listener is not bound to the configured loopback `listen` address"
-    )]
+    #[error("the inherited `s2s` listener is not bound to the configured `listen` address")]
     InheritedListenerMismatch,
 }
 
@@ -70,10 +68,21 @@ pub async fn load_config(
 }
 
 /// Check the `s2s` listener inherited through `LISTEN_FDS` against the
+/// configured `listen` address under the default [`PeerScope::Test`]; see
+/// [`check_inherited_listener_in`].
+pub fn check_inherited_listener(
+    configured: SocketAddr,
+    actual: SocketAddr,
+) -> Result<(), StartupError> {
+    check_inherited_listener_in(configured, actual, PeerScope::Test)
+}
+
+/// Check the `s2s` listener inherited through `LISTEN_FDS` against the
 /// configured `listen` address. A cold start binds `listen` itself, which
-/// the loader has checked is loopback; an inherited descriptor was bound
-/// by the launcher and could be bound anywhere, so it is accepted only on
-/// a loopback address equal to `listen`.
+/// the loader has checked is loopback under [`PeerScope::Test`]; an
+/// inherited descriptor was bound by the launcher and could be bound
+/// anywhere, so it is accepted only on the address `listen` names, and
+/// under [`PeerScope::Test`] only on a loopback address.
 ///
 /// The port must equal the configured one, with one exception: when
 /// `listen` names port zero, any port is accepted, because the first
@@ -81,12 +90,14 @@ pub async fn load_config(
 /// successors inherit it. Only the native fixture configures port zero; a
 /// nonzero `listen` port never matches another port, and the address must
 /// match in either case.
-pub fn check_inherited_listener(
+pub fn check_inherited_listener_in(
     configured: SocketAddr,
     actual: SocketAddr,
+    scope: PeerScope,
 ) -> Result<(), StartupError> {
     let port_matches = configured.port() == 0 || configured.port() == actual.port();
-    if actual.ip().is_loopback() && actual.ip() == configured.ip() && port_matches {
+    let scope_allows = scope == PeerScope::Public || actual.ip().is_loopback();
+    if scope_allows && actual.ip() == configured.ip() && port_matches {
         Ok(())
     } else {
         Err(StartupError::InheritedListenerMismatch)

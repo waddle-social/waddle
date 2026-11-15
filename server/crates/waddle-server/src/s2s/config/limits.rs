@@ -46,6 +46,9 @@ pub const MAX_ENDPOINTS_PER_DOMAIN: usize = 4;
 /// Most domains with configured endpoints.
 pub const MAX_ENDPOINT_DOMAINS: usize = 256;
 
+/// Most operator-listed blocked address prefixes.
+pub const MAX_BLOCKED_PREFIXES: usize = 64;
+
 /// Most private-CA profiles in one snapshot.
 pub const MAX_PRIVATE_CA_PROFILES: usize = 32;
 
@@ -64,6 +67,13 @@ pub const MIN_INPUT_BYTES_PER_SECOND: u32 = 32 * 1024;
 /// the peer only for time the server was willing to read; this bounds the
 /// whole time.
 pub const MAX_INCOMPLETE_ELEMENT_TIME: Duration = Duration::from_secs(30);
+
+/// How long a remote domain that has no endpoint, or is not a domain a peer
+/// can have, is answered from memory before it is looked up again. A
+/// repeated request for such a domain then spends neither a dial token nor
+/// a lookup; a domain that publishes records is reached at most this much
+/// later.
+pub const NO_ENDPOINT_WAIT: Duration = Duration::from_secs(30);
 
 /// A token bucket: `per_second` tokens accrue each second up to `burst`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +129,20 @@ pub struct ResourceLimits {
     /// Outbound attempts in progress at once, each for a distinct
     /// directional domain pair.
     pub max_dialing: usize,
+    /// New outbound connections to every remote domain together. Local
+    /// users can make this server dial arbitrary domains once discovery is
+    /// on; the rate bounds how fast attempts that fail quickly can follow
+    /// one another. Dialback verification connections have their own rate.
+    pub dial_rate: RateLimit,
+    /// Dialback verification connections in progress at once. They are
+    /// outside every socket and handshake cap of ordinary connections and
+    /// run on their own verifier workers, so remote parties that make this
+    /// server verify keys can never take sockets, handshakes or dials from
+    /// ordinary outbound streams.
+    pub max_verifications: usize,
+    /// New dialback verification connections, taken before the
+    /// Authoritative Server is looked up in DNS.
+    pub verification_rate: RateLimit,
     /// Remote domains whose outbound backoff is remembered. Only failing
     /// destinations have an entry; a domain without one is never refused.
     /// When the table is full, recording a new failure replaces the entry
@@ -165,7 +189,16 @@ impl ResourceLimits {
         },
         max_tracked_addresses: 256,
         max_dialing: 8,
+        dial_rate: RateLimit {
+            per_second: 4,
+            burst: 8,
+        },
         max_backoff_destinations: 256,
+        max_verifications: 4,
+        verification_rate: RateLimit {
+            per_second: 2,
+            burst: 4,
+        },
         input_rate_per_socket: RateLimit {
             per_second: 64 * 1024,
             burst: 128 * 1024,
@@ -194,6 +227,11 @@ pub struct Deadlines {
     /// The SASL phase, from the post-TLS stream header; never renewed by
     /// replacement or aborted exchanges.
     pub sasl: Duration,
+    /// A dialback exchange: from the post-TLS features until an inbound
+    /// peer's key is verified, or until an outbound stream's key is
+    /// answered. It covers a verification connection to the Authoritative
+    /// Server and is still bounded by the whole negotiation.
+    pub dialback: Duration,
     /// Everything from TCP accept or connect to the established stream.
     pub negotiation: Duration,
     /// An unfinished first-level element on an established stream,
@@ -233,6 +271,7 @@ impl Deadlines {
         connect: Duration::from_secs(5),
         stage: Duration::from_secs(5),
         sasl: Duration::from_secs(5),
+        dialback: Duration::from_secs(15),
         negotiation: Duration::from_secs(20),
         incomplete_element: Duration::from_secs(5),
         idle: Duration::from_secs(300),
@@ -253,6 +292,7 @@ impl Deadlines {
         connect: Duration::from_secs(5),
         stage: Duration::from_secs(5),
         sasl: Duration::from_secs(5),
+        dialback: Duration::from_secs(15),
         negotiation: Duration::from_secs(20),
         incomplete_element: Duration::from_secs(5),
         idle: Duration::from_secs(3600),

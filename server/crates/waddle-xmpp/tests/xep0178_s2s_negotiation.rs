@@ -21,9 +21,9 @@ use waddle_xmpp::ns::{SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
     AuthorizationDecision, AuthorizationRequest, CloseReason, CodecLimits, DestinationStatus,
     DialbackMode, HeaderAddress, Inbound, InboundAdmission, InitiatingConfig, NegotiatedStream,
-    NegotiationPhase, Output, ReceivingConfig, Role, S2sStream, SaslFailureCondition, SaslLimits,
-    Signal, StreamDecoder, StreamErrorCondition, StreamHeader, StreamLanguage, StreamVersion,
-    TlsPeer,
+    NegotiationClock, NegotiationPhase, Output, ReceivingConfig, Role, S2sStream,
+    SaslFailureCondition, SaslLimits, Signal, StreamAuthentication, StreamDecoder,
+    StreamErrorCondition, StreamHeader, StreamLanguage, StreamVersion, TlsPeer,
 };
 
 const INITIAL: &[u8] = b"<?xml version='1.0'?><stream:stream xmlns='jabber:server' \
@@ -84,6 +84,7 @@ fn receiving_config() -> ReceivingConfig {
         language: StreamLanguage::english(),
         sasl: SaslLimits::PILOT,
         dialback: DialbackMode::Disabled,
+        clock: NegotiationClock::system(),
     }
 }
 
@@ -250,6 +251,11 @@ fn absorb(outputs: Vec<Output>, me: &mut Side, peer: &mut Side) {
             Output::Established(stream) => me.established = Some(stream),
             Output::Close(reason) => me.closes.push(reason),
             Output::Stanza(_) => unreachable!("stanza delivery is not enabled in this suite"),
+            Output::VerifyDialback(_)
+            | Output::VerifyVerdict(_)
+            | Output::DialbackAnswered { .. } => {
+                unreachable!("dialback is not enabled in this suite")
+            }
         }
     }
 }
@@ -314,6 +320,7 @@ fn both_roles_establish_under_every_read_segmentation() {
                 role: Role::Initiating,
                 source: domain("home-a.test"),
                 destination: domain("home-b.test"),
+                authentication: StreamAuthentication::SaslExternal,
             }),
             "chunk {chunk}"
         );
@@ -323,6 +330,7 @@ fn both_roles_establish_under_every_read_segmentation() {
                 role: Role::Receiving,
                 source: domain("home-a.test"),
                 destination: domain("home-b.test"),
+                authentication: StreamAuthentication::SaslExternal,
             }),
             "chunk {chunk}"
         );
@@ -1080,6 +1088,7 @@ fn initiator_authenticates_with_external_and_no_authorization_identity() {
             role: Role::Initiating,
             source: domain("home-a.test"),
             destination: domain("home-b.test"),
+            authentication: StreamAuthentication::SaslExternal,
         })]
     );
 }

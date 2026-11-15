@@ -39,8 +39,11 @@ async fn starttls_and_external_establish_streams_in_both_directions() {
     assert_eq!(outbound.source(), &domain(HOME_A));
     assert_eq!(outbound.destination(), &domain(HOME_B));
     assert_eq!(outbound.strength(), AuthenticationStrength::Pkix);
-    assert_eq!(outbound.trust_profile(), TrustProfileKind::PrivateCa);
-    assert_eq!(outbound.matched_identifier(), MatchedIdentifier::DnsId);
+    assert_eq!(outbound.trust_profile(), Some(TrustProfileKind::PrivateCa));
+    assert_eq!(
+        outbound.matched_identifier(),
+        Some(MatchedIdentifier::DnsId)
+    );
     assert!(matches!(
         outbound.tls().version,
         Some(ProtocolVersion::TLSv1_3 | ProtocolVersion::TLSv1_2)

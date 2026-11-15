@@ -90,7 +90,8 @@ Which of these are recorded today:
 ## Server-to-server connection metrics
 
 Emitted by the S2S connection manager
-(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`) only when S2S is
+(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`) and S2S discovery
+(`server/crates/waddle-server/src/s2s/discovery.rs`) only when S2S is
 enabled, which it is not by default. Attributes are the closed enums in
 `server/crates/waddle-xmpp/src/telemetry/attributes/s2s.rs`; no metric
 carries a domain, an address or a stream id. None is zero-registered.
@@ -98,10 +99,12 @@ carries a domain, an address or a stream id. None is zero-registered.
 | Metric | Type | Unit | Attributes | Derived Prometheus name | Meaning |
 |---|---|---|---|---|---|
 | `waddle.s2s.connections` | counter | `{connection}` | `direction`, `outcome` | `waddle_s2s_connections_total` | S2S connections that ended, by how they ended. |
-| `waddle.s2s.capacity.refusals` | counter | `{connection}` | `direction`, `resource` | `waddle_s2s_capacity_refusals_total` | Sockets and streams a connection limit refused. |
-| `waddle.s2s.established` | counter | `{stream}` | `direction`, `transport` | `waddle_s2s_established_total` | Streams that completed TLS, SASL EXTERNAL and the authenticated restart. |
+| `waddle.s2s.capacity.refusals` | counter | `{connection}` | `direction`, `resource` | `waddle_s2s_capacity_refusals_total` | Sockets, streams, dials and dialback verification connections a connection limit refused, by the limit (`sockets`, `unauthenticated`, `source_address`, `accept_rate`, `handshakes`, `streams`, `peers`, `per_peer`, `dial_rate`, `verifications`, `verification_rate`). |
+| `waddle.s2s.established` | counter | `{stream}` | `direction`, `transport`, `strength` | `waddle_s2s_established_total` | Streams that completed negotiation over TLS, by how the pair authenticated (`pkix` or `dialback`). |
 | `waddle.s2s.negotiation.duration` | histogram | `ms` | `direction` | `waddle_s2s_negotiation_duration_milliseconds_bucket / _sum / _count` | Time from TCP accept or connect to an established stream. |
 | `waddle.s2s.streams` | gauge | `{stream}` | `direction` | `waddle_s2s_streams` | Established streams. |
+| `waddle.s2s.dialback` | counter | `{exchange}` | `role`, `result` | `waddle_s2s_dialback_total` | Server Dialback exchanges, by this server's role (`initiating`, `receiving`, `authoritative`) and result (`valid`, `invalid`, `error`). |
+| `waddle.s2s.discovery` | counter | `{lookup}` | `source` | `waddle_s2s_discovery_total` | Endpoint resolutions, by where the endpoints came from (`configured`, `srv`, `fallback`) or why there were none (`no_service`, `lookup_failed`, `blocked`). |
 
 ## All other metrics
 

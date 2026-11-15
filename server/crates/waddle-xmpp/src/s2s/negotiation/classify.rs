@@ -7,6 +7,7 @@ use minidom::Element;
 use crate::ns::{JABBER_CLIENT, JABBER_SERVER, JABBER_SERVER_DIALBACK, SASL, STREAM, TLS};
 use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
 
+use super::dialback::{self, DialbackElement};
 use super::elements::EXTERNAL;
 
 /// Stanza element names (RFC 6120 §8).
@@ -53,7 +54,7 @@ pub(crate) enum TopLevel {
     Success(Result<SaslPayload, SaslFailureCondition>),
     SaslFailure(SaslFailureCondition),
     /// Any element qualified by the dialback namespace.
-    Dialback,
+    Dialback(DialbackElement),
     /// Anything else, including unknown elements in known namespaces.
     Other,
 }
@@ -104,7 +105,7 @@ pub(crate) fn classify(element: Element, max_payload_bytes: usize) -> TopLevel {
         };
     }
     if namespace == JABBER_SERVER_DIALBACK {
-        return TopLevel::Dialback;
+        return TopLevel::Dialback(dialback::read(&element));
     }
     TopLevel::Other
 }

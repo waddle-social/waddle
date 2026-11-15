@@ -135,11 +135,19 @@ pub async fn start_with_config_and_owner_outbox(
     let http_listener = if let Some(ref mut set) = inherited {
         // Launcher inheritance path: all listeners MUST be inherited. The
         // `s2s` listener is taken only when S2S listens, and only when it
-        // is bound to the configured loopback address; an inherited `s2s`
+        // is bound to the configured `listen` address, which must be
+        // loopback unless the peer scope is public; an inherited `s2s`
         // descriptor without `listen` is left over and fails startup below.
-        if let Some(address) = s2s_config.as_ref().and_then(|config| config.listen()) {
+        let s2s_listen = s2s_config
+            .as_ref()
+            .and_then(|config| config.listen().map(|address| (config, address)));
+        if let Some((config, address)) = s2s_listen {
             let listener = set.take(crate::s2s::conn::S2S_LISTENER_NAME);
-            crate::s2s::conn::check_inherited_listener(address, listener.local_addr()?)?;
+            crate::s2s::conn::check_inherited_listener_in(
+                address,
+                listener.local_addr()?,
+                config.admission().scope(),
+            )?;
             s2s_listener = Some(listener);
         }
         set.take("http")
@@ -515,12 +523,24 @@ pub async fn start_with_config_and_owner_outbox(
 
     // The S2S service starts draining when the process stop token fires
     // and is joined below. It shares no lock, permit or task with HTTP.
+    // Configured endpoints, and DNS discovery through the system's name
+    // servers when the configuration enables it (ADR-0020 D3).
+    let s2s_resolver = s2s_config
+        .as_ref()
+        .map(|config| {
+            crate::s2s::discovery::PeerEndpoints::for_config(std::sync::Arc::clone(config))
+        })
+        .transpose()?;
     let s2s_service = s2s_config.map(|config| {
         crate::s2s::conn::S2sService::start(
             config,
             s2s_listener,
             crate::s2s::conn::ServiceOptions {
                 stop: Some(stop_token.clone()),
+                resolver: s2s_resolver.map(|resolver| {
+                    std::sync::Arc::new(resolver)
+                        as std::sync::Arc<dyn crate::s2s::conn::EndpointResolver>
+                }),
                 ..Default::default()
             },
         )

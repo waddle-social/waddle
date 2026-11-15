@@ -9,6 +9,11 @@
 //! to make room for a new socket hands the evicted socket's place to the
 //! new one at once, under the lock, while the evicted connection sends
 //! `resource-constraint` and closes within the write deadline.
+//!
+//! Dialback verification connections have a budget of their own, a cap on
+//! those in progress and a rate of new ones, and are outside every socket
+//! and handshake count of ordinary connections, so verifications that
+//! remote parties cause can never take capacity from ordinary streams.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -117,6 +122,8 @@ struct State {
     unauthenticated: usize,
     inbound_handshakes: usize,
     outbound_handshakes: usize,
+    verifications: usize,
+    verification_rate: TokenBucket,
     accept: TokenBucket,
     input: TokenBucket,
     addresses: HashMap<IpAddr, AddressState>,
@@ -141,6 +148,8 @@ impl Capacity {
                 unauthenticated: 0,
                 inbound_handshakes: 0,
                 outbound_handshakes: 0,
+                verifications: 0,
+                verification_rate: TokenBucket::new(limits.verification_rate, now),
                 accept: TokenBucket::new(limits.accept_rate, now),
                 input: TokenBucket::new(limits.input_rate_global, now),
                 addresses: HashMap::new(),
@@ -313,6 +322,25 @@ impl Capacity {
         })
     }
 
+    /// Start a dialback verification connection if fewer than the cap are
+    /// in progress and the verification rate has a token. The cap is
+    /// checked first, so a refusal for it spends no token. The slot covers
+    /// the whole verification, from the DNS lookup of the Authoritative
+    /// Server to the close, including its socket and TLS handshake.
+    pub(super) fn admit_verification(self: &Arc<Self>) -> Result<VerificationSlot, S2sResource> {
+        let mut state = self.state();
+        if state.verifications >= self.limits.max_verifications {
+            return Err(S2sResource::Verifications);
+        }
+        if !state.verification_rate.try_take(Instant::now()) {
+            return Err(S2sResource::VerificationRate);
+        }
+        state.verifications += 1;
+        Ok(VerificationSlot {
+            capacity: Arc::clone(self),
+        })
+    }
+
     /// Account `bytes` read from any S2S socket against the global input
     /// rate.
     pub(super) fn consume_input(&self, bytes: usize) {
@@ -427,6 +455,19 @@ impl OutboundSlot {
 impl Drop for OutboundSlot {
     fn drop(&mut self) {
         self.socket.release();
+    }
+}
+
+/// A dialback verification connection in progress.
+#[derive(Debug)]
+pub(super) struct VerificationSlot {
+    capacity: Arc<Capacity>,
+}
+
+impl Drop for VerificationSlot {
+    fn drop(&mut self) {
+        let mut state = self.capacity.state();
+        state.verifications = state.verifications.saturating_sub(1);
     }
 }
 

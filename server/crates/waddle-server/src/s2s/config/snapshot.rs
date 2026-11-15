@@ -21,26 +21,75 @@ use rustls::InconsistentKeys;
 use uuid::Uuid;
 use waddle_xmpp::identity::CanonicalDomain;
 
-use super::admission::{is_test_domain, AdmissionMode, AdmissionPolicy};
+use super::admission::{is_test_domain, AdmissionMode, AdmissionPolicy, PeerScope};
 use super::document::{
-    AdmissionDocument, CredentialDocument, Document, EndpointDocument, LimitsDocument,
-    ModeDocument, PrivateCaDocument,
+    AdmissionDocument, CredentialDocument, DialbackDocument, DiscoveryDocument, Document,
+    EndpointDocument, EndpointTransportDocument, LimitsDocument, ModeDocument, PeerScopeDocument,
+    PrivateCaDocument,
 };
 use super::error::{ConfigError, ConfigSection};
 use super::limits::{
-    Deadlines, ResourceLimits, MAX_ENDPOINTS_PER_DOMAIN, MAX_ENDPOINT_DOMAINS, MAX_LIST_ENTRIES,
-    MAX_LOCAL_DOMAINS, MAX_PRIVATE_CA_PROFILES, MAX_PROFILE_FILES, MIN_INPUT_BYTES_PER_SECOND,
+    Deadlines, ResourceLimits, MAX_BLOCKED_PREFIXES, MAX_ENDPOINTS_PER_DOMAIN,
+    MAX_ENDPOINT_DOMAINS, MAX_LIST_ENTRIES, MAX_LOCAL_DOMAINS, MAX_PRIVATE_CA_PROFILES,
+    MAX_PROFILE_FILES, MIN_INPUT_BYTES_PER_SECOND,
 };
 use super::load::MaterialReader;
+use crate::s2s::dialback::DialbackSecret;
+use crate::s2s::discovery::address::{AddressBlock, BlockedAddresses};
 use crate::s2s::verify::{
-    PrivateCaMaterial, PrivateCaProfile, PublicRoots, TlsConfigError, TlsSettings, TrustInventory,
-    TrustProfileKind,
+    OutboundTransport, PrivateCaMaterial, PrivateCaProfile, PublicRoots, TlsConfigError,
+    TlsSettings, TrustInventory, TrustProfileKind,
 };
 
-/// An endpoint configured for one remote domain, reached with STARTTLS.
+/// The shortest dialback secret accepted, in bytes.
+pub const MIN_DIALBACK_SECRET_BYTES: usize = 32;
+
+/// An endpoint configured for one remote domain (RFC 6120 §3.2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfiguredEndpoint {
     pub address: SocketAddr,
+    /// STARTTLS, or XEP-0368 direct TLS.
+    pub transport: OutboundTransport,
+}
+
+/// Which Server Dialback roles run (ADR-0020 D2). Every role is off by
+/// default.
+#[derive(Clone, Default)]
+pub struct DialbackSettings {
+    /// The Initiating and Authoritative Server roles, with the deployment's
+    /// secret: present exactly when `dialback.outbound` is on.
+    secret: Option<Arc<DialbackSecret>>,
+    /// The Receiving Server role for domains on the dialback list that are
+    /// admitted.
+    inbound: bool,
+}
+
+impl DialbackSettings {
+    /// The secret, when this deployment authenticates itself by dialback
+    /// and answers verification requests.
+    pub fn secret(&self) -> Option<&Arc<DialbackSecret>> {
+        self.secret.as_ref()
+    }
+
+    /// Whether the Initiating and Authoritative Server roles run.
+    pub fn outbound(&self) -> bool {
+        self.secret.is_some()
+    }
+
+    /// Whether the Receiving Server role runs.
+    pub fn inbound(&self) -> bool {
+        self.inbound
+    }
+}
+
+impl fmt::Debug for DialbackSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DialbackSettings")
+            .field("outbound", &self.outbound())
+            .field("inbound", &self.inbound)
+            .finish()
+    }
 }
 
 /// The validated S2S configuration of one process.
@@ -55,6 +104,9 @@ pub struct S2sConfig {
     limits: ResourceLimits,
     deadlines: Deadlines,
     settings: TlsSettings,
+    discovery: bool,
+    blocked: Arc<BlockedAddresses>,
+    dialback: DialbackSettings,
 }
 
 impl fmt::Debug for S2sConfig {
@@ -66,7 +118,11 @@ impl fmt::Debug for S2sConfig {
             .field("listen", &self.listen.is_some())
             .field("local_domains", &self.local_domains.len())
             .field("mode", &self.admission.mode())
+            .field("scope", &self.admission.scope())
             .field("endpoint_domains", &self.endpoints.len())
+            .field("discovery", &self.discovery)
+            .field("blocked_prefixes", &self.blocked.extra().len())
+            .field("dialback", &self.dialback)
             .finish_non_exhaustive()
     }
 }
@@ -99,20 +155,27 @@ impl S2sConfig {
             Uuid::parse_str(&document.generation).map_err(|_| ConfigError::InvalidGeneration)?;
         let now = settings.now().ok_or(ConfigError::ClockUnavailable)?;
 
-        let local_domains = local_domains(&document.local_domains)?;
+        let scope = match document.peer_scope {
+            None | Some(PeerScopeDocument::Test) => PeerScope::Test,
+            Some(PeerScopeDocument::Public) => PeerScope::Public,
+        };
+        let local_domains = local_domains(&document.local_domains, scope)?;
         let local: BTreeSet<CanonicalDomain> = local_domains.iter().cloned().collect();
-        let admission = admission(&document.admission, &local)?;
+        let admission = admission(&document.admission, &local, scope)?;
         let listen = document
             .listen
             .as_deref()
-            .map(|address| loopback_address(address, ConfigSection::Listen))
+            .map(|address| socket_address(address, ConfigSection::Listen, scope))
             .transpose()?;
         let credentials =
             credentials(&document.credentials, &local_domains, reader, &settings).await?;
-        let trust = trust_inventory(&document.private_ca, &local, reader, &settings, now).await?;
-        let admission = require_private_ca(admission, &document.admission, &trust)?;
-        let endpoints = endpoints(&document.endpoints, &local)?;
+        let trust =
+            trust_inventory(&document.private_ca, &local, reader, &settings, now, scope).await?;
+        let admission = require_private_ca(admission, &document.admission, &trust, scope)?;
+        let endpoints = endpoints(&document.endpoints, &local, scope)?;
         let (limits, deadlines) = limits(&document.limits)?;
+        let blocked = discovery(&document.discovery, scope)?;
+        let dialback = dialback(&document.dialback, &admission, reader).await?;
 
         let expected: BTreeSet<&CanonicalDomain> = admission
             .allowlist()
@@ -133,6 +196,9 @@ impl S2sConfig {
             limits,
             deadlines,
             settings,
+            discovery: document.discovery.enabled,
+            blocked: Arc::new(blocked),
+            dialback,
         })
     }
 
@@ -197,31 +263,38 @@ impl S2sConfig {
     pub fn settings(&self) -> &TlsSettings {
         &self.settings
     }
+
+    /// Whether remote domains without configured endpoints are discovered
+    /// through DNS (ADR-0020 D3).
+    pub fn discovery_enabled(&self) -> bool {
+        self.discovery
+    }
+
+    /// The address classes refused for DNS-derived addresses: the built-in
+    /// classes and the operator's `discovery.blocked_prefixes`.
+    pub fn blocked_addresses(&self) -> &Arc<BlockedAddresses> {
+        &self.blocked
+    }
+
+    /// The Server Dialback roles.
+    pub fn dialback(&self) -> &DialbackSettings {
+        &self.dialback
+    }
+
+    /// Whether an inbound stream from `remote` may authenticate by
+    /// dialback: the Receiving Server role runs, and `remote` is on the
+    /// dialback list and admitted (ADR-0020 D2).
+    pub fn permits_inbound_dialback(&self, remote: &CanonicalDomain) -> bool {
+        self.dialback.inbound && self.admission.permits_dialback(remote)
+    }
 }
 
-/// Whether a list's entries must be within `.test` while ADR-0020 gate G6
-/// restricts S2S to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
-    /// Domains this release may serve, admit or dial.
-    TestOnly,
-    /// Denylist entries, which refuse and never admit, so they may name
-    /// real domains before the restriction is lifted.
-    AnyDomain,
-}
-
-/// Prepare every entry of a domain list as a federation peer domain.
+/// Prepare every entry of a domain list as a federation peer domain, within
+/// `.test` when `scope` is [`PeerScope::Test`].
 fn peer_domains(
     section: ConfigSection,
     entries: &[String],
-) -> Result<Vec<CanonicalDomain>, ConfigError> {
-    scoped_domains(section, entries, Scope::TestOnly)
-}
-
-fn scoped_domains(
-    section: ConfigSection,
-    entries: &[String],
-    scope: Scope,
+    scope: PeerScope,
 ) -> Result<Vec<CanonicalDomain>, ConfigError> {
     if entries.len() > MAX_LIST_ENTRIES {
         return Err(ConfigError::TooManyEntries(section));
@@ -242,7 +315,7 @@ fn peer_domain(
     section: ConfigSection,
     index: usize,
     entry: &str,
-    scope: Scope,
+    scope: PeerScope,
 ) -> Result<CanonicalDomain, ConfigError> {
     let domain = CanonicalDomain::prepare(entry).map_err(|error| ConfigError::InvalidDomain {
         section,
@@ -252,22 +325,24 @@ fn peer_domain(
     if !domain.kind().names_federation_peer() {
         return Err(ConfigError::NotAPeerDomain { section, index });
     }
-    // The discovery slice lifts this restriction through its own reviewed
-    // change (ADR-0020 gate G6).
-    if scope == Scope::TestOnly && !is_test_domain(&domain) {
+    // Lifted only by `peer_scope = "public"` (ADR-0020 gate G6).
+    if scope == PeerScope::Test && !is_test_domain(&domain) {
         return Err(ConfigError::OutsideTestDomain { section, index });
     }
     Ok(domain)
 }
 
-fn local_domains(entries: &[String]) -> Result<Vec<CanonicalDomain>, ConfigError> {
+fn local_domains(
+    entries: &[String],
+    scope: PeerScope,
+) -> Result<Vec<CanonicalDomain>, ConfigError> {
     if entries.is_empty() {
         return Err(ConfigError::NoLocalDomains);
     }
     if entries.len() > MAX_LOCAL_DOMAINS {
         return Err(ConfigError::TooManyEntries(ConfigSection::LocalDomains));
     }
-    peer_domains(ConfigSection::LocalDomains, entries)
+    peer_domains(ConfigSection::LocalDomains, entries, scope)
 }
 
 /// A remote-domain list whose entries must not be local.
@@ -275,8 +350,9 @@ fn remote_domains(
     section: ConfigSection,
     entries: &[String],
     local: &BTreeSet<CanonicalDomain>,
+    scope: PeerScope,
 ) -> Result<BTreeSet<CanonicalDomain>, ConfigError> {
-    let domains = peer_domains(section, entries)?;
+    let domains = peer_domains(section, entries, scope)?;
     if let Some(index) = domains.iter().position(|domain| local.contains(domain)) {
         return Err(ConfigError::LocalDomain { section, index });
     }
@@ -286,13 +362,16 @@ fn remote_domains(
 fn admission(
     document: &AdmissionDocument,
     local: &BTreeSet<CanonicalDomain>,
+    scope: PeerScope,
 ) -> Result<AdmissionPolicy, ConfigError> {
     let mode = match document.mode {
         None | Some(ModeDocument::Allowlist) => AdmissionMode::Allowlist,
         Some(ModeDocument::Closed) => AdmissionMode::Closed,
         Some(ModeDocument::Open) => AdmissionMode::Open,
     };
-    let deny_entries = scoped_domains(ConfigSection::Denylist, &document.deny, Scope::AnyDomain)?;
+    // Denylist entries only refuse, so they may name any DNS domain in
+    // every scope and an operator can pre-provision real domains.
+    let deny_entries = peer_domains(ConfigSection::Denylist, &document.deny, PeerScope::Public)?;
     // A denylist entry covering a local domain would refuse this
     // deployment's own name; it is a contradiction, not a policy.
     if let Some(index) = deny_entries
@@ -305,21 +384,30 @@ fn admission(
         });
     }
     let deny: BTreeSet<CanonicalDomain> = deny_entries.into_iter().collect();
-    let allow = exact_list(ConfigSection::Allowlist, &document.allow, local, &deny)?;
+    let allow = exact_list(
+        ConfigSection::Allowlist,
+        &document.allow,
+        local,
+        &deny,
+        scope,
+    )?;
     let dialback = exact_list(
         ConfigSection::DialbackList,
         &document.dialback,
         local,
         &deny,
+        scope,
     )?;
     let trusted_homes = exact_list(
         ConfigSection::TrustedHomes,
         &document.trusted_homes,
         local,
         &deny,
+        scope,
     )?;
     let policy = AdmissionPolicy::new(
         mode,
+        scope,
         local.clone(),
         allow.iter().cloned().collect(),
         deny,
@@ -338,8 +426,9 @@ fn exact_list(
     entries: &[String],
     local: &BTreeSet<CanonicalDomain>,
     deny: &BTreeSet<CanonicalDomain>,
+    scope: PeerScope,
 ) -> Result<Vec<CanonicalDomain>, ConfigError> {
-    let domains = peer_domains(section, entries)?;
+    let domains = peer_domains(section, entries, scope)?;
     for (index, domain) in domains.iter().enumerate() {
         if local.contains(domain) {
             return Err(ConfigError::LocalDomain { section, index });
@@ -378,9 +467,10 @@ fn require_private_ca(
     admission: AdmissionPolicy,
     document: &AdmissionDocument,
     trust: &TrustInventory,
+    scope: PeerScope,
 ) -> Result<AdmissionPolicy, ConfigError> {
     let section = ConfigSection::RequirePrivateCa;
-    let domains = peer_domains(section, &document.require_private_ca)?;
+    let domains = peer_domains(section, &document.require_private_ca, scope)?;
     for (index, domain) in domains.iter().enumerate() {
         if !admission.trusted_homes().contains(domain) {
             return Err(ConfigError::NotTrustedHome { index });
@@ -392,13 +482,20 @@ fn require_private_ca(
     Ok(admission.with_private_ca_required(domains.into_iter().collect()))
 }
 
-fn loopback_address(text: &str, section: ConfigSection) -> Result<SocketAddr, ConfigError> {
+/// A listener or endpoint address: loopback only under [`PeerScope::Test`]
+/// (ADR-0020 gate G6). A configured endpoint is the operator's explicit
+/// choice of socket for one domain (RFC 6120 §3.2.3), so under
+/// [`PeerScope::Public`] it may be any address; DNS-derived addresses are
+/// checked by discovery instead.
+fn socket_address(
+    text: &str,
+    section: ConfigSection,
+    scope: PeerScope,
+) -> Result<SocketAddr, ConfigError> {
     let address: SocketAddr = text
         .parse()
         .map_err(|_| ConfigError::InvalidAddress(section))?;
-    // The discovery slice lifts this restriction through its own reviewed
-    // change (ADR-0020 gate G6).
-    if !address.ip().is_loopback() {
+    if scope == PeerScope::Test && !address.ip().is_loopback() {
         return Err(ConfigError::NotLoopback(section));
     }
     Ok(address)
@@ -480,6 +577,7 @@ async fn trust_inventory(
     reader: &mut MaterialReader,
     settings: &TlsSettings,
     now: UnixTime,
+    scope: PeerScope,
 ) -> Result<TrustInventory, ConfigError> {
     let section = ConfigSection::PrivateCa;
     if documents.len() > MAX_PRIVATE_CA_PROFILES {
@@ -490,7 +588,7 @@ async fn trust_inventory(
     let mut inventory = TrustInventory::new(PublicRoots::mozilla());
     let mut configured = BTreeSet::new();
     for (index, document) in documents.iter().enumerate() {
-        let domains = remote_domains(section, &document.domains, local)?;
+        let domains = remote_domains(section, &document.domains, local, scope)?;
         if domains.is_empty() {
             return Err(ConfigError::EmptyProfile { index });
         }
@@ -561,18 +659,54 @@ async fn read_certificates(
     Ok(certificates)
 }
 
+/// The discovery settings: discovery itself only in the public scope, where
+/// remote domains are real DNS names, and the operator's extra blocked
+/// address prefixes. Under [`PeerScope::Test`] every admitted domain is
+/// within `.test` and every configured endpoint is loopback, so DNS
+/// discovery could only ever reach addresses the blocked classes refuse;
+/// a configuration that enables it there is a mistake and fails to load.
+fn discovery(
+    document: &DiscoveryDocument,
+    scope: PeerScope,
+) -> Result<BlockedAddresses, ConfigError> {
+    if document.enabled && scope != PeerScope::Public {
+        return Err(ConfigError::DiscoveryRequiresPublicScope);
+    }
+    if document.blocked_prefixes.len() > MAX_BLOCKED_PREFIXES {
+        return Err(ConfigError::TooManyEntries(ConfigSection::BlockedPrefixes));
+    }
+    let mut blocks: Vec<AddressBlock> = Vec::with_capacity(document.blocked_prefixes.len());
+    for (index, entry) in document.blocked_prefixes.iter().enumerate() {
+        let block =
+            AddressBlock::parse(entry).ok_or(ConfigError::InvalidBlockedPrefix { index })?;
+        if blocks.contains(&block) {
+            return Err(ConfigError::Duplicate {
+                section: ConfigSection::BlockedPrefixes,
+                index,
+            });
+        }
+        blocks.push(block);
+    }
+    Ok(BlockedAddresses::new(blocks))
+}
+
 fn endpoints(
     documents: &[EndpointDocument],
     local: &BTreeSet<CanonicalDomain>,
+    scope: PeerScope,
 ) -> Result<BTreeMap<CanonicalDomain, Vec<ConfiguredEndpoint>>, ConfigError> {
     let section = ConfigSection::Endpoints;
     let mut endpoints: BTreeMap<CanonicalDomain, Vec<ConfiguredEndpoint>> = BTreeMap::new();
     for (index, document) in documents.iter().enumerate() {
-        let domain = peer_domain(section, index, &document.domain, Scope::TestOnly)?;
+        let domain = peer_domain(section, index, &document.domain, scope)?;
         if local.contains(&domain) {
             return Err(ConfigError::LocalDomain { section, index });
         }
-        let address = loopback_address(&document.address, section)?;
+        let address = socket_address(&document.address, section, scope)?;
+        let transport = match document.transport {
+            None | Some(EndpointTransportDocument::Starttls) => OutboundTransport::StartTls,
+            Some(EndpointTransportDocument::DirectTls) => OutboundTransport::DirectTls,
+        };
         if !endpoints.contains_key(&domain) && endpoints.len() >= MAX_ENDPOINT_DOMAINS {
             return Err(ConfigError::TooManyEntries(section));
         }
@@ -580,8 +714,8 @@ fn endpoints(
         if list.len() >= MAX_ENDPOINTS_PER_DOMAIN {
             return Err(ConfigError::TooManyEntries(section));
         }
-        let endpoint = ConfiguredEndpoint { address };
-        if list.contains(&endpoint) {
+        let endpoint = ConfiguredEndpoint { address, transport };
+        if list.iter().any(|existing| existing.address == address) {
             return Err(ConfigError::Duplicate { section, index });
         }
         list.push(endpoint);
@@ -689,6 +823,9 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
             document.max_negotiating_per_peer,
             |l| l.max_negotiating_per_peer,
         )?,
+        max_verifications: cap("max_verifications", document.max_verifications, |l| {
+            l.max_verifications
+        })?,
         ..default
     };
     let connections = |name, value, default, ceiling| rate(name, value, default, 1, ceiling);
@@ -715,6 +852,30 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
         document.accept_per_address_burst,
         default.accept_rate_per_address.burst,
         ceiling.accept_rate_per_address.burst,
+    )?;
+    limits.dial_rate.per_second = connections(
+        "dial_per_second",
+        document.dial_per_second,
+        default.dial_rate.per_second,
+        ceiling.dial_rate.per_second,
+    )?;
+    limits.dial_rate.burst = connections(
+        "dial_burst",
+        document.dial_burst,
+        default.dial_rate.burst,
+        ceiling.dial_rate.burst,
+    )?;
+    limits.verification_rate.per_second = connections(
+        "verification_per_second",
+        document.verification_per_second,
+        default.verification_rate.per_second,
+        ceiling.verification_rate.per_second,
+    )?;
+    limits.verification_rate.burst = connections(
+        "verification_burst",
+        document.verification_burst,
+        default.verification_rate.burst,
+        ceiling.verification_rate.burst,
     )?;
     limits.input_rate_global.per_second = rate(
         "input_per_second",
@@ -791,6 +952,12 @@ fn deadlines(document: &LimitsDocument) -> Result<Deadlines, ConfigError> {
             defaults.sasl,
             ceilings.sasl,
         )?,
+        dialback: duration(
+            "dialback_timeout_ms",
+            document.dialback_timeout_ms,
+            defaults.dialback,
+            ceilings.dialback,
+        )?,
         negotiation: duration(
             "negotiation_timeout_ms",
             document.negotiation_timeout_ms,
@@ -856,4 +1023,63 @@ fn deadlines(document: &LimitsDocument) -> Result<Deadlines, ConfigError> {
         return Err(ConfigError::LimitOutOfRange("backoff_initial_ms"));
     }
     Ok(deadlines)
+}
+
+/// The Server Dialback roles. The Initiating and Authoritative roles need
+/// the deployment's secret, read from `secret_file` with one trailing line
+/// ending removed and at least [`MIN_DIALBACK_SECRET_BYTES`] long. The
+/// Receiving role needs no secret. A secret without the roles that use it,
+/// a Receiving role with an empty dialback list, or a dialback list the
+/// Receiving role never consults is likely a mistake and logs a warning,
+/// but loads.
+async fn dialback(
+    document: &DialbackDocument,
+    admission: &AdmissionPolicy,
+    reader: &mut MaterialReader,
+) -> Result<DialbackSettings, ConfigError> {
+    let section = ConfigSection::Dialback;
+    let secret = match (&document.secret_file, document.outbound) {
+        (Some(path), true) => {
+            let bytes = reader.read(path, section).await?;
+            let secret = trim_line_ending(&bytes);
+            if secret.len() < MIN_DIALBACK_SECRET_BYTES {
+                return Err(ConfigError::DialbackSecretTooShort(
+                    MIN_DIALBACK_SECRET_BYTES,
+                ));
+            }
+            Some(Arc::new(DialbackSecret::new(secret)))
+        }
+        (None, true) => return Err(ConfigError::DialbackSecretMissing),
+        (Some(_), false) => {
+            tracing::warn!(
+                setting = "dialback.secret_file",
+                "s2s dialback secret is configured but dialback.outbound is off"
+            );
+            None
+        }
+        (None, false) => None,
+    };
+    let listed = !admission.dialback_list().is_empty();
+    if document.inbound && !listed {
+        tracing::warn!(
+            setting = "admission.dialback",
+            "s2s inbound dialback is on but the dialback list is empty"
+        );
+    }
+    if listed && !document.inbound {
+        tracing::warn!(
+            setting = "dialback.inbound",
+            "s2s dialback list is configured but inbound dialback is off"
+        );
+    }
+    Ok(DialbackSettings {
+        secret,
+        inbound: document.inbound,
+    })
+}
+
+/// `bytes` without one trailing `\n` or `\r\n`.
+fn trim_line_ending(bytes: &[u8]) -> &[u8] {
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    bytes.strip_suffix(b"\r").unwrap_or(bytes)
 }

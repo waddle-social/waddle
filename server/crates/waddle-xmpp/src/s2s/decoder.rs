@@ -294,6 +294,15 @@ impl StreamDecoder {
         }
     }
 
+    /// Leave the pre-authentication mode without a restart, when a stream
+    /// authenticates by dialback, which has none (XEP-0220 §2.2.1).
+    /// Elements that follow are held to the stream limits instead of the
+    /// control-element ceiling; an element already in progress keeps the
+    /// ceiling it started with.
+    pub fn end_pre_authentication(&mut self) {
+        self.pre_authentication = false;
+    }
+
     /// Whether the decoder is in the pre-authentication mode.
     pub fn is_pre_authentication(&self) -> bool {
         self.pre_authentication
@@ -886,7 +895,10 @@ impl StreamDecoder {
             id: text("id").and_then(StreamId::parse),
             version,
             lang,
-            declare_dialback: false,
+            declare_dialback: head
+                .prefix_declarations
+                .iter()
+                .any(|(_, uri)| uri == JABBER_SERVER_DIALBACK),
         })
     }
 }

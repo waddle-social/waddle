@@ -13,9 +13,9 @@ use std::sync::Arc;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
     AuthorizationDecision, CloseReason, CodecLimits, DestinationStatus, DialbackMode,
-    HeaderAddress, Inbound, InboundAdmission, InitiatingConfig, NegotiationPhase, Output,
-    ReceivingConfig, S2sStream, SaslLimits, StreamDecoder, StreamEncoder, StreamErrorCondition,
-    StreamHeader, StreamLanguage, TlsPeer,
+    HeaderAddress, Inbound, InboundAdmission, InitiatingConfig, NegotiationClock, NegotiationPhase,
+    Output, ReceivingConfig, S2sStream, SaslLimits, StreamDecoder, StreamEncoder,
+    StreamErrorCondition, StreamHeader, StreamLanguage, TlsPeer,
 };
 
 /// `bücher.test` in A-label form.
@@ -62,6 +62,7 @@ fn receiver() -> S2sStream {
             language: StreamLanguage::english(),
             sasl: SaslLimits::PILOT,
             dialback: DialbackMode::Disabled,
+            clock: NegotiationClock::system(),
         },
         CodecLimits::PILOT,
     )
@@ -450,6 +451,8 @@ fn an_emitted_header_can_declare_the_dialback_namespace() {
     let declared = String::from_utf8(declared).expect("UTF-8");
     assert!(declared.contains("xmlns:db"));
     assert!(declared.contains("jabber:server:dialback"));
-    // The decoder accepts the declaration on a received header.
-    first_header(declared.as_bytes());
+    // The decoder accepts the declaration on a received header and
+    // reports it, which advertises traditional dialback (XEP-0220 §2.4.1).
+    assert!(first_header(declared.as_bytes()).declare_dialback);
+    assert!(!first_header(plain.as_bytes()).declare_dialback);
 }

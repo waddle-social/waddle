@@ -10,13 +10,15 @@
 //! to load and S2S does not start. A change takes effect when the process
 //! restarts with a new snapshot; there is no reload.
 //!
-//! Outbound endpoints are reached with STARTTLS only; XEP-0368 direct TLS
-//! arrives with discovery.
+//! Configured endpoints are reached with STARTTLS or, when configured so,
+//! XEP-0368 direct TLS. DNS discovery ([`S2sConfig::discovery_enabled`])
+//! and every Server Dialback role ([`DialbackSettings`]) are off by
+//! default; discovery loads only with [`PeerScope::Public`].
 //!
-//! Until the discovery slice lifts it through its own reviewed change
-//! (ADR-0020 gate G6), every configured domain must be within `.test`,
-//! except denylist entries, which only refuse, and the listener and every
-//! endpoint must be loopback addresses.
+//! Under the default [`PeerScope::Test`] every configured domain must be
+//! within `.test`, except denylist entries, which only refuse, and the
+//! listener and every endpoint must be loopback addresses.
+//! [`PeerScope::Public`] lifts that restriction (ADR-0020 gate G6).
 
 mod admission;
 mod document;
@@ -25,12 +27,14 @@ mod limits;
 mod load;
 mod snapshot;
 
-pub use admission::{AdmissionDecision, AdmissionMode, AdmissionPolicy, AdmissionRefusal};
+pub use admission::{
+    AdmissionDecision, AdmissionMode, AdmissionPolicy, AdmissionRefusal, PeerScope,
+};
 pub use error::{ConfigError, ConfigSection};
 pub use limits::{
-    Deadlines, RateLimit, ResourceLimits, MAX_CONFIG_FILE_BYTES, MAX_ENDPOINTS_PER_DOMAIN,
-    MAX_INCOMPLETE_ELEMENT_TIME, MAX_MATERIAL_FILE_BYTES, MAX_TOTAL_MATERIAL_BYTES,
-    MIN_INPUT_BYTES_PER_SECOND, STREAM_CODEC_LIMITS,
+    Deadlines, RateLimit, ResourceLimits, MAX_BLOCKED_PREFIXES, MAX_CONFIG_FILE_BYTES,
+    MAX_ENDPOINTS_PER_DOMAIN, MAX_INCOMPLETE_ELEMENT_TIME, MAX_MATERIAL_FILE_BYTES,
+    MAX_TOTAL_MATERIAL_BYTES, MIN_INPUT_BYTES_PER_SECOND, NO_ENDPOINT_WAIT, STREAM_CODEC_LIMITS,
 };
 pub use load::{S2sActivation, CONFIG_FILE_VARIABLE, ENABLED_VARIABLE};
-pub use snapshot::{ConfiguredEndpoint, S2sConfig};
+pub use snapshot::{ConfiguredEndpoint, DialbackSettings, S2sConfig, MIN_DIALBACK_SECRET_BYTES};

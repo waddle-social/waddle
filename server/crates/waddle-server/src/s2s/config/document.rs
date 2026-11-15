@@ -29,6 +29,56 @@ pub(super) struct Document {
     pub(super) endpoints: Vec<EndpointDocument>,
     #[serde(default)]
     pub(super) limits: LimitsDocument,
+    /// Whether peers are limited to `.test` domains and loopback addresses
+    /// (`test`, the default) or may be any DNS domain and address
+    /// (`public`); ADR-0020 gate G6.
+    #[serde(default)]
+    pub(super) peer_scope: Option<PeerScopeDocument>,
+    #[serde(default)]
+    pub(super) discovery: DiscoveryDocument,
+    #[serde(default)]
+    pub(super) dialback: DialbackDocument,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PeerScopeDocument {
+    Test,
+    Public,
+}
+
+/// ADR-0020 D3: DNS discovery of remote domains without configured
+/// endpoints. Off by default, and only with `peer_scope = "public"`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DiscoveryDocument {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    /// Address blocks, in CIDR notation, refused for DNS-derived addresses
+    /// in addition to the built-in classes: the network's own NAT64
+    /// (RFC 6052) and 6rd (RFC 5969) prefixes, which embed IPv4 addresses
+    /// an address alone does not reveal, or any other block.
+    #[serde(default)]
+    pub(super) blocked_prefixes: Vec<String>,
+}
+
+/// ADR-0020 D2: Server Dialback (XEP-0220). Every role is off by default.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DialbackDocument {
+    /// The Initiating and Authoritative Server roles: authenticate this
+    /// deployment by dialback to peers that do not offer SASL EXTERNAL,
+    /// and answer their verification requests. Requires `secret_file`.
+    #[serde(default)]
+    pub(super) outbound: bool,
+    /// The Receiving Server role: accept dialback from domains on
+    /// `admission.dialback` that are also admitted.
+    #[serde(default)]
+    pub(super) inbound: bool,
+    /// The deployment's dialback secret (XEP-0185), shared by every
+    /// replica of this deployment and by no other deployment.
+    #[serde(default)]
+    pub(super) secret_file: Option<PathBuf>,
 }
 
 /// ADR-0020 D1 and D8: the admission mode and lists.
@@ -86,9 +136,17 @@ pub(super) struct PrivateCaDocument {
 #[serde(deny_unknown_fields)]
 pub(super) struct EndpointDocument {
     pub(super) domain: String,
-    /// Reached with STARTTLS. XEP-0368 direct TLS endpoints arrive with
-    /// discovery.
     pub(super) address: String,
+    /// `starttls` (the default) or `direct_tls` (XEP-0368).
+    #[serde(default)]
+    pub(super) transport: Option<EndpointTransportDocument>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum EndpointTransportDocument {
+    Starttls,
+    DirectTls,
 }
 
 /// Caps, rates and deadlines within their ceilings; see
@@ -105,6 +163,14 @@ pub(super) struct LimitsDocument {
     pub(super) max_inbound_handshakes: Option<usize>,
     pub(super) max_outbound_handshakes: Option<usize>,
     pub(super) max_dialing: Option<usize>,
+    /// New outbound connections per second across every remote domain.
+    pub(super) dial_per_second: Option<u32>,
+    pub(super) dial_burst: Option<u32>,
+    /// Dialback verification connections in progress, and new ones per
+    /// second.
+    pub(super) max_verifications: Option<usize>,
+    pub(super) verification_per_second: Option<u32>,
+    pub(super) verification_burst: Option<u32>,
     pub(super) max_backoff_destinations: Option<usize>,
     pub(super) max_streams: Option<usize>,
     pub(super) max_peers: Option<usize>,
@@ -122,6 +188,7 @@ pub(super) struct LimitsDocument {
     pub(super) connect_timeout_ms: Option<u64>,
     pub(super) stage_timeout_ms: Option<u64>,
     pub(super) sasl_timeout_ms: Option<u64>,
+    pub(super) dialback_timeout_ms: Option<u64>,
     pub(super) negotiation_timeout_ms: Option<u64>,
     pub(super) incomplete_element_timeout_ms: Option<u64>,
     pub(super) idle_timeout_ms: Option<u64>,

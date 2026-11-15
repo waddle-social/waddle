@@ -215,10 +215,11 @@ pub struct StreamHeader {
     pub id: Option<StreamId>,
     pub version: Option<StreamVersion>,
     pub lang: Option<StreamLanguage>,
-    /// Whether an emitted header declares the Server Dialback namespace
-    /// with the `db` prefix (XEP-0220 §2.1). Never set by this codec, which
-    /// does not implement dialback; ignored on received headers, whose
-    /// declarations the decoder has already checked.
+    /// Whether the header declares the Server Dialback namespace, which
+    /// advertises traditional dialback (XEP-0220 §2.4.1). An emitted header
+    /// declares it with the `db` prefix where the negotiation enables a
+    /// dialback role; on a received header it reports a declaration under
+    /// any prefix, which the decoder has already checked.
     pub declare_dialback: bool,
 }
 
