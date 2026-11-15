@@ -54,27 +54,32 @@ class ListDetailNavigationTest {
     }
 
     @Test
-    fun `folding a room list returns to the phone room root`() {
-        val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, WaddleNavKey.Rooms)
+    fun `folding makes a tab root opened from the sidebar its tab`() {
+        val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, WaddleNavKey.DmList, alice)
 
-        backStack.removeDuplicateRoomList()
+        backStack.adaptTo(sidebarPane = false)
 
-        assertEquals(listOf(WaddleNavKey.Home), backStack.toList())
+        assertEquals(listOf(WaddleNavKey.DmList, alice), backStack.toList())
     }
 
     @Test
-    fun `folding removes the duplicate room list without dropping its conversation or thread`() {
-        val thread = WaddleNavKey.Thread(
-            conversationJid = general.roomJid,
-            isGroupchat = true,
-            threadId = "t-1",
-        )
-        val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, WaddleNavKey.Rooms, general, thread)
+    fun `folding keeps a page that is not a tab on the Home tab`() {
+        val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, WaddleNavKey.Rooms, general)
 
-        backStack.removeDuplicateRoomList()
+        backStack.adaptTo(sidebarPane = false)
 
-        assertEquals(listOf(WaddleNavKey.Home, general, thread), backStack.toList())
-        assertEquals(general.roomJid, openConversationJidOf(backStack))
+        assertEquals(listOf(WaddleNavKey.Home, WaddleNavKey.Rooms, general), backStack.toList())
+    }
+
+    @Test
+    fun `unfolding puts the sidebar under another tab's stack`() {
+        val backStack = NavBackStack<NavKey>(WaddleNavKey.People, alice)
+
+        backStack.adaptTo(sidebarPane = true)
+
+        assertEquals(listOf(WaddleNavKey.Home, WaddleNavKey.People, alice), backStack.toList())
+        backStack.adaptTo(sidebarPane = true)
+        assertEquals(3, backStack.size)
     }
 
     @Test

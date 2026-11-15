@@ -71,7 +71,10 @@ import social.waddle.android.feature.dm.DmListItem
 import social.waddle.android.feature.dm.DmListRow
 import social.waddle.android.feature.dm.DmListViewModel
 import social.waddle.android.feature.home.HomeViewModel
+import social.waddle.android.feature.home.LiveHuddleCard
+import social.waddle.android.feature.home.homeSectionsOf
 import social.waddle.android.feature.rooms.RoomActivity
+import social.waddle.android.feature.rooms.rememberHuddleJoiner
 import social.waddle.android.feature.you.YouIdentity
 import social.waddle.android.feature.you.connectionLabelOf
 import social.waddle.android.feature.you.presenceOf
@@ -94,6 +97,8 @@ internal data class SidebarState(
     /** Joined rooms, in the order to show. */
     val rooms: List<RoomActivity>,
     val dms: List<DmListItem>,
+    /** Live huddles, shown as cards on top of the phone's Home tab. */
+    val live: List<RoomActivity> = emptyList(),
 )
 
 /** Where the sidebar sends the user. */
@@ -106,15 +111,18 @@ class SidebarActions(
     val onOpenGroupDm: (roomJid: String, name: String) -> Unit = { _, _ -> },
     val onOpenYou: () -> Unit = {},
     val onOpenSettings: () -> Unit = {},
+    /** Joins a live huddle from its card (phone Home tab). */
+    val onJoinHuddle: (RoomActivity) -> Unit = {},
 )
 
 /**
- * The start screen, as chat's sidebar is on phones: the community, a
- * filter over everything listed, People, the rooms and the
- * direct messages, and you at the bottom.
+ * Chat's sidebar: the community, a filter over everything listed,
+ * People, the rooms and the direct messages, and you at the bottom.
+ * [tab]: the phone's Home tab, where the tab bar has People and You, so
+ * those give way to live huddle cards on top.
  */
 @Composable
-fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null) {
+fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null, tab: Boolean = false) {
     val graph = LocalAppGraph.current
     val home: HomeViewModel = viewModel(factory = HomeViewModel.factory(graph))
     val dmList: DmListViewModel = viewModel(factory = DmListViewModel.factory(graph))
@@ -134,9 +142,21 @@ fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null) {
             identity = YouIdentity(name = name, jid = jid, connection = connection),
             rooms = sidebarRoomsOf(homeState.rooms),
             dms = dms,
+            live = if (tab) homeSectionsOf(homeState.rooms).live else emptyList(),
         ),
-        actions = actions,
+        actions = SidebarActions(
+            onOpenPage = actions.onOpenPage,
+            onBrowseRooms = actions.onBrowseRooms,
+            onOpenAllDms = actions.onOpenAllDms,
+            onOpenRoom = actions.onOpenRoom,
+            onOpenDm = actions.onOpenDm,
+            onOpenGroupDm = actions.onOpenGroupDm,
+            onOpenYou = actions.onOpenYou,
+            onOpenSettings = actions.onOpenSettings,
+            onJoinHuddle = rememberHuddleJoiner(onJoined = { room -> actions.onOpenRoom(room.roomJid, room.name) }),
+        ),
         current = current,
+        tab = tab,
     )
 }
 
@@ -157,7 +177,12 @@ internal fun sidebarRoomsOf(rooms: List<RoomActivity>): List<RoomActivity> =
 
 /** Stateless sidebar. */
 @Composable
-internal fun SidebarContent(state: SidebarState, actions: SidebarActions, current: SidebarPage? = null) {
+internal fun SidebarContent(
+    state: SidebarState,
+    actions: SidebarActions,
+    current: SidebarPage? = null,
+    tab: Boolean = false,
+) {
     val colors = Waddle.colors
     var query by rememberSaveable { mutableStateOf("") }
     val match = { name: String -> query.isBlank() || name.contains(query.trim(), ignoreCase = true) }
@@ -178,7 +203,16 @@ internal fun SidebarContent(state: SidebarState, actions: SidebarActions, curren
                 vertical = Waddle.space.xs,
             ),
         ) {
-            if (query.isBlank()) {
+            if (query.isBlank() && tab) {
+                items(state.live, key = { "live:" + it.roomJid }) { room ->
+                    LiveHuddleCard(
+                        room = room,
+                        onOpen = { actions.onOpenRoom(room.roomJid, room.name) },
+                        onJoin = { actions.onJoinHuddle(room) },
+                        modifier = Modifier.padding(Waddle.space.xs),
+                    )
+                }
+            } else if (query.isBlank()) {
                 item {
                     NavRow(
                         icon = Icons.Outlined.People,
@@ -192,8 +226,10 @@ internal fun SidebarContent(state: SidebarState, actions: SidebarActions, curren
             roomSection(state.rooms.filter { match(it.name) }, open, actions)
             dmSection(state.dms.filter { match(nameOf(it.row)) }, open, actions)
         }
-        HorizontalDivider(color = colors.borderSoft)
-        Footer(identity = state.identity, onOpenYou = actions.onOpenYou, onOpenSettings = actions.onOpenSettings)
+        if (!tab) {
+            HorizontalDivider(color = colors.borderSoft)
+            Footer(identity = state.identity, onOpenYou = actions.onOpenYou, onOpenSettings = actions.onOpenSettings)
+        }
     }
 }
 
