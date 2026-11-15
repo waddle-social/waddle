@@ -172,7 +172,7 @@ const orbit = (animation: string) =>
       </p>
     </main>
     <script>
-      // Tri-state: System (nothing saved) -> Night -> Daylight -> System.
+      // Tri-state: System (nothing saved), then Night, then Daylight, then System again.
       const root = document.documentElement;
       const toggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]")!;
       const prefersLight = matchMedia("(prefers-color-scheme: light)");
