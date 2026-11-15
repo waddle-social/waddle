@@ -4,7 +4,7 @@ Status: source inventory for #2047 F0; **production closure is not established**
 Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
-through `e9feae31492f2461964555facf4fade642927ca9` (see the last refresh below); the original
+and S2S routing through `6e4cceebb627b36dd48931bcaf1cb30c0f0835af` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -41,10 +41,10 @@ or legacy projection the canonical authority.
 ## Writer and policy-input map
 
 **W1 — Graph backend and schema (concrete).** The permission actor owns a private
-SpiceDB backend. [Lifecycle backend selection](../../crates/waddle-server/src/server/lifecycle.rs#L187) chooses it from server
+SpiceDB backend. [Lifecycle backend selection](../../crates/waddle-server/src/server/lifecycle.rs#L214) chooses it from server
 configuration, except for the explicit missing-SpiceDB + enabled fixed-test-account
 branch; [that branch](../../crates/waddle-server/src/server/fixed_account.rs#L19) uses the local backend. Lifecycle also asks
-[EnsureSchema](../../crates/waddle-server/src/server/lifecycle.rs#L229). The backend [writes the schema](../../crates/waddle-server/src/permissions/spicedb.rs#L64),
+[EnsureSchema](../../crates/waddle-server/src/server/lifecycle.rs#L256). The backend [writes the schema](../../crates/waddle-server/src/permissions/spicedb.rs#L64),
 [creates](../../crates/waddle-server/src/permissions/spicedb.rs#L453), [deletes](../../crates/waddle-server/src/permissions/spicedb.rs#L557), [replaces a relation family](../../crates/waddle-server/src/permissions/spicedb.rs#L468), and
 [conditionally swaps a family for rollback](../../crates/waddle-server/src/permissions/spicedb.rs#L495). Each RPC has its own external
 transaction/ACK. These methods return unit/status rather than a durable F0
@@ -55,7 +55,7 @@ revision. The [local test backend](../../crates/waddle-server/src/permissions/ac
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1542) invokes account reconciliation behind its
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1561) invokes account reconciliation behind its
 lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L142) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L182) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
@@ -94,7 +94,7 @@ whole command committed. Room configuration, roles, explicit affiliations and
 invitations also affect acceptance independently of a channel's inherited read
 permission. E3/E6. For a room an enrolled host-grant scope manages, none of
 this applies: the handler takes the sender's authority from the canonical
-grants, [records one affiliation change in the host-grant store](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs#L110)
+grants, [records one affiliation change in the host-grant store](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs#L113)
 before the room actor applies it, writes no relationship and rolls nothing
 back; owner configuration needs the canonical `manage` action and
 [destroy is refused](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs#L1321); admin channel and Space
@@ -102,15 +102,15 @@ commands [are refused](../../crates/waddle-server/src/admin/mod.rs#L59); and a
 [mediated invitation grants nothing](../../crates/waddle-server/src/server/routes/websocket/handlers/message/muc_invite.rs#L272).
 
 **W6 — Group-DM graph and legacy SQL mirror (concrete).**
-[Member persistence](../../crates/waddle-server/src/admin/channels.rs#L3972) writes the permission actor and then
-[permission_tuples through DbExecute](../../crates/waddle-server/src/admin/channels.rs#L4030). Failure attempts compensation
-of the graph write. [Deletion](../../crates/waddle-server/src/admin/channels.rs#L4069) performs the inverse pair and may
+[Member persistence](../../crates/waddle-server/src/admin/channels.rs#L3978) writes the permission actor and then
+[permission_tuples through DbExecute](../../crates/waddle-server/src/admin/channels.rs#L4036). Failure attempts compensation
+of the graph write. [Deletion](../../crates/waddle-server/src/admin/channels.rs#L4075) performs the inverse pair and may
 restore graph membership if SQL deletion fails. These are separate commits with
 possible partial/unknown outcomes, not a PostgreSQL transaction containing the
 external graph mutation. Include the compensating paths as writers. Do not treat
 this SQL mirror as the complete canonical grant journal. E3 is adjacent recovery
 coverage, not an atomic graph/SQL proof. Both writers now
-[refuse a group-DM identifier](../../crates/waddle-server/src/admin/channels.rs#L4018) that is the authorization
+[refuse a group-DM identifier](../../crates/waddle-server/src/admin/channels.rs#L4024) that is the authorization
 object of a room an enrolled scope manages, before either statement, since
 group DMs and managed rooms share the channel identifier space.
 
@@ -133,9 +133,9 @@ subscriptions there are never a second grant store.
 **W8 — Parent/bookmark/link changes and compensation (concrete).**
 [Spaces publish/move](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L17) separately changes the bookmark, SQL
 channel-space link and graph parent once
-[the publisher manages the channel or owns the deployment, or the channel already belongs to the Space](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L411),
-then runs [stale cleanup](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_bookmark_cleanup.rs#L4).
-[Publish rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L553), [retract](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs#L17) and
+[the publisher manages the channel or owns the deployment, or the channel already belongs to the Space](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L413),
+then runs [stale cleanup](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_bookmark_cleanup.rs#L11).
+[Publish rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs#L542), [retract](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs#L17) and
 [Space deletion](../../crates/waddle-server/src/admin/spaces.rs#L1122) can remove or restore these inputs. Error results
 and best-effort rollback do not prove no mutation happened. There is no single
 SQL/graph revision covering the whole operation. A link is used as a projection
@@ -143,14 +143,19 @@ in one path and as a repair/discovery input in another; this inventory does not
 resolve canonical parent authority. E5.
 
 **W9 — Read/join-triggered repair (concrete).** An authorized Spaces items request
-can execute [bookmark backfill](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_items.rs#L100), including parent repair and stale
-cleanup/compensation. [Join affiliation resolution](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L24) can invoke
-[parent repair](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L361) after a denied channel check. Repair uses bookmarks
-and the [channel-space link](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L491), writes graph parents, and rechecks
-bookmark validity after writing, deleting stale repairs when necessary. The
+can execute [bookmark backfill](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_items.rs#L97). It publishes a missing bookmark
+and writes the channel's parent only when the channel has none or already has
+that Space, retracting the bookmark when the parent write fails; it runs no
+stale cleanup, and skips a room an enrolled scope manages or whose enrollment
+cannot be told. [Join affiliation resolution](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L25) can invoke
+[parent repair](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L366) after a denied channel check. Repair writes a graph
+parent only for a channel that has none, naming the Space of the [channel-space link](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L500)
+when that Space lists the channel's bookmark; a channel with a parent keeps it,
+since only a placement moves it. Repair rechecks the bookmark after writing and
+deletes its own write when the bookmark is gone. The
 post-write recheck matters: a captured read alone does not prove the stale parent
 survives. MAM explicitly disables graph repair. E5/E6. A room an enrolled
-scope manages is [resolved from its canonical grants](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L65)
+scope manages is [resolved from its canonical grants](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L66)
 before any of this runs, so no repair is attempted for it.
 
 **W10 — Room actor state, invitations and restoration (concrete, separate plane).**
@@ -178,7 +183,7 @@ room an enrolled host-grant scope manages is entered only with the standing
 its canonical grants honour (Outcast for a ban, nothing without a grant), as
 a members-only room, and only through its channel row.
 
-**S2 — Archive/discovery/extension reads.** The [MUC archive gate](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L162)
+**S2 — Archive/discovery/extension reads.** The [MUC archive gate](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L163)
 uses live room configuration when available, direct relations and managed-entry
 rules; unmanaged rooms without a live actor fail closed. It is followed by a
 separate [archive query](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/archive_inbox_upload.rs#L184). There is no shared authorization snapshot
@@ -188,7 +193,7 @@ authorizer](../../crates/waddle-server/src/server/extension_commands/pubsub.rs#L
 MAM sink. Rejection/error, returned archive rows and later network transmission
 are different boundaries. E6. For a room an enrolled scope manages, the gate
 and the room's disco#info decide from the canonical grants, and the archive
-page is sent only if [a decision taken after the read](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L297)
+page is sent only if [a decision taken after the read](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L298)
 still admits the requester.
 
 **S3 — PubSub delivery.** The real database [subscriber query](../../crates/waddle-server/src/pubsub/implementation.rs#L376)
@@ -242,9 +247,9 @@ backend, common snapshots, race ordering or production closure.
 | --- | --- | --- |
 | E1 | [write_and_delete_tuple_with_typed_payloads](../../crates/waddle-server/src/permissions/actor/tests.rs#L52) | Typed actor behavior; its helper uses an in-memory database/local backend, not SpiceDB. |
 | E2 | `owner_reseed_keeps_bans_skips_enrolled_spaces_and_refuses_remote_accounts` in `crates/waddle-server/tests/xep0045_host_grant_fence.rs` (outside the scan roots, so not anchored) | The seed keeps an Outcast on the in-memory and SQL stores, skips an enrolled Space node and refuses remote privileged seeds; executed in the writer fence's focused set (host-grant design, evidence of the writer fence). |
-| E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3518) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
+| E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3529) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
 | E4 | [database_deliverable_subscribers_excludes_outcast](../../crates/waddle-server/src/pubsub/tests.rs#L997) | Storage filtering; no post-capture fanout guarantee. |
-| E5 | [items authorization before backfill](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L3348), [repair only projected parent](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L4867) | Selected repair gates/selection; not all mutation interleavings or authority choice. |
+| E5 | [items authorization before backfill](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L3348), [repair only projected parent](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L4882) | Selected repair gates/selection; not all mutation interleavings or authority choice. |
 | E6 | [members-only join requires explicit affiliation](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L1145), [MAM denies non-member](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L5533) | Current action-specific entry semantics; test state uses local fixtures, not an inherited graph fence. |
 | E7 | [durable channel/Space users excluding outcasts](../../crates/waddle-server/src/server/durable_membership_tests.rs#L101) | Membership-source derivation; local permission actor, not a common snapshot. |
 | E8 | [stale admission but preserved accepted children](../../crates/waddle-server/src/ingress/xep0045_room_manifest_tests.rs#L488) | The current accepted-manifest contract; not a new revocation policy. |
@@ -374,6 +379,45 @@ the remaining fences of the writer fence, through `e9feae31492f2461964555facf4fa
 - Eight tokens were added to the lexical scan for that vocabulary. The raw
   scan changed in every file those fences touch; their review is again the
   design's disposition table.
+
+The selected evidence was refreshed a fifth time, through
+`6e4cceebb627b36dd48931bcaf1cb30c0f0835af`, after reviewing the delta of the
+reviewed files since the fourth refresh:
+
+- Space parents move only by an authorised placement. Join-triggered repair
+  writes a parent only for a channel that has none; `join-repair-link` now
+  names `linked_space_node`, which replaced `space_parent_repair_nodes` and
+  no longer chooses among bookmarked Spaces. Read-triggered backfill runs no
+  stale cleanup and skips rooms an enrolled scope manages. The stale cleanup
+  that placement runs also removes other Spaces that are the channel's parent
+  without listing its bookmark, and restores what it removed on failure. W9
+  above states the current behaviour.
+- The fences fail closed in more cases. The admin listing withholds every
+  room the enrolled set names, even one the gate then answers as unmanaged.
+  Group DM creation refuses a managed identifier before writing anything.
+  Room administration arms the mirror repair before recording the first
+  change, so a batch refused part-way or a commit that could not be confirmed
+  is still repaired, and the repair re-reads the grants until their
+  generation stops moving. A channel-wide mention in a managed room needs the
+  sender's `moderate` grant and is not broadcast when the grants cannot be
+  read. Room system messages without WebSocket state, and search results the
+  store does not hold as managed, are withheld; search now reads grants by
+  channel. The enrolled set records its age from the start of each load,
+  drops a load that finished after a newer one, and warns when a reload
+  shrinks it. The call gate's documentation now names which decisions pass it.
+- The server startup and HTTP wiring gain the S2S configuration load,
+  listener acquisition and router start. Those edits move the `startup*`,
+  `startup-call` and `hg-recovery` anchors without changing backend
+  selection, `EnsureSchema`, account reconciliation or projection recovery.
+  S2S inbound routing refuses every stanza for the MUC and Spaces services
+  and delivers only correlated IQ responses to local account resources, so
+  it reaches no selected writer or sink.
+- The raw scan keeps 1590 records. Six changed, all in files the fence
+  touches: the parent-repair imports and delete, the backfill (which lost the
+  retraction of its stale-cleanup rollback and gained its enrollment check),
+  the room-admin call's error binding and the enrolled-set re-export. The
+  rest moved lines. No token was added, and no production grant writer,
+  grant store or acceptance authority was found.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
