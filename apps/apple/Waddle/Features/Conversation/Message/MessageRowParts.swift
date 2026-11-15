@@ -310,7 +310,7 @@ private struct MessageThreadFaces: View {
         if let jid = face.jid {
             JIDAvatar(jid: jid, name: face.name, size: Self.size)
         } else {
-            AvatarView(name: face.name, colorKey: face.colorKey, size: Self.size)
+            AvatarView(name: face.name, size: Self.size)
         }
     }
 }

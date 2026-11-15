@@ -16,6 +16,8 @@ on:
     - apps/android/settings.gradle.kts/**
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**
+    - apps/apple/Waddle/Design/WaddleTokens.swift
+    - apps/apple/Waddle/Design/WaddleTokens.swift/**
     - bun.lock
     - bun.lock/**
     - chat/astro.config.mjs

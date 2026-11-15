@@ -3,26 +3,24 @@
 //
 // Sources of truth (human-edited):
 //   - design/src/preset.ts: the Polar Huddle preset (@waddle/design). Feeds
-//     Android's `WaddleTokens.Huddle`.
+//     Apple's `WaddleTokens` and accent, and Android's `WaddleTokens.Huddle`.
 //   - scripts/design-tokens/legacy-tokens.css: the legacy chat sheet, a
-//     frozen copy. Feeds the Apple accent and Android's legacy
-//     `WaddleTokens` sections until those move to the preset too.
+//     frozen copy. Feeds Android's legacy `WaddleTokens` sections until
+//     those move to the preset too.
 // Generated outputs (never edit by hand):
 //   - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
+//   - apps/apple/Waddle/Design/WaddleTokens.swift
 //   - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt
 //
 // Usage:
 //   bun scripts/generate-design-tokens.mjs           # write outputs
 //   bun scripts/generate-design-tokens.mjs --check   # exit 1 if outputs are stale
 //
-// Apple shares only the brand accent (chat `--primary`); the website uses
-// @waddle/design instead.
-// Android takes the whole semantic sheet — colours in both schemes, the
-// spacing, radius and type scales — because it has no platform palette
-// worth keeping: Material 3's defaults are lavender and pink, not neutral
-// like Apple's system greys. Android maps these tokens onto Material
-// roles in WaddleTheme.kt; the mapping is the design decision, the values
-// stay here.
+// Apple and Android both take the preset's semantic colours in both
+// schemes, plus the radius, type and motion scales; Apple also takes
+// spacing and border widths. Elevation, state layers and springs are
+// derived on each platform (Theme.swift, WaddleTheme.kt): the mapping is
+// the design decision, the values stay here.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,6 +36,7 @@ const ACCENT_COLORSET = join(
   repoRoot,
   "apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
 );
+const APPLE_TOKENS = join(repoRoot, "apps/apple/Waddle/Design/WaddleTokens.swift");
 const ANDROID_TOKENS = join(
   repoRoot,
   "apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
@@ -93,26 +92,7 @@ function srgbToHex(rgb) {
 // Parse the chat token sheet
 // ---------------------------------------------------------------------------
 
-function parseLightDarkOklch(css, varName) {
-  const pattern = new RegExp(
-    `--${varName}:\\s*light-dark\\(\\s*oklch\\(([^)]+)\\)\\s*,\\s*oklch\\(([^)]+)\\)\\s*\\)`,
-  );
-  const match = css.match(pattern);
-  if (!match) {
-    throw new Error(`--${varName}: light-dark(oklch(...), oklch(...)) not found in tokens.css`);
-  }
-  const parse = (body) => {
-    const parts = body.trim().split(/[\s/]+/).map(Number);
-    if (parts.length < 3 || parts.some(Number.isNaN)) {
-      throw new Error(`--${varName}: unparseable oklch body "${body}"`);
-    }
-    return { l: parts[0], c: parts[1], h: parts[2] };
-  };
-  return { light: parse(match[1]), dark: parse(match[2]) };
-}
-
 const tokensCss = readFileSync(TOKENS_CSS, "utf8");
-const primary = parseLightDarkOklch(tokensCss, "primary");
 
 // Plain colour values: `#rrggbb`, `rgba(r, g, b, a)`, or `light-dark(x, y)`
 // of those. `var(--other)` resolves through the sheet. Returns
@@ -197,6 +177,7 @@ function plainNumber(name) {
 // Outputs
 // ---------------------------------------------------------------------------
 
+// `light` and `dark` are sRGB component triples in 0..1.
 function colorsetJson({ light, dark }) {
   const component = (v) => v.toFixed(3);
   const entry = (rgb, appearance) => ({
@@ -221,7 +202,7 @@ function colorsetJson({ light, dark }) {
   return (
     JSON.stringify(
       {
-        colors: [entry(oklchToSrgb(light)), entry(oklchToSrgb(dark), "dark")],
+        colors: [entry(light), entry(dark, "dark")],
         info: { author: "scripts/generate-design-tokens.mjs", version: 1 },
       },
       null,
@@ -357,8 +338,28 @@ function huddleCubicBezier(name) {
   if (points?.length !== 4 || points.some(Number.isNaN)) {
     throw new Error(`easings.${name}: expected cubic-bezier(x1, y1, x2, y2), got "${value}"`);
   }
-  return `CubicBezierEasing(${points.map(ktFloat).join(", ")})`;
+  return points;
 }
+
+// Semantic colours both platforms take; the derived groups stay out.
+const huddleColorNames = () =>
+  huddle
+    .semanticNames("colors")
+    .filter((n) => !DERIVED_COLOR_GROUPS.some((g) => n === g || n.startsWith(g)));
+
+const isAvatarTint = (name) => /^avatar\.\d+$/.test(name);
+
+// Easings a platform curve can express: `linear()` springs are web-only.
+const huddleBezierEasings = () =>
+  huddle
+    .tokenNames("easings")
+    .filter((n) => !String(huddleValue("easings", n)).startsWith("linear("));
+
+// Text styles with fixed sizes, as `[name, { font, size, weight, leading, tracking }]`.
+const huddleTextStyles = () =>
+  Object.entries(presetTheme.textStyles)
+    .filter(([name]) => !FLUID_TEXT_STYLES.has(name))
+    .map(([name, { value }]) => [name, huddleTextStyle(name, value)]);
 
 // `val name = Type(` + one named argument per line + `)`.
 const ktConstruct = (name, type, args) => [
@@ -398,14 +399,22 @@ function huddleTextStyle(name, style) {
   if (!Number.isInteger(style.fontWeight)) {
     throw new Error(`textStyles.${name}: unsupported fontWeight "${style.fontWeight}"`);
   }
-  return [
-    `font = HuddleFont.${pascal(style.fontFamily)}`,
-    `size = ${size}.sp`,
-    `weight = FontWeight(${style.fontWeight})`,
-    `lineHeight = ${round3(leading)}.em`,
-    `letterSpacing = ${ktNumber(Number(em[1]))}.em`,
-  ];
+  return {
+    font: style.fontFamily,
+    size,
+    weight: style.fontWeight,
+    leading: round3(leading),
+    tracking: Number(em[1]),
+  };
 }
+
+const ktTextStyle = ({ font, size, weight, leading, tracking }) => [
+  `font = HuddleFont.${pascal(font)}`,
+  `size = ${size}.sp`,
+  `weight = FontWeight(${weight})`,
+  `lineHeight = ${leading}.em`,
+  `letterSpacing = ${ktNumber(tracking)}.em`,
+];
 
 // Control heights from the comfortable density (`sizes.chipH`, `rowH`,
 // `controlH`, `target`); xs is the compact chip.
@@ -422,9 +431,7 @@ function controlHeights() {
 
 function huddleKt() {
   const indent = (lines, depth) => lines.map((l) => `${"    ".repeat(depth)}${l}`).join("\n");
-  const colorNames = huddle
-    .semanticNames("colors")
-    .filter((n) => !DERIVED_COLOR_GROUPS.some((g) => n === g || n.startsWith(g)));
+  const colorNames = huddleColorNames();
   const scheme = (key) =>
     indent(colorNames.map((n) => `val ${kotlinName(n)} = Color(${huddleColor(n, key)})`), 3);
   const pxDims = (category, unit) =>
@@ -435,13 +442,11 @@ function huddleKt() {
         .map((n) => `val ${kotlinName(n)} = ${ktNumber(px(`${category}.${n}`, huddleValue(category, n)))}.${unit}`),
       3,
     );
-  const avatarTints = colorNames.filter((n) => /^avatar\.\d+$/.test(n));
-  const textStyles = Object.entries(presetTheme.textStyles)
-    .filter(([name]) => !FLUID_TEXT_STYLES.has(name))
-    .flatMap(([name, { value }]) => ktConstruct(name, "HuddleTextStyle", huddleTextStyle(name, value)));
-  const easings = huddle
-    .tokenNames("easings")
-    .filter((n) => !String(huddleValue("easings", n)).startsWith("linear(")); // linear() springs: web-only
+  const avatarTints = colorNames.filter(isAvatarTint);
+  const textStyles = huddleTextStyles().flatMap(([name, style]) =>
+    ktConstruct(name, "HuddleTextStyle", ktTextStyle(style)),
+  );
+  const easings = huddleBezierEasings();
   return `    /**
      * Polar Huddle (design/src/preset.ts). Night is the default scheme;
      * Daylight is the light one.
@@ -485,7 +490,7 @@ ${indent(huddle.tokenNames("durations").map((n) => `const val ${kotlinName(n).to
         }
 
         object Easing {
-${indent(easings.map((n) => `val ${ktIdentifier(kotlinName(n))} = ${huddleCubicBezier(n)}`), 3)}
+${indent(easings.map((n) => `val ${ktIdentifier(kotlinName(n))} = CubicBezierEasing(${huddleCubicBezier(n).map(ktFloat).join(", ")})`), 3)}
         }
     }`;
 }
@@ -506,6 +511,130 @@ data class HuddleTextStyle(
     val letterSpacing: TextUnit,
 )`;
 }
+
+// ---------------------------------------------------------------------------
+// Polar Huddle (design/src/preset.ts) -> apps/apple WaddleTokens.swift
+// ---------------------------------------------------------------------------
+
+// Token names that are Swift keywords get a readable name instead.
+const SWIFT_KEYWORD_NAMES = { in: "easeIn" };
+const swiftName = (dotted) => SWIFT_KEYWORD_NAMES[kotlinName(dotted)] ?? kotlinName(dotted);
+
+// `0xAARRGGBB` -> sRGB component triple in 0..1 (alpha dropped).
+const literalRgb = (literal) =>
+  [2, 4, 6].map((i) => Number.parseInt(literal.slice(2 + i, 4 + i), 16) / 255);
+
+// Spacing steps are numbers on the web (`2`, `0.5`); Swift names them `s2`, `s0_5`.
+const swiftSpacingName = (step) => `s${String(step).replace(".", "_")}`;
+
+function appleTokensSwift() {
+  const indent = (lines, depth) => lines.map((l) => `${"    ".repeat(depth)}${l}`).join("\n");
+  const swiftColor = (n) =>
+    `Color(night: ${huddleColor(n, "night")}, daylight: ${huddleColor(n, "daylight")})`;
+  const colorNames = huddleColorNames();
+  const colors = colorNames
+    .filter((n) => !isAvatarTint(n))
+    .map((n) => `static let ${swiftName(n)} = ${swiftColor(n)}`);
+  const avatarTints = colorNames.filter(isAvatarTint).map((n) => `${swiftColor(n)},`);
+  const pxDims = (category) =>
+    huddle
+      .tokenNames(category)
+      .filter((n) => isPx(huddleValue(category, n)))
+      .map((n) => `static let ${swiftName(n)}: CGFloat = ${px(`${category}.${n}`, huddleValue(category, n))}`);
+  // JS lists integer-like keys first (`1`, `2`, … then `0.5`): order the grid by size.
+  const spacing = huddle
+    .tokenNames("spacing")
+    .map((n) => [n, px(`spacing.${n}`, huddleValue("spacing", n))])
+    .sort(([, a], [, b]) => a - b)
+    .map(([n, value]) => `static let ${swiftSpacingName(n)}: CGFloat = ${value}`);
+  const textStyles = huddleTextStyles().map(
+    ([name, { font, size, weight, leading, tracking }]) =>
+      `static let ${swiftName(name)} = HuddleTextStyle(font: .${swiftName(font)}, size: ${size}, weight: ${weight}, lineHeight: ${leading}, letterSpacing: ${tracking})`,
+  );
+  const durations = huddle
+    .tokenNames("durations")
+    .map((n) => `static let ${swiftName(n)}: TimeInterval = ${huddleMillis(n) / 1000}`);
+  const easings = huddleBezierEasings().map((n) => {
+    const [x1, y1, x2, y2] = huddleCubicBezier(n);
+    return `static let ${swiftName(n)} = UnitCurve.bezier(startControlPoint: UnitPoint(x: ${x1}, y: ${y1}), endControlPoint: UnitPoint(x: ${x2}, y: ${y2}))`;
+  });
+  return `// GENERATED — do not edit.
+// Source: design/src/preset.ts (Polar Huddle)
+// Regenerate: bun scripts/generate-design-tokens.mjs
+import SwiftUI
+
+/// Polar Huddle design tokens, shared with the web and Android clients.
+enum WaddleTokens {
+    /// Semantic colours. Each resolves to its Night value in a dark
+    /// appearance and its Daylight value in a light one.
+    enum Colors {
+${indent(colors, 2)}
+
+        /// Avatar fallback tints (web \`avatar.N\`), one picked per name.
+        static let avatarTints: [Color] = [
+${indent(avatarTints, 3)}
+        ]
+    }
+
+    /// 4pt grid (web \`spacing.N\`). Half steps are for inside controls only.
+    enum Spacing {
+${indent(spacing, 2)}
+    }
+
+    enum Radius {
+${indent(pxDims("radii"), 2)}
+    }
+
+    enum BorderWidth {
+${indent(pxDims("borderWidths"), 2)}
+    }
+
+    /// Control heights (comfortable density; touch is the 44pt target).
+    enum ControlHeight {
+${indent(Object.entries(controlHeights()).map(([n, v]) => `static let ${n}: CGFloat = ${v}`), 2)}
+    }
+
+    enum FontSize {
+${indent(pxDims("fontSizes"), 2)}
+    }
+
+    /// Web \`textStyles\`.
+    enum TextStyles {
+${indent(textStyles, 2)}
+    }
+
+    /// Durations in seconds.
+    enum Duration {
+${indent(durations, 2)}
+    }
+
+    enum Easing {
+${indent(easings, 2)}
+    }
+}
+
+/// Polar Huddle font roles (web \`fonts\` tokens).
+enum HuddleFont: CaseIterable {
+${indent(huddle.tokenNames("fonts").map((n) => `case ${swiftName(n)}`), 1)}
+}
+
+/// A Polar Huddle text style. \`lineHeight\` is a multiple of \`size\`;
+/// \`letterSpacing\` is in em.
+struct HuddleTextStyle: Equatable {
+    let font: HuddleFont
+    let size: CGFloat
+    let weight: CGFloat
+    let lineHeight: CGFloat
+    let letterSpacing: CGFloat
+}
+`;
+}
+
+// The Apple accent is the Polar Huddle action colour in each scheme.
+const appleAccent = {
+  light: literalRgb(huddleColor("action", "daylight")),
+  dark: literalRgb(huddleColor("action", "night")),
+};
 
 function androidTokensKt() {
   const colors = ANDROID_COLORS.map((name) => [camel(name), resolveColor(name)]);
@@ -566,7 +695,8 @@ ${huddleFontsKt()}
 }
 
 const outputs = [
-  { path: ACCENT_COLORSET, content: colorsetJson(primary) },
+  { path: ACCENT_COLORSET, content: colorsetJson(appleAccent) },
+  { path: APPLE_TOKENS, content: appleTokensSwift() },
   { path: ANDROID_TOKENS, content: androidTokensKt() },
 ];
 

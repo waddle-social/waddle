@@ -11,7 +11,6 @@ struct OccupantMemberRow: View {
         MemberRowLabel(
             name: occupant.nick,
             avatarJID: occupant.realJID,
-            colorKey: "\(room)/\(occupant.nick)",
             availability: occupant.availability,
             status: occupant.status,
             hats: occupant.hats,
@@ -36,7 +35,6 @@ struct AbsentMemberRow: View {
         MemberRowLabel(
             name: MemberRoster.displayName(of: member),
             avatarJID: member.jid,
-            colorKey: member.jid.description,
             availability: .offline,
             status: nil,
             hats: [],
@@ -59,7 +57,6 @@ struct BotMemberRow: View {
         MemberRowLabel(
             name: bot.displayName,
             avatarJID: bot.jid,
-            colorKey: bot.jid.description,
             availability: .offline,
             status: nil,
             hats: [],
@@ -74,7 +71,6 @@ struct BotMemberRow: View {
 struct MemberRowLabel: View {
     let name: String
     let avatarJID: BareJID?
-    let colorKey: String
     let availability: Availability
     let status: String?
     let hats: [Hat]
@@ -121,7 +117,7 @@ struct MemberRowLabel: View {
         if let avatarJID {
             JIDAvatar(jid: avatarJID, name: name, size: Theme.Size.rowAvatar)
         } else {
-            AvatarView(name: name, colorKey: colorKey, size: Theme.Size.rowAvatar)
+            AvatarView(name: name, size: Theme.Size.rowAvatar)
         }
     }
 

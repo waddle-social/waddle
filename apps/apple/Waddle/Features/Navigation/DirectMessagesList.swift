@@ -44,7 +44,7 @@ struct DirectMessagesList: View {
                 Button("New message") {
                     navigation.sheet = .newMessage
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.huddle(.primary))
             }
         }
     }

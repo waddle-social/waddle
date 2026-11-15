@@ -44,8 +44,7 @@ struct SignInAuthorizingPanel: View {
                 Label("Open browser again", systemImage: "safari")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.huddle(.primary, size: .large))
 
             Button("Cancel", role: .cancel) {
                 app.cancelSignIn()
