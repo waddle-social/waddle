@@ -1,6 +1,8 @@
 //! RFC 6120 §10 destination routing for client IQs over real WebSockets and
 //! SCRAM sessions: every destination class, explicit result/error routing,
-//! and the no-loop and no-fabrication rules while S2S is not enabled.
+//! and the no-loop and no-fabrication rules while S2S is not enabled; and
+//! the RFC 6120 §10.4.3 error for messages and presence to a domain the
+//! deployment does not serve, with no roster change.
 
 use std::time::Duration;
 
@@ -412,4 +414,124 @@ async fn a_trailing_domain_dot_routes_to_the_canonical_destination() {
 
     origin.close().await.expect("close origin");
     peer.close().await.expect("close peer");
+}
+
+/// Send a typed stanza on the client's socket.
+async fn send_stanza(client: &mut WsXmppClient, stanza: impl Into<Element>) {
+    let mut bytes = Vec::new();
+    stanza
+        .into()
+        .write_to(&mut bytes)
+        .expect("serialize a typed stanza");
+    client
+        .send(&String::from_utf8(bytes).expect("UTF-8 stanza"))
+        .await
+        .expect("send on the authenticated WebSocket");
+}
+
+/// The next `name` stanza with `id` on the socket.
+async fn next_stanza(client: &mut WsXmppClient, name: &str, id: &str) -> Element {
+    let frame = client
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.name() == name && element.attr("id") == Some(id))
+        })
+        .await
+        .expect("the correlated stanza");
+    frame.parse::<Element>().expect("stanza XML")
+}
+
+fn stanza_error_of(stanza: &Element) -> StanzaError {
+    stanza
+        .children()
+        .find_map(|child| StanzaError::try_from(child.clone()).ok())
+        .expect("a stanza error")
+}
+
+#[tokio::test]
+async fn messages_and_presence_to_unserved_domains_are_answered_with_an_error() {
+    use xmpp_parsers::message::{Id, Lang, Message, MessageType};
+    use xmpp_parsers::presence::{Presence, Type as PresenceType};
+    let server = TestServer::start();
+    let mut origin = connect(&server, "admin", server.fixed_account_password(), "stanzas").await;
+    let bound = bound_jid(&origin);
+    let targets = [
+        "bob@remote.test",
+        "bob@remote.test/phone",
+        "room@muc.remote.test",
+        "127.0.0.1",
+        "bob@intranet",
+    ];
+    for (index, target) in targets.into_iter().enumerate() {
+        let id = ["message-", &index.to_string()].concat();
+        let mut message = Message::new_with_type(MessageType::Chat, Some(jid(target)));
+        message.id = Some(Id(id.clone()));
+        message.bodies.insert(Lang(String::new()), "hi".into());
+        send_stanza(&mut origin, message).await;
+        let reply = next_stanza(&mut origin, "message", &id).await;
+        assert_eq!(reply.attr("type"), Some("error"));
+        assert_eq!(reply.attr("to"), Some(bound.to_string().as_str()));
+        assert!(reply.children().all(|child| child.name() != "body"));
+        let error = stanza_error_of(&reply);
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::RemoteServerNotFound
+        );
+        assert_eq!(error.type_, ErrorType::Cancel);
+    }
+
+    // A join of a remote room and directed presence fail at once.
+    for (index, target) in ["room@muc.remote.test/me", "bob@remote.test/phone"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = ["directed-", &index.to_string()].concat();
+        let mut presence = Presence::new(PresenceType::None);
+        presence.to = Some(jid(target));
+        presence.id = Some(id.clone());
+        send_stanza(&mut origin, presence).await;
+        let reply = next_stanza(&mut origin, "presence", &id).await;
+        assert_eq!(reply.attr("type"), Some("error"));
+        assert_eq!(
+            stanza_error_of(&reply).defined_condition,
+            DefinedCondition::RemoteServerNotFound
+        );
+    }
+
+    // A subscription request is refused and records nothing on the roster.
+    let mut subscribe = Presence::new(PresenceType::Subscribe);
+    subscribe.to = Some(jid("bob@remote.test"));
+    subscribe.id = Some("subscribe".into());
+    send_stanza(&mut origin, subscribe).await;
+    let reply = next_stanza(&mut origin, "presence", "subscribe").await;
+    assert_eq!(reply.attr("type"), Some("error"));
+    assert_eq!(reply.attr("from"), Some("bob@remote.test"));
+    assert_eq!(
+        stanza_error_of(&reply).defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
+    let roster = round_trip(
+        &mut origin,
+        request("jabber:iq:roster", false, None, "roster-after"),
+    )
+    .await;
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = roster
+    else {
+        panic!("a roster result: {roster:?}");
+    };
+    assert!(query
+        .children()
+        .all(|item| item.attr("jid") != Some("bob@remote.test")));
+
+    // An error stanza is never answered; the socket still serves local
+    // requests.
+    let mut error = Message::new_with_type(MessageType::Error, Some(jid("bob@remote.test")));
+    error.id = Some(Id("error-message".into()));
+    send_stanza(&mut origin, error).await;
+    assert_silent_then_local_ping(&mut origin, "after-stanzas").await;
+    origin.close().await.expect("close origin");
 }

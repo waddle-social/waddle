@@ -152,7 +152,7 @@ use extension_forms::{
     CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
-use full_jid_forward::route_full_jid_iq;
+use full_jid_forward::{outgoing_block_frames, route_full_jid_iq};
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};

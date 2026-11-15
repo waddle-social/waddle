@@ -456,3 +456,97 @@ fn an_emitted_header_can_declare_the_dialback_namespace() {
     assert!(first_header(declared.as_bytes()).declare_dialback);
     assert!(!first_header(plain.as_bytes()).declare_dialback);
 }
+
+#[test]
+fn a_stanza_address_is_presented_with_u_labels() {
+    use waddle_xmpp::identity::{parse_jid, presentation_text};
+    for written in [
+        "alice@xn--bcher-kva.test/phone",
+        "alice@bücher.test/phone",
+        "alice@bücher.test./phone",
+    ] {
+        let address = parse_jid(written).expect("an address in the profile");
+        assert_eq!(
+            presentation_text(&address).expect("presentable"),
+            "alice@bücher.test/phone"
+        );
+    }
+    let address = parse_jid(TIFINAGH_A_LABEL).expect("a domain address");
+    assert_eq!(
+        presentation_text(&address).expect("presentable"),
+        TIFINAGH_U_LABEL
+    );
+}
+
+/// `initiator()` established with its peer, which answers in U-labels.
+fn established_initiator() -> S2sStream {
+    let mut stream = initiator();
+    let features_starttls: &[u8] = b"<stream:features><starttls \
+xmlns='urn:ietf:params:xml:ns:xmpp-tls'><required/></starttls></stream:features>";
+    let features_external: &[u8] = b"<stream:features><mechanisms \
+xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>EXTERNAL</mechanism></mechanisms>\
+</stream:features>";
+    stream.receive(
+        &[
+            response(U_LABEL, "home-b.test").as_slice(),
+            features_starttls,
+        ]
+        .concat(),
+    );
+    stream.receive(b"<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>");
+    stream.tls_established(TlsPeer::Verified(domain(A_LABEL)));
+    stream.receive(
+        &[
+            response(U_LABEL, "home-b.test").as_slice(),
+            features_external,
+        ]
+        .concat(),
+    );
+    stream.receive(b"<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>");
+    let out = stream.receive(
+        &[
+            response(U_LABEL, "home-b.test").as_slice(),
+            b"<stream:features/>".as_slice(),
+        ]
+        .concat(),
+    );
+    assert!(
+        out.iter()
+            .any(|output| matches!(output, Output::Established(_))),
+        "the stream is established"
+    );
+    stream
+}
+
+#[test]
+fn an_initiating_stream_writes_stanza_addresses_in_u_labels() {
+    let mut stream = established_initiator();
+    // The router hands stanzas on in canonical form, with A-labels.
+    let mut iq = minidom::Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "p1")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "alice@home-b.test/phone",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            ["bob@", A_LABEL].concat(),
+        )
+        .append(minidom::Element::builder("ping", "urn:xmpp:ping").build())
+        .build();
+    let out = stream
+        .send_stanza(iq.clone())
+        .expect("a stanza for the pair");
+    let written = String::from_utf8(transmitted(&out)).expect("UTF-8");
+    assert!(written.contains(&["bob@", U_LABEL].concat()), "{written}");
+    assert!(!written.contains(A_LABEL), "{written}");
+
+    // A `to` written with U-labels is the same domain.
+    iq.set_attr(
+        minidom::rxml::Namespace::NONE,
+        minidom::rxml::xml_ncname!("to").to_owned(),
+        ["bob@", U_LABEL].concat(),
+    );
+    assert!(stream.send_stanza(iq).is_ok());
+}

@@ -41,7 +41,7 @@ mod stanza;
 pub use account::{AccountLocalpart, ACCOUNT_LOCALPART_MAX_BYTES};
 pub use address::{
     canonical_jid, parse_bare_jid, parse_full_jid, parse_jid, parse_localpart, parse_resourcepart,
-    CanonicalBareJid,
+    presentation_text, CanonicalBareJid,
 };
 pub use domain::{CanonicalDomain, DomainKind};
 pub use error::IdentityError;

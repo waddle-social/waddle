@@ -17,7 +17,11 @@
 //!   restart), with XEP-0220 Server Dialback over TLS in the Initiating,
 //!   Receiving and Authoritative Server roles when [`DialbackMode`] and the
 //!   owner's admission enable them, and verification connections;
-//! - [`S2sStream`]: a driver combining all of the above for one connection.
+//! - [`S2sStream`]: a driver combining all of the above for one connection,
+//!   which hands stanzas from an established receiving stream to its owner
+//!   and encodes stanzas for an established initiating stream;
+//! - [`into_server_content`] and [`into_client_content`]: the content
+//!   namespace mapping a stanza needs to cross a server-to-server stream.
 //!
 //! Stream header addresses are read from the raw attribute text into the
 //! identity profile's [`CanonicalDomain`](crate::identity::CanonicalDomain),
@@ -25,6 +29,7 @@
 //! headers write U-labels.
 
 mod condition;
+mod content;
 mod decoder;
 mod encoder;
 mod header;
@@ -33,6 +38,7 @@ mod negotiation;
 mod stream;
 
 pub use condition::{SaslFailureCondition, StreamErrorCondition};
+pub use content::{into_client_content, into_server_content};
 pub use decoder::{DecodeError, DiscardedInput, Inbound, StreamDecoder, TlsHandoff};
 pub use encoder::{EncodeError, StreamEncoder};
 pub use header::{HeaderAddress, StreamHeader, StreamId, StreamLanguage, StreamVersion};
@@ -44,4 +50,4 @@ pub use negotiation::{
     NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication,
     TlsEntry, TlsPeer, VerifyRequest, VerifyVerdict, MAX_DIALBACK_KEY_BYTES,
 };
-pub use stream::{Output, S2sStream};
+pub use stream::{Output, S2sStream, SendError};

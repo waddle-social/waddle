@@ -500,6 +500,19 @@ pub async fn start_with_config_and_owner_outbox(
     let http_drain_complete = Arc::clone(&drain_complete);
     let http_pubsub_database_storage = Arc::clone(&pubsub_database_storage);
     let http_shutdown_deadline = shutdown_deadline.clone();
+    // With S2S enabled, the router is the remote route of local entities
+    // and the stanza sink of inbound streams. Its pending IQ correlations
+    // live in the global database, which every replica shares.
+    let s2s_router = match s2s_config.as_ref() {
+        Some(config) => Some(start_s2s_router(
+            Arc::clone(config),
+            &xmpp_config,
+            db_pool.global().clone(),
+            stop_token.clone(),
+        )?),
+        None => None,
+    };
+    let http_s2s_router = s2s_router.clone();
     let http_handle = tokio::spawn(async move {
         start_http_server(HttpServerDeps {
             state: http_state,
@@ -515,6 +528,7 @@ pub async fn start_with_config_and_owner_outbox(
             sm_drain_complete,
             shutdown_deadline: http_shutdown_deadline,
             connections_drained,
+            s2s_router: http_s2s_router,
         })
         .await
     });
@@ -532,18 +546,22 @@ pub async fn start_with_config_and_owner_outbox(
         })
         .transpose()?;
     let s2s_service = s2s_config.map(|config| {
-        crate::s2s::conn::S2sService::start(
-            config,
-            s2s_listener,
-            crate::s2s::conn::ServiceOptions {
-                stop: Some(stop_token.clone()),
-                resolver: s2s_resolver.map(|resolver| {
-                    std::sync::Arc::new(resolver)
-                        as std::sync::Arc<dyn crate::s2s::conn::EndpointResolver>
-                }),
-                ..Default::default()
-            },
-        )
+        let mut options = crate::s2s::conn::ServiceOptions {
+            stop: Some(stop_token.clone()),
+            resolver: s2s_resolver.map(|resolver| {
+                std::sync::Arc::new(resolver)
+                    as std::sync::Arc<dyn crate::s2s::conn::EndpointResolver>
+            }),
+            ..Default::default()
+        };
+        if let Some(router) = &s2s_router {
+            options.sink = Arc::new(router.clone());
+        }
+        let service = crate::s2s::conn::S2sService::start(config, s2s_listener, options);
+        if let Some(router) = &s2s_router {
+            router.attach_transport(service.handle());
+        }
+        service
     });
 
     // Run the Ecdysis shutdown lifecycle
@@ -601,6 +619,11 @@ pub async fn start_with_config_and_owner_outbox(
         service
             .shutdown(shutdown_deadline.start().remaining())
             .await;
+    }
+    // The router's workers stopped taking stanzas when the stop token
+    // fired; join them within what remains.
+    if let Some(router) = s2s_router {
+        router.shutdown(shutdown_deadline.start().remaining()).await;
     }
 
     // Issue #1388: both drains just awaited above (SM/Q6 via `http_handle`,
@@ -866,4 +889,31 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
         return Ok(());
     }
     anyhow::bail!("MAM storage did not expose a lineage backend")
+}
+
+/// The S2S router for an enabled S2S configuration: the destinations this
+/// deployment serves, exactly as the WebSocket classifier sees them, and the
+/// shared correlation table in the global database.
+fn start_s2s_router(
+    config: Arc<crate::s2s::config::S2sConfig>,
+    xmpp_config: &XmppConfig,
+    global: crate::db::Database,
+    stop: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<crate::s2s::route::S2sRouter> {
+    let served = crate::server::routes::websocket::XmppServiceDomains::new(
+        &xmpp_config.domain,
+        xmpp_config.muc_domain.as_str(),
+        xmpp_config.spaces_jid.domain().as_str(),
+    )
+    .served_domains(&xmpp_config.domain)
+    .ok_or_else(|| anyhow::anyhow!("the XMPP domain is not a valid domain"))?;
+    Ok(crate::s2s::route::S2sRouter::new(
+        crate::s2s::route::RouterOptions {
+            config,
+            served,
+            correlations: Arc::new(crate::s2s::route::SqlIqCorrelations::new(global)),
+            limits: crate::s2s::route::RouterLimits::default(),
+            stop: Some(stop),
+        },
+    ))
 }

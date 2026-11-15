@@ -277,6 +277,7 @@ impl Verification<'_> {
             Output::Authorize(_)
             | Output::Established(_)
             | Output::Stanza(_)
+            | Output::MalformedAddress(_)
             | Output::VerifyDialback(_)
             | Output::DialbackAnswered { .. } => Err(S2sOutcome::Protocol),
         }

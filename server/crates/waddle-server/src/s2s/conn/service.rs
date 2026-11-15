@@ -28,6 +28,7 @@ use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 use super::admission::ConnectionAdmission;
 use super::capacity::{Capacity, InboundSlot, OutboundSlot};
 use super::endpoints::{ConfiguredEndpoints, EndpointResolver, Endpoints, ResolveError};
+use super::outbox::{self, TransmitError};
 use super::peer_stream::{StreamDirection, VerifiedPeerStream};
 use super::registry::{Activity, DialRefusal, DialSlot, DialStart, Registry};
 use super::session::{is_peer_failure, EstablishedSender, Role, Session, SessionStart};
@@ -393,6 +394,24 @@ impl S2sHandle {
             Ok(Err(outcome)) => Err(ConnectError::Failed(outcome)),
             Err(_) => Err(ConnectError::Failed(S2sOutcome::Shutdown)),
         }
+    }
+
+    /// Write `stanza` on the established outbound `stream`, waiting while
+    /// the stream writes the stanza before it, and report whether it was
+    /// written. The stanza's `from` must be at the stream's local domain
+    /// and its `to` at its remote domain; it is written in the stream's
+    /// content namespace with U-label domains.
+    ///
+    /// `Ok` means the bytes were handed to the TLS session within the write
+    /// deadline, not that the peer received or accepted the stanza.
+    /// [`TransmitError::NotTaken`] returns a stanza that was never written,
+    /// for example because the stream was replaced or is closing.
+    pub async fn transmit(
+        &self,
+        stream: &VerifiedPeerStream,
+        stanza: minidom::Element,
+    ) -> Result<(), TransmitError> {
+        outbox::transmit(&self.shared.registry, stream, stanza).await
     }
 
     /// Every established stream.

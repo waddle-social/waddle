@@ -406,6 +406,9 @@ pub enum Signal {
     /// local policy, such as a stanza no service accepts or a domain that is
     /// no longer admitted.
     PolicyViolation,
+    /// The connection owner refuses a stanza whose address is written in a
+    /// spelling the identity profile refuses (RFC 6120 §4.9.3.7).
+    ImproperAddressing,
 }
 
 impl Signal {
@@ -418,6 +421,7 @@ impl Signal {
             Self::ResourceExhausted => StreamErrorCondition::ResourceConstraint,
             Self::Conflict => StreamErrorCondition::Conflict,
             Self::PolicyViolation => StreamErrorCondition::PolicyViolation,
+            Self::ImproperAddressing => StreamErrorCondition::ImproperAddressing,
         }
     }
 }
@@ -517,6 +521,11 @@ pub enum Step {
     /// The receiving role answered a `<db:verify/>` request as the
     /// Authoritative Server; `valid` is the answer.
     DialbackAnswered { valid: bool },
+    /// Hand a stanza from an established receiving stream whose `to` or
+    /// `from` is a valid address written in a spelling the identity profile
+    /// refuses to the connection owner, which may answer it with a
+    /// `jid-malformed` stanza error instead of closing the stream.
+    DeliverMalformed(Element),
     /// Close: send the stream error (if any) and closing tag where the
     /// outbound stream is open, then close the transport.
     Close(CloseReason),

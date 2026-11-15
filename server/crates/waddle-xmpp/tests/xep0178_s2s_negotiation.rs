@@ -250,7 +250,9 @@ fn absorb(outputs: Vec<Output>, me: &mut Side, peer: &mut Side) {
             Output::Authorize(request) => me.authorizations.push(request),
             Output::Established(stream) => me.established = Some(stream),
             Output::Close(reason) => me.closes.push(reason),
-            Output::Stanza(_) => unreachable!("stanza delivery is not enabled in this suite"),
+            Output::Stanza(_) | Output::MalformedAddress(_) => {
+                unreachable!("stanza delivery is not enabled in this suite")
+            }
             Output::VerifyDialback(_)
             | Output::VerifyVerdict(_)
             | Output::DialbackAnswered { .. } => {
@@ -1253,5 +1255,154 @@ fn initiator_refuses_inbound_stanzas() {
     assert_stream_error(
         &stream.receive(b"<message from='bob@home-b.test' to='alice@home-a.test'/>"),
         StreamErrorCondition::PolicyViolation,
+    );
+}
+
+// --- stanzas on established streams --------------------------------------
+
+/// Both ends of an established stream, with the receiving end handing
+/// address-checked stanzas to its owner.
+fn delivering_pair() -> (S2sStream, S2sStream) {
+    let (a, mut b, a_side, b_side) = handshake(usize::MAX);
+    assert_eq!(a_side.closes, []);
+    assert_eq!(b_side.closes, []);
+    b.deliver_stanzas();
+    (a, b)
+}
+
+fn typed_message(from: &str, to: &str) -> Element {
+    let mut message = xmpp_parsers::message::Message::new(Some(to.parse().expect("to")));
+    message.from = Some(from.parse().expect("from"));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), "hi".to_owned());
+    Element::from(message)
+}
+
+#[test]
+fn an_initiating_stream_sends_a_typed_stanza_in_the_server_content_namespace() {
+    let (mut a, mut b) = delivering_pair();
+    let stanza = typed_message("alice@home-a.test/phone", "bob@home-b.test");
+    assert_eq!(stanza.ns(), waddle_xmpp::ns::JABBER_CLIENT);
+    let out = a.send_stanza(stanza).expect("a stanza for the pair");
+    let bytes = transmitted(&out);
+    let delivered = b.receive(&bytes);
+    let stanza = delivered
+        .iter()
+        .find_map(|output| match output {
+            Output::Stanza(stanza) => Some(stanza.clone()),
+            _ => None,
+        })
+        .expect("the receiving end delivers the stanza");
+    assert_eq!(stanza.ns(), waddle_xmpp::ns::JABBER_SERVER);
+    let body = stanza
+        .get_child("body", waddle_xmpp::ns::JABBER_SERVER)
+        .expect("the body in the server content namespace");
+    assert_eq!(body.text(), "hi");
+    assert_eq!(close_reason(&delivered), None);
+}
+
+#[test]
+fn an_initiating_stream_refuses_a_stanza_outside_its_pair_before_writing() {
+    let (mut a, _) = delivering_pair();
+    let cases = [
+        typed_message("alice@elsewhere.test", "bob@home-b.test"),
+        typed_message("alice@home-a.test", "bob@muc.home-b.test"),
+        Element::builder("foo", "urn:example:foo").build(),
+    ];
+    for stanza in cases {
+        assert_eq!(
+            a.send_stanza(stanza),
+            Err(waddle_xmpp::s2s::SendError::Addressing)
+        );
+    }
+    let missing = Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "alice@home-a.test",
+        )
+        .build();
+    assert_eq!(
+        a.send_stanza(missing),
+        Err(waddle_xmpp::s2s::SendError::Addressing)
+    );
+}
+
+#[test]
+fn a_receiving_stream_cannot_send_and_neither_can_a_stream_still_negotiating() {
+    let (_, mut b) = delivering_pair();
+    assert_eq!(
+        b.send_stanza(typed_message("bob@home-b.test", "alice@home-a.test")),
+        Err(waddle_xmpp::s2s::SendError::NotEstablished)
+    );
+    let (mut negotiating, _) = initiator();
+    assert_eq!(
+        negotiating.send_stanza(typed_message("alice@home-a.test", "bob@home-b.test")),
+        Err(waddle_xmpp::s2s::SendError::NotEstablished)
+    );
+}
+
+#[test]
+fn a_delivering_stream_hands_on_a_refused_spelling_and_stays_open() {
+    let (_, mut b) = delivering_pair();
+    let out = b.receive(
+        b"<message from='Alice@home-a.test/phone' to='bob@home-b.test'><body>hi</body></message>",
+    );
+    assert_eq!(close_reason(&out), None);
+    let stanza = out
+        .iter()
+        .find_map(|output| match output {
+            Output::MalformedAddress(stanza) => Some(stanza.clone()),
+            _ => None,
+        })
+        .expect("the stanza is handed on as malformed");
+    // Both addresses carry the canonical form of their preparation, for a
+    // reply.
+    assert_eq!(stanza.attr("from"), Some("alice@home-a.test/phone"));
+    assert_eq!(stanza.attr("to"), Some("bob@home-b.test"));
+
+    // The stream still carries the next stanza.
+    let out = b.receive(MESSAGE);
+    assert!(out.iter().any(|output| matches!(output, Output::Stanza(_))));
+    assert_eq!(b.phase(), NegotiationPhase::Established);
+}
+
+#[test]
+fn a_delivering_stream_still_closes_for_unusable_or_foreign_addresses() {
+    let cases: [(&[u8], StreamErrorCondition); 4] = [
+        (
+            b"<message from='alice@home-a.test' to='bob@'/>",
+            StreamErrorCondition::ImproperAddressing,
+        ),
+        (
+            b"<message to='bob@home-b.test'/>",
+            StreamErrorCondition::ImproperAddressing,
+        ),
+        // A refused spelling of another domain is still another domain.
+        (
+            b"<message from='Mallory@evil.test' to='bob@home-b.test'/>",
+            StreamErrorCondition::InvalidFrom,
+        ),
+        (
+            b"<message from='alice@home-a.test' to='Bob@elsewhere.test'/>",
+            StreamErrorCondition::HostUnknown,
+        ),
+    ];
+    for (stanza, condition) in cases {
+        let (_, mut b) = delivering_pair();
+        assert_stream_error(&b.receive(stanza), condition);
+    }
+}
+
+#[test]
+fn an_owner_refusing_a_refused_spelling_closes_with_improper_addressing() {
+    let (_, mut b) = delivering_pair();
+    let out = b.receive(b"<message from='Alice@home-a.test' to='bob@home-b.test'/>");
+    assert!(out
+        .iter()
+        .any(|output| matches!(output, Output::MalformedAddress(_))));
+    assert_stream_error(
+        &b.signal(Signal::ImproperAddressing),
+        StreamErrorCondition::ImproperAddressing,
     );
 }

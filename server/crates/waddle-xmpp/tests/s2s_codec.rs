@@ -6,11 +6,13 @@
 
 use minidom::Element;
 use waddle_xmpp::identity::CanonicalDomain;
-use waddle_xmpp::ns::{JABBER_SERVER, SASL, STREAM, TLS};
+use waddle_xmpp::ns::{JABBER_CLIENT, JABBER_SERVER, SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
-    CodecLimits, DecodeError, HeaderAddress, Inbound, LimitKind, StreamDecoder, StreamEncoder,
-    StreamErrorCondition, StreamHeader, StreamId, StreamLanguage, StreamVersion,
+    into_client_content, into_server_content, CodecLimits, DecodeError, HeaderAddress, Inbound,
+    LimitKind, StreamDecoder, StreamEncoder, StreamErrorCondition, StreamHeader, StreamId,
+    StreamLanguage, StreamVersion,
 };
+use waddle_xmpp::xep::xep0297::NS_FORWARD;
 
 const HEADER: &[u8] = b"<?xml version='1.0'?><stream:stream xmlns='jabber:server' \
 xmlns:stream='http://etherx.jabber.org/streams' xmlns:db='jabber:server:dialback' \
@@ -1009,4 +1011,82 @@ fn stream_error_elements_carry_only_the_condition() {
         StreamErrorCondition::from_peer_element(element),
         StreamErrorCondition::ImproperAddressing
     );
+}
+
+// --- content namespace (RFC 6120 §4.8.3) --------------------------------
+
+/// A `jabber:client` message with a standard child and an XEP-0297
+/// forwarded payload that carries a nested `jabber:client` message.
+fn client_message_with_forwarded() -> Element {
+    let nested = Element::builder("message", JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "carol@home-c.test",
+        )
+        .append(
+            Element::builder("body", JABBER_CLIENT)
+                .append("nested")
+                .build(),
+        )
+        .build();
+    Element::builder("message", JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "alice@home-a.test/x",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "bob@home-b.test",
+        )
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "m1")
+        .append(Element::builder("body", JABBER_CLIENT).append("hi").build())
+        .append(
+            Element::builder("forwarded", NS_FORWARD)
+                .append(nested)
+                .build(),
+        )
+        .build()
+}
+
+#[test]
+fn server_content_maps_the_stanza_and_its_direct_children_only() {
+    let mapped = into_server_content(client_message_with_forwarded());
+    assert!(mapped.is("message", JABBER_SERVER));
+    assert_eq!(mapped.attr("from"), Some("alice@home-a.test/x"));
+    assert_eq!(mapped.attr("to"), Some("bob@home-b.test"));
+    assert_eq!(mapped.attr("id"), Some("m1"));
+    let body = mapped
+        .get_child("body", JABBER_SERVER)
+        .expect("the body is in the server content namespace");
+    assert_eq!(body.text(), "hi");
+
+    // A payload keeps its namespace, and a stanza nested in it keeps the
+    // namespace it declares.
+    let forwarded = mapped
+        .get_child("forwarded", NS_FORWARD)
+        .expect("the payload is unchanged");
+    let nested = forwarded
+        .get_child("message", JABBER_CLIENT)
+        .expect("the nested stanza keeps jabber:client");
+    assert_eq!(
+        nested
+            .get_child("body", JABBER_CLIENT)
+            .map(|body| body.text()),
+        Some("nested".to_owned())
+    );
+}
+
+#[test]
+fn client_content_reverses_server_content() {
+    let original = client_message_with_forwarded();
+    let round_trip = into_client_content(into_server_content(original.clone()));
+    assert_eq!(round_trip, original);
+
+    // An element in neither content namespace is left as it is.
+    let other = Element::builder("foo", "urn:example:foo")
+        .append(Element::builder("bar", JABBER_SERVER).build())
+        .build();
+    let mapped = into_client_content(other.clone());
+    assert!(mapped.is("foo", "urn:example:foo"));
+    assert!(mapped.get_child("bar", JABBER_CLIENT).is_some());
 }

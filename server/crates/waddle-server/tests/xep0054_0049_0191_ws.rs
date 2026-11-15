@@ -451,6 +451,107 @@ async fn websocket_blocking_set_then_get_returns_blocklist() {
     let _ = client.close().await;
 }
 
+/// Block `jid` on `client`'s account.
+async fn block(client: &mut WsXmppClient, jid: &str, id: &str) {
+    let item = Element::builder("item", "urn:xmpp:blocking")
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("jid").to_owned(),
+            jid,
+        )
+        .build();
+    let request = xmpp_parsers::iq::Iq::Set {
+        from: None,
+        to: None,
+        id: id.to_owned(),
+        payload: Element::builder("block", "urn:xmpp:blocking")
+            .append(item)
+            .build(),
+    };
+    client
+        .send(&element_to_xml(Element::from(request)))
+        .await
+        .expect("send block set");
+    let response = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("blocking set response");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "expected blocking set result, got: {response}"
+    );
+}
+
+/// Send a ping to `to` and return the error that answers it.
+async fn ping_error(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) -> (Element, xmpp_parsers::stanza_error::StanzaError) {
+    let request = xmpp_parsers::iq::Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("a test JID")),
+        id: id.to_owned(),
+        payload: Element::builder("ping", NS_PING).build(),
+    };
+    client
+        .send(&element_to_xml(Element::from(request)))
+        .await
+        .expect("send ping");
+    let frame = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("the ping is answered");
+    let reply: Element = frame.parse().expect("reply XML");
+    assert_eq!(reply.attr("type"), Some("error"), "{frame}");
+    let error = reply
+        .children()
+        .find_map(|child| xmpp_parsers::stanza_error::StanzaError::try_from(child.clone()).ok())
+        .expect("a stanza error");
+    (reply, error)
+}
+
+/// XEP-0191 §3.3: a request to a remote address the sender blocked is
+/// answered with `not-acceptable` and `<blocked/>`, from that address, and
+/// is never offered to the remote route; an address the sender did not
+/// block still reaches the route, which refuses it while S2S is disabled.
+#[tokio::test]
+async fn websocket_request_to_a_blocked_remote_address_is_not_acceptable() {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
+    let (_server, mut client) = setup().await;
+    block(&mut client, "spammer@remote.test", "ws-block-remote").await;
+    block(&mut client, "blocked.test", "ws-block-remote-domain").await;
+
+    for (to, id) in [
+        ("spammer@remote.test", "ws-remote-bare"),
+        ("spammer@remote.test/phone", "ws-remote-full"),
+        ("anyone@blocked.test/phone", "ws-remote-domain"),
+    ] {
+        let (reply, error) = ping_error(&mut client, to, id).await;
+        assert_eq!(reply.attr("from"), Some(to), "{id}");
+        assert_eq!(error.type_, ErrorType::Cancel, "{id}");
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::NotAcceptable,
+            "{id}"
+        );
+        assert!(
+            error
+                .other
+                .as_ref()
+                .is_some_and(|other| other.is("blocked", "urn:xmpp:blocking:errors")),
+            "{id}: {error:?}"
+        );
+    }
+
+    let (_, error) = ping_error(&mut client, "friend@remote.test/phone", "ws-remote-open").await;
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
+
+    let _ = client.close().await;
+}
+
 #[tokio::test]
 async fn websocket_disco_advertises_blocking() {
     let (_server, mut client) = setup().await;

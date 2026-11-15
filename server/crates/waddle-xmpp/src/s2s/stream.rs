@@ -1,7 +1,9 @@
 //! I/O-agnostic S2S connection driver combining codec and negotiation.
 
 use minidom::Element;
+use thiserror::Error;
 
+use super::content::into_server_content;
 use super::decoder::{Inbound, StreamDecoder, TlsHandoff};
 use super::encoder::StreamEncoder;
 use super::limits::CodecLimits;
@@ -11,6 +13,7 @@ use super::negotiation::{
     NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication, TlsEntry, TlsPeer,
     VerifyRequest, VerifyVerdict,
 };
+use crate::identity::{parse_jid, presentation_text, CanonicalDomain};
 
 /// What the connection owner must do next, in order.
 #[derive(Debug, PartialEq)]
@@ -44,8 +47,34 @@ pub enum Output {
     /// This server answered a `<db:verify/>` request as the Authoritative
     /// Server.
     DialbackAnswered { valid: bool },
+    /// A stanza from the established receiving stream whose `to` or `from`
+    /// is a valid address written in a spelling the identity profile
+    /// refuses, for the connection owner to answer with a `jid-malformed`
+    /// stanza error or refuse with [`Signal::ImproperAddressing`]. Both
+    /// addresses are in the canonical form of their RFC 7622 preparation,
+    /// and both domains are the stream's pair; the stanza must not be
+    /// processed otherwise. Emitted only after
+    /// [`S2sStream::deliver_stanzas`].
+    MalformedAddress(Element),
     /// Close the transport after writing all earlier output.
     Close(CloseReason),
+}
+
+/// Why [`S2sStream::send_stanza`] did not encode a stanza. Nothing was
+/// written for it, and the stream is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SendError {
+    /// The stream is not an established initiating stream, or it closed.
+    #[error("the stream cannot carry stanzas")]
+    NotEstablished,
+    /// The element is not a stanza, or its `to` or `from` is missing,
+    /// outside the identity profile, or names a domain other than the
+    /// stream's destination or source.
+    #[error("the stanza does not belong to the stream's domain pair")]
+    Addressing,
+    /// The stanza could not be serialised.
+    #[error("the stanza could not be encoded")]
+    Encode,
 }
 
 /// One S2S connection's XML codec and negotiation, without sockets or TLS.
@@ -66,6 +95,8 @@ pub struct S2sStream {
     /// Present while an outbound stream header is open and not closed.
     encoder: Option<StreamEncoder>,
     negotiation: Negotiation,
+    /// The `(source, destination)` pair once negotiation completed.
+    established: Option<(CanonicalDomain, CanonicalDomain)>,
     closed: bool,
 }
 
@@ -77,6 +108,7 @@ impl S2sStream {
             decoder: StreamDecoder::pre_authentication(limits),
             encoder: None,
             negotiation: Negotiation::receiving(config),
+            established: None,
             closed: false,
         }
     }
@@ -116,6 +148,7 @@ impl S2sStream {
             decoder: StreamDecoder::pre_authentication(limits),
             encoder: None,
             negotiation,
+            established: None,
             closed: false,
         };
         let mut out = Vec::new();
@@ -187,6 +220,47 @@ impl S2sStream {
     /// Report a deadline, expiry, drain or resource event.
     pub fn signal(&mut self, signal: Signal) -> Vec<Output> {
         self.input(NegotiationInput::Signal(signal))
+    }
+
+    /// Encode a stanza for an established initiating stream, which carries
+    /// stanzas from its source domain to its destination domain (streams
+    /// are directional).
+    ///
+    /// The stanza may be qualified by `jabber:client`, as typed stanzas are,
+    /// or by `jabber:server`; it is written in the stream's content
+    /// namespace. Its `from` must be an address at the source domain and its
+    /// `to` an address at the destination domain, each in the identity
+    /// profile; they are written with the domain in U-labels, as RFC 7622
+    /// §3.2.1 asks of an address presented to a peer and as stream headers
+    /// are. Anything else is refused before a byte is produced.
+    pub fn send_stanza(&mut self, stanza: Element) -> Result<Vec<Output>, SendError> {
+        if self.closed || self.role() != Role::Initiating {
+            return Err(SendError::NotEstablished);
+        }
+        let Some((source, destination)) = &self.established else {
+            return Err(SendError::NotEstablished);
+        };
+        let mut stanza = into_server_content(stanza);
+        if !matches!(stanza.name(), "message" | "presence" | "iq")
+            || stanza.ns() != crate::ns::JABBER_SERVER
+        {
+            return Err(SendError::Addressing);
+        }
+        let to = presented_address(&stanza, "to", destination)?;
+        let from = presented_address(&stanza, "from", source)?;
+        stanza.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            to,
+        );
+        stanza.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            from,
+        );
+        let encoder = self.encoder.as_mut().ok_or(SendError::NotEstablished)?;
+        let bytes = encoder.element(&stanza).map_err(|_| SendError::Encode)?;
+        Ok(vec![Output::Transmit(bytes)])
     }
 
     fn input(&mut self, input: NegotiationInput) -> Vec<Output> {
@@ -272,12 +346,14 @@ impl S2sStream {
                     if stream.authentication == StreamAuthentication::Dialback {
                         self.decoder.end_pre_authentication();
                     }
+                    self.established = Some((stream.source.clone(), stream.destination.clone()));
                     out.push(Output::Established(stream));
                 }
                 Step::Deliver(stanza) => out.push(Output::Stanza(stanza)),
                 Step::VerifyDialback(request) => out.push(Output::VerifyDialback(request)),
                 Step::VerifyVerdict(verdict) => out.push(Output::VerifyVerdict(verdict)),
                 Step::DialbackAnswered { valid } => out.push(Output::DialbackAnswered { valid }),
+                Step::DeliverMalformed(stanza) => out.push(Output::MalformedAddress(stanza)),
                 Step::Close(reason) => self.close(reason, out),
             }
         }
@@ -305,6 +381,23 @@ impl S2sStream {
         self.closed = true;
         out.push(Output::Close(CloseReason::LocalFailure));
     }
+}
+
+/// The presentation text of the stanza attribute `name`, which must be an
+/// address in the identity profile at `domain`.
+fn presented_address(
+    stanza: &Element,
+    name: &str,
+    domain: &CanonicalDomain,
+) -> Result<String, SendError> {
+    let address = stanza
+        .attr(name)
+        .and_then(|value| parse_jid(value).ok())
+        .ok_or(SendError::Addressing)?;
+    if address.domain().as_str() != domain.as_str() {
+        return Err(SendError::Addressing);
+    }
+    presentation_text(&address).map_err(|_| SendError::Addressing)
 }
 
 /// Append bytes, merging with a directly preceding transmission.

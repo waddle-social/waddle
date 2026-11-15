@@ -99,11 +99,9 @@ addressed to `bob@0x7f.1` is not refused with `<jid-malformed/>`. Destination
 classification (`destination.rs`) maps each refused kind to an
 `InvalidDestination` and answers an IQ request (`get` or `set`) with
 `<remote-server-not-found/>`, as D3 requires. Only IQs are classified there.
-Messages and presence to such a domain take the path of any other domain
-this server does not serve while S2S is off: a message with no local
-recipient is dropped without an error reply (`route_to_connection`), and no
-error reply is added for presence. Answering them with
-`<remote-server-not-found/>` is left to S2S routing (W5a). `DomainKind::names_federation_peer` is the predicate that
+Messages and presence a client addresses to such a domain are answered
+with `<remote-server-not-found/>` as well, before any local handler sees
+them ([routing design](s2s-routing-2047.md#egress)). `DomainKind::names_federation_peer` is the predicate that
 admission (W4c), discovery (W4d) and S2S routing (W5a) use; none of them
 re-derive the classification from text. Configured served domains may be of
 any kind (`localhost` is the default account domain).

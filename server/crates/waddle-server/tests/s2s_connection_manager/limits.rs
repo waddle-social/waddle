@@ -792,11 +792,21 @@ async fn a_stream_younger_than_the_replacement_interval_is_kept() {
         .handle
         .connect(&domain(HOME_A), &domain(HOME_B))
         .await;
-    assert_eq!(refused, Err(ConnectError::Failed(S2sOutcome::PeerError)));
+    // The peer's `conflict` ends the attempt like a local one.
+    assert_eq!(refused, Err(ConnectError::Failed(S2sOutcome::Conflict)));
     // home-b refused the newcomer with `conflict`.
     assert!(eventually(WAIT, || inbound_endings(&metrics, "conflict") == 1).await);
     assert_eq!(first.handle.streams().len(), 1);
     assert_eq!(inbound_connection(&b).await, kept);
+    // It says nothing about the peer's health, so the domain does not back
+    // off: the next attempt dials again and is refused the same way.
+    assert_eq!(
+        second
+            .handle
+            .connect(&domain(HOME_A), &domain(HOME_B))
+            .await,
+        Err(ConnectError::Failed(S2sOutcome::Conflict))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -42,7 +42,10 @@ async fn blocked_direction(
     Ok(None)
 }
 
-fn outgoing_block_frames(iq: &Iq, sender: &FullJid, target: &FullJid) -> Vec<String> {
+/// XEP-0191 §3.3: the error answering a request to an address on the
+/// sender's own blocking list, from that address; the request is not
+/// routed.
+pub(super) fn outgoing_block_frames(iq: &Iq, sender: &FullJid, target: &Jid) -> Vec<String> {
     // RFC 6120 §8.2.3 prohibits answering result/error IQs with another IQ.
     let payload = match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
@@ -57,7 +60,7 @@ fn outgoing_block_frames(iq: &Iq, sender: &FullJid, target: &FullJid) -> Vec<Str
     error.other = Some(Element::builder("blocked", NS_BLOCKING_ERRORS).build());
     error.by = Some(Jid::from(BareJid::from_parts(None, sender.domain())));
     vec![stanza_to_xml(&Stanza::Iq(Box::new(Iq::Error {
-        from: Some(Jid::from(target.clone())),
+        from: Some(target.clone()),
         to: Some(Jid::from(sender.clone())),
         id: iq.id().into(),
         payload: Some(payload.clone()),
@@ -88,7 +91,7 @@ pub(super) async fn route_full_jid_iq(
     let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
     match blocked_direction(&blocking, sender_jid, &target).await {
         Ok(Some(BlockDirection::Outgoing)) => {
-            return outgoing_block_frames(&iq, sender_jid, &target)
+            return outgoing_block_frames(&iq, sender_jid, &Jid::from(target.clone()))
         }
         Ok(Some(BlockDirection::Incoming)) => {
             // XEP-0191 §3.3: blocked IQ replies are silently discarded.
