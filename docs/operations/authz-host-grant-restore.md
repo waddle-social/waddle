@@ -114,7 +114,7 @@ ready (see [Readiness](#readiness)). Alert on the gauge.
 | `lineage_changed` | The database was adopted after a restore or a clone and the restore was not declared. | Follow the restore procedure. |
 | `projection_absent` | Scopes admit, and SpiceDB holds no projection marker or room witness of a scope the database holds, and no position witness, latch or witnessed epoch of this authority: the servers are connected to a SpiceDB that is empty or another deployment's (another deployment's markers do not count, nor do journal witnesses). Nothing is closed and no position witness is written into it. | Point the servers at the deployment's SpiceDB; the refusal clears by itself. If that SpiceDB is lost, follow [What a restore can still lose](#what-a-restore-can-still-lose). |
 | `position_regressed` | PostgreSQL is behind the position SpiceDB witnessed: on the same timeline it was rolled back in place or replaced by an older copy; on another timeline it was promoted or recovered below the witnessed position; or a position witness of a later declared epoch exists. The regression is latched (the `latch_<authority_id>` witness) and stays refused after the server writes past the witnessed position again. | Follow the restore procedure. A regression on the witnessed timeline may instead be acknowledged, if an operator has established that nothing was lost (see [After a promotion](#after-a-promotion)); one across timelines takes a declared restore. |
-| `position_unverified` | The PostgreSQL timeline changed since the witness (a promotion, a point-in-time recovery) or the system did (another cluster); or SpiceDB holds a latch without its position witness; or the position witness, the latch or the witnessed epoch cannot be read. | See [After a promotion](#after-a-promotion). Another system, a latch without its witness and a witness that cannot be read take a declared restore: the first fence pass under the raised epoch removes what cannot be read (and the latch), and the pass after it writes a new position witness. Do not delete these witnesses by hand. |
+| `position_unverified` | The PostgreSQL timeline changed since the witness (a promotion, a point-in-time recovery) or the system did (another cluster); or SpiceDB holds a latch without its position witness; or the position witness, the latch or the witnessed epoch cannot be read. | See [After a promotion](#after-a-promotion). Another system, a latch without its witness and a witness that cannot be read take a declared restore: the first fence pass under the raised epoch removes what cannot be read (and the latch), and the pass after it writes a new position witness. It can do so only when one of the three still shows an epoch below the raised one; when none does (the position witness cannot be read and the witnessed epoch is missing or unreadable, with no readable latch), the refusal stays after the restore is declared. Only then, and only after declaring the restore, remove the three resources by hand: `zed relationship delete waddle_grant_projection:position_<authority_id> marker waddle_grant_projection:<stamp>` for each stamp each of `position_`, `latch_` and `epoch_<authority_id>` holds. Otherwise do not delete these witnesses by hand. |
 | `position_unreadable` | The runtime role cannot run `pg_current_wal_flush_lsn()` or `pg_walfile_name()` (outside the attested pool, `pg_control_system()` as well). | Grant `EXECUTE` on the two WAL functions to the runtime role. Never grant `pg_control_system()` to a restricted runtime role: the physical attestor requires that it cannot run it, and on the attested pool the server takes the system identifier from the attested identity. |
 | `authority_moved` | The authority changed while the fence ran, three times in a row. | Retried by itself; investigate if it persists. |
 
@@ -147,10 +147,12 @@ not answer, the message is served as an unmanaged room, and the server stops
 asking for a minute. Other rooms are unaffected.
 
 A server that was already running when the database lost the enrollment
-refuses its rooms from its next fence pass that reads SpiceDB: at most one
-periodic pass (about five and a half minutes) after the restore, sooner when
-a message to a managed room finds the authority changed and the fence runs
-again. While SpiceDB does not answer no pass reads it, and the server keeps
+refuses its rooms from its next read of them: at most one periodic interval
+(about five and a half minutes) after the restore, sooner when a message to
+a managed room finds the authority changed and the fence runs again, or at
+the next attempt while a refused authority is retried. A server whose
+runtime role does not match the profile reads them once every interval as
+well. While SpiceDB does not answer nothing reads them, and the server keeps
 serving those rooms as unmanaged. Stopping every server before a restore
 (the [restore procedure](#restore-procedure)) avoids the window.
 
@@ -191,9 +193,9 @@ leaves the endpoint set until it clears:
 
 A refusal of the **whole authority** (the fence refusals above other than
 `epoch_mismatch`) keeps the server ready with `"host_grants": "unverified"`,
-since every server shares it. A deployment with no unretired scope reports
-`"host_grants": "unmanaged"`; a verified server adds no `host_grants`
-field. A SpiceDB outage that every server shares, and that outlasts the
+since every server shares it. A server with no verified attachment in a
+deployment with no unretired scope reports `"host_grants": "unmanaged"`
+and stays ready; a verified server adds no `host_grants` field. A SpiceDB outage that every server shares, and that outlasts the
 grace, takes every server out of the endpoint set while a scope is
 enrolled.
 

@@ -189,8 +189,10 @@ pub enum RestoreFenceRefusal {
     PositionRegressed,
     #[error(
         "the PostgreSQL system or timeline changed since SpiceDB witnessed its position (a \
-         promotion, a point-in-time recovery or another cluster); acknowledge it with \
-         `waddle-server host-grant acknowledge-position` or declare a restore"
+         promotion, a point-in-time recovery or another cluster), or the position witness is \
+         missing beside its latch or cannot be read; a later timeline of the same system can \
+         be acknowledged with `waddle-server host-grant acknowledge-position`, anything else \
+         takes a declared restore (docs/operations/authz-host-grant-restore.md)"
     )]
     PositionUnverified,
     #[error(

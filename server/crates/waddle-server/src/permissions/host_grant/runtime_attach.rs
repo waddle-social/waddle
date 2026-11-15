@@ -670,9 +670,23 @@ impl HostGrantGate {
                 if gate.state() != GateState::Attached {
                     // A gate that stopped verifying (a runtime role that does
                     // not match the profile) still learns whether a scope was
-                    // enrolled since, which decides its readiness.
+                    // enrolled since, which decides its readiness, and reads
+                    // the rooms of lost enrollments again, which it refuses
+                    // whether or not it is attached.
                     if !gate.verifying.load(Ordering::Acquire) {
                         gate.refresh_scope_enrolled(verifier).await;
+                        if let Err(error) = refresh_refused_rooms(
+                            &verifier.store,
+                            &verifier.permissions,
+                            &gate.memory,
+                        )
+                        .await
+                        {
+                            tracing::debug!(
+                                kind = error.kind(),
+                                "the rooms of lifecycles only SpiceDB holds were not read"
+                            );
+                        }
                     }
                     continue;
                 }
