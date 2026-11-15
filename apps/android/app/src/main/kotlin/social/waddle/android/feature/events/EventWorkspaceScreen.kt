@@ -204,7 +204,8 @@ fun EventsScreen(
                     }
                     TextButton(onClick = {
                         val directory = java.io.File(context.cacheDir, "event_exports").apply { mkdirs() }
-                        val target = java.io.File(directory, "event.ics")
+                        // Previously granted URIs must never expose a later event export.
+                        val target = java.io.File(directory, "event-${java.util.UUID.randomUUID()}.ics")
                         target.writeText(planningCalendar(state.items, room))
                         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
                         val intent = Intent(Intent.ACTION_SEND).apply {
