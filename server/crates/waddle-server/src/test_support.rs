@@ -287,12 +287,9 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
 /// Panics if database schema or WebSocket fixture construction fails.
 pub async fn websocket_state_with_test_spaces_service() -> Arc<WebSocketState> {
     let db_pool = Arc::new(
-        DatabasePool::try_new(
-            crate::db::DatabaseConfig::default(),
-            crate::db::PoolConfig,
-        )
-        .await
-        .expect("db pool"),
+        DatabasePool::try_new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
+            .await
+            .expect("db pool"),
     );
     let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
     app_state.spaces_jid = "spaces.example.com"
@@ -1197,7 +1194,7 @@ pub async fn record_room_affiliation_under_commit_fault(
         ),
     )
     .await
-    .map_err(|error| error.defined_condition)
+    .map_err(|refusal| refusal.error.defined_condition)
 }
 
 /// Record one affiliation change of a managed room as an XEP-0045
@@ -1222,7 +1219,7 @@ pub async fn record_room_affiliation_with_grants(
         affiliation,
     )
     .await
-    .map_err(|error| error.defined_condition)
+    .map_err(|refusal| refusal.error.defined_condition)
 }
 
 /// Fan out the publication of `payload` as item `item_id` on the node

@@ -1543,30 +1543,12 @@ pub(super) async fn handle_muc_admin_iq(
     // Collapse only the external projection, after validating all original
     // items. A failed duplicate write must not leave an intermediate ban.
     let affiliation_updates = final_affiliation_writes(&affiliation_updates);
-    if let Some(room) = host_grant_room.as_ref() {
-        for (jid, affiliation) in &affiliation_updates {
-            if let Err(error) = super::muc_admin_host_grant::record_host_grant_affiliation(
-                state,
-                room,
-                &sender_jid.to_bare(),
-                jid,
-                *affiliation,
-            )
-            .await
-            {
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    *error,
-                )]
-                .into();
-            }
-        }
-    }
     // A change the store recorded is what every admission reads; the room
-    // actor only mirrors it. Unless the actor applies it below, the mirror
-    // is put back in line with the canonical grants in the background.
+    // actor only mirrors it. The repair is armed before the first change is
+    // recorded, so that a batch refused part-way, or a change whose commit
+    // could not be confirmed, still puts the mirror back in line with
+    // whatever the store holds. Unless the actor applies every change
+    // below, that happens in the background.
     let mirror_repair = host_grant_room
         .as_ref()
         .filter(|_| !affiliation_updates.is_empty())
@@ -1580,6 +1562,35 @@ pub(super) async fn handle_muc_admin_iq(
                     .collect(),
             )
         });
+    let mut mirror_repair = mirror_repair;
+    if let Some(room) = host_grant_room.as_ref() {
+        for (index, (jid, affiliation)) in affiliation_updates.iter().enumerate() {
+            if let Err(refusal) = super::muc_admin_host_grant::record_host_grant_affiliation(
+                state,
+                room,
+                &sender_jid.to_bare(),
+                jid,
+                *affiliation,
+            )
+            .await
+            {
+                // Nothing of the batch is in the store: the mirror already
+                // matches it.
+                if index == 0 && !refusal.maybe_recorded {
+                    if let Some(repair) = mirror_repair.take() {
+                        repair.disarm();
+                    }
+                }
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    *refusal.error,
+                )]
+                .into();
+            }
+        }
+    }
     // A room an enrolled scope manages writes no authorization relationship
     // here and so has nothing to roll back.
     let managed_channel_id =

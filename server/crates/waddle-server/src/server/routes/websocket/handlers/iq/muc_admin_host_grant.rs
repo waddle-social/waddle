@@ -107,25 +107,29 @@ pub(super) fn host_grant_affiliation_list(
 /// actor applies it. `Ok` means the change is recorded: a reduction is
 /// effective at once, and an increase once its projection has been verified
 /// and activated by the reconciliation this starts.
+///
+/// The refusal says whether the change may have been recorded anyway: its
+/// commit was not acknowledged and could not be read back.
 pub(crate) async fn record_host_grant_affiliation(
     state: &WebSocketState,
     room: &ManagedRoomGrants,
     initiator: &BareJid,
     target: &BareJid,
     affiliation: Affiliation,
-) -> Result<(), Box<StanzaError>> {
+) -> Result<(), RecordRefusal> {
     let gate = &state.deps.app_state.host_grants;
     let (Some(store), Some(attachment)) = (gate.store(), gate.attachment()) else {
-        return Err(Box::new(service_unavailable_iq_error(
+        return Err(RecordRefusal::refused(service_unavailable_iq_error(
             "The room is not available.",
         )));
     };
-    let issuance = issuance_policy(state, attachment.served())
-        .ok_or_else(|| Box::new(service_unavailable_iq_error("The room is not available.")))?;
+    let issuance = issuance_policy(state, attachment.served()).ok_or_else(|| {
+        RecordRefusal::refused(service_unavailable_iq_error("The room is not available."))
+    })?;
     let initiator = GrantSubject::new(initiator.clone())
-        .map_err(|_| Box::new(forbidden_iq_error("Operation not permitted.")))?;
+        .map_err(|_| RecordRefusal::refused(forbidden_iq_error("Operation not permitted.")))?;
     let subject = GrantSubject::new(target.clone()).map_err(|_| {
-        Box::new(jid_malformed_iq_error(
+        RecordRefusal::refused(jid_malformed_iq_error(
             "Room affiliations require a bare account JID.",
         ))
     })?;
@@ -157,26 +161,46 @@ pub(crate) async fn record_host_grant_affiliation(
                         spawn_reconcile(authority, command);
                         Ok(())
                     }
-                    Ok(OperationOutcome::Absent) => Err(Box::new(internal_server_error_iq_error(
-                        "Internal server error.",
-                    ))),
+                    Ok(OperationOutcome::Absent) => Err(RecordRefusal::refused(
+                        internal_server_error_iq_error("Internal server error."),
+                    )),
                     Err(error) => {
                         warn!(
                             kind = error.kind(),
                             "A room affiliation change has an unknown outcome"
                         );
-                        Err(Box::new(internal_server_error_iq_error(
-                            "Internal server error.",
-                        )))
+                        Err(RecordRefusal {
+                            error: Box::new(internal_server_error_iq_error(
+                                "Internal server error.",
+                            )),
+                            maybe_recorded: true,
+                        })
                     }
                 };
             }
-            Err(error) => return Err(Box::new(refusal(&error))),
+            Err(error) => return Err(RecordRefusal::refused(refusal(&error))),
         }
     }
-    Err(Box::new(resource_constraint_iq_error(
+    Err(RecordRefusal::refused(resource_constraint_iq_error(
         "The room's grants are changing; try again.",
     )))
+}
+
+/// Why an affiliation change was not recorded, as the request's reply.
+pub(crate) struct RecordRefusal {
+    pub(crate) error: Box<StanzaError>,
+    /// The commit was not acknowledged and its outcome could not be read
+    /// back: the store may hold the change.
+    pub(crate) maybe_recorded: bool,
+}
+
+impl RecordRefusal {
+    fn refused(error: StanzaError) -> Self {
+        Self {
+            error: Box::new(error),
+            maybe_recorded: false,
+        }
+    }
 }
 
 /// The issuance policy of this replica: its served account domains, the
@@ -309,14 +333,16 @@ const MIRROR_REPAIR_DELAYS: [std::time::Duration; 5] = [
     std::time::Duration::from_secs(60),
 ];
 
-/// A repair of the room actor's affiliation list for the subjects of a
-/// recorded change, armed once the store recorded the change and disarmed
-/// once the room actor applied it.
+/// A repair of the room actor's affiliation list for the subjects of an
+/// administration request's changes, armed before the store records the
+/// first of them and disarmed once the room actor applied them all, or when
+/// the request was refused before the store could hold any of them.
 ///
 /// The actor's list of a managed room is a mirror: no admission reads it,
 /// but the role it seats an occupant with and the lists a stale actor shows
 /// follow it. When the actor did not apply a recorded change (it refused,
-/// failed, timed out or answered ambiguously), dropping the armed repair
+/// failed, timed out or answered ambiguously), or when the request stopped
+/// after the store may have recorded some of them, dropping the armed repair
 /// sets each subject's entry to the affiliation the canonical grants
 /// record, in the background, after each of [`MIRROR_REPAIR_DELAYS`] until
 /// one attempt succeeds.
@@ -373,13 +399,23 @@ impl Drop for MirrorRepair {
     }
 }
 
+/// How many times one repair attempt re-reads the grants after applying
+/// them, while other changes keep landing in between.
+const MIRROR_REPAIR_READS: usize = 4;
+
 impl MirrorRepairWork {
     /// One attempt; `true` once every subject's entry matches the recorded
     /// grant, or when there is no room actor left to repair.
+    ///
+    /// The values applied are those of one generation of the room's grants.
+    /// A change recorded after that read may already have been applied to
+    /// the actor by its own request, so after applying, the grants are read
+    /// again: the attempt counts only when the generation has not moved,
+    /// and otherwise the values of the newer generation are applied over
+    /// the older ones.
     async fn repair_once(&self) -> bool {
-        use waddle_xmpp::muc::room_actor::ChangeAffiliation;
         use waddle_xmpp::muc::room_registry_actor::GetRoom;
-        let grants = match self.host_grants.room(RoomBinding::Room(&self.room)).await {
+        let mut grants = match self.host_grants.room(RoomBinding::Room(&self.room)).await {
             RoomGate::Managed(grants) => grants,
             RoomGate::Unmanaged => return true,
             RoomGate::Unavailable => return false,
@@ -397,7 +433,32 @@ impl MirrorRepairWork {
             Ok(None) => return true,
             Err(_) => return false,
         };
-        let mut repaired = true;
+        for _ in 0..MIRROR_REPAIR_READS {
+            if !self.apply(&actor, &grants).await {
+                return false;
+            }
+            let current = match self.host_grants.room(RoomBinding::Room(&self.room)).await {
+                RoomGate::Managed(current) => current,
+                RoomGate::Unmanaged => return true,
+                RoomGate::Unavailable => return false,
+            };
+            if current.grants.generation == grants.grants.generation {
+                return true;
+            }
+            grants = current;
+        }
+        false
+    }
+
+    /// Set each subject's entry in the actor's list to the affiliation
+    /// `grants` record. `true` when every entry was set.
+    async fn apply(
+        &self,
+        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        grants: &ManagedRoomGrants,
+    ) -> bool {
+        use waddle_xmpp::muc::room_actor::ChangeAffiliation;
+        let mut applied = true;
         for subject in &self.subjects {
             let affiliation = muc_affiliation(grants.grants.recorded_affiliation(subject));
             if actor
@@ -408,10 +469,10 @@ impl MirrorRepairWork {
                 .await
                 .is_err()
             {
-                repaired = false;
+                applied = false;
             }
         }
-        repaired
+        applied
     }
 }
 
