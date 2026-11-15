@@ -90,7 +90,7 @@ fun GroupDmScreen(
     ConversationScreen(
         title = title,
         kind = ConversationKind.Room(title),
-        titleSubline = { RoomHeaderSubline(here = directory.rooms[roomJid]?.here, huddle = null) },
+        titleSubline = { RoomHeaderSubline(community = null, here = directory.rooms[roomJid]?.here, huddle = null) },
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,

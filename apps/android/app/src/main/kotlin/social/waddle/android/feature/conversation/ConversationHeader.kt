@@ -58,17 +58,18 @@ fun ConversationTitle(
 data class HeaderHuddle(val participants: Int, val video: Boolean)
 
 /**
- * Under a room's name: who is here ("5 here", from the people
- * directory's headcount) and, when a huddle is live, the ember part:
- * "● Huddle · 3 in". Nothing when neither is known.
+ * Under a room's name, as chat's header has it: the community, then who
+ * is here ("5 here", from the people directory's headcount) and, when a
+ * huddle is live, the live part: "● Huddle · 3 in".
  */
 @Composable
-fun RoomHeaderSubline(here: Int?, huddle: HeaderHuddle?) {
-    if (here == null && huddle == null) return
+fun RoomHeaderSubline(community: String?, here: Int?, huddle: HeaderHuddle?) {
+    if (community == null && here == null && huddle == null) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
     ) {
+        if (community != null) DmHeaderSubline(community)
         if (here != null) Kicker(text = pluralStringResource(R.plurals.room_header_here, here, here))
         if (huddle != null) {
             Kicker(

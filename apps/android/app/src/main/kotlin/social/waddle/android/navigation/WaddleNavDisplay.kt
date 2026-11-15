@@ -1,18 +1,9 @@
 package social.waddle.android.navigation
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.only
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
 import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
@@ -49,7 +40,6 @@ import social.waddle.android.feature.sidebar.SidebarScreen
 import social.waddle.android.feature.you.YouScreen
 import social.waddle.android.ui.EmptyState
 import social.waddle.android.ui.LocalOpenConversation
-import social.waddle.android.ui.WaddleTopBar
 
 /**
  * Navigation 3 host: a saveable [NavBackStack] rooted at Home rendered by
@@ -117,37 +107,31 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
             // top, so back returns to the page.
             entry<WaddleNavKey.Dashboard>(metadata = ListDetailSceneStrategy.detailPane()) {
                 val speaking by LocalAppGraph.current.callSessionController.speakingJids.collectAsStateWithLifecycle()
-                PushedPage(onBack = { backStack.popSafely() }) { insets ->
-                    HomeScreen(
-                        onOpenChannel = { roomJid, name -> backStack.add(WaddleNavKey.Channel(roomJid, name)) },
-                        contentWindowInsets = insets,
-                        onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid, name)) },
-                        onOpenYou = { backStack.add(WaddleNavKey.You) },
-                        onOpenPeople = { backStack.add(WaddleNavKey.People) },
-                        onOpenRooms = { backStack.add(WaddleNavKey.Rooms) },
-                        speaking = speaking,
-                    )
-                }
+                HomeScreen(
+                    onOpenChannel = { roomJid, name -> backStack.add(WaddleNavKey.Channel(roomJid, name)) },
+                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid, name)) },
+                    onOpenYou = { backStack.add(WaddleNavKey.You) },
+                    onOpenPeople = { backStack.add(WaddleNavKey.People) },
+                    onOpenRooms = { backStack.add(WaddleNavKey.Rooms) },
+                    speaking = speaking,
+                    onBack = { backStack.popSafely() },
+                )
             }
             entry<WaddleNavKey.Rooms>(metadata = ListDetailSceneStrategy.detailPane()) {
                 val speaking by LocalAppGraph.current.callSessionController.speakingJids.collectAsStateWithLifecycle()
-                PushedPage(onBack = { backStack.popSafely() }) { insets ->
-                    RoomsScreen(
-                        onOpenChannel = { roomJid, name -> backStack.add(WaddleNavKey.Channel(roomJid, name)) },
-                        contentWindowInsets = insets,
-                        speaking = speaking,
-                    )
-                }
+                RoomsScreen(
+                    onOpenChannel = { roomJid, name -> backStack.add(WaddleNavKey.Channel(roomJid, name)) },
+                    speaking = speaking,
+                    onBack = { backStack.popSafely() },
+                )
             }
             entry<WaddleNavKey.People>(metadata = ListDetailSceneStrategy.detailPane()) {
                 val speaking by LocalAppGraph.current.callSessionController.speakingJids.collectAsStateWithLifecycle()
-                PushedPage(onBack = { backStack.popSafely() }) { insets ->
-                    PeopleScreen(
-                        onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid, name)) },
-                        contentWindowInsets = insets,
-                        speaking = speaking,
-                    )
-                }
+                PeopleScreen(
+                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid, name)) },
+                    speaking = speaking,
+                    onBack = { backStack.popSafely() },
+                )
             }
             entry<WaddleNavKey.You>(metadata = ListDetailSceneStrategy.detailPane()) {
                 YouScreen(
@@ -266,28 +250,6 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
             }
         },
     )
-}
-
-/**
- * A page opened from the sidebar: a back arrow over [content], which
- * gets the insets left once the bar has taken the top.
- */
-@Composable
-private fun PushedPage(onBack: () -> Unit, content: @Composable (WindowInsets) -> Unit) {
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        WaddleTopBar(
-            title = {},
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        Icons.AutoMirrored.Outlined.ArrowBack,
-                        contentDescription = stringResource(R.string.action_back),
-                    )
-                }
-            },
-        )
-        content(ScaffoldDefaults.contentWindowInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-    }
 }
 
 /** The detail pane before anything is open (wide layouts only). */

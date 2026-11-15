@@ -33,7 +33,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -45,13 +44,14 @@ import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.feature.home.DashedNote
-import social.waddle.android.feature.home.PageHeader
 import social.waddle.android.feature.home.SectionLabel
 import social.waddle.android.feature.home.ShellSearchField
 import social.waddle.android.feature.home.rememberStableOrder
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.BackArrow
 import social.waddle.android.ui.ChoiceOption
 import social.waddle.android.ui.SegmentedChoice
+import social.waddle.android.ui.WaddleTopBar
 import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.HuddleAvatar
 import social.waddle.android.ui.huddle.SkeletonBlock
@@ -67,13 +67,22 @@ fun PeopleScreen(
     onOpenDm: (peerJid: String, name: String) -> Unit,
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
     speaking: Set<String> = emptySet(),
+    onBack: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: PeopleViewModel = viewModel(factory = PeopleViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
     var everyone by rememberSaveable { mutableStateOf(false) }
-    Scaffold(contentWindowInsets = contentWindowInsets) { padding ->
+    Scaffold(
+        contentWindowInsets = contentWindowInsets,
+        topBar = {
+            WaddleTopBar(
+                title = { Text(stringResource(R.string.people_title)) },
+                navigationIcon = { BackArrow(onBack) },
+            )
+        },
+    ) { padding ->
         PeopleContent(
             people = personRowsOf(state.people, state.roomNames, speaking),
             settled = state.settled,
@@ -129,7 +138,7 @@ fun PeopleContent(
         contentPadding = PaddingValues(
             start = Waddle.space.md,
             end = Waddle.space.md,
-            top = Waddle.space.xs,
+            top = Waddle.space.xxs,
             bottom = Waddle.space.xl,
         ),
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
@@ -139,13 +148,6 @@ fun PeopleContent(
             .imePadding()
             .testTag(PeopleScreenTestTags.SCREEN),
     ) {
-        fullWidth("header") {
-            PageHeader(
-                title = stringResource(R.string.people_title),
-                kicker = pluralStringResource(R.plurals.people_count, people.size, people.size),
-                lead = stringResource(R.string.people_lead),
-            )
-        }
         fullWidth("filter") {
             Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.sm)) {
                 SegmentedChoice(

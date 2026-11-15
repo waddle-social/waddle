@@ -46,6 +46,7 @@ import social.waddle.android.feature.rooms.RoomActivity
 import social.waddle.android.feature.rooms.rememberHuddleJoiner
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.BackArrow
 import social.waddle.android.ui.huddle.AvatarSize
 import java.time.Clock
 import java.time.ZonedDateTime
@@ -60,6 +61,8 @@ class HomeActions(
     val onBrowseRooms: () -> Unit = {},
     val onCreateRoom: () -> Unit = {},
     val onRetry: () -> Unit = {},
+    /** Back to the sidebar; `null` hides the arrow. */
+    val onBack: (() -> Unit)? = null,
 )
 
 /** Everything Home shows, resolved. */
@@ -91,6 +94,7 @@ fun HomeScreen(
     onOpenRooms: () -> Unit = {},
     speaking: Set<String> = emptySet(),
     clock: Clock = Clock.systemDefaultZone(),
+    onBack: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: HomeViewModel = viewModel(factory = HomeViewModel.factory(graph))
@@ -138,6 +142,7 @@ fun HomeScreen(
                 onBrowseRooms = onOpenRooms,
                 onCreateRoom = { create.open = true },
                 onRetry = viewModel::retryConnection,
+                onBack = onBack,
             ),
             speaking = speaking,
             modifier = Modifier
@@ -190,8 +195,9 @@ private fun HomeHeader(state: HomeContentState, actions: HomeActions) {
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = HEADER_HEIGHT)
-            .padding(start = Waddle.space.md, end = Waddle.space.xxs),
+            .padding(start = if (actions.onBack != null) Waddle.space.xxs else Waddle.space.md, end = Waddle.space.xxs),
     ) {
+        BackArrow(actions.onBack)
         Wordmark(modifier = Modifier.weight(1f))
         if (state.canCreateRoom) {
             IconButton(

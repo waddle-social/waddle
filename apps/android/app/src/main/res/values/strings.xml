@@ -523,16 +523,7 @@
     <string name="connection_banner_attention_title">Connection needs attention</string>
     <string name="connection_banner_attention_body">Your session expired. Sign in again to reconnect.</string>
     <string name="connection_banner_back">Back online</string>
-    <string name="rooms_title">Rooms</string>
-    <string name="rooms_lead">Sorted by what is happening: huddles first, then mentions and unread.</string>
-    <plurals name="rooms_count">
-        <item quantity="one">%1$d room</item>
-        <item quantity="other">%1$d rooms</item>
-    </plurals>
-    <plurals name="rooms_live">
-        <item quantity="one">%1$d live</item>
-        <item quantity="other">%1$d live</item>
-    </plurals>
+    <string name="rooms_browse_title">Browse rooms</string>
     <string name="rooms_new">New room</string>
     <string name="rooms_search">Find a room</string>
     <string name="rooms_loading">Finding your rooms.</string>
@@ -557,6 +548,7 @@
     <string name="room_kicker_video_huddle">Video huddle · %1$d in</string>
     <string name="room_quiet_line">It is quiet in here. Be the one who breaks the silence.</string>
     <string name="room_enter">Enter</string>
+    <string name="room_open">Open</string>
     <string name="room_join">Join</string>
     <string name="room_enter_description">Enter %1$s</string>
     <string name="room_join_description">Join the huddle in %1$s</string>
@@ -569,11 +561,6 @@
         <item quantity="other">%1$d unread</item>
     </plurals>
     <string name="people_title">People</string>
-    <string name="people_lead">Everyone in your rooms. Tap someone to message them.</string>
-    <plurals name="people_count">
-        <item quantity="one">%1$d person</item>
-        <item quantity="other">%1$d people</item>
-    </plurals>
     <string name="people_search">Find people</string>
     <string name="people_group_huddle">In a huddle</string>
     <string name="people_group_around">Around</string>

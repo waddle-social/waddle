@@ -11,12 +11,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
@@ -37,6 +34,7 @@ import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.feature.profile.formatPepKeyword
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.BackArrow
 import social.waddle.android.ui.GlyphTile
 import social.waddle.android.ui.GroupDivider
 import social.waddle.android.ui.GroupedRow
@@ -90,16 +88,7 @@ internal fun YouContent(
         topBar = {
             WaddleTopBar(
                 title = { Text(text = stringResource(R.string.you_title)) },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                Icons.AutoMirrored.Outlined.ArrowBack,
-                                contentDescription = stringResource(R.string.action_back),
-                            )
-                        }
-                    }
-                },
+                navigationIcon = { BackArrow(onBack) },
             )
         },
     ) { padding ->
