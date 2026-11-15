@@ -6,7 +6,8 @@
 //! when handed one the classifier would have refused; failures answered
 //! with `remote-server-not-found` or `remote-server-timeout`; bounded
 //! queues and pending requests, per resource, per remote domain and for
-//! keys too long to correlate; server-minted credentials stripped; local
+//! keys too long to correlate, and replies to remote senders within their
+//! share of the pair queues; server-minted credentials stripped; local
 //! responses sent only for a pending remote request, and an uncorrelated
 //! one never dialled for; and the remote principal a stanza is read as.
 //!
@@ -498,6 +499,44 @@ async fn a_local_response_leaves_only_for_a_pending_remote_request() {
             .is_some()
     );
     assert!(captured.with_id("unsolicited").is_empty());
+}
+
+#[tokio::test]
+async fn a_reply_to_a_remote_sender_never_opens_a_pair_beyond_the_reply_share() {
+    let pki = Pki::new();
+    let limits = RouterLimits {
+        reply_queues: 0,
+        ..RouterLimits::default()
+    };
+    let (a, b, captured) = routed_and_capturing(&pki, limits, |_| {}).await;
+    let remote_ping = |id: &str| Iq::Get {
+        from: Some(jid("bob@home-b.test/phone")),
+        to: Some(jid(HOME_A)),
+        id: id.to_owned(),
+        payload: Element::builder("ping", NS_PING).build(),
+    };
+    // No pair has a queue, and a reply may open none.
+    support::send(&b, HOME_B, HOME_A, remote_ping("reply-1")).await;
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        captured.with_id("reply-1").is_empty(),
+        "the reply is dropped"
+    );
+    // A local request opens the pair's queue; a reply then uses it.
+    assert!(matches!(
+        a.offer_iq(HOME_B, ping("opens")).await,
+        IqOffer::Accepted
+    ));
+    assert!(
+        wait_for(ARRIVES, || captured.with_id("opens").into_iter().next())
+            .await
+            .is_some()
+    );
+    support::send(&b, HOME_B, HOME_A, remote_ping("reply-2")).await;
+    let reply = wait_for(ARRIVES, || captured.with_id("reply-2").into_iter().next())
+        .await
+        .expect("the reply leaves on the open pair");
+    assert_eq!(reply.attr("type"), Some("result"));
 }
 
 #[tokio::test]

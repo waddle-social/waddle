@@ -17,8 +17,8 @@ not run until verification (D9):
 
 - `crates/waddle-server/tests/s2s_routing.rs`: egress, refusals (the
   router's own refusal of a destination that cannot name a peer included),
-  failures, bounds per resource and per remote domain, keys too long to
-  correlate, credential stripping, an uncorrelated local response dropped
+  failures, bounds per resource and per remote domain, the reply share of
+  the pair queues, keys too long to correlate, credential stripping, an uncorrelated local response dropped
   without dialling, and the remote principal;
 - `crates/waddle-server/tests/s2s_iq_correlation.rs`: at-most-once
   completion, expiry, a response reaching another replica and its prompt
@@ -442,7 +442,8 @@ runbook (G24):
 - A client message to an unserved domain is now answered with a message
   error `remote-server-not-found` (type `cancel`), from the addressed JID,
   without echoing the body, and never enters the ingress authority.
-  Before, a bound client's `chat` or `normal` message with a body was
+  Before, as read from the code at the branch point (not executed), a
+  bound client's `chat` or `normal` message with a body was
   accepted by the ingress authority and committed: it was archived in the
   sender's MAM archive, projected into the sender's inbox with the remote
   JID as peer, and carbon-copied to the sender's other carbons-enabled
