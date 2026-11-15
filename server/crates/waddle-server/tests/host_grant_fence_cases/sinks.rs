@@ -892,8 +892,11 @@ async fn the_topology_bootstrap_leaves_an_enrolled_default_channel_and_general_s
     let catalog = |id: &'static str| {
         let ingress = &fixture.grants.ingress;
         async move {
+            // The scalar subquery yields one row, NULL without a catalog row.
             ingress
-                .optional_text(&format!("SELECT id FROM channels WHERE id = '{id}'"))
+                .optional_text(&format!(
+                    "SELECT (SELECT id FROM channels WHERE id = '{id}')"
+                ))
                 .await
         }
     };
