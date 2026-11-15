@@ -7,7 +7,9 @@ use crate::support::{
     inbox_with_unread, store, target, target_named, FailingBlockingStorage, TestStore,
 };
 use jid::Jid;
+use opentelemetry::trace::TraceContextExt;
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
     NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
@@ -34,6 +36,10 @@ async fn notification_publish_attempt_exports_identity_outcome_and_parent() {
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let inbox = inbox_with_unread(&bare("alice@example.com"), &bare("bob@example.com"), 1).await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    // Read the parent's context up front: work spawned under it can hold
+    // the span open past the assertions, so its export cannot be awaited.
+    let parent = tracing::info_span!("notification.publish.test.parent");
+    let parent_context = parent.context().span().span_context().clone();
     let outcomes = store
         .drain_due_outbox_jobs(
             &push_service,
@@ -43,7 +49,7 @@ async fn notification_publish_attempt_exports_identity_outcome_and_parent() {
             &bare("push.example.com"),
             1,
         )
-        .instrument(tracing::info_span!("notification.publish.test.parent"))
+        .instrument(parent)
         .await
         .expect("drain");
     assert!(matches!(
@@ -55,15 +61,8 @@ async fn notification_publish_attempt_exports_identity_outcome_and_parent() {
         .iter()
         .find(|span| span.name == "notification.job.publish")
         .expect("publish attempt span exports");
-    let parent = exported
-        .iter()
-        .find(|span| span.name == "notification.publish.test.parent")
-        .expect("parent exports");
-    assert_eq!(
-        attempt.span_context.trace_id(),
-        parent.span_context.trace_id()
-    );
-    assert_eq!(attempt.parent_span_id, parent.span_context.span_id());
+    assert_eq!(attempt.span_context.trace_id(), parent_context.trace_id());
+    assert_eq!(attempt.parent_span_id, parent_context.span_id());
     assert_eq!(
         spans.attribute_of("notification.job.publish", "job_id"),
         Some(job_id)
