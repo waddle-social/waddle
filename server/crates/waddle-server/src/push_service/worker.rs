@@ -489,7 +489,11 @@ impl DatabasePushServiceStore {
         let outcome = match &result {
             Ok(Some(fanout)) => {
                 span.record("attempted_devices", fanout.attempted_devices);
-                "processed"
+                if fanout.attempted_devices == 0 {
+                    "nothing_sent"
+                } else {
+                    "processed"
+                }
             }
             Ok(None) => "skipped",
             Err(_) => "error",

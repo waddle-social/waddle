@@ -63,6 +63,7 @@ impl NotificationOutboxStore {
                         .await?;
                     if claimed {
                         tracing::info!(
+                            stanza_id = candidate.archive_stanza_id.id.as_str(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = SuppressedReason::Xep0191Blocked.as_db_value(),
@@ -152,6 +153,7 @@ impl NotificationOutboxStore {
                         .await?;
                     if claimed {
                         tracing::info!(
+                            stanza_id = candidate.archive_stanza_id.id.as_str(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = reason.as_db_value(),
@@ -206,6 +208,7 @@ impl NotificationOutboxStore {
                     .await?;
                 if claimed {
                     tracing::info!(
+                        stanza_id = candidate.archive_stanza_id.id.as_str(),
                         notification_class = candidate.class().as_db_value(),
                         push_stage = "suppressed",
                         suppression_reason = reason.as_db_value(),
@@ -227,7 +230,7 @@ impl NotificationOutboxStore {
                 for job_id in job_ids {
                     tracing::info!(
                         stanza_id = candidate.archive_stanza_id.id.as_str(),
-                        delivery_id = ?candidate.delivery_id,
+                        delivery_id = candidate.delivery_id.map(tracing::field::display),
                         job_id = job_id.as_str(),
                         notification_class = candidate.class().as_db_value(),
                         "notification candidate queued as job"
@@ -252,6 +255,7 @@ impl NotificationOutboxStore {
                 .await?;
             if claimed {
                 tracing::info!(
+                    stanza_id = candidate.archive_stanza_id.id.as_str(),
                     notification_class = candidate.class().as_db_value(),
                     push_stage = "suppressed",
                     suppression_reason = reason.as_db_value(),
