@@ -4,6 +4,7 @@ import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { avatarStore } from "@/lib/avatars/avatar-store";
 import { isBotJid } from "@/lib/avatars/author-jid";
 import { useAvatarUrl } from "@/lib/avatars/use-avatar-url";
+import { useLivePresence } from "@/presence/live-presence";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
 /**
@@ -29,6 +30,10 @@ const props = defineProps<{
 
 // A bot's room presence only says when it last posted: never show a status.
 const bot = computed(() => isBotJid(props.jid));
+// What the app knows about the person wins over the caller's guess (often a
+// focused-room nick map, which says "offline" for anyone outside that room).
+const live = useLivePresence(() => props.jid);
+const shownPresence = computed(() => (bot.value ? undefined : live.value ?? props.presence));
 const storeSrc = useAvatarUrl(() => props.jid);
 const src = computed(() => {
   if (storeSrc.value) return storeSrc.value;
@@ -42,7 +47,7 @@ const src = computed(() => {
     :name="name"
     :src="src"
     :size="size"
-    :presence="bot ? undefined : presence"
+    :presence="shownPresence"
     :last-seen="bot ? undefined : lastSeen"
     :in-call="inCall"
     :huddle="huddle"

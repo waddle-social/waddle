@@ -26,6 +26,7 @@ import type {
   DmReactionEvent,
   LiveDmMessage,
   LiveRoomMessage,
+  OccupantPresence,
   PresenceUpdateEvent,
   ReactionEvent,
   RoomActivityEvent,
@@ -132,6 +133,8 @@ export type ClientEvents = {
   avatarChanged: [event: AvatarChangedEvent];
   /** `bareJid` null: the nick is held by an occupant whose real JID is not disclosed. `isBot`: the presence carried the server's bot hat. */
   occupantRealJid: [roomJid: string, nick: string, bareJid: string | null, isBot?: boolean];
+  /** Every joined room's occupant shows, keyed by disclosed real bare JID. */
+  occupantPresence: [byJid: Record<string, OccupantPresence[]>];
   ownProfilePublished: [ownBareJid: string];
   /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
   ownOccupantNick: [roomJid: string, nick: string | null];

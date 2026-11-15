@@ -324,6 +324,27 @@ describe("PresenceManager MUC occupant tracking", () => {
   });
 });
 
+describe("PresenceManager occupant presence by real JID", () => {
+  test("every joined room reports its occupants by real JID, focused or not, and drops them on leave", () => {
+    const { manager, events } = createManager({ currentRoom: () => null });
+    const snapshots: Record<string, string[]>[] = [];
+    events.on("occupantPresence", (byJid) => snapshots.push(byJid));
+    const other = "other@muc.example.com";
+
+    manager.handle(directPresence({ from: `${ROOM}/bob`, show: "away", muc_affiliation: "member", muc_role: "participant", muc_jid: "Bob@example.com/phone" }));
+    manager.handle(directPresence({ from: `${other}/bobby`, muc_affiliation: "member", muc_role: "participant", muc_jid: "bob@example.com/web" }));
+    // A nick with no disclosed real JID names nobody.
+    manager.handle(directPresence({ from: `${ROOM}/anon`, muc_affiliation: "none", muc_role: "participant" }));
+    expect(snapshots.at(-1)).toEqual({ "bob@example.com": ["away", "online"] });
+
+    manager.handle(directPresence({ from: `${other}/bobby`, presence_type: "unavailable", muc_affiliation: "member" }));
+    expect(snapshots.at(-1)).toEqual({ "bob@example.com": ["away"] });
+
+    manager.clearRoom(ROOM);
+    expect(snapshots.at(-1)).toEqual({});
+  });
+});
+
 describe("PresenceManager outbound presence", () => {
   test("setPresence omits the show element for available and stamps XEP-0319 idle", async () => {
     const sends: Array<[string | null | undefined, string | null | undefined, string | null | undefined]> = [];
