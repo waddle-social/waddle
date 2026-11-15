@@ -182,7 +182,9 @@ struct ConnectionBanner: View {
                 if content.showsProgress {
                     ProgressView().controlSize(.small)
                 } else {
+                    // A fixed box: symbol metrics change between OS releases.
                     Image(systemName: content.symbol)
+                        .frame(width: 20, height: 20)
                 }
                 Text(content.text)
                     .huddleText(Theme.Typography.label)
@@ -251,6 +253,7 @@ struct EmptyStateView: View {
         VStack(spacing: Theme.Spacing.s) {
             Image(systemName: symbol)
                 .font(.system(size: 40, weight: .regular))
+                .frame(height: 48)
                 .foregroundStyle(Theme.Colors.fgSoft)
                 .padding(.bottom, Theme.Spacing.xs)
                 .accessibilityHidden(true)
