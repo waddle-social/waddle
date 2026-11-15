@@ -59,21 +59,21 @@ class ShellScreenshotTest {
     @Test
     fun homeBusy() = captureThemed("home_busy") {
         Shell {
-            HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions())
+            HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions(onOpenMenu = {}))
         }
     }
 
     @Test
     fun homeQuiet() = captureThemed("home_quiet") {
         Shell {
-            HomeContent(state = Fixtures.quietHome, now = Fixtures.EVENING, actions = HomeActions())
+            HomeContent(state = Fixtures.quietHome, now = Fixtures.EVENING, actions = HomeActions(onOpenMenu = {}))
         }
     }
 
     @Test
     fun homeLoading() = captureThemed("home_loading") {
         Shell {
-            HomeContent(state = Fixtures.loadingHome, now = Fixtures.MORNING, actions = HomeActions())
+            HomeContent(state = Fixtures.loadingHome, now = Fixtures.MORNING, actions = HomeActions(onOpenMenu = {}))
         }
     }
 
@@ -83,7 +83,7 @@ class ShellScreenshotTest {
         val density = LocalDensity.current
         CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = LARGE_TEXT)) {
             Shell {
-                HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions())
+                HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions(onOpenMenu = {}))
             }
         }
     }
@@ -248,14 +248,11 @@ private object Fixtures {
 
     val busyHome = HomeContentState(
         greetingName = "David",
-        accountName = "David Flanagan",
-        accountJid = "david@waddle.test",
         rooms = rooms,
         people = people,
         dmUnread = 3,
         connection = ConnectionState.Ready,
         settled = true,
-        canCreateRoom = true,
     )
 
     val quietHome = busyHome.copy(
@@ -269,7 +266,6 @@ private object Fixtures {
         people = emptyList(),
         dmUnread = 0,
         settled = false,
-        canCreateRoom = false,
         connection = ConnectionState.Offline,
     )
 
