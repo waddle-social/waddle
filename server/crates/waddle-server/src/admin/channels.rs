@@ -2209,6 +2209,11 @@ async fn run_group_dm_create(
 ) -> Result<GroupDmRef, AdminErr> {
     validate_group_dm_members(state, creator_jid, &args.member_jids).await?;
     let localpart = format!("group-dm-{}", mint_channel_localpart(&args.name));
+    // The identifier is checked before anything is written: no room actor
+    // or catalog row is created under a managed room's identifier.
+    refuse_enrolled_group_dm(state, &localpart)
+        .await
+        .map_err(|error| Box::new(CommandResult::Error(error)))?;
     let muc_domain = state.muc_domain.to_string();
     let room_jid: BareJid = format!("{localpart}@{muc_domain}")
         .parse()

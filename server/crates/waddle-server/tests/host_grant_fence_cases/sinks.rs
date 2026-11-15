@@ -22,8 +22,11 @@ use waddle_server::test_support::{
     persist_group_dm_member,
 };
 use waddle_ws_test_support::iq::round_trip;
-use waddle_ws_test_support::stanza::{get, is_error, is_result, result_payload, set, NS_PUBSUB};
+use waddle_ws_test_support::stanza::{
+    get, is_error, is_result, pubsub_items, result_payload, set, NS_PUBSUB,
+};
 use waddle_ws_test_support::WsXmppClient;
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
 use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
 use waddle_xmpp::xep::xep0272::{Muji, NS_MUJI};
@@ -585,6 +588,92 @@ async fn a_spaces_retract_does_not_move_a_managed_room() {
     assert!(
         is_error(&reply, DefinedCondition::Forbidden),
         "a Spaces retract moved a managed room: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_spaces_items_read_backfills_no_bookmark_of_a_managed_room() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_backfill").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    community_owner(&fixture, CAROL).await;
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    let plain_space =
+        space_jid_for_node(&spaces, &SpaceNode::from(PLAIN_SPACE)).expect("plain Space JID");
+    // Both rooms have a catalog row and a live room actor, and both are
+    // linked to a Space no scope enrolls, with no bookmark there and no
+    // parent: what a read backfills.
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+    const PLAIN_ROOM: &str = "plain-room";
+    let plain_room: BareJid = format!("{PLAIN_ROOM}@{MUC}")
+        .parse()
+        .expect("plain room address");
+    fixture.server.channel(PLAIN_ROOM, false).await;
+    fixture
+        .server
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: plain_room.clone(),
+            waddle_id: "test".to_owned(),
+            channel_id: PLAIN_ROOM.to_owned(),
+            config: waddle_xmpp::muc::RoomConfig::default(),
+        })
+        .await
+        .expect("plain room actor");
+    for channel in [&room, &plain_room] {
+        fixture
+            .server
+            .state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .set(&ChannelSpaceLink {
+                channel_jid: channel.clone(),
+                space_jid: plain_space.clone(),
+                space_node: SpaceNode::from(PLAIN_SPACE),
+                created_at: 0,
+            })
+            .await
+            .expect("channel-space link");
+    }
+
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let reply = round_trip(
+        &mut carol,
+        get("backfill", SPACES, pubsub_items(PLAIN_SPACE)),
+    )
+    .await;
+    assert!(is_result(&reply), "the items read was refused: {reply:?}");
+    let listed: Vec<String> = fixture
+        .server
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&spaces, PLAIN_SPACE, None, &[])
+        .await
+        .expect("Space items")
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    assert!(
+        listed.contains(&plain_room.to_string()),
+        "the unmanaged room's bookmark was not backfilled: {listed:?}"
+    );
+    assert!(
+        !listed.contains(&room.to_string()),
+        "a managed room's bookmark was backfilled: {listed:?}"
     );
     fixture.close().await;
 }

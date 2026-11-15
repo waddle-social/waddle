@@ -146,6 +146,19 @@ async fn backfill_missing_space_bookmarks(
             warn!(channel = %channel_jid, "Skipping Spaces bookmark backfill for non-managed room JID");
             continue;
         };
+        // A room an enrolled host-grant scope manages is placed by its
+        // canonical topology only: a read never publishes its bookmark or
+        // writes its parent, nor does it while enrollment cannot be told.
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .channel_enrolled(&channel_id)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) | Err(_) => continue,
+        }
         // A read backfills a parent only where none exists: the link names
         // this Space, and no Space is the channel's parent yet. A channel
         // whose parent is another Space keeps it, and the link that
