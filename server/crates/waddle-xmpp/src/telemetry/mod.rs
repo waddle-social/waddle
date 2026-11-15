@@ -87,6 +87,7 @@ pub mod attributes;
 pub mod authority;
 pub mod call;
 pub mod messages;
+pub mod producer_trace;
 pub mod push_pipeline;
 pub mod reliability;
 pub mod remote_owner;
