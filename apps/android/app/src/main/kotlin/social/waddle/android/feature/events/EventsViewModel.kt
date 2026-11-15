@@ -3,6 +3,7 @@ package social.waddle.android.feature.events
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -29,6 +30,7 @@ class EventsViewModel(
     private val _state = MutableStateFlow(EventsState())
     private val pendingWorkspaces = mutableMapOf<String, String>()
     val state = _state.asStateFlow()
+    private var operationJob: Job? = null
 
     init { refresh() }
 
@@ -62,8 +64,8 @@ class EventsViewModel(
 
     fun openPlanning(event: WaddleEvent, onOpen: (String) -> Unit) = operation {
         event.workspaceRoom?.let {
-            onOpen(it);
-        return@operation true
+            onOpen(it)
+            return@operation true
         }
         val room = pendingWorkspaces[event.id] ?: manager.createEventRoom(event.summary, true)
             ?: return@operation false
@@ -81,10 +83,16 @@ class EventsViewModel(
         true
     }
 
+    fun cancelPending() {
+        operationJob?.cancel()
+        operationJob = null
+        _state.value = _state.value.copy(busy = false)
+    }
+
     private fun operation(block: suspend () -> Boolean) {
         if (_state.value.busy) return
         _state.value = _state.value.copy(busy = true, failed = false)
-        viewModelScope.launch {
+        operationJob = viewModelScope.launch {
             try {
                 val success = block()
                 _state.value = _state.value.copy(busy = false, failed = !success)

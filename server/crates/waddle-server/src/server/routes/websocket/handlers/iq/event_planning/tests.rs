@@ -34,6 +34,11 @@ fn iq(room: &BareJid, sender: &FullJid, set: bool) -> Iq {
     }
 }
 
+fn is_result(frame: &str) -> bool {
+    let element: minidom::Element = frame.parse().expect("valid IQ reply");
+    matches!(Iq::try_from(element), Ok(Iq::Result { .. }))
+}
+
 fn publish(item: &PlanningItem) -> PubSubRequest {
     PubSubRequest::Publish {
         node: NODE_EVENT_PLANNING.into(),
@@ -122,10 +127,7 @@ async fn room_membership_protects_storage_and_revocation_takes_effect() {
         publish(&metadata),
     )
     .await;
-    assert!(
-        owner_result[0].contains("type=\"result\""),
-        "{owner_result:?}"
-    );
+    assert!(is_result(&owner_result[0]), "{owner_result:?}");
     let denied = handle_room_pubsub(&iq(&room, &bob, false), &state, &room, &bob, read()).await;
     assert!(denied[0].contains("forbidden"));
     assert!(!denied[0].contains("London meetup"));
@@ -142,7 +144,7 @@ async fn room_membership_protects_storage_and_revocation_takes_effect() {
     task.author = Some(alice.to_bare());
     let written =
         handle_room_pubsub(&iq(&room, &bob, true), &state, &room, &bob, publish(&task)).await;
-    assert!(written[0].contains("type=\"result\""), "{written:?}");
+    assert!(is_result(&written[0]), "{written:?}");
     let stored = state
         .deps
         .protocol
@@ -209,7 +211,7 @@ async fn members_cannot_overwrite_or_retract_another_publishers_items() {
         publish(&item),
     )
     .await;
-    assert!(owner_result[0].contains("type=\"result\""));
+    assert!(is_result(&owner_result[0]));
     let overwrite =
         handle_room_pubsub(&iq(&room, &bob, true), &state, &room, &bob, publish(&item)).await;
     assert!(overwrite[0].contains("forbidden"), "{overwrite:?}");
@@ -280,7 +282,7 @@ async fn poll_votes_require_live_open_poll_and_known_choices() {
         publish(&poll),
     )
     .await;
-    assert!(created[0].contains("type=\"result\""), "{created:?}");
+    assert!(is_result(&created[0]), "{created:?}");
     vote.selections = vec!["unknown".into()];
     let unknown =
         handle_room_pubsub(&iq(&room, &bob, true), &state, &room, &bob, publish(&vote)).await;
@@ -288,7 +290,7 @@ async fn poll_votes_require_live_open_poll_and_known_choices() {
     vote.selections = vec!["a".into()];
     let accepted =
         handle_room_pubsub(&iq(&room, &bob, true), &state, &room, &bob, publish(&vote)).await;
-    assert!(accepted[0].contains("type=\"result\""), "{accepted:?}");
+    assert!(is_result(&accepted[0]), "{accepted:?}");
     poll.completed = true;
     let closed = handle_room_pubsub(
         &iq(&room, &alice, true),
@@ -298,7 +300,7 @@ async fn poll_votes_require_live_open_poll_and_known_choices() {
         publish(&poll),
     )
     .await;
-    assert!(closed[0].contains("type=\"result\""));
+    assert!(is_result(&closed[0]));
     vote.selections = vec!["b".into()];
     let denied =
         handle_room_pubsub(&iq(&room, &bob, true), &state, &room, &bob, publish(&vote)).await;
@@ -341,20 +343,21 @@ async fn assignee_and_organizer_edits_preserve_original_author_and_payer() {
         .expect("invite member");
     let mut task = PlanningItem::new("dinner", PlanningKind::Task, "Book dinner");
     task.assignee = Some(bob.to_bare());
-    assert!(handle_room_pubsub(
-        &iq(&room, &alice, true),
-        &state,
-        &room,
-        &alice,
-        publish(&task)
-    )
-    .await[0]
-        .contains("type=\"result\""));
+    assert!(is_result(
+        &handle_room_pubsub(
+            &iq(&room, &alice, true),
+            &state,
+            &room,
+            &alice,
+            publish(&task)
+        )
+        .await[0]
+    ));
     task.completed = true;
     task.description = Some("Booked for six".into());
     let completed =
         handle_room_pubsub(&iq(&room, &bob, true), &state, &room, &bob, publish(&task)).await;
-    assert!(completed[0].contains("type=\"result\""), "{completed:?}");
+    assert!(is_result(&completed[0]), "{completed:?}");
     let stored = state
         .deps
         .protocol
@@ -381,25 +384,27 @@ async fn assignee_and_organizer_edits_preserve_original_author_and_payer() {
     let mut expense = PlanningItem::new("hotel", PlanningKind::Expense, "Hotel");
     expense.amount_minor = Some(15000);
     expense.currency = Some("GBP".into());
-    assert!(handle_room_pubsub(
-        &iq(&room, &bob, true),
-        &state,
-        &room,
-        &bob,
-        publish(&expense)
-    )
-    .await[0]
-        .contains("type=\"result\""));
+    assert!(is_result(
+        &handle_room_pubsub(
+            &iq(&room, &bob, true),
+            &state,
+            &room,
+            &bob,
+            publish(&expense)
+        )
+        .await[0]
+    ));
     expense.description = Some("Two nights".into());
-    assert!(handle_room_pubsub(
-        &iq(&room, &alice, true),
-        &state,
-        &room,
-        &alice,
-        publish(&expense)
-    )
-    .await[0]
-        .contains("type=\"result\""));
+    assert!(is_result(
+        &handle_room_pubsub(
+            &iq(&room, &alice, true),
+            &state,
+            &room,
+            &alice,
+            publish(&expense)
+        )
+        .await[0]
+    ));
     let stored = state
         .deps
         .protocol

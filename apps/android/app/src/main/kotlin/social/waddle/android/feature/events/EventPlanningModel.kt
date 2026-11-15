@@ -2,6 +2,7 @@ package social.waddle.android.feature.events
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -25,6 +26,7 @@ internal class EventPlanningModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(PlanningState())
     val state = _state.asStateFlow()
+    private var operationJob: Job? = null
     private var pendingCreateRoom: String? = null
     init { refresh() }
 
@@ -42,14 +44,18 @@ internal class EventPlanningModel(
             return@operation false
         }
         val items = manager.eventPlanningItems(room) ?: return@operation false
-        manager.setRoomNotificationMode(
-            room, WaddleNotifyMode.ON_MENTION, items.firstOrNull { it.id == "event" }?.title,
-        )
+        val bookmarks = manager.fetchEventRooms()
+        if (bookmarks != null && bookmarks.none { it.jid == room }) {
+            manager.setRoomNotificationMode(
+                room, WaddleNotifyMode.ON_MENTION, items.firstOrNull { it.id == "event" }?.title,
+            )
+        }
         _state.value = _state.value.copy(room = room, items = items)
         true
     }
 
     fun close() {
+        cancelPending()
         pendingCreateRoom = null
         _state.value = _state.value.copy(room = null, items = emptyList())
         refresh()
@@ -76,6 +82,25 @@ internal class EventPlanningModel(
         true
     }
 
+    fun invite(target: String, coOrganiser: Boolean, onInvited: () -> Unit) = operation {
+        val room = _state.value.room ?: return@operation false
+        val affiliation = if (coOrganiser) {
+            social.waddle.client.ffi.WaddleMucAffiliation.ADMIN
+        } else {
+            social.waddle.client.ffi.WaddleMucAffiliation.MEMBER
+        }
+        if (manager.setRoomAffiliation(room, target, affiliation) != social.waddle.android.client.RoomAdminResult.Ok) {
+            return@operation false
+        }
+        val title = _state.value.items.firstOrNull { it.id == "event" }?.title ?: room
+        val message = manager.sendChatMessage(
+            target, "You are invited to $title. Open this event room in Waddle: $room",
+        )
+        val accepted = message.queued || message.outcome is social.waddle.client.ffi.WaddleSendMessageOutcome.Sent
+        if (accepted) onInvited()
+        accepted
+    }
+
     fun delete(item: WaddlePlanningItem) = operation {
         val room = _state.value.room ?: return@operation false
         if (!manager.eventPlanningRetract(room, item.id)) return@operation false
@@ -83,10 +108,16 @@ internal class EventPlanningModel(
         true
     }
 
+    fun cancelPending() {
+        operationJob?.cancel()
+        operationJob = null
+        _state.value = _state.value.copy(busy = false)
+    }
+
     private fun operation(block: suspend () -> Boolean) {
         if (_state.value.busy) return
         _state.value = _state.value.copy(busy = true, failed = false)
-        viewModelScope.launch {
+        operationJob = viewModelScope.launch {
             try {
                 val success = block()
                 _state.value = _state.value.copy(busy = false, failed = !success)

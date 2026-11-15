@@ -266,8 +266,8 @@ class XmppSessionManager(
 
     suspend fun retractCommunityEvent(communityJid: String, itemId: String): Boolean =
         activeSession.fetch {
-            it.retractCommunityEvent(communityJid, itemId);
-        true
+            it.retractCommunityEvent(communityJid, itemId)
+            true
         } ?: false
 
     suspend fun rsvpCommunityEvent(
@@ -277,8 +277,8 @@ class XmppSessionManager(
         status: WaddleEventParticipation,
     ): Boolean =
         activeSession.fetch {
-            it.rsvpCommunityEvent(communityJid, uid, selfJid, status);
-        true
+            it.rsvpCommunityEvent(communityJid, uid, selfJid, status)
+            true
         } ?: false
 
     suspend fun eventPlanningItems(roomJid: String): List<social.waddle.client.ffi.WaddlePlanningItem>? =
@@ -291,8 +291,8 @@ class XmppSessionManager(
 
     suspend fun eventPlanningRetract(roomJid: String, itemId: String): Boolean =
         activeSession.fetch {
-            it.eventPlanningRetract(roomJid, itemId);
-        true
+            it.eventPlanningRetract(roomJid, itemId)
+            true
         } ?: false
 
     suspend fun createEventRoom(name: String, privateRoom: Boolean): String? =
@@ -351,7 +351,7 @@ class XmppSessionManager(
             }
         }
         // Fence ALL ordinary outbound work before the call teardown can
-        // suspend. The one captured connection is call-teardown-only;
+        // suspend. The one captured connection is call-teardown-only
         // concurrent sends cannot capture a lease, persist a row, or use
         // its transport. This also invalidates a same-account relogin.
         val retiredCallConnection = activeSession.revokeOutboundAuthority()
@@ -551,7 +551,7 @@ class XmppSessionManager(
 
     /**
      * XEP-0430 server-side mark-read for one conversation (optionally
-     * one room thread). The displayed path co-fires this automatically;
+     * one room thread). The displayed path co-fires this automatically
      * exposed for callers without a displayed target (thread reads).
      */
     suspend fun markInboxRead(conversationJid: String, threadId: String? = null) =
@@ -898,7 +898,7 @@ class XmppSessionManager(
 
     /**
      * A displayed dispatch target: [markerId] is what the XEP-0333
-     * marker carries (author-assigned in 1:1, room stanza id in MUCs);
+     * marker carries (author-assigned in 1:1, room stanza id in MUCs)
      * the stanza-id pair feeds only the XEP-0490 MDS publish.
      */
     data class DisplayedTarget(

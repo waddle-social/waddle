@@ -21,7 +21,8 @@ import social.waddle.client.ffi.WaddlePlanningKind
 
 @Composable
 internal fun PlanningCard(
-    item: WaddlePlanningItem, items: List<WaddlePlanningItem>, self: String, busy: Boolean, mayEdit: Boolean, mayDelete: Boolean,
+    item: WaddlePlanningItem, items: List<WaddlePlanningItem>, self: String,
+    busy: Boolean, mayEdit: Boolean, mayDelete: Boolean,
     onEdit: () -> Unit, onSave: (WaddlePlanningItem) -> Unit, onDelete: () -> Unit, onDiscuss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -100,10 +101,10 @@ internal fun PlanningCard(
                             )
                         }
                     }
-                    if (item.kind != WaddlePlanningKind.EVENT && mayDelete) {
-                        TextButton(onClick = onDelete, enabled = !busy && mayEdit) {
-                            Text(stringResource(R.string.events_item_delete))
-                        }
+                }
+                if (item.kind != WaddlePlanningKind.EVENT && mayDelete) {
+                    TextButton(onClick = onDelete, enabled = !busy) {
+                        Text(stringResource(R.string.events_item_delete))
                     }
                 }
             }

@@ -159,7 +159,7 @@ function addItem() {
   else if (activeTab.value in kindLabels) startEdit(newPlanningItem(activeTab.value as PlanningKind, ""));
 }
 function mayDelete(item: PlanningItem) { return canOrganise.value || item.author === self.value; }
-function mayEdit(item: PlanningItem) { return canOrganise.value || item.author === self.value || (item.kind === "task" && item.assignee === self.value); }
+function mayEdit(item: PlanningItem) { return item.author === self.value || (item.kind === "task" && item.assignee === self.value) || (canOrganise.value && !["travel", "attendance", "vote"].includes(item.kind)); }
 async function saveEditor() {
   const draft = editor.value;
   if (!draft || !draft.title.trim()) return;

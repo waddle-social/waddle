@@ -32,7 +32,7 @@ internal fun PlanningEditor(
     var url by rememberSaveable(key) { mutableStateOf(initial.url.orEmpty()) }
     var category by rememberSaveable(key) { mutableStateOf(initial.category.orEmpty()) }
     var location by rememberSaveable(key) { mutableStateOf(initial.location.orEmpty()) }
-    var timezone by rememberSaveable(key) { mutableStateOf(initial.timezone ?: "Europe/London") }
+    var timezone by rememberSaveable(key) { mutableStateOf(initial.timezone ?: ZoneId.systemDefault().id) }
     var start by rememberSaveable(key) { mutableStateOf(planningLocal(initial.startsAt, timezone)) }
     var end by rememberSaveable(key) { mutableStateOf(planningLocal(initial.endsAt, timezone)) }
     var assignee by rememberSaveable(key) { mutableStateOf(initial.assignee.orEmpty()) }
@@ -50,10 +50,13 @@ internal fun PlanningEditor(
         require(until == null || from != null && until > from)
         from to until
     }
-    val valid = title.isNotBlank() && (!timed || dated.isSuccess) &&
+    val amountValid = amount.toLongOrNull()?.let { it in 0..9_007_199_254_740_991L } == true
+    val valid = title.isNotBlank() && title.length <= 512 && description.length <= 16_384 &&
+        category.length <= 128 && location.length <= 2048 && url.length <= 8192 &&
+        (!timed || dated.isSuccess) &&
         (url.isBlank() || safePlanningUrl(url) != null) &&
         (initial.kind != WaddlePlanningKind.LINK || safePlanningUrl(url) != null) &&
-        (initial.kind != WaddlePlanningKind.EXPENSE || amount.toLongOrNull()?.let { it >= 0 } == true) &&
+        (initial.kind != WaddlePlanningKind.EXPENSE || amountValid) &&
         (
             initial.kind != WaddlePlanningKind.EXPENSE ||
             runCatching { java.util.Currency.getInstance(currency) }.isSuccess

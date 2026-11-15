@@ -13,6 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -22,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +59,9 @@ fun EventsScreen(
         key = "planning:$self", factory = viewModelFactoryOf { EventPlanningModel(graph.sessionManager, self) },
     )
     val state by model.state.collectAsStateWithLifecycle()
+    DisposableEffect(model) {
+        onDispose { model.cancelPending() }
+    }
     val memberRooms by graph.sessionManager.roomMembersStore.rooms.collectAsStateWithLifecycle()
     LaunchedEffect(state.room) {
         state.room?.let { graph.sessionManager.refreshRoomMembers(it) }
@@ -70,11 +75,14 @@ fun EventsScreen(
     var addingKind by rememberSaveable { mutableStateOf<String?>(null) }
     var creating by rememberSaveable { mutableStateOf(false) }
     var roomAddress by rememberSaveable { mutableStateOf("") }
+    var invitee by rememberSaveable { mutableStateOf("") }
+    var coOrganiser by rememberSaveable { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
     val closeEditor = {
-        editingId = null;
-    addingKind = null;
-    creating = false
+        model.cancelPending()
+        editingId = null
+        addingKind = null
+            creating = false
     }
     val draftId = rememberSaveable(creating, addingKind) { java.util.UUID.randomUUID().toString() }
     val editing = state.items.firstOrNull { it.id == editingId }
@@ -94,8 +102,8 @@ fun EventsScreen(
         CommunityCalendarScreen(
             onBack = { calendar = false },
             onOpenWorkspace = { room ->
-                calendar = false;
-            model.open(room)
+                calendar = false
+                model.open(room)
             },
         )
         return
@@ -121,7 +129,7 @@ fun EventsScreen(
                 creating || editing != null || addingKind != null -> PlanningEditor(
                     initial = editing ?: newPlanningItem(
                         if (creating) WaddlePlanningKind.EVENT else WaddlePlanningKind.valueOf(addingKind!!),
-                    ).copy(id = draftId),
+                    ).copy(id = draftId, timezone = metadata?.timezone),
                     busy = state.busy,
                     onCancel = closeEditor,
                     onSave = { if (creating) model.create(it, closeEditor) else model.save(it, closeEditor) },
@@ -163,6 +171,22 @@ fun EventsScreen(
                     Text(stringResource(R.string.events_private_notice))
                     TextButton(onClick = { onOpenMembers(room, metadata?.title ?: room) }) {
                         Text(stringResource(R.string.events_members))
+                    }
+                    if (mayManage) {
+                        OutlinedTextField(
+                            invitee, { invitee = it }, label = { Text(stringResource(R.string.events_invitee)) },
+                            modifier = Modifier.fillMaxWidth(), enabled = !state.busy,
+                        )
+                        FlowRow {
+                            Checkbox(
+                                checked = coOrganiser, onCheckedChange = { coOrganiser = it }, enabled = !state.busy,
+                            )
+                            Text(stringResource(R.string.events_coorganiser))
+                            Button(
+                                onClick = { model.invite(invitee.trim(), coOrganiser) { invitee = "" } },
+                                enabled = !state.busy && '@' in invitee && '/' !in invitee && invitee.trim() != self,
+                            ) { Text(stringResource(R.string.events_invite)) }
+                        }
                     }
                     FlowRow {
                         listOf(
@@ -208,7 +232,9 @@ fun EventsScreen(
                         .forEach { item ->
                             PlanningCard(
                                 item = item, items = state.items, self = self, busy = state.busy,
-                                mayEdit = mayManage || item.author == self ||
+                                mayEdit = mayManage && item.kind !in listOf(
+                                    WaddlePlanningKind.TRAVEL, WaddlePlanningKind.ATTENDANCE, WaddlePlanningKind.VOTE,
+                                ) || item.author == self ||
                                     item.kind == WaddlePlanningKind.TASK && item.assignee == self,
                                 mayDelete = mayManage || item.author == self,
                                 onEdit = { editingId = item.id }, onSave = { model.save(it) },

@@ -23,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -47,14 +48,18 @@ fun CommunityCalendarScreen(onBack: () -> Unit, onOpenWorkspace: (String) -> Uni
     val selfJid = session?.jid ?: return
     val model: EventsViewModel = viewModel(key = "events:$selfJid", factory = EventsViewModel.factory(graph, selfJid))
     val state by model.state.collectAsStateWithLifecycle()
+    DisposableEffect(model) {
+        onDispose { model.cancelPending() }
+    }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var editing by rememberSaveable { mutableStateOf(false) }
     var creating by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     val selected = state.events.firstOrNull { it.id == selectedId }
     val closeEditor = {
-        editing = false;
-    creating = false
+        model.cancelPending()
+        editing = false
+        creating = false
     }
     val back = {
         if (editing || creating) {

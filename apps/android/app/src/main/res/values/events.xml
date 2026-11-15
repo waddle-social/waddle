@@ -14,7 +14,7 @@
     <string name="events_delete_confirm">Delete this event? This cannot be undone.</string>
     <string name="events_back">Back</string>
     <string name="events_retry">Refresh</string>
-    <string name="events_error">Could not complete the request. Check your connection and try again.</string>
+    <string name="events_error">Could not complete the request. Check your connection and that you have access to this event.</string>
     <string name="events_invalid">Enter a name and valid dates. The end must be after the start.</string>
     <string name="events_no_date">Dates to be confirmed</string>
     <string name="events_going">Going</string>
@@ -61,4 +61,7 @@
     <string name="events_members">Invitations and co-organisers</string>
     <string name="events_close_poll">Close poll</string>
     <string name="events_all">All</string>
+    <string name="events_invitee">Invitee (bare JID)</string>
+    <string name="events_coorganiser">Co-organiser</string>
+    <string name="events_invite">Invite</string>
 </resources>
