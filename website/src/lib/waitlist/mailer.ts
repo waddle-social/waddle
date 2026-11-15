@@ -22,7 +22,7 @@ export function createWaitlistMailer(binding: SendEmailBinding): WaitlistMailer 
 			unsubscribeUrl.searchParams.set("token", input.unsubscribeToken);
 
 			const { subject, html, text } = buildWaitlistEmail({
-				logoUrl: new URL("/logo.png", input.origin).toString(),
+				origin: input.origin,
 				confirmUrl: confirmUrl.toString(),
 				unsubscribeUrl: unsubscribeUrl.toString(),
 			});

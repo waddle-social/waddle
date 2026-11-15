@@ -29,14 +29,15 @@ function button(label: string, url: string, background: string, color: string): 
 }
 
 export function buildWaitlistEmail(input: {
-	logoUrl: string;
+	origin: string;
 	confirmUrl: string;
 	unsubscribeUrl: string;
 }): { subject: string; html: string; text: string } {
 	const subject = "Confirm your Waddle waitlist request";
 	const confirmUrl = escapeHtml(input.confirmUrl);
 	const unsubscribeUrl = escapeHtml(input.unsubscribeUrl);
-	const logoUrl = escapeHtml(input.logoUrl);
+	const asset = (path: string) => escapeHtml(new URL(path, input.origin).toString());
+	const logoUrl = asset("/logo.png");
 	const preheader = "Confirm your spot on the Waddle waitlist.";
 
 	const html = `<!doctype html>
@@ -181,6 +182,24 @@ export function buildWaitlistEmail(input: {
 								If you never requested this, use the cancel link and you’re done.
 							</td>
 						</tr>
+						<tr>
+							<td
+								style="
+									padding:0 32px 26px;
+									font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;
+									font-size:12px;
+									line-height:20px;
+									font-weight:500;
+									color:#6b8589;
+								"
+							>
+								infrastructure by
+								<a href="https://www.hetzner.com/?mtm_campaign=waddle-social&amp;mtm_medium=referral&amp;mtm_content=sponsoring_link" style="text-decoration:none;"><img src="${asset("/hetzner-logo.jpg")}" alt="Hetzner" width="52" height="20" style="display:inline-block;width:52px;height:20px;border:0;border-radius:3px;vertical-align:middle;" /></a>
+								<span aria-hidden="true" style="display:inline-block;width:4px;height:4px;margin:0 10px;border-radius:50%;background:#6b8589;vertical-align:middle;"></span>
+								CI by
+								<a href="https://namespace.so" style="text-decoration:none;"><img src="${asset("/namespace-logo.png")}" alt="Namespace" width="20" height="20" style="display:inline-block;width:20px;height:20px;border:0;border-radius:3px;vertical-align:middle;" /></a>
+							</td>
+						</tr>
 					</table>
 				</td>
 			</tr>
@@ -198,6 +217,8 @@ export function buildWaitlistEmail(input: {
 		`Cancel this request: ${input.unsubscribeUrl}`,
 		"",
 		"Waddle sends one confirmation email first, then only the launch notes you asked for.",
+		"",
+		"infrastructure by Hetzner · CI by Namespace",
 	].join("\n");
 
 	return { subject, html, text };
