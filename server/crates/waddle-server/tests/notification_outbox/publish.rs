@@ -7,6 +7,9 @@ use crate::support::{
     inbox_with_unread, store, target, target_named, FailingBlockingStorage, TestStore,
 };
 use jid::Jid;
+use opentelemetry::trace::TraceContextExt;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
     NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
@@ -14,6 +17,63 @@ use waddle_server::notification_outbox::{
     PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
 };
 use waddle_xmpp::push::PushSubscriptionStore;
+
+#[tokio::test(flavor = "current_thread")]
+async fn notification_publish_attempt_exports_identity_outcome_and_parent() {
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let store = store().await;
+    enqueue_jobs_for_test(&store, &candidate("archive-span"), &[foreign_target()]).await;
+    let job_id = store.pending_outbox_jobs().await.expect("jobs")[0]
+        .job_id()
+        .as_str()
+        .to_owned();
+    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+        Database::in_memory("push-span").await.expect("database"),
+        b"waddle-push-service-test-secret-key",
+    )
+    .await
+    .expect("push service");
+    let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+    let inbox = inbox_with_unread(&bare("alice@example.com"), &bare("bob@example.com"), 1).await;
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    // Read the parent's context up front: work spawned under it can hold
+    // the span open past the assertions, so its export cannot be awaited.
+    let parent = tracing::info_span!("notification.publish.test.parent");
+    let parent_context = parent.context().span().span_context().clone();
+    let outcomes = store
+        .drain_due_outbox_jobs(
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+            1,
+        )
+        .instrument(parent)
+        .await
+        .expect("drain");
+    assert!(matches!(
+        outcomes.as_slice(),
+        [NotificationOutboxPublishOutcome::Failed { .. }]
+    ));
+    let exported = spans.exported();
+    let attempt = exported
+        .iter()
+        .find(|span| span.name == "notification.job.publish")
+        .expect("publish attempt span exports");
+    assert_eq!(attempt.span_context.trace_id(), parent_context.trace_id());
+    assert_eq!(attempt.parent_span_id, parent_context.span_id());
+    assert_eq!(
+        spans.attribute_of("notification.job.publish", "job_id"),
+        Some(job_id)
+    );
+    assert_eq!(
+        spans
+            .attribute_of("notification.job.publish", "outcome")
+            .as_deref(),
+        Some("failed")
+    );
+}
 
 fn foreign_target() -> NotificationOutboxTarget {
     NotificationOutboxTarget::new(
