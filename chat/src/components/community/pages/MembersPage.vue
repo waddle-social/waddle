@@ -12,6 +12,7 @@ import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vu
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useInCallOverlays } from "@/presence/in-call-overlay-store";
+import { $livePresence } from "@/presence/live-presence";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { buildMemberCards, isAroundPresence, type MemberCardModel } from "@/shell/controllers/use-people-rail";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -42,6 +43,7 @@ const {
 } = props.controller;
 
 const participantsStore = useStore($mucCallParticipants);
+const livePresence = useStore($livePresence);
 const { activeSpeakerIdentities } = useCallEngine();
 const { peerInCall } = useInCallOverlays();
 
@@ -80,6 +82,7 @@ const cards = computed<MemberCardModel[]>(() =>
     huddleJids: huddleJids.value,
     speakingJids: speakingJids.value,
     peerInCall,
+    livePresence: livePresence.value,
   }),
 );
 

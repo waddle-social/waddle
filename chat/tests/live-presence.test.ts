@@ -7,6 +7,7 @@ import {
   setOccupantPresence,
   setSelfPresenceJid,
 } from "../src/presence/live-presence";
+import { resetInCallOverlays, setInCallOverlay } from "../src/presence/in-call-overlay-store";
 import { pickPresence, resetPresenceMode } from "../src/presence/presence-store";
 
 afterEach(() => {
@@ -14,24 +15,28 @@ afterEach(() => {
   setOccupantPresence({});
   setSelfPresenceJid(null);
   resetPresenceMode();
+  resetInCallOverlays();
 });
 
+const AVATAR = "../src/components/ui/UserAvatar.vue";
+
 describe("live presence by JID", () => {
-  test("merges contact and room presence most-available-wins, DND first", () => {
-    setContactPresence("Bob@example.com", "away");
-    setOccupantPresence({ "bob@example.com": ["online"], "carol@example.com": ["away", "dnd"] });
+  test("a contact's own presence wins over a room, which only fills in for people without it", () => {
+    // Rooms only hear the Show a client joined with, so "online" there is not news.
+    setContactPresence("Bob@example.com", "xa");
+    setOccupantPresence({ "bob@example.com": ["online"], "carol@example.com": ["online", "dnd"] });
     setContactPresence("dave@example.com", "offline");
 
     expect($livePresence.get()).toEqual({
-      "bob@example.com": "online",
+      "bob@example.com": "xa",
       "carol@example.com": "dnd",
       "dave@example.com": "offline",
     });
   });
 
-  test("the signed-in account follows this device's chosen Show, not a room echo", () => {
+  test("the signed-in account follows this device's chosen Show", () => {
     setSelfPresenceJid("me@example.com/web");
-    setOccupantPresence({ "me@example.com": ["online"] });
+    setContactPresence("me@example.com", "available");
     pickPresence("away");
 
     expect($livePresence.get()["me@example.com"]).toBe("away");
@@ -39,17 +44,22 @@ describe("live presence by JID", () => {
 
   test("an avatar shows a known person's dot without its caller passing presence", async () => {
     setContactPresence("bob@example.com", "dnd");
-    const known = await renderVueComponent("../src/components/ui/UserAvatar.vue", { name: "Bob", jid: "bob@example.com" }, import.meta.url);
+    const known = await renderVueComponent(AVATAR, { name: "Bob", jid: "bob@example.com" }, import.meta.url);
     // A focused-room guess of "offline" never hides what the app knows.
-    const overridden = await renderVueComponent(
-      "../src/components/ui/UserAvatar.vue",
-      { name: "Bob", jid: "bob@example.com", presence: "offline" },
-      import.meta.url,
-    );
-    const unknown = await renderVueComponent("../src/components/ui/UserAvatar.vue", { name: "Eve", jid: "eve@example.com" }, import.meta.url);
+    const overridden = await renderVueComponent(AVATAR, { name: "Bob", jid: "bob@example.com", presence: "offline" }, import.meta.url);
+    const unknown = await renderVueComponent(AVATAR, { name: "Eve", jid: "eve@example.com" }, import.meta.url);
 
     expect(known).toContain(`data-presence="dnd"`);
     expect(overridden).toContain(`data-presence="dnd"`);
     expect(unknown).not.toContain("data-presence");
+  });
+
+  test("an avatar follows the person's in-call overlay unless its caller hides the badge", async () => {
+    setInCallOverlay("bob@example.com", true);
+    const shown = await renderVueComponent(AVATAR, { name: "Bob", jid: "bob@example.com" }, import.meta.url);
+    const hidden = await renderVueComponent(AVATAR, { name: "Bob", jid: "bob@example.com", inCall: false }, import.meta.url);
+
+    expect(shown).toContain(`aria-label="In a call"`);
+    expect(hidden).not.toContain(`aria-label="In a call"`);
   });
 });

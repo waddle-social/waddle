@@ -62,6 +62,7 @@ import {
   threadChipParticipants as threadChipParticipantsFor,
 } from "./timeline-display-meta";
 import { latestThreadReply } from "./thread-reply-card";
+import { $livePresence, liveShow, presenceFromShow } from "@/presence/live-presence";
 import ConnectionNotice from "./ConnectionNotice.vue";
 import { useConnectionNotice } from "./composables/use-connection-notice";
 import { useMessageJump } from "./composables/use-message-jump";
@@ -187,6 +188,8 @@ const orderedFeedMessages = computed(() =>
 // The current user is excluded — the stack answers "who else is
 // here right now?", which is the question worth answering at a
 // glance. The members panel still shows the full roster.
+// Every person's one presence, which the avatars' dots also read.
+const livePresence = useStore($livePresence);
 const channelHeaderMembers = computed<ChannelHeaderMember[]>(() => {
   if (!props.channel) return [];
   const presence = props.roomPresence;
@@ -197,13 +200,14 @@ const channelHeaderMembers = computed<ChannelHeaderMember[]>(() => {
     if (me && nick === me) continue;
     const jid = props.authorJidByNick?.[nick];
     const bot = isBotJid(jid);
+    const avatarJid = roomOccupantAvatarJid(props.roomJid, nick);
     members.push({
       nick,
       // A bot takes no DM: without a jid the avatar opens the room details instead.
       jid: bot ? undefined : jid,
-      avatarJid: roomOccupantAvatarJid(props.roomJid, nick),
+      avatarJid,
       // A bot's presence only says when it last posted: it has no status.
-      presence: bot ? undefined : p,
+      presence: bot ? undefined : presenceFromShow(liveShow(livePresence.value, avatarJid)) ?? p,
     });
   }
   return members;
@@ -614,7 +618,11 @@ function presenceText(show?: string): string {
   return "offline";
 }
 
-function presenceTextForAuthor(username: string): string {
+// The drawer's dot reads the person's presence by JID; its caption must too.
+function presenceTextForAuthor(author: { username: string; avatarJid: string | null }): string {
+  const username = author.username;
+  const show = liveShow(livePresence.value, author.avatarJid);
+  if (show) return presenceText(show);
   if (props.dmPeer?.peerUsername === username) return presenceText(props.dmPeer?.presenceShow);
   const roomShow = props.roomPresence[username];
   if (roomShow) return presenceText(roomShow === "online" ? "available" : roomShow);
@@ -1228,7 +1236,7 @@ const cls = {
       :jid="popoverAuthor?.jid ?? ''"
       :avatar-jid="popoverAuthor?.avatarJid ?? null"
       :presence="popoverAuthor ? roomPresence[popoverAuthor.username] : undefined"
-      :presence-text="popoverAuthor ? presenceTextForAuthor(popoverAuthor.username) : undefined"
+      :presence-text="popoverAuthor ? presenceTextForAuthor(popoverAuthor) : undefined"
       :hats="popoverAuthor ? roomHats[popoverAuthor.username] : undefined"
       :is-self="popoverIsSelf"
       :xmpp-client="xmppClient"

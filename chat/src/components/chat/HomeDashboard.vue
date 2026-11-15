@@ -60,6 +60,7 @@ import {
 } from "./home-hero";
 import { $callState } from "@/lib/calls/call-store";
 import { useInCallOverlays } from "@/presence/in-call-overlay-store";
+import { $livePresence, liveShow } from "@/presence/live-presence";
 import {
   dmCallActivitiesForPeer,
   hasKnownDmCallMedia,
@@ -209,6 +210,7 @@ const dmCallActivities = computed(() => props.dmCallActivities ?? {});
 const callState = useStore($callState);
 // Whether a DM peer is in a call (their XEP-0108 overlay, ADR-010 Phase 3).
 const { peerInCall } = useInCallOverlays();
+const livePresence = useStore($livePresence);
 const callParticipantAvatarJid = useCallParticipantAvatarJid();
 const currentActiveDmPeer = computed(() => {
   const current = callState.value;
@@ -221,10 +223,14 @@ const activeDmCallPeers = computed(() => {
   if (currentActiveDmPeer.value) peers.add(currentActiveDmPeer.value);
   return peers;
 });
+// Each card's dot, caption and label read the person's one presence.
 const directMessages = computed(() =>
-  (props.dmConversations ?? []).filter((conversation) =>
-    !activeDmCallPeers.value.has(barePeerJid(conversation.peerJid).toLowerCase())
-  ),
+  (props.dmConversations ?? [])
+    .filter((conversation) => !activeDmCallPeers.value.has(barePeerJid(conversation.peerJid).toLowerCase()))
+    .map((conversation) => ({
+      ...conversation,
+      presenceShow: liveShow(livePresence.value, conversation.peerJid) ?? conversation.presenceShow,
+    })),
 );
 const discoveredCallEntries = computed<CallActivityDockEntry[]>(() =>
   sortCallActivityDockEntries(
@@ -275,7 +281,7 @@ const inHuddleCount = computed(() => callEntriesInHuddleCount(activeCallEntries.
 /** Roster contacts and DM peers, one per bare JID, split by the same
  * "around" rule as the people rail and the context column, so the hero
  * kicker, the summary line and the "Around" section below all agree. */
-const knownPeople = computed(() => splitKnownPeople(props.contacts, props.dmConversations ?? []));
+const knownPeople = computed(() => splitKnownPeople(props.contacts, props.dmConversations ?? [], livePresence.value));
 const aroundPeople = computed(() => knownPeople.value.around);
 const awayPeople = computed(() => knownPeople.value.awayAndOffline);
 
@@ -811,7 +817,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                   v-for="label in callEntryVisibleParticipantLabels(entry)"
                   :key="`${entry.key}:${label}`"
                 >
-                  <UserAvatar :name="label" :jid="callParticipantAvatarJid(entry.roomJid, label)" size="xs" />
+                  <UserAvatar :name="label" :jid="callParticipantAvatarJid(entry.roomJid, label)" size="xs" :in-call="false" />
                 </span>
               </span>
               <span :class="[captionClass, ellipsisClass]">

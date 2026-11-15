@@ -14,6 +14,7 @@ import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-acti
 import { useDmCallStart, useMucCallStart } from "@/lib/calls/use-call-start";
 import { formatIdle } from "@/presence/idle-duration";
 import { useInCallOverlay } from "@/presence/in-call-overlay-store";
+import { useLivePresence } from "@/presence/live-presence";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -145,10 +146,14 @@ onBeforeUnmount(() => {
 // Presence line for a DM peer, appending the XEP-0319 idle age behind an
 // away/xa dot ("away · idle 20m"). Recomputes both when the peer's presence
 // changes and every minute as `nowMs` ticks, so the age stays current.
+// The peer's one presence (the avatar's dot reads the same); the idle age
+// belongs to the DM's own Show, so it only shows while the two agree.
+const dmPeerLive = useLivePresence(() => props.dmPeer?.peerJid);
+const dmPeerShow = computed(() => dmPeerLive.value ?? props.dmPeer?.presenceShow);
 const dmPeerPresenceText = computed(() => {
-  const show = props.dmPeer?.presenceShow;
+  const show = dmPeerShow.value;
   const base = presenceText(show);
-  const idleSince = props.dmPeer?.presenceIdleSince;
+  const idleSince = show === props.dmPeer?.presenceShow ? props.dmPeer?.presenceIdleSince : undefined;
   return (show === "away" || show === "xa") && idleSince !== undefined
     ? `${base} · ${formatIdle(idleSince, nowMs.value)}`
     : base;
@@ -212,7 +217,7 @@ function presenceText(show?: string): string {
 }
 
 const dmPeerPresence = computed<OccupantPresence>(() => {
-  const show = props.dmPeer?.presenceShow;
+  const show = dmPeerShow.value;
   if (show === "available" || show === "chat") return "online";
   if (show === "away" || show === "xa") return "away";
   return show === "dnd" ? "dnd" : "offline";

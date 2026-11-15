@@ -119,6 +119,7 @@ const bodyClass = css({ minWidth: 0, fontSize: "14px", lineHeight: "1.45" });
           :name="m.author"
           :jid="avatarJidFor(m)"
           size="sm"
+          :in-call="false"
         />
         <div :class="metaClass">
           <span :class="authorClass">{{ m.author }}</span>

@@ -1,9 +1,9 @@
-// One presence dot per person, by bare JID, for any avatar in the app.
-// Three sources feed it: subscription presence (a contact's resources
+// One presence per person, by bare JID, for every dot, label and grouping in
+// the app. Three sources feed it: subscription presence (a contact's resources
 // collapsed by `PresenceRegistry`), MUC occupant presence from every joined
 // room whose occupant's real JID is disclosed (XEP-0045 §7.2.4), and this
-// device's own chosen Show. `UserAvatar` reads it by JID, so a surface no
-// longer needs to thread presence through props for the dot to appear.
+// device's own chosen Show. Surfaces read it by JID instead of each deriving
+// presence from whatever list they happen to hold, so they cannot disagree.
 
 import { atom, computed, map } from "nanostores";
 import { useStore } from "@nanostores/vue";
@@ -11,29 +11,36 @@ import { computed as vueComputed, type ComputedRef } from "vue";
 
 import { bareJidKey } from "@/lib/xmpp/jid";
 import type { OccupantPresence } from "@/lib/xmpp/types";
-import type { RenderedShow } from "./most-available";
+import { mostAvailableShow, type RenderedShow } from "./most-available";
 import { $selfShow } from "./presence-store";
 
-type LivePresence = Record<string, OccupantPresence>;
+export type LivePresence = Readonly<Record<string, RenderedShow>>;
 
-const $contactPresence = map<LivePresence>({});
+const $contactPresence = map<Record<string, RenderedShow>>({});
 const $occupantPresence = atom<Record<string, OccupantPresence[]>>({});
 const $selfJid = atom("");
 
-// Mirrors `mostAvailableShow`: a deliberate Do Not Disturb wins, then
-// available, then away; offline is the floor.
-const ORDER: OccupantPresence[] = ["dnd", "online", "away", "offline"];
-
-function fromShow(show: RenderedShow | "chat"): OccupantPresence {
-  if (show === "available" || show === "chat") return "online";
-  if (show === "xa") return "away";
-  return show;
+/** The dot for a Show: extended away reads as away; unknown stays unknown. */
+export function presenceFromShow(show: RenderedShow | undefined): OccupantPresence | undefined {
+  switch (show) {
+    case "available":
+      return "online";
+    case "away":
+    case "xa":
+      return "away";
+    case "dnd":
+      return "dnd";
+    case "offline":
+      return "offline";
+    default:
+      return undefined;
+  }
 }
 
 /** Record a contact's rendered (resource-aggregated) subscription presence. */
 export function setContactPresence(jid: string, show: RenderedShow): void {
   const key = bareJidKey(jid);
-  if (key) $contactPresence.setKey(key, fromShow(show));
+  if (key) $contactPresence.setKey(key, show);
 }
 
 /** Replace the occupant snapshot: every joined room's shows per real bare JID. */
@@ -41,7 +48,7 @@ export function setOccupantPresence(byJid: Record<string, OccupantPresence[]>): 
   $occupantPresence.set(byJid);
 }
 
-/** The signed-in account, whose dot follows this device's chosen Show. */
+/** The signed-in account, whose presence follows this device's chosen Show. */
 export function setSelfPresenceJid(jid: string | null | undefined): void {
   $selfJid.set(bareJidKey(jid ?? ""));
 }
@@ -54,22 +61,27 @@ export function resetContactPresence(): void {
 export const $livePresence = computed(
   [$contactPresence, $occupantPresence, $selfJid, $selfShow],
   (contacts, occupants, selfJid, selfShow): LivePresence => {
-    const merged: LivePresence = {};
-    for (const key of new Set([...Object.keys(contacts), ...Object.keys(occupants)])) {
-      const shows = [contacts[key], ...(occupants[key] ?? [])];
-      const best = ORDER.find((show) => shows.includes(show));
-      if (best) merged[key] = best;
+    const merged: Record<string, RenderedShow> = {};
+    // A room only hears the Show a client joined with: status changes go to
+    // subscribers, not rooms. So a room says "connected", never "away", and it
+    // fills in for people without subscription presence rather than override it.
+    for (const [jid, shows] of Object.entries(occupants)) {
+      merged[jid] = mostAvailableShow(shows.map((show) => (show === "online" ? "available" : show)));
     }
-    if (selfJid) merged[selfJid] = fromShow(selfShow);
+    Object.assign(merged, contacts);
+    if (selfJid) merged[selfJid] = selfShow === "chat" ? "available" : selfShow;
     return merged;
   },
 );
 
-/** Reactive presence for one JID; `undefined` when nothing is known about it. */
-export function useLivePresence(jid: () => string | null | undefined): ComputedRef<OccupantPresence | undefined> {
+/** A person's Show in a snapshot, or `undefined` when nothing is known. */
+export function liveShow(live: LivePresence, jid: string | null | undefined): RenderedShow | undefined {
+  const key = bareJidKey(jid ?? "");
+  return key ? live[key] : undefined;
+}
+
+/** Reactive Show for one JID; `undefined` when nothing is known about it. */
+export function useLivePresence(jid: () => string | null | undefined): ComputedRef<RenderedShow | undefined> {
   const live = useStore($livePresence);
-  return vueComputed(() => {
-    const key = bareJidKey(jid() ?? "");
-    return key ? live.value[key] : undefined;
-  });
+  return vueComputed(() => liveShow(live.value, jid()));
 }
