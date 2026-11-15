@@ -27,9 +27,12 @@ not run until verification (D9):
 - `crates/waddle-server/tests/destination_classifier.rs` and
   `rfc6120_destination_routing_ws.rs`: the RFC 6120 §10.4.3 errors for
   client messages and presence to unserved domains;
-- `crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs` and
-  `s2s_stream_addresses.rs`: stanzas on established streams, U-label
-  addresses and the delivery of refused spellings.
+- `crates/waddle-server/tests/dm_pinned_messages_ws.rs`: a DM pin marker
+  for a remote peer answered as a message to an unserved domain;
+- `crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs`,
+  `s2s_stream_addresses.rs`, `s2s_pre_authentication.rs` and
+  `s2s_codec.rs`: stanzas on established streams, U-label addresses, the
+  delivery of refused spellings and the content namespace mapping.
 
 The implementation is `crates/waddle-server/src/s2s/route.rs` and `route/`,
 the outbound channel of `crates/waddle-server/src/s2s/conn/` (`outbox.rs`
@@ -351,6 +354,11 @@ runbook (G24):
   was answered with `unsubscribed` from the contact, other subscription
   presence was ignored, and directed presence, a remote room join
   included, went to the directed-presence handler.
+- A message carrying a direct-message pin marker (`urn:waddle:pin:0`)
+  for a remote peer was refused by the DM pin handler with `forbidden`. It
+  now goes to the remote route first, so it is answered with
+  `remote-server-not-found` like any other message for an unserved domain,
+  and no pin is recorded.
 - Migration 2003 creates `s2s_iq_correlations` on both engines, and the
   owner phase grants the runtime `SELECT, INSERT, DELETE` on it. The table
   stays empty while S2S is off.
@@ -382,7 +390,9 @@ runbook (G24):
   a joined remote room to the occupant's full JID.
 - Account traffic (W6c): replace both D7 refusals for reviewed handlers,
   register inbound requests for correlation, and define the ingress receipt
-  for a remote target.
+  for a remote target. A message carrying a DM pin marker for a remote peer
+  must still be refused before it is routed, since DM pins are local-only:
+  today the outbound D7 refusal is what keeps the marker off the wire.
 - Effect-boundary admission (W5e): take the `RemotePrincipal` at the
   protected-effect boundary.
 - Capability advertisement (W11): any further feature in server-domain
