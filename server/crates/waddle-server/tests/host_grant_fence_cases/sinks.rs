@@ -1125,7 +1125,11 @@ async fn the_moderator_role_is_granted_to_served_accounts_only() {
     )
     .await;
     assert!(
-        is_error(&reply, DefinedCondition::NotAllowed),
+        is_error(&reply, DefinedCondition::NotAllowed)
+            && mentions(
+                &Element::from(reply.clone()),
+                "The moderator role is granted to this deployment's accounts only."
+            ),
         "a remote occupant was made a moderator: {reply:?}"
     );
     fixture.close().await;
