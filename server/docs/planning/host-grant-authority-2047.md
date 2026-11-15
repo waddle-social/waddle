@@ -1617,15 +1617,19 @@ The recovery pass a replica runs when it attaches is covered by the first
 slice's suites (`xep0045_host_grant_admission.rs`, `host_grant_projection.rs`).
 Not covered by a test: the call-token gate and the call-thread anchor (the
 fenced state configures no media server; the Muji refusal precedes the
-update the anchor is built from), the media grant re-assertion paths, the
+update the anchor is built from), the relayed ordered delivery of a Muji
+presence (only the local path is driven; both call the same function),
+the media grant re-assertion paths, the
 mirror repair and its generation check, claim-move re-seating and the
 invitation rollbacks (they need actor-failure injection or clustering), the
 reconciliation retries, the host tool's item-read refusal (it needs a
 loaded extension), the channel-mention decision end to end in a managed
 room, the readiness answer and the gauge of a stale set, and the warning of
-a reload that holds fewer objects. The library's pin case that now gives
-its interpreter a WebSocket state (`ingress/room_pin_tests.rs`) is a
-library test, which this lane neither compiles nor runs.
+a reload that holds fewer objects. The library tests that cover the same
+code (the pin and unpin cases whose interpreter holds a WebSocket state in
+`ingress/room_pin_tests.rs`, and the join's parent repair from a link in
+`server/routes/websocket/tests/muc.rs`) are neither compiled nor run in
+this lane.
 
 The acceptance-matrix rows marked W5c map to them as follows: "Delayed
 repair or compensation by any other writer" to the administration and
