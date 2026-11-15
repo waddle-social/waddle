@@ -1,7 +1,6 @@
 package social.waddle.android.feature.events
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -13,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import coil3.compose.AsyncImage
 import social.waddle.android.R
 import social.waddle.android.ui.huddle.HuddleCard
@@ -58,7 +58,7 @@ internal fun PlanningCard(
         }
         if (url != null) {
             TextButton(onClick = {
-            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri())) }
         }) { Text(stringResource(R.string.events_open_link)) }
         }
         if (item.kind == WaddlePlanningKind.POLL) {
