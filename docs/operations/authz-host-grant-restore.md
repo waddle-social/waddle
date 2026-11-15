@@ -104,17 +104,18 @@ refusal below at most once a minute, sets the gauge
 `waddle.host_grant.authority.unverified` to 1, and tries again with a backoff
 of up to a minute. It stays ready (its readiness body says
 `"host_grants": "unverified"`), because every server sees the same authority
-and rooms no scope manages are still served. `epoch_mismatch` is the
-exception: it is the server's own configuration, and the server is not
-ready (see [Readiness](#readiness)). Alert on the gauge.
+and rooms no scope manages are still served. `epoch_mismatch` with a
+configured epoch **below** the recorded one is the only exception: that
+server's configuration predates a declared restore, and it is not ready (see
+[Readiness](#readiness)). Alert on the gauge.
 
 | Refusal | Meaning | What to do |
 | --- | --- | --- |
 | `epoch_mismatch` | The configured epoch is not the one the database records: the configuration predates or postdates the latest declared restore, or the database was restored to before it. | Correct the configuration, or follow the restore procedure. |
 | `lineage_changed` | The database was adopted after a restore or a clone and the restore was not declared. | Follow the restore procedure. |
-| `projection_absent` | Scopes admit, and SpiceDB holds no projection marker or room witness of a scope the database holds, and no position witness, latch or witnessed epoch of this authority: the servers are connected to a SpiceDB that is empty or another deployment's (another deployment's markers do not count, nor do journal witnesses). Nothing is closed and no position witness is written into it. | Point the servers at the deployment's SpiceDB; the refusal clears by itself. If that SpiceDB is lost, follow [What a restore can still lose](#what-a-restore-can-still-lose). |
+| `projection_absent` | Scopes admit, and SpiceDB holds no projection marker or room witness of a scope the database holds, and no position witness, latch or witnessed epoch of this authority: the servers are connected to a SpiceDB that is empty or another deployment's (another deployment's markers do not count, nor do journal witnesses). Nothing is closed, no position witness is written into it, and no first projection of a newly enrolled or restored scope is written into it either: such a scope stays not effective. | Point the servers at the deployment's SpiceDB; the refusal clears by itself. If that SpiceDB is lost, follow [What a restore can still lose](#what-a-restore-can-still-lose). |
 | `position_regressed` | PostgreSQL is behind the position SpiceDB witnessed: on the same timeline it was rolled back in place or replaced by an older copy; on another timeline it was promoted or recovered below the witnessed position; or a position witness of a later declared epoch exists. The regression is latched (the `latch_<authority_id>` witness) and stays refused after the server writes past the witnessed position again. | Follow the restore procedure. A regression on the witnessed timeline may instead be acknowledged, if an operator has established that nothing was lost (see [After a promotion](#after-a-promotion)); one across timelines takes a declared restore. |
-| `position_unverified` | The PostgreSQL timeline changed since the witness (a promotion, a point-in-time recovery) or the system did (another cluster); or SpiceDB holds a latch without its position witness; or the position witness, the latch or the witnessed epoch cannot be read. | See [After a promotion](#after-a-promotion). Another system, a latch without its witness and a witness that cannot be read take a declared restore: the first fence pass under the raised epoch removes what cannot be read (and the latch), and the pass after it writes a new position witness. It can do so only when one of the three still shows an epoch below the raised one; when none does (the position witness cannot be read and the witnessed epoch is missing or unreadable, with no readable latch), the refusal stays after the restore is declared. Only then, and only after declaring the restore, remove the three resources by hand: `zed relationship delete waddle_grant_projection:position_<authority_id> marker waddle_grant_projection:<stamp>` for each stamp each of `position_`, `latch_` and `epoch_<authority_id>` holds. Otherwise do not delete these witnesses by hand. |
+| `position_unverified` | The PostgreSQL timeline changed since the witness (a promotion, a point-in-time recovery) or the system did (another cluster); or SpiceDB holds a latch without its position witness; or the position witness or the latch cannot be read, or the witnessed epoch cannot be read while neither of them is there to carry an epoch (beside a readable position witness or latch an unreadable witnessed epoch is not refused: the next move of the position witness replaces it). | See [After a promotion](#after-a-promotion). Another system, a latch without its witness and a witness that cannot be read take a declared restore: the first fence pass under the raised epoch removes what cannot be read (and the latch), and the pass after it writes a new position witness. It can do so only when one of the three still shows an epoch below the raised one and none that can be read shows the raised epoch or a later one (one written under the raised epoch shows the unreadable one may be newer than the declaration: the refusal stays, and a further declared restore is needed); when none does (the position witness cannot be read and the witnessed epoch is missing or unreadable, with no readable latch), the refusal stays after the restore is declared. Only then, and only after declaring the restore, remove the three resources by hand: `zed relationship delete waddle_grant_projection:position_<authority_id> marker waddle_grant_projection:<stamp>` for each stamp each of `position_`, `latch_` and `epoch_<authority_id>` holds. Otherwise do not delete these witnesses by hand. |
 | `position_unreadable` | The runtime role cannot run `pg_current_wal_flush_lsn()` or `pg_walfile_name()` (outside the attested pool, `pg_control_system()` as well). | Grant `EXECUTE` on the two WAL functions to the runtime role. Never grant `pg_control_system()` to a restricted runtime role: the physical attestor requires that it cannot run it, and on the attested pool the server takes the system identifier from the attested identity. |
 | `authority_moved` | The authority changed while the fence ran, three times in a row. | Retried by itself; investigate if it persists. |
 
@@ -136,6 +137,15 @@ which a reopen requires the operator to confirm (see
 [Operator commands](#operator-commands)). Reconciliation closes a scope the
 same way when it finds the same evidence.
 
+The mark is always recorded with an operation of its own (`fence`, or
+`reconstruct` when reconciliation of a restored scope finds the loss), and
+the projection written afterwards names that operation. A database restored
+again, to a point after a declared restore but before the mark, therefore
+cannot hold the operation SpiceDB's marker names: the next pass marks the
+scope again (after a second declared restore) or fences it (when the second
+restore is acknowledged instead of declared), and a reopen of every scope
+never reopens it.
+
 When SpiceDB names a scope **the database does not hold** (the database lost
 an enrollment), messages to that scope's rooms are refused with
 `service-unavailable`, rather than served as rooms no scope manages, whether
@@ -155,6 +165,15 @@ runtime role does not match the profile reads them once every interval as
 well. While SpiceDB does not answer nothing reads them, and the server keeps
 serving those rooms as unmanaged. Stopping every server before a restore
 (the [restore procedure](#restore-procedure)) avoids the window.
+
+Once a pass has read the refused rooms, the server answers from that set
+alone and asks SpiceDB about no single room again; the set is replaced only
+by the next pass that reads both SpiceDB and the database. Between passes,
+and for as long as passes fail before that read, it is stale both ways: a
+lost enrollment that appears after it was read (a restore under the running
+server) is served as unmanaged, and a room it lists stays refused after the
+scope is enrolled again or its witness removed, until a pass reads the set
+again.
 
 ### While a server runs
 
@@ -178,26 +197,30 @@ answering) keeps the attachment, up to three in a row.
 
 ### Readiness
 
-`/readyz` follows the host-grant gate only while an unretired scope is
-enrolled. A failure of **this server alone** answers HTTP 503 with
-`"status": "not_ready"` and the cause in `host_grants`, and the server
-leaves the endpoint set until it clears:
+`/readyz` never depends on SpiceDB, nor on a host-grant failure every server
+shares. It fails for one cause only, while an unretired scope is enrolled:
 
 | `host_grants` | Cause | Clears when |
 | --- | --- | --- |
-| `configuration_predates_restore` | The configured epoch is below the recorded one: a restore was declared and this server was not restarted with the new configuration. | It is restarted with the current configuration. |
-| `configuration_ahead_of_restore` | The configured epoch is above the recorded one: the owner phase has not declared the restore yet, or the configuration is wrong. | The owner phase runs with the same epoch, or the configuration is corrected. |
-| `runtime_profile_mismatch` | The runtime role does not match the profile, or the store cannot be read as it requires. | The role is corrected and the server restarted. |
+| `configuration_predates_restore` | The configured epoch is below the recorded one: a restore was declared and this server was not restarted with the new configuration. HTTP 503, `"status": "not_ready"`; the server leaves the endpoint set. | It is restarted with the current configuration. |
+
+Every other host-grant failure keeps the server ready (HTTP 200,
+`"status": "ready"`), refuses messages to managed rooms, logs an error at
+most once a minute and sets `waddle.host_grant.authority.unverified` to 1;
+`host_grants` names it:
+
+| `host_grants` | Cause | Clears when |
+| --- | --- | --- |
+| `unverified` | A refusal of the whole authority (the fence refusals above other than `epoch_mismatch`), or no verification has completed yet. | The fence passes. |
+| `configuration_ahead_of_restore` | The configured epoch is above the recorded one: the owner phase has not declared the restore yet, or the configuration is wrong. During a rollout every server configured ahead of the owner phase shares it. | The owner phase runs with the same epoch, or the configuration is corrected. |
+| `runtime_profile_mismatch` | The runtime role does not match the profile, or the store cannot be read as it requires: the owner phase's grants, which every server shares. | The owner phase corrects the grants. The server checks again about every five minutes and attaches without a restart. |
 | `spicedb_unreachable` | Three verifications in a row, over at least 30 seconds, could not complete because SpiceDB did not answer. | A verification completes. |
 | `fence_incomplete` | The same, failing on PostgreSQL (busy or not answering). | A verification completes. |
 
-A refusal of the **whole authority** (the fence refusals above other than
-`epoch_mismatch`) keeps the server ready with `"host_grants": "unverified"`,
-since every server shares it. A server with no verified attachment in a
-deployment with no unretired scope reports `"host_grants": "unmanaged"`
-and stays ready; a verified server adds no `host_grants` field. A SpiceDB outage that every server shares, and that outlasts the
-grace, takes every server out of the endpoint set while a scope is
-enrolled.
+A server with no verified attachment in a deployment with no unretired scope
+reports `"host_grants": "unmanaged"`; a verified server adds no
+`host_grants` field. Alert on the gauge and the error log, not on
+readiness.
 
 ## Scope states
 
@@ -315,10 +338,20 @@ A scope's lifecycle is `host_grant_rooms.lifecycle_id` for the room.
    in; it never grants anything SpiceDB holds and the database does not. A
    scope whose reconstruction reports a contradiction (`MarkerMissing`,
    `MalformedMarker`, `MalformedFamily`, `ContentMismatch`,
-   `ReconstructionTooLarge`) stays `restored`. A scope that was never
-   projected has nothing to lower its grants to; when its journal witness
-   shows an operation the restored database does not record, it is marked
-   as one the restore lost operations in all the same.
+   `ReconstructionTooLarge`, `MalformedJournalWitness`) stays `restored`. A
+   scope that was never projected has nothing to lower its grants to; when
+   its journal witness shows an operation the restored database does not
+   record, it is marked as one the restore lost operations in all the same.
+   A journal witness that cannot be read (`head_<lifecycle>` holding more
+   than one relationship, or a stamp that is not a canonical one) cannot
+   show what was lost: the scope is marked as one that lost operations and
+   reports `MalformedJournalWitness`. Keep the stamps it holds for the
+   record, delete them (`zed relationship delete
+   waddle_grant_projection:head_<lifecycle> marker
+   waddle_grant_projection:<stamp>` for each), and the next pass
+   reconstructs the scope; the mark stays, so step 10 applies to it.
+   Reconciliation also writes no first projection while the fence would
+   refuse `projection_absent`.
 10. **Apply what SpiceDB cannot show.** A revoke or ban acknowledged after the
     restore point whose projection was never written is lost with the
     database; reconstruction cannot lower it. Scopes marked with lost
@@ -440,8 +473,8 @@ Otherwise declare a restore.
   `WADDLE_SPICEDB_*` when set.
 - A server starts whatever the restore fence finds; a refusal leaves managed
   rooms unavailable on that server. Readiness fails, while an unretired scope
-  is enrolled, only for a failure of that server alone (see
-  [Readiness](#readiness)).
+  is enrolled, only for a configured restore epoch below the recorded one
+  (see [Readiness](#readiness)).
 - Every server reads, when it attaches to the grant store and on every fence
   pass, every projection marker and witness in SpiceDB and the scope table.
   A deployment without an enrolled scope holds none and writes none. The
