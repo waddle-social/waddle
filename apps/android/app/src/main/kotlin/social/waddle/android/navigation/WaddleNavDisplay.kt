@@ -69,7 +69,11 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     LaunchedEffect(sidebarPane) {
-        if (sidebarPane) drawer.snapTo(DrawerValue.Closed)
+        if (sidebarPane) {
+            drawer.snapTo(DrawerValue.Closed)
+        } else {
+            backStack.removeDuplicateRoomList()
+        }
     }
     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
 
@@ -321,6 +325,11 @@ internal fun openConversationJidOf(backStack: List<NavKey>): String? =
         is WaddleNavKey.Thread -> top.conversationJid
         else -> null
     }
+
+/** Folding makes the root the room list; keep its open conversation and thread above it. */
+internal fun NavBackStack<NavKey>.removeDuplicateRoomList() {
+    removeAll { it == WaddleNavKey.Rooms }
+}
 
 /** Back to the room list on phones. */
 private fun NavBackStack<NavKey>.popToRoot() {

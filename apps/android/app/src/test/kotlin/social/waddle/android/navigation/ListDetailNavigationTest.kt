@@ -54,6 +54,30 @@ class ListDetailNavigationTest {
     }
 
     @Test
+    fun `folding a room list returns to the phone room root`() {
+        val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, WaddleNavKey.Rooms)
+
+        backStack.removeDuplicateRoomList()
+
+        assertEquals(listOf(WaddleNavKey.Home), backStack.toList())
+    }
+
+    @Test
+    fun `folding removes the duplicate room list without dropping its conversation or thread`() {
+        val thread = WaddleNavKey.Thread(
+            conversationJid = general.roomJid,
+            isGroupchat = true,
+            threadId = "t-1",
+        )
+        val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, WaddleNavKey.Rooms, general, thread)
+
+        backStack.removeDuplicateRoomList()
+
+        assertEquals(listOf(WaddleNavKey.Home, general, thread), backStack.toList())
+        assertEquals(general.roomJid, openConversationJidOf(backStack))
+    }
+
+    @Test
     fun `the open conversation follows the top of the stack`() {
         assertEquals(general.roomJid, openConversationJidOf(listOf(WaddleNavKey.Home, general)))
         assertEquals(alice.peerJid, openConversationJidOf(listOf(WaddleNavKey.Home, alice)))
