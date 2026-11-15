@@ -1,0 +1,85 @@
+---
+// Shared shell of the waitlist confirm and cancel pages: sea backdrop, wordmark, one card.
+import mark from "@waddle/design/assets/waddle-mark.svg?url";
+import { css } from "../../styled-system/css";
+import ThemeToggle from "./ThemeToggle.astro";
+
+interface Props {
+	heading: string;
+	spot?: string | undefined;
+}
+
+const { heading, spot } = Astro.props;
+---
+
+<div
+	class={css({
+		minHeight: "100dvh",
+		bgImage: "{gradients.sea}",
+		color: "fg",
+		fontFamily: "body",
+		display: "flex",
+		flexDirection: "column",
+		alignItems: "center",
+		justifyContent: "center",
+		py: "12",
+		px: "4",
+		boxSizing: "border-box",
+		gap: "6",
+		position: "relative",
+		overflow: "clip",
+	})}
+>
+	<ThemeToggle placement="corner" />
+	<a
+		href="/"
+		class={css({
+			display: "flex",
+			alignItems: "center",
+			gap: "2.5",
+			color: "fg",
+			textDecoration: "none",
+		})}
+	>
+		<img
+			src={mark}
+			alt=""
+			width="28"
+			height="28"
+			class={css({ width: "28px", height: "28px", borderRadius: "pill", bg: "belly", p: "3px" })}
+		/>
+		<span class={css({ fontFamily: "display", fontWeight: 700, fontSize: "base" })}>waddle.social</span>
+	</a>
+	<main
+		class={css({
+			width: "100%",
+			maxWidth: "440px",
+			bg: "surface",
+			border: "1px solid {colors.border}",
+			borderRadius: "panel",
+			p: { base: "8", _narrow: "6" },
+			boxSizing: "border-box",
+			display: "flex",
+			flexDirection: "column",
+			gap: "4",
+		})}
+	>
+		{spot && <img src={spot} alt="" width="96" height="96" class={css({ width: "96px", height: "96px" })} />}
+		<h1
+			class={css({
+				m: 0,
+				fontFamily: "display",
+				fontSize: "3xl",
+				lineHeight: 1.2,
+				fontWeight: 700,
+				letterSpacing: "-0.01em",
+			})}
+		>
+			{heading}
+		</h1>
+		<p class={css({ m: 0, fontSize: "md", lineHeight: 1.5, color: "fg.muted" })}>
+			<slot />
+		</p>
+		<slot name="actions" />
+	</main>
+</div>

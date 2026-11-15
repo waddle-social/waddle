@@ -1,6 +1,8 @@
 # Waddle Website
 
-Cloudflare-hosted landing page for Waddle, built with Astro and Tailwind CSS.
+Cloudflare-hosted landing page for Waddle, built with Astro and Panda CSS on the shared
+`@waddle/design` preset. `bun run dev` and `bun run build` run `panda codegen`
+first; its `styled-system/` output is not committed.
 
 ## Setup
 

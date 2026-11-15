@@ -1,4 +1,10 @@
 ---
+import spotConversation from "@waddle/design/assets/spot-conversation.svg?url";
+import spotError from "@waddle/design/assets/spot-error.svg?url";
+import spotStickers from "@waddle/design/assets/spot-stickers.svg?url";
+import { css, cx } from "../../../styled-system/css";
+import { btn } from "../../../styled-system/recipes";
+import ActionCard from "../../components/ActionCard.astro";
 import WebsiteLayout from "../../layouts/WebsiteLayout.astro";
 import { getWaitlistRuntime } from "../../lib/waitlist/runtime";
 import { inspectConfirmToken } from "../../lib/waitlist/service";
@@ -14,57 +20,64 @@ if (result === "confirmed") {
 	const { store } = getWaitlistRuntime();
 	mode = (await inspectConfirmToken(token, store)) === "ready" ? "ready" : "stale";
 }
+
+const heading = {
+	ready: "Lock in your place.",
+	success: "You're confirmed.",
+	stale: "That link is no longer active.",
+}[mode];
+const spot = { ready: spotConversation, success: spotStickers, stale: spotError }[mode];
+const wide = css({ height: "44px", minHeight: "44px", justifyContent: "center", textDecoration: "none" });
 ---
 
 <WebsiteLayout
 	title="Confirm Waitlist"
 	description="Confirm your Waddle waitlist request."
 	canonicalPath="/waitlist/confirm"
-	footerMode="stacked"
 >
-	<section class="action-shell">
-		<div class:list={["action-card", mode === "success" && "action-card--success"]}>
-			<p class="action-kicker">waitlist checkpoint</p>
-			<h1 class="action-title">
-				{
-					mode === "ready"
-						? "Lock in your place."
-						: mode === "success"
-							? "You’re confirmed."
-							: "That link is no longer active."
-				}
-			</h1>
-			<p class="action-copy">
-				{
-					mode === "ready"
-						? "One tap confirms that this inbox really wants Waddle beta notes."
-						: mode === "success"
-							? "Your spot is saved. When Waddle is ready, the note comes from humans@waddle.social."
-							: "Confirmation links are single-use. If you still want in, start again from the homepage."
-				}
-			</p>
+	<ActionCard heading={heading} spot={spot}>
+		{mode === "ready" && "One tap confirms that this inbox really wants Waddle beta notes."}
+		{
+			mode === "success" && (
+				<>
+					You're on the list. When there's news, the note comes from{" "}
+					<span class={css({ fontFamily: "mono", fontSize: "xs", color: "fg" })}>humans@waddle.social</span>.
+				</>
+			)
+		}
+		{
+			mode === "stale" &&
+				"Confirmation links are single-use and expire. Join the waitlist again from the homepage to get a fresh one."
+		}
 
-			{
-				mode === "ready" ? (
-					<form method="post" action="/api/waitlist/confirm" class="action-form">
-						<input type="hidden" name="token" value={token ?? ""} />
-						<div class="action-actions">
-							<button type="submit" class="action-button">
-								confirm waitlist signup
-							</button>
-							<a href="/" class="action-link">
-								back home
-							</a>
-						</div>
-					</form>
-				) : (
-					<div class="action-actions">
-						<a href="/" class="action-button action-button--ghost">
-							return to homepage
-						</a>
-					</div>
-				)
-			}
-		</div>
-	</section>
+		{
+			mode === "ready" ? (
+				<form
+					slot="actions"
+					method="post"
+					action="/api/waitlist/confirm"
+					class={css({ display: "flex", flexDirection: "column", gap: "2", pt: "2" })}
+				>
+					<input type="hidden" name="token" value={token ?? ""} />
+					<button type="submit" class={cx(btn({ variant: "primary" }), wide)}>
+						Confirm waitlist signup
+					</button>
+					<a href="/" class={css({
+							alignSelf: "center",
+							fontSize: "sm",
+							color: "action.text",
+							textDecoration: "underline",
+							textUnderlineOffset: "3px",
+							_hover: { color: "fg" },
+						})}>
+						Back home
+					</a>
+				</form>
+			) : (
+				<a slot="actions" href="/" class={cx(btn(), wide, css({ mt: "2" }))}>
+					Return to homepage
+				</a>
+			)
+		}
+	</ActionCard>
 </WebsiteLayout>

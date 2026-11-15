@@ -185,7 +185,7 @@ schema.#Project & {
 			]
 		}
 
-		// Fails when generated native and website token outputs drift from
+		// Fails when generated native token outputs drift from
 		// tokens.css or the Huddle Panda tokens.
 		tokensCheck: schema.#Task & {
 			command: "bun"
@@ -196,7 +196,6 @@ schema.#Project & {
 				"src/styles/global/tokens.css",
 				"src/styles/huddle-tokens.ts",
 				"panda.config.ts",
-				"../website/src/styles/global/brand-palette.css",
 				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
 				"../apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
 			]
