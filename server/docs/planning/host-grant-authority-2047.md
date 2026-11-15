@@ -1215,14 +1215,18 @@ request path:
   `waddle.host_grant.enrolled_set.load_started` (unix seconds, no
   attributes). The load itself records it, so its last value keeps being
   exported while later reloads fail or hang, and `time()` minus it is the
-  set's age whatever the refresh task is doing. Each refresh tick that
+  set's age whatever the refresh task is doing. That holds under
+  cumulative temporality, the OTLP exporter's default; a deployment that
+  sets `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` to `delta` gets
+  the value only from the collection after each load. Each refresh tick that
   completes also records that age as `waddle.host_grant.enrolled_set.age`
   (seconds, no attributes) and, once a set that holds the host-grant
   relations is older than 30 s (`ENROLLED_SET_STALE_AFTER`, six refresh
   intervals), logs a rate-limited warning. A reload that finds the
   relations gone after a load keeps the set and its start: it does not
-  count as a fresh load. Operators alert on the age computed from
-  `load_started`, per replica, above that bound.
+  count as a fresh load. Operators alert per replica when the age
+  computed from `load_started` exceeds that bound or the replica reports
+  no `load_started` series.
 - The set's age does not affect readiness. While reloads fail, an
   unmanaged room keeps its legacy checks and a managed room reads its
   grants from PostgreSQL per decision and fails closed when it cannot; a
@@ -1591,7 +1595,12 @@ The suites, all under `crates/waddle-server/tests/`:
   presence refused to a seated occupant whose grant was revoked (and not
   reflected to another occupant) while a member's is, a room system
   message reaching only readers, channel search, Spaces and
-  service discovery, Spaces retract, a managed room without a channel row,
+  service discovery, Spaces retract, a Spaces items read of a Space no
+  scope enrolls that backfills an unmanaged room's bookmark and leaves none
+  of a managed room (the end state only: the suite's in-memory PubSub
+  storage keeps no trace of a bookmark published and then retracted, so
+  the case also passes without the enrollment check), a managed room
+  without a channel row,
   an unattached replica, extension bots, the extension host (a ban and the
   deployment owner), admin refusals including a Space-deletion cascade,
   admin listings, the group-DM writers, the read re-decision after a ban,
@@ -1652,8 +1661,12 @@ mirror repair and its generation check, claim-move re-seating and the
 invitation rollbacks (they need actor-failure injection or clustering), the
 reconciliation retries, the host tool's item-read refusal (it needs a
 loaded extension), the channel-mention decision end to end in a managed
-room, the readiness answer and the gauge of a stale set, and the warning of
-a reload that holds fewer objects. The library tests that cover the same
+room and its skip for a message without a channel mention, the refusal of a
+group-DM creation under a managed room's identifier (a minted identifier
+cannot be made to collide), the exported gauges and the stale-set warning,
+the rule that a load finishing after a later-started one installs nothing,
+the transient publish the Spaces backfill no longer makes (above), and the
+warning of a reload that holds fewer objects. The library tests that cover the same
 code (the pin and unpin cases whose interpreter holds a WebSocket state in
 `ingress/room_pin_tests.rs`, and the join's parent repair from a link in
 `server/routes/websocket/tests/muc.rs`) are neither compiled nor run in
