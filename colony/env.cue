@@ -66,12 +66,16 @@ schema.#Project & {
 				"../bun.lock",
 				"package.json",
 				"astro.config.ts",
+				"panda.config.ts",
 				"tsconfig.json",
 				"wrangler.jsonc",
 				"drizzle.config.ts",
 				"src/**",
 				"public/**",
 				"drizzle/**",
+				"../design/package.json",
+				"../design/src/**",
+				"../design/assets/**",
 			]
 			outputs: [
 				"dist/**",
