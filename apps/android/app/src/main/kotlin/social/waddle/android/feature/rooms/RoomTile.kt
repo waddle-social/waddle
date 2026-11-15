@@ -162,7 +162,7 @@ private fun RoomBadge(room: RoomActivity) {
             val description = pluralStringResource(R.plurals.room_mentions_description, room.mentions, room.mentions)
             CountBadge(
                 count = room.mentions,
-                tone = CountTone.LIVE,
+                tone = CountTone.MENTION,
                 prefix = "@",
                 modifier = Modifier.clearAndSetSemantics { contentDescription = description },
             )

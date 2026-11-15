@@ -2,13 +2,11 @@
 // Design-token generator.
 //
 // Sources of truth (human-edited):
-//   - scripts/design-tokens/huddle-tokens.ts: the pre-Polar Huddle Panda
-//     tokens. Feeds Android's `WaddleTokens.Huddle`.
-//   - scripts/design-tokens/legacy-tokens.css: the legacy chat sheet. Feeds
-//     the Apple accent and Android's legacy `WaddleTokens` sections.
-// Both are frozen copies: chat now takes its tokens from the Polar Huddle
-// preset (@waddle/design). Native apps keep these values until they move
-// to the preset too.
+//   - design/src/preset.ts: the Polar Huddle preset (@waddle/design). Feeds
+//     Android's `WaddleTokens.Huddle`.
+//   - scripts/design-tokens/legacy-tokens.css: the legacy chat sheet, a
+//     frozen copy. Feeds the Apple accent and Android's legacy
+//     `WaddleTokens` sections until those move to the preset too.
 // Generated outputs (never edit by hand):
 //   - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
 //   - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt
@@ -30,11 +28,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  semanticTokens as huddleSemanticTokens,
-  textStyles as huddleTextStyles,
-  tokens as huddleTokens,
-} from "./design-tokens/huddle-tokens.ts";
+import { waddlePreset } from "../design/src/preset.ts";
 import { createPandaTokenResolver } from "./design-tokens/panda-tokens.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -285,22 +279,32 @@ const camel = (name) =>
   name.replace(/^([0-9])/, "x$1").replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
 
 // ---------------------------------------------------------------------------
-// Huddle (scripts/design-tokens/huddle-tokens.ts) -> WaddleTokens.Huddle
+// Polar Huddle (design/src/preset.ts) -> WaddleTokens.Huddle
 // ---------------------------------------------------------------------------
 
-// panda.config.ts: night is the default (`_dark`), daylight is `_light`.
-const HUDDLE_SCHEMES = { night: "_dark", daylight: "_light" };
+const presetTheme = waddlePreset.theme.extend;
+
+// The preset's `t()` values key night as `_night` (and `base`), daylight as `_daylight`.
+const HUDDLE_SCHEMES = { night: "_night", daylight: "_daylight" };
 
 const huddle = createPandaTokenResolver({
-  tokens: huddleTokens,
-  semanticTokens: huddleSemanticTokens,
+  tokens: presetTheme.tokens,
+  semanticTokens: presetTheme.semanticTokens,
   conditions: HUDDLE_SCHEMES,
 });
 
-// `bg.rail` -> `bgRail`, `surface.2` -> `surface2`.
+// Semantic colours built from `color-mix()` or `transparent`: Compose
+// derives these itself (WaddleTheme.kt), so they are not emitted.
+const DERIVED_COLOR_GROUPS = ["state.", "material", "elev."];
+
+// Text styles with fluid (clamp) sizes: web-only.
+const FLUID_TEXT_STYLES = new Set(["lead", "marketing"]);
+
+// `bg.rail` -> `bgRail`, `surface.2` -> `surface2`, `2xs` -> `xxs`, `4xl` -> `xxxxl`.
 function kotlinName(dotted) {
   const name = dotted
     .split(".")
+    .map((part) => part.replace(/^(\d)(x[sl])$/, (_, n, rest) => "x".repeat(Number(n) - 1) + rest))
     .map((part, i) => (i === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1)))
     .join("");
   if (!/^[a-z][A-Za-z0-9]*$/.test(name)) {
@@ -309,9 +313,12 @@ function kotlinName(dotted) {
   return name;
 }
 
+// Hard keywords a token name can collide with (`easings.in`) need backticks.
+const ktIdentifier = (name) => (["in", "is", "as", "do", "if"].includes(name) ? `\`${name}\`` : name);
+
 const pascal = (name) => kotlinName(name).replace(/^./, (c) => c.toUpperCase());
 
-function huddleValue(category, name, scheme) {
+function huddleValue(category, name, scheme = "night") {
   return huddle.resolve(category, name, scheme);
 }
 
@@ -322,24 +329,18 @@ function huddleColor(name, scheme) {
   return literal;
 }
 
-// rem (16px root) or px -> a dp/sp number.
-function huddleLength(category, name) {
-  const value = String(huddleValue(category, name));
-  const match = /^(-?[\d.]+)(rem|px)$/.exec(value);
-  if (!match) throw new Error(`${category}.${name}: expected rem or px, got "${value}"`);
-  return Number(match[1]) * (match[2] === "rem" ? 16 : 1);
+function px(label, value) {
+  const match = /^(-?[\d.]+)px$/.exec(String(value));
+  if (!match) throw new Error(`${label}: expected px, got "${value}"`);
+  return Number(match[1]);
 }
+
+const isPx = (value) => /^-?[\d.]+px$/.test(String(value));
 
 // Kotlin numeric literal for an `.em`/`.dp` receiver: negatives need parens.
 const ktNumber = (n) => (n < 0 ? `(${n})` : `${n}`);
 const ktFloat = (n) => `${n}f`;
-
-function huddleEm(category, name) {
-  const value = String(huddleValue(category, name));
-  const match = /^(-?[\d.]+)(em)?$/.exec(value);
-  if (!match) throw new Error(`${category}.${name}: expected a number or em, got "${value}"`);
-  return `${ktNumber(Number(match[1]))}.em`;
-}
+const round3 = (n) => Math.round(n * 1000) / 1000;
 
 function huddleMillis(name) {
   const value = String(huddleValue("durations", name));
@@ -358,31 +359,6 @@ function huddleCubicBezier(name) {
   return `CubicBezierEasing(${points.map(ktFloat).join(", ")})`;
 }
 
-// Single-layer box-shadow: `x y blur [spread] color`. Lengths are peeled
-// off the front one at a time (no backtracking); the rest is the colour.
-const SHADOW_LENGTH = /^(-?[\d.]+(?:px)?)\s+/;
-
-function huddleShadow(name) {
-  const value = String(huddleValue("shadows", name)).trim();
-  const lengths = [];
-  let rest = value;
-  for (let m = SHADOW_LENGTH.exec(rest); m && lengths.length < 4; m = SHADOW_LENGTH.exec(rest)) {
-    lengths.push(m[1]);
-    rest = rest.slice(m[0].length);
-  }
-  const color = lengths.length >= 3 ? colorLiteral(rest.trim()) : null;
-  if (!color) throw new Error(`shadows.${name}: expected "x y blur [spread] colour", got "${value}"`);
-  const [offsetX, offsetY, blur, spread] = lengths;
-  const dp = (v) => `${ktNumber(Number.parseFloat(v ?? "0"))}.dp`;
-  return [
-    `offsetX = ${dp(offsetX)}`,
-    `offsetY = ${dp(offsetY)}`,
-    `blur = ${dp(blur)}`,
-    `spread = ${dp(spread)}`,
-    `color = Color(${color})`,
-  ];
-}
-
 // `val name = Type(` + one named argument per line + `)`.
 const ktConstruct = (name, type, args) => [
   `val ${kotlinName(name)} = ${type}(`,
@@ -390,50 +366,84 @@ const ktConstruct = (name, type, args) => [
   ")",
 ];
 
-const FONT_WEIGHTS = { 400: "Normal", 500: "Medium", 600: "SemiBold", 700: "Bold" };
+// Web-only text style properties (wrapping, numerals, colour, per-theme or
+// per-pointer tweaks, width axis): Compose styles do without them.
+const WEB_ONLY_TEXT = new Set(["textWrap", "fontVariantNumeric", "color", "_night", "_coarse", "fontStretch"]);
 
+// A token name or a raw value: `md`, `20px`, `1.5`, `0.01em`.
 function huddleTextStyle(name, style) {
-  const known = new Set(["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textTransform"]);
+  const known = new Set(["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"]);
   for (const key of Object.keys(style)) {
-    if (!known.has(key)) throw new Error(`textStyles.${name}: unsupported property "${key}"`);
+    if (!known.has(key) && !WEB_ONLY_TEXT.has(key)) {
+      throw new Error(`textStyles.${name}: unsupported property "${key}"`);
+    }
   }
   if (!huddle.tokenNames("fonts").includes(style.fontFamily)) {
     throw new Error(`textStyles.${name}: unknown font "${style.fontFamily}"`);
   }
-  const weight = FONT_WEIGHTS[style.fontWeight ?? "400"];
-  if (!weight) throw new Error(`textStyles.${name}: unsupported fontWeight "${style.fontWeight}"`);
-  if (style.textTransform !== undefined && style.textTransform !== "uppercase") {
-    throw new Error(`textStyles.${name}: unsupported textTransform "${style.textTransform}"`);
+  const size = px(`textStyles.${name}.fontSize`, huddleValue("fontSizes", style.fontSize));
+  const lh = huddle.tokenNames("lineHeights").includes(style.lineHeight)
+    ? huddleValue("lineHeights", style.lineHeight)
+    : style.lineHeight;
+  const leading = isPx(lh) ? px(`textStyles.${name}.lineHeight`, lh) / size : Number(lh);
+  if (Number.isNaN(leading)) throw new Error(`textStyles.${name}: unsupported lineHeight "${lh}"`);
+  const ls = style.letterSpacing === undefined
+    ? "0em"
+    : huddle.tokenNames("letterSpacings").includes(style.letterSpacing)
+      ? huddleValue("letterSpacings", style.letterSpacing)
+      : style.letterSpacing;
+  const em = /^(-?[\d.]+)em$/.exec(String(ls));
+  if (!em) throw new Error(`textStyles.${name}: unsupported letterSpacing "${ls}"`);
+  if (!Number.isInteger(style.fontWeight)) {
+    throw new Error(`textStyles.${name}: unsupported fontWeight "${style.fontWeight}"`);
   }
   return [
     `font = HuddleFont.${pascal(style.fontFamily)}`,
-    `size = ${huddleLength("fontSizes", style.fontSize)}.sp`,
-    `weight = FontWeight.${weight}`,
-    `lineHeight = ${style.lineHeight ? huddleEm("lineHeights", style.lineHeight) : "TextUnit.Unspecified"}`,
-    `letterSpacing = ${style.letterSpacing ? huddleEm("letterSpacings", style.letterSpacing) : "0.em"}`,
-    `uppercase = ${style.textTransform === "uppercase"}`,
+    `size = ${size}.sp`,
+    `weight = FontWeight(${style.fontWeight})`,
+    `lineHeight = ${round3(leading)}.em`,
+    `letterSpacing = ${ktNumber(Number(em[1]))}.em`,
   ];
+}
+
+// Control heights from the comfortable density (`sizes.chipH`, `rowH`,
+// `controlH`, `target`); xs is the compact chip.
+function controlHeights() {
+  const sizes = presetTheme.semanticTokens.sizes;
+  return {
+    xs: px("sizes.chipH._compact", sizes.chipH.value._compact.base),
+    sm: px("sizes.chipH", sizes.chipH.value.base),
+    md: px("sizes.rowH", sizes.rowH.value.base),
+    lg: px("sizes.controlH", sizes.controlH.value.base),
+    touch: px("sizes.target", huddleValue("sizes", "target")),
+  };
 }
 
 function huddleKt() {
   const indent = (lines, depth) => lines.map((l) => `${"    ".repeat(depth)}${l}`).join("\n");
+  const colorNames = huddle
+    .semanticNames("colors")
+    .filter((n) => !DERIVED_COLOR_GROUPS.some((g) => n === g || n.startsWith(g)));
   const scheme = (key) =>
+    indent(colorNames.map((n) => `val ${kotlinName(n)} = Color(${huddleColor(n, key)})`), 3);
+  const pxDims = (category, unit) =>
     indent(
-      huddle.semanticNames("colors").map((n) => `val ${kotlinName(n)} = Color(${huddleColor(n, key)})`),
+      huddle
+        .tokenNames(category)
+        .filter((n) => isPx(huddleValue(category, n)))
+        .map((n) => `val ${kotlinName(n)} = ${ktNumber(px(`${category}.${n}`, huddleValue(category, n)))}.${unit}`),
       3,
     );
-  const dims = (category, names, unit, rename = (n) => n) =>
-    indent(names.map((n) => `val ${kotlinName(rename(n))} = ${ktNumber(huddleLength(category, n))}.${unit}`), 3);
-  const controls = huddle.tokenNames("sizes").filter((n) => n.startsWith("control."));
-  const textStyles = Object.entries(huddleTextStyles).flatMap(([name, { value }]) =>
-    ktConstruct(name, "HuddleTextStyle", huddleTextStyle(name, value)),
-  );
-  const shadows = huddle
-    .tokenNames("shadows")
-    .flatMap((name) => ktConstruct(name, "HuddleShadow", huddleShadow(name)));
+  const avatarTints = colorNames.filter((n) => /^avatar\.\d+$/.test(n));
+  const textStyles = Object.entries(presetTheme.textStyles)
+    .filter(([name]) => !FLUID_TEXT_STYLES.has(name))
+    .flatMap(([name, { value }]) => ktConstruct(name, "HuddleTextStyle", huddleTextStyle(name, value)));
+  const easings = huddle
+    .tokenNames("easings")
+    .filter((n) => !String(huddleValue("easings", n)).startsWith("linear(")); // linear() springs: web-only
   return `    /**
-     * Huddle, the web's design system (chat/panda.config.ts). Night is the
-     * default scheme; Daylight is the light one.
+     * Polar Huddle (design/src/preset.ts). Night is the default scheme;
+     * Daylight is the light one.
      */
     object Huddle {
         /** Night scheme (the default). */
@@ -447,30 +457,21 @@ ${scheme("daylight")}
         }
 
         object Radius {
-${dims("radii", huddle.tokenNames("radii"), "dp")}
+${pxDims("radii", "dp")}
         }
 
-        /** Avatar fallback tints (web \`avatarTints\`), one picked per name; same in both schemes. */
+        /** Avatar fallback tints (web \`avatar.N\`), one picked per name; same in both schemes. */
         val avatarTints = listOf(
-${indent(huddle.tokenNames("colors").filter((n) => n.startsWith("avatarTints.")).map((n) => `Color(${huddleColor(n, "night")}),`), 3)}
+${indent(avatarTints.map((n) => `Color(${huddleColor(n, "night")}),`), 3)}
         )
 
-        /** Control heights (web \`sizes.control.*\`). */
+        /** Control heights (comfortable density; touch is the 44dp target). */
         object ControlHeight {
-${dims("sizes", controls, "dp", (n) => n.slice("control.".length))}
+${indent(Object.entries(controlHeights()).map(([n, v]) => `val ${n} = ${v}.dp`), 3)}
         }
 
         object FontSize {
-${dims("fontSizes", huddle.tokenNames("fontSizes"), "sp")}
-        }
-
-        /** Line height relative to the font size. */
-        object LineHeight {
-${indent(huddle.tokenNames("lineHeights").map((n) => `val ${kotlinName(n)} = ${huddleEm("lineHeights", n)}`), 3)}
-        }
-
-        object LetterSpacing {
-${indent(huddle.tokenNames("letterSpacings").map((n) => `val ${kotlinName(n)} = ${huddleEm("letterSpacings", n)}`), 3)}
+${pxDims("fontSizes", "sp")}
         }
 
         /** Web \`textStyles\`; the theme maps [HuddleFont] onto font families. */
@@ -483,45 +484,25 @@ ${indent(huddle.tokenNames("durations").map((n) => `const val ${kotlinName(n).to
         }
 
         object Easing {
-${indent(huddle.tokenNames("easings").map((n) => `val ${kotlinName(n)} = ${huddleCubicBezier(n)}`), 3)}
-        }
-
-        object Shadow {
-${indent(shadows, 3)}
+${indent(easings.map((n) => `val ${ktIdentifier(kotlinName(n))} = ${huddleCubicBezier(n)}`), 3)}
         }
     }`;
 }
 
 function huddleFontsKt() {
-  const entries = huddle.tokenNames("fonts").map((n) => {
-    const family = String(huddleValue("fonts", n)).split(",")[0].trim().replace(/^'|'$/g, "");
-    return `    /** ${family} */\n    ${pascal(n)},`;
-  });
-  return `/** Huddle font roles (web \`fonts\` tokens). */
+  const entries = huddle.tokenNames("fonts").map((n) => `    ${pascal(n)},`);
+  return `/** Polar Huddle font roles (web \`fonts\` tokens). */
 enum class HuddleFont {
-${entries.join("\n\n")}
+${entries.join("\n")}
 }
 
-/**
- * A Huddle text style. [lineHeight] and [letterSpacing] are in em;
- * [lineHeight] is unspecified where the web inherits it.
- */
+/** A Polar Huddle text style. [lineHeight] and [letterSpacing] are in em. */
 data class HuddleTextStyle(
     val font: HuddleFont,
     val size: TextUnit,
     val weight: FontWeight,
     val lineHeight: TextUnit,
     val letterSpacing: TextUnit,
-    val uppercase: Boolean,
-)
-
-/** A single-layer box shadow. */
-data class HuddleShadow(
-    val offsetX: Dp,
-    val offsetY: Dp,
-    val blur: Dp,
-    val spread: Dp,
-    val color: Color,
 )`;
 }
 
@@ -534,7 +515,7 @@ function androidTokensKt() {
       .map((n) => `        val ${camel(n === "2xs" ? "xxs" : n === "2xl" ? "xxl" : n === "3xl" ? "xxxl" : n)} = ${remToDp(`${prefix}-${n}`)}.${unit}`)
       .join("\n");
   return `// GENERATED — do not edit.
-// Sources: scripts/design-tokens/huddle-tokens.ts (Huddle),
+// Sources: design/src/preset.ts (Huddle),
 //          scripts/design-tokens/legacy-tokens.css (everything else)
 // Regenerate: bun scripts/generate-design-tokens.mjs
 package social.waddle.android.theme
@@ -542,7 +523,6 @@ package social.waddle.android.theme
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em

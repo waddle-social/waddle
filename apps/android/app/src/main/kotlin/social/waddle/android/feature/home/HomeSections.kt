@@ -184,8 +184,8 @@ fun HomeHero(model: HeroModel, onAction: (HeroAction) -> Unit, modifier: Modifie
                     // Not the one-line Kicker: at large text sizes the
                     // counts wrap instead of being cut off.
                     Text(
-                        text = heroKickerOf(model).uppercase(LocalConfiguration.current.locales[0]),
-                        style = Waddle.type.kicker,
+                        text = heroKickerOf(model),
+                        style = Waddle.type.eyebrow,
                         color = Waddle.colors.fgMuted,
                     )
                 }
@@ -391,7 +391,7 @@ fun LiveHuddleCard(
             val inCall = stringResource(R.string.home_call_in_this_call, names.size)
             CountBadge(
                 count = names.size,
-                tone = CountTone.LIVE,
+                tone = CountTone.MENTION,
                 modifier = Modifier.clearAndSetSemantics { contentDescription = inCall },
             )
             Text(
@@ -495,7 +495,7 @@ fun NeedsYouRow(room: RoomActivity, onOpen: () -> Unit, modifier: Modifier = Mod
                 if (room.mentions > 0) {
                     CountBadge(
                         count = room.mentions,
-                        tone = CountTone.LIVE,
+                        tone = CountTone.MENTION,
                         prefix = "@",
                         modifier = Modifier.clearAndSetSemantics { },
                     )

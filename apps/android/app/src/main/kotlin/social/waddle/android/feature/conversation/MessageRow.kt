@@ -423,19 +423,19 @@ private fun AuthorName(author: String, onClick: (() -> Unit)?) {
     }
 }
 
-/** A role hat after the name: mono, uppercase, text only (web `.chat-hat-tag`). */
+/** A role hat after the name: tag style, text only. */
 @Composable
 private fun HatTag(badge: AuthorBadge) {
     val colors = Waddle.colors
     val color = when (badge.kind) {
         AuthorBadgeKind.OWNER -> colors.goldText
         AuthorBadgeKind.ADMIN, AuthorBadgeKind.MODERATOR, AuthorBadgeKind.VERIFIED -> colors.actionText
-        AuthorBadgeKind.BOT -> colors.mossText
+        AuthorBadgeKind.BOT -> colors.successText
         AuthorBadgeKind.HAT -> colors.fgMuted
     }
     Text(
-        text = badge.label.uppercase(),
-        style = Waddle.type.kicker,
+        text = badge.label,
+        style = Waddle.type.tag,
         color = color,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -482,7 +482,7 @@ internal fun authorNameOf(item: TimelineItem): String {
 /** Author line name: body 13/600 (web `.chat-author`). */
 internal val AuthorStyle: TextStyle
     @Composable get() = Waddle.type.control.copy(
-        fontSize = WaddleTokens.Huddle.FontSize.control,
+        fontSize = WaddleTokens.Huddle.FontSize.sm,
         fontWeight = FontWeight.SemiBold,
     )
 

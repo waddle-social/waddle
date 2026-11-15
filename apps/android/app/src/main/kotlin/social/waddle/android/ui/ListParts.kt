@@ -29,7 +29,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -105,18 +104,13 @@ fun UnreadCountBadge(count: Int, modifier: Modifier = Modifier, emphasized: Bool
     }
     CountBadge(
         count = count,
-        tone = if (emphasized) CountTone.LIVE else CountTone.NEUTRAL,
+        tone = if (emphasized) CountTone.MENTION else CountTone.NEUTRAL,
         prefix = if (emphasized) MENTION_PREFIX else "",
         modifier = modifier.clearAndSetSemantics { contentDescription = description },
     )
 }
 
-/**
- * Text set as a Huddle kicker (mono 11, uppercase, tracked) whose
- * uppercase is presentation only: accessibility and tests read [text] as
- * written, so screen readers do not spell short words out letter by
- * letter.
- */
+/** Text set as a Polar Huddle kicker (eyebrow: body 13/700, sentence case). */
 @Composable
 fun KickerText(
     text: String,
@@ -125,8 +119,8 @@ fun KickerText(
     heading: Boolean = false,
 ) {
     Text(
-        text = text.uppercase(LocalConfiguration.current.locales[0]),
-        style = Waddle.type.kicker,
+        text = text,
+        style = Waddle.type.eyebrow,
         color = color,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,

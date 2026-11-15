@@ -29,27 +29,28 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.theme.Waddle
-import social.waddle.android.theme.WaddleTokens
 
 /**
- * Huddle's overlay shadow (web `shadows.overlay`: 0 16px 40px, 45% black)
- * under floating things that sit over the timeline: the "Latest" pill and
- * composer popovers. Drawn as a blurred shadow of the element's own
- * rounded shape, outside its bounds, so it costs no layout.
+ * Polar Huddle's overlay shadow (web `shadows.elev.3`, its wide layer:
+ * 0 24px 56px, 70% black at night) under floating things that sit over
+ * the timeline: the "Latest" pill and composer popovers. Drawn as a
+ * blurred shadow of the element's own rounded shape, outside its bounds,
+ * so it costs no layout. Android shadow layers have no spread, so the
+ * web's -12px spread becomes a lighter alpha.
  */
 fun Modifier.overlayShadow(cornerRadius: Dp): Modifier = drawBehind {
-    val shadow = WaddleTokens.Huddle.Shadow.overlay
     val radius = cornerRadius.toPx()
     drawIntoCanvas { canvas ->
         val paint = Paint()
         paint.asFrameworkPaint().apply {
             isAntiAlias = true
             color = android.graphics.Color.TRANSPARENT
-            setShadowLayer(shadow.blur.toPx() / 2f, shadow.offsetX.toPx(), shadow.offsetY.toPx(), shadow.color.toArgb())
+            setShadowLayer(OVERLAY_BLUR.toPx() / 2f, 0f, OVERLAY_OFFSET_Y.toPx(), OVERLAY_COLOR.toArgb())
         }
         canvas.drawRoundRect(0f, 0f, size.width, size.height, radius, radius, paint)
     }
@@ -216,3 +217,7 @@ private val HANDLE_HEIGHT = 4.dp
 private val MASCOT = 72.dp
 private val MASCOT_HALO = 112.dp
 private val EMPTY_MAX_WIDTH = 360.dp
+
+private val OVERLAY_BLUR = 56.dp
+private val OVERLAY_OFFSET_Y = 24.dp
+private val OVERLAY_COLOR = Color.Black.copy(alpha = 0.5f)

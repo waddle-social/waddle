@@ -683,7 +683,7 @@ internal fun formatCallDuration(totalSeconds: Long): String {
 }
 
 /** The stage clock: mono at message size, steady digits. */
-private val STAGE_CLOCK = WaddleType.time.copy(fontSize = WaddleTokens.Huddle.FontSize.message)
+private val STAGE_CLOCK = WaddleType.time.copy(fontSize = WaddleTokens.Huddle.FontSize.md)
 
 private val TOP_ROW_HEIGHT = CALL_CONTROL
 private val STAGE_AVATAR = WaddleTokens.Space.xxxl * 2
