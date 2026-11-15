@@ -5,7 +5,7 @@ import { CalendarDays, Check, ExternalLink, MessageSquare, Pin, Plus, RefreshCw,
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { MemberSummary } from "@/lib/chat-types";
 import { barePeerJid } from "@/lib/xmpp/jid";
-import { eventPlanningCalendar, newPlanningItem, planningInstant, planningLocal, safePlanningUrl, type AttendanceStatus, type PlanningItem, type PlanningKind } from "@/lib/xmpp/event-planning";
+import { eventPlanningCalendar, formatPlanningAmount, parsePlanningAmount, newPlanningItem, planningInstant, planningLocal, safePlanningUrl, type AttendanceStatus, type PlanningItem, type PlanningKind } from "@/lib/xmpp/event-planning";
 import { css, cx } from "styled-system/css";
 import { btn, input, kicker } from "styled-system/recipes";
 
@@ -168,7 +168,7 @@ function startEdit(item: PlanningItem) {
   startsLocal.value = planningLocal(item.starts_at, editor.value.timezone!);
   endsLocal.value = planningLocal(item.ends_at, editor.value.timezone!);
   optionsText.value = item.options.map((option) => option.label).join("\n"); participantsText.value = item.participants.join(", ");
-  amountText.value = item.amount_minor == null ? "" : String(item.amount_minor / 10 ** currencyDigits(item.currency || "GBP"));
+  amountText.value = item.amount_minor == null ? "" : formatPlanningAmount(item.amount_minor, item.currency || "GBP");
 }
 function addItem() {
   if (activeTab.value === "media") startEdit({ ...newPlanningItem("link", ""), category: "file" });
@@ -193,11 +193,8 @@ async function saveEditor() {
       item.options = labels.map((label) => ({ id: draft.options.find((option) => option.label === label)?.id ?? crypto.randomUUID(), label }));
     }
     if (item.kind === "expense") {
-      const amount = Number(amountText.value);
-      if (!amountText.value.trim() || !Number.isFinite(amount) || amount < 0) throw new Error("Enter a valid amount.");
       item.currency = item.currency?.toUpperCase() || "GBP";
-      item.amount_minor = Math.round(amount * 10 ** currencyDigits(item.currency));
-      if (!Number.isSafeInteger(item.amount_minor)) throw new Error("This amount is too large.");
+      item.amount_minor = parsePlanningAmount(amountText.value, item.currency);
     }
     await publish(item); if (editor.value === draft) editor.value = null;
   });
@@ -348,7 +345,7 @@ onUnmounted(() => { destroyed = true; request++; if (refreshTimer) clearInterval
           <label v-if="['task', 'itinerary'].includes(editor.kind)" :class="ui.field">Owner's Waddle address<input v-model="editor.assignee" :class="inputClass" placeholder="name@example.com" :disabled="!!editor.author && editor.author !== self && !canOrganise" /></label>
           <template v-if="['event', 'itinerary', 'travel', 'task'].includes(editor.kind)"><label :class="ui.field">{{ editor.kind === 'task' ? 'Due' : 'Starts' }} (optional)<input v-model="startsLocal" :class="inputClass" type="datetime-local" /></label><label v-if="editor.kind !== 'task'" :class="ui.field">Ends (optional)<input v-model="endsLocal" :class="inputClass" type="datetime-local" /></label><label :class="ui.field">Time zone<input v-model="editor.timezone" :class="inputClass" placeholder="Europe/London" required /></label></template>
           <label v-if="['event', 'itinerary', 'decision'].includes(editor.kind)" :class="ui.field">Status<AppSelect :model-value="editor.status ?? 'proposed'" :options="STATUS_OPTIONS" :class="inputClass" aria-label="Status" @update:model-value="editor.status = $event" /></label>
-          <template v-if="editor.kind === 'expense'"><label :class="ui.field">Amount paid<input v-model="amountText" :class="inputClass" type="number" step="any" min="0" required /></label><label :class="ui.field">Currency<input v-model="editor.currency" :class="inputClass" placeholder="GBP" pattern="[A-Za-z]{3}" maxlength="3" /></label><label :class="ui.field">Shared by (Waddle addresses, comma separated)<input v-model="participantsText" :class="inputClass" /></label></template>
+          <template v-if="editor.kind === 'expense'"><label :class="ui.field">Amount paid<input v-model="amountText" :class="inputClass" type="text" inputmode="decimal" required /></label><label :class="ui.field">Currency<input v-model="editor.currency" :class="inputClass" placeholder="GBP" pattern="[A-Za-z]{3}" maxlength="3" /></label><label :class="ui.field">Shared by (Waddle addresses, comma separated)<input v-model="participantsText" :class="inputClass" /></label></template>
         </div>
         <label v-if="editor.kind === 'poll'" :class="ui.field">Options, one per line<textarea v-model="optionsText" :class="cx(inputClass, ui.full)" rows="4" required /></label>
         <label v-if="editor.kind !== 'event'" :class="ui.row"><input v-model="editor.pinned" type="checkbox" /> Pin to event overview</label>

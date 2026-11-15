@@ -70,6 +70,34 @@ export function safePlanningUrl(value: string | null | undefined): string | null
   try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : null; } catch { return null; }
 }
 
+function currencyFractionDigits(currency: string): number {
+  return new Intl.NumberFormat("en", { style: "currency", currency }).resolvedOptions().maximumFractionDigits ?? 2;
+}
+
+/** Parse major-unit decimal text without binary floating-point rounding. */
+export function parsePlanningAmount(text: string, currency: string): number {
+  const match = /^(\d*)(?:\.(\d*))?$/.exec(text.trim());
+  if (!match || (!match[1] && !match[2])) throw new Error("Enter a non-negative decimal amount.");
+  const digits = currencyFractionDigits(currency);
+  const fraction = (match[2] ?? "").replace(/0+$/, "");
+  if (fraction.length > digits) throw new Error(`${currency} amounts allow at most ${digits} decimal places.`);
+  const whole = (match[1] || "0").replace(/^0+(?=\d)/, "");
+  if (whole.length > 16) throw new Error("This amount is too large.");
+  const minor = BigInt(whole) * 10n ** BigInt(digits) + BigInt(fraction.padEnd(digits, "0") || "0");
+  if (minor > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("This amount is too large.");
+  return Number(minor);
+}
+
+/** Preserve every minor unit when populating an expense editor. */
+export function formatPlanningAmount(minor: number, currency: string): string {
+  if (!Number.isSafeInteger(minor) || minor < 0) throw new Error("Enter a valid minor-unit amount.");
+  const digits = currencyFractionDigits(currency);
+  const factor = 10n ** BigInt(digits);
+  const amount = BigInt(minor);
+  const whole = String(amount / factor);
+  return digits ? `${whole}.${String(amount % factor).padStart(digits, "0")}` : whole;
+}
+
 function calendarText(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/;/g, "\\;").replace(/,/g, "\\,");
 }

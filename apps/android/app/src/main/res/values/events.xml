@@ -43,7 +43,7 @@
     <string name="events_local_start">Start (YYYY-MM-DDTHH:MM, optional)</string>
     <string name="events_local_end">End (YYYY-MM-DDTHH:MM, optional)</string>
     <string name="events_assignee">Owner (bare JID)</string>
-    <string name="events_amount">Amount (minor currency units, e.g. 1250 for £12.50)</string>
+    <string name="events_amount">Amount</string>
     <string name="events_currency">Currency (e.g. GBP)</string>
     <string name="events_participants">Participants (comma-separated bare JIDs)</string>
     <string name="events_options">Poll options (one per line)</string>

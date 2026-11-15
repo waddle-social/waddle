@@ -39,7 +39,11 @@ internal fun PlanningCard(
         item.amountMinor?.let { amount ->
             val formatted = runCatching {
                 val currency = java.util.Currency.getInstance(item.currency ?: "GBP")
-                val number = java.text.NumberFormat.getCurrencyInstance().apply { this.currency = currency }
+                val number = java.text.NumberFormat.getCurrencyInstance().apply {
+                    this.currency = currency
+                    minimumFractionDigits = currency.defaultFractionDigits
+                    maximumFractionDigits = currency.defaultFractionDigits
+                }
                 number.format(java.math.BigDecimal.valueOf(amount, currency.defaultFractionDigits))
             }.getOrDefault("$amount ${item.currency.orEmpty()}")
             Text(formatted)

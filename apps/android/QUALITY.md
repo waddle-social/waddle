@@ -67,8 +67,8 @@ other session of the account is online.
 | Theme follows the system by default; Night or Daylight pin it | n/a | `UserPrefsTest` | `settings` | — |
 | Calls (1:1 and Muji) | ✅ | — | — | — |
 | Community: feed (0472), stories (0501) | ✅ | ❌ | — | — |
-| Events: create/edit/delete, RSVP and private trip workspaces (links, tasks, itinerary, decisions, polls, travel, expenses, calendar export) | 🟡 | No churn coverage; `EventDatesTest` and `PlanningValidationTest` cover 7 date/timezone, URL and export cases | — | — |
+| Events: create/edit/delete, RSVP and private trip workspaces (links, tasks, itinerary, decisions, polls, travel, expenses, calendar export) | 🟡 | No churn coverage; `EventDatesTest`, `PlanningValidationTest` and `PlanningMoneyTest` cover 11 date/timezone, URL, export and currency cases | — | — |
 
-Event creation and planning compile in the Android app. The seven JVM validation cases do not cover reconnects, room permissions, native rendering or an on-device planning flow; those remain separate verification work. The Events sidebar entry affects six shell goldens: `sidebar`, `sidebar_large_text`, and `home_tab`, each in light and dark mode. The Home dashboard goldens are unchanged from main; updating and reviewing the six sidebar images requires the native renderer.
+Event creation and planning compile in the Android app. The eleven JVM validation cases do not cover reconnects, room permissions, native rendering or an on-device planning flow; those remain separate verification work. The Events sidebar entry affects six shell goldens: `sidebar`, `sidebar_large_text`, and `home_tab`, each in light and dark mode. The Home dashboard goldens are unchanged from main; updating and reviewing the six sidebar images requires the native renderer.
 
 Resume community surfaces only once the rows above are verified on device.

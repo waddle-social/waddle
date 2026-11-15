@@ -36,7 +36,9 @@ internal fun PlanningEditor(
     var start by rememberSaveable(key) { mutableStateOf(planningLocal(initial.startsAt, timezone)) }
     var end by rememberSaveable(key) { mutableStateOf(planningLocal(initial.endsAt, timezone)) }
     var assignee by rememberSaveable(key) { mutableStateOf(initial.assignee.orEmpty()) }
-    var amount by rememberSaveable(key) { mutableStateOf(initial.amountMinor?.toString().orEmpty()) }
+    var amount by rememberSaveable(key) {
+        mutableStateOf(planningAmountText(initial.amountMinor, initial.currency ?: "GBP"))
+    }
     var currency by rememberSaveable(key) { mutableStateOf(initial.currency ?: "GBP") }
     var participants by rememberSaveable(key) { mutableStateOf(initial.participants.joinToString(", ")) }
     var options by rememberSaveable(key) { mutableStateOf(initial.options.joinToString("\n") { it.label }) }
@@ -50,17 +52,13 @@ internal fun PlanningEditor(
         require(until == null || from != null && until > from)
         from to until
     }
-    val amountValid = amount.toLongOrNull()?.let { it in 0..9_007_199_254_740_991L } == true
+    val amountMinor = planningAmountMinor(amount, currency)
     val valid = title.isNotBlank() && title.length <= 512 && description.length <= 16_384 &&
         category.length <= 128 && location.length <= 2048 && url.length <= 8192 &&
         (!timed || dated.isSuccess) &&
         (url.isBlank() || safePlanningUrl(url) != null) &&
         (initial.kind != WaddlePlanningKind.LINK || safePlanningUrl(url) != null) &&
-        (initial.kind != WaddlePlanningKind.EXPENSE || amountValid) &&
-        (
-            initial.kind != WaddlePlanningKind.EXPENSE ||
-            runCatching { java.util.Currency.getInstance(currency) }.isSuccess
-        ) &&
+        (initial.kind != WaddlePlanningKind.EXPENSE || amountMinor != null) &&
         (initial.kind != WaddlePlanningKind.POLL || options.lines().count { it.isNotBlank() } >= 2)
     PlanField(title, { title = it }, R.string.events_name, busy)
     PlanField(description, { description = it }, R.string.events_description, busy)
@@ -86,7 +84,7 @@ internal fun PlanningEditor(
     }
     if (initial.kind == WaddlePlanningKind.EXPENSE) {
         PlanField(amount, { amount = it }, R.string.events_amount, busy)
-        PlanField(currency, { currency = it.uppercase() }, R.string.events_currency, busy)
+        PlanField(currency, { currency = it.trim().uppercase(java.util.Locale.ROOT) }, R.string.events_currency, busy)
         PlanField(participants, { participants = it }, R.string.events_participants, busy)
     }
     if (initial.kind == WaddlePlanningKind.POLL) PlanField(options, { options = it }, R.string.events_options, busy)
@@ -115,7 +113,8 @@ internal fun PlanningEditor(
                 location = location.trim().ifBlank { null }, timezone = if (timed) timezone else initial.timezone,
                 startsAt = if (timed) dated.getOrThrow().first else initial.startsAt,
                 endsAt = if (timed) dated.getOrThrow().second else initial.endsAt,
-                assignee = assignee.trim().ifBlank { null }, amountMinor = amount.toLongOrNull(),
+                assignee = assignee.trim().ifBlank { null },
+                amountMinor = if (initial.kind == WaddlePlanningKind.EXPENSE) amountMinor else initial.amountMinor,
                 currency = if (initial.kind == WaddlePlanningKind.EXPENSE) currency else initial.currency,
                 participants = participants.split(',').map { it.trim() }.filter { it.isNotBlank() },
                 options = if (initial.kind == WaddlePlanningKind.POLL) {

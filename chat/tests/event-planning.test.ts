@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { reactive, type Ref } from "vue";
-import { eventPlanningCalendar, newPlanningItem, planningInstant, planningLocal, safePlanningUrl, type PlanningItem } from "../src/lib/xmpp/event-planning";
+import { eventPlanningCalendar, formatPlanningAmount, parsePlanningAmount, newPlanningItem, planningInstant, planningLocal, safePlanningUrl, type PlanningItem } from "../src/lib/xmpp/event-planning";
 import { renderVueComponent, setupVueComponent } from "./helpers/render-vue-sfc";
 const ROOM = "event-london@muc.example.com";
 const SELF = "alice@example.com";
@@ -26,6 +26,7 @@ interface Panel {
   rememberRoom: () => Promise<void>;
   startEdit: (item: PlanningItem) => void; invite: () => Promise<void>;
   rsvp: (status: string) => Promise<void>; vote: (poll: PlanningItem, option: string) => Promise<void>;
+  amountText: Ref<string>;
   items: Ref<PlanningItem[]>; editor: Ref<PlanningItem | null>; createName: Ref<string>;
   selectedRoom: Ref<string>; inviteJid: Ref<string>; inviteRole: Ref<string>; error: Ref<string | null>;
 }
@@ -135,5 +136,40 @@ describe("public calendar planning association", () => {
     expect(publish).toHaveBeenCalledWith("community.example.com", expect.objectContaining({ workspace_room: ROOM }));
     expect(result.workspaceRoom).toBe(ROOM);
     expect(eventFromWasm({ id: "e", uid: "e", summary: "London", workspace_room: ROOM }).workspaceRoom).toBe(ROOM);
+  });
+});
+
+
+describe("exact expense decimal entry", () => {
+  test("parses currency precision exactly, permitting redundant trailing zeros", () => {
+    expect(parsePlanningAmount("12.50", "GBP")).toBe(1250);
+    expect(parsePlanningAmount("12.500", "GBP")).toBe(1250);
+    expect(formatPlanningAmount(1250, "GBP")).toBe("12.50");
+    expect(parsePlanningAmount("123.0", "JPY")).toBe(123);
+    expect(formatPlanningAmount(123, "JPY")).toBe("123");
+    expect(parsePlanningAmount("12.345", "KWD")).toBe(12345);
+    expect(formatPlanningAmount(12345, "KWD")).toBe("12.345");
+    expect(parsePlanningAmount(".50", "GBP")).toBe(50);
+    expect(parsePlanningAmount("0", "GBP")).toBe(0);
+  });
+  test("rejects negative, excess precision, exponent and unsafe values", () => {
+    for (const amount of ["-0", "-1.00", "12.501", "1e2", "", ".", "NaN", "90071992547409.92"]) expect(() => parsePlanningAmount(amount, "GBP")).toThrow();
+    expect(() => parsePlanningAmount("12.1", "JPY")).toThrow();
+    expect(() => parsePlanningAmount("1.0001", "KWD")).toThrow();
+    expect(() => formatPlanningAmount(Number.MAX_SAFE_INTEGER + 1, "GBP")).toThrow();
+    expect(() => formatPlanningAmount(-1, "GBP")).toThrow();
+  });
+  test("maximum safe amounts retain every minor unit through editing", () => {
+    for (const currency of ["GBP", "JPY", "KWD"]) expect(parsePlanningAmount(formatPlanningAmount(Number.MAX_SAFE_INTEGER, currency), currency)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(formatPlanningAmount(Number.MAX_SAFE_INTEGER, "GBP")).toBe("90071992547409.91");
+  });
+  test("expense editor preserves large values and retains invalid precision for correction", async () => {
+    const { api, state } = await panel(); await state.selectRoom(ROOM);
+    state.startEdit({ ...newPlanningItem("expense", "Travel"), currency: "GBP", amount_minor: Number.MAX_SAFE_INTEGER });
+    expect(state.amountText.value).toBe("90071992547409.91"); await state.saveEditor();
+    expect(api.publishEventPlanning).toHaveBeenLastCalledWith(ROOM, expect.objectContaining({ amount_minor: Number.MAX_SAFE_INTEGER }));
+    state.startEdit({ ...newPlanningItem("expense", "Lunch"), currency: "GBP" }); state.amountText.value = "12.501";
+    await state.saveEditor(); expect(state.error.value).toContain("2 decimal places");
+    expect(state.editor.value?.title).toBe("Lunch"); expect(api.publishEventPlanning).toHaveBeenCalledTimes(1);
   });
 });
