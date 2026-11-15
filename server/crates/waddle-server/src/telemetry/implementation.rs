@@ -399,6 +399,10 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // alias reads absent otherwise — Qodo review on PR #1426).
     waddle_xmpp::metrics::init_pod_gauges();
 
+    // After the meter provider: an actor observed earlier would bind the
+    // `waddle.actor.*` instruments to the noop provider.
+    crate::actor_telemetry::install();
+
     // Register the process start-time/CPU/FD instruments eagerly so a
     // fresh pod exports its restart signal on the first OTLP push
     // (#1435).

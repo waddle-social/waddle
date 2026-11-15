@@ -428,6 +428,143 @@ groups:
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: Fewer than two PostgreSQL WAL PVC utilization series are available after the used/capacity join.
+    # Authority and transport invariants (#2046), promoted from
+    # ../staged/ on 2026-11-15 once every series they read was
+    # confirmed in production.
+    - name: waddle-authority-invariants
+      rules:
+        - alert: IngressEntryRefused
+          expr: sum by (authority, outcome) (increase(waddle_ingress_entry_transactions_total{outcome=~"refused|epoch_unsupported"}[15m])) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Ingress entry refusals". `epoch_unsupported` means the database's protocol epoch is above this binary's; stop the rollout. `refused` means the entry could not prove its timeouts or the epoch row.
+            summary: An ingress transaction entry could not prove its bounds or the protocol epoch.
+        - alert: TransportTaskPanickedOrAbandoned
+          expr: (sum(increase(waddle_io_pump_exits_total{cause=~"panicked|abandoned"}[15m])) or vector(0)) + (sum(increase(waddle_io_custodian_retirements_total{cause=~"panicked|abandoned"}[15m])) or vector(0)) + (sum(increase(waddle_connection_actor_retirements_total{cause=~"panic|abandoned"}[15m])) or vector(0)) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Actor or pump panic". Find the panic in the pod log; the socket and its claims are released by the custodian, so check for an orphaned binding of the affected account.
+            summary: A transport pump, its custodian or a connection actor panicked or was dropped without retiring.
+    - name: waddle-authority-custody
+      rules:
+        - alert: DestroyCompletionAge
+          expr: max(waddle_muc_destroy_completion_oldest_age_seconds) > 900
+          for: 10m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Destroy completion stuck". The gauge is the database's queue as each pod read it; use max across pods, never sum. In the week before 2026-11-15 production never read an age above 0.
+            summary: A room-destroy completion has waited more than 15 minutes.
+        - alert: ConnectionActorMailboxRejecting
+          expr: sum by (lane, reason) (increase(waddle_connection_actor_mailbox_rejected_total{reason="full"}[15m])) > 50
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Stream management custody backlog". In the week before 2026-11-15 production recorded no full-mailbox rejections.
+            summary: Connection actor mailboxes are refusing messages because they are full.
+        - alert: PendingRemoteAcceptanceBacklog
+          expr: histogram_quantile(0.99, sum by (le) (rate(waddle_muc_remote_acceptance_oldest_pending_age_seconds_bucket[10m]))) > 60
+          for: 10m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Relay uncertainty backlog". In the week before 2026-11-15 production peaked at 4.4 seconds at the 99th percentile.
+            summary: Submissions to rooms owned by another node have waited more than a minute for acceptance at the 99th percentile.
+    - name: waddle-authority-uncertainty
+      rules:
+        - alert: RemoteDispatchUncertain
+          expr: sum(increase(waddle_muc_remote_dispatch_outcomes_total{outcome=~"uncertain|timed_out"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Relay uncertainty backlog".
+            summary: Submissions to a remote room owner ended without a known outcome.
+    - name: waddle-authority-restricted-runtime
+      rules:
+        - alert: RestrictedStartupRefusing
+          expr: sum by (stage) (increase(waddle_restricted_runtime_startup_refusals_total[15m])) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Restricted attach refusal at startup". The `stage` label says where. The pod exits after flushing this count, so the series comes from pods that have since restarted.
+            summary: A server pod refused to start under the restricted database role.
+        - alert: RestrictedAttachFailing
+          expr: sum by (store) (increase(waddle_restricted_runtime_attach_failures_total[15m])) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Restricted attach refusal at startup". The `store` label names the store.
+            summary: A store failed its attachment verification under the restricted database role.
+        - alert: KeypoolActivationPendingTooLong
+          expr: sum(increase(waddle_restricted_runtime_startup_refusals_total{stage="startup"}[30m])) > 5
+          for: 30m
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Stuck keypool activation". Read `SELECT state, activation_after FROM clustering_keypool` as the schema owner; a pending generation needs the owner phase run again after its activation time. In the week before 2026-11-15 production refused 20 starts in two hours on 2026-11-14 while pods restarted in a loop, and none otherwise.
+            summary: Pods have refused to start for 30 minutes at the store attachment stage.
+    - name: waddle-authority-stream-management
+      rules:
+        - alert: SmResumeFailureRate
+          expr: (sum(increase(xmpp_sm_resume_results_total{outcome!="resumed"}[15m])) / sum(increase(xmpp_sm_resume_results_total[15m])) > 0.2) and (sum(increase(xmpp_sm_resume_results_total[15m])) > 20)
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Stream management custody backlog". Break the rate down by `outcome`; `not_found` after a rollout is expected for sessions older than the resume window. In the week before 2026-11-15 the ratio reached 1.0 only at 5 resumes per 15 minutes, below the volume floor of 20.
+            summary: More than a fifth of XEP-0198 resumption attempts are failing.
+        - alert: SmEnableFailing
+          expr: sum(increase(xmpp_sm_enable_results_total{outcome="failed"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Stream management custody backlog".
+            summary: XEP-0198 enable requests are failing to persist their session.
+    - name: waddle-authority-telemetry
+      rules:
+        - alert: AuthoritySeriesMissing
+          expr: absent(waddle_ingress_entry_transactions_total) or (group by (instance) (target_info{job="waddle-server"}) unless group by (instance) (waddle_ingress_entry_transactions_total))
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: Check the pod's version (the series exists from the release that added it), its startup log for the telemetry initialisation, and the Alloy OTLP receiver.
+            summary: A server pod exports no ingress entry series; the alerts in this file cannot evaluate for it.
+        - alert: DestroyCompletionSnapshotMissing
+          expr: absent(waddle_muc_destroy_completion_depth)
+          for: 30m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: The gauge is recorded only after a successful read. Check the destroy-completion janitor heartbeat (`waddle_janitor_sweeps_total{janitor="destroy_completion"}`) and database reads.
+            summary: No pod has a successful reading of the room-destroy completion queue.
+        - alert: OtlpPipelineSilent
+          expr: ((count(up{job="waddle-server"} == 1) or vector(0)) > 0) unless on () (count(target_info{job="waddle-server"}) > 0)
+          for: 10m
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: Check the grafana-alloy pods and their OTLP receiver and exporter logs, the OTLP credentials, and the server's OTEL_EXPORTER_OTLP_ENDPOINT. Counter increments made while the collector is unreachable are not lost in the server (cumulative counters), but gauges and histogram samples from that interval are.
+            summary: Server pods are up but no OTLP metrics arrive; every alert on an OTLP metric is blind.
     # ── Legacy-name aliases (#1330 contract phase) ──────────────────
     # Each record keeps a retired waddle_* text-family name answering
     # from its OTel successor's translated series (dots→underscores,

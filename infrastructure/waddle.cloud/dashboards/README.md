@@ -32,11 +32,14 @@ and preserves links and history.
 | `02-delivery-reliability.json` | Waddle delivery reliability | Panel-complete, including ingress authority decisions, aliases, retries, GC, latency, and unresolved effects for #1657; table metrics include `ingress_effect_receipts`. |
 | `03-clustering.json` | Waddle clustering | Panel-complete. |
 | `04-client-experience.json` | Waddle client experience | Panel-complete; all signals come from Faro in Loki. |
-| `05-calls.json` | Waddle calls | Deliberate board-wide skeleton, marked by the `skeleton` tag, until #1317, #1318, and #1319 land. |
+| `05-calls.json` | Waddle calls | Panel-complete: setup, tokens and gates, webhooks and teardown, reconciliation, SFU capacity, and media quality. |
 | `06-state-inventory.json` | Waddle server — long-lived state inventory | Migrated from `scripts/` with its existing `waddle-state-inventory` UID. |
+| `07-actors.json` | Waddle actors | Panel-complete: actor progress and lifecycle, registry mailboxes, and connection actor and transport health. |
 
 Dark panels are real queries that intentionally render no data until their
-producer lands. Only a dashboard whose own `tags` array contains `skeleton`
+producer lands or their first event occurs; the calls dashboard includes SFU
+token denials and call-control rate-limit rejections that remain empty until
+their first increment. Only a dashboard whose own `tags` array contains `skeleton`
 may have an empty `panels` array.
 
 ## Required credentials (operator setup, once)

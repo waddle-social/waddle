@@ -404,6 +404,24 @@ pub enum SmResumeOutcome {
     Internal,
 }
 
+impl SmResumeOutcome {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 12] = [
+        Self::Resumed,
+        Self::UnexpectedRequest,
+        Self::NotFound,
+        Self::OwnerUnreachable,
+        Self::ShutdownAbandoned,
+        Self::IdentityMismatch,
+        Self::ReplayGap,
+        Self::HandledTooHigh,
+        Self::PrincipalUnavailable,
+        Self::DetachedDivergence,
+        Self::Storage,
+        Self::Internal,
+    ];
+}
+
 impl sealed::Sealed for SmResumeOutcome {}
 impl MetricAttribute for SmResumeOutcome {
     fn key(&self) -> &'static str {

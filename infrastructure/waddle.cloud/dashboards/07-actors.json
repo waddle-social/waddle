@@ -1,0 +1,369 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Uniform kameo actor progress and lifecycle, registry mailboxes, and connection and transport health; failing asks are not errors in the uniform metrics, actor=\"connection\" covers binding commands only, stanza turns use waddle.connection_actor.turn.duration, and message types are available through the actor.handle_message span's message attribute in Tempo rather than metric attributes.",
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "collapsed": false,
+      "description": "Falling handled throughput or rising waits and handler occupancy indicate actors may be unable to keep up with incoming work.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": null,
+      "panels": [],
+      "title": "All actors",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Handled messages per second by actor",
+      "description": "A handled-message rate that stops despite demand indicates a stuck actor, whose waiting messages produce no queue-wait observations until they reach a handler.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor) (rate(waddle_actor_message_handle_duration_seconds_count[$__rate_interval]))",
+          "legendFormat": "{{actor}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue wait p50 and p99 by actor",
+      "description": "High queue-wait percentiles indicate delays before handling among messages that reach a handler, including sender backpressure and on_start for startup-buffered messages.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, actor) (rate(waddle_actor_message_queue_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{actor}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, actor) (rate(waddle_actor_message_queue_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{actor}} p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Handler duration p50 and p99 by actor",
+      "description": "High handler-duration percentiles indicate long actor occupancy; delegated reply work is excluded, so use xmpp.actor.mailbox.latency for room registry end-to-end latency.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, actor) (rate(waddle_actor_message_handle_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{actor}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, actor) (rate(waddle_actor_message_handle_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{actor}} p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Actor busy fraction by actor",
+      "description": "A busy fraction near 1 (100%) means that single-instance actor is saturated on that pod; actors with many instances per pod are left out, and delegated reply work is excluded.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor, instance) (rate(waddle_actor_message_handle_duration_seconds_sum{actor=~\"room_registry|user_registry|permission|db|relay\"}[$__rate_interval]))",
+          "legendFormat": "{{actor}} {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 }
+    },
+    {
+      "collapsed": false,
+      "description": "Unexpected churn, panicked stops, or dead actors indicate unstable actor lifecycles.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "id": null,
+      "panels": [],
+      "title": "Lifecycle",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Starts and stops per second by actor",
+      "description": "Sustained starts and stops beyond expected workload churn indicate unstable actors; starts follow successful on_start and stops count started actors leaving their message loop.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor) (rate(waddle_actor_started_total[$__rate_interval]))",
+          "legendFormat": "{{actor}} started",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (actor) (rate(waddle_actor_stopped_total[$__rate_interval]))",
+          "legendFormat": "{{actor}} stopped",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Panicked stops by actor (interval increase)",
+      "description": "Any panicked stops in the rate interval indicate a lifecycle hook or handler panicked or returned a fatal error.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor) (increase(waddle_actor_stopped_total{reason=\"panicked\"}[$__rate_interval]))",
+          "legendFormat": "{{actor}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Live actors estimate by actor",
+      "description": "An unexplained rise or fall can indicate retained actors or actor loss, but this starts-minus-stops estimate resets per pod restart and may be absent until a stop series exists.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor) (waddle_actor_started_total) - (sum by (actor) (waddle_actor_stopped_total) or 0 * sum by (actor) (waddle_actor_started_total))",
+          "legendFormat": "{{actor}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Dead actors detected by actor and reason",
+      "description": "A nonzero detection rate means a registry found dead actors and removed them without respawning, so callers can fail.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor, reason) (rate(xmpp_actor_dead_detected_total[$__rate_interval]))",
+          "legendFormat": "{{actor}} {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 }
+    },
+    {
+      "type": "timeseries",
+      "title": "User actors reaped",
+      "description": "An unexpected reaping rate relative to session churn can indicate excessive user actor turnover, while normal reaping removes empty user actors.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(xmpp_user_actor_reaped_total[$__rate_interval]))",
+          "legendFormat": "reaped",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 }
+    },
+    {
+      "collapsed": false,
+      "description": "Growing registry mailbox depth, request latency, drops, or timeouts indicate backpressure or stalled request completion.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "id": null,
+      "panels": [],
+      "title": "Registry mailboxes",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Mailbox depth by actor, class and capacity",
+      "description": "Sustained mailbox depth near max_capacity indicates registry backpressure and a risk of dropped requests.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max by (actor, class, max_capacity) (xmpp_actor_mailbox_depth)",
+          "legendFormat": "{{actor}} {{class}} capacity={{max_capacity}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Mailbox request latency p50 and p99",
+      "description": "High end-to-end request latency percentiles indicate slow registry replies, including delegated reply work excluded from uniform handler duration.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, actor, operation, class) (rate(xmpp_actor_mailbox_latency_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{actor}} {{operation}} {{class}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, actor, operation, class) (rate(xmpp_actor_mailbox_latency_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{actor}} {{operation}} {{class}} p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Dropped requests by actor, operation, class and reason",
+      "description": "A rising dropped-request rate indicates registry requests lost to backpressure or actor shutdown for the shown reasons.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor, operation, class, reason) (rate(xmpp_actor_requests_dropped_total[$__rate_interval]))",
+          "legendFormat": "{{actor}} {{operation}} {{class}} {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request timeouts by actor, operation and class",
+      "description": "A rising timeout rate indicates registry requests exceeded their mailbox or reply deadline.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (actor, operation, class) (rate(xmpp_actor_requests_timeout_total[$__rate_interval]))",
+          "legendFormat": "{{actor}} {{operation}} {{class}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 }
+    },
+    {
+      "collapsed": false,
+      "description": "Long connection turns, mailbox rejections, or unexpected retirements and pump exits indicate impaired connection progress.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "id": null,
+      "panels": [],
+      "title": "Connection actor and transport",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection turn duration p50 and p99 by event",
+      "description": "High turn-duration percentiles indicate slow connection stanza turns that are not covered by the uniform actor=\"connection\" binding-command metrics.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, event) (rate(waddle_connection_actor_turn_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{event}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, event) (rate(waddle_connection_actor_turn_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{event}} p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection mailbox rejections by lane and reason",
+      "description": "A rising rejection rate indicates connection mailbox admission is failing for the shown lane and reason.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (lane, reason) (rate(waddle_connection_actor_mailbox_rejected_total[$__rate_interval]))",
+          "legendFormat": "{{lane}} {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection actor retirements by cause",
+      "description": "Unexpected retirement causes or a surge beyond normal connection churn indicate connection actors are losing progress or shutting down abnormally.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (cause) (rate(waddle_connection_actor_retirements_total[$__rate_interval]))",
+          "legendFormat": "{{cause}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 60 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Transport pump exits by pump and cause",
+      "description": "Unexpected pump exit causes or a surge beyond normal disconnects indicate transport read or write failures.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (pump, cause) (rate(waddle_io_pump_exits_total[$__rate_interval]))",
+          "legendFormat": "{{pump}} {{cause}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 60 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Transport custodian retirements by cause",
+      "description": "Unexpected custodian retirement causes or a surge beyond normal disconnects indicate sockets and their pumps are being retired abnormally.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (cause) (rate(waddle_io_custodian_retirements_total[$__rate_interval]))",
+          "legendFormat": "{{cause}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 60 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["waddle", "actors"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "regex": "/-prom$/",
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-prom", "value": "grafanacloud-prom" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Waddle actors",
+  "uid": "waddle-actors",
+  "version": 1
+}
