@@ -517,7 +517,8 @@ watch(isPreparingSend, (preparing) => {
 
 const cls = {
   // The composer row under the timeline (Room / DM / Mobile Room boards).
-  root: css({ position: "relative", flex: "none", px: "6", _narrow: { px: "3", bg: "bg.rail" } }),
+  // A size container so the card fits narrow panels (call dock, thread) on wide screens.
+  root: css({ position: "relative", flex: "none", px: "6", containerType: "inline-size", _narrow: { px: "3", bg: "bg.rail" } }),
   rootBottom: css({ pb: "5", _narrow: { pt: "2", pb: "max(12px, env(safe-area-inset-bottom))", borderTop: "1px solid {colors.border.soft}" } }),
   rootTop: css({ pt: "4", _narrow: { pt: "2", pb: "2", borderBottom: "1px solid {colors.border.soft}" } }),
   aux: css({ display: "flex", flexDirection: "column", gap: "2", pb: "2" }),
@@ -553,10 +554,12 @@ const cls = {
   // The field: formatting bar and attachments wrap onto their own rows above the editor.
   card: css({ flexWrap: "wrap", "& button:disabled": { opacity: 0.4, cursor: "default" } }),
   cardDisabled: css({ opacity: 0.7 }),
-  editor: css({ flex: "1 1 0", minWidth: 0, alignSelf: "center" }),
+  // Too narrow for editor and tools on one row: the editor takes its own row above them.
+  editor: css({ flex: "1 1 0", minWidth: 0, alignSelf: "center", "@container (max-width: 340px)": { order: -2, flexBasis: "100%" } }),
   add: css({ order: -1, "& svg": { transition: "rotate {durations.base} {easings.spring.bouncy}" }, _expanded: { bg: "state.selected", color: "fg", "& svg": { rotate: "45deg" } } }),
-  // Phones keep +, emoji and send (Mobile Room board); @, / and the selection toolbar cover the rest.
-  wide: css({ _narrow: { display: "none" } }),
+  // Phones and narrow panels keep +, emoji and send (Mobile Room board); @, / and the selection toolbar cover the rest.
+  wide: css({ _narrow: { display: "none" }, "@container (max-width: 480px)": { display: "none" } }),
+  send: css({ "@container (max-width: 340px)": { ml: "auto" } }),
   tool: css({ _expanded: { bg: "state.selected", color: "fg" } }),
   // Send sleeps until there is something to send.
   sendIdle: css({ bg: "transparent", bgImage: "none", boxShadow: "none", color: "fg.soft", _hover: { bg: "state.hover", bgImage: "none", color: "fg.muted" } }),
@@ -826,7 +829,7 @@ const cls = {
         <AppTooltip :label="isSendBusy ? 'Sending message' : 'Send now'">
           <button
             type="button"
-            :class="[iconbtn({ variant: 'send' }), !canSend && cls.sendIdle]"
+            :class="[iconbtn({ variant: 'send' }), cls.send, !canSend && cls.sendIdle]"
             :data-armed="canSend || undefined"
             :disabled="!canSend"
             :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
