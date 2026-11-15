@@ -242,6 +242,8 @@ private fun ownBubbleColors(colors: WaddleColors): WaddleColors {
         goldText = fg,
         goldSubtle = fg.copy(alpha = BUBBLE_WASH_ALPHA),
         surfaceCode = fg.copy(alpha = BUBBLE_WASH_ALPHA),
+        codeForeground = fg,
+        codeBorder = muted,
         quoteBorder = muted,
     )
 }
