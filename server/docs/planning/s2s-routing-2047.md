@@ -359,7 +359,13 @@ alive in `s2s_iq_correlation_owners`. An expired row is pruned only when
 its replica has not recorded that it is alive for ten minutes, so pruning
 never takes a request from a replica that would still answer it; a
 replica whose database writes fail for that long may find its expired
-requests pruned and then releases them without an answer.
+requests pruned and then releases them without an answer. A live replica
+also removes its own rows that expired more than ten minutes ago: a row
+whose registration committed although the database reported a failure is
+held by no reservation in memory, so nothing else would remove it.
+Liveness is judged by the same wall-clock milliseconds, so a replica whose
+clock lags the pruning replica's by more than ten minutes is taken for
+stopped, and its expired requests are pruned before it answers them.
 
 **Inbound requests.** The table's `inbound` direction holds a remote
 entity's request to a local entity, completed by the local response. No

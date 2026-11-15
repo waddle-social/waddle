@@ -6,9 +6,10 @@
 //! without a response is answered once at expiry; the replica that sent a
 //! request another replica completed releases it at its next sweep; a
 //! response carrying an address outside the identity profile answers its
-//! request with an error at once; only the requests of a replica that
-//! stopped recording that it is alive are pruned; and a key too long for
-//! the table is refused.
+//! request with an error at once; the expired requests of a replica that
+//! stopped recording that it is alive are pruned, and a live replica prunes
+//! its own requests long past expiry; and a key too long for the table is
+//! refused.
 //!
 //! Two correlation stores over one database stand for two replicas of one
 //! deployment. The routed cases use two in-process deployments on loopback
@@ -241,6 +242,38 @@ async fn requests_left_by_a_stopped_replica_are_pruned() {
         Ok(true)
     );
     assert_eq!(first.expire(&key("kept"), NOW + 3_000).await, Ok(true));
+}
+
+#[tokio::test]
+async fn a_live_replica_prunes_its_own_requests_long_past_expiry() {
+    let (first, second) = replicas("correlation-prune-own").await;
+    let (alive, other) = ("alive", "other");
+    first
+        .register(&owned("orphaned", NOW + 1_000, alive), NOW)
+        .await
+        .expect("registered");
+    first
+        .register(&owned("recent", NOW + 5_000, alive), NOW)
+        .await
+        .expect("registered");
+    first
+        .register(&owned("theirs", NOW + 1_000, other), NOW)
+        .await
+        .expect("registered");
+    // Only this replica's request that expired at or before the cut-off is
+    // removed; another replica's rows are left to that replica.
+    assert_eq!(
+        first
+            .prune_own(&CorrelationOwner::named(alive), NOW + 2_000)
+            .await,
+        Ok(1)
+    );
+    assert_eq!(
+        second.expire(&key("orphaned"), NOW + 6_000).await,
+        Ok(false)
+    );
+    assert_eq!(second.expire(&key("recent"), NOW + 6_000).await, Ok(true));
+    assert_eq!(second.expire(&key("theirs"), NOW + 6_000).await, Ok(true));
 }
 
 #[tokio::test]

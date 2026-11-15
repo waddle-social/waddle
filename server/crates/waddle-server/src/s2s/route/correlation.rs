@@ -13,8 +13,10 @@
 //! Each row names the replica that registered it ([`CorrelationOwner`]).
 //! That replica reads its own rows to learn which of its requests another
 //! replica completed ([`IqCorrelations::outstanding`]), and records that it
-//! is alive ([`IqCorrelations::heartbeat`]); only the rows of a replica that
-//! has stopped recording are pruned.
+//! is alive ([`IqCorrelations::heartbeat`]). The expired rows of a replica
+//! that has stopped recording are pruned, and a live replica prunes its own
+//! rows long past expiry that it no longer holds in memory
+//! ([`IqCorrelations::prune_own`]).
 
 use async_trait::async_trait;
 use jid::Jid;
@@ -200,6 +202,17 @@ pub trait IqCorrelations: Send + Sync {
     /// stopped replica left, and forget such owners. A live owner answers
     /// its own expired requests. Returns how many requests were removed.
     async fn prune(&self, before_ms: i64) -> Result<u64, CorrelationError>;
+
+    /// Remove every request `owner` registered that expired at or before
+    /// `before_ms`. A live owner answers its requests at expiry from what it
+    /// holds in memory; a row it holds nothing for, such as one whose
+    /// registration committed although the store reported a failure, is
+    /// removed here instead. Returns how many requests were removed.
+    async fn prune_own(
+        &self,
+        owner: &CorrelationOwner,
+        before_ms: i64,
+    ) -> Result<u64, CorrelationError>;
 }
 
 /// The correlation table in the deployment's global database
@@ -407,5 +420,17 @@ impl IqCorrelations for SqlIqCorrelations {
         )
         .await?;
         Ok(removed)
+    }
+
+    async fn prune_own(
+        &self,
+        owner: &CorrelationOwner,
+        before_ms: i64,
+    ) -> Result<u64, CorrelationError> {
+        self.execute(
+            "DELETE FROM s2s_iq_correlations WHERE owner_id = ? AND expires_at_ms <= ?",
+            crate::db_params![owner.as_str(), before_ms],
+        )
+        .await
     }
 }

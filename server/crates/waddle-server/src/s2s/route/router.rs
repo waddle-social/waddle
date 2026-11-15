@@ -554,11 +554,6 @@ impl Inner {
         })
     }
 
-    /// Forget a request reserved on this replica.
-    fn release(&self, key: &CorrelationKey) {
-        self.release_if(key, None);
-    }
-
     /// Forget the request reserved under `key`, if it is still the
     /// reservation `generation` names (any reservation when `None`).
     fn release_if(&self, key: &CorrelationKey, generation: Option<u64>) {
@@ -916,13 +911,24 @@ impl Inner {
         let router = Arc::clone(self);
         self.tasks.spawn(async move {
             let _permit = permit;
+            // The reservation the response may complete, taken before the
+            // table is changed: once the row is removed, its key may be
+            // reserved again for a new request that this response must not
+            // release.
+            let generation = router
+                .pending()
+                .requests
+                .get(&key)
+                .map(|reserved| reserved.generation);
             match router
                 .correlations
                 .complete(&key, payload_namespace.as_deref(), now_ms())
                 .await
             {
                 Ok(true) => {
-                    router.release(&key);
+                    if let Some(generation) = generation {
+                        router.release_if(&key, Some(generation));
+                    }
                     router.deliver_local(&requester, stanza, origin).await;
                 }
                 Ok(false) => tracing::debug!("dropping an uncorrelated s2s response"),
@@ -1060,6 +1066,14 @@ async fn sweep(router: Arc<Inner>) {
             let before = now_ms().saturating_sub(duration_ms(router.limits.prune_after));
             if router.correlations.prune(before).await.is_err() {
                 tracing::warn!("pruning expired s2s correlations failed");
+            }
+            if router
+                .correlations
+                .prune_own(&router.owner, before)
+                .await
+                .is_err()
+            {
+                tracing::warn!("pruning this replica's expired s2s correlations failed");
             }
         }
     }
