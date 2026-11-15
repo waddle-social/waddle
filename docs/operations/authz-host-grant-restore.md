@@ -139,8 +139,8 @@ an enrollment), messages to that scope's rooms are refused with
 or not the server's fence passed: the fence reads those rooms before it
 decides anything else. Until a server's first fence pass has read them it
 asks SpiceDB about the room of each such message (within half a second); if
-SpiceDB does not answer, the message is served as an unmanaged room. Other
-rooms are unaffected.
+SpiceDB does not answer, the message is served as an unmanaged room, and the
+server stops asking for a minute. Other rooms are unaffected.
 
 ### While a server runs
 
