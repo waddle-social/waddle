@@ -622,7 +622,7 @@ impl UserRegistryActor {
             let _ = self.release_user_claim(bare_jid, &entry.claim).await;
         }
         self.poisoned_users.insert(bare_jid.clone());
-        metrics::record_actor_restart("user_actor", "detected_dead_actor_fail_fast");
+        metrics::record_actor_dead_detected("user_actor", "detected_dead_actor_fail_fast");
         UserRegistryError::UserActorStateLost(bare_jid.clone())
     }
 

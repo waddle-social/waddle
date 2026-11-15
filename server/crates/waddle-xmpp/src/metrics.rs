@@ -208,12 +208,13 @@ pub fn stanza_handler_timeouts() -> Counter<u64> {
         .build()
 }
 
-/// Counter for actor restarts.
-pub fn actor_restarts() -> Counter<u64> {
+/// Counter for actors a registry found dead. The registry drops its
+/// reference and fails the caller; nothing is respawned here.
+pub fn actor_dead_detected() -> Counter<u64> {
     meter()
-        .u64_counter("xmpp.actor.restarts")
-        .with_description("Actor restarts performed by runtime supervision policy")
-        .with_unit("{restart}")
+        .u64_counter("xmpp.actor.dead_detected")
+        .with_description("Actors a registry found dead and removed without respawning")
+        .with_unit("{actor}")
         .build()
 }
 
@@ -351,9 +352,9 @@ pub fn record_stanza_handler_timeout(stanza_kind: &str, payload_ns: &str) {
     );
 }
 
-/// Record a supervised actor restart.
-pub fn record_actor_restart(actor: &str, reason: &str) {
-    actor_restarts().add(
+/// Record that a registry found one of its actors dead and removed it.
+pub fn record_actor_dead_detected(actor: &str, reason: &str) {
+    actor_dead_detected().add(
         1,
         &[
             KeyValue::new("actor", actor.to_string()),
@@ -681,7 +682,7 @@ mod tests {
         record_actor_request_dropped("user", "send", "request", "mailbox_full");
         record_actor_request_timeout("user", "send", "request");
         record_stanza_handler_timeout("message", "jabber:client");
-        record_actor_restart("user", "panic");
+        record_actor_dead_detected("user", "panic");
         record_extension_enrichment(1.0, 1);
 
         const EXPECTED_UNITS: [(&str, &str); 16] = [
@@ -698,7 +699,7 @@ mod tests {
             ("xmpp.actor.requests.dropped", "{request}"),
             ("xmpp.actor.requests.timeout", "{request}"),
             ("xmpp.stanza.handler.timeout", "{stanza}"),
-            ("xmpp.actor.restarts", "{restart}"),
+            ("xmpp.actor.dead_detected", "{actor}"),
             ("xmpp.extensions.enrichment.latency", "ms"),
             ("xmpp.extensions.embeds.added", "{embed}"),
         ];
