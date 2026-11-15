@@ -27,7 +27,7 @@ mod host_grant_support;
 mod ingress_support;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use host_grant_support::{bare, served, GrantFixture, OWNER, SENDER};
 use ingress_support::IsolatedPostgresDatabase;
@@ -37,7 +37,7 @@ use kameo::error::SendError;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::permissions::host_grant::{
     EnrolledScopes, Enrollment, HostGrantAction, HostGrantAttachment, HostGrantError,
-    HostGrantGate, HostGrantStore, RoomBinding, RoomGate,
+    HostGrantGate, HostGrantStore, RoomBinding, RoomGate, ENROLLED_SET_STALE_AFTER,
 };
 use waddle_server::permissions::{
     CheckPermission, ListRelations, ListSubjects, Object, ObjectType, Permission, PermissionActor,
@@ -342,7 +342,10 @@ async fn the_set_ages_while_refreshes_fail_and_a_reload_resets_it() {
     scopes.refresh().await.expect("refresh");
     let age = scopes.age().expect("a loaded set has an age");
     assert!(age < LOAD, "a set loaded just now is {age:?} old");
-    assert!(!scopes.stale(), "a set loaded just now is stale");
+    assert!(
+        !scopes.older_than(ENROLLED_SET_STALE_AFTER),
+        "a set loaded just now is past the warning bound"
+    );
 
     // The lifecycle ledger cannot be read: the refresh fails, the set
     // keeps aging from its last load and is past any bound it has crossed.
@@ -357,7 +360,10 @@ async fn the_set_ages_while_refreshes_fail_and_a_reload_resets_it() {
     assert!(scopes.refresh().await.is_err());
     assert!(scopes.age().expect("age") >= Duration::from_millis(50));
     assert!(scopes.older_than(Duration::from_millis(10)));
-    assert!(!scopes.stale(), "the default bound is not yet reached");
+    assert!(
+        !scopes.older_than(ENROLLED_SET_STALE_AFTER),
+        "the warning bound is not yet reached"
+    );
 
     // A successful reload makes the set fresh again.
     fixture
@@ -369,6 +375,111 @@ async fn the_set_ages_while_refreshes_fail_and_a_reload_resets_it() {
         .await;
     scopes.refresh().await.expect("refresh");
     assert!(!scopes.older_than(Duration::from_millis(10)));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_load_is_dated_from_its_start_and_only_a_successful_one_moves_it() {
+    let Some(fixture) = GrantFixture::active("hg_set_load_start").await else {
+        return;
+    };
+    // Built outside the runtime: only this case's refreshes load it.
+    let scopes = never_loaded(&fixture.store);
+    assert_eq!(scopes.load_started(), None);
+    assert_eq!(scopes.age(), None);
+
+    let before = SystemTime::now();
+    scopes.refresh().await.expect("first load");
+    let after = SystemTime::now();
+    let first = scopes.load_started().expect("a loaded set has a start");
+    assert!(before <= first && first <= after, "{first:?}");
+
+    // A session holds the lifecycle ledger, so the next load waits on it
+    // after it has started. The set it installs is dated from that start,
+    // not from when the wait ended.
+    const HOLD: Duration = Duration::from_millis(600);
+    let blocker = sqlx::PgPool::connect(fixture.ingress.db.database_url())
+        .await
+        .expect("blocking connection");
+    let mut held = blocker.begin().await.expect("blocking transaction");
+    sqlx::query("LOCK TABLE host_grant_scope_lifecycles IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .expect("hold the lifecycle ledger");
+    let refreshing = {
+        let scopes = scopes.clone();
+        tokio::spawn(async move {
+            let begun = SystemTime::now();
+            scopes.refresh().await.map(|()| begun)
+        })
+    };
+    tokio::time::sleep(HOLD).await;
+    assert!(
+        !refreshing.is_finished(),
+        "the load did not wait on the lifecycle ledger"
+    );
+    let released = SystemTime::now();
+    held.rollback().await.expect("release the lifecycle ledger");
+    let begun = refreshing
+        .await
+        .expect("refresh task")
+        .expect("a load after the wait");
+    let second = scopes.load_started().expect("start of the second load");
+    assert!(second > first);
+    assert!(begun <= second, "{begun:?} {second:?}");
+    assert!(
+        second + HOLD / 2 <= released,
+        "the load is dated from when its wait ended: {second:?} {released:?}"
+    );
+    assert!(scopes.age().expect("age") >= HOLD / 2);
+    blocker.close().await;
+
+    // A failed refresh keeps the set and its start.
+    fixture
+        .ingress
+        .execute(
+            "ALTER TABLE host_grant_scope_lifecycles RENAME TO host_grant_scope_lifecycles_hidden",
+            (),
+        )
+        .await;
+    assert!(scopes.refresh().await.is_err());
+    assert_eq!(scopes.load_started(), Some(second));
+    fixture
+        .ingress
+        .execute(
+            "ALTER TABLE host_grant_scope_lifecycles_hidden RENAME TO host_grant_scope_lifecycles",
+            (),
+        )
+        .await;
+
+    // So does a refresh that finds the relations gone after a load: it is
+    // not a fresh load of an empty schema.
+    fixture
+        .ingress
+        .execute(
+            "ALTER TABLE host_grant_rooms RENAME TO host_grant_rooms_hidden",
+            (),
+        )
+        .await;
+    assert!(matches!(
+        scopes.refresh().await,
+        Err(HostGrantError::RelationsMissing)
+    ));
+    assert_eq!(scopes.load_started(), Some(second));
+    assert_eq!(
+        scopes.channel(&fixture.scope.channel_id),
+        Enrollment::Enrolled
+    );
+    fixture
+        .ingress
+        .execute(
+            "ALTER TABLE host_grant_rooms_hidden RENAME TO host_grant_rooms",
+            (),
+        )
+        .await;
+
+    scopes.refresh().await.expect("refresh");
+    assert!(scopes.load_started().expect("start of the third load") > second);
     fixture.close().await;
 }
 
