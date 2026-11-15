@@ -40,6 +40,9 @@ const TINTS = ["1", "2", "3", "4", "5", "6"] as const;
 const messageSize = css({ width: "msgAvatar", height: "msgAvatar" });
 const huddleRing = css({ boxShadow: "0 0 0 2px {colors.live}" });
 const offline = css({ "& > img, & > [data-part=fallback]": { opacity: 0.55, filter: "grayscale(0.4)" } });
+// The image is never lazy-loaded: Ark keeps it `hidden` until it loads, and a
+// hidden lazy image never loads, so a picture resolved after mount would stay
+// on initials.
 const imageClass = css({ width: "100%", height: "100%", borderRadius: "inherit", objectFit: "cover", bg: "surface.2" });
 const fallbackClass = css({ userSelect: "none", lineHeight: 1 });
 const callBadge = css({
@@ -128,7 +131,7 @@ const tooltipLabel = computed(() => {
 <template>
   <AppTooltip :label="tooltipLabel">
     <Avatar.Root :class="rootClass" :data-speaking="speaking ? 'true' : undefined">
-      <Avatar.Image v-if="src" :src="src" :alt="name" :class="imageClass" loading="lazy" />
+      <Avatar.Image v-if="src" :src="src" :alt="name" :class="imageClass" />
       <Avatar.Fallback :class="fallbackClass">{{ initials }}</Avatar.Fallback>
       <span
         v-if="presenceState"

@@ -92,6 +92,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology, supp
     addPubsubEventHandler: noop,
     addAvatarChangedHandler: () => noop,
     addOccupantRealJidHandler: () => noop,
+    addOccupantPresenceHandler: () => noop,
     addOwnProfilePublishedHandler: () => noop,
     addOwnOccupantNickHandler: () => noop,
     fetchUserAvatar: async () => null,

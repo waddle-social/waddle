@@ -95,6 +95,7 @@ import type {
   MamPageParam,
   MamThreadPageParam,
   MessageSearchResult,
+  OccupantPresence,
   PresenceUpdateEvent,
   ReactionEvent,
   RoomActivityEvent,
@@ -2260,6 +2261,11 @@ export class BrowserXmppClient {
    */
   addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null, isBot?: boolean) => void): () => void {
     return this.events.on("occupantRealJid", handler);
+  }
+
+  /** Occupant shows across every joined room, keyed by disclosed real bare JID. */
+  addOccupantPresenceHandler(handler: (byJid: Record<string, OccupantPresence[]>) => void): () => void {
+    return this.events.on("occupantPresence", handler);
   }
 
   /** Our actual occupant nick per room, from XEP-0045 self-presence (may differ from the requested one). */

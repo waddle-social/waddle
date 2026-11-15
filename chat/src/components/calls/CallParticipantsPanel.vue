@@ -116,7 +116,7 @@ const footerClass = css({ flex: "none", borderTop: "1px solid {colors.border.sof
         :class="rowClass"
         :data-speaking="row.speaking || undefined"
       >
-        <UserAvatar :name="row.label" :jid="avatarJid(row.identity)" size="sm" :speaking="row.speaking" />
+        <UserAvatar :name="row.label" :jid="avatarJid(row.identity)" size="sm" :speaking="row.speaking" :in-call="false" />
         <span :class="nameCellClass">
           <span :class="nameClass">{{ row.label }}</span>
           <span v-if="row.speaking" :class="liveDot()" aria-label="Speaking" />

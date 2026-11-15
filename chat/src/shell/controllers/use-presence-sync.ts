@@ -4,7 +4,8 @@ import type { useDirectMessageConversations } from "@/dms/conversations";
 import type { useXmppRosterContacts } from "@/contacts/roster";
 import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
-import { $ownNotificationsSuppressed, $presenceMode, resetPresenceMode } from "@/presence/presence-store";
+import { resetContactPresence, setContactPresence, setOccupantPresence, setSelfPresenceJid } from "@/presence/live-presence";
+import { $ownNotificationsSuppressed, $presenceMode, resetPresenceMode, setSelfBroadcastShow } from "@/presence/presence-store";
 import { activityOverlayUpdate } from "@/presence/in-call-activity";
 import {
   presenceModeFromWire,
@@ -43,6 +44,13 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
   // Aggregates each contact's resources into one rendered Show
   // (most-available-wins, ADR-010); inbound presence is per-resource.
   const presenceRegistry = new PresenceRegistry();
+  // Every avatar reads presence by JID from the live store; the registry's
+  // clears below reset its contact half, and the own dot follows this JID.
+  const clearContactPresence = (): void => {
+    presenceRegistry.clear();
+    resetContactPresence();
+  };
+  watch(() => session.value?.jid, setSelfPresenceJid, { immediate: true });
   // This device's own mode drives the Show we broadcast and the local
   // DND checks; the picker writes it via the presence store.
   const presenceMode = useStore($presenceMode);
@@ -60,6 +68,8 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
     now: () => Date.now(),
     getMode: () => presenceMode.value,
     onBroadcast: (presence) => {
+      // Own avatars and the account footer show this Show, auto-away included.
+      setSelfBroadcastShow(presence.show);
       xmppClient.value?.setPresence(presence.show, presence.idleSince).catch(() => undefined);
     },
     // In-call pauses auto-away (ADR-010): never broadcast "Away + in a call".
@@ -148,7 +158,8 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
    * and drop every contact's in-call overlay so it can't bleed into the
    * next account in this tab. */
   function onClientCleared(): void {
-    presenceRegistry.clear();
+    clearContactPresence();
+    setOccupantPresence({});
     resetInCallOverlays();
   }
 
@@ -165,6 +176,7 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
     const renderedIdle = presenceRegistry.renderedIdleFor(event.bareJid);
     dmConversations.updatePresence({ ...event, show: rendered, idleSince: renderedIdle });
     rosterContacts.updatePresence(event.bareJid, rendered);
+    setContactPresence(event.bareJid, rendered);
     // Ghost-call cleanup (ADR-010): a contact whose last resource went
     // unavailable can't still be in a call — clear any overlay a crashed
     // client left published, even if its XEP-0108 retract never arrived.
@@ -227,7 +239,7 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
       // were gone; drop the stale per-resource map so the fresh presence
       // probes repopulate it cleanly. A resumed session is gap-free, so
       // its registry is preserved.
-      presenceRegistry.clear();
+      clearContactPresence();
       // Same gap applies to the in-call overlay: a fresh session may have
       // missed contacts' activity retracts, so drop it and let live presence
       // + PEP repopulate. A resumed session is gap-free, so it's preserved.
@@ -247,7 +259,7 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
     // (which would clear the synced preference for every device).
     statusPreferenceCoordinator.suspend();
     resetPresenceMode();
-    presenceRegistry.clear();
+    clearContactPresence();
     // Graceful disconnect (ADR-010 ghost cleanup): if a call is live the wire
     // holds the in-call overlay, so restore the user's manual activity (or clear
     // it) before the stream closes — no stale "in a call" survives on the

@@ -1,9 +1,11 @@
 import { computed, type ComputedRef, type Ref } from "vue";
+import { useStore } from "@nanostores/vue";
 import type { MemberSummary, RoomBotSummary } from "@/lib/chat-types";
 import type { DmConversation, OccupantPresence, RoomPresence, RosterContact } from "@/lib/xmpp/types";
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { isBotJid } from "@/lib/avatars/author-jid";
+import { $livePresence, liveShow, presenceFromShow, type LivePresence } from "@/presence/live-presence";
 
 /**
  * People rail model: the one place that turns the controller's disjoint
@@ -74,6 +76,8 @@ export interface PeopleRailSources {
   contacts: readonly RosterContact[];
   conversations: readonly DmConversation[];
   peerInCall: (jid: string) => boolean;
+  /** Every person's presence by bare JID (`$livePresence`); it wins over the lists above. */
+  livePresence?: LivePresence;
 }
 
 type PresenceShow = DmConversation["presenceShow"];
@@ -86,22 +90,6 @@ const STATUS_ORDER: Record<PeopleRailStatus, number> = {
   dnd: 4,
   offline: 5,
 };
-
-export function presenceFromShow(show: PresenceShow): OccupantPresence | undefined {
-  switch (show) {
-    case "available":
-      return "online";
-    case "away":
-    case "xa":
-      return "away";
-    case "dnd":
-      return "dnd";
-    case "offline":
-      return "offline";
-    default:
-      return undefined;
-  }
-}
 
 /**
  * The one rule for "around": available or do-not-disturb. Away, extended
@@ -136,6 +124,7 @@ export interface KnownPeopleGroups {
 export function splitKnownPeople(
   contacts: readonly RosterContact[],
   conversations: readonly DmConversation[],
+  live: LivePresence = {},
 ): KnownPeopleGroups {
   const contactByJid = new Map<string, RosterContact>();
   for (const contact of contacts) contactByJid.set(bare(contact.jid), contact);
@@ -150,7 +139,7 @@ export function splitKnownPeople(
     if (!jid || isBotJid(jid)) continue;
     const contact = contactByJid.get(jid);
     const conversation = conversationByJid.get(jid);
-    const presenceShow = conversation?.presenceShow ?? contact?.presenceShow;
+    const presenceShow = liveShow(live, jid) ?? conversation?.presenceShow ?? contact?.presenceShow;
     const person: KnownPerson = {
       jid,
       name: contact?.name || conversation?.peerUsername || contact?.username || jid,
@@ -241,10 +230,9 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
   }
 
   function knownPresence(jid: string): OccupantPresence | undefined {
-    const conversation = conversationByJid.get(jid);
-    const fromDm = presenceFromShow(conversation?.presenceShow);
-    if (fromDm) return fromDm;
-    return presenceFromShow(contactByJid.get(jid)?.presenceShow);
+    return presenceFromShow(liveShow(sources.livePresence ?? {}, jid))
+      ?? presenceFromShow(conversationByJid.get(jid)?.presenceShow)
+      ?? presenceFromShow(contactByJid.get(jid)?.presenceShow);
   }
 
   function knownName(jid: string, fallback: string): string {
@@ -300,7 +288,7 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
       huddle.push({
         jid,
         name: knownName(jid, nick),
-        presence: (isActiveRoom ? sources.roomPresence[nick] : undefined) ?? knownPresence(jid) ?? "online",
+        presence: knownPresence(jid) ?? (isActiveRoom ? sources.roomPresence[nick] : undefined) ?? "online",
         status,
         statusText: statusText(status),
         inCall: true,
@@ -333,11 +321,12 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
       const jid = bare(realJid);
       if (occupantPresence === "offline" && !isBotJid(jid)) continue;
       if (!claim(jid, nick)) continue;
-      const status = statusFromPresence(occupantPresence);
+      const presence = knownPresence(jid) ?? occupantPresence;
+      const status = statusFromPresence(presence);
       room.push({
         jid,
         name: knownName(jid, nick),
-        presence: occupantPresence,
+        presence,
         status,
         statusText: statusText(status),
         inCall: sources.peerInCall(jid),
@@ -394,6 +383,8 @@ export interface MemberCardSources {
   huddleJids: ReadonlySet<string>;
   speakingJids: ReadonlySet<string>;
   peerInCall: (jid: string) => boolean;
+  /** Every person's presence by bare JID (`$livePresence`); it wins over the lists above. */
+  livePresence?: LivePresence;
 }
 
 /**
@@ -453,7 +444,8 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
       if (!jid || seen.has(jid)) continue;
       seen.add(jid);
       const nick = nickByJid.get(jid);
-      const presence = (nick ? sources.roomPresence[nick] : undefined)
+      const presence = presenceFromShow(liveShow(sources.livePresence ?? {}, jid))
+        ?? (nick ? sources.roomPresence[nick] : undefined)
         ?? presenceFromShow(conversationByJid.get(jid)?.presenceShow)
         ?? presenceFromShow(contactByJid.get(jid)?.presenceShow);
       cards.push(card(jid, member.username || nick || jid, presence, member.affiliation));
@@ -465,7 +457,9 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
       seen.add(jid);
       const contact = contactByJid.get(jid);
       const conversation = conversationByJid.get(jid);
-      const presence = presenceFromShow(conversation?.presenceShow) ?? presenceFromShow(contact?.presenceShow);
+      const presence = presenceFromShow(liveShow(sources.livePresence ?? {}, jid))
+        ?? presenceFromShow(conversation?.presenceShow)
+        ?? presenceFromShow(contact?.presenceShow);
       cards.push(card(jid, contact?.name || conversation?.peerUsername || contact?.username || jid, presence, null));
     }
   }
@@ -492,6 +486,7 @@ export interface PeopleRailDeps {
 
 /** Reactive wrapper: recomputes the groups whenever any source changes. */
 export function usePeopleRail(deps: PeopleRailDeps): ComputedRef<PeopleRailGroups> {
+  const livePresence = useStore($livePresence);
   return computed(() =>
     buildPeopleRail({
       selfJid: deps.selfJid.value,
@@ -508,6 +503,7 @@ export function usePeopleRail(deps: PeopleRailDeps): ComputedRef<PeopleRailGroup
       contacts: deps.contacts.value,
       conversations: deps.conversations.value,
       peerInCall: deps.peerInCall,
+      livePresence: livePresence.value,
     }),
   );
 }

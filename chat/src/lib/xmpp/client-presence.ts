@@ -11,7 +11,7 @@
 import { bareJidKey, barePeerJid, fullJidIdentityKey, resourceOf } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { BOT_HAT_URI, parseMucAffiliation, parseMucRole } from "./types";
-import type { RoomAuthority, RoomHats, RoomPresence } from "./types";
+import type { OccupantPresence, RoomAuthority, RoomHats, RoomPresence } from "./types";
 import {
   mapPresenceIdleSince,
   mapPresenceShow,
@@ -146,6 +146,7 @@ export class PresenceManager {
     for (const map of [this.roomHatsByRoom, this.roomAuthorityByRoom, this.roomPresenceByRoom, this.roomMemberJidsByRoom]) {
       for (const room of [...map.keys()]) if (bareJidKey(room) === key) map.delete(room);
     }
+    this.emitOccupantPresence();
   }
 
   clearAll(): void {
@@ -153,6 +154,25 @@ export class PresenceManager {
     this.roomAuthorityByRoom.clear();
     this.roomPresenceByRoom.clear();
     this.roomMemberJidsByRoom.clear();
+    this.emitOccupantPresence();
+  }
+
+  /**
+   * Every joined room's occupant shows, keyed by the occupant's disclosed
+   * real bare JID, so a person's dot can render outside the focused room.
+   * ponytail: rebuilt from all rooms per occupant presence; index by JID if
+   * room sizes make this show up in profiles.
+   */
+  private emitOccupantPresence(): void {
+    const byJid: Record<string, OccupantPresence[]> = {};
+    for (const [room, memberJids] of this.roomMemberJidsByRoom) {
+      const presence = this.roomPresenceByRoom.get(room) ?? {};
+      for (const [nick, jid] of Object.entries(memberJids)) {
+        const show = presence[nick];
+        if (show) (byJid[bareJidKey(jid)] ??= []).push(show);
+      }
+    }
+    this.deps.events.emitSafe("occupantPresence", byJid);
   }
 
   /** Replay the focused room's cached presence state to the room handlers. */
@@ -216,6 +236,11 @@ export class PresenceManager {
         delete roomAuthority[nick];
         roomPresence[nick] = "offline";
         delete roomMemberJids[nick];
+        // Once we have left (or were removed), the room tells us nothing more,
+        // so its remaining occupants would show stale presence app-wide. A
+        // rejoin rebuilds the cache from the room's fresh occupant list.
+        if (this.isOwnMucSelfPresence(presence) && !isNickChange) this.clearRoom(room);
+        else this.emitOccupantPresence();
         if (isFocusedRoom) {
           this.deps.events.emit("hats", { ...roomHats });
           this.deps.events.emit("authority", { ...roomAuthority });
@@ -253,6 +278,7 @@ export class PresenceManager {
         this.deps.events.emitSafe("occupantRealJid", room, nick, null);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, null);
       }
+      this.emitOccupantPresence();
       if (isFocusedRoom) {
         this.deps.events.emit("hats", { ...roomHats });
         this.deps.events.emit("authority", { ...roomAuthority });

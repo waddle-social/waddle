@@ -327,7 +327,7 @@ const embed = css({
               </button>
               <div :class="rowSide">
                 <div v-if="tile.nicks.length > 0" :class="avatars" :aria-label="`${tile.nicks.length} in the huddle`">
-                  <UserAvatar v-for="avatar in tileAvatars(tile)" :key="avatar.nick" :name="avatar.nick" :jid="avatar.jid" size="xs" />
+                  <UserAvatar v-for="avatar in tileAvatars(tile)" :key="avatar.nick" :name="avatar.nick" :jid="avatar.jid" size="xs" :in-call="false" />
                 </div>
                 <span v-if="tile.mentions > 0" :class="mentionBadge" :aria-label="`${tile.mentions} mentions`">@{{ tile.mentions }}</span>
                 <span v-else-if="tile.unread > 0" :class="unreadBadge" :aria-label="`${tile.unread} unread`">{{ tile.unread }}</span>
