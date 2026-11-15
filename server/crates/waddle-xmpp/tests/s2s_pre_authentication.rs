@@ -322,7 +322,10 @@ fn ascii_case_in_a_stanza_domain_is_mapped_and_nowhere_else() {
 
     // The localpart and resourcepart are read exactly: an uppercase
     // localpart is a spelling the profile refuses, and so is a fullwidth
-    // domain, which only a width mapping would fold.
+    // domain, which only a width mapping would fold. A delivering stream
+    // hands such a stanza on as malformed, with both addresses in the
+    // canonical form of their RFC 7622 preparation, and stays open; a
+    // stream that does not deliver closes with `improper-addressing`.
     for raw in [
         b"<message from='Alice@home-a.test' to='bob@home-b.test'/>".as_slice(),
         "<message from='alice@home-a.test' to='bob@\u{ff48}ome-b.test'/>".as_bytes(),
@@ -330,6 +333,22 @@ fn ascii_case_in_a_stanza_domain_is_mapped_and_nowhere_else() {
         let mut stream = established(true);
         let out = stream.receive(raw);
         assert!(delivered(&out).is_none());
+        assert_eq!(close_reason(&out), None);
+        let stanza = out
+            .iter()
+            .find_map(|output| match output {
+                Output::MalformedAddress(stanza) => Some(stanza.clone()),
+                _ => None,
+            })
+            .expect("the stanza is handed on as malformed");
+        assert_eq!(stanza.attr("from"), Some("alice@home-a.test"));
+        assert_eq!(stanza.attr("to"), Some("bob@home-b.test"));
+
+        let mut stream = established(false);
+        let out = stream.receive(raw);
+        assert!(!out
+            .iter()
+            .any(|output| matches!(output, Output::MalformedAddress(_))));
         assert_eq!(
             close_reason(&out),
             Some(CloseReason::StreamError(
@@ -386,6 +405,10 @@ fn owner_signals_close_with_their_conditions() {
         (
             Signal::PolicyViolation,
             StreamErrorCondition::PolicyViolation,
+        ),
+        (
+            Signal::ImproperAddressing,
+            StreamErrorCondition::ImproperAddressing,
         ),
     ] {
         assert_eq!(signal.condition(), condition);
