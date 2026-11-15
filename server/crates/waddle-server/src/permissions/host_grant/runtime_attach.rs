@@ -99,6 +99,12 @@ const ROOM_WITNESS_READ_TIMEOUT: Duration = Duration::from_millis(500);
 /// Most answers of that read the gate remembers.
 const ROOM_WITNESS_CACHE: usize = 4096;
 
+/// How long the gate stops asking SpiceDB about single rooms after such a
+/// read failed or timed out: SpiceDB not answering is the accepted residual
+/// in which those rooms are served as unmanaged, and waiting for it on
+/// every message would only slow them down.
+const ROOM_WITNESS_BACKOFF_MS: i64 = 60_000;
+
 /// Least time between two error logs about an unverified authority.
 const ALERT_INTERVAL_MS: i64 = 60_000;
 
@@ -287,6 +293,9 @@ pub struct HostGrantGate {
     watching: AtomicBool,
     syncing: Arc<AtomicBool>,
     room_reads: Mutex<HashMap<String, bool>>,
+    /// Until when (Unix milliseconds) single-room reads are skipped after
+    /// one failed.
+    room_reads_paused_until_ms: AtomicI64,
     last_alert_ms: AtomicI64,
 }
 
@@ -304,6 +313,7 @@ impl Default for HostGrantGate {
             watching: AtomicBool::new(false),
             syncing: Arc::new(AtomicBool::new(false)),
             room_reads: Mutex::new(HashMap::new()),
+            room_reads_paused_until_ms: AtomicI64::new(i64::MIN),
             last_alert_ms: AtomicI64::new(i64::MIN),
         }
     }
@@ -368,7 +378,8 @@ impl HostGrantGate {
     /// The answer comes from the rooms the last fence pass read. Until a
     /// pass has read them, the room's witness is read from SpiceDB, within
     /// [`ROOM_WITNESS_READ_TIMEOUT`], and the answer remembered; when
-    /// SpiceDB does not answer the room is served.
+    /// SpiceDB does not answer the room is served, and no room is asked
+    /// about for [`ROOM_WITNESS_BACKOFF_MS`].
     pub async fn refuses_unmanaged(&self, room: &BareJid) -> bool {
         let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
             return false;
@@ -383,6 +394,10 @@ impl HostGrantGate {
         if let Some(known) = self.room_reads().get(&digest) {
             return *known;
         }
+        let now = chrono::Utc::now().timestamp_millis();
+        if now < self.room_reads_paused_until_ms.load(Ordering::Acquire) {
+            return false;
+        }
         let read = tokio::time::timeout(
             ROOM_WITNESS_READ_TIMEOUT,
             read_witness(&verifier.permissions, &room_witness_resource(&channel_id)),
@@ -391,7 +406,15 @@ impl HostGrantGate {
         let refused = match read {
             Ok(Ok(Some(listed))) => !listed.stamps.is_empty(),
             Ok(Ok(None)) => false,
-            Ok(Err(_)) | Err(_) => return false,
+            Ok(Err(_)) | Err(_) => {
+                self.room_reads_paused_until_ms.store(
+                    chrono::Utc::now()
+                        .timestamp_millis()
+                        .saturating_add(ROOM_WITNESS_BACKOFF_MS),
+                    Ordering::Release,
+                );
+                return false;
+            }
         };
         let mut reads = self.room_reads();
         if reads.len() >= ROOM_WITNESS_CACHE {

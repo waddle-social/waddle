@@ -496,9 +496,6 @@ impl HostGrantAuthority {
             return Ok(Reconciliation::ProjectionUnknown);
         };
         let lost = projection_lost || head.lost;
-        if lost {
-            self.store.record_lost_operations(lifecycle).await?;
-        }
         let changes: Vec<ReconstructionChange> =
             reconstruction_targets(&plan.plan().intent, observed, lost)
                 .into_iter()
@@ -545,6 +542,12 @@ impl HostGrantAuthority {
                 Some(plan) => plan,
                 None => return Ok(Reconciliation::Superseded),
             };
+        }
+        // What the projection or the journal witness showed lost is marked
+        // before the takeover replaces them; a reconstruction refused above
+        // records nothing, the mark included.
+        if lost {
+            self.store.record_lost_operations(lifecycle).await?;
         }
         // The journal witness moves with the takeover, from exactly what was
         // read: what it showed lost is recorded by now, and a head of an

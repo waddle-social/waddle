@@ -74,7 +74,23 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
         }
         HostGrantActionArgs::AcknowledgePosition { witnessed } => {
             let witnessed = match (witnessed, &permissions) {
-                (Some(witnessed), _) => witnessed,
+                (Some(witnessed), Some(permissions)) => {
+                    // The acknowledgement applies only to the witness it
+                    // names; say so when SpiceDB holds another one.
+                    if let Ok(Some((Some(held), _))) =
+                        read_position_witness(&store, permissions).await
+                    {
+                        if held != witnessed {
+                            eprintln!(
+                                "warning: SpiceDB holds the position witness {held}, not the one \
+                                 given; the acknowledgement applies only while the witness it \
+                                 names is current"
+                            );
+                        }
+                    }
+                    witnessed
+                }
+                (Some(witnessed), None) => witnessed,
                 (None, Some(permissions)) => match read_position_witness(&store, permissions)
                     .await
                     .map_err(OwnerCliError::HostGrant)?
