@@ -239,10 +239,19 @@ async fn assert_clean_retry_window(admin: &PgPool, application: &str) -> i32 {
                     .try_get("no_advisory")
                     .expect("retry advisory lock state");
                 assert_eq!(pid, first_pid, "retries stay on the same pooled backend");
-                assert!(no_xact, "retry backend has no active transaction");
-                assert!(no_xmin, "retry backend retains no active xmin");
-                assert!(no_advisory, "retry backend retains no advisory lock");
-                samples += 1;
+                // pg_stat_activity and pg_locks are observations of a moving
+                // backend, not one atomic snapshot. The next retry may begin
+                // after the idle/ROLLBACK state was read, while xact_start or
+                // its advisory locks already describe that next transaction.
+                // Count only complete rollback boundaries; the timeout still
+                // rejects a backend that never releases its transaction/locks.
+                if no_xact && no_xmin && no_advisory {
+                    samples += 1;
+                } else {
+                    samples = 0;
+                }
+            } else {
+                samples = 0;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
