@@ -4,6 +4,7 @@ import android.Manifest
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -126,9 +127,8 @@ class AppShellNavigationTest {
         composeRule.onNodeWithTag("sidebar-dashboard").assertDoesNotExist()
         // Back shuts the drawer and stays in the app.
         back()
-        composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithTag(SidebarTestTags.SCREEN).fetchSemanticsNodes().isEmpty()
-        }
+        // Closing animates the drawer off screen; its content stays composed.
+        composeRule.onNodeWithTag(SidebarTestTags.SCREEN).assertIsNotDisplayed()
         assertFalse(composeRule.activity.isFinishing)
     }
 
