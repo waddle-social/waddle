@@ -8,7 +8,8 @@
 //!   [`EndpointResolver`] returns, with STARTTLS or XEP-0368 direct TLS as
 //!   each endpoint says, and the remote domain as the TLS server name and
 //!   Server Name Indication. A DNS-derived address is checked against the
-//!   blocked address classes on the address connected to. A
+//!   blocked address classes and the operator's blocked prefixes on the
+//!   address connected to. A
 //!   `see-other-host` redirect ends the attempt and is never followed.
 //! - Both directions authenticate with certificate verification and SASL
 //!   EXTERNAL, or, where configured (ADR-0020 D2), XEP-0220 Server Dialback
@@ -18,7 +19,8 @@
 //!   Server. Only then does a stream become a [`VerifiedPeerStream`], which
 //!   carries its authentication strength.
 //! - Global caps on sockets, unauthenticated sockets, handshakes, streams
-//!   and peers, per-address and per-peer limits, accept and input rates,
+//!   and peers, per-address and per-peer limits, accept, dial and input
+//!   rates, a separate budget for dialback verification connections,
 //!   eviction of streams that carry no traffic, outbound backoff,
 //!   per-stage deadlines and a bounded shutdown join, as recorded in
 //!   `server/docs/planning/s2s-connection-manager-2047.md`.

@@ -32,7 +32,10 @@ connections), the dialback paths of `conn/session.rs` and the
 `[dialback]` table of the configuration.
 
 Sources: XEP-0220 1.1.1 and XEP-0185 1.0 at xsf/xeps
-`4132c531487fe9450ae90b905b8df950d0d478b2`, RFC 6120 and RFC 7590.
+`4132c531487fe9450ae90b905b8df950d0d478b2`, RFC 6120 and RFC 7590. The
+XEP-0185 §3 example (`xmpp.example.com`, `example.org`, `D60000229F`,
+secret `s3cr3tf0rd14lb4ck`, key `37c69b1c…3075643`) and the XEP-0220 §2
+examples are the key vectors of the suite.
 
 ## Configuration and roles
 
@@ -76,8 +79,8 @@ secret_file = "/absolute/path"  # required when outbound is on
 ## Keys (XEP-0185)
 
 `key = HMAC-SHA256(hex(SHA-256(secret)), receiving ' ' originating ' ' id)`
-in lowercase hexadecimal, as XEP-0185 §3 recommends and its and XEP-0220's
-examples compute. Both domains are the identity profile's canonical form
+in lowercase hexadecimal, as XEP-0185 §2 recommends and the examples of
+XEP-0185 §3 and XEP-0220 §2 compute. Both domains are the identity profile's canonical form
 (lowercase A-labels, no trailing dot), so a peer that echoes them in a
 U-label or another accepted spelling reaches the same key. `id` is the ID
 of the response stream header the Receiving Server sent on the stream the
@@ -151,14 +154,22 @@ Receiving role (inbound):
   post-TLS features in every later state, including on an established
   stream, from the stream's source about a key issued to it by the
   stream's destination: `from` and `to` swapped, `id` copied, `type`
-  `valid` or `invalid`. At most eight per stream, then `policy-violation`,
-  so one connection cannot use the server as an unbounded key oracle.
+  `valid` or `invalid`. At most eight within any 60 seconds on one
+  stream; a ninth within the same 60 seconds ends the stream with
+  `policy-violation`. This is a rate, not a lifetime cap, so a long-lived
+  stream that a peer reuses for verification requests keeps working, while
+  one connection cannot use the server as an unbounded key oracle.
 
 Initiating role (outbound):
 
 - After TLS has verified the receiving server, post-TLS features that
   offer SASL EXTERNAL are always used; dialback is used only when they do
-  not and `outbound` is on. Waddle then sends `<db:result/>` with the key
+  not, `outbound` is on, and the receiving server advertised dialback,
+  by declaring the dialback namespace on its post-TLS response header
+  (XEP-0220 §2.4.1) or by the dialback stream feature (§2.4.2). A server
+  that advertised neither never receives a key: the stream ends with
+  `policy-violation`, as when no dialback role runs. Waddle then sends
+  `<db:result/>` with the key
   for the remote domain, itself and the stream ID of the receiving
   server's post-TLS header, and accepts only the typed `<db:result/>` for
   that pair. `valid` establishes the stream with the `dialback` strength;
@@ -177,13 +188,28 @@ Verification connection (Receiving Server to Authoritative Server):
   stanzas: after the post-TLS features it sends one `<db:verify/>`
   (`from` this deployment, `to` the claimed domain, `id` the inbound
   stream's ID), accepts only the answer correlated to it and closes.
-- It takes an outbound socket without evicting any stream, a token of the
-  global dial rate and an outbound handshake slot, and ends by the inbound
-  stream's dialback deadline (`limits.dialback_timeout_ms`, 15 s, within
-  the 20 s negotiation deadline). One inbound stream causes at most one
-  verification connection, and inbound streams without a verified
-  certificate stay within the unauthenticated socket caps (8 globally,
-  2 per source address), which bounds how many a remote party can cause.
+- It has a budget of its own, separate from ordinary dials and outbound
+  handshakes: a slot under the cap on verifications in progress
+  (`limits.max_verifications`, 4) and a token of the verification rate
+  (`limits.verification_per_second` and `verification_burst`, 2 per
+  second with a burst of 4), both taken before the Authoritative Server is
+  looked up in DNS and refused as `resource-constraint` when exhausted.
+  Its socket is outside the socket caps and its TLS handshake outside the
+  handshake caps of ordinary connections, and the handshake runs on
+  verification workers of its own, so verifications never evict, delay or
+  refuse an ordinary outbound stream, dial or handshake. The slot covers
+  the lookup, the connection and its handshake until the connection
+  closes.
+- It ends by the inbound stream's dialback deadline
+  (`limits.dialback_timeout_ms`, 15 s, within the 20 s negotiation
+  deadline), when the inbound session that asked for it ends for any
+  reason, or when the service drains or aborts, including during the DNS
+  lookup. One inbound stream causes at most one verification connection,
+  and inbound streams without a verified certificate stay within the
+  unauthenticated socket caps (8 globally, 2 per source address).
+- Before a key is verified, the pair is checked as for registration: a
+  `dialback` stream would be refused while the pair has a `pkix` stream
+  (below), so no verification is dialled for it.
 - Outcomes for the inbound peer:
 
   | Verification connection | Answer to the Initiating Server |
@@ -194,7 +220,7 @@ Verification connection (Receiving Server to Authoritative Server):
   | No endpoint, every address blocked, or not a DNS domain | `type='error'`, `remote-server-not-found` |
   | DNS lookup failed, TCP connect or TLS failed | `type='error'`, `remote-connection-failed` |
   | Authoritative Server's certificate failed | `type='error'`, `not-acceptable` |
-  | Dial rate, socket or handshake cap | `type='error'`, `resource-constraint` |
+  | Verification cap or rate | `type='error'`, `resource-constraint` |
   | Deadline, closed without an answer, or any other failure | `type='error'`, `remote-server-timeout` |
 
 ## Classification of certificate outcomes
@@ -221,9 +247,9 @@ classified here.
   asking this deployment to verify a key) or when the pair may use inbound
   dialback (the peer may be an Initiating Server for a listed domain). The
   claimed domain is known from the pre-TLS header, so this is decided
-  before the handshake. Everywhere else a certificate stays mandatory, as
-  before this slice. This settles the connection-manager design's
-  follow-up on absent client certificates.
+  before the handshake. Everywhere else a certificate is mandatory. This
+  settles the connection-manager design's follow-up on absent client
+  certificates.
 - An absent certificate is detected after a completed handshake in which
   the peer sent no certificate and the verifier was never asked about
   one (`PeerVerifier::completed_without_certificate`). A certificate that
@@ -237,7 +263,11 @@ classified here.
   restriction; the harness slice (W10) measures what it costs with
   Prosody and ejabberd.
 - Logs carry `VerifyError::code` at debug level; metrics count
-  `outcome="certificate"` connections and dialback results by role.
+  `outcome="certificate"` connections and dialback results by role:
+  every Initiating Server exchange that sent a key as `valid`, `invalid`
+  or `error` (an `error` answer, or a stream that ended before any
+  answer), and a Receiving Server key as `valid` only once the domain
+  passed the admissibility check made when the answer arrives.
 
 ## Authentication strength
 
@@ -253,6 +283,12 @@ stream without a certificate carries no certificate evidence:
 The strength travels with the stream to the routing slice and the
 protected-effect witness (G17); D8 forbids privileged authority and room
 moderation on `dialback` streams, which those slices enforce.
+
+A weaker proof never displaces a stronger one: while a directional pair
+has a `pkix` stream, a `dialback` stream for the same pair is refused with
+`conflict`, whatever the existing stream's age, before its key is
+verified. A `pkix` stream may replace a `dialback` stream under the
+connection manager's replacement interval, like any replacement.
 
 ## Residual risk
 
@@ -279,10 +315,14 @@ moderation on `dialback` streams, which those slices enforce.
   inbound dialback is limited to operator-listed domains.
 - **Oracle and amplification.** Stateless verification answers any
   well-formed request after TLS; HMAC-SHA256 makes that useless for
-  forging keys, and the per-stream request cap and the unauthenticated
-  socket caps bound the work. A remote party can make Waddle open one
-  verification connection per unauthenticated inbound socket, only to the
-  Authoritative Server of a listed domain, within the global dial rate.
+  forging keys, and the per-stream request rate (eight per 60 seconds)
+  and the unauthenticated socket caps bound the work. A remote party can
+  make Waddle open one verification connection per unauthenticated
+  inbound socket, only to the Authoritative Server of a listed domain,
+  and only within the verification cap and rate. Those are a budget of
+  their own: a party that exhausts them makes other inbound dialback keys
+  fail with `resource-constraint` until they recover, but cannot take
+  sockets, handshakes or dial tokens from ordinary streams.
 
 These risks are accepted for the dark-by-default implementation. Enabling
 inbound dialback on a deployment is a G5 decision that needs this

@@ -99,7 +99,7 @@ carries a domain, an address or a stream id. None is zero-registered.
 | Metric | Type | Unit | Attributes | Derived Prometheus name | Meaning |
 |---|---|---|---|---|---|
 | `waddle.s2s.connections` | counter | `{connection}` | `direction`, `outcome` | `waddle_s2s_connections_total` | S2S connections that ended, by how they ended. |
-| `waddle.s2s.capacity.refusals` | counter | `{connection}` | `direction`, `resource` | `waddle_s2s_capacity_refusals_total` | Sockets and streams a connection limit refused. |
+| `waddle.s2s.capacity.refusals` | counter | `{connection}` | `direction`, `resource` | `waddle_s2s_capacity_refusals_total` | Sockets, streams, dials and dialback verification connections a connection limit refused, by the limit (`sockets`, `unauthenticated`, `source_address`, `accept_rate`, `handshakes`, `streams`, `peers`, `per_peer`, `dial_rate`, `verifications`, `verification_rate`). |
 | `waddle.s2s.established` | counter | `{stream}` | `direction`, `transport`, `strength` | `waddle_s2s_established_total` | Streams that completed negotiation over TLS, by how the pair authenticated (`pkix` or `dialback`). |
 | `waddle.s2s.negotiation.duration` | histogram | `ms` | `direction` | `waddle_s2s_negotiation_duration_milliseconds_bucket / _sum / _count` | Time from TCP accept or connect to an established stream. |
 | `waddle.s2s.streams` | gauge | `{stream}` | `direction` | `waddle_s2s_streams` | Established streams. |

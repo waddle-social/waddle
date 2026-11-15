@@ -15,15 +15,21 @@ G6. D3 fixes the policy; this document records how it is implemented and
 the values D3 left to this slice.
 
 Gate G6 must be reviewed before W4d merges. Discovery is off by default,
-and the restriction to `.test` domains and loopback addresses stays in
-force unless the configuration lifts it.
+loads only with `peer_scope = "public"`, and the restriction to `.test`
+domains and loopback addresses stays in force unless the configuration
+lifts it.
 
 Nothing here is executed evidence. The evidence is
-`crates/waddle-server/tests/xep0368_s2s_discovery.rs` (a stub resolver
-driving discovery, the address classes, configuration, and direct TLS and
-dialling cases on loopback), compiled and run in the verification phase
-(step 2), and step 6 for configured endpoints, refused domain forms and
-redirects.
+`crates/waddle-server/tests/xep0368_s2s_discovery.rs`, compiled and run in
+the verification phase (step 2): a stub resolver driving discovery; the
+address classes and the operator's blocked prefixes; `SystemDnsLookup`
+against a name server in the test process on loopback, which pins how
+Hickory DNS 0.26.3 classifies answers and that only the exact absolute
+name is queried; configuration; and direct TLS and dialling cases on
+loopback. Discovery has no other evidence and no test-only way around
+these checks: the interoperability harness (W10) and step 6 reach their
+peers through configured endpoints, so they cover configured endpoints,
+refused domain forms and redirects, not DNS.
 
 The implementation is `crates/waddle-server/src/s2s/discovery.rs`,
 `discovery/address.rs` and `discovery/system.rs`, the endpoint and dialling
@@ -42,7 +48,8 @@ Address Registries.
 peer_scope = "test"   # or "public"; top-level key
 
 [discovery]
-enabled = false
+enabled = false            # true only with peer_scope = "public"
+blocked_prefixes = []      # e.g. ["2001:db8:64::/96"], CIDR, at most 64
 
 [[endpoints]]
 domain = "peer.example"
@@ -58,6 +65,17 @@ transport = "starttls"   # or "direct_tls"
   from the system's name-server configuration; a configuration that
   cannot be read or names no name server fails startup instead of
   silently disabling discovery.
+- `enabled = true` fails to load (`DiscoveryRequiresPublicScope`) unless
+  `peer_scope = "public"`. In the test scope every admitted domain is
+  within `.test` and every configured endpoint is loopback, so discovery
+  could only ever resolve to addresses the blocked classes refuse; a
+  configuration that enables it there is a mistake, not a working
+  setting.
+- `blocked_prefixes` lists address blocks refused for DNS-derived
+  addresses in addition to the built-in classes (below). Each entry is
+  CIDR notation with its host bits clear and a prefix length from one up
+  to the family's width; a malformed entry, a duplicate or more than 64
+  entries fail the load.
 
 ## Discovery profile
 
@@ -73,7 +91,10 @@ To reach domain D (its canonical form, lowercase A-labels):
    concurrently. Each answer is records, negative (NXDOMAIN, or a
    successful response without SRV records) or failed (SERVFAIL, REFUSED,
    a timeout, a malformed response or any other error). At most 64 records
-   of one answer are considered.
+   of one answer are considered. An answer with SRV records whose targets
+   cannot be read as absolute names is still records, not negative: the
+   service is published, so those records forbid the fallback like any
+   others, and contribute no target.
 3. **"." targets.** A record set containing a "." target says that service
    is not offered. Its "." records are dropped; the other set is still
    used; A/AAAA fallback is forbidden for D. D3 speaks of a set whose only
@@ -87,7 +108,9 @@ To reach domain D (its canonical form, lowercase A-labels):
 5. **Targets.** A target whose name the identity profile does not classify
    as a DNS name is skipped. The first six targets that remain are
    resolved, A and AAAA concurrently; records from either lookup are used
-   when the other fails. Addresses in a blocked class are removed, the rest
+   when the other fails, and a failure of either with no usable address
+   from the other is a failed lookup, never absence. Addresses in a
+   blocked class or an operator-listed block are removed, the rest
    interleaved IPv6 first and at most four kept per target, in order.
 6. **Outcome.** If SRV records produced at least one address, those are
    the endpoints, in order. If no SRV records exist: a failed SRV lookup
@@ -96,13 +119,16 @@ To reach domain D (its canonical form, lowercase A-labels):
    lookups were negative are D's own A and AAAA records used on port 5269
    with STARTTLS, with the same address rules and the same four-address
    cap. When nothing usable remains the reason is, in order, a failed
-   lookup (`LookupFailed`), only blocked addresses (`Blocked`), or nothing
-   published (`NoEndpoints`).
+   lookup of any kind, SRV or address, including a failed SRV set beside
+   records whose targets have no address (`LookupFailed`), only blocked
+   addresses (`Blocked`), or nothing published (`NoEndpoints`).
 7. **Bounds.** One domain's discovery takes at most 10 s, every lookup
    included; each query waits 3 s for a name server and is sent twice. A
    lookup failure and an all-blocked result back the domain off like a
-   failed connection; no endpoint at all does not, since no retry changes
-   it until DNS does.
+   failed connection. No endpoint at all, and a domain that is not a DNS
+   name, are not failures and record no backoff; they are remembered for
+   30 seconds instead, and a repeated request for the domain within that
+   time gets the same answer without a dial token or a lookup.
 
 Recorded deviation: RFC 6120 §3.2.1 says an initiating entity that
 receives no response to its SRV query SHOULD fall back to A/AAAA records.
@@ -110,11 +136,18 @@ Waddle does not, because an attacker who can suppress DNS responses could
 otherwise bypass published records, including a "." target (D3).
 
 **No search list.** Every query is for an absolute name ending with a dot.
-The system resolver is rebuilt from the system's name servers only: its
-default domain and search list are dropped, and the hosts file is never
-consulted, so no configuration can complete or redirect a name. The
-`DnsLookup` trait carries absolute names only, which the stub suite
-asserts.
+The system resolver keeps only the system's name servers: its default
+domain and search list are dropped and the hosts file is never consulted,
+so neither a search domain nor a hosts entry can complete or redirect a
+name; the name servers themselves still answer as they choose, which
+D3 accepts because DNS never authenticates. The `DnsLookup` trait
+carries absolute names only, which the stub suite asserts, and the
+loopback name-server tests assert that `SystemDnsLookup`, built from a
+configuration that names a default domain and a search list, puts only
+the exact names it was given to the name server. The hosts-file test can
+assert only where the test machine's hosts file maps a name other than
+`localhost`, which Hickory answers itself under RFC 6761 whatever the
+configuration.
 
 **DNS never authenticates.** The reference identity, the TLS server name
 and the direct-TLS Server Name Indication are always D. SRV target names
@@ -132,9 +165,11 @@ needs and the standard library's resolver cannot express.
 ## Blocked address classes
 
 Every DNS-derived address, from an SRV target or the A/AAAA fallback, is
-refused if it is in one of these classes, and the dialler connects only to
-the exact address it checked, checking it again immediately before the
-TCP connect. A changed DNS answer cannot substitute another address,
+refused if it is in one of these classes or in a block the operator lists
+in `discovery.blocked_prefixes`, and the dialler, for streams and for
+dialback verification connections alike, connects only to the exact
+address it checked, checking it again immediately before the TCP
+connect. A changed DNS answer cannot substitute another address,
 because nothing is re-resolved between the check and the connect.
 
 | Class | Blocked |
@@ -179,8 +214,12 @@ Decisions completing D3's table from the IANA registries:
 - Embedded IPv4 addresses are checked for NAT64, 6to4, Teredo (both
   addresses) and ISATAP. Network-specific NAT64 prefixes (RFC 6052) and
   6rd (RFC 5969) embed IPv4 addresses under operator-chosen prefixes that
-  an address alone does not reveal; they cannot be detected and are not
-  checked. This is recorded as a limitation.
+  an address alone does not reveal, so the operator of a network that
+  uses them lists those prefixes in `discovery.blocked_prefixes`, which
+  refuses every address within them. In a DNS64 network that also blocks
+  the synthesised addresses of IPv4-only peers, which are then reached
+  only through configured endpoints. An operator-listed IPv4 block also
+  applies to the IPv4 address embedded by NAT64, 6to4, Teredo and ISATAP.
 
 ## Direct TLS (XEP-0368)
 
@@ -198,8 +237,7 @@ Decisions completing D3's table from the IANA registries:
   `policy-violation`, as on any stream after TLS: STARTTLS is never used
   over direct TLS.
 - Metrics carry `transport="direct_tls"` on established streams.
-- Inbound direct TLS stays deferred (D2); there is still no direct-TLS
-  listener.
+- There is no inbound direct TLS and no direct-TLS listener (D2).
 
 ## The peer scope (lifting the loopback and `.test` restriction)
 
@@ -210,29 +248,44 @@ loopback address, and admission refusing every domain outside `.test`.
 
 `peer_scope = "public"` lifts it: local domains, allowlist, dialback,
 trusted-home and private-CA entries may be any fully qualified DNS domain,
-admission no longer refuses domains outside `.test`, the listener and
-configured endpoints may be any address, and an inherited `s2s` listener
-must still be bound to exactly the configured address (on any interface
-rather than loopback only). Nothing else changes: the identity profile
+admission admits domains outside `.test` by its lists, the listener and
+configured endpoints may be any address, discovery may be enabled, and an
+inherited `s2s` listener must still be bound to exactly the configured
+address (on any interface rather than loopback only). Nothing else
+changes: the identity profile
 still refuses IP-address, numeric IPv4 and single-label names in every
 list and at stream open; the denylist, which could already name any
 domain, overrides every list in both scopes; DNS-derived addresses are
 checked against the blocked classes in both scopes.
 
-Lifting the scope on a deployment is part of its activation decision
-(G20 and G22), not of this slice. The per-address limits and the inbound
-socket reserve, which the connection manager accepted only while the
-scope is `.test`, are decided again below.
+Discovery is available only in the public scope. Lifting the scope on a
+deployment is part of its activation decision (G20 and G22), not of this
+slice. The connection manager accepted the per-address limits and the
+inbound socket reserve only while the scope is `.test`; for the public
+scope the per-address limits are kept and the inbound socket reserve
+(NB1) stays open until the switch to `open` and G20, as recorded below.
 
 ## Connection-manager follow-ups decided here (G6)
 
-- **Global dial rate.** New outbound connections, every remote domain and
-  dialback verification connections together, are limited to 4 per second
-  with a burst of 8 (`limits.dial_per_second`, `limits.dial_burst`, which
-  can only be lowered). An attempt that finds no token fails with
+- **Global dial rate.** New outbound connections to every remote domain
+  together are limited to 4 per second with a burst of 8
+  (`limits.dial_per_second`, `limits.dial_burst`, which can only be
+  lowered), so attempts that fail quickly cannot follow one another
+  without pause. An attempt that finds no token fails with
   `ConnectError::RateLimited` and records nothing in the backoff table.
-  Attempts that fail quickly can no longer follow one another without
-  pause.
+  Dialback verification connections are not charged here; they have a
+  budget of their own ([dialback design](s2s-dialback-2047.md#wire-profile)).
+- **Dial-rate fairness, for W5a and G20.** The token is taken before the
+  endpoints are looked up, so an attempt for a domain that turns out to
+  have no endpoint, or not to be a DNS name, spends a token although
+  nothing is dialled, and records nothing in the backoff table. Such a
+  result is remembered for 30 seconds, so repeated requests for the same
+  dead domain spend no further token. Distinct dead domains still cost one
+  token each: once routing (W5a) calls `connect` on behalf of senders,
+  one sender naming many distinct dead domains can use up the dial rate
+  and starve dials for everyone else. The rate is global, not per sender;
+  W5a and the activation decision (G20) decide per-sender fairness before
+  routing dials on senders' behalf.
 - **Backoff entries are not flushable.** An entry is kept at least until
   its wait has passed. When the table (256 entries) is full, a new
   domain's failure replaces only the entry updated longest ago among those
@@ -241,7 +294,7 @@ scope is `.test`, are decided again below.
   failing domains can therefore never shorten another domain's wait; a
   domain whose failure was not recorded is dialled again only within the
   global dial rate. Entries are forgotten when their wait passed more than
-  the maximum backoff ago, as before.
+  the maximum backoff ago.
 - **Outbound eviction only after the TCP connect.** An attempt takes an
   outbound socket without eviction before it connects. When the outbound
   socket cap is full, it connects first and evicts a stream without
@@ -249,7 +302,9 @@ scope is `.test`, are decided again below.
   evicted then, it drops the connection and fails with `capacity`. An
   unreachable destination never displaces a stream. While connecting, such
   a socket is outside the socket counts; the cap on attempts in progress
-  (8) bounds how many exist. Verification connections never evict.
+  (8) bounds how many exist. Dialback verification connections are
+  outside the outbound socket counts altogether, bounded by their own cap
+  (4), and never evict.
 - **Per-address limits** (2 unauthenticated sockets per source address,
   accept rates per address, IPv6 counted per /64) are kept for the public
   scope. They remain an availability control, not an identity; a source
@@ -273,24 +328,35 @@ scope is `.test`, are decided again below.
 ## Telemetry
 
 `waddle.s2s.discovery` counts resolutions by `source`: `configured`,
-`srv`, `fallback`, `no_service`, `lookup_failed` or `blocked`. No domain,
-name or address is a metric attribute. Rate-limited dials count as
-`waddle.s2s.capacity.refusals{resource="dial_rate"}`.
+`srv`, `fallback`, `no_service`, `lookup_failed` or `blocked`. A domain
+answered from memory is not resolved again and is not counted again. No
+domain, name or address is a metric attribute. Rate-limited dials count
+as `waddle.s2s.capacity.refusals{resource="dial_rate"}`, refused
+verification connections as `resource="verifications"` or
+`resource="verification_rate"`.
 
 ## Recorded deviations and restrictions
 
 - No A/AAAA fallback after a failed SRV lookup (RFC 6120 §3.2.1 SHOULD).
-- A "." target among other targets forbids fallback like a "." alone.
+- A "." target among other targets forbids fallback like a "." alone, and
+  so do SRV records none of whose targets is usable.
+- A failed A or AAAA lookup with no usable address from the other is a
+  failed lookup, retried with backoff, not absence.
 - IPv4-mapped and IPv4-compatible AAAA records are refused outright.
 - Endpoints are tried one at a time, each within the 5 s connect deadline
   and all within the 20 s negotiation deadline, so a domain whose first
   addresses do not answer may run out of time before its later ones are
   tried; there is no parallel (Happy Eyeballs) connect.
-- `see-other-host` still ends the attempt and is never followed (D3).
+- `see-other-host` ends the attempt and is never followed (D3).
+- Discovery loads only with `peer_scope = "public"`.
 
 ## Follow-ups
 
 - W10: discovery against real SRV records for the pinned Prosody and
-  ejabberd, including `_xmpps-server` targets.
+  ejabberd, including `_xmpps-server` targets; until then the stub suite
+  and the loopback `SystemDnsLookup` tests are the only evidence for
+  discovery, since the harness reaches its peers through configured
+  endpoints.
+- W5a and G20: per-sender fairness of the dial rate (above).
 - DNSSEC validation, with DANE (D2's later slice).
 - NB1 and the per-address limits at the switch to `open` and at G20.

@@ -155,8 +155,9 @@ above.
 
 The configured endpoint selects the socket only. It never replaces the remote
 destination domain as the certificate reference identity or TLS SNI. The fixture
-uses explicit loopback endpoints, so DNS discovery is deferred; implementing it
-later must not add trust or authorize redirects. Unexpected inherited sockets
+uses explicit loopback endpoints. DNS discovery, decided in
+[the discovery design](s2s-discovery-2047.md), adds no trust and authorizes no
+redirect. Unexpected inherited sockets
 fail startup. An enabled inherited start requires the named `s2s` descriptor;
 a cold start binds it normally. Follow the existing [startup safety rules](../../../docs/planning/startup-safety-2020-2024.md).
 
@@ -582,13 +583,13 @@ the identity profile's address parser (`identity::parse_jid`), also without
 JID preparation, compared with the stream's pair, and handed on rewritten
 in canonical form.
 
-**Direct TLS.** Outbound XEP-0368 direct TLS was deferred to the discovery
-slice (W4d), which brings `_xmpps-server` targets. It adds a direct-TLS
-entry to the initiating machine (`TlsEntry::DirectTls`): the first step
-is the TLS handshake, with no plaintext header and no `<starttls/>`, the
-Server Name Indication is the remote domain and the `xmpp-server` ALPN
-protocol is offered; everything after TLS is unchanged, including the
-refusal of a STARTTLS offer. Inbound direct TLS stays deferred. See
+**Direct TLS.** Outbound XEP-0368 direct TLS, for `_xmpps-server` targets
+and configured direct-TLS endpoints, is a direct-TLS entry to the
+initiating machine (`TlsEntry::DirectTls`): the first step is the TLS
+handshake, with no plaintext header and no `<starttls/>`, the Server Name
+Indication is the remote domain and the `xmpp-server` ALPN protocol is
+offered; everything after TLS is as for STARTTLS, including the refusal of
+a STARTTLS offer. There is no inbound direct TLS. See
 [the discovery design](s2s-discovery-2047.md#direct-tls-xep-0368).
 
 **Admission refusals before TLS** receive `policy-violation`, whichever rule
@@ -617,11 +618,12 @@ example `host-unknown`), and anything else closes it with the condition the
 header check found.
 
 **Dialback namespace.** `StreamHeader::declare_dialback` binds the
-`jabber:server:dialback` namespace to the `db` prefix on an emitted header.
-The dialback slice (W4d) sets it where a dialback role applies to the
-stream, and the decision points that refused dialback while it was
-disabled now implement the XEP-0220 roles where configuration enables
-them; see [the dialback design](s2s-dialback-2047.md).
+`jabber:server:dialback` namespace to the `db` prefix on an emitted header
+where a dialback role applies to the stream, and reports the declaration
+on a received header, which advertises traditional dialback. The decision
+points where dialback could follow implement the XEP-0220 roles where
+configuration enables them and refuse dialback otherwise; see
+[the dialback design](s2s-dialback-2047.md).
 
 **Trusted homes on the public profile (D8).** A domain on the trusted-home
 list may authenticate under the public-WebPKI profile; an operator who

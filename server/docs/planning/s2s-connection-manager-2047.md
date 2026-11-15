@@ -191,7 +191,13 @@ wiring in `server/lifecycle.rs`.
   pair replaces the existing one, which closes with `conflict` (owner
   decision). To prevent two peers making a pair flap, a stream younger than
   `replacement_interval` (30 seconds by default) is kept and the new stream
-  is refused with `conflict` instead.
+  is refused with `conflict` instead. A stream never replaces one of
+  greater authentication strength: while the pair has a `pkix` stream, a
+  `dialback` stream for it is refused with `conflict` whatever the
+  existing stream's age, and the check runs before any verification
+  connection is opened for it. A `pkix` stream may replace a `dialback`
+  one under the replacement interval like any other
+  ([dialback design](s2s-dialback-2047.md#authentication-strength)).
 - **One stream per pair is a restriction.** RFC 6120 allows more than one
   stream for a pair, and a pooled or clustered peer opens several, for
   example ejabberd with `max_s2s_connections` above one. Such a peer's
@@ -219,17 +225,18 @@ below the per-socket one. The values are bounds, not measured capacity.
 
 | Resource | Value | On exhaustion |
 | --- | --- | --- |
-| Open sockets, all stages | 32 (16 inbound, 16 outbound) | Inbound: only a socket every other accept limit admits can find the inbound cap full. Then the established inbound stream without traffic the longest is evicted if it has had none for the eviction idle time (30 s), and the new socket takes its place under the same lock; otherwise the socket is closed at accept, no byte read. A stream outside the reserve is evicted first; in `open` mode a new socket, whose peer is unknown at accept, never evicts a reserved peer's stream. Outbound: the same with outbound streams, but only once the attempt's own TCP connection is open (G6), and an attempt to a reserved peer may evict a reserved peer's stream when no other can be evicted; otherwise the attempt fails, no backoff. A dialback verification connection never evicts. |
+| Open sockets, all stages | 32 (16 inbound, 16 outbound) | Inbound: only a socket every other accept limit admits can find the inbound cap full. Then the established inbound stream without traffic the longest is evicted if it has had none for the eviction idle time (30 s), and the new socket takes its place under the same lock; otherwise the socket is closed at accept, no byte read. A stream outside the reserve is evicted first; in `open` mode a new socket, whose peer is unknown at accept, never evicts a reserved peer's stream. Outbound: the same with outbound streams, but only once the attempt's own TCP connection is open (G6), and an attempt to a reserved peer may evict a reserved peer's stream when no other can be evicted; otherwise the attempt fails, no backoff. Dialback verification connections are outside these counts and never evict. |
 | Unauthenticated inbound sockets | 8 globally, 2 per source address (ceiling 4) | Closed at accept. |
 | Tracked source addresses | 256, idle entries expire after 60 s | A new address is closed at accept while full. |
 | Accept rate | 8/s burst 8 globally; 2/s burst 4 per address | Closed at accept. Every per-address limit is checked before a global token is spent, so a source over its own limits cannot drain the allowance others share. |
 | TLS handshakes | 4 inbound, 2 outbound, separately | Inbound closes without XML (after `<proceed/>`, TLS cannot carry an error); outbound fails without backoff. |
-| Verifier workers | One per handshake slot and as many waiters, per direction | A waiting handshake is bounded by its stage deadline; a refused one is treated like an exhausted handshake cap. Inbound handshakes can never occupy the outbound workers. |
+| Verifier workers | One per handshake slot and as many waiters, per direction, and one per verification slot for verification connections | A waiting handshake is bounded by its stage deadline; a refused one is treated like an exhausted handshake cap. Inbound handshakes, outbound handshakes and verification handshakes can never occupy each other's workers. |
 | Established streams | 24: the socket cap less the unauthenticated cap, so negotiation always has sockets. In `open` mode, 18 (all but a quarter) for peers that are neither allowlisted nor trusted homes | Evict the stream without traffic the longest if it has had none for the eviction idle time. A peer outside the reserve evicts only streams outside it, whether its general share or the whole cap is full. Otherwise refuse the new stream with `resource-constraint`. |
 | Peers (remote domains with an established stream) | 12, below each direction's socket cap. In `open` mode, 9 for peers that are neither allowlisted nor trusted homes | Evict every stream of the peer whose latest traffic is oldest if none of its streams has had traffic for the eviction idle time, as for streams, and a peer outside the reserve only a peer outside it; otherwise refuse with `resource-constraint`. |
 | Negotiating streams per remote domain | 3 in each direction (ceiling 4), counted separately | An inbound connection counts only once TLS has verified the remote domain, and is closed with `resource-constraint` if the domain's inbound budget is full. Outbound: the attempt fails. |
 | Outbound attempts in progress | 8, one per directional pair | `ConnectError::Busy` or `InProgress`. |
-| New outbound connections | 4/s burst 8, attempts and dialback verification connections together | `ConnectError::RateLimited`; a verification connection answers a dialback error. No backoff. |
+| New outbound connections | 4/s burst 8, outbound attempts only; the token is taken before the endpoints are looked up | `ConnectError::RateLimited`. No backoff. A domain whose lookup found no endpoint is answered from memory for 30 s without a token (G6). |
+| Dialback verification connections | 4 in progress (ceiling 4); 2/s burst 4 new ones (ceilings); slot and token taken before the Authoritative Server is looked up; outside the socket and handshake caps above, on their own verifier workers | The inbound key is answered `type='error'` with `resource-constraint`. Ordinary connections are never refused or evicted for a verification ([dialback design](s2s-dialback-2047.md#wire-profile)). |
 | Outbound backoff | Failing remote domains only; 1 s doubling to 300 s; 256 entries | A domain without an entry is never refused. An entry is kept until its wait has passed: when the table is full, a new failure replaces the entry updated longest ago among those whose wait has passed, and is not recorded when every entry is still waiting (G6). |
 | Input rate | 64 KiB/s burst 128 KiB per socket; 512 KiB/s burst 1 MiB globally; each at least 32 KiB/s | Reads pause (backpressure); the connection is not closed for its rate. Deadlines still bound a throttled negotiation; the incomplete-element deadline adds back the time reads waited for the rates (see [Deadlines](#deadlines)). |
 | Output | rustls buffer limit 64 KiB per connection; each batch written within the 1 s write deadline | Close. |
@@ -308,12 +315,13 @@ established stream and takes the pair's dial slot under one lock, and an
 attempt registers its stream before it gives up the slot, so two requests
 for one pair never dial twice.
 
-The discovery slice (G6) closed the two limits this design recorded for
-the time local users' requests can reach arbitrary domains: failures to
-many domains can no longer flush a waiting backoff entry, and a global
-dial rate bounds new outbound connections. A DNS lookup failure and a
-domain whose every address is blocked back off like a failed connection.
-See [the discovery design](s2s-discovery-2047.md#connection-manager-follow-ups-decided-here-g6).
+For the time local users' requests can reach arbitrary domains, G6
+bounds both: failures to many domains never flush a waiting backoff
+entry, and a global dial rate bounds new outbound connections. A DNS
+lookup failure and a domain whose every address is blocked back off like
+a failed connection; a domain without endpoints is remembered for a
+short while instead. See
+[the discovery design](s2s-discovery-2047.md#connection-manager-follow-ups-decided-here-g6).
 
 ## Deadlines
 
@@ -409,7 +417,8 @@ only (`S2sDirection`, `S2sOutcome`, `S2sResource`, `S2sTransport`,
 never a domain, address, JID or stream id: `waddle.s2s.connections` (ended
 connections by direction and outcome, including dialback refusals and
 completed verification connections), `waddle.s2s.capacity.refusals` (by
-direction and resource, including the dial rate), `waddle.s2s.established`
+direction and resource, including the dial rate and the verification
+cap and rate), `waddle.s2s.established`
 (by direction, transport and strength), `waddle.s2s.negotiation.duration`
 (milliseconds, by direction), the `waddle.s2s.streams` gauge (by
 direction), `waddle.s2s.dialback` (by role and result) and
@@ -418,12 +427,12 @@ id, codes and counts; certificate failures log `VerifyError::code` only.
 
 ## Follow-ups
 
-- Done in the discovery and dialback slice (W4d): `_xmpps-server` direct
-  TLS dialling, DNS discovery behind `EndpointResolver`, the peer scope
-  that lifts the loopback and `.test` restriction, the per-address limits
-  decided again ([discovery design](s2s-discovery-2047.md)); the `dialback`
+- `_xmpps-server` direct TLS dialling, DNS discovery behind
+  `EndpointResolver`, the peer scope that lifts the loopback and `.test`
+  restriction and the per-address limits in the public scope are decided
+  in the [discovery design](s2s-discovery-2047.md); the `dialback`
   strength, the dialback list's use and when an absent client certificate
-  may reach dialback ([dialback design](s2s-dialback-2047.md)).
+  may reach dialback in the [dialback design](s2s-dialback-2047.md).
 - Routing: replace `RefuseAllStanzas`, carry the stream's strength and
   trust-profile kind into the remote principal, and address stanzas to
   peers in U-labels as stream headers already are.
@@ -440,5 +449,6 @@ id, codes and counts; certificate failures log `VerifyError::code` only.
 - Activation (G20) and the switch of the default mode to `open` (D1): the
   socket-layer reserve (NB1, recorded in the discovery design), handshake
   monopolisation by a few source addresses and wildcard-certificate peers,
-  recorded above. Backoff flush and the global dial rate were settled at
-  G6.
+  recorded above. Backoff flush and the global dial rate are decided under
+  G6; fairness of the dial rate between senders once routing dials on
+  their behalf is recorded there for W5a and G20.

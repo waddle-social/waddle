@@ -282,7 +282,8 @@ async fn the_hosts_file_is_never_consulted() {
 }
 
 /// A name with at least one dot that the system's hosts file maps to an
-/// IPv4 address, other than a `localhost` name.
+/// IPv4 address, other than a name Hickory answers itself under RFC 6761:
+/// `localhost` and its subdomains, `.invalid` and `.onion`.
 fn hosts_entry() -> Option<(String, IpAddr)> {
     let text = std::fs::read_to_string("/etc/hosts").ok()?;
     text.lines()
@@ -300,7 +301,8 @@ fn hosts_entry() -> Option<(String, IpAddr)> {
                         && name.is_ascii()
                         && name != "localhost"
                         && !name.ends_with(".localhost")
-                        && !name.starts_with("localhost.")
+                        && !name.ends_with(".invalid")
+                        && !name.ends_with(".onion")
                 })
                 .map(|name| (name, address))
         })
