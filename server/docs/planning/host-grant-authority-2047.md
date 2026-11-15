@@ -1138,7 +1138,7 @@ cause, but it has not been confirmed. That SpiceDB used the memory
 datastore, so the `live_spicedb_` and `host_grant_projection` cases are
 evidence against SpiceDB's API and consistency semantics, not against a
 PostgreSQL-backed SpiceDB datastore. The same set was executed again on
-2026-11-15 at the writer fence's commit `0c1658148` (below), against the
+2026-11-15 at the writer fence's commit `ef5205cf2` (below), against the
 same versions, and passed 110 of 110 cases.
 
 ## Writer fence and sink contracts
@@ -1637,8 +1637,8 @@ only, and each case creates and drops its own database;
 `host_grant_projection` needs both stores; `xep0503_channel_placement`,
 `xep0060_extension_route_room_access` and `spaces_pubsub_owner_seed` run
 on the in-memory test state. The set was last executed on 2026-11-15 at
-commit `0c1658148`, against PostgreSQL 17.11 and SpiceDB 1.56.1 (memory
-datastore) with nextest's default parallelism, and passed 62 of 62 cases.
+commit `ef5205cf2`, against PostgreSQL 17.11 and SpiceDB 1.56.1 (memory
+datastore) with nextest's default parallelism, and passed 64 of 64 cases.
 Only this document has changed since that commit.
 
 The recovery pass a replica runs when it attaches is covered by the first
