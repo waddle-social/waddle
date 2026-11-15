@@ -32,8 +32,7 @@ adjust its notification settings to suit your involvement.
 - **People and travel:** record attendance, arrivals and departures. Travel
   information is shared with the invited group.
 - **Expenses:** record amounts and currencies with the people sharing a cost.
-  Amounts use the currency's minor units; this records costs rather than
-  transferring money or settling debts.
+  Amounts use the currency's minor units to preserve exact costs.
 
 Share an item into the event conversation to discuss it. Refresh the planning
 view to pick up other people's changes; the web also refreshes while visible.

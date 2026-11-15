@@ -332,7 +332,7 @@ pub(super) async fn handle_room_pubsub(
 #[cfg(test)]
 mod tests {
     use super::{is_member, is_organizer};
-    use waddle_xmpp::{Affiliation, StanzaErrorCondition, StanzaErrorType, XmppError};
+    use waddle_xmpp::Affiliation;
 
     #[test]
     fn event_workspace_access_requires_explicit_membership() {
