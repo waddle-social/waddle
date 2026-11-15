@@ -311,15 +311,27 @@ async fn acknowledging_a_stanza_that_was_never_exposed_is_a_stream_error() {
         .expect("handled-count-too-high stream error");
     assert!(error.contains(SM_NS));
 
-    let row = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
-        row.outbound_appended >= i64::from(written)
+    // The stream error ends the session, and a session that ends hands its
+    // unacknowledged frames to offline delivery. An invalid count releases
+    // nothing, so the frame must arrive there; a released frame never would.
+    // Waiting for that end state avoids reading the session mid hand-over.
+    let kept = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let pending: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid LIKE 'alice@localhost%'",
+            )
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("read pending deliveries");
+            if pending > 0 {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     })
-    .await;
-    assert_eq!(row.outbound_acked, 0, "an invalid count releases nothing");
-    assert_eq!(
-        retained_frames(&fixture.pool, &row.session_id).await,
-        row.outbound_appended
-    );
+    .await
+    .expect("the unacknowledged frame is kept for offline delivery");
+    assert_eq!(kept, i64::from(written));
 }
 
 #[tokio::test]
