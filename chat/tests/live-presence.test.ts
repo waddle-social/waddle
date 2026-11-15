@@ -8,7 +8,7 @@ import {
   setSelfPresenceJid,
 } from "../src/presence/live-presence";
 import { resetInCallOverlays, setInCallOverlay } from "../src/presence/in-call-overlay-store";
-import { pickPresence, resetPresenceMode } from "../src/presence/presence-store";
+import { pickPresence, resetPresenceMode, setSelfBroadcastShow } from "../src/presence/presence-store";
 
 afterEach(() => {
   resetContactPresence();
@@ -34,12 +34,16 @@ describe("live presence by JID", () => {
     });
   });
 
-  test("the signed-in account follows this device's chosen Show", () => {
+  test("the signed-in account follows this device's chosen Show, then what it broadcasts", () => {
     setSelfPresenceJid("me@example.com/web");
     setContactPresence("me@example.com", "available");
-    pickPresence("away");
+    pickPresence("dnd");
+    expect($livePresence.get()["me@example.com"]).toBe("dnd");
 
-    expect($livePresence.get()["me@example.com"]).toBe("away");
+    // Auto-away is never a pick: only the broadcast carries it.
+    pickPresence("reset");
+    setSelfBroadcastShow("xa");
+    expect($livePresence.get()["me@example.com"]).toBe("xa");
   });
 
   test("an avatar shows a known person's dot without its caller passing presence", async () => {

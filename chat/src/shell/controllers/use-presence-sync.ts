@@ -5,7 +5,7 @@ import type { useXmppRosterContacts } from "@/contacts/roster";
 import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
 import { resetContactPresence, setContactPresence, setOccupantPresence, setSelfPresenceJid } from "@/presence/live-presence";
-import { $ownNotificationsSuppressed, $presenceMode, resetPresenceMode } from "@/presence/presence-store";
+import { $ownNotificationsSuppressed, $presenceMode, resetPresenceMode, setSelfBroadcastShow } from "@/presence/presence-store";
 import { activityOverlayUpdate } from "@/presence/in-call-activity";
 import {
   presenceModeFromWire,
@@ -68,6 +68,8 @@ export function usePresenceSync(deps: PresenceSyncDeps) {
     now: () => Date.now(),
     getMode: () => presenceMode.value,
     onBroadcast: (presence) => {
+      // Own avatars and the account footer show this Show, auto-away included.
+      setSelfBroadcastShow(presence.show);
       xmppClient.value?.setPresence(presence.show, presence.idleSince).catch(() => undefined);
     },
     // In-call pauses auto-away (ADR-010): never broadcast "Away + in a call".

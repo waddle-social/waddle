@@ -4,7 +4,7 @@ import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, PhoneOff, Video } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
 import { btn, liveDot, tag } from "styled-system/recipes";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { $callState } from "@/lib/calls/call-store";
 import {
   canEndRecoveredDmCallActivity,
@@ -20,7 +20,6 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import { $mucCallParticipantOwners, $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { callParticipantAvatarJid, conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
-import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
@@ -113,7 +112,6 @@ function avatarJidFor(label: string): string | null {
   return callParticipantAvatarJid(roomJid, label, mucCallParticipantOwners.value[roomJid] ?? []);
 }
 
-const avatarUrlFor = useAvatarUrls(() => (banner.value?.avatarLabels.slice(0, 3) ?? []).map(avatarJidFor));
 
 function groupCallBanner(): BannerView | null {
   const roomJid = normalizedRoomJid.value;
@@ -466,11 +464,12 @@ const secondaryClass = cx(btn({ size: "sm" }), css({ _coarse: { height: "44px" }
             <p :class="bodyClass">{{ banner.body }}</p>
             <div :class="metaClass" aria-hidden="true">
               <span v-if="banner.avatarLabels.length" :class="avatarsClass">
-                <AppAvatar
+                <UserAvatar
                   v-for="label in banner.avatarLabels.slice(0, 3)"
                   :key="label"
                   :name="label"
-                  :src="avatarUrlFor(avatarJidFor(label))"
+                  :jid="avatarJidFor(label)"
+                  :in-call="false"
                   size="sm"
                 />
                 <span v-if="banner.avatarLabels.length > 3" :class="moreClass">

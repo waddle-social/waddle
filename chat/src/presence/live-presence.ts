@@ -2,8 +2,9 @@
 // the app. Three sources feed it: subscription presence (a contact's resources
 // collapsed by `PresenceRegistry`), MUC occupant presence from every joined
 // room whose occupant's real JID is disclosed (XEP-0045 §7.2.4), and this
-// device's own chosen Show. Surfaces read it by JID instead of each deriving
-// presence from whatever list they happen to hold, so they cannot disagree.
+// device's own broadcast Show (auto-away included). Surfaces read it by JID
+// instead of each deriving presence from whatever list they happen to hold,
+// so they cannot disagree.
 
 import { atom, computed, map } from "nanostores";
 import { useStore } from "@nanostores/vue";
@@ -12,7 +13,7 @@ import { computed as vueComputed, type ComputedRef } from "vue";
 import { bareJidKey } from "@/lib/xmpp/jid";
 import type { OccupantPresence } from "@/lib/xmpp/types";
 import { mostAvailableShow, type RenderedShow } from "./most-available";
-import { $selfShow } from "./presence-store";
+import { $selfPresenceShow } from "./presence-store";
 
 export type LivePresence = Readonly<Record<string, RenderedShow>>;
 
@@ -48,7 +49,7 @@ export function setOccupantPresence(byJid: Record<string, OccupantPresence[]>): 
   $occupantPresence.set(byJid);
 }
 
-/** The signed-in account, whose presence follows this device's chosen Show. */
+/** The signed-in account, whose presence follows what this device broadcasts. */
 export function setSelfPresenceJid(jid: string | null | undefined): void {
   $selfJid.set(bareJidKey(jid ?? ""));
 }
@@ -59,7 +60,7 @@ export function resetContactPresence(): void {
 }
 
 export const $livePresence = computed(
-  [$contactPresence, $occupantPresence, $selfJid, $selfShow],
+  [$contactPresence, $occupantPresence, $selfJid, $selfPresenceShow],
   (contacts, occupants, selfJid, selfShow): LivePresence => {
     const merged: Record<string, RenderedShow> = {};
     // A room only hears the Show a client joined with: status changes go to

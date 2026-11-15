@@ -4,7 +4,7 @@ import { useStore } from "@nanostores/vue";
 import { PhoneOff } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
 import { btn, iconbtn, liveDot } from "styled-system/recipes";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { liveKicker } from "@/ui/part-classes";
 import {
   $mucCallParticipantOwners,
@@ -30,7 +30,6 @@ import type { ChannelSummary, GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { callParticipantAvatarJid } from "@/lib/avatars/author-jid";
-import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 
 defineOptions({ inheritAttrs: false });
 
@@ -258,11 +257,6 @@ function participantAvatarJid(entry: CallActivityDockEntry, label: string): stri
   return callParticipantAvatarJid(entry.roomJid, label, owners);
 }
 
-const participantAvatarUrl = useAvatarUrls(() =>
-  visibleEntries.value.flatMap((entry) =>
-    visibleParticipantLabels(entry).map((label) => participantAvatarJid(entry, label)),
-  ),
-);
 
 function selectEntry(entry: CallActivityDockEntry): void {
   if (!entryCanSelect(entry)) return;
@@ -401,11 +395,12 @@ const endClass = cx(iconbtn({ size: "sm" }), css({ marginRight: "2", bg: "danger
               </span>
               <span :class="metaClass">
                 <span v-if="visibleParticipantLabels(entry).length" :class="stackClass" aria-hidden="true">
-                  <AppAvatar
+                  <UserAvatar
                     v-for="label in visibleParticipantLabels(entry)"
                     :key="`${entry.key}:${label}`"
                     :name="label"
-                    :src="participantAvatarUrl(participantAvatarJid(entry, label))"
+                    :jid="participantAvatarJid(entry, label)"
+                    :in-call="false"
                     size="sm"
                   />
                 </span>

@@ -4,7 +4,7 @@
 
 import { atom, computed } from "nanostores";
 
-import { applyPick, resolveShow, type PresenceMode, type PresencePick } from "./effective-show";
+import { applyPick, resolveShow, type BroadcastShow, type PresenceMode, type PresencePick } from "./effective-show";
 import { presenceSuppressesOwnNotifications } from "./own-notification-gate";
 
 /** The user's chosen presence mode on this device. Defaults to Automatic. */
@@ -12,6 +12,21 @@ export const $presenceMode = atom<PresenceMode>({ kind: "automatic" });
 
 /** The Show this device currently broadcasts, derived from the mode. */
 export const $selfShow = computed($presenceMode, (mode) => resolveShow(mode));
+
+// What the idle tracker last decided to broadcast, auto-away included.
+const $selfBroadcastShow = atom<BroadcastShow | null>(null);
+
+/** Record the Show this device broadcasts (the idle tracker's every emit). */
+export function setSelfBroadcastShow(show: BroadcastShow): void {
+  $selfBroadcastShow.set(show);
+}
+
+/** The user's own presence as others see it: the broadcast Show, or the
+ * chosen mode's Show before the first broadcast. */
+export const $selfPresenceShow = computed(
+  [$selfBroadcastShow, $selfShow],
+  (broadcast, chosen): BroadcastShow => broadcast ?? chosen,
+);
 
 /**
  * Whether this device should silence its OWN message banners/sounds because
@@ -35,4 +50,5 @@ export function pickPresence(pick: PresencePick): void {
  */
 export function resetPresenceMode(): void {
   $presenceMode.set({ kind: "automatic" });
+  $selfBroadcastShow.set(null);
 }

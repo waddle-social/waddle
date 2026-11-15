@@ -11,7 +11,7 @@ import AppTooltip from "@/components/ui/AppTooltip.vue";
 import PresencePicker from "@/components/chat/PresencePicker.vue";
 import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
-import { $selfShow } from "@/presence/presence-store";
+import { $selfPresenceShow } from "@/presence/presence-store";
 import { menuClasses } from "@/ui/menu-classes";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 import type { XmppServerVersion } from "@/shell/version";
@@ -64,8 +64,9 @@ const bellCount = computed(() => (props.totalMentionCount ?? 0) || (props.totalU
 
 const accountMenuLabel = computed(() => `${props.session.username} — Account menu`);
 
-// The footer trigger reads the own status (Sidebar board: "Available").
-const selfShow = useStore($selfShow);
+// The footer trigger reads the own status as others see it, auto-away
+// included, so it matches the own avatar's dot (Sidebar board: "Available").
+const selfShow = useStore($selfPresenceShow);
 const STATUS: Record<string, { label: string; presence: OccupantPresence }> = {
   available: { label: "Available", presence: "online" },
   chat: { label: "Free to chat", presence: "online" },
