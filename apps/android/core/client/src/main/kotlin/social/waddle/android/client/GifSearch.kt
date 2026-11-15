@@ -12,12 +12,11 @@ import okhttp3.Request
 import social.waddle.android.client.auth.await
 
 /**
- * GIF search over the same-origin `/api/giphy` proxy contract the web
- * client uses (`chat/src/lib/giphy-proxy.ts`). This is an out-of-band
- * HTTP call to the SAME origin that already serves the auth REST
- * endpoints — it carries no XMPP semantics and replaces no XMPP API
+ * GIF search over the web client's `/api/giphy` proxy contract
+ * (`chat/src/lib/giphy-proxy.ts`). This is an out-of-band HTTP call to
+ * the configured web origin — it carries no XMPP semantics and replaces no XMPP API
  * (no XMPP wire shape for GIF search exists anywhere in Waddle). A
- * deployment whose server origin does not expose the proxy degrades to
+ * deployment whose web origin does not expose the proxy degrades to
  * [GifSearchResult.NotConfigured], the web's exact missing-key state.
  */
 
@@ -88,7 +87,7 @@ internal fun parseGifSearchPayload(body: String): GifSearchResult? = runCatching
     GifSearchResult.Results(gifs)
 }.getOrNull()
 
-/** Production gateway: `GET {serverOrigin}/api/giphy?limit=24[&q=…]`. */
+/** Production gateway: `GET {webOrigin}/api/giphy?limit=24[&q=…]`. */
 class GiphyProxyGateway(
     baseUrl: String,
     private val httpClient: OkHttpClient,

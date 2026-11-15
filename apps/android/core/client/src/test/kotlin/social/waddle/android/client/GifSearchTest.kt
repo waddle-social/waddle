@@ -1,6 +1,11 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.test.runTest
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,5 +54,40 @@ class GifSearchTest {
     fun `empty data array is a valid empty result`() {
         val result = classifyGifSearchResponse(200, """{"data":[]}""")
         assertTrue((result as GifSearchResult.Results).gifs.isEmpty())
+    }
+
+    @Test
+    fun `search uses the configured web proxy and encodes the query without credentials`() = runTest {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse(body = payload))
+            val gateway = GiphyProxyGateway(server.url("/").toString(), OkHttpClient())
+
+            val result = gateway.search("  happy penguins & snow  ") as GifSearchResult.Results
+
+            val request = server.takeRequest()
+            assertEquals("/api/giphy", request.url.encodedPath)
+            assertEquals("happy penguins & snow", request.url.queryParameter("q"))
+            assertEquals("24", request.url.queryParameter("limit"))
+            assertNull(request.url.queryParameter("api_key"))
+            assertNull(request.headers["Authorization"])
+            assertNull(request.headers["Cookie"])
+            assertEquals("https://media0.giphy.com/g1/giphy.gif", result.gifs.first().originalUrl)
+        }
+    }
+
+    @Test
+    fun `a blank query requests trending from a configured proxy path`() = runTest {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse(body = """{"data":[]}"""))
+            val gateway = GiphyProxyGateway(server.url("/chat/").toString(), OkHttpClient())
+
+            assertEquals(GifSearchResult.Results(emptyList()), gateway.search("   "))
+
+            val request = server.takeRequest()
+            assertEquals("/chat/api/giphy", request.url.encodedPath)
+            assertNull(request.url.queryParameter("q"))
+        }
     }
 }
