@@ -798,8 +798,15 @@ pub(super) async fn dispatch_to_room(
     // XEP-0513 channel-wide mentions are a moderator's: in a room an
     // enrolled host-grant scope manages, the sender's canonical grants
     // decide (the `moderate` action), not the role the room actor mirrors.
-    // When the grants cannot be read the mention is not broadcast.
-    let channel_mention_decision = host_grant_channel_mention(state, &room_jid, &sender_full).await;
+    // When the grants cannot be read the mention is not broadcast. A message
+    // without any channel mention has nothing to decide, and reads nothing.
+    let carries_channel_mention = waddle_xmpp::xep::extract_explicit_mentions(&prototype)
+        .is_some_and(|mentions| mentions.has_channel());
+    let channel_mention_decision = if carries_channel_mention {
+        host_grant_channel_mention(state, &room_jid, &sender_full).await
+    } else {
+        None
+    };
 
     // 8. Build context + run the rest of the chain (canonicalize,
     //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
