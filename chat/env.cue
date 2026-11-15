@@ -185,15 +185,14 @@ schema.#Project & {
 			]
 		}
 
-		// Fails when generated native and website token outputs drift from
-		// their frozen sources in scripts/design-tokens.
+		// Fails when generated native token outputs drift from their frozen
+		// sources in scripts/design-tokens.
 		tokensCheck: schema.#Task & {
 			command: "bun"
 			args: ["../scripts/generate-design-tokens.mjs", "--check"]
 			inputs: [
 				"../scripts/generate-design-tokens.mjs",
 				"../scripts/design-tokens/**",
-				"../website/src/styles/global/brand-palette.css",
 				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
 				"../apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
 			]

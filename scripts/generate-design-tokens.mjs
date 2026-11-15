@@ -5,21 +5,20 @@
 //   - scripts/design-tokens/huddle-tokens.ts: the pre-Polar Huddle Panda
 //     tokens. Feeds Android's `WaddleTokens.Huddle`.
 //   - scripts/design-tokens/legacy-tokens.css: the legacy chat sheet. Feeds
-//     the Apple accent, the website palette and Android's legacy
-//     `WaddleTokens` sections.
+//     the Apple accent and Android's legacy `WaddleTokens` sections.
 // Both are frozen copies: chat now takes its tokens from the Polar Huddle
 // preset (@waddle/design). Native apps keep these values until they move
 // to the preset too.
 // Generated outputs (never edit by hand):
 //   - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
-//   - website/src/styles/global/brand-palette.css
 //   - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt
 //
 // Usage:
 //   bun scripts/generate-design-tokens.mjs           # write outputs
 //   bun scripts/generate-design-tokens.mjs --check   # exit 1 if outputs are stale
 //
-// Apple and the website share only the brand accent (chat `--primary`).
+// Apple shares only the brand accent (chat `--primary`); the website uses
+// @waddle/design instead.
 // Android takes the whole semantic sheet — colours in both schemes, the
 // spacing, radius and type scales — because it has no platform palette
 // worth keeping: Material 3's defaults are lavender and pink, not neutral
@@ -44,10 +43,6 @@ const TOKENS_CSS = join(repoRoot, "scripts/design-tokens/legacy-tokens.css");
 const ACCENT_COLORSET = join(
   repoRoot,
   "apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
-);
-const WEBSITE_PALETTE = join(
-  repoRoot,
-  "website/src/styles/global/brand-palette.css",
 );
 const ANDROID_TOKENS = join(
   repoRoot,
@@ -239,22 +234,6 @@ function colorsetJson({ light, dark }) {
       2,
     ) + "\n"
   );
-}
-
-function websitePaletteCss({ light, dark }) {
-  const lightHex = srgbToHex(oklchToSrgb(light));
-  const darkHex = srgbToHex(oklchToSrgb(dark));
-  return `/* GENERATED — do not edit.
- * Source: scripts/design-tokens/legacy-tokens.css (--primary)
- * Regenerate: bun scripts/generate-design-tokens.mjs
- */
-:root {
-  --brand-accent: oklch(${light.l} ${light.c} ${light.h});
-  --brand-accent-dark: oklch(${dark.l} ${dark.c} ${dark.h});
-  --brand-accent-hex: ${lightHex};
-  --brand-accent-dark-hex: ${darkHex};
-}
-`;
 }
 
 // CSS token name -> Kotlin property name (Android consumes these).
@@ -607,7 +586,6 @@ ${huddleFontsKt()}
 
 const outputs = [
   { path: ACCENT_COLORSET, content: colorsetJson(primary) },
-  { path: WEBSITE_PALETTE, content: websitePaletteCss(primary) },
   { path: ANDROID_TOKENS, content: androidTokensKt() },
 ];
 

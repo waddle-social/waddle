@@ -80,8 +80,6 @@ on:
     - server/rust-toolchain.toml/**
     - server/vendor/**
     - server/wasm-pkg/waddle-xmpp-client-wasm/**
-    - website/src/styles/global/brand-palette.css
-    - website/src/styles/global/brand-palette.css/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true

@@ -1,5 +1,8 @@
 ---
 import ColonyLayout from "../layouts/ColonyLayout.astro";
+import { css, cx } from "../../styled-system/css";
+import { avatar, btn, presence } from "../../styled-system/recipes";
+import { heading, kicker, lead, sheet } from "../styles/text";
 
 const user = Astro.locals.user;
 const session = Astro.locals.session;
@@ -7,47 +10,51 @@ const githubUsername =
   user && "githubUsername" in user && typeof user.githubUsername === "string"
     ? user.githubUsername.trim()
     : "";
+const handle = githubUsername || user?.name || user?.email || "";
+const initials = handle.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2).toUpperCase();
+
+const details = css({
+  display: "grid",
+  gridTemplateColumns: "auto minmax(0, 1fr)",
+  "& > *": { m: 0, px: "14px", py: "2.5", borderBottom: "1px solid {colors.border.soft}" },
+  "& > :nth-last-child(-n + 2)": { borderBottom: "none" },
+  "& dt": { fontSize: "xs", color: "fg.muted" },
+  "& dd": { fontSize: "sm", overflowWrap: "anywhere" },
+  "& dd[data-mono]": { fontFamily: "mono", fontSize: "xs" },
+});
 ---
 
-<ColonyLayout
-  title="Colony"
-  heading={user && session ? "Signed in" : "Identity for Waddle"}
-  description={user && session ? "Your Waddle identity session is active." : "OAuth for Waddle services."}
-  showHeader={false}
-  showLogo={Boolean(!user || !session)}
->
+<ColonyLayout title="Colony" width="md">
+  <span slot="mark" class={kicker}>Colony · identity for Waddle</span>
   {user && session ? (
-    <div class="stack">
-      <dl class="detail-list">
+    <>
+      <div class={css({ display: "flex", alignItems: "center", gap: "3" })}>
+        <span class={avatar({ size: "lg", tint: "2" })} aria-hidden="true">
+          {initials}
+          <span class={presence({ state: "available" })}></span>
+        </span>
+        <h1 class={heading}>Signed in</h1>
+      </div>
+      <dl class={cx(sheet, details)}>
         {githubUsername && (
-          <div class="detail-row">
+          <>
             <dt>Username</dt>
-            <dd>{githubUsername}</dd>
-          </div>
+            <dd data-mono>{githubUsername}</dd>
+          </>
         )}
-        <div class="detail-row">
-          <dt>Name</dt>
-          <dd>{user.name ?? user.email}</dd>
-        </div>
-        <div class="detail-row">
-          <dt>Email</dt>
-          <dd>{user.email}</dd>
-        </div>
-        <div class="detail-row">
-          <dt>Session</dt>
-          <dd class="session-id">{session.id}</dd>
-        </div>
+        <dt>Name</dt>
+        <dd>{user.name ?? user.email}</dd>
+        <dt>Email</dt>
+        <dd data-mono>{user.email}</dd>
       </dl>
-      <div class="button-row">
-        <button class="button button--secondary" id="sign-out" type="button">Sign out</button>
-      </div>
-    </div>
+      <button class={btn()} id="sign-out" type="button">Sign out</button>
+    </>
   ) : (
-    <div class="stack">
-      <div class="button-row">
-        <button class="button button--primary" id="sign-in" type="button">Continue with GitHub</button>
-      </div>
-    </div>
+    <>
+      <h1 class={heading}>Identity for Waddle</h1>
+      <p class={lead}>One account for every Waddle server that trusts this colony.</p>
+      <button class={btn({ variant: "primary" })} id="sign-in" type="button">Continue with GitHub</button>
+    </>
   )}
 
   <script>

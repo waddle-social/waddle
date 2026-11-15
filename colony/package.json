@@ -7,20 +7,22 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro check && astro build",
+    "dev": "bun run panda:codegen && astro dev",
+    "build": "bun run panda:codegen && astro check && astro build",
     "astro": "astro",
     "deploy": "wrangler deploy",
     "generate-types": "wrangler types",
     "auth:generate": "sh -ac 'set -a; . ./.auth.env; set +a; bunx @better-auth/cli generate --config src/lib/auth.schema.ts --output src/db/schema.ts --yes'",
     "db:generate": "drizzle-kit generate",
-    "test:oidc": "bun run build && bun run scripts/smoke-oidc.mjs"
+    "test:oidc": "bun run build && bun run scripts/smoke-oidc.mjs",
+    "panda:codegen": "panda codegen --silent"
   },
   "dependencies": {
     "@astrojs/cloudflare": "~14.0.0",
     "@better-auth/drizzle-adapter": "^1.6.7",
     "@better-auth/oauth-provider": "^1.6.7",
-    "astro": "~7.3.2",
+    "@waddle/design": "workspace:*",
+    "astro": "~7.3.8",
     "better-auth": "^1.6.7",
     "drizzle-orm": "^0.45.2",
     "wrangler": "^4.84.1"
@@ -28,6 +30,9 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.8",
     "@cloudflare/workers-types": "^4.20260422.1",
+    "@pandacss/dev": "2.5.0",
+    "@pandacss/preset-base": "2.5.0",
+    "@pandacss/vite": "2.5.0",
     "drizzle-kit": "^0.31.10",
     "typescript": "^6.0.3"
   }

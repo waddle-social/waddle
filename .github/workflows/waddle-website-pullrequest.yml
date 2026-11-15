@@ -9,6 +9,11 @@ on:
     - bun.lock
     - bun.lock/**
     - cue.mod/**
+    - design/**
+    - design/assets/**
+    - design/package.json
+    - design/package.json/**
+    - design/src/**
     - package.json
     - package.json/**
     - website/astro.config.ts
@@ -16,6 +21,8 @@ on:
     - website/env.cue
     - website/package.json
     - website/package.json/**
+    - website/panda.config.ts
+    - website/panda.config.ts/**
     - website/public/**
     - website/schema/**
     - website/src/**
