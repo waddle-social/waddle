@@ -4,7 +4,8 @@ use super::{
     DEPLOYMENT_SERVER_ID,
 };
 use crate::permissions::{
-    DeleteTuple, ListRelations, PermissionError, Relation, SubjectType, Tuple, WriteTuple,
+    DeleteTuple, ListRelations, ListSubjects, PermissionError, Relation, SubjectType, Tuple,
+    WriteTuple,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 
@@ -125,8 +126,8 @@ async fn resolve_legacy_channel_affiliation(
     }
 
     // The parent-tuple repair below issues `WriteTuple`/`DeleteTuple`
-    // effects. Join admission opts in (`allow_repairs = true`) so a stale
-    // Space→channel projection self-heals on the way into the room. The
+    // effects. Join admission opts in (`allow_repairs = true`) so a channel
+    // missing its Space parent regains it on the way into the room. The
     // read-only MAM archive gate opts out: an archive query must not
     // mutate the permission graph. A member whose Space-inherited read
     // access hinges on a broken parent tuple is denied here until their
@@ -358,85 +359,90 @@ fn read_access_affiliation(members_only: bool) -> Option<Affiliation> {
     }
 }
 
+/// Give a channel that has no parent the Space its link names, when that
+/// Space lists the channel's bookmark. A channel that already has a parent
+/// keeps it, whichever Space the link or a bookmark names: a join is not
+/// authority over the channel, and only a placement moves it.
 async fn restore_space_parent_tuples_for_room(
     state: &WebSocketState,
     room_jid: &BareJid,
     channel_id: &str,
 ) -> Result<(), ()> {
-    let item_id = room_jid.to_string();
-    let nodes = state
+    let parents = state
         .deps
-        .protocol
-        .pubsub_storage
-        .list_node_names_for_item(&state.deps.app_state.spaces_jid, &item_id)
+        .app_state
+        .permission_actor
+        .ask(ListSubjects {
+            object: Object::new(ObjectType::Channel, channel_id),
+            relation: Relation::new("parent"),
+        })
         .await
         .map_err(|error| {
             warn!(
                 room = %room_jid,
                 channel_id,
-                error = %error,
-                "Failed to enumerate Spaces bookmarks while repairing managed MUC permissions"
+                error = ?error,
+                "Failed to read channel parents while repairing managed MUC permissions"
             );
         })?;
-
-    let mut valid_nodes = Vec::new();
-    for node in nodes {
-        if space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
-            valid_nodes.push(node);
+    if !parents.is_empty() {
+        return Ok(());
+    }
+    let Some(node) = linked_space_node(state, room_jid, channel_id).await? else {
+        return Ok(());
+    };
+    let item_id = room_jid.to_string();
+    if !space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
+        return Ok(());
+    }
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, &node, ""),
+    );
+    match state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: tuple.clone(),
+        })
+        .await
+    {
+        Ok(()) => {}
+        // Written by a concurrent repair or placement: not this call's to undo.
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {
+            return Ok(());
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                channel_id,
+                node,
+                error = ?error,
+                "Failed to repair managed MUC channel parent tuple"
+            );
+            return Err(());
         }
     }
-
-    let repair_nodes = space_parent_repair_nodes(state, room_jid, channel_id, valid_nodes).await?;
-    for node in repair_nodes {
-        let tuple = Tuple::new(
-            Object::new(ObjectType::Channel, channel_id),
-            Relation::new("parent"),
-            Subject::userset(SubjectType::Space, &node, ""),
-        );
+    if !space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
         match state
             .deps
             .app_state
             .permission_actor
-            .ask(WriteTuple {
-                tuple: tuple.clone(),
-            })
+            .ask(DeleteTuple { tuple })
             .await
         {
-            Ok(())
-            | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {}
+            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {}
             Err(error) => {
                 warn!(
                     room = %room_jid,
                     channel_id,
                     node,
                     error = ?error,
-                    "Failed to repair managed MUC channel parent tuple"
+                    "Failed to clean up stale managed MUC channel parent tuple after revalidation"
                 );
                 return Err(());
-            }
-        }
-        if !space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
-            match state
-                .deps
-                .app_state
-                .permission_actor
-                .ask(DeleteTuple {
-                    tuple: tuple.clone(),
-                })
-                .await
-            {
-                Ok(())
-                | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {}
-                Err(error) => {
-                    warn!(
-                        room = %room_jid,
-                        channel_id,
-                        node,
-                        error = ?error,
-                        "Failed to clean up stale managed MUC channel parent tuple after revalidation"
-                    );
-                    return Err(());
-                }
             }
         }
     }
@@ -488,12 +494,13 @@ async fn space_node_has_room_bookmark(
     Ok(bookmark.jid == *room_jid)
 }
 
-async fn space_parent_repair_nodes(
+/// The Space node the channel's link names, on this deployment's Spaces
+/// service.
+async fn linked_space_node(
     state: &WebSocketState,
     room_jid: &BareJid,
     channel_id: &str,
-    valid_nodes: Vec<String>,
-) -> Result<Vec<String>, ()> {
+) -> Result<Option<String>, ()> {
     let link = state
         .deps
         .app_state
@@ -509,21 +516,8 @@ async fn space_parent_repair_nodes(
             );
         })?;
     let Some(link) = link else {
-        return match valid_nodes.as_slice() {
-            [] => Ok(Vec::new()),
-            [node] => Ok(vec![node.clone()]),
-            nodes => {
-                warn!(
-                    room = %room_jid,
-                    channel_id,
-                    nodes = ?nodes,
-                    "Refusing to repair ambiguous managed MUC Space parents without a channel-space projection"
-                );
-                Ok(Vec::new())
-            }
-        };
+        return Ok(None);
     };
-
     if link.space_jid.domain() != state.deps.app_state.spaces_jid.domain() {
         warn!(
             room = %room_jid,
@@ -532,29 +526,18 @@ async fn space_parent_repair_nodes(
             spaces = %state.deps.app_state.spaces_jid,
             "Refusing to repair managed MUC Space parent from a different Spaces service"
         );
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let Some(node) = link.space_jid.node().map(|node| node.to_string()) else {
+    let node = link.space_jid.node().map(|node| node.to_string());
+    if node.is_none() {
         warn!(
             room = %room_jid,
             channel_id,
             linked_space = %link.space_jid,
             "Refusing to repair managed MUC Space parent without a Space node"
         );
-        return Ok(Vec::new());
-    };
-    if valid_nodes.iter().any(|valid| valid == &node) {
-        return Ok(vec![node]);
     }
-
-    warn!(
-        room = %room_jid,
-        channel_id,
-        linked_space = %link.space_jid,
-        nodes = ?valid_nodes,
-        "Refusing to repair managed MUC Space parent because the projected Space lacks the bookmark"
-    );
-    Ok(Vec::new())
+    Ok(node)
 }
 
 async fn check_channel_permission(

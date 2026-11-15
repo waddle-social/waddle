@@ -278,6 +278,38 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// The default in-memory WebSocket state whose app state names the Spaces
+/// service the test state's Spaces handlers serve (`spaces.example.com`),
+/// so that the code reading the app state's service (a join's Space parent
+/// repair) reads the nodes those handlers write.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_test_spaces_service() -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::try_new(
+            crate::db::DatabaseConfig::default(),
+            crate::db::PoolConfig,
+        )
+        .await
+        .expect("db pool"),
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("test Spaces service parses as BareJid");
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// The default in-memory WebSocket state with `extension_manager` in place
 /// of the empty one, for suites that serve extension routes.
 ///

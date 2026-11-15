@@ -29,10 +29,14 @@ use waddle_server::permissions::{
     ListSubjects, Object, ObjectType, Relation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use waddle_server::space_identity::{space_jid_for_node, SpaceNode};
-use waddle_server::test_support::websocket_state;
+use waddle_server::test_support::websocket_state_with_test_spaces_service;
 use waddle_ws_test_support::iq::round_trip;
-use waddle_ws_test_support::stanza::{is_error, is_result, pubsub_publish, set};
+use waddle_ws_test_support::stanza::{get, is_error, is_result, pubsub_items, pubsub_publish, set};
+use waddle_ws_test_support::WsXmppClient;
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::pubsub::{Affiliation, PubSubItem};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
+use xmpp_parsers::minidom::Element;
 use ws_loopback_support::Loopback;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
@@ -40,6 +44,7 @@ use xmpp_parsers::stanza_error::DefinedCondition;
 const MUC: &str = "muc.example.com";
 /// The test state's Spaces service.
 const SPACES: &str = "spaces.example.com";
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
 
 /// The community whose channel is the target.
 const VICTIM_SPACE: &str = "victim-space";
@@ -61,7 +66,7 @@ struct Fixture {
 
 impl Fixture {
     async fn start() -> Self {
-        let server = Loopback::serve(websocket_state().await).await;
+        let server = Loopback::serve(websocket_state_with_test_spaces_service().await).await;
         let mallory = server.account("mallory").await;
         let victor = server.account("victor").await;
         let fixture = Self {
@@ -147,6 +152,63 @@ impl Fixture {
             .expect("permission relationship");
     }
 
+    /// Spawn the channel's members-only room actor and make its catalog row
+    /// members-only, so that a join is admitted by a channel right only.
+    async fn room_actor(&self, channel: &str) {
+        self.server.channel(channel, true).await;
+        let config = waddle_xmpp::muc::RoomConfig {
+            members_only: true,
+            ..Default::default()
+        };
+        self.server
+            .state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room(channel),
+                waddle_id: "test".to_owned(),
+                channel_id: channel.to_owned(),
+                config,
+            })
+            .await
+            .expect("room actor");
+    }
+
+    /// Make `account` an owner of the Space node `node` in PubSub, so that
+    /// it may read the node's items.
+    async fn space_affiliation(&self, node: &str, account: &BareJid) {
+        let spaces: BareJid = SPACES.parse().expect("Spaces service");
+        self.server
+            .state
+            .deps
+            .protocol
+            .pubsub_storage
+            .set_affiliation(&spaces, node, account, Affiliation::Owner)
+            .await
+            .expect("Space node affiliation");
+    }
+
+    /// Store the channel's bookmark in the Space node `node` directly,
+    /// without a publish and its placement.
+    async fn bookmark_in(&self, node: &str) {
+        let spaces: BareJid = SPACES.parse().expect("Spaces service");
+        let channel = room(CHANNEL);
+        let bookmark = Bookmark::new(channel.clone()).with_name(CHANNEL);
+        let item = PubSubItem::new(
+            Some(channel.to_string()),
+            Some(build_bookmark_element(&bookmark)),
+        );
+        self.server
+            .state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(&spaces, node, &item, None, false)
+            .await
+            .expect("stored bookmark");
+    }
+
     /// The Space node the channel's link names.
     async fn linked_space(&self) -> Option<String> {
         self.linked_space_of(CHANNEL).await
@@ -219,6 +281,32 @@ fn channel_bookmark_publish(id: &str, node: &str, channel: &str) -> xmpp_parsers
     )
 }
 
+/// Join `room` as `nick` and return the first presence the room sends from
+/// that occupant address: the self-presence or the join error.
+async fn join(client: &mut WsXmppClient, room: &BareJid, nick: &str) -> Element {
+    let occupant = format!("{room}/{nick}");
+    let presence = Element::builder("presence", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            occupant.as_str(),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .build();
+    client
+        .send(&String::from(&presence))
+        .await
+        .expect("send join");
+    let frame = client
+        .recv_matching(|frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                element.name() == "presence" && element.attr("from") == Some(occupant.as_str())
+            })
+        })
+        .await
+        .expect("join presence");
+    frame.parse().expect("presence XML")
+}
+
 /// The items the Space `node` lists.
 async fn listed(fixture: &Fixture, node: &str) -> usize {
     let spaces: BareJid = SPACES.parse().expect("Spaces service");
@@ -276,7 +364,7 @@ async fn the_channel_manager_places_the_channel_and_republishes_it_in_its_space(
     let reply = round_trip(&mut victor, bookmark_publish("move", OTHER_SPACE)).await;
     assert!(is_result(&reply), "move refused: {reply:?}");
     assert_eq!(fixture.linked_space().await.as_deref(), Some(OTHER_SPACE));
-    assert!(fixture.parents().await.contains(&OTHER_SPACE.to_owned()));
+    assert_eq!(fixture.parents().await, vec![OTHER_SPACE.to_owned()]);
 }
 
 #[tokio::test]
@@ -304,7 +392,7 @@ async fn the_owner_of_the_channels_parent_space_republishes_and_moves_it() {
     let reply = round_trip(&mut mallory, bookmark_publish("move", OTHER_SPACE)).await;
     assert!(is_result(&reply), "move refused: {reply:?}");
     assert_eq!(fixture.linked_space().await.as_deref(), Some(OTHER_SPACE));
-    assert!(fixture.parents().await.contains(&OTHER_SPACE.to_owned()));
+    assert_eq!(fixture.parents().await, vec![OTHER_SPACE.to_owned()]);
 }
 
 #[tokio::test]
@@ -353,6 +441,33 @@ async fn a_link_that_disagrees_with_the_parent_is_moved_only_with_authority() {
     assert_eq!(fixture.parents().await, vec![VICTIM_SPACE.to_owned()]);
     assert_eq!(listed(&fixture, LINKED_SPACE).await, 0);
 
+    // Reading the linked Space's items backfills the bookmarks of the
+    // channels linked to it. The channel already has a parent elsewhere, so
+    // the read lists nothing new and neither adds the linked Space as a
+    // parent nor removes the parent the channel has.
+    fixture.room_actor(CHANNEL).await;
+    fixture.space_affiliation(LINKED_SPACE, &fixture.mallory).await;
+    let reply = round_trip(
+        &mut mallory,
+        get("backfill", SPACES, pubsub_items(LINKED_SPACE)),
+    )
+    .await;
+    assert!(is_result(&reply), "the items read was refused: {reply:?}");
+    assert_eq!(listed(&fixture, LINKED_SPACE).await, 0);
+    assert_eq!(fixture.parents().await, vec![VICTIM_SPACE.to_owned()]);
+
+    // A bookmark of the channel left in the linked Space does not make
+    // that Space its parent when an account without access joins: the join
+    // repairs a missing parent only, and this channel has one.
+    fixture.bookmark_in(LINKED_SPACE).await;
+    let joined = join(&mut mallory, &room(CHANNEL), "mallory").await;
+    assert_eq!(
+        joined.attr("type"),
+        Some("error"),
+        "the join was admitted: {joined:?}"
+    );
+    assert_eq!(fixture.parents().await, vec![VICTIM_SPACE.to_owned()]);
+
     // The owner of the parent Space, who has no relationship on the channel
     // itself, holds the authority the channel inherits from it, so
     // republishing in the parent Space moves the link there.
@@ -368,6 +483,8 @@ async fn a_link_that_disagrees_with_the_parent_is_moved_only_with_authority() {
     let reply = round_trip(&mut olivia, bookmark_publish("realign", VICTIM_SPACE)).await;
     assert!(is_result(&reply), "the parent owner was refused: {reply:?}");
     assert_eq!(fixture.linked_space().await.as_deref(), Some(VICTIM_SPACE));
+    assert_eq!(fixture.parents().await, vec![VICTIM_SPACE.to_owned()]);
+    assert_eq!(listed(&fixture, LINKED_SPACE).await, 0);
 }
 
 #[tokio::test]
@@ -386,4 +503,8 @@ async fn the_deployment_owner_places_a_channel_it_does_not_manage() {
     let reply = round_trip(&mut operator, bookmark_publish("place", OTHER_SPACE)).await;
     assert!(is_result(&reply), "deployment owner refused: {reply:?}");
     assert_eq!(fixture.linked_space().await.as_deref(), Some(OTHER_SPACE));
+    // The Space the channel left held no bookmark of it; the move still
+    // removes that Space as the channel's parent.
+    assert_eq!(listed(&fixture, VICTIM_SPACE).await, 0);
+    assert_eq!(fixture.parents().await, vec![OTHER_SPACE.to_owned()]);
 }

@@ -408,6 +408,30 @@ pub(super) async fn write_channel_parent_tuple_if_absent(
     .await
 }
 
+/// The Space nodes the channel's parent relationships name.
+pub(super) async fn channel_parent_spaces(
+    state: &WebSocketState,
+    channel_id: &str,
+) -> Result<Vec<String>, String> {
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(crate::permissions::ListSubjects {
+            object: Object::new(ObjectType::Channel, channel_id),
+            relation: Relation::new("parent"),
+        })
+        .await
+        .map(|parents| {
+            parents
+                .into_iter()
+                .filter(|parent| parent.subject_type == SubjectType::Space)
+                .map(|parent| parent.id)
+                .collect()
+        })
+        .map_err(|error| format!("channel parent lookup failed: {error}"))
+}
+
 pub(super) async fn delete_channel_parent_tuple(
     state: &WebSocketState,
     channel_id: &str,

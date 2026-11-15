@@ -1,6 +1,6 @@
 use super::permissions::{
-    delete_channel_parent_tuple, server_permission_allowed, write_channel_parent_tuple,
-    write_channel_parent_tuple_if_absent,
+    channel_parent_spaces, delete_channel_parent_tuple, server_permission_allowed,
+    write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::{
@@ -9,7 +9,7 @@ use super::{
     Permission, PubSubError, PubSubItem, WebSocketState,
 };
 use crate::channel_space_links::ChannelSpaceLink;
-use crate::permissions::{ListRelations, ListSubjects, Relation, Subject, SubjectType};
+use crate::permissions::{ListRelations, Subject};
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
@@ -301,6 +301,8 @@ pub(super) async fn handle_spaces_publish(
                         ))];
                     }
                 };
+            // A placement moves the channel: every other Space stops being
+            // its parent, whether or not that Space listed a bookmark of it.
             if let Err(error) = cleanup_stale_space_bookmarks(
                 state,
                 &spaces_jid,
@@ -433,20 +435,7 @@ async fn channel_placement_allowed(
         .get(channel_jid)
         .await
         .map_err(|error| format!("channel-space link lookup failed: {error}"))?;
-    let parents: Vec<String> = state
-        .deps
-        .app_state
-        .permission_actor
-        .ask(ListSubjects {
-            object: Object::new(ObjectType::Channel, channel_id),
-            relation: Relation::new("parent"),
-        })
-        .await
-        .map_err(|error| format!("channel parent lookup failed: {error}"))?
-        .into_iter()
-        .filter(|parent| parent.subject_type == SubjectType::Space)
-        .map(|parent| parent.id)
-        .collect();
+    let parents = channel_parent_spaces(state, channel_id).await?;
     let link_here = link.as_ref().is_some_and(|link| {
         link.space_node.as_str() == node && link.space_jid.domain() == spaces_jid.domain()
     });

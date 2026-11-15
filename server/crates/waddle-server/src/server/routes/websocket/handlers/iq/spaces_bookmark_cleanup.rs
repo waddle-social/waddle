@@ -1,6 +1,13 @@
-use super::permissions::{delete_channel_parent_tuple, write_channel_parent_tuple};
+use super::permissions::{
+    channel_parent_spaces, delete_channel_parent_tuple, write_channel_parent_tuple,
+};
 use super::{warn, BareJid, PubSubItem, WebSocketState};
 
+/// Move a placed channel out of every Space other than `keep_node`: retract
+/// its bookmark `item_id` from each of `stale_nodes`, and remove each other
+/// Space as the channel's parent, including a Space that is its parent
+/// without listing a bookmark of it. On a failure everything removed so far
+/// is restored and the error is returned.
 pub(super) async fn cleanup_stale_space_bookmarks(
     state: &WebSocketState,
     spaces_jid: &BareJid,
@@ -82,6 +89,27 @@ pub(super) async fn cleanup_stale_space_bookmarks(
             }
         }
     }
+    let parents = match channel_parent_spaces(state, channel_id).await {
+        Ok(parents) => parents,
+        Err(error) => {
+            restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+            return Err(error);
+        }
+    };
+    for parent in parents.iter().filter(|parent| parent.as_str() != keep_node) {
+        match delete_channel_parent_tuple(state, channel_id, parent).await {
+            Ok(true) => removed_stale.push(RemovedStaleSpaceBookmark {
+                node: parent.clone(),
+                item: None,
+                parent_tuple_deleted: true,
+            }),
+            Ok(false) => {}
+            Err(error) => {
+                restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+                return Err(error);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -98,27 +126,31 @@ async fn restore_stale_space_bookmarks(
     removed_stale: &[RemovedStaleSpaceBookmark],
 ) {
     for removed in removed_stale.iter().rev() {
-        if let Some(item) = removed.item.as_ref() {
-            match state
-                .deps
-                .protocol
-                .pubsub_storage
-                .publish_item(spaces_jid, &removed.node, item, None, false)
-                .await
-            {
-                Ok(_) => {
-                    if removed.parent_tuple_deleted {
-                        let _ = write_channel_parent_tuple(state, channel_id, &removed.node).await;
-                    }
+        let Some(item) = removed.item.as_ref() else {
+            if removed.parent_tuple_deleted {
+                let _ = write_channel_parent_tuple(state, channel_id, &removed.node).await;
+            }
+            continue;
+        };
+        match state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(spaces_jid, &removed.node, item, None, false)
+            .await
+        {
+            Ok(_) => {
+                if removed.parent_tuple_deleted {
+                    let _ = write_channel_parent_tuple(state, channel_id, &removed.node).await;
                 }
-                Err(error) => {
-                    warn!(
-                        channel_id = %channel_id,
-                        node = %removed.node,
-                        error = %error,
-                        "Failed to restore stale Space bookmark after cleanup rollback"
-                    );
-                }
+            }
+            Err(error) => {
+                warn!(
+                    channel_id = %channel_id,
+                    node = %removed.node,
+                    error = %error,
+                    "Failed to restore stale Space bookmark after cleanup rollback"
+                );
             }
         }
     }
