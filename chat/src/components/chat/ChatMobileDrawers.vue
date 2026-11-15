@@ -43,6 +43,7 @@ const {
   openCommunitySurface,
   selectExtensionRoute,
   openChannelEdit,
+  openHome,
 } = props.controller;
 
 function selectCommunitySurface(surface: "feed" | "events") {
@@ -132,10 +133,11 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
 </script>
 
 <template>
-    <!-- Mobile header (settings page only - chat pages render the consolidated header inside ContentArea) -->
+    <!-- Mobile header (settings page only - chat pages render the consolidated header inside ContentArea).
+         Phone-only, so its sidebar button goes back to the home screen, which is the sidebar. -->
     <SettingsMobileHeader
       v-if="ui.activePage.value === 'settings'"
-      @open-nav="ui.showMobileNav.value = true"
+      @open-nav="openHome()"
     />
 
     <!-- Mobile navigation: the sidebar itself (Mobile-Home board). -->

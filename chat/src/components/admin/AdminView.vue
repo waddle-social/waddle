@@ -61,9 +61,8 @@ const deniedMessage = computed(() =>
 );
 
 // Admin-Access board: a centred loader, or the empty state with one way back.
-// The shell's frame gives the root no definite height, so an inner box
-// takes the viewport height.
-const centreClass = css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "3", height: "100dvh", padding: "32px 16px", boxSizing: "border-box", bg: "bg", color: "fg.muted", fontSize: "15px" });
+// The shell's main column is a flex column; the box fills it.
+const centreClass = css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "3", flex: 1, minHeight: 0, padding: "32px 16px", boxSizing: "border-box", bg: "bg", color: "fg.muted", fontSize: "15px" });
 const deniedClass = cx(empty(), css({ maxWidth: "420px", color: "fg", "& h1": { margin: 0, font: "700 24px/1.25 {fonts.display}" } }));
 const backClass = btn();
 
