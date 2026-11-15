@@ -230,7 +230,10 @@ implemented unless the text says so.
   crate; the first compile is verification step 1 or 3.
 - **`clustering` feature.** Slice gates before 2026-11-15 did not compile
   `waddle-server` with the `clustering` feature, although the release image
-  builds with it. No recorded run has compiled this tree with it.
+  builds with it. `cargo clippy -p waddle-server --lib --features clustering
+  --locked -- -D warnings` passed on the integration tree at `73fd797d9`
+  (library only; test targets and runs with the feature are still owed), and
+  the slice gates include it from that point on.
 
 ### Handshake design (`s2s-handshake-2047.md`)
 
