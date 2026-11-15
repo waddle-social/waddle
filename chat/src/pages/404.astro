@@ -2,6 +2,7 @@
 // NotFound board: unknown routes land here. A static page in the app's
 // look (no shell or session), with one way back: Home.
 import { Font } from "astro:assets";
+import ThemeRestore from "@/components/ThemeRestore.astro";
 import "@/styles/global.css";
 import { css, cx } from "styled-system/css";
 import { btn } from "styled-system/recipes";
@@ -26,15 +27,7 @@ const action = cx(btn({ variant: "primary" }), css({ textDecoration: "none", jus
     <meta name="color-scheme" content="dark light" />
     <Font cssVariable="--font-display" preload />
     <Font cssVariable="--font-body" preload />
-    <script is:inline>
-      (function () {
-        try {
-          if (localStorage.getItem("waddle:theme") === "daylight") {
-            document.documentElement.setAttribute("data-theme", "daylight");
-          }
-        } catch (e) {}
-      })();
-    </script>
+    <ThemeRestore />
     <title>Page not found · Waddle</title>
   </head>
   <body>

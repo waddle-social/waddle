@@ -1,0 +1,15 @@
+---
+// Applies the stored theme (see preferences/theme.ts) before first paint,
+// so the page never flashes night before hydration. Goes in <head>.
+---
+
+<script is:inline>
+  (function () {
+    try {
+      var theme = localStorage.getItem("waddle:theme");
+      if (theme === "daylight" || (theme === "system" && matchMedia("(prefers-color-scheme: light)").matches)) {
+        document.documentElement.setAttribute("data-theme", "daylight");
+      }
+    } catch (e) {}
+  })();
+</script>

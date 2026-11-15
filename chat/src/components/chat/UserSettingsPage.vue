@@ -77,7 +77,7 @@ const offlineClass = css({
   fontSize: "14px",
   "& img": { width: "36px", height: "36px", flex: "none" },
 });
-const themeGridClass = css({ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "2.5" });
+const themeGridClass = css({ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "2.5" });
 const themeOptionClass = css({
   display: "flex",
   flexDirection: "column",
@@ -112,6 +112,7 @@ const formClass = css({ display: "flex", flexDirection: "column", gap: "4" });
 
 const { mode: themeMode, setTheme } = useTheme();
 const themeOptions: ReadonlyArray<{ value: ThemeMode; label: string }> = [
+  { value: "system", label: "System" },
   { value: "night", label: "Night" },
   { value: "daylight", label: "Daylight" },
 ];
@@ -421,7 +422,13 @@ async function clearTuneStatus() {
         <h2 id="appearance-title" :class="sc.heading">Appearance</h2>
         <div role="radiogroup" aria-label="Theme" :class="themeGridClass">
           <label v-for="option in themeOptions" :key="option.value" :class="themeOptionClass">
-            <span :class="themeSwatchClass" :data-theme="option.value" aria-hidden="true"><span /><span /></span>
+            <!-- The System swatch takes the resolved page theme. -->
+            <span
+              :class="themeSwatchClass"
+              :data-theme="option.value === 'system' ? undefined : option.value"
+              aria-hidden="true"
+              ><span /><span
+            /></span>
             <span :class="themeLabelClass">
               <input
                 type="radio"
