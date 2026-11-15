@@ -145,7 +145,7 @@ function isVideoStory(story: Story): boolean {
 }
 
 function eventTargetUsesArrows(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && Boolean(target.closest("video,audio,input,textarea,select,[contenteditable='true']"));
+  return target instanceof HTMLElement && Boolean(target.closest("video,audio,input,textarea,select,[role='combobox'],[role='listbox'],[contenteditable='true']"));
 }
 
 function focusableElements(): HTMLElement[] {
