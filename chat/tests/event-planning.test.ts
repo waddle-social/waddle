@@ -8,7 +8,7 @@ const metadata: PlanningItem = { ...newPlanningItem("event", "London maintainers
 function client() {
   return {
     ensureJoined: mock(async () => {}),
-    fetchUserBookmarks: mock(async () => []),
+    fetchUserBookmarks: mock(async (): Promise<{ jid: string; name: string; notifyMode: "always" | "on-mention" | "never" }[]> => []),
     fetchEventPlanning: mock(async (_room: string): Promise<PlanningItem[]> => [metadata]),
     publishEventPlanning: mock(async (_room: string, item: PlanningItem) => ({ ...item, author: SELF })),
     retractEventPlanning: mock(async () => {}), createEventRoom: mock(async () => ROOM),
@@ -23,6 +23,7 @@ interface Panel {
   selectRoom: (room: string) => Promise<void>; refresh: () => Promise<void>;
   createEvent: () => Promise<void>; saveEditor: () => Promise<void>;
   discuss: (item: PlanningItem) => Promise<void>;
+  rememberRoom: () => Promise<void>;
   startEdit: (item: PlanningItem) => void; invite: () => Promise<void>;
   rsvp: (status: string) => Promise<void>; vote: (poll: PlanningItem, option: string) => Promise<void>;
   items: Ref<PlanningItem[]>; editor: Ref<PlanningItem | null>; createName: Ref<string>;
@@ -101,6 +102,12 @@ describe("event workspace interactions", () => {
     const hotel = { ...newPlanningItem("link", "Hotel", "hotel-link"), url: "https://example.com/hotel" };
     await state.discuss(hotel);
     expect(api.sendGroupMessage).toHaveBeenCalledWith("", ROOM, "Hotel\nhttps://example.com/hotel", { threadId: "hotel-link" });
+  });
+  test("saving an existing event preserves its notification preference", async () => {
+    const { api, state } = await panel(); await state.selectRoom(ROOM);
+    api.fetchUserBookmarks.mockResolvedValue([{ jid: ROOM, name: "London", notifyMode: "always" }]);
+    await state.rememberRoom();
+    expect(api.setRoomNotificationMode).not.toHaveBeenCalled();
   });
   test("clearing optional typed links and assignees publishes null", async () => {
     const { api, state } = await panel(); await state.selectRoom(ROOM);

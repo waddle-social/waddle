@@ -10,7 +10,7 @@ import { btn, input, kicker } from "styled-system/recipes";
 
 const props = defineProps<{ client: BrowserXmppClient | null; selfJid: string | null; requestedRoom?: { jid: string; version: number } | null }>();
 const emit = defineEmits<{ openConversation: [roomJid: string] }>();
-const rooms = ref<{ jid: string; name: string }[]>([]);
+const rooms = ref<{ jid: string; name: string; notifyMode?: "always" | "on-mention" | "never" | null }[]>([]);
 const selectedRoom = ref<string | null>(null);
 const roomInput = ref("");
 const items = ref<PlanningItem[]>([]);
@@ -82,7 +82,7 @@ async function discover() {
   try {
     const bookmarks = await client.fetchUserBookmarks();
     if (client !== props.client || destroyed) return;
-    rooms.value = bookmarks.filter((bookmark) => bookmark.jid.split("@")[0]?.startsWith("event-")).map((bookmark) => ({ jid: bookmark.jid, name: bookmark.name || "Event planning" }));
+    rooms.value = bookmarks.filter((bookmark) => bookmark.jid.split("@")[0]?.startsWith("event-")).map((bookmark) => ({ jid: bookmark.jid, name: bookmark.name || "Event planning", notifyMode: bookmark.notifyMode }));
   } catch (cause) { if (client === props.client && !destroyed) error.value = message(cause); }
 }
 function message(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause); }
@@ -105,6 +105,7 @@ async function refresh(silent = false) {
   finally { if (token === request) loading.value = false; }
 }
 async function selectRoom(room: string) {
+  notifyMode.value = rooms.value.find((entry) => entry.jid === room.trim())?.notifyMode ?? "on-mention";
   request++; selectedRoom.value = room.trim(); items.value = []; members.value = []; editor.value = null; creating.value = false; activeTab.value = "overview";
   const joiningClient = props.client; const joiningRoom = selectedRoom.value;
   try { if (joiningClient && joiningRoom) await joiningClient.ensureJoined(joiningRoom); }
@@ -255,10 +256,14 @@ async function setNotifications() {
     if (!selectedRoom.value || !props.client) return;
     const result = await props.client.setRoomNotificationMode({ roomJid: selectedRoom.value, name: metadata.value?.title, mode: notifyMode.value });
     if (result.kind !== "ok") throw new Error("Could not save event notifications.");
+    const saved = rooms.value.find((room) => room.jid === selectedRoom.value);
+    if (saved) saved.notifyMode = notifyMode.value;
   });
 }
 async function rememberRoom() {
-  await setNotifications(); await discover();
+  const room = selectedRoom.value; const client = props.client;
+  if (!room || !client) return;
+  await mutate(async () => { await ensureBookmark(room, client); await discover(); });
 }
 watch(() => props.requestedRoom, (room) => { if (room) void selectRoom(room.jid); });
 watch(() => props.client, () => { request++; items.value = []; members.value = []; selectedRoom.value = null; editor.value = null; void discover(); });

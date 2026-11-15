@@ -59,3 +59,12 @@ payloads are not projected into public calendar feeds or community activity.
 
 The wire contract and server permission model are documented in
 [the event planning specification](../../server/docs/specs/event-planning.md).
+
+## Preview
+
+The development preview includes a London maintainers meetup in February 2027.
+It uses the production planning component with local fixture storage, so it can
+be explored without an account at `/_preview?screen=event-planning`.
+
+[Desktop preview](../screenshots/event-planning/desktop.png) ·
+[Mobile preview](../screenshots/event-planning/mobile.png)

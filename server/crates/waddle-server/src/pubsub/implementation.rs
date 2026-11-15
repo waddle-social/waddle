@@ -116,14 +116,12 @@ impl PubSubStorage for DatabasePubSubStorage {
         {
             return Err(XmppError::feature_not_implemented(None));
         }
-        self.db
-            .execute(
+        self.execute(
                 "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ? AND publisher_jid = ?",
                 crate::db_params![owner.to_string(), node_name, item_id, publisher.to_string()],
             )
             .await
             .map(|affected| affected > 0)
-            .map_err(|cause| XmppError::internal(cause.to_string()))
     }
 
     async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError> {

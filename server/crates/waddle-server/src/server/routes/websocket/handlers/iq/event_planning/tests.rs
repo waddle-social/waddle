@@ -147,7 +147,7 @@ async fn room_membership_protects_storage_and_revocation_takes_effect() {
         .deps
         .protocol
         .pubsub_storage
-        .get_items(&room, &backing_node, None, &[task.id.clone()])
+        .get_items(&room, &backing_node, None, std::slice::from_ref(&task.id))
         .await
         .expect("persisted task");
     let parsed = PlanningItem::from_element(
@@ -359,7 +359,7 @@ async fn assignee_and_organizer_edits_preserve_original_author_and_payer() {
         .deps
         .protocol
         .pubsub_storage
-        .get_items(&room, &backing_node, None, &[task.id.clone()])
+        .get_items(&room, &backing_node, None, std::slice::from_ref(&task.id))
         .await
         .expect("task");
     assert_eq!(stored[0].publisher, Some(alice.to_bare()));
