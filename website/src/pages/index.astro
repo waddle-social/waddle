@@ -731,7 +731,8 @@ const sponsorText = css({
 				widgetId = window.turnstile.render(turnstileContainer, {
 					sitekey: turnstileSiteKey,
 					action: turnstileAction,
-					size: "invisible",
+					// Invisible mode is set on the widget in the Cloudflare dashboard; we run the check ourselves.
+					execution: "execute",
 					callback: (token) => {
 						turnstileResponseInput.value = token;
 						setFormState("ready");
