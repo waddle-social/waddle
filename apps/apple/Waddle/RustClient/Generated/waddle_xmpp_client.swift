@@ -631,6 +631,17 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func disconnect() async
 
+    func fetchCommunityEvents(communityJid: String) async throws  -> [WaddleEvent]
+
+    /**
+     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     */
+    func publishCommunityEvent(communityJid: String, event: WaddleEvent) async throws  -> WaddleEvent
+
+    func retractCommunityEvent(communityJid: String, itemId: String) async throws
+
+    func rsvpCommunityEvent(communityJid: String, uid: String, selfJid: String, status: WaddleEventParticipation) async throws
+
     /**
      * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
      * user's own server advertises, as typed entries the app maps to
@@ -834,6 +845,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * mechanism — the server re-checks every actual command.
      */
     func isCommunityOwner() async  -> Bool
+
+    func createEventRoom(name: String, privateRoom: Bool) async throws  -> String
+
+    func eventPlanningItems(roomJid: String) async throws  -> [WaddlePlanningItem]
+
+    func eventPlanningPublish(roomJid: String, item: WaddlePlanningItem) async throws  -> WaddlePlanningItem
+
+    func eventPlanningRetract(roomJid: String, id: String) async throws
 
     /**
      * Discover the extension service and its XEP-0050 command list,
@@ -1507,6 +1526,77 @@ open func disconnect()async   {
             liftFunc: { $0 },
             errorHandler: nil
 
+        )
+}
+
+open func fetchCommunityEvents(communityJid: String)async throws  -> [WaddleEvent]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_community_events(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleEvent.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     */
+open func publishCommunityEvent(communityJid: String, event: WaddleEvent)async throws  -> WaddleEvent  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_community_event(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterTypeWaddleEvent_lower(event)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleEvent_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+open func retractCommunityEvent(communityJid: String, itemId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_community_event(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterString.lower(itemId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+open func rsvpCommunityEvent(communityJid: String, uid: String, selfJid: String, status: WaddleEventParticipation)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rsvp_community_event(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterString.lower(uid),FfiConverterString.lower(selfJid),FfiConverterTypeWaddleEventParticipation_lower(status)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -2191,6 +2281,74 @@ open func isCommunityOwner()async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+open func createEventRoom(name: String, privateRoom: Bool)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_event_room(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(name),FfiConverterBool.lower(privateRoom)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+open func eventPlanningItems(roomJid: String)async throws  -> [WaddlePlanningItem]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_event_planning_items(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddlePlanningItem.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+open func eventPlanningPublish(roomJid: String, item: WaddlePlanningItem)async throws  -> WaddlePlanningItem  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_event_planning_publish(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterTypeWaddlePlanningItem_lower(item)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddlePlanningItem_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+open func eventPlanningRetract(roomJid: String, id: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_event_planning_retract(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -7006,6 +7164,146 @@ public func FfiConverterTypeWaddleEncryptedFileHash_lower(_ value: WaddleEncrypt
 }
 
 
+public struct WaddleEvent: Equatable, Hashable {
+    public var id: String
+    public var uid: String
+    public var summary: String
+    public var description: String?
+    public var location: String?
+    public var organizer: String?
+    public var workspaceRoom: String?
+    public var start: WaddleCalendarDate?
+    public var end: WaddleCalendarDate?
+    public var attendees: [WaddleEventAttendee]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, uid: String, summary: String, description: String?, location: String?, organizer: String?, workspaceRoom: String?, start: WaddleCalendarDate?, end: WaddleCalendarDate?, attendees: [WaddleEventAttendee]) {
+        self.id = id
+        self.uid = uid
+        self.summary = summary
+        self.description = description
+        self.location = location
+        self.organizer = organizer
+        self.workspaceRoom = workspaceRoom
+        self.start = start
+        self.end = end
+        self.attendees = attendees
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEvent {
+        return
+            try WaddleEvent(
+                id: FfiConverterString.read(from: &buf),
+                uid: FfiConverterString.read(from: &buf),
+                summary: FfiConverterString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                location: FfiConverterOptionString.read(from: &buf),
+                organizer: FfiConverterOptionString.read(from: &buf),
+                workspaceRoom: FfiConverterOptionString.read(from: &buf),
+                start: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
+                end: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
+                attendees: FfiConverterSequenceTypeWaddleEventAttendee.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleEvent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.uid, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.location, into: &buf)
+        FfiConverterOptionString.write(value.organizer, into: &buf)
+        FfiConverterOptionString.write(value.workspaceRoom, into: &buf)
+        FfiConverterOptionTypeWaddleCalendarDate.write(value.start, into: &buf)
+        FfiConverterOptionTypeWaddleCalendarDate.write(value.end, into: &buf)
+        FfiConverterSequenceTypeWaddleEventAttendee.write(value.attendees, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEvent_lift(_ buf: RustBuffer) throws -> WaddleEvent {
+    return try FfiConverterTypeWaddleEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEvent_lower(_ value: WaddleEvent) -> RustBuffer {
+    return FfiConverterTypeWaddleEvent.lower(value)
+}
+
+
+public struct WaddleEventAttendee: Equatable, Hashable {
+    public var uri: String
+    public var status: WaddleEventParticipation
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(uri: String, status: WaddleEventParticipation) {
+        self.uri = uri
+        self.status = status
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleEventAttendee: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEventAttendee: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEventAttendee {
+        return
+            try WaddleEventAttendee(
+                uri: FfiConverterString.read(from: &buf),
+                status: FfiConverterTypeWaddleEventParticipation.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleEventAttendee, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.uri, into: &buf)
+        FfiConverterTypeWaddleEventParticipation.write(value.status, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventAttendee_lift(_ buf: RustBuffer) throws -> WaddleEventAttendee {
+    return try FfiConverterTypeWaddleEventAttendee.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventAttendee_lower(_ value: WaddleEventAttendee) -> RustBuffer {
+    return FfiConverterTypeWaddleEventAttendee.lower(value)
+}
+
+
 /**
  * One discovered extension command with its composer metadata.
  */
@@ -9928,6 +10226,194 @@ public func FfiConverterTypeWaddlePinPreview_lower(_ value: WaddlePinPreview) ->
 }
 
 
+public struct WaddlePlanningItem: Equatable, Hashable {
+    public var id: String
+    public var kind: WaddlePlanningKind
+    public var author: String?
+    public var title: String
+    public var description: String?
+    public var url: String?
+    public var category: String?
+    public var location: String?
+    public var timezone: String?
+    public var startsAt: Int64?
+    public var endsAt: Int64?
+    public var assignee: String?
+    public var completed: Bool
+    public var pinned: Bool
+    public var amountMinor: Int64?
+    public var currency: String?
+    public var participants: [String]
+    public var options: [WaddlePlanningOption]
+    public var selections: [String]
+    public var subject: String?
+    public var attendance: WaddleAttendanceStatus?
+    public var status: WaddlePlanningStatus?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, kind: WaddlePlanningKind, author: String?, title: String, description: String?, url: String?, category: String?, location: String?, timezone: String?, startsAt: Int64?, endsAt: Int64?, assignee: String?, completed: Bool, pinned: Bool, amountMinor: Int64?, currency: String?, participants: [String], options: [WaddlePlanningOption], selections: [String], subject: String?, attendance: WaddleAttendanceStatus?, status: WaddlePlanningStatus?) {
+        self.id = id
+        self.kind = kind
+        self.author = author
+        self.title = title
+        self.description = description
+        self.url = url
+        self.category = category
+        self.location = location
+        self.timezone = timezone
+        self.startsAt = startsAt
+        self.endsAt = endsAt
+        self.assignee = assignee
+        self.completed = completed
+        self.pinned = pinned
+        self.amountMinor = amountMinor
+        self.currency = currency
+        self.participants = participants
+        self.options = options
+        self.selections = selections
+        self.subject = subject
+        self.attendance = attendance
+        self.status = status
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePlanningItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePlanningItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePlanningItem {
+        return
+            try WaddlePlanningItem(
+                id: FfiConverterString.read(from: &buf),
+                kind: FfiConverterTypeWaddlePlanningKind.read(from: &buf),
+                author: FfiConverterOptionString.read(from: &buf),
+                title: FfiConverterString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                url: FfiConverterOptionString.read(from: &buf),
+                category: FfiConverterOptionString.read(from: &buf),
+                location: FfiConverterOptionString.read(from: &buf),
+                timezone: FfiConverterOptionString.read(from: &buf),
+                startsAt: FfiConverterOptionInt64.read(from: &buf),
+                endsAt: FfiConverterOptionInt64.read(from: &buf),
+                assignee: FfiConverterOptionString.read(from: &buf),
+                completed: FfiConverterBool.read(from: &buf),
+                pinned: FfiConverterBool.read(from: &buf),
+                amountMinor: FfiConverterOptionInt64.read(from: &buf),
+                currency: FfiConverterOptionString.read(from: &buf),
+                participants: FfiConverterSequenceString.read(from: &buf),
+                options: FfiConverterSequenceTypeWaddlePlanningOption.read(from: &buf),
+                selections: FfiConverterSequenceString.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
+                attendance: FfiConverterOptionTypeWaddleAttendanceStatus.read(from: &buf),
+                status: FfiConverterOptionTypeWaddlePlanningStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePlanningItem, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterTypeWaddlePlanningKind.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.author, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+        FfiConverterOptionString.write(value.category, into: &buf)
+        FfiConverterOptionString.write(value.location, into: &buf)
+        FfiConverterOptionString.write(value.timezone, into: &buf)
+        FfiConverterOptionInt64.write(value.startsAt, into: &buf)
+        FfiConverterOptionInt64.write(value.endsAt, into: &buf)
+        FfiConverterOptionString.write(value.assignee, into: &buf)
+        FfiConverterBool.write(value.completed, into: &buf)
+        FfiConverterBool.write(value.pinned, into: &buf)
+        FfiConverterOptionInt64.write(value.amountMinor, into: &buf)
+        FfiConverterOptionString.write(value.currency, into: &buf)
+        FfiConverterSequenceString.write(value.participants, into: &buf)
+        FfiConverterSequenceTypeWaddlePlanningOption.write(value.options, into: &buf)
+        FfiConverterSequenceString.write(value.selections, into: &buf)
+        FfiConverterOptionString.write(value.subject, into: &buf)
+        FfiConverterOptionTypeWaddleAttendanceStatus.write(value.attendance, into: &buf)
+        FfiConverterOptionTypeWaddlePlanningStatus.write(value.status, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningItem_lift(_ buf: RustBuffer) throws -> WaddlePlanningItem {
+    return try FfiConverterTypeWaddlePlanningItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningItem_lower(_ value: WaddlePlanningItem) -> RustBuffer {
+    return FfiConverterTypeWaddlePlanningItem.lower(value)
+}
+
+
+public struct WaddlePlanningOption: Equatable, Hashable {
+    public var id: String
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePlanningOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePlanningOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePlanningOption {
+        return
+            try WaddlePlanningOption(
+                id: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePlanningOption, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningOption_lift(_ buf: RustBuffer) throws -> WaddlePlanningOption {
+    return try FfiConverterTypeWaddlePlanningOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningOption_lower(_ value: WaddlePlanningOption) -> RustBuffer {
+    return FfiConverterTypeWaddlePlanningOption.lower(value)
+}
+
+
 public struct WaddlePresence: Equatable, Hashable {
     public var from: String?
     public var to: String?
@@ -10557,6 +11043,9 @@ public func FfiConverterTypeWaddleRoomConfig_lower(_ value: WaddleRoomConfig) ->
  * clears the description.
  */
 public struct WaddleRoomConfigPatch: Equatable, Hashable {
+    public var membersOnly: Bool?
+    public var publicRoom: Bool?
+    public var persistentRoom: Bool?
     public var name: String?
     public var description: String?
     public var forum: Bool?
@@ -10564,7 +11053,10 @@ public struct WaddleRoomConfigPatch: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String?, description: String?, forum: Bool?, pinPermission: WaddlePinPermission?) {
+    public init(membersOnly: Bool?, publicRoom: Bool?, persistentRoom: Bool?, name: String?, description: String?, forum: Bool?, pinPermission: WaddlePinPermission?) {
+        self.membersOnly = membersOnly
+        self.publicRoom = publicRoom
+        self.persistentRoom = persistentRoom
         self.name = name
         self.description = description
         self.forum = forum
@@ -10587,6 +11079,9 @@ public struct FfiConverterTypeWaddleRoomConfigPatch: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoomConfigPatch {
         return
             try WaddleRoomConfigPatch(
+                membersOnly: FfiConverterOptionBool.read(from: &buf),
+                publicRoom: FfiConverterOptionBool.read(from: &buf),
+                persistentRoom: FfiConverterOptionBool.read(from: &buf),
                 name: FfiConverterOptionString.read(from: &buf),
                 description: FfiConverterOptionString.read(from: &buf),
                 forum: FfiConverterOptionBool.read(from: &buf),
@@ -10595,6 +11090,9 @@ public struct FfiConverterTypeWaddleRoomConfigPatch: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: WaddleRoomConfigPatch, into buf: inout [UInt8]) {
+        FfiConverterOptionBool.write(value.membersOnly, into: &buf)
+        FfiConverterOptionBool.write(value.publicRoom, into: &buf)
+        FfiConverterOptionBool.write(value.persistentRoom, into: &buf)
         FfiConverterOptionString.write(value.name, into: &buf)
         FfiConverterOptionString.write(value.description, into: &buf)
         FfiConverterOptionBool.write(value.forum, into: &buf)
@@ -12140,6 +12638,160 @@ public func FfiConverterTypeWaddleAdhocStatus_lower(_ value: WaddleAdhocStatus) 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleAttendanceStatus: Equatable, Hashable {
+
+    case invited
+    case interested
+    case going
+    case declined
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAttendanceStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAttendanceStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleAttendanceStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAttendanceStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .invited
+
+        case 2: return .interested
+
+        case 3: return .going
+
+        case 4: return .declined
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleAttendanceStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .invited:
+            writeInt(&buf, Int32(1))
+
+
+        case .interested:
+            writeInt(&buf, Int32(2))
+
+
+        case .going:
+            writeInt(&buf, Int32(3))
+
+
+        case .declined:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAttendanceStatus_lift(_ buf: RustBuffer) throws -> WaddleAttendanceStatus {
+    return try FfiConverterTypeWaddleAttendanceStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAttendanceStatus_lower(_ value: WaddleAttendanceStatus) -> RustBuffer {
+    return FfiConverterTypeWaddleAttendanceStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCalendarDate: Equatable, Hashable {
+
+    case date(date: String
+    )
+    case dateTime(timestampMs: Int64
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCalendarDate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCalendarDate: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCalendarDate
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCalendarDate {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .date(date: try FfiConverterString.read(from: &buf)
+        )
+
+        case 2: return .dateTime(timestampMs: try FfiConverterInt64.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCalendarDate, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .date(date):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(date, into: &buf)
+
+
+        case let .dateTime(timestampMs):
+            writeInt(&buf, Int32(2))
+            FfiConverterInt64.write(timestampMs, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCalendarDate_lift(_ buf: RustBuffer) throws -> WaddleCalendarDate {
+    return try FfiConverterTypeWaddleCalendarDate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCalendarDate_lower(_ value: WaddleCalendarDate) -> RustBuffer {
+    return FfiConverterTypeWaddleCalendarDate.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * Variants of an inbound A/V call event. Matches the wire shapes
  * `messaging::call::CallEventKind` already parses for the wasm
@@ -12999,6 +13651,87 @@ public func FfiConverterTypeWaddleError_lift(_ buf: RustBuffer) throws -> Waddle
 public func FfiConverterTypeWaddleError_lower(_ value: WaddleError) -> RustBuffer {
     return FfiConverterTypeWaddleError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleEventParticipation: Equatable, Hashable {
+
+    case needsAction
+    case accepted
+    case declined
+    case tentative
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleEventParticipation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEventParticipation: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleEventParticipation
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEventParticipation {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .needsAction
+
+        case 2: return .accepted
+
+        case 3: return .declined
+
+        case 4: return .tentative
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleEventParticipation, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .needsAction:
+            writeInt(&buf, Int32(1))
+
+
+        case .accepted:
+            writeInt(&buf, Int32(2))
+
+
+        case .declined:
+            writeInt(&buf, Int32(3))
+
+
+        case .tentative:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventParticipation_lift(_ buf: RustBuffer) throws -> WaddleEventParticipation {
+    return try FfiConverterTypeWaddleEventParticipation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventParticipation_lower(_ value: WaddleEventParticipation) -> RustBuffer {
+    return FfiConverterTypeWaddleEventParticipation.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -14680,6 +15413,203 @@ public func FfiConverterTypeWaddlePinPermission_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddlePinPermission_lower(_ value: WaddlePinPermission) -> RustBuffer {
     return FfiConverterTypeWaddlePinPermission.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddlePlanningKind: Equatable, Hashable {
+
+    case event
+    case link
+    case task
+    case itinerary
+    case decision
+    case travel
+    case expense
+    case poll
+    case vote
+    case attendance
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePlanningKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePlanningKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePlanningKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePlanningKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .event
+
+        case 2: return .link
+
+        case 3: return .task
+
+        case 4: return .itinerary
+
+        case 5: return .decision
+
+        case 6: return .travel
+
+        case 7: return .expense
+
+        case 8: return .poll
+
+        case 9: return .vote
+
+        case 10: return .attendance
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePlanningKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .event:
+            writeInt(&buf, Int32(1))
+
+
+        case .link:
+            writeInt(&buf, Int32(2))
+
+
+        case .task:
+            writeInt(&buf, Int32(3))
+
+
+        case .itinerary:
+            writeInt(&buf, Int32(4))
+
+
+        case .decision:
+            writeInt(&buf, Int32(5))
+
+
+        case .travel:
+            writeInt(&buf, Int32(6))
+
+
+        case .expense:
+            writeInt(&buf, Int32(7))
+
+
+        case .poll:
+            writeInt(&buf, Int32(8))
+
+
+        case .vote:
+            writeInt(&buf, Int32(9))
+
+
+        case .attendance:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningKind_lift(_ buf: RustBuffer) throws -> WaddlePlanningKind {
+    return try FfiConverterTypeWaddlePlanningKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningKind_lower(_ value: WaddlePlanningKind) -> RustBuffer {
+    return FfiConverterTypeWaddlePlanningKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddlePlanningStatus: Equatable, Hashable {
+
+    case proposed
+    case confirmed
+    case cancelled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePlanningStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePlanningStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePlanningStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePlanningStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .proposed
+
+        case 2: return .confirmed
+
+        case 3: return .cancelled
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePlanningStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .proposed:
+            writeInt(&buf, Int32(1))
+
+
+        case .confirmed:
+            writeInt(&buf, Int32(2))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningStatus_lift(_ buf: RustBuffer) throws -> WaddlePlanningStatus {
+    return try FfiConverterTypeWaddlePlanningStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePlanningStatus_lower(_ value: WaddlePlanningStatus) -> RustBuffer {
+    return FfiConverterTypeWaddlePlanningStatus.lower(value)
 }
 
 
@@ -16859,6 +17789,54 @@ fileprivate struct FfiConverterOptionTypeWaddleVCard4: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleAttendanceStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleAttendanceStatus?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleAttendanceStatus.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleAttendanceStatus.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleCalendarDate: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCalendarDate?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleCalendarDate.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleCalendarDate.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleCarbonDirection: FfiConverterRustBuffer {
     typealias SwiftType = WaddleCarbonDirection?
 
@@ -17067,6 +18045,30 @@ fileprivate struct FfiConverterOptionTypeWaddlePinPermission: FfiConverterRustBu
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddlePinPermission.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddlePlanningStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePlanningStatus?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddlePlanningStatus.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddlePlanningStatus.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17472,6 +18474,56 @@ fileprivate struct FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleEvent]
+
+    public static func write(_ value: [WaddleEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleEvent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleEvent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleEventAttendee: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleEventAttendee]
+
+    public static func write(_ value: [WaddleEventAttendee], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleEventAttendee.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleEventAttendee] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleEventAttendee]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleEventAttendee.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleExtensionCommand: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleExtensionCommand]
 
@@ -17789,6 +18841,56 @@ fileprivate struct FfiConverterSequenceTypeWaddlePinEntry: FfiConverterRustBuffe
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddlePinEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddlePlanningItem: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddlePlanningItem]
+
+    public static func write(_ value: [WaddlePlanningItem], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddlePlanningItem.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddlePlanningItem] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddlePlanningItem]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddlePlanningItem.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddlePlanningOption: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddlePlanningOption]
+
+    public static func write(_ value: [WaddlePlanningOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddlePlanningOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddlePlanningOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddlePlanningOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddlePlanningOption.read(from: &buf))
         }
         return seq
     }
@@ -18303,6 +19405,18 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 62037) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 23102) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_community_event() != 52707) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rsvp_community_event() != 18201) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18394,6 +19508,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_event_room() != 29281) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_event_planning_items() != 46189) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_event_planning_publish() != 18296) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_event_planning_retract() != 53875) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_extension_commands() != 25241) {

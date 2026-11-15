@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Event
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
@@ -60,6 +61,7 @@ class HomeActions(
     val onBrowseRooms: () -> Unit = {},
     val onCreateRoom: () -> Unit = {},
     val onRetry: () -> Unit = {},
+    val onOpenEvents: () -> Unit = {},
 )
 
 /** Everything Home shows, resolved. */
@@ -89,6 +91,7 @@ fun HomeScreen(
     onOpenYou: () -> Unit = {},
     onOpenPeople: () -> Unit = {},
     onOpenRooms: () -> Unit = {},
+    onOpenEvents: () -> Unit = {},
     speaking: Set<String> = emptySet(),
     clock: Clock = Clock.systemDefaultZone(),
 ) {
@@ -138,6 +141,7 @@ fun HomeScreen(
                 onBrowseRooms = onOpenRooms,
                 onCreateRoom = { create.open = true },
                 onRetry = viewModel::retryConnection,
+                onOpenEvents = onOpenEvents,
             ),
             speaking = speaking,
             modifier = Modifier
@@ -193,6 +197,9 @@ private fun HomeHeader(state: HomeContentState, actions: HomeActions) {
             .padding(start = Waddle.space.md, end = Waddle.space.xxs),
     ) {
         Wordmark(modifier = Modifier.weight(1f))
+        IconButton(onClick = actions.onOpenEvents) {
+            Icon(Icons.Outlined.Event, contentDescription = stringResource(R.string.events_title))
+        }
         if (state.canCreateRoom) {
             IconButton(
                 onClick = actions.onCreateRoom,

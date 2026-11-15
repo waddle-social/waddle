@@ -765,3 +765,38 @@ fn keyed_carbon_side_effect_retains_original_obligation_on_wire() {
     };
     assert_eq!(ingress_append.as_deref(), Some(&obligation));
 }
+
+#[test]
+fn event_planning_access_has_independent_typed_wire_id() {
+    use super::{RelayEventPlanningAccess, RelayEventPlanningAccessReply};
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayEventPlanningAccess>>::REMOTE_ID,
+        "waddle.clustering.relay.event_planning_access.v1"
+    );
+    let message = RelayEventPlanningAccess {
+        room: "london@muc.example.com".parse().expect("room"),
+        requester: "alice@example.com/android".parse().expect("requester"),
+        trace: Default::default(),
+    };
+    let decoded: RelayEventPlanningAccess =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&message).expect("encode access query"))
+            .expect("decode access query");
+    assert_eq!(decoded.room, message.room);
+    assert_eq!(decoded.requester, message.requester);
+    use crate::server::routes::websocket::handlers::iq::event_planning_access::{
+        EventPlanningAccess, EventPlanningGeneration,
+    };
+    for reply in [
+        RelayEventPlanningAccessReply::Access(EventPlanningAccess {
+            affiliation: waddle_xmpp::Affiliation::Member,
+            generation: EventPlanningGeneration(uuid::Uuid::new_v4()),
+        }),
+        RelayEventPlanningAccessReply::NotOwner,
+        RelayEventPlanningAccessReply::Unavailable,
+    ] {
+        let decoded: RelayEventPlanningAccessReply =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode access reply"))
+                .expect("decode access reply");
+        assert_eq!(decoded, reply);
+    }
+}

@@ -7996,12 +7996,14 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "chrono-tz",
  "jid",
  "minidom",
  "serde",
  "sha1 0.11.0",
  "thiserror 2.0.18",
  "tracing",
+ "url",
  "uuid",
  "xmpp-parsers",
 ]

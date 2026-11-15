@@ -205,6 +205,7 @@ mod xep0045_owner {
             description: Some(String::new()),
             forum: Some(true),
             pin_permission: Some(WaddlePinPermission::AdminsOnly),
+            ..WaddleRoomConfigPatch::default()
         });
         assert_eq!(patch.name.as_deref(), Some("Renamed"));
         assert_eq!(patch.description.as_deref(), Some(""));

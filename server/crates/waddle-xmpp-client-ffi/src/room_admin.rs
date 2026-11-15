@@ -93,6 +93,9 @@ pub struct WaddleRoomConfig {
 /// clears the description.
 #[derive(uniffi::Record, Clone, Debug, Default)]
 pub struct WaddleRoomConfigPatch {
+    pub members_only: Option<bool>,
+    pub public_room: Option<bool>,
+    pub persistent_room: Option<bool>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub forum: Option<bool>,
@@ -181,6 +184,9 @@ pub(crate) fn room_config_from_form(form: &RoomConfigForm) -> WaddleRoomConfig {
 
 pub(crate) fn patch_from_ffi(patch: WaddleRoomConfigPatch) -> RoomConfigPatch {
     RoomConfigPatch {
+        members_only: patch.members_only,
+        public_room: patch.public_room,
+        persistent_room: patch.persistent_room,
         name: patch.name,
         description: patch.description,
         forum: patch.forum,
@@ -196,7 +202,10 @@ impl WaddleClient {
     }
 
     /// Fetch + parse the §10.2 owner config form for `room`.
-    async fn fetch_room_config_form(&self, room: &BareJid) -> Result<RoomConfigForm, WaddleError> {
+    pub(crate) async fn fetch_room_config_form(
+        &self,
+        room: &BareJid,
+    ) -> Result<RoomConfigForm, WaddleError> {
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
         let iq = build_muc_owner_config_get_iq(room);
         let result = send_iq_with_timeout(&handle, iq)

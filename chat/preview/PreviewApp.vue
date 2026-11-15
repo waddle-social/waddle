@@ -18,6 +18,7 @@ import { seedAdmin } from "./admin-preview";
 import { seedEvents } from "./seed-events";
 import { seedFeed } from "./seed-feed";
 import { seedPeople } from "./seed-people";
+import EventPlanningPreview from "./EventPlanningPreview.vue";
 import NotifyPreview from "./NotifyPreview.vue";
 
 /**
@@ -214,7 +215,8 @@ watch(appController, (c) => { if (c) seed(c); }, { flush: "post", immediate: tru
 </script>
 
 <template>
-  <AppShell>
+  <EventPlanningPreview v-if="screen === 'event-planning'" />
+  <AppShell v-else>
     <RoutePageShell route-id="home" />
     <!-- XmppProvider hosts these in the app; the preview has no provider. -->
     <IncomingCallToast />

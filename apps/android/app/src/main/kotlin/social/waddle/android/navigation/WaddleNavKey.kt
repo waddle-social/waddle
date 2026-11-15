@@ -36,6 +36,9 @@ sealed interface WaddleNavKey : NavKey {
     @Serializable
     data object Settings : WaddleNavKey
 
+    @Serializable
+    data object Events : WaddleNavKey
+
     /** Own-profile publishing (vCard4, avatar, mood/activity/tune). */
     @Serializable
     data object Profile : WaddleNavKey

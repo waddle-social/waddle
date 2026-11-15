@@ -179,6 +179,24 @@ export class WaddleClient {
      */
     enable_push_notifications(service_jid: string, node: string): Promise<any>;
     /**
+     * Fetch objects, checking room membership on every request.
+     */
+    event_planning_items(room_jid: string): Promise<any>;
+    /**
+     * Publish one object with the authenticated author's identity.
+     */
+    event_planning_publish(room_jid: string, input: any): Promise<any>;
+    /**
+     * Remove one object, enforcing author and organiser permissions on the service.
+     */
+    event_planning_retract(room_jid: string, item_id: string): Promise<any>;
+    /**
+     * Create and bookmark an event conversation. Private workspaces require
+     * members-only and hidden-room fields to be supported by the service.
+     * Configure access before publishing any planning metadata.
+     */
+    event_room_create(name: string, private_room: boolean): Promise<any>;
+    /**
      * Fetch the latest items from the community Social Feed node on
      * `spaces_jid` — the community service (`community.<domain>`).
      * Returns an array of JsFeedEntry objects ordered as the server

@@ -108,6 +108,21 @@ pub trait PubSubStorage: Send + Sync + 'static {
         item_id: &str,
     ) -> Result<bool, XmppError>;
 
+    /// Atomically retract an item only if its stored publisher matches.
+    ///
+    /// This must never be implemented as a separate read followed by an
+    /// unconditional delete. Backends may decline nodes with projection
+    /// semantics they cannot preserve atomically.
+    async fn retract_item_if_publisher(
+        &self,
+        _owner: &BareJid,
+        _node_name: &str,
+        _item_id: &str,
+        _publisher: &BareJid,
+    ) -> Result<bool, XmppError> {
+        Err(XmppError::feature_not_implemented(None))
+    }
+
     /// List all nodes owned by a JID.
     async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError>;
 

@@ -15,6 +15,9 @@ import {
   Repeat,
   Trash2,
 } from "lucide-vue-next";
+import EventPlanningPanel from "@/components/community/EventPlanningPanel.vue";
+import { newPlanningItem } from "@/lib/xmpp/event-planning";
+import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import CalendarFeedUrlPanel from "@/components/community/CalendarFeedUrlPanel.vue";
 import RecurrencePicker from "@/components/community/RecurrencePicker.vue";
 import type {
@@ -44,6 +47,7 @@ import { css, cx } from "styled-system/css";
 import { btn, chip, empty, iconbtn, input, kicker, scrim, seg } from "styled-system/recipes";
 
 interface EventsPaneProps {
+  client?: BrowserXmppClient | null;
   events: readonly CommunityEvent[];
   isLoading: boolean;
   isPosting: boolean;
@@ -70,6 +74,7 @@ const emit = defineEmits<{
   cancelInstance: [masterUid: string, instanceDtstart: CalendarDateValue];
   rsvp: [event: CommunityEvent, partstat: PartStat];
   openNav: [];
+  openEventConversation: [roomJid: string];
 }>();
 
 /**
@@ -671,6 +676,43 @@ function authorLabel(jid: string | undefined): string {
   return jidLocalpart(stripped);
 }
 
+const planningRoomRequest = ref<{ jid: string; version: number } | null>(null);
+const planningPanel = ref<HTMLElement | null>(null);
+const pendingWorkspaceLinks = ref<Record<string, string>>({});
+const planningError = ref<string | null>(null);
+const planningBusy = ref(false);
+function openPlanning(room: string) {
+  planningRoomRequest.value = { jid: room, version: (planningRoomRequest.value?.version ?? 0) + 1 };
+  planningPanel.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+async function createPlanning(event: CommunityEvent) {
+  const client = props.client; const community = props.communityJid;
+  if (!client || !community || planningBusy.value) return;
+  planningBusy.value = true; planningError.value = null;
+  const master = props.findMaster(event.uid) ?? event;
+  try {
+    let room = master.workspaceRoom || pendingWorkspaceLinks.value[master.uid];
+    if (!room) {
+      room = await client.createEventRoom(master.summary, true);
+      pendingWorkspaceLinks.value[master.uid] = room;
+    }
+    await client.publishEventPlanning(room, {
+      ...newPlanningItem("event", master.summary, "event"),
+      description: master.description, location: master.location, timezone: "UTC",
+      starts_at: master.dtstart?.kind === "date-time" ? new Date(master.dtstart.ms).toISOString() : master.dtstart?.kind === "date" ? `${master.dtstart.date}T00:00:00Z` : null,
+      ends_at: master.dtend?.kind === "date-time" ? new Date(master.dtend.ms).toISOString() : master.dtend?.kind === "date" ? `${master.dtend.date}T00:00:00Z` : null,
+      status: "proposed",
+    });
+    await client.updateCommunityEvent(community, master.id, {
+      summary: master.summary, description: master.description, location: master.location,
+      organizer: master.organizer, dtstart: master.dtstart, dtend: master.dtend,
+      rrule: master.rrule, exdates: master.exdates, workspaceRoom: room,
+    });
+    openPlanning(room); emit("refresh");
+  } catch (cause) { planningError.value = cause instanceof Error ? cause.message : String(cause); }
+  finally { planningBusy.value = false; }
+}
+
 // ─── Composer ─────────────────────────────────────────────────────────────────
 
 const composerOpen = ref(false);
@@ -678,6 +720,7 @@ const editingId = ref<string | null>(null);
 const summary = ref("");
 const description = ref("");
 const location = ref("");
+const workspaceRoom = ref<string | null>(null);
 const dtstart = ref("");
 const dtend = ref("");
 const allDay = ref(false);
@@ -787,6 +830,7 @@ function startEdit(event: CommunityEvent) {
   summary.value = master.summary;
   description.value = master.description ?? "";
   location.value = master.location ?? "";
+  workspaceRoom.value = master.workspaceRoom ?? null;
   if (master.dtstart?.kind === "date") {
     allDay.value = true;
     allDayStart.value = master.dtstart.date;
@@ -856,6 +900,7 @@ function submit() {
   if (!dateFields) return;
   const input: CommunityEventInput = {
     summary: summaryValue,
+    ...(workspaceRoom.value ? { workspaceRoom: workspaceRoom.value } : {}),
     ...(description.value.trim() ? { description: description.value.trim() } : {}),
     ...(location.value.trim() ? { location: location.value.trim() } : {}),
     ...(props.selfJid
@@ -882,6 +927,7 @@ function resetComposerFields() {
   summary.value = "";
   description.value = "";
   location.value = "";
+  workspaceRoom.value = null;
   dtstart.value = "";
   dtend.value = "";
   allDay.value = false;
@@ -1024,6 +1070,8 @@ function isMine(event: CommunityEvent): boolean {
 
     <div :class="ui.scroll">
       <div :class="ui.content">
+        <div v-if="client" ref="planningPanel"><EventPlanningPanel :client="client" :self-jid="selfJid" :requested-room="planningRoomRequest" @open-conversation="(roomJid) => emit('openEventConversation', roomJid)" /></div>
+        <p v-if="planningError" role="alert">{{ planningError }}</p>
         <div :class="ui.head">
           <h1 :class="ui.h1">Calendar</h1>
           <button
@@ -1298,6 +1346,8 @@ function isMine(event: CommunityEvent): boolean {
                     </button>
                   </template>
                 </div>
+                <button v-if="client && event.workspaceRoom" type="button" :class="quietButtonClass" @click="openPlanning(event.workspaceRoom)">Open planning space</button>
+                <button v-else-if="client && isOrganiser(event)" type="button" :class="quietButtonClass" :disabled="planningBusy" @click="createPlanning(event)">{{ planningBusy ? 'Creating…' : 'Add a private planning space' }}</button>
                 <p v-if="event.description" :class="ui.cardDesc">{{ event.description }}</p>
                 <span v-if="event.rrule" :class="ui.cardRepeat">
                   <Repeat aria-hidden="true" />

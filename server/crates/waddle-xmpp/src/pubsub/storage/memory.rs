@@ -341,6 +341,27 @@ impl PubSubStorage for InMemoryPubSubStorage {
         Ok(items.len() < original_len)
     }
 
+    async fn retract_item_if_publisher(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item_id: &str,
+        publisher: &BareJid,
+    ) -> Result<bool, XmppError> {
+        let key = Self::key(owner, node_name);
+        let Some(mut items) = self.items.get_mut(&key) else {
+            return Ok(false);
+        };
+        let Some(index) = items.iter().position(|item| item.id == item_id) else {
+            return Ok(false);
+        };
+        if items[index].publisher.as_ref() != Some(publisher) {
+            return Err(XmppError::forbidden(None));
+        }
+        items.remove(index);
+        Ok(true)
+    }
+
     async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError> {
         let owner_str = owner.to_string();
         let nodes: Vec<String> = self

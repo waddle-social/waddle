@@ -379,6 +379,12 @@ function setPinnedPanelOpen(isOpen: boolean) {
   activateRightPanel("pinned");
 }
 
+async function openEventConversation(roomJid: string) {
+  // New private workspaces become visible through the user's saved room bookmarks.
+  await waddles.loadStructure(jidLocalpart(roomJid));
+  await selectChannelByRoomJid(roomJid);
+}
+
 function onSelectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);
 }
@@ -847,6 +853,7 @@ async function recoverSupersededFromShell() {
       />
       <EventsPane
         v-else-if="ui.activeCommunitySurface.value === 'events'"
+        :client="xmppClient"
         :events="communityEvents.events.value"
         :is-loading="communityEvents.isLoading.value"
         :is-posting="communityEvents.isPosting.value"
@@ -860,6 +867,7 @@ async function recoverSupersededFromShell() {
         @refresh="communityEvents.refresh()"
         @post="(input) => communityEvents.post(input)"
         @edit="(id, input) => communityEvents.edit(id, input)"
+        @open-event-conversation="openEventConversation"
         @cancel-series="(id) => communityEvents.cancel(id)"
         @cancel-instance="(uid, dtstart) => communityEvents.cancelInstance(uid, dtstart)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"

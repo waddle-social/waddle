@@ -94,6 +94,7 @@ use implementation::ordered_send_error;
 #[cfg(test)]
 use implementation::refresh_relay_registration;
 
+pub use crate::server::routes::websocket::handlers::iq::event_planning_access::EventPlanningAccess;
 use implementation::relay_dispatch_span;
 pub use implementation::relay_name;
 use implementation::send_error;
@@ -110,6 +111,8 @@ pub use implementation::RelayDeliverRemoteResourceWriteAcceptedFrame;
 use implementation::RelayDispatchKind;
 pub use implementation::RelayEchoReply;
 pub use implementation::RelayEchoStanza;
+pub use implementation::RelayEventPlanningAccess;
+pub use implementation::RelayEventPlanningAccessReply;
 pub use implementation::RelayExtensionRoomSend;
 pub use implementation::RelayExtensionRoomSendReply;
 pub use implementation::RelayFaultAck;

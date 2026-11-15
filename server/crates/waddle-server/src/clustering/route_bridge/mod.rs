@@ -78,6 +78,7 @@ const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 mod account_authority;
 mod delivery;
+mod event_planning_access;
 mod extension_room;
 mod mailbox;
 pub(crate) use mailbox::ensure_room_occupancy_seated;

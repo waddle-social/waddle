@@ -119,6 +119,9 @@ internal class RoomAdminVerbs(
             description = description?.trim()?.takeIf { it.isNotEmpty() },
             forum = forum,
             pinPermission = null,
+            membersOnly = null,
+            publicRoom = null,
+            persistentRoom = null,
         )
         val roomJid = try {
             when (val result = activeSession.invokeIfCurrent(lease) { it.createRoom(localpart, nick, patch) }) {

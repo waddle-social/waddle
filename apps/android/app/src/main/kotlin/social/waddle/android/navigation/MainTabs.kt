@@ -77,6 +77,7 @@ class MainTabsActions(
     val openGroupDm: (roomJid: String, name: String) -> Unit,
     val openProfile: () -> Unit,
     val openSettings: () -> Unit,
+    val openEvents: () -> Unit = {},
 )
 
 /**
@@ -146,6 +147,7 @@ private fun TabContent(
             onOpenYou = { select(MainTab.YOU) },
             onOpenPeople = { select(MainTab.PEOPLE) },
             onOpenRooms = { select(MainTab.ROOMS) },
+            onOpenEvents = actions.openEvents,
             speaking = speaking,
         )
         MainTab.ROOMS -> RoomsScreen(

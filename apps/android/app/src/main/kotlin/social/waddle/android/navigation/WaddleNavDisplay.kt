@@ -25,6 +25,7 @@ import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.dm.GroupDmScreen
+import social.waddle.android.feature.events.EventsScreen
 import social.waddle.android.feature.members.MembersScreen
 import social.waddle.android.feature.profile.ProfileScreen
 import social.waddle.android.feature.settings.SettingsScreen
@@ -73,6 +74,7 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                             },
                             openProfile = { backStack.add(WaddleNavKey.Profile) },
                             openSettings = { backStack.add(WaddleNavKey.Settings) },
+                            openEvents = { backStack.add(WaddleNavKey.Events) },
                         ),
                         // Wide layouts show the tabs beside an open
                         // conversation; back then closes that first.
@@ -183,6 +185,13 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     onBack = { backStack.popSafely() },
                     onOpenCommunityUsers = { backStack.add(WaddleNavKey.CommunityUsers) },
                     onOpenProfile = { backStack.add(WaddleNavKey.Profile) },
+                )
+            }
+            entry<WaddleNavKey.Events> {
+                EventsScreen(
+                    onBack = { backStack.popSafely() },
+                    onOpenConversation = { jid, name -> backStack.add(WaddleNavKey.Channel(jid, name)) },
+                    onOpenMembers = { jid, name -> backStack.add(WaddleNavKey.Members(jid, name)) },
                 )
             }
             entry<WaddleNavKey.Profile> {

@@ -10,6 +10,8 @@ description = "Shared typed core primitives for Waddle's native XMPP client stac
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+url = { workspace = true }
 jid = { workspace = true }
 minidom = { workspace = true }
 serde = { workspace = true }

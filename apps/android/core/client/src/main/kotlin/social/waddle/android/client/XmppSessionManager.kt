@@ -47,6 +47,8 @@ import social.waddle.android.client.store.peopleDirectoryFlow
 import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleEvent
+import social.waddle.client.ffi.WaddleEventParticipation
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMucAffiliation
@@ -254,6 +256,50 @@ class XmppSessionManager(
 
     /** Persisted push delivery state (any account; check [PushState.owner]). */
     val pushState: Flow<PushState?> = sessionPrefs.push.state
+
+    /** Community calendar operations use the same account fence as all XMPP verbs. */
+    suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent>? =
+        activeSession.fetch { it.fetchCommunityEvents(communityJid) }
+
+    suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent? =
+        activeSession.fetch { it.publishCommunityEvent(communityJid, event) }
+
+    suspend fun retractCommunityEvent(communityJid: String, itemId: String): Boolean =
+        activeSession.fetch {
+            it.retractCommunityEvent(communityJid, itemId);
+        true
+        } ?: false
+
+    suspend fun rsvpCommunityEvent(
+        communityJid: String,
+        uid: String,
+        selfJid: String,
+        status: WaddleEventParticipation,
+    ): Boolean =
+        activeSession.fetch {
+            it.rsvpCommunityEvent(communityJid, uid, selfJid, status);
+        true
+        } ?: false
+
+    suspend fun eventPlanningItems(roomJid: String): List<social.waddle.client.ffi.WaddlePlanningItem>? =
+        activeSession.fetch { it.eventPlanningItems(roomJid) }
+
+    suspend fun eventPlanningPublish(
+        roomJid: String,
+        item: social.waddle.client.ffi.WaddlePlanningItem,
+    ): social.waddle.client.ffi.WaddlePlanningItem? = activeSession.fetch { it.eventPlanningPublish(roomJid, item) }
+
+    suspend fun eventPlanningRetract(roomJid: String, itemId: String): Boolean =
+        activeSession.fetch {
+            it.eventPlanningRetract(roomJid, itemId);
+        true
+        } ?: false
+
+    suspend fun createEventRoom(name: String, privateRoom: Boolean): String? =
+        activeSession.fetch { it.createEventRoom(name, privateRoom) }
+
+    suspend fun fetchEventRooms(): List<social.waddle.client.ffi.WaddleBookmarkItem>? =
+        activeSession.fetch { it.fetchUserBookmarks().filter { bookmark -> bookmark.jid.startsWith("event-") } }
 
     /** Every domain event, after store fan-out. */
     val events: SharedFlow<XmppEvent> = router.events
