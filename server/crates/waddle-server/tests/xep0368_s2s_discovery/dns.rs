@@ -1,6 +1,7 @@
 //! `DnsDiscovery` against a stub resolver: record-set merging and order,
-//! "." targets, fallback, failures, names queried, refused domain forms,
-//! caps and the discovery deadline.
+//! "." targets, SRV records without a usable target, fallback, failures
+//! of either lookup, names queried, refused domain forms, caps, the
+//! operator's blocked prefixes and the discovery deadline.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use waddle_server::s2s::conn::{Endpoint, EndpointOrigin, ResolveError};
+use waddle_server::s2s::discovery::address::{AddressBlock, BlockedAddresses};
 use waddle_server::s2s::discovery::{
     DnsAnswer, DnsDiscovery, DnsFailure, DnsLookup, DnsName, SrvRecord, FALLBACK_PORT,
     MAX_ADDRESSES_PER_TARGET, MAX_SRV_TARGETS,
@@ -583,4 +585,109 @@ async fn discovery_that_outlasts_its_deadline_is_a_failed_lookup() {
         discovery.discover(&prepared(DOMAIN)).await,
         Err(ResolveError::LookupFailed)
     );
+}
+
+#[tokio::test]
+async fn srv_records_without_a_usable_target_forbid_fallback() {
+    // SRV records exist, but none has a target this resolver could
+    // represent: the service is published, so the domain's own addresses
+    // are never used.
+    let stub = Arc::new(
+        StubDns::default()
+            .srv(STARTTLS_SRV, Stub::Records(Vec::new()))
+            .a("example.org.", Stub::Records(vec![v4("8.8.8.8")])),
+    );
+    assert_eq!(
+        discovery(&stub).discover(&prepared(DOMAIN)).await,
+        Err(ResolveError::NoEndpoints)
+    );
+    assert!(
+        stub.queries().iter().all(|query| query.starts_with("SRV ")),
+        "no address lookup after published SRV records"
+    );
+}
+
+#[tokio::test]
+async fn one_failed_address_lookup_without_addresses_is_a_failed_lookup() {
+    // An SRV target whose A lookup fails while its AAAA lookup is
+    // negative: retried later, never read as absence.
+    for (a, aaaa) in [
+        (Stub::Failure, Stub::Negative),
+        (Stub::Negative, Stub::Failure),
+    ] {
+        let stub = Arc::new(
+            StubDns::default()
+                .srv(
+                    STARTTLS_SRV,
+                    Stub::Records(vec![record(10, 0, 5269, "xmpp.example.org.")]),
+                )
+                .a("xmpp.example.org.", a.clone())
+                .aaaa("xmpp.example.org.", aaaa.clone()),
+        );
+        assert_eq!(
+            discovery(&stub).discover(&prepared(DOMAIN)).await,
+            Err(ResolveError::LookupFailed)
+        );
+        // The same for the domain's own addresses after two negative SRV
+        // answers.
+        let stub = Arc::new(
+            StubDns::default()
+                .a("example.org.", a)
+                .aaaa("example.org.", aaaa),
+        );
+        assert_eq!(
+            discovery(&stub).discover(&prepared(DOMAIN)).await,
+            Err(ResolveError::LookupFailed)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_srv_lookup_beside_targets_without_addresses_is_a_failed_lookup() {
+    let stub = Arc::new(StubDns::default().srv(DIRECT_SRV, Stub::Failure).srv(
+        STARTTLS_SRV,
+        Stub::Records(vec![record(10, 0, 5269, "xmpp.example.org.")]),
+    ));
+    assert_eq!(
+        discovery(&stub).discover(&prepared(DOMAIN)).await,
+        Err(ResolveError::LookupFailed)
+    );
+}
+
+#[tokio::test]
+async fn operator_blocked_prefixes_are_refused_with_the_built_in_classes() {
+    let blocked = BlockedAddresses::new(vec![
+        // A network-specific NAT64 prefix (RFC 6052) and an IPv4 block.
+        AddressBlock::parse("2a00:64::/96").expect("a prefix"),
+        AddressBlock::parse("8.8.4.0/24").expect("a prefix"),
+    ]);
+    let stub = Arc::new(
+        StubDns::default()
+            .srv(
+                STARTTLS_SRV,
+                Stub::Records(vec![record(10, 0, 5269, "xmpp.example.org.")]),
+            )
+            .aaaa(
+                "xmpp.example.org.",
+                Stub::Records(vec![v6("2a00:64::808:808"), v6("2002:808:404::1")]),
+            )
+            .a(
+                "xmpp.example.org.",
+                Stub::Records(vec![v4("8.8.4.4"), v4("10.0.0.1"), v4("8.8.8.8")]),
+            ),
+    );
+    let found = endpoints(
+        discovery(&stub)
+            .with_blocked_addresses(Arc::new(blocked))
+            .discover(&prepared(DOMAIN))
+            .await,
+    );
+    // The NAT64 address, the 6to4 address embedding 8.8.4.4, 8.8.4.4 and
+    // the private address are refused.
+    let addresses: Vec<SocketAddr> = found.iter().map(|endpoint| endpoint.address).collect();
+    assert_eq!(addresses, vec![socket("8.8.8.8", 5269)]);
+
+    // Without the operator's blocks only the built-in classes apply.
+    let found = endpoints(discovery(&stub).discover(&prepared(DOMAIN)).await);
+    assert_eq!(found.len(), MAX_ADDRESSES_PER_TARGET);
 }

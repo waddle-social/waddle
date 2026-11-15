@@ -3,30 +3,39 @@
 //! certificate that authenticates to home-b.test by dialback while the real
 //! home-a.test answers home-b's verification request as the Authoritative
 //! Server, and a receiving server for home-b.test that offers no SASL
-//! EXTERNAL, so that home-a.test authenticates itself by dialback.
+//! EXTERNAL, so that home-a.test authenticates itself by dialback. The
+//! verification connection's outcomes are covered too: an Authoritative
+//! Server whose certificate fails, a DNS-derived address in a blocked
+//! class, and the verification budget; and a `dialback` stream never
+//! replaces a `pkix` one.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use minidom::rxml::xml_ncname;
 use minidom::Element;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use waddle_server::s2s::conn::{AuthenticationStrength, StreamDirection, VerifiedPeerStream};
+use waddle_server::s2s::conn::{
+    AuthenticationStrength, Endpoint, EndpointOrigin, EndpointResolver, Endpoints, ResolveError,
+    ServiceOptions, StreamDirection, VerifiedPeerStream,
+};
 use waddle_server::s2s::dialback::DialbackSecret;
-use waddle_server::s2s::verify::TrustProfileKind;
-use waddle_xmpp::ns::{DIALBACK_FEATURES, JABBER_SERVER_DIALBACK, SASL, STREAM, TLS};
+use waddle_server::s2s::verify::{OutboundTransport, TrustProfileKind};
+use waddle_xmpp::identity::CanonicalDomain;
+use waddle_xmpp::ns::{DIALBACK_FEATURES, JABBER_SERVER_DIALBACK, SASL, STANZAS, STREAM, TLS};
 use waddle_xmpp::s2s::{
     CodecLimits, DialbackKeys, HeaderAddress, Inbound, StreamDecoder, StreamEncoder, StreamHeader,
     StreamId, StreamLanguage, StreamVersion,
 };
 
 use crate::support::{
-    await_element, await_header, domain, eventually, listener, start, Deployment, Pki, Spec,
-    HOME_A, HOME_B,
+    await_element, await_header, domain, eventually, listener, start, start_with, Deployment, Pki,
+    Spec, HOME_A, HOME_B,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -456,4 +465,281 @@ async fn a_deployment_authenticates_itself_by_dialback_where_external_is_not_off
     let _ = release.send(());
     let report = server.await.expect("the receiving server");
     assert_eq!(report.verified.as_deref(), Some("valid"));
+}
+
+/// Send home-a's genuine key for `peer`'s stream to home-b.test and return
+/// home-b's typed answer.
+async fn send_key(peer: &mut Negotiated<tokio_rustls::client::TlsStream<TcpStream>>) -> Element {
+    let key = secret_key(HOME_B, HOME_A, &peer.stream_id);
+    let result = dialback_element("result", HOME_A, HOME_B)
+        .append(key)
+        .build();
+    write_element(&mut peer.tls, &mut peer.encoder, &result).await;
+    await_element(
+        &mut peer.tls,
+        &mut peer.decoder,
+        "result",
+        JABBER_SERVER_DIALBACK,
+    )
+    .await
+}
+
+/// Whether a `type='error'` dialback answer carries `condition`.
+fn has_condition(answer: &Element, condition: &str) -> bool {
+    answer.attr("type") == Some("error")
+        && answer
+            .children()
+            .filter(|child| child.name() == "error")
+            .flat_map(|error| error.children())
+            .any(|child| child.is(condition, STANZAS))
+}
+
+/// `[[endpoints]]` lines for a direct-TLS endpoint.
+fn direct_tls_endpoint(domain: &str, address: SocketAddr) -> Vec<String> {
+    vec![
+        "[[endpoints]]".to_owned(),
+        format!("domain = {domain:?}"),
+        format!("address = \"{address}\""),
+        "transport = \"direct_tls\"".to_owned(),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authoritative_server_whose_certificate_fails_is_not_acceptable() {
+    let pki = Pki::new();
+    // Where home-a.test's Authoritative Server should be, a direct-TLS
+    // server presents a certificate for another name: an active
+    // certificate failure on the verification connection.
+    let (impostor, impostor_address) = listener().await;
+    let acceptor = TlsAcceptor::from(Arc::new(pki.server_config("impostor.test", &[])));
+    let reached = tokio::spawn(async move {
+        let Ok((socket, _)) = impostor.accept().await else {
+            return false;
+        };
+        let _ = acceptor.accept(socket).await;
+        true
+    });
+    let (listener_b, _) = listener().await;
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.dialback = vec![HOME_A];
+    spec_b.tables = inbound_dialback();
+    spec_b
+        .tables
+        .extend(direct_tls_endpoint(HOME_A, impostor_address));
+    let b = start(&pki, &spec_b, listener_b).await;
+
+    let mut peer = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let answer = send_key(&mut peer).await;
+    assert!(has_condition(&answer, "not-acceptable"), "{answer:?}");
+    assert!(
+        tokio::time::timeout(WAIT, reached)
+            .await
+            .expect("the verification connection in time")
+            .expect("the impostor task"),
+        "the verification connection reached the impostor"
+    );
+    let (_, closed) = read_rest(&mut peer.tls, WAIT).await;
+    assert!(closed, "home-b closes the stream after a dialback error");
+    assert!(dialback_stream(&b, HOME_A).is_none());
+}
+
+/// A resolver that answers every domain with one SRV-derived endpoint.
+struct SrvResolver(SocketAddr);
+
+#[async_trait]
+impl EndpointResolver for SrvResolver {
+    async fn resolve(&self, _domain: &CanonicalDomain) -> Result<Endpoints, ResolveError> {
+        Ok(Endpoints::new(vec![Endpoint {
+            address: self.0,
+            origin: EndpointOrigin::Srv,
+            transport: OutboundTransport::StartTls,
+        }]))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_verification_connection_never_dials_a_blocked_address() {
+    let pki = Pki::new();
+    // home-a.test's real Authoritative Server, on loopback: where a DNS
+    // answer would point, and a blocked class for a DNS-derived address.
+    let (listener_a, address_a) = listener().await;
+    let mut spec_a = Spec::new(HOME_A, HOME_B);
+    spec_a.tables = outbound_dialback(&pki);
+    let a = start(&pki, &spec_a, listener_a).await;
+    let (listener_b, _) = listener().await;
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.dialback = vec![HOME_A];
+    spec_b.tables = inbound_dialback();
+    let options = ServiceOptions {
+        resolver: Some(Arc::new(SrvResolver(address_a)) as Arc<dyn EndpointResolver>),
+        ..Default::default()
+    };
+    let b = start_with(&pki, &spec_b, listener_b, options).await;
+
+    let mut peer = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let answer = send_key(&mut peer).await;
+    // Every address is refused, so there is no Authoritative Server this
+    // deployment may reach.
+    assert!(
+        has_condition(&answer, "remote-server-not-found"),
+        "{answer:?}"
+    );
+    assert!(dialback_stream(&b, HOME_A).is_none());
+    // home-a never saw a verification connection.
+    assert!(a.handle.streams().is_empty());
+    assert_eq!(a.handle.open_sockets(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verifications_beyond_their_rate_are_a_resource_constraint() {
+    let pki = Pki::new();
+    let (a, b) = {
+        let (listener_a, address_a) = listener().await;
+        let (listener_b, _) = listener().await;
+        let mut spec_a = Spec::new(HOME_A, HOME_B);
+        spec_a.tables = outbound_dialback(&pki);
+        let mut spec_b = Spec::new(HOME_B, HOME_A);
+        spec_b.endpoints = vec![(HOME_A, address_a)];
+        spec_b.dialback = vec![HOME_A];
+        spec_b.tables = inbound_dialback();
+        spec_b.limits = vec![
+            "verification_per_second = 1".to_owned(),
+            "verification_burst = 1".to_owned(),
+        ];
+        (
+            start(&pki, &spec_a, listener_a).await,
+            start(&pki, &spec_b, listener_b).await,
+        )
+    };
+    // Both peers are connected before the first key is sent, so only the
+    // first verification runs between the two keys, well within the
+    // second it takes the rate to accrue a token. The first key is forged:
+    // its verification spends the only token and is refused, so no stream
+    // holds the pair.
+    let mut first = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let mut second = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let forged = DialbackSecret::new(b"an impostor's secret, not home-a's at all")
+        .key(&domain(HOME_B), &domain(HOME_A), &first.stream_id)
+        .expect("a key");
+    let result = dialback_element("result", HOME_A, HOME_B)
+        .append(forged.as_str())
+        .build();
+    write_element(&mut first.tls, &mut first.encoder, &result).await;
+    let answer = await_element(
+        &mut first.tls,
+        &mut first.decoder,
+        "result",
+        JABBER_SERVER_DIALBACK,
+    )
+    .await;
+    assert_eq!(answer.attr("type"), Some("invalid"));
+
+    // A genuine key at once: the verification rate has no token left.
+    let answer = send_key(&mut second).await;
+    assert!(has_condition(&answer, "resource-constraint"), "{answer:?}");
+    assert!(dialback_stream(&b, HOME_A).is_none());
+    // Ordinary dials were never charged: home-b still reaches home-a.
+    b.handle
+        .connect(&domain(HOME_B), &domain(HOME_A))
+        .await
+        .expect("an ordinary outbound stream");
+    drop(a);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dialback_stream_never_replaces_a_pkix_stream() {
+    let pki = Pki::new();
+    let (listener_a, _) = listener().await;
+    let (listener_b, address_b) = listener().await;
+    let mut spec_a = Spec::new(HOME_A, HOME_B);
+    spec_a.endpoints = vec![(HOME_B, address_b)];
+    spec_a.tables = outbound_dialback(&pki);
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.dialback = vec![HOME_A];
+    spec_b.tables = inbound_dialback();
+    // Any stream could replace another at once, but for its strength.
+    spec_b.limits = vec!["replacement_interval_ms = 1".to_owned()];
+    let a = start(&pki, &spec_a, listener_a).await;
+    let b = start(&pki, &spec_b, listener_b).await;
+
+    // home-a.test authenticates to home-b.test with its certificate.
+    a.handle
+        .connect(&domain(HOME_A), &domain(HOME_B))
+        .await
+        .expect("a pkix stream");
+    let pkix = |deployment: &Deployment| {
+        deployment.handle.streams().into_iter().find(|stream| {
+            stream.direction() == StreamDirection::Inbound
+                && stream.remote() == &domain(HOME_A)
+                && stream.strength() == AuthenticationStrength::Pkix
+        })
+    };
+    assert!(eventually(WAIT, || pkix(&b).is_some()).await);
+    let kept = pkix(&b).expect("the pkix stream").connection();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A dialback attempt for the same pair is refused before any key is
+    // verified, with `conflict`, and the pkix stream stays.
+    let mut peer = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let key = secret_key(HOME_B, HOME_A, &peer.stream_id);
+    let result = dialback_element("result", HOME_A, HOME_B)
+        .append(key)
+        .build();
+    write_element(&mut peer.tls, &mut peer.encoder, &result).await;
+    let (bytes, closed) = read_rest(&mut peer.tls, WAIT).await;
+    assert!(closed);
+    peer.decoder.push(&bytes).expect("input within the limits");
+    let mut conflict = false;
+    while let Ok(Some(item)) = peer.decoder.next_item() {
+        if let Inbound::Element(element) = item {
+            if element.is("error", STREAM) {
+                conflict = element.children().any(|child| child.name() == "conflict");
+            }
+        }
+    }
+    assert!(
+        conflict,
+        "home-b refuses the dialback stream with `conflict`"
+    );
+    assert_eq!(
+        pkix(&b).map(|stream| stream.connection()),
+        Some(kept),
+        "the pkix stream is kept"
+    );
+    assert!(dialback_stream(&b, HOME_A).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verifications_beyond_their_cap_are_a_resource_constraint() {
+    let pki = Pki::new();
+    // home-a.test's Authoritative Server accepts TCP and never answers, so
+    // a verification stays in progress until its deadline.
+    let (silent, silent_address) = listener().await;
+    let held = tokio::spawn(async move {
+        let mut sockets = Vec::new();
+        while let Ok((socket, _)) = silent.accept().await {
+            sockets.push(socket);
+        }
+    });
+    let (listener_b, _) = listener().await;
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.endpoints = vec![(HOME_A, silent_address)];
+    spec_b.dialback = vec![HOME_A];
+    spec_b.tables = inbound_dialback();
+    spec_b.limits = vec!["max_verifications = 1".to_owned()];
+    let b = start(&pki, &spec_b, listener_b).await;
+
+    let mut first = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let mut second = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let key = secret_key(HOME_B, HOME_A, &first.stream_id);
+    let result = dialback_element("result", HOME_A, HOME_B)
+        .append(key)
+        .build();
+    write_element(&mut first.tls, &mut first.encoder, &result).await;
+    // The first verification holds the only slot.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let answer = send_key(&mut second).await;
+    assert!(has_condition(&answer, "resource-constraint"), "{answer:?}");
+    assert!(dialback_stream(&b, HOME_A).is_none());
+    held.abort();
 }

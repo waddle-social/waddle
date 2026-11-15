@@ -13,7 +13,7 @@ pub use machine::Negotiation;
 pub use types::{
     AuthorizationDecision, AuthorizationRequest, CloseReason, DestinationStatus, DialbackError,
     DialbackKey, DialbackKeys, DialbackMode, DialbackOutcome, DialbackRequest, ExchangeId,
-    InboundAdmission, InitiatingConfig, NegotiatedStream, NegotiationInput, NegotiationPhase,
-    ReceivingConfig, Role, Signal, Step, StreamAuthentication, TlsEntry, TlsPeer, VerifyRequest,
-    VerifyVerdict, MAX_DIALBACK_KEY_BYTES,
+    InboundAdmission, InitiatingConfig, NegotiatedStream, NegotiationClock, NegotiationInput,
+    NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication, TlsEntry, TlsPeer,
+    VerifyRequest, VerifyVerdict, MAX_DIALBACK_KEY_BYTES,
 };

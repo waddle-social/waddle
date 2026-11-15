@@ -3,6 +3,8 @@
 //! Server; and answers to `<db:verify/>` as the Authoritative Server.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use jid::Jid;
 use minidom::rxml::Namespace;
@@ -22,10 +24,15 @@ use super::types::{
     NegotiationPhase, ReceivingConfig, Role, Step, StreamAuthentication, TlsPeer,
 };
 
-/// Most `<db:verify/>` requests answered on one stream. A Receiving Server
-/// asks once per stream it verifies; the bound keeps one connection from
-/// using this server as an unbounded key oracle.
-const MAX_VERIFY_REQUESTS: u8 = 8;
+/// Most `<db:verify/>` requests answered on one stream within
+/// [`VERIFY_WINDOW`]. A Receiving Server asks once per stream it verifies,
+/// and a long-lived stream may carry requests for as long as it lives; the
+/// rate keeps one connection from using this server as an unbounded key
+/// oracle without limiting how long it may keep asking.
+const MAX_VERIFY_REQUESTS: usize = 8;
+
+/// The window [`MAX_VERIFY_REQUESTS`] is counted over.
+const VERIFY_WINDOW: Duration = Duration::from_secs(60);
 
 /// Which stream header the receiving role awaits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +90,9 @@ pub(crate) struct Receiving {
     dialback_permitted: bool,
     /// Whether a dialback key was received; one pair, one attempt.
     dialback_used: bool,
-    verify_requests: u8,
+    /// When the verification requests answered within the last
+    /// [`VERIFY_WINDOW`] arrived, oldest first.
+    verify_requests: VecDeque<Instant>,
 }
 
 impl Receiving {
@@ -102,7 +111,7 @@ impl Receiving {
             stream_id: None,
             dialback_permitted: false,
             dialback_used: false,
-            verify_requests: 0,
+            verify_requests: VecDeque::new(),
         }
     }
 
@@ -410,10 +419,9 @@ impl Receiving {
         let (Some(id), Some(key)) = (id, key) else {
             return self.fail(steps, StreamErrorCondition::BadFormat);
         };
-        if self.verify_requests >= MAX_VERIFY_REQUESTS {
+        if !self.admit_verify_request() {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
-        self.verify_requests += 1;
         let valid = keys.verify(&receiving, &originating, &id, &key);
         steps.push(Step::Send(dialback::verify_answer(
             &originating,
@@ -422,6 +430,24 @@ impl Receiving {
             valid,
         )));
         steps.push(Step::DialbackAnswered { valid });
+    }
+
+    /// Count one more verification request, unless [`MAX_VERIFY_REQUESTS`]
+    /// were answered within the last [`VERIFY_WINDOW`].
+    fn admit_verify_request(&mut self) -> bool {
+        let now = self.config.clock.now();
+        while self
+            .verify_requests
+            .front()
+            .is_some_and(|answered| now.saturating_duration_since(*answered) >= VERIFY_WINDOW)
+        {
+            self.verify_requests.pop_front();
+        }
+        if self.verify_requests.len() >= MAX_VERIFY_REQUESTS {
+            return false;
+        }
+        self.verify_requests.push_back(now);
+        true
     }
 
     /// The owner's verification of the stream's dialback key. A valid key
@@ -450,9 +476,8 @@ impl Receiving {
                 }));
                 self.state = State::Established;
             }
-            DialbackOutcome::Invalid | DialbackOutcome::Error(_) => {
-                self.close(steps, CloseReason::DialbackRefused)
-            }
+            DialbackOutcome::Invalid => self.close(steps, CloseReason::DialbackRefused),
+            DialbackOutcome::Error(_) => self.close(steps, CloseReason::DialbackFailed),
         }
     }
 

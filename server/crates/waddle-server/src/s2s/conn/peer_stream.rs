@@ -40,6 +40,12 @@ impl AuthenticationStrength {
             Self::Dialback => "dialback",
         }
     }
+
+    /// Whether this strength proves less than `other`: `dialback` proves
+    /// less than `pkix`.
+    pub(super) fn is_weaker_than(self, other: Self) -> bool {
+        self == Self::Dialback && other == Self::Pkix
+    }
 }
 
 /// The TLS version and cipher suite a stream's connection negotiated.

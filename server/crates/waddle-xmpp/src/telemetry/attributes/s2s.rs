@@ -148,11 +148,15 @@ pub enum S2sResource {
     PerPeer,
     /// The global rate of new outbound connections.
     DialRate,
+    /// Dialback verification connections in progress.
+    Verifications,
+    /// The rate of new dialback verification connections.
+    VerificationRate,
 }
 
 impl S2sResource {
     /// Every value, for zero-registration and tests.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Sockets,
         Self::Unauthenticated,
         Self::SourceAddress,
@@ -162,6 +166,8 @@ impl S2sResource {
         Self::Peers,
         Self::PerPeer,
         Self::DialRate,
+        Self::Verifications,
+        Self::VerificationRate,
     ];
 }
 
@@ -182,6 +188,8 @@ impl MetricAttribute for S2sResource {
             Self::Peers => "peers",
             Self::PerPeer => "per_peer",
             Self::DialRate => "dial_rate",
+            Self::Verifications => "verifications",
+            Self::VerificationRate => "verification_rate",
         }
     }
 }

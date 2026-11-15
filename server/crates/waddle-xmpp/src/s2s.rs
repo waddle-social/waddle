@@ -40,8 +40,8 @@ pub use limits::{CodecLimits, LimitKind, SaslLimits};
 pub use negotiation::{
     AuthorizationDecision, AuthorizationRequest, CloseReason, DestinationStatus, DialbackError,
     DialbackKey, DialbackKeys, DialbackMode, DialbackOutcome, DialbackRequest, ExchangeId,
-    InboundAdmission, InitiatingConfig, NegotiatedStream, Negotiation, NegotiationInput,
-    NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication, TlsEntry, TlsPeer,
-    VerifyRequest, VerifyVerdict, MAX_DIALBACK_KEY_BYTES,
+    InboundAdmission, InitiatingConfig, NegotiatedStream, Negotiation, NegotiationClock,
+    NegotiationInput, NegotiationPhase, ReceivingConfig, Role, Signal, Step, StreamAuthentication,
+    TlsEntry, TlsPeer, VerifyRequest, VerifyVerdict, MAX_DIALBACK_KEY_BYTES,
 };
 pub use stream::{Output, S2sStream};

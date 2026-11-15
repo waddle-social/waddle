@@ -17,6 +17,13 @@
 //! one. The decisions are recorded in
 //! `server/docs/planning/s2s-discovery-2047.md`.
 //!
+//! Network-specific NAT64 (RFC 6052) and 6rd (RFC 5969) prefixes embed
+//! IPv4 addresses under prefixes an address alone does not reveal. The
+//! operator lists them, or any other block, in
+//! `discovery.blocked_prefixes`; [`BlockedAddresses`] refuses those blocks
+//! with the built-in classes, and an operator-listed IPv4 block also
+//! applies to every embedded IPv4 address checked above.
+//!
 //! Configured endpoints are the only exemption; they never pass through
 //! here.
 
@@ -61,7 +68,97 @@ const BLOCKED_V4: &[V4Block] = &[
     V4Block(0xf000_0000, 4),
 ];
 
-/// Whether discovery refuses `address`.
+/// An operator-listed address block: a network and its prefix length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressBlock {
+    network: IpAddr,
+    length: u8,
+}
+
+impl AddressBlock {
+    /// Parse CIDR notation, `address/length`. The length is from one up to
+    /// the address family's width, and the address has no bit set beyond
+    /// it, so a mistyped block is refused instead of silently widened.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (address, length) = text.split_once('/')?;
+        let network: IpAddr = address.parse().ok()?;
+        let length: u8 = length.parse().ok()?;
+        let block = Self { network, length };
+        let width = match network {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        ((1..=width).contains(&length) && block.host_bits_clear()).then_some(block)
+    }
+
+    fn host_bits_clear(&self) -> bool {
+        match self.network {
+            IpAddr::V4(network) => {
+                let bits = u32::from(network);
+                bits & v4_mask(self.length) == bits
+            }
+            IpAddr::V6(network) => {
+                let bits = u128::from(network);
+                bits & v6_mask(self.length) == bits
+            }
+        }
+    }
+
+    /// Whether `address` is within the block. An IPv4 block never contains
+    /// an IPv6 address or the reverse.
+    pub fn contains(&self, address: IpAddr) -> bool {
+        match (self.network, address) {
+            (IpAddr::V4(network), IpAddr::V4(address)) => {
+                within(u32::from(address), u32::from(network), self.length)
+            }
+            (IpAddr::V6(network), IpAddr::V6(address)) => {
+                let mask = v6_mask(self.length);
+                u128::from(address) & mask == u128::from(network) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The built-in blocked classes and the operator's own blocks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockedAddresses {
+    extra: Vec<AddressBlock>,
+}
+
+impl BlockedAddresses {
+    /// The built-in classes and `extra`.
+    pub fn new(extra: Vec<AddressBlock>) -> Self {
+        Self { extra }
+    }
+
+    /// The operator's own blocks.
+    pub fn extra(&self) -> &[AddressBlock] {
+        &self.extra
+    }
+
+    /// Whether discovery refuses `address`: it is in a built-in class or an
+    /// operator-listed block, or it embeds an IPv4 address that is.
+    pub fn is_blocked(&self, address: IpAddr) -> bool {
+        if self.extra.iter().any(|block| block.contains(address)) {
+            return true;
+        }
+        match address {
+            IpAddr::V4(address) => self.blocks_v4(address),
+            IpAddr::V6(address) => blocked_v6(address, &|embedded| self.blocks_v4(embedded)),
+        }
+    }
+
+    fn blocks_v4(&self, address: Ipv4Addr) -> bool {
+        is_blocked_v4(address)
+            || self
+                .extra
+                .iter()
+                .any(|block| block.contains(IpAddr::V4(address)))
+    }
+}
+
+/// Whether discovery refuses `address` under the built-in classes alone.
 pub fn is_blocked(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_blocked_v4(address),
@@ -77,19 +174,33 @@ pub fn is_blocked_v4(address: Ipv4Addr) -> bool {
         .any(|V4Block(network, length)| within(bits, *network, *length))
 }
 
+fn v4_mask(length: u8) -> u32 {
+    u32::MAX.checked_shl(32 - u32::from(length)).unwrap_or(0)
+}
+
+fn v6_mask(length: u8) -> u128 {
+    u128::MAX.checked_shl(128 - u32::from(length)).unwrap_or(0)
+}
+
 fn within(bits: u32, network: u32, length: u8) -> bool {
-    let mask = u32::MAX.checked_shl(32 - u32::from(length)).unwrap_or(0);
+    let mask = v4_mask(length);
     bits & mask == network & mask
 }
 
 /// Whether discovery refuses the IPv6 `address`.
 pub fn is_blocked_v6(address: Ipv6Addr) -> bool {
+    blocked_v6(address, &is_blocked_v4)
+}
+
+/// Whether the IPv6 `address` is in a built-in class, checking every
+/// embedded IPv4 address with `blocked_v4`.
+fn blocked_v6(address: Ipv6Addr, blocked_v4: &dyn Fn(Ipv4Addr) -> bool) -> bool {
     let bits = u128::from(address);
     let segments = address.segments();
     // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052): the embedded IPv4
     // address decides. It is outside 2000::/3, so it is checked first.
     if bits >> 32 == 0x0064_ff9b_0000_0000_0000_0000 {
-        return is_blocked_v4(low_v4(bits));
+        return blocked_v4(low_v4(bits));
     }
     // Everything outside global unicast 2000::/3: unspecified, loopback,
     // IPv4-mapped and IPv4-compatible, the local-use NAT64 prefix
@@ -104,7 +215,7 @@ pub fn is_blocked_v6(address: Ipv6Addr) -> bool {
     if segments[0] == 0x2001 && segments[1] == 0x0000 {
         let server = Ipv4Addr::from(((bits >> 64) & 0xffff_ffff) as u32);
         let client = Ipv4Addr::from(!low_v4_bits(bits));
-        return is_blocked_v4(server) || is_blocked_v4(client);
+        return blocked_v4(server) || blocked_v4(client);
     }
     // IETF protocol assignments 2001::/23 (RFC 2928), with the globally
     // reachable anycast, AMT, AS112 and ORCHIDv2 blocks inside it.
@@ -120,13 +231,13 @@ pub fn is_blocked_v6(address: Ipv6Addr) -> bool {
     // 6to4 2002::/16 (RFC 3056): the embedded IPv4 address decides.
     if segments[0] == 0x2002 {
         let embedded = Ipv4Addr::from(((bits >> 80) & 0xffff_ffff) as u32);
-        return is_blocked_v4(embedded);
+        return blocked_v4(embedded);
     }
     // An ISATAP interface identifier (RFC 5214) embeds an IPv4 address in
     // any prefix.
     let interface = bits as u64;
     if interface >> 32 == 0x0000_5efe || interface >> 32 == 0x0200_5efe {
-        return is_blocked_v4(low_v4(bits));
+        return blocked_v4(low_v4(bits));
     }
     false
 }

@@ -1,5 +1,6 @@
-//! XEP-0185 dialback keys: the recommended algorithm's vectors from
-//! XEP-0185 §3 and XEP-0220 §2, and constant verification.
+//! XEP-0185 dialback keys: the recommended algorithm (XEP-0185 §2) checked
+//! against the worked example of XEP-0185 §3 and the examples of XEP-0220
+//! §2, and constant verification.
 
 use waddle_server::s2s::dialback::DialbackSecret;
 use waddle_xmpp::identity::CanonicalDomain;

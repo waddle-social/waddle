@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
-    DialbackKeys, DialbackMode, InitiatingConfig, ReceivingConfig, S2sStream, SaslLimits,
-    StreamLanguage, TlsEntry,
+    DialbackKeys, DialbackMode, InitiatingConfig, NegotiationClock, ReceivingConfig, S2sStream,
+    SaslLimits, StreamLanguage, TlsEntry,
 };
 use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 
@@ -35,7 +35,6 @@ use super::sink::{RefuseAllStanzas, StanzaSink};
 use super::telemetry;
 use super::transport::Transport;
 use crate::s2s::config::{AdmissionRefusal, S2sConfig, STREAM_CODEC_LIMITS};
-use crate::s2s::discovery::address;
 use crate::s2s::verify::{OutboundTransport, VerifierWorkers};
 
 /// Pause after a failed `accept`, such as when the process is out of file
@@ -87,6 +86,9 @@ pub(super) struct Shared {
     pub(super) registry: Arc<Registry>,
     pub(super) inbound_workers: VerifierWorkers,
     pub(super) outbound_workers: VerifierWorkers,
+    /// The workers dialback verification connections' handshakes run on,
+    /// as many as verifications may be in progress.
+    pub(super) verification_workers: VerifierWorkers,
     pub(super) sink: Arc<dyn StanzaSink>,
     pub(super) resolver: Arc<dyn EndpointResolver>,
     /// Cancelled to drain: connections send `system-shutdown` and close.
@@ -254,6 +256,7 @@ impl S2sService {
             config,
             inbound_workers,
             outbound_workers,
+            verification_workers: workers_for(limits.max_verifications),
             sink: options.sink,
             resolver,
             shutdown,
@@ -349,6 +352,7 @@ impl S2sHandle {
                     telemetry::capacity_refused(StreamDirection::Outbound, S2sResource::DialRate);
                     ConnectError::RateLimited
                 }
+                DialRefusal::NoEndpoint(error) => ConnectError::Resolve(error),
             })?;
         let dial = match start {
             DialStart::Established(stream) => return Ok(stream),
@@ -359,9 +363,16 @@ impl S2sHandle {
             Err(error) => {
                 // A failed lookup or a domain whose every address is blocked
                 // backs off like a failed connection; it is retried later,
-                // never answered by falling back to other records.
-                if matches!(error, ResolveError::LookupFailed | ResolveError::Blocked) {
-                    shared.registry.record_failure(remote);
+                // never answered by falling back to other records. A domain
+                // without endpoints is answered from memory for a short
+                // while, so asking again spends no dial token.
+                match error {
+                    ResolveError::LookupFailed | ResolveError::Blocked => {
+                        shared.registry.record_failure(remote);
+                    }
+                    ResolveError::NoEndpoints | ResolveError::NotAPeerDomain => {
+                        shared.registry.record_no_endpoints(remote, error);
+                    }
                 }
                 return Err(ConnectError::Resolve(error));
             }
@@ -470,6 +481,7 @@ fn receiving_stream(shared: &Arc<Shared>) -> Option<(S2sStream, Arc<ConnectionAd
             language: StreamLanguage::english(),
             sasl: SaslLimits::PILOT,
             dialback: dialback_mode(&shared.config),
+            clock: NegotiationClock::system(),
         },
         STREAM_CODEC_LIMITS,
     );
@@ -511,8 +523,9 @@ fn fail_attempt(shared: &Shared, attempt: Attempt, outcome: S2sOutcome) {
 
 /// Dial the attempt's endpoints in order and run a stream, with STARTTLS
 /// or direct TLS as the endpoint says, on the first one that accepts the
-/// TCP connection. A DNS-derived address in a blocked class is skipped
-/// here, on the exact address connected to. Any failure after a connection
+/// TCP connection. A DNS-derived address in a blocked class or an
+/// operator-listed block is skipped here, on the exact address connected
+/// to. Any failure after a connection
 /// is open, including a `see-other-host` redirect, ends the attempt: the
 /// redirect is never followed.
 ///
@@ -544,12 +557,11 @@ async fn run_attempt(shared: Arc<Shared>, attempt: Attempt) {
             return fail_attempt(&shared, attempt, S2sOutcome::Capacity);
         }
     };
+    let blocked = Arc::clone(shared.config.blocked_addresses());
     let endpoints: Vec<(SocketAddr, OutboundTransport)> = attempt
         .endpoints
         .iter()
-        .filter(|endpoint| {
-            !(endpoint.origin.is_dns() && address::is_blocked(endpoint.address.ip()))
-        })
+        .filter(|endpoint| !(endpoint.origin.is_dns() && blocked.is_blocked(endpoint.address.ip())))
         .map(|endpoint| (endpoint.address, endpoint.transport))
         .collect();
     let mut connected: Option<(TcpStream, OutboundTransport)> = None;

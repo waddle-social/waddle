@@ -10,22 +10,27 @@
 //!   for D. The other set may still be used, but A/AAAA fallback is then
 //!   forbidden.
 //! - The A/AAAA records of D on port 5269 are used only when both lookups
-//!   returned a negative answer (NXDOMAIN, or a response without records).
-//!   A lookup failure (SERVFAIL, REFUSED, a timeout, a malformed response)
-//!   is not absence: if neither set returned records the attempt fails with
+//!   returned a negative answer (NXDOMAIN, or a response without SRV
+//!   records). SRV records that exist but name no usable target are not
+//!   absence: they forbid the fallback too. A lookup failure (SERVFAIL,
+//!   REFUSED, a timeout, a malformed response) is not absence either: if
+//!   neither set produced an address the attempt fails with
 //!   [`ResolveError::LookupFailed`] and is retried later with backoff,
-//!   without fallback. If one set returned records and the other lookup
-//!   failed, the returned records are used.
+//!   without fallback. If one set produced addresses and the other lookup
+//!   failed, those addresses are used.
+//! - A name's A and AAAA lookups are made together; addresses from one are
+//!   used when the other fails, and a failure of either with no usable
+//!   address from the other is a failed lookup, never absence.
 //! - Every name is queried as an absolute [`DnsName`], with a trailing dot,
-//!   through a resolver without a search list, so nothing completes a name. An IP
-//!   address, numeric IPv4 form or single-label domain, as the identity
-//!   profile classifies it, is never resolved; neither is an SRV target so
-//!   classified.
+//!   through a resolver without a search list, so nothing completes a name.
+//!   An IP address, numeric IPv4 form or single-label domain, as the
+//!   identity profile classifies it, is never resolved; neither is an SRV
+//!   target so classified.
 //! - At most [`MAX_SRV_TARGETS`] targets are tried per domain and at most
 //!   [`MAX_ADDRESSES_PER_TARGET`] addresses per target (or for the
-//!   fallback), after addresses in a blocked class
-//!   ([`address::is_blocked`]) are removed. The connection manager checks
-//!   each DNS-derived address again on the address it connects to.
+//!   fallback), after addresses in a blocked class or an operator-listed
+//!   block ([`BlockedAddresses`]) are removed. The connection manager
+//!   checks each DNS-derived address again on the address it connects to.
 //! - DNS only selects sockets. The reference identity, the TLS server name
 //!   and the direct-TLS Server Name Indication stay D; SRV target names are
 //!   never reference identities, and DNS never authenticates a peer.
@@ -48,6 +53,8 @@ use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::telemetry::attributes::S2sDiscovery;
 
 pub use system::{SystemDnsError, SystemDnsLookup};
+
+use address::BlockedAddresses;
 
 use crate::s2s::config::S2sConfig;
 use crate::s2s::conn::{
@@ -146,7 +153,10 @@ impl SrvRecord {
 /// A lookup's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsAnswer<T> {
-    /// The records of the requested type, at least one.
+    /// Records of the requested type exist. For SRV, a record whose target
+    /// cannot be represented as a [`DnsName`] is left out, so the list may
+    /// be empty: such records still say the service is published and
+    /// forbid the A/AAAA fallback.
     Records(T),
     /// A negative answer: NXDOMAIN, or a successful response without
     /// records of the requested type.
@@ -194,7 +204,7 @@ struct Addresses {
     allowed: Vec<IpAddr>,
     /// Whether DNS returned any address in a blocked class.
     blocked: bool,
-    /// Whether both lookups failed.
+    /// Whether either lookup failed.
     failed: bool,
 }
 
@@ -204,17 +214,26 @@ pub struct DnsDiscovery {
     lookup: Arc<dyn DnsLookup>,
     picker: WeightPicker,
     deadline: Duration,
+    blocked: Arc<BlockedAddresses>,
 }
 
 impl DnsDiscovery {
     /// Discovery through `lookup`, ordering equal priorities at random by
-    /// weight.
+    /// weight, refusing the built-in blocked classes.
     pub fn new(lookup: Arc<dyn DnsLookup>) -> Self {
         Self {
             lookup,
             picker: Arc::new(|total| rand::random_range(0..=total)),
             deadline: DISCOVERY_DEADLINE,
+            blocked: Arc::new(BlockedAddresses::default()),
         }
+    }
+
+    /// Refuse `blocked`, the built-in classes and the operator's own
+    /// blocks, instead of the built-in classes alone.
+    pub fn with_blocked_addresses(mut self, blocked: Arc<BlockedAddresses>) -> Self {
+        self.blocked = blocked;
+        self
     }
 
     /// Replace the random choice among records of one priority, so a test
@@ -259,15 +278,17 @@ impl DnsDiscovery {
         let (direct, starttls) =
             tokio::join!(self.srv_set(&direct_name), self.srv_set(&starttls_name));
         let mut targets = Vec::new();
-        let mut service_refused = false;
+        let mut published = false;
         let mut failed = false;
         for (set, transport) in [
             (direct, OutboundTransport::DirectTls),
             (starttls, OutboundTransport::StartTls),
         ] {
             match set {
+                // Records of either set, "." targets and records without a
+                // usable target included, forbid the fallback.
                 SrvSet::Records(records) => {
-                    service_refused |= records.iter().any(SrvRecord::is_root);
+                    published = true;
                     targets.extend(
                         records
                             .into_iter()
@@ -280,12 +301,12 @@ impl DnsDiscovery {
             }
         }
         if !targets.is_empty() {
-            return self.srv_endpoints(targets).await;
+            return self.srv_endpoints(targets, failed).await;
         }
         if failed {
             return Err(ResolveError::LookupFailed);
         }
-        if service_refused {
+        if published {
             return Err(ResolveError::NoEndpoints);
         }
         // No SRV record exists: the domain's own addresses on 5269.
@@ -304,18 +325,24 @@ impl DnsDiscovery {
 
     async fn srv_set(&self, name: &DnsName) -> SrvSet {
         match self.lookup.srv(name).await {
-            Ok(DnsAnswer::Records(mut records)) if !records.is_empty() => {
+            Ok(DnsAnswer::Records(mut records)) => {
                 records.truncate(MAX_SRV_RECORDS);
                 SrvSet::Records(records)
             }
-            Ok(_) => SrvSet::Negative,
+            Ok(DnsAnswer::Negative) => SrvSet::Negative,
             Err(DnsFailure) => SrvSet::Failed,
         }
     }
 
     /// Order the targets, keep the first [`MAX_SRV_TARGETS`] whose names
-    /// are DNS names, and resolve their addresses.
-    async fn srv_endpoints(&self, targets: Vec<Target>) -> Result<Endpoints, ResolveError> {
+    /// are DNS names, and resolve their addresses. `srv_failed` says the
+    /// other SRV lookup failed, which makes an attempt without any address
+    /// a failed lookup rather than absence.
+    async fn srv_endpoints(
+        &self,
+        targets: Vec<Target>,
+        srv_failed: bool,
+    ) -> Result<Endpoints, ResolveError> {
         let ordered = order(targets, self.picker.as_ref());
         let chosen: Vec<(Target, CanonicalDomain)> = ordered
             .into_iter()
@@ -329,7 +356,7 @@ impl DnsDiscovery {
         let lookups = names.iter().map(|name| self.addresses(name));
         let resolved = futures::future::join_all(lookups).await;
         let mut endpoints = Vec::new();
-        let mut failed = false;
+        let mut failed = srv_failed;
         let mut blocked = false;
         for ((target, _), addresses) in chosen.iter().zip(resolved) {
             failed |= addresses.failed;
@@ -344,10 +371,12 @@ impl DnsDiscovery {
     }
 
     /// The A and AAAA records of the absolute `name`. Records from either
-    /// lookup are used when the other fails.
+    /// lookup are used when the other fails; a failure of either is
+    /// reported, so a name with no usable address and a failed lookup is
+    /// a failed lookup, not absence.
     async fn addresses(&self, name: &DnsName) -> Addresses {
         let (v6, v4) = tokio::join!(self.lookup.ipv6(name), self.lookup.ipv4(name));
-        let failed = v6.is_err() && v4.is_err();
+        let failed = v6.is_err() || v4.is_err();
         let v6: Vec<IpAddr> = match v6 {
             Ok(DnsAnswer::Records(records)) => records.into_iter().map(IpAddr::V6).collect(),
             _ => Vec::new(),
@@ -356,12 +385,10 @@ impl DnsDiscovery {
             Ok(DnsAnswer::Records(records)) => records.into_iter().map(IpAddr::V4).collect(),
             _ => Vec::new(),
         };
-        let blocked = v6
-            .iter()
-            .chain(v4.iter())
-            .any(|ip| address::is_blocked(*ip));
-        let allowed_v6 = v6.into_iter().filter(|ip| !address::is_blocked(*ip));
-        let allowed_v4 = v4.into_iter().filter(|ip| !address::is_blocked(*ip));
+        let refused = |ip: &IpAddr| self.blocked.is_blocked(*ip);
+        let blocked = v6.iter().chain(v4.iter()).any(refused);
+        let allowed_v6 = v6.into_iter().filter(|ip| !refused(ip));
+        let allowed_v4 = v4.into_iter().filter(|ip| !refused(ip));
         Addresses {
             allowed: interleave(allowed_v6, allowed_v4)
                 .take(MAX_ADDRESSES_PER_TARGET)
@@ -473,9 +500,12 @@ pub struct PeerEndpoints {
 
 impl PeerEndpoints {
     /// Configured endpoints, and `dns` for every other domain when the
-    /// configuration enables discovery.
+    /// configuration enables discovery, refusing the configuration's
+    /// blocked addresses.
     pub fn new(config: Arc<S2sConfig>, dns: Option<DnsDiscovery>) -> Self {
-        let dns = dns.filter(|_| config.discovery_enabled());
+        let dns = dns
+            .filter(|_| config.discovery_enabled())
+            .map(|dns| dns.with_blocked_addresses(Arc::clone(config.blocked_addresses())));
         Self {
             configured: ConfiguredEndpoints::new(Arc::clone(&config)),
             config,

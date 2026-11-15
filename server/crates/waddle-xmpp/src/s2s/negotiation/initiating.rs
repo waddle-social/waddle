@@ -5,7 +5,7 @@
 
 use minidom::Element;
 
-use crate::ns::{SASL, TLS};
+use crate::ns::{DIALBACK_FEATURES, SASL, TLS};
 use crate::s2s::condition::StreamErrorCondition;
 use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamId, StreamVersion};
@@ -68,6 +68,9 @@ pub(crate) struct Initiating {
     state: State,
     /// The ID of the latest response header the receiving server sent.
     stream_id: Option<StreamId>,
+    /// Whether the receiving server's post-TLS response header declared
+    /// the dialback namespace (XEP-0220 §2.4.1).
+    header_declares_dialback: bool,
 }
 
 impl Initiating {
@@ -96,6 +99,7 @@ impl Initiating {
             purpose,
             state: State::AwaitHeader(Stage::PreTls),
             stream_id: None,
+            header_declares_dialback: false,
         };
         let steps = match entry {
             TlsEntry::StartTls => vec![Step::Open(machine.header())],
@@ -176,6 +180,9 @@ impl Initiating {
         match self.check_response_header(header) {
             Ok(()) => {
                 self.stream_id = header.id.clone();
+                if stage == Stage::Tls {
+                    self.header_declares_dialback = header.declare_dialback;
+                }
                 self.state = State::AwaitFeatures(stage);
             }
             Err(condition) => self.state = State::AwaitPeerError(stage, condition),
@@ -282,7 +289,7 @@ impl Initiating {
             steps.push(Step::Send(elements::external_auth()));
             self.state = State::AwaitSaslOutcome;
         } else {
-            self.weak_identity_fallback(steps);
+            self.weak_identity_fallback(&features, steps);
         }
     }
 
@@ -322,12 +329,19 @@ impl Initiating {
 
     /// Decision point for XEP-0220 when SASL EXTERNAL is not offered: send a
     /// dialback key as the Initiating Server (XEP-0220 §2.1.1), computed
-    /// for the stream ID of the receiving server's post-TLS header. TLS has
-    /// already verified the receiving server's certificate.
-    fn weak_identity_fallback(&mut self, steps: &mut Vec<Step>) {
+    /// for the stream ID of the receiving server's post-TLS header, but
+    /// only to a receiving server that advertised dialback, by declaring
+    /// its namespace on that header or by the dialback stream feature
+    /// (XEP-0220 §2.4). A key is never sent to a server that did not ask
+    /// for one. TLS has already verified the receiving server's
+    /// certificate.
+    fn weak_identity_fallback(&mut self, features: &Element, steps: &mut Vec<Step>) {
         let Some(keys) = self.config.dialback.keys() else {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         };
+        if !self.header_declares_dialback && !offers_dialback(features) {
+            return self.fail(steps, StreamErrorCondition::PolicyViolation);
+        }
         let Some(stream_id) = self.stream_id.as_ref() else {
             return self.fail(steps, StreamErrorCondition::BadFormat);
         };
@@ -360,9 +374,8 @@ impl Initiating {
                 },
             ) if from == self.config.destination && to == self.config.source => match kind {
                 DialbackType::Valid => self.establish(StreamAuthentication::Dialback, steps),
-                DialbackType::Invalid | DialbackType::Error => {
-                    self.close(steps, CloseReason::DialbackRefused)
-                }
+                DialbackType::Invalid => self.close(steps, CloseReason::DialbackRefused),
+                DialbackType::Error => self.close(steps, CloseReason::DialbackFailed),
                 DialbackType::Request | DialbackType::Unknown => {
                     self.fail(steps, StreamErrorCondition::PolicyViolation)
                 }
@@ -412,6 +425,14 @@ impl Initiating {
 /// Whether a features element offers STARTTLS (RFC 6120 §5.4.1).
 fn offers_starttls(features: &Element) -> bool {
     features.children().any(|child| child.is("starttls", TLS))
+}
+
+/// Whether a features element offers dialback with error handling
+/// (XEP-0220 §2.4.2).
+fn offers_dialback(features: &Element) -> bool {
+    features
+        .children()
+        .any(|child| child.is("dialback", DIALBACK_FEATURES))
 }
 
 /// The SASL mechanism names a features element offers (RFC 6120 §6.4.1).

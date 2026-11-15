@@ -1,7 +1,8 @@
 //! The dialler with discovery's endpoints, on real loopback sockets:
 //! XEP-0368 direct TLS with its Server Name Indication and ALPN protocol,
 //! DNS-derived addresses checked on the address connected to, the global
-//! dial rate, and backoff after a failed lookup.
+//! dial rate, backoff after a failed lookup, and a domain without
+//! endpoints answered from memory without spending dial tokens.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -331,4 +332,44 @@ async fn a_failed_lookup_backs_the_domain_off_without_fallback() {
             Err(ConnectError::Resolve(ResolveError::NoEndpoints))
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_domain_without_endpoints_is_answered_from_memory_without_dial_tokens() {
+    let pki = Pki::new();
+    let resolver = FixedResolver::new(Err(ResolveError::NoEndpoints));
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.allow = vec![HOME_B, "other.test"];
+    spec.private = vec![HOME_B, "other.test"];
+    spec.limits = vec![
+        "dial_per_second = 1".to_owned(),
+        "dial_burst = 1".to_owned(),
+    ];
+    let (listener_a, _) = listener().await;
+    let a = start_with(&pki, &spec, listener_a, options(&resolver)).await;
+    let (home_a, home_b) = (domain(HOME_A), domain(HOME_B));
+
+    // The first request spends the only token and finds nothing.
+    assert_eq!(
+        a.handle.connect(&home_a, &home_b).await,
+        Err(ConnectError::Resolve(ResolveError::NoEndpoints))
+    );
+    // Repeats are answered from memory: neither the rate nor the resolver
+    // is consulted, even once the resolver would answer.
+    let (_held, dead) = dead_port();
+    resolver.set(Ok(vec![starttls_endpoint(
+        dead,
+        EndpointOrigin::Configured,
+    )]));
+    for _ in 0..3 {
+        assert_eq!(
+            a.handle.connect(&home_a, &home_b).await,
+            Err(ConnectError::Resolve(ResolveError::NoEndpoints))
+        );
+    }
+    // Another domain still needs a token, which is spent.
+    assert_eq!(
+        a.handle.connect(&home_a, &domain("other.test")).await,
+        Err(ConnectError::RateLimited)
+    );
 }

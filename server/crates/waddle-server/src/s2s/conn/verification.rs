@@ -16,10 +16,15 @@
 //! - The connection carries one `<db:verify/>` request with the inbound
 //!   stream's pair and stream ID, accepts only the answer correlated to it,
 //!   and closes. It never authenticates and never carries stanzas.
-//! - It takes an outbound socket without evicting any stream, a token of
-//!   the global dial rate and an outbound handshake slot, and ends by the
-//!   inbound stream's dialback deadline. Any shortage or failure is a
-//!   dialback error, never a valid key.
+//! - It has a budget of its own: a slot under the cap on verifications in
+//!   progress and a token of the verification rate, both taken before the
+//!   Authoritative Server is looked up. Its socket is outside the socket
+//!   caps and its handshake outside the handshake caps of ordinary
+//!   connections, and runs on the verification workers, so it never
+//!   evicts, delays or refuses an ordinary stream, dial or handshake.
+//! - It ends by the inbound stream's dialback deadline, when the inbound
+//!   session stops waiting for it, or when the service drains. Any
+//!   shortage or failure is a dialback error, never a valid key.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,17 +35,16 @@ use waddle_xmpp::s2s::{
     DialbackError, DialbackMode, DialbackOutcome, DialbackRequest, InitiatingConfig, Output,
     S2sStream, StreamLanguage, TlsEntry, VerifyRequest, VerifyVerdict,
 };
-use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource};
+use waddle_xmpp::telemetry::attributes::S2sOutcome;
 
 use super::endpoints::ResolveError;
 use super::peer_stream::StreamDirection;
 use super::registry::Activity;
 use super::service::Shared;
-use super::session::{establish_tls, TlsOutcome, TlsRequest};
+use super::session::{establish_tls, HandshakeBudget, TlsOutcome, TlsRequest};
 use super::telemetry;
 use super::transport::{Transport, TransportError};
 use crate::s2s::config::STREAM_CODEC_LIMITS;
-use crate::s2s::discovery::address;
 use crate::s2s::verify::OutboundTransport;
 
 /// Plaintext handed to the codec at once.
@@ -49,44 +53,59 @@ const READ_CHUNK: usize = 16 * 1024;
 /// Ask the Authoritative Server of `request.source` whether `request.key`
 /// is the key it issued for the stream `request.stream_id` from
 /// `request.source` to `request.destination`, by `deadline`.
+///
+/// The verification's slot and rate token are taken first, before the
+/// DNS lookup, and the slot is held until the connection closes. A drain
+/// or abort of the service ends the verification at any step.
 pub(super) async fn verify_key(
     shared: &Arc<Shared>,
     request: DialbackRequest,
     deadline: Instant,
 ) -> DialbackOutcome {
-    let resolve = shared.resolver.resolve(&request.source);
-    let endpoints = match tokio::time::timeout_at(deadline.into(), resolve).await {
-        Ok(Ok(endpoints)) => endpoints,
-        Ok(Err(ResolveError::LookupFailed)) | Err(_) => {
-            return DialbackOutcome::Error(DialbackError::RemoteConnectionFailed)
-        }
-        Ok(Err(
-            ResolveError::NoEndpoints | ResolveError::Blocked | ResolveError::NotAPeerDomain,
-        )) => return DialbackOutcome::Error(DialbackError::RemoteServerNotFound),
-    };
-    if !shared.registry.take_dial_token() {
-        telemetry::capacity_refused(StreamDirection::Outbound, S2sResource::DialRate);
-        return DialbackOutcome::Error(DialbackError::ResourceConstraint);
-    }
-    // A verification connection never evicts a stream for its socket.
-    let _slot = match shared.capacity.admit_outbound() {
+    let _slot = match shared.capacity.admit_verification() {
         Ok(slot) => slot,
         Err(resource) => {
             telemetry::capacity_refused(StreamDirection::Outbound, resource);
             return DialbackOutcome::Error(DialbackError::ResourceConstraint);
         }
     };
+    let resolve =
+        tokio::time::timeout_at(deadline.into(), shared.resolver.resolve(&request.source));
+    let resolved = tokio::select! {
+        biased;
+        () = shared.abort.cancelled() => return DialbackOutcome::Error(DialbackError::RemoteServerTimeout),
+        () = shared.shutdown.cancelled() => return DialbackOutcome::Error(DialbackError::RemoteServerTimeout),
+        resolved = resolve => resolved,
+    };
+    let endpoints = match resolved {
+        Ok(Ok(endpoints)) => endpoints,
+        Ok(Err(ResolveError::LookupFailed)) => {
+            return DialbackOutcome::Error(DialbackError::RemoteConnectionFailed)
+        }
+        Err(_) => return DialbackOutcome::Error(DialbackError::RemoteServerTimeout),
+        Ok(Err(
+            ResolveError::NoEndpoints | ResolveError::Blocked | ResolveError::NotAPeerDomain,
+        )) => return DialbackOutcome::Error(DialbackError::RemoteServerNotFound),
+    };
+    // A DNS-derived address is checked again on the address connected, with
+    // the operator's own blocks; a domain whose every address is refused
+    // has no Authoritative Server this deployment may reach.
+    let blocked = Arc::clone(shared.config.blocked_addresses());
+    let candidates: Vec<_> = endpoints
+        .iter()
+        .filter(|endpoint| !(endpoint.origin.is_dns() && blocked.is_blocked(endpoint.address.ip())))
+        .map(|endpoint| (endpoint.address, endpoint.transport))
+        .collect();
+    if candidates.is_empty() {
+        return DialbackOutcome::Error(DialbackError::RemoteServerNotFound);
+    }
     let connect = *shared.config.deadlines();
     let mut connected = None;
-    for endpoint in endpoints.iter() {
-        // A DNS-derived address is checked again on the address connected.
-        if endpoint.origin.is_dns() && address::is_blocked(endpoint.address.ip()) {
-            continue;
-        }
+    for (address, transport) in candidates {
         let attempt_deadline = (Instant::now() + connect.connect).min(deadline);
-        let socket = connect_to(shared, endpoint.address, attempt_deadline).await;
+        let socket = connect_to(shared, address, attempt_deadline).await;
         if let Some(socket) = socket {
-            connected = Some((socket, endpoint.transport));
+            connected = Some((socket, transport));
             break;
         }
     }
@@ -144,11 +163,12 @@ pub(super) async fn verify_key(
 }
 
 /// Open a TCP connection to `address` by `deadline`, unless the service
-/// starts to drain first.
+/// starts to drain or aborts first.
 async fn connect_to(shared: &Shared, address: SocketAddr, deadline: Instant) -> Option<TcpStream> {
     let connect = tokio::time::timeout_at(deadline.into(), TcpStream::connect(address));
     tokio::select! {
         biased;
+        () = shared.abort.cancelled() => None,
         () = shared.shutdown.cancelled() => None,
         connect = connect => connect.ok().and_then(Result::ok),
     }
@@ -223,6 +243,7 @@ impl Verification<'_> {
                     deadline: stage.min(self.deadline),
                     transport: self.tls,
                     client_certificate_optional: false,
+                    budget: HandshakeBudget::Verification,
                 };
                 let shutdown = self.shared.shutdown.clone();
                 let handshake = tokio::select! {

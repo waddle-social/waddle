@@ -159,7 +159,11 @@ pub(super) struct Session {
     expiry: Option<Instant>,
     verified: Option<VerifiedPeer>,
     /// The verification of the inbound peer's dialback key, in progress.
+    /// Dropping the receiver cancels the verification.
     pending_dialback: Option<oneshot::Receiver<DialbackOutcome>>,
+    /// An outbound stream sent its dialback key and awaits the answer, which
+    /// telemetry has not counted yet.
+    awaiting_dialback_result: bool,
     negotiation: Option<NegotiationSlot>,
     registered: Option<StreamSlot>,
     peer_stream: Option<VerifiedPeerStream>,
@@ -199,6 +203,7 @@ impl Session {
             expiry: None,
             verified: None,
             pending_dialback: None,
+            awaiting_dialback_result: false,
             negotiation: None,
             registered: None,
             peer_stream: None,
@@ -366,6 +371,7 @@ impl Session {
                         S2sTransport::DirectTls => OutboundTransport::DirectTls,
                     },
                     client_certificate_optional,
+                    budget: HandshakeBudget::Connection,
                 };
                 // A drain does not wait for a handshake: no XML, and so no
                 // `system-shutdown`, can be sent during one.
@@ -429,7 +435,17 @@ impl Session {
                     SinkVerdict::Refuse => Ok(self.stream.signal(Signal::PolicyViolation)),
                 }
             }
-            Output::Close(reason) => Err(self.close_outcome(reason)),
+            Output::Close(reason) => {
+                if self.awaiting_dialback_result {
+                    self.awaiting_dialback_result = false;
+                    let result = match reason {
+                        CloseReason::DialbackRefused => S2sDialbackResult::Invalid,
+                        _ => S2sDialbackResult::Error,
+                    };
+                    telemetry::dialback(S2sDialbackRole::Initiating, result);
+                }
+                Err(self.close_outcome(reason))
+            }
         }
     }
 
@@ -485,11 +501,13 @@ impl Session {
                 .authorization(request.exchange, AuthorizationDecision::Denied);
         }
         let reserved = admission.is_reserved_peer(&remote);
-        match self
-            .shared
-            .registry
-            .check(self.direction, &local, &remote, reserved)
-        {
+        match self.shared.registry.check(
+            self.direction,
+            &local,
+            &remote,
+            AuthenticationStrength::Pkix,
+            reserved,
+        ) {
             Ok(()) => self
                 .stream
                 .authorization(request.exchange, AuthorizationDecision::Granted),
@@ -505,7 +523,9 @@ impl Session {
     /// connection that runs in its own task. The domain is checked first:
     /// still admitted, inbound dialback still permitted for it, and a
     /// stream the registry could take, so nothing is dialled for a stream
-    /// that would be refused anyway.
+    /// that would be refused anyway. The task ends as soon as this session
+    /// stops waiting for it, which happens when the session ends for any
+    /// reason, so no verification outlives the stream it is for.
     fn verify_dialback(&mut self, request: DialbackRequest) -> Vec<Output> {
         if self.direction != StreamDirection::Inbound {
             return self.stream.signal(Signal::PolicyViolation);
@@ -518,8 +538,14 @@ impl Session {
         let (sender, receiver) = oneshot::channel();
         let shared = Arc::clone(&self.shared);
         let verification = async move {
-            let outcome = verification::verify_key(&shared, request, deadline).await;
-            // The session may have ended meanwhile.
+            let mut sender = sender;
+            let outcome = tokio::select! {
+                biased;
+                // The session ended: drop the lookup, the connection and
+                // its handshake wait.
+                () = sender.closed() => return,
+                outcome = verification::verify_key(&shared, request, deadline) => outcome,
+            };
             let _ = sender.send(outcome);
         };
         if !self.shared.spawn(verification) {
@@ -531,16 +557,20 @@ impl Session {
 
     /// Answer the inbound peer's dialback request with the verification's
     /// outcome. A valid key is accepted only if the domain is still
-    /// admissible when the answer arrives.
+    /// admissible when the answer arrives; one that no longer is counts as
+    /// an error, not as a valid key.
     fn dialback_verified(&mut self, outcome: DialbackOutcome) -> Vec<Output> {
-        telemetry::dialback(S2sDialbackRole::Receiving, outcome_result(outcome));
         if outcome == DialbackOutcome::Valid {
-            if let Some((local, remote)) = self.pair() {
-                if let Err(signal) = self.dialback_admissible(&local, &remote) {
-                    return self.stream.signal(signal);
-                }
+            let admissible = match self.pair() {
+                Some((local, remote)) => self.dialback_admissible(&local, &remote),
+                None => Err(Signal::PolicyViolation),
+            };
+            if let Err(signal) = admissible {
+                telemetry::dialback(S2sDialbackRole::Receiving, S2sDialbackResult::Error);
+                return self.stream.signal(signal);
             }
         }
+        telemetry::dialback(S2sDialbackRole::Receiving, outcome_result(outcome));
         self.stream.dialback(outcome)
     }
 
@@ -562,7 +592,13 @@ impl Session {
         let reserved = config.admission().is_reserved_peer(remote);
         self.shared
             .registry
-            .check(self.direction, local, remote, reserved)
+            .check(
+                self.direction,
+                local,
+                remote,
+                AuthenticationStrength::Dialback,
+                reserved,
+            )
             .map_err(|refusal| self.refused(refusal))
     }
 
@@ -673,9 +709,8 @@ impl Session {
         };
         self.negotiation = None;
         self.expiry = Some(self.expiry_instant(verified.as_ref()));
-        if strength == AuthenticationStrength::Dialback
-            && self.direction == StreamDirection::Outbound
-        {
+        if self.awaiting_dialback_result {
+            self.awaiting_dialback_result = false;
             telemetry::dialback(S2sDialbackRole::Initiating, S2sDialbackResult::Valid);
         }
         match &mut self.role {
@@ -743,6 +778,9 @@ impl Session {
             if self.dialback_deadline.is_none() {
                 self.dialback_deadline = Some(now + deadlines.dialback);
             }
+            if phase == NegotiationPhase::DialbackAwaitResult {
+                self.awaiting_dialback_result = true;
+            }
         } else if phase != NegotiationPhase::Established {
             self.stage_deadline = now + deadlines.stage;
         }
@@ -797,7 +835,7 @@ impl Session {
             CloseReason::PeerClosed => S2sOutcome::PeerClosed,
             CloseReason::SaslFailure(_) if self.admission_refused => S2sOutcome::Admission,
             CloseReason::TlsRefused => S2sOutcome::Tls,
-            CloseReason::DialbackRefused => S2sOutcome::Dialback,
+            CloseReason::DialbackRefused | CloseReason::DialbackFailed => S2sOutcome::Dialback,
             CloseReason::VerificationComplete => S2sOutcome::Verified,
             CloseReason::SaslFailure(_)
             | CloseReason::SaslExhausted
@@ -808,6 +846,12 @@ impl Session {
 
     /// Close the transport, report the outcome and release every slot.
     async fn end(mut self, outcome: S2sOutcome) {
+        // Stop a verification of the peer's dialback key at once.
+        self.pending_dialback = None;
+        if self.awaiting_dialback_result {
+            self.awaiting_dialback_result = false;
+            telemetry::dialback(S2sDialbackRole::Initiating, S2sDialbackResult::Error);
+        }
         let abort = self.shared.abort.clone();
         if !abort.is_cancelled() {
             // Abort interrupts the close too; the socket is dropped anyway.
@@ -944,6 +988,19 @@ pub(super) struct TlsRequest {
     /// certificate. Ignored outbound, where the receiving server must
     /// always present one.
     pub(super) client_certificate_optional: bool,
+    pub(super) budget: HandshakeBudget,
+}
+
+/// Whose capacity a TLS handshake uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HandshakeBudget {
+    /// An ordinary connection: its direction's handshake cap and verifier
+    /// workers.
+    Connection,
+    /// A dialback verification connection: the verification cap, which the
+    /// connection already holds, and the verification workers, so it never
+    /// takes a handshake or a worker from an ordinary connection.
+    Verification,
 }
 
 /// What a completed TLS handshake established about the peer.
@@ -970,13 +1027,15 @@ pub(super) async fn establish_tls(
     transport: &mut Transport,
     request: TlsRequest,
 ) -> Result<TlsOutcome, TlsFailure> {
-    let _handshake = shared
-        .capacity
-        .handshake(request.direction)
-        .map_err(|resource| TlsFailure {
-            outcome: S2sOutcome::Capacity,
-            resource: Some(resource),
-        })?;
+    let _handshake = match request.budget {
+        HandshakeBudget::Connection => Some(shared.capacity.handshake(request.direction).map_err(
+            |resource| TlsFailure {
+                outcome: S2sOutcome::Capacity,
+                resource: Some(resource),
+            },
+        )?),
+        HandshakeBudget::Verification => None,
+    };
     let settings = shared.config.settings();
     let client_certificate_optional =
         request.direction == StreamDirection::Inbound && request.client_certificate_optional;
@@ -1019,11 +1078,13 @@ pub(super) async fn establish_tls(
                 .into()
         }
     };
-    // Each direction has its own workers, so a flood of inbound handshakes
-    // cannot hold every worker an outbound handshake needs.
-    let workers = match request.direction {
-        StreamDirection::Inbound => &shared.inbound_workers,
-        StreamDirection::Outbound => &shared.outbound_workers,
+    // Each direction, and verification connections, have their own
+    // workers, so a flood of handshakes of one kind cannot hold every
+    // worker another kind needs.
+    let workers = match (request.budget, request.direction) {
+        (HandshakeBudget::Verification, _) => &shared.verification_workers,
+        (HandshakeBudget::Connection, StreamDirection::Inbound) => &shared.inbound_workers,
+        (HandshakeBudget::Connection, StreamDirection::Outbound) => &shared.outbound_workers,
     };
     let handshake = transport.handshake(tls, request.handoff, workers);
     let failed = |verifier: &PeerVerifier, outcome: S2sOutcome| {
@@ -1038,7 +1099,10 @@ pub(super) async fn establish_tls(
         Err(_) => Err(TlsFailure::of(S2sOutcome::Timeout)),
         Ok(Err(TransportError::Workers(_))) => Err(TlsFailure {
             outcome: S2sOutcome::Capacity,
-            resource: Some(S2sResource::Handshakes),
+            resource: Some(match request.budget {
+                HandshakeBudget::Connection => S2sResource::Handshakes,
+                HandshakeBudget::Verification => S2sResource::Verifications,
+            }),
         }),
         Ok(Err(TransportError::Io(_) | TransportError::HandshakeEof)) => {
             Err(failed(&verifier, S2sOutcome::Io))

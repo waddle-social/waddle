@@ -11,7 +11,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hickory_resolver::config::{ResolveHosts, ResolverConfig};
+use hickory_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::op::ResponseCode;
@@ -47,8 +47,22 @@ pub struct SystemDnsLookup {
 impl SystemDnsLookup {
     /// A resolver for the system's name servers, without a search list.
     pub fn from_system() -> Result<Self, SystemDnsError> {
-        let (system, mut options) = hickory_resolver::system_conf::read_system_conf()
+        let (system, options) = hickory_resolver::system_conf::read_system_conf()
             .map_err(|_| SystemDnsError::Configuration)?;
+        Self::from_config(system, options)
+    }
+
+    /// A resolver for the name servers of `system`, configured exactly as
+    /// [`SystemDnsLookup::from_system`] configures the system's: the
+    /// default domain and search list of `system` are dropped, the hosts
+    /// file is never consulted, and the query timeout and attempts are
+    /// this module's. `from_system` reads `system` and `options` from the
+    /// system; a test passes its own name servers to exercise the same
+    /// path.
+    pub fn from_config(
+        system: ResolverConfig,
+        mut options: ResolverOpts,
+    ) -> Result<Self, SystemDnsError> {
         if system.name_servers().is_empty() {
             return Err(SystemDnsError::NoNameServers);
         }
@@ -106,31 +120,38 @@ fn answer<T>(records: Vec<T>) -> DnsAnswer<Vec<T>> {
 
 #[async_trait]
 impl DnsLookup for SystemDnsLookup {
+    /// SRV records of `name`. A record whose target is not an absolute
+    /// ASCII name is left out, but an answer with SRV records is never
+    /// negative, even when none of them has a usable target: the service
+    /// is published, so the A/AAAA fallback stays forbidden.
     async fn srv(&self, name: &DnsName) -> Result<DnsAnswer<Vec<SrvRecord>>, DnsFailure> {
         let records = self.records(name, RecordType::SRV).await?;
-        Ok(answer(
-            records
-                .into_iter()
-                .filter_map(|data| match data {
-                    RData::SRV(srv) => {
-                        // A target that is not an absolute ASCII name is
-                        // dropped with its record.
-                        let target = if srv.target.is_root() {
-                            DnsName::parse(".")
-                        } else {
-                            DnsName::parse(&srv.target.to_ascii())
-                        }?;
-                        Some(SrvRecord {
-                            priority: srv.priority,
-                            weight: srv.weight,
-                            port: srv.port,
-                            target,
-                        })
-                    }
-                    _ => None,
-                })
-                .collect(),
-        ))
+        let mut published = false;
+        let usable = records
+            .into_iter()
+            .filter_map(|data| match data {
+                RData::SRV(srv) => {
+                    published = true;
+                    let target = if srv.target.is_root() {
+                        DnsName::parse(".")
+                    } else {
+                        DnsName::parse(&srv.target.to_ascii())
+                    }?;
+                    Some(SrvRecord {
+                        priority: srv.priority,
+                        weight: srv.weight,
+                        port: srv.port,
+                        target,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        Ok(if published {
+            DnsAnswer::Records(usable)
+        } else {
+            DnsAnswer::Negative
+        })
     }
 
     async fn ipv4(&self, name: &DnsName) -> Result<DnsAnswer<Vec<Ipv4Addr>>, DnsFailure> {

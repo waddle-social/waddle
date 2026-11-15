@@ -1,9 +1,10 @@
 //! The blocked address classes: ADR-0020 D3's table, completed from the
-//! IANA special-purpose address registries, with embedded IPv4 checks.
+//! IANA special-purpose address registries, with embedded IPv4 checks; and
+//! the operator's own blocked prefixes, applied with them.
 
 use std::net::IpAddr;
 
-use waddle_server::s2s::discovery::address::is_blocked;
+use waddle_server::s2s::discovery::address::{is_blocked, AddressBlock, BlockedAddresses};
 
 fn ip(text: &str) -> IpAddr {
     text.parse().expect("an address")
@@ -101,5 +102,74 @@ fn globally_reachable_addresses_are_allowed() {
     ];
     for address in allowed {
         assert!(!is_blocked(ip(address)), "{address} must be allowed");
+    }
+}
+
+#[test]
+fn address_blocks_parse_only_exact_cidr_notation() {
+    for text in [
+        "8.8.4.0/24",
+        "2a00:64::/96",
+        "192.0.2.1/32",
+        "2a00::1/128",
+        "128.0.0.0/1",
+    ] {
+        assert!(AddressBlock::parse(text).is_some(), "{text} must parse");
+    }
+    for text in [
+        "8.8.4.1/24",
+        "2a00:64::1/96",
+        "8.8.4.0/0",
+        "::/0",
+        "8.8.4.0/33",
+        "2a00::/129",
+        "8.8.4.0",
+        "8.8.4.0/",
+        "8.8.4.0/x",
+        "peer.example/24",
+        "[2a00::]/16",
+    ] {
+        assert!(
+            AddressBlock::parse(text).is_none(),
+            "{text} must be refused"
+        );
+    }
+    let block = AddressBlock::parse("8.8.4.0/24").expect("a block");
+    assert!(block.contains(ip("8.8.4.255")));
+    assert!(!block.contains(ip("8.8.5.0")));
+    // An IPv4 block never contains an IPv6 address, mapped or not.
+    assert!(!block.contains(ip("::ffff:8.8.4.4")));
+}
+
+#[test]
+fn operator_blocks_apply_with_the_built_in_classes() {
+    let blocked = BlockedAddresses::new(vec![
+        AddressBlock::parse("2a00:64::/96").expect("a network-specific NAT64 prefix"),
+        AddressBlock::parse("8.8.4.0/24").expect("an IPv4 block"),
+    ]);
+    for address in [
+        // The listed blocks themselves.
+        "2a00:64::808:808",
+        "8.8.4.4",
+        // An IPv4 block also covers the IPv4 addresses embedded by 6to4,
+        // Teredo (server address), the NAT64 well-known prefix and ISATAP.
+        "2002:808:404::1",
+        "2001:0:808:404::f7f7:f7f7",
+        "64:ff9b::808:404",
+        "2a00:1450::5efe:808:404",
+        // The built-in classes still apply.
+        "10.0.0.1",
+        "::1",
+    ] {
+        assert!(blocked.is_blocked(ip(address)), "{address} must be blocked");
+        if !address.starts_with("10.") && address != "::1" {
+            assert!(!is_blocked(ip(address)), "{address} is not built in");
+        }
+    }
+    for address in ["8.8.8.8", "2a00:65::808:808", "2002:808:808::1"] {
+        assert!(
+            !blocked.is_blocked(ip(address)),
+            "{address} must be allowed"
+        );
     }
 }

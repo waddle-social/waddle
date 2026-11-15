@@ -23,16 +23,19 @@ use waddle_xmpp::identity::CanonicalDomain;
 
 use super::admission::{is_test_domain, AdmissionMode, AdmissionPolicy, PeerScope};
 use super::document::{
-    AdmissionDocument, CredentialDocument, DialbackDocument, Document, EndpointDocument,
-    EndpointTransportDocument, LimitsDocument, ModeDocument, PeerScopeDocument, PrivateCaDocument,
+    AdmissionDocument, CredentialDocument, DialbackDocument, DiscoveryDocument, Document,
+    EndpointDocument, EndpointTransportDocument, LimitsDocument, ModeDocument, PeerScopeDocument,
+    PrivateCaDocument,
 };
 use super::error::{ConfigError, ConfigSection};
 use super::limits::{
-    Deadlines, ResourceLimits, MAX_ENDPOINTS_PER_DOMAIN, MAX_ENDPOINT_DOMAINS, MAX_LIST_ENTRIES,
-    MAX_LOCAL_DOMAINS, MAX_PRIVATE_CA_PROFILES, MAX_PROFILE_FILES, MIN_INPUT_BYTES_PER_SECOND,
+    Deadlines, ResourceLimits, MAX_BLOCKED_PREFIXES, MAX_ENDPOINTS_PER_DOMAIN,
+    MAX_ENDPOINT_DOMAINS, MAX_LIST_ENTRIES, MAX_LOCAL_DOMAINS, MAX_PRIVATE_CA_PROFILES,
+    MAX_PROFILE_FILES, MIN_INPUT_BYTES_PER_SECOND,
 };
 use super::load::MaterialReader;
 use crate::s2s::dialback::DialbackSecret;
+use crate::s2s::discovery::address::{AddressBlock, BlockedAddresses};
 use crate::s2s::verify::{
     OutboundTransport, PrivateCaMaterial, PrivateCaProfile, PublicRoots, TlsConfigError,
     TlsSettings, TrustInventory, TrustProfileKind,
@@ -102,6 +105,7 @@ pub struct S2sConfig {
     deadlines: Deadlines,
     settings: TlsSettings,
     discovery: bool,
+    blocked: Arc<BlockedAddresses>,
     dialback: DialbackSettings,
 }
 
@@ -117,6 +121,7 @@ impl fmt::Debug for S2sConfig {
             .field("scope", &self.admission.scope())
             .field("endpoint_domains", &self.endpoints.len())
             .field("discovery", &self.discovery)
+            .field("blocked_prefixes", &self.blocked.extra().len())
             .field("dialback", &self.dialback)
             .finish_non_exhaustive()
     }
@@ -169,6 +174,7 @@ impl S2sConfig {
         let admission = require_private_ca(admission, &document.admission, &trust, scope)?;
         let endpoints = endpoints(&document.endpoints, &local, scope)?;
         let (limits, deadlines) = limits(&document.limits)?;
+        let blocked = discovery(&document.discovery, scope)?;
         let dialback = dialback(&document.dialback, &admission, reader).await?;
 
         let expected: BTreeSet<&CanonicalDomain> = admission
@@ -191,6 +197,7 @@ impl S2sConfig {
             deadlines,
             settings,
             discovery: document.discovery.enabled,
+            blocked: Arc::new(blocked),
             dialback,
         })
     }
@@ -261,6 +268,12 @@ impl S2sConfig {
     /// through DNS (ADR-0020 D3).
     pub fn discovery_enabled(&self) -> bool {
         self.discovery
+    }
+
+    /// The address classes refused for DNS-derived addresses: the built-in
+    /// classes and the operator's `discovery.blocked_prefixes`.
+    pub fn blocked_addresses(&self) -> &Arc<BlockedAddresses> {
+        &self.blocked
     }
 
     /// The Server Dialback roles.
@@ -646,6 +659,37 @@ async fn read_certificates(
     Ok(certificates)
 }
 
+/// The discovery settings: discovery itself only in the public scope, where
+/// remote domains are real DNS names, and the operator's extra blocked
+/// address prefixes. Under [`PeerScope::Test`] every admitted domain is
+/// within `.test` and every configured endpoint is loopback, so DNS
+/// discovery could only ever reach addresses the blocked classes refuse;
+/// a configuration that enables it there is a mistake and fails to load.
+fn discovery(
+    document: &DiscoveryDocument,
+    scope: PeerScope,
+) -> Result<BlockedAddresses, ConfigError> {
+    if document.enabled && scope != PeerScope::Public {
+        return Err(ConfigError::DiscoveryRequiresPublicScope);
+    }
+    if document.blocked_prefixes.len() > MAX_BLOCKED_PREFIXES {
+        return Err(ConfigError::TooManyEntries(ConfigSection::BlockedPrefixes));
+    }
+    let mut blocks: Vec<AddressBlock> = Vec::with_capacity(document.blocked_prefixes.len());
+    for (index, entry) in document.blocked_prefixes.iter().enumerate() {
+        let block =
+            AddressBlock::parse(entry).ok_or(ConfigError::InvalidBlockedPrefix { index })?;
+        if blocks.contains(&block) {
+            return Err(ConfigError::Duplicate {
+                section: ConfigSection::BlockedPrefixes,
+                index,
+            });
+        }
+        blocks.push(block);
+    }
+    Ok(BlockedAddresses::new(blocks))
+}
+
 fn endpoints(
     documents: &[EndpointDocument],
     local: &BTreeSet<CanonicalDomain>,
@@ -779,6 +823,9 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
             document.max_negotiating_per_peer,
             |l| l.max_negotiating_per_peer,
         )?,
+        max_verifications: cap("max_verifications", document.max_verifications, |l| {
+            l.max_verifications
+        })?,
         ..default
     };
     let connections = |name, value, default, ceiling| rate(name, value, default, 1, ceiling);
@@ -817,6 +864,18 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
         document.dial_burst,
         default.dial_rate.burst,
         ceiling.dial_rate.burst,
+    )?;
+    limits.verification_rate.per_second = connections(
+        "verification_per_second",
+        document.verification_per_second,
+        default.verification_rate.per_second,
+        ceiling.verification_rate.per_second,
+    )?;
+    limits.verification_rate.burst = connections(
+        "verification_burst",
+        document.verification_burst,
+        default.verification_rate.burst,
+        ceiling.verification_rate.burst,
     )?;
     limits.input_rate_global.per_second = rate(
         "input_per_second",

@@ -3,12 +3,12 @@
 //!
 //! The key for a stream is
 //! `HMAC-SHA256(hex(SHA256(secret)), receiving ' ' originating ' ' stream-id)`
-//! in lowercase hexadecimal, as XEP-0185 §3 recommends, with both domains
-//! in the identity profile's canonical form. The secret belongs to one
-//! deployment: every replica that can answer verification requests holds
-//! it, so a key one replica issued verifies on any other without shared
-//! state, and no other deployment holds it. Keys are compared in constant
-//! time and never logged.
+//! in lowercase hexadecimal, as XEP-0185 §2 recommends and its §3 example
+//! computes, with both domains in the identity profile's canonical form.
+//! The secret belongs to one deployment: every replica that can answer
+//! verification requests holds it, so a key one replica issued verifies on
+//! any other without shared state, and no other deployment holds it. Keys
+//! are compared in constant time and never logged.
 //!
 //! Keys are not bound to the TLS channel that carries them. A party that
 //! obtains the key this deployment issued for a peer's stream ID, for

@@ -13,7 +13,7 @@
 //! Configured endpoints are reached with STARTTLS or, when configured so,
 //! XEP-0368 direct TLS. DNS discovery ([`S2sConfig::discovery_enabled`])
 //! and every Server Dialback role ([`DialbackSettings`]) are off by
-//! default.
+//! default; discovery loads only with [`PeerScope::Public`].
 //!
 //! Under the default [`PeerScope::Test`] every configured domain must be
 //! within `.test`, except denylist entries, which only refuse, and the
@@ -32,9 +32,9 @@ pub use admission::{
 };
 pub use error::{ConfigError, ConfigSection};
 pub use limits::{
-    Deadlines, RateLimit, ResourceLimits, MAX_CONFIG_FILE_BYTES, MAX_ENDPOINTS_PER_DOMAIN,
-    MAX_INCOMPLETE_ELEMENT_TIME, MAX_MATERIAL_FILE_BYTES, MAX_TOTAL_MATERIAL_BYTES,
-    MIN_INPUT_BYTES_PER_SECOND, STREAM_CODEC_LIMITS,
+    Deadlines, RateLimit, ResourceLimits, MAX_BLOCKED_PREFIXES, MAX_CONFIG_FILE_BYTES,
+    MAX_ENDPOINTS_PER_DOMAIN, MAX_INCOMPLETE_ELEMENT_TIME, MAX_MATERIAL_FILE_BYTES,
+    MAX_TOTAL_MATERIAL_BYTES, MIN_INPUT_BYTES_PER_SECOND, NO_ENDPOINT_WAIT, STREAM_CODEC_LIMITS,
 };
 pub use load::{S2sActivation, CONFIG_FILE_VARIABLE, ENABLED_VARIABLE};
 pub use snapshot::{ConfiguredEndpoint, DialbackSettings, S2sConfig, MIN_DIALBACK_SECRET_BYTES};

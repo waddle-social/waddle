@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use minidom::Element;
 
@@ -270,6 +271,42 @@ pub struct ReceivingConfig {
     pub language: StreamLanguage,
     pub sasl: SaslLimits,
     pub dialback: DialbackMode,
+    /// The clock the negotiation's rates are measured against.
+    pub clock: NegotiationClock,
+}
+
+/// A monotonic clock for the negotiation's rates: the system clock, or one
+/// a test controls.
+#[derive(Clone)]
+pub struct NegotiationClock(Arc<dyn Fn() -> Instant + Send + Sync>);
+
+impl NegotiationClock {
+    /// [`Instant::now`].
+    pub fn system() -> Self {
+        Self(Arc::new(Instant::now))
+    }
+
+    /// A clock that reads `now`.
+    pub fn new(now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        Self(Arc::new(now))
+    }
+
+    /// The current instant.
+    pub fn now(&self) -> Instant {
+        (self.0)()
+    }
+}
+
+impl Default for NegotiationClock {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+impl fmt::Debug for NegotiationClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NegotiationClock")
+    }
 }
 
 impl fmt::Debug for ReceivingConfig {
@@ -433,9 +470,12 @@ pub enum CloseReason {
     /// The peer's first bytes were not XML, such as a TLS ClientHello sent
     /// to the STARTTLS port; the connection closes without any XML.
     NotXml,
-    /// Dialback did not authenticate the pair: the key was refused or
-    /// could not be verified. The stream closes without a stream error.
+    /// Dialback did not authenticate the pair: the key was refused
+    /// (`type='invalid'`). The stream closes without a stream error.
     DialbackRefused,
+    /// Dialback did not authenticate the pair: the key could not be
+    /// verified (`type='error'`). The stream closes without a stream error.
+    DialbackFailed,
     /// A verification connection received its answer and closes normally.
     VerificationComplete,
 }

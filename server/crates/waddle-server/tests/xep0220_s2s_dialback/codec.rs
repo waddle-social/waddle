@@ -1,9 +1,11 @@
 //! The codec's dialback roles, driven byte by byte without sockets: the
 //! Receiving Server (inbound dialback), the Authoritative Server (answers to
-//! `db:verify`), the Initiating Server (outbound dialback), verification
-//! connections and the XEP-0368 direct-TLS entry.
+//! `db:verify`, at a bounded rate per stream), the Initiating Server
+//! (outbound dialback, only to a receiving server that advertised it),
+//! verification connections and the XEP-0368 direct-TLS entry.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use minidom::Element;
 use waddle_server::s2s::config::STREAM_CODEC_LIMITS;
@@ -13,9 +15,9 @@ use waddle_xmpp::ns::{DIALBACK_FEATURES, JABBER_SERVER_DIALBACK, SASL, STANZAS, 
 use waddle_xmpp::s2s::{
     AuthorizationDecision, CloseReason, CodecLimits, DestinationStatus, DialbackError, DialbackKey,
     DialbackKeys, DialbackMode, DialbackOutcome, DialbackRequest, Inbound, InboundAdmission,
-    InitiatingConfig, Output, ReceivingConfig, S2sStream, SaslLimits, StreamAuthentication,
-    StreamDecoder, StreamErrorCondition, StreamHeader, StreamId, StreamLanguage, TlsEntry, TlsPeer,
-    VerifyRequest, VerifyVerdict,
+    InitiatingConfig, NegotiationClock, Output, ReceivingConfig, S2sStream, SaslLimits,
+    StreamAuthentication, StreamDecoder, StreamErrorCondition, StreamHeader, StreamId,
+    StreamLanguage, TlsEntry, TlsPeer, VerifyRequest, VerifyVerdict,
 };
 
 pub const SECRET: &[u8] = b"the codec suite's dialback secret, 32+ bytes";
@@ -95,6 +97,14 @@ impl InboundAdmission for Admission {
 }
 
 fn receiver(dialback: DialbackMode, permits: bool) -> S2sStream {
+    receiver_with_clock(dialback, permits, NegotiationClock::system())
+}
+
+fn receiver_with_clock(
+    dialback: DialbackMode,
+    permits: bool,
+    clock: NegotiationClock,
+) -> S2sStream {
     let mut stream = S2sStream::accept(
         ReceivingConfig {
             admission: Arc::new(Admission { permits }),
@@ -102,11 +112,37 @@ fn receiver(dialback: DialbackMode, permits: bool) -> S2sStream {
             language: StreamLanguage::english(),
             sasl: SaslLimits::PILOT,
             dialback,
+            clock,
         },
         STREAM_CODEC_LIMITS,
     );
     stream.deliver_stanzas();
     stream
+}
+
+/// A clock a test moves forward by hand.
+#[derive(Clone)]
+struct ManualClock(Arc<Mutex<Instant>>);
+
+impl ManualClock {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(Instant::now())))
+    }
+
+    fn advance(&self, by: Duration) {
+        match self.0.lock() {
+            Ok(mut now) => *now += by,
+            Err(poisoned) => *poisoned.into_inner() += by,
+        }
+    }
+
+    fn clock(&self) -> NegotiationClock {
+        let now = Arc::clone(&self.0);
+        NegotiationClock::new(move || match now.lock() {
+            Ok(now) => *now,
+            Err(poisoned) => *poisoned.into_inner(),
+        })
+    }
 }
 
 fn initiating(dialback: DialbackMode) -> InitiatingConfig {
@@ -373,7 +409,7 @@ fn a_key_that_could_not_be_verified_is_a_dialback_error() {
     assert!(error
         .children()
         .any(|condition| condition.is("remote-connection-failed", STANZAS)));
-    assert_eq!(close_reason(&out), Some(CloseReason::DialbackRefused));
+    assert_eq!(close_reason(&out), Some(CloseReason::DialbackFailed));
 }
 
 #[test]
@@ -572,15 +608,57 @@ fn verification_requests_are_for_the_streams_pair_and_bounded() {
         assert_stream_error(&after.stream.receive(&element), condition);
     }
 
-    let mut after = after_tls(receiver(enabled(), false), TlsPeer::NoCertificate);
+    // Eight requests within a minute are answered; a ninth within the same
+    // minute ends the stream.
+    let clock = ManualClock::new();
+    let mut after = after_tls(
+        receiver_with_clock(enabled(), false, clock.clock()),
+        TlsPeer::NoCertificate,
+    );
     for index in 0..8 {
+        let out = after
+            .stream
+            .receive(&verify_request_for(&format!("s-{index}")));
+        assert_eq!(close_reason(&out), None, "request {index}");
+        clock.advance(Duration::from_secs(5));
+    }
+    assert_stream_error(
+        &after.stream.receive(&verify_request_for("s-8")),
+        StreamErrorCondition::PolicyViolation,
+    );
+}
+
+#[test]
+fn verification_requests_are_a_rate_not_a_lifetime_cap() {
+    let clock = ManualClock::new();
+    let mut after = after_tls(
+        receiver_with_clock(enabled(), false, clock.clock()),
+        TlsPeer::NoCertificate,
+    );
+    // Three full windows' worth of requests at the rate: all answered.
+    for index in 0..24 {
+        let out = after
+            .stream
+            .receive(&verify_request_for(&format!("s-{index}")));
+        assert_eq!(
+            dialback_element(&out, "verify").attr("type"),
+            Some("valid"),
+            "request {index}"
+        );
+        assert_eq!(close_reason(&out), None, "request {index}");
+        clock.advance(Duration::from_millis(7_500));
+    }
+    // Eight at once, a minute after the last: answered, and the window is
+    // full again.
+    clock.advance(Duration::from_secs(60));
+    for index in 24..32 {
         let out = after
             .stream
             .receive(&verify_request_for(&format!("s-{index}")));
         assert_eq!(close_reason(&out), None, "request {index}");
     }
     assert_stream_error(
-        &after.stream.receive(&verify_request_for("s-8")),
+        &after.stream.receive(&verify_request_for("s-32")),
         StreamErrorCondition::PolicyViolation,
     );
 }
@@ -666,16 +744,53 @@ fn the_initiating_server_sends_its_key_when_external_is_not_offered() {
 
 #[test]
 fn the_initiating_server_stops_when_its_key_is_refused() {
-    let refusals: [&[u8]; 2] = [
-        b"<db:result from='home-b.test' to='home-a.test' type='invalid'/>",
-        b"<db:result from='home-b.test' to='home-a.test' type='error'><error type='cancel'>\
+    let refusals: [(&[u8], CloseReason); 2] = [
+        (
+            b"<db:result from='home-b.test' to='home-a.test' type='invalid'/>",
+            CloseReason::DialbackRefused,
+        ),
+        (
+            b"<db:result from='home-b.test' to='home-a.test' type='error'><error type='cancel'>\
 <remote-connection-failed xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></db:result>",
+            CloseReason::DialbackFailed,
+        ),
     ];
-    for refusal in refusals {
+    for (refusal, reason) in refusals {
         let mut stream = initiator_awaiting_result();
         let out = stream.receive(refusal);
-        assert_eq!(close_reason(&out), Some(CloseReason::DialbackRefused));
+        assert_eq!(close_reason(&out), Some(reason));
     }
+}
+
+/// home-b.test's response header to home-a.test without the dialback
+/// namespace.
+const RESPONSE_WITHOUT_DIALBACK: &[u8] = b"<?xml version='1.0'?><stream:stream \
+xmlns='jabber:server' xmlns:stream='http://etherx.jabber.org/streams' \
+from='home-b.test' to='home-a.test' id='s2s-2' version='1.0' xml:lang='en'>";
+
+const FEATURES_NONE: &[u8] = b"<stream:features/>";
+
+#[test]
+fn the_initiating_server_sends_its_key_only_where_dialback_is_advertised() {
+    // Neither the header's namespace nor the feature: no key is sent.
+    let (mut stream, _) = initiator_after_tls(enabled());
+    let out = stream.receive(&concat(&[RESPONSE_WITHOUT_DIALBACK, FEATURES_NONE]));
+    let (_, elements) = decode(&transmitted(&out));
+    assert!(!elements
+        .iter()
+        .any(|element| element.ns() == JABBER_SERVER_DIALBACK));
+    assert_stream_error(&out, StreamErrorCondition::PolicyViolation);
+
+    // The namespace on the post-TLS header advertises traditional dialback
+    // (XEP-0220 §2.4.1).
+    let (mut stream, _) = initiator_after_tls(enabled());
+    let out = stream.receive(&concat(&[RESPONSE, FEATURES_NONE]));
+    assert_eq!(dialback_element(&out, "result").attr("to"), Some(HOME_B));
+
+    // The feature advertises dialback with error handling (§2.4.2).
+    let (mut stream, _) = initiator_after_tls(enabled());
+    let out = stream.receive(&concat(&[RESPONSE_WITHOUT_DIALBACK, FEATURES_DIALBACK]));
+    assert_eq!(dialback_element(&out, "result").attr("to"), Some(HOME_B));
 }
 
 #[test]

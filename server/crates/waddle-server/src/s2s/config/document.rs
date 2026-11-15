@@ -48,12 +48,18 @@ pub(super) enum PeerScopeDocument {
 }
 
 /// ADR-0020 D3: DNS discovery of remote domains without configured
-/// endpoints. Off by default.
+/// endpoints. Off by default, and only with `peer_scope = "public"`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DiscoveryDocument {
     #[serde(default)]
     pub(super) enabled: bool,
+    /// Address blocks, in CIDR notation, refused for DNS-derived addresses
+    /// in addition to the built-in classes: the network's own NAT64
+    /// (RFC 6052) and 6rd (RFC 5969) prefixes, which embed IPv4 addresses
+    /// an address alone does not reveal, or any other block.
+    #[serde(default)]
+    pub(super) blocked_prefixes: Vec<String>,
 }
 
 /// ADR-0020 D2: Server Dialback (XEP-0220). Every role is off by default.
@@ -157,10 +163,14 @@ pub(super) struct LimitsDocument {
     pub(super) max_inbound_handshakes: Option<usize>,
     pub(super) max_outbound_handshakes: Option<usize>,
     pub(super) max_dialing: Option<usize>,
-    /// New outbound connections per second across every remote domain,
-    /// verification connections included.
+    /// New outbound connections per second across every remote domain.
     pub(super) dial_per_second: Option<u32>,
     pub(super) dial_burst: Option<u32>,
+    /// Dialback verification connections in progress, and new ones per
+    /// second.
+    pub(super) max_verifications: Option<usize>,
+    pub(super) verification_per_second: Option<u32>,
+    pub(super) verification_burst: Option<u32>,
     pub(super) max_backoff_destinations: Option<usize>,
     pub(super) max_streams: Option<usize>,
     pub(super) max_peers: Option<usize>,

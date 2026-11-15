@@ -1,13 +1,16 @@
-//! Configuration of the discovery slice: the peer scope that lifts the
-//! `.test` and loopback restriction, discovery, direct-TLS endpoints, the
-//! global dial rate and the dialback deadline; and [`PeerEndpoints`],
-//! where configured endpoints replace discovery.
+//! Configuration of discovery and dialling: the peer scope that lifts the
+//! `.test` and loopback restriction, discovery only in the public scope,
+//! the operator's blocked prefixes, direct-TLS endpoints, the global dial
+//! rate, the verification budget and the dialback deadline; and
+//! [`PeerEndpoints`], where configured endpoints replace discovery.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use waddle_server::s2s::config::{AdmissionRefusal, ConfigError, ConfigSection, PeerScope};
+use waddle_server::s2s::config::{
+    AdmissionRefusal, ConfigError, ConfigSection, PeerScope, MAX_BLOCKED_PREFIXES,
+};
 use waddle_server::s2s::conn::{EndpointOrigin, EndpointResolver, ResolveError};
 use waddle_server::s2s::discovery::{DnsDiscovery, DnsLookup, PeerEndpoints};
 use waddle_server::s2s::verify::OutboundTransport;
@@ -96,16 +99,40 @@ async fn the_public_scope_admits_real_domains_and_any_address() {
 }
 
 #[tokio::test]
-async fn discovery_and_direct_tls_endpoints_are_configured() {
+async fn discovery_loads_only_in_the_public_scope() {
+    let pki = Pki::new();
+    // In the test scope every peer is a `.test` domain on loopback, which
+    // discovery could only ever resolve to blocked addresses: refused.
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.tables = vec!["[discovery]".to_owned(), "enabled = true".to_owned()];
+    assert!(matches!(
+        spec.load(&pki).await,
+        Err(ConfigError::DiscoveryRequiresPublicScope)
+    ));
+    // Naming the test scope explicitly changes nothing.
+    spec.top = vec!["peer_scope = \"test\"".to_owned()];
+    assert!(matches!(
+        spec.load(&pki).await,
+        Err(ConfigError::DiscoveryRequiresPublicScope)
+    ));
+
+    spec.top = vec!["peer_scope = \"public\"".to_owned()];
+    let config = spec
+        .load(&pki)
+        .await
+        .expect("discovery in the public scope");
+    assert!(config.discovery_enabled());
+}
+
+#[tokio::test]
+async fn direct_tls_endpoints_are_configured() {
     let pki = Pki::new();
     let mut spec = Spec::new(HOME_A, HOME_B);
     spec.tables = endpoint_table(HOME_B, "127.0.0.1:5270", Some("direct_tls"));
     spec.tables
         .extend(endpoint_table(HOME_B, "127.0.0.1:5269", Some("starttls")));
-    spec.tables
-        .extend(["[discovery]".to_owned(), "enabled = true".to_owned()]);
     let config = spec.load(&pki).await.expect("a configuration");
-    assert!(config.discovery_enabled());
+    assert!(!config.discovery_enabled());
     let endpoints = config.endpoints(&domain(HOME_B));
     assert_eq!(endpoints.len(), 2);
     assert_eq!(endpoints[0].transport, OutboundTransport::DirectTls);
@@ -125,6 +152,9 @@ async fn the_dial_rate_and_dialback_deadline_stay_within_their_ranges() {
         .expect("defaults");
     assert_eq!(config.limits().dial_rate.per_second, 4);
     assert_eq!(config.limits().dial_rate.burst, 8);
+    assert_eq!(config.limits().max_verifications, 4);
+    assert_eq!(config.limits().verification_rate.per_second, 2);
+    assert_eq!(config.limits().verification_rate.burst, 4);
     assert_eq!(config.deadlines().dialback, Duration::from_secs(15));
 
     let mut spec = Spec::new(HOME_A, HOME_B);
@@ -132,11 +162,17 @@ async fn the_dial_rate_and_dialback_deadline_stay_within_their_ranges() {
         "dial_per_second = 1".to_owned(),
         "dial_burst = 2".to_owned(),
         "dialback_timeout_ms = 1000".to_owned(),
+        "max_verifications = 1".to_owned(),
+        "verification_per_second = 1".to_owned(),
+        "verification_burst = 1".to_owned(),
     ];
     let config = spec.load(&pki).await.expect("lowered limits");
     assert_eq!(config.limits().dial_rate.per_second, 1);
     assert_eq!(config.limits().dial_rate.burst, 2);
     assert_eq!(config.deadlines().dialback, Duration::from_secs(1));
+    assert_eq!(config.limits().max_verifications, 1);
+    assert_eq!(config.limits().verification_rate.per_second, 1);
+    assert_eq!(config.limits().verification_rate.burst, 1);
 
     for (line, name) in [
         ("dial_per_second = 0", "dial_per_second"),
@@ -144,6 +180,10 @@ async fn the_dial_rate_and_dialback_deadline_stay_within_their_ranges() {
         ("dial_burst = 9", "dial_burst"),
         ("dialback_timeout_ms = 0", "dialback_timeout_ms"),
         ("dialback_timeout_ms = 15001", "dialback_timeout_ms"),
+        ("max_verifications = 0", "max_verifications"),
+        ("max_verifications = 5", "max_verifications"),
+        ("verification_per_second = 3", "verification_per_second"),
+        ("verification_burst = 5", "verification_burst"),
     ] {
         let mut spec = Spec::new(HOME_A, HOME_B);
         spec.limits = vec![line.to_owned()];
@@ -155,11 +195,68 @@ async fn the_dial_rate_and_dialback_deadline_stay_within_their_ranges() {
 }
 
 #[tokio::test]
+async fn blocked_prefixes_are_validated_at_load() {
+    let pki = Pki::new();
+    let prefixes = |entries: &[&str]| {
+        let mut spec = Spec::new(HOME_A, HOME_B);
+        let list: Vec<String> = entries.iter().map(|entry| format!("{entry:?}")).collect();
+        spec.tables = vec![
+            "[discovery]".to_owned(),
+            format!("blocked_prefixes = [{}]", list.join(", ")),
+        ];
+        spec
+    };
+    let config = prefixes(&["2a00:64::/96", "8.8.4.0/24"])
+        .load(&pki)
+        .await
+        .expect("valid prefixes");
+    let blocked = config.blocked_addresses();
+    assert_eq!(blocked.extra().len(), 2);
+    assert!(blocked.is_blocked("2a00:64::808:808".parse().expect("an address")));
+    assert!(blocked.is_blocked("8.8.4.4".parse().expect("an address")));
+    assert!(!blocked.is_blocked("8.8.8.8".parse().expect("an address")));
+
+    for (index, entries) in [
+        (0, vec!["8.8.4.1/24"]),
+        (0, vec!["2a00:64::1/96"]),
+        (0, vec!["8.8.4.0/33"]),
+        (0, vec!["2a00::/129"]),
+        (0, vec!["::/0"]),
+        (0, vec!["8.8.4.0"]),
+        (0, vec!["example.org/24"]),
+        (1, vec!["8.8.4.0/24", "8.8.4.0/"]),
+    ] {
+        match prefixes(&entries).load(&pki).await {
+            Err(ConfigError::InvalidBlockedPrefix { index: refused }) => {
+                assert_eq!(refused, index, "{entries:?}")
+            }
+            other => panic!("{entries:?}: expected an invalid prefix, got {other:?}"),
+        }
+    }
+    assert!(matches!(
+        prefixes(&["8.8.4.0/24", "8.8.4.0/24"]).load(&pki).await,
+        Err(ConfigError::Duplicate {
+            section: ConfigSection::BlockedPrefixes,
+            index: 1
+        })
+    ));
+    let many: Vec<String> = (0..=MAX_BLOCKED_PREFIXES)
+        .map(|index| format!("10.{index}.0.0/16"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!(matches!(
+        prefixes(&many).load(&pki).await,
+        Err(ConfigError::TooManyEntries(ConfigSection::BlockedPrefixes))
+    ));
+}
+
+#[tokio::test]
 async fn configured_endpoints_replace_discovery_for_their_domain() {
     let pki = Pki::new();
     let mut spec = Spec::new(HOME_A, HOME_B);
     spec.allow = vec![HOME_B, "other.test"];
     spec.endpoints = vec![(HOME_B, SocketAddr::from(([127, 0, 0, 1], 5269)))];
+    spec.top = vec!["peer_scope = \"public\"".to_owned()];
     spec.tables = vec!["[discovery]".to_owned(), "enabled = true".to_owned()];
     let config = Arc::new(spec.load(&pki).await.expect("a configuration"));
     let stub = Arc::new(

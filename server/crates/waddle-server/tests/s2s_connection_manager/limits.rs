@@ -1,6 +1,7 @@
 //! The resource model: socket caps, per-peer budgets, deadlines and the
-//! input rates, eviction and its reserve, replacement of a pair's stream,
-//! backoff and the shutdown join.
+//! input rates, eviction and its reserve, outbound eviction only once a
+//! TCP connection is open, replacement of a pair's stream, backoff and the
+//! shutdown join.
 //!
 //! Every connection in these tests comes from 127.0.0.1, so a test that
 //! opens more than four in a row waits for the per-address accept rate (two
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use minidom::rxml::xml_ncname;
 use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use waddle_server::s2s::config::{
     Deadlines, ResourceLimits, MAX_INCOMPLETE_ELEMENT_TIME, STREAM_CODEC_LIMITS,
 };
@@ -975,4 +976,61 @@ async fn a_peer_that_stops_mid_element_is_closed_at_the_incomplete_element_deadl
     assert!(lasted >= allowed, "{lasted:?}");
     assert!(lasted < allowed + Duration::from_secs(3), "{lasted:?}");
     assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outbound_stream_is_evicted_only_once_the_new_connection_is_open() {
+    let pki = Pki::new();
+    let (listener_b, address_b) = listener().await;
+    let b = start(&pki, &Spec::new(HOME_B, HOME_A), listener_b).await;
+    // A destination that refuses every connection, and one that accepts
+    // TCP and never speaks.
+    let (_held, dead) = dead_port();
+    let silent = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let silent_address = silent.local_addr().expect("an address");
+    let mut spec = Spec::new(HOME_A, HOME_B);
+    spec.allow = vec![HOME_B, "dead.test", "silent.test"];
+    spec.endpoints = vec![
+        (HOME_B, address_b),
+        ("dead.test", dead),
+        ("silent.test", silent_address),
+    ];
+    spec.limits = vec![
+        "max_outbound_sockets = 1".to_owned(),
+        "eviction_idle_ms = 1".to_owned(),
+    ];
+    let (listener_a, _) = listener().await;
+    let a = start(&pki, &spec, listener_a).await;
+    let home_a = domain(HOME_A);
+    a.handle
+        .connect(&home_a, &domain(HOME_B))
+        .await
+        .expect("the only outbound stream");
+    holds_streams(&b, 1).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The outbound socket cap is full and the stream is quiet enough to be
+    // evicted, but the destination never answers: the stream stays.
+    assert_eq!(
+        a.handle.connect(&home_a, &domain("dead.test")).await,
+        Err(ConnectError::Failed(S2sOutcome::Io))
+    );
+    assert_eq!(remotes(&a), set_of(&[HOME_B]));
+
+    // A destination whose TCP connection opens takes the quiet stream's
+    // socket.
+    let handle = a.handle.clone();
+    let attempt = tokio::spawn(async move {
+        handle
+            .connect(&domain(HOME_A), &domain("silent.test"))
+            .await
+    });
+    let accepted = tokio::time::timeout(WAIT, silent.accept()).await;
+    assert!(matches!(accepted, Ok(Ok(_))), "silent.test was not dialled");
+    assert!(
+        eventually(WAIT, || a.handle.streams().is_empty()).await,
+        "the quiet stream is evicted once the new connection is open"
+    );
+    drop(accepted);
+    let _ = tokio::time::timeout(WAIT, attempt).await;
 }

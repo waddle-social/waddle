@@ -24,6 +24,7 @@ pub enum ConfigSection {
     Listen,
     Limits,
     Dialback,
+    BlockedPrefixes,
 }
 
 impl ConfigSection {
@@ -42,6 +43,7 @@ impl ConfigSection {
             Self::Listen => "listen",
             Self::Limits => "limits",
             Self::Dialback => "dialback",
+            Self::BlockedPrefixes => "discovery.blocked_prefixes",
         }
     }
 }
@@ -151,6 +153,10 @@ pub enum ConfigError {
     InconsistentLimit(&'static str),
     #[error("the clock cannot tell the current time")]
     ClockUnavailable,
+    #[error("`discovery.enabled` requires `peer_scope = \"public\"`")]
+    DiscoveryRequiresPublicScope,
+    #[error("entry {index} of `discovery.blocked_prefixes` is not an address block in CIDR notation with its host bits clear")]
+    InvalidBlockedPrefix { index: usize },
     #[error("`dialback.outbound` requires `dialback.secret_file`")]
     DialbackSecretMissing,
     #[error("the dialback secret is shorter than {0} bytes")]

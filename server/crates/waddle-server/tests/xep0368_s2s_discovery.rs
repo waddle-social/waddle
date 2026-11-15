@@ -6,9 +6,11 @@
 //! peer-scope and discovery configuration, and outbound XEP-0368 direct TLS
 //! with its Server Name Indication and ALPN protocol.
 //!
-//! DNS is a stub resolver; no lookup leaves the process. Service cases run
-//! in-process deployments on real loopback sockets with the shared test CA.
-//! No PostgreSQL, SpiceDB or second process is involved.
+//! Discovery runs against a stub resolver, and `SystemDnsLookup` against a
+//! name server in this process on loopback; no lookup leaves the process.
+//! Service cases run in-process deployments on real loopback sockets with
+//! the shared test CA. No PostgreSQL, SpiceDB or second process is
+//! involved.
 
 // The connection-manager support module is shared by several suites; this
 // one uses only part of it.
@@ -27,3 +29,6 @@ mod config;
 
 #[path = "xep0368_s2s_discovery/dialling.rs"]
 mod dialling;
+
+#[path = "xep0368_s2s_discovery/system.rs"]
+mod system;

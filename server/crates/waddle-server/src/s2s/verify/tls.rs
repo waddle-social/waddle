@@ -120,7 +120,10 @@ pub fn initiating_config(
 /// The TLS configuration of one receiving connection.
 ///
 /// `credentials` authenticate the local destination domain and `verifier`
-/// verifies the initiating server, which must present a certificate.
+/// verifies the initiating server's certificate. The initiating server must
+/// present one unless `verifier` allows it to be absent, which the
+/// connection manager permits only where the peer may then use dialback
+/// ([`PeerVerifier::with_optional_client_certificate`]).
 pub fn receiving_config(
     settings: &TlsSettings,
     credentials: Arc<CertifiedKey>,

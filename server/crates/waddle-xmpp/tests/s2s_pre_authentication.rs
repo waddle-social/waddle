@@ -11,8 +11,9 @@ use std::sync::Arc;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::s2s::{
     AuthorizationDecision, CloseReason, CodecLimits, DecodeError, DestinationStatus, DialbackMode,
-    Inbound, InboundAdmission, LimitKind, NegotiationPhase, Output, ReceivingConfig, S2sStream,
-    SaslLimits, Signal, StreamDecoder, StreamErrorCondition, StreamLanguage, TlsPeer,
+    Inbound, InboundAdmission, LimitKind, NegotiationClock, NegotiationPhase, Output,
+    ReceivingConfig, S2sStream, SaslLimits, Signal, StreamDecoder, StreamErrorCondition,
+    StreamLanguage, TlsPeer,
 };
 
 const HEADER: &[u8] = b"<stream:stream xmlns='jabber:server' \
@@ -52,6 +53,7 @@ fn receiver() -> S2sStream {
             language: StreamLanguage::english(),
             sasl: SaslLimits::PILOT,
             dialback: DialbackMode::Disabled,
+            clock: NegotiationClock::system(),
         },
         CodecLimits::PILOT,
     )

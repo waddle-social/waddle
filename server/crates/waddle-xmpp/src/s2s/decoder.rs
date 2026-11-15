@@ -895,7 +895,10 @@ impl StreamDecoder {
             id: text("id").and_then(StreamId::parse),
             version,
             lang,
-            declare_dialback: false,
+            declare_dialback: head
+                .prefix_declarations
+                .iter()
+                .any(|(_, uri)| uri == JABBER_SERVER_DIALBACK),
         })
     }
 }

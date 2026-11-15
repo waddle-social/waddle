@@ -21,9 +21,9 @@ use waddle_xmpp::ns::{SASL, STREAM, TLS};
 use waddle_xmpp::s2s::{
     AuthorizationDecision, AuthorizationRequest, CloseReason, CodecLimits, DestinationStatus,
     DialbackMode, HeaderAddress, Inbound, InboundAdmission, InitiatingConfig, NegotiatedStream,
-    NegotiationPhase, Output, ReceivingConfig, Role, S2sStream, SaslFailureCondition, SaslLimits,
-    Signal, StreamAuthentication, StreamDecoder, StreamErrorCondition, StreamHeader,
-    StreamLanguage, StreamVersion, TlsPeer,
+    NegotiationClock, NegotiationPhase, Output, ReceivingConfig, Role, S2sStream,
+    SaslFailureCondition, SaslLimits, Signal, StreamAuthentication, StreamDecoder,
+    StreamErrorCondition, StreamHeader, StreamLanguage, StreamVersion, TlsPeer,
 };
 
 const INITIAL: &[u8] = b"<?xml version='1.0'?><stream:stream xmlns='jabber:server' \
@@ -84,6 +84,7 @@ fn receiving_config() -> ReceivingConfig {
         language: StreamLanguage::english(),
         sasl: SaslLimits::PILOT,
         dialback: DialbackMode::Disabled,
+        clock: NegotiationClock::system(),
     }
 }
 
