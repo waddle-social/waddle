@@ -4520,13 +4520,19 @@ async fn live_spicedb_an_unreadable_epoch_beside_a_readable_witness_is_replaced(
     live.close().await;
 }
 
-/// Commit a transaction that writes write-ahead log, so the flushed
-/// position moves forward.
+/// Commit a row into a table of the case's own database, so the flushed
+/// position moves forward: a commit that wrote no data may be flushed
+/// later.
 async fn advance_wal(fixture: &GrantFixture) {
     let pool = owner_pool(fixture).await;
-    let _: i64 = sqlx::query_scalar("SELECT pg_catalog.txid_current()")
-        .fetch_one(&pool)
-        .await
-        .expect("assign a transaction ID");
+    for statement in [
+        "CREATE TABLE IF NOT EXISTS wal_advance (written_at timestamptz NOT NULL)",
+        "INSERT INTO wal_advance VALUES (pg_catalog.now())",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
     pool.close().await;
 }
