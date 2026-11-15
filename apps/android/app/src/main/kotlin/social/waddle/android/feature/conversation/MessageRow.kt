@@ -26,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.layout
@@ -136,7 +135,7 @@ private fun RowFrame(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .then(if (entry.mentionsSelf) Modifier.mentionWash(colors.live) else Modifier)
+            .then(if (entry.mentionsSelf) Modifier.mentionWash(colors.gold, colors.goldSubtle) else Modifier)
             .then(
                 if (onLongPress != null) {
                     // Touch: a tap on a post with replies opens its
@@ -218,20 +217,10 @@ private fun Modifier.overhang(visible: Dp, target: Dp): Modifier = layout { meas
     }
 }
 
-/**
- * The mention row: a 3dp ember bar at the left edge over an ember wash
- * that is strongest beside the bar. A flat 8% ember over the night ground
- * mixes to grey; letting it fall off from the bar keeps it reading warm.
- */
-private fun Modifier.mentionWash(live: Color): Modifier = drawBehind {
-    drawRect(live.copy(alpha = MENTION_BASE_ALPHA))
-    drawRect(
-        Brush.horizontalGradient(
-            0f to live.copy(alpha = MENTION_EDGE_ALPHA),
-            MENTION_FALLOFF to Color.Transparent,
-        ),
-    )
-    drawRect(live, size = size.copy(width = MENTION_BAR.toPx()))
+/** The mention row (web `wd-msg` mention): a gold-subtle wash with a 3dp gold bar at the left edge. */
+private fun Modifier.mentionWash(gold: Color, wash: Color): Modifier = drawBehind {
+    drawRect(wash)
+    drawRect(gold, size = size.copy(width = MENTION_BAR.toPx()))
 }
 
 @Composable
@@ -423,19 +412,19 @@ private fun AuthorName(author: String, onClick: (() -> Unit)?) {
     }
 }
 
-/** A role hat after the name: mono, uppercase, text only (web `.chat-hat-tag`). */
+/** A role hat after the name: tag style, text only. */
 @Composable
 private fun HatTag(badge: AuthorBadge) {
     val colors = Waddle.colors
     val color = when (badge.kind) {
         AuthorBadgeKind.OWNER -> colors.goldText
         AuthorBadgeKind.ADMIN, AuthorBadgeKind.MODERATOR, AuthorBadgeKind.VERIFIED -> colors.actionText
-        AuthorBadgeKind.BOT -> colors.mossText
+        AuthorBadgeKind.BOT -> colors.successText
         AuthorBadgeKind.HAT -> colors.fgMuted
     }
     Text(
-        text = badge.label.uppercase(),
-        style = Waddle.type.kicker,
+        text = badge.label,
+        style = Waddle.type.tag,
         color = color,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -482,7 +471,7 @@ internal fun authorNameOf(item: TimelineItem): String {
 /** Author line name: body 13/600 (web `.chat-author`). */
 internal val AuthorStyle: TextStyle
     @Composable get() = Waddle.type.control.copy(
-        fontSize = WaddleTokens.Huddle.FontSize.control,
+        fontSize = WaddleTokens.Huddle.FontSize.sm,
         fontWeight = FontWeight.SemiBold,
     )
 
@@ -490,7 +479,4 @@ private val ROW_GAP: Dp = 2.dp
 private val MIN_TOUCH_TARGET: Dp = 48.dp
 private val MENTION_BAR: Dp = 3.dp
 private val HAT_MAX_WIDTH: Dp = 120.dp
-private const val MENTION_BASE_ALPHA = 0.06f
-private const val MENTION_EDGE_ALPHA = 0.12f
-private const val MENTION_FALLOFF = 0.7f
 private const val PENDING_ALPHA = 0.72f

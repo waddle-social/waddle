@@ -481,7 +481,7 @@ private fun BotCard(bot: BotRow) {
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                KickerText(text = stringResource(R.string.huddle_member_bot), color = colors.mossText)
+                KickerText(text = stringResource(R.string.huddle_member_bot), color = colors.successText)
             }
         }
     }

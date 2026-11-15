@@ -48,6 +48,8 @@ on:
     - chat/wrangler.jsonc/**
     - cue.mod/**
     - design/**
+    - design/src/preset.ts
+    - design/src/preset.ts/**
     - env.cue
     - env.cue/**
     - flake.lock

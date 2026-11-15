@@ -395,20 +395,20 @@ fun MessageComposer(
 }
 
 /**
- * The composer card (web `.composer`): radius 14 on the card colour with
- * a hairline border; focus turns the border teal with a 1dp teal ring.
+ * The composer card (web `wd-composer`): radius 16 on the surface inside
+ * a strong edge; focus turns the edge floe with a soft floe ring.
  */
 @Composable
 private fun ComposerCard(focused: Boolean, content: @Composable ColumnScope.() -> Unit) {
     val colors = Waddle.colors
     val shape = RoundedCornerShape(COMPOSER_RADIUS)
     val border by animateColorAsState(
-        if (focused) colors.action else colors.border,
+        if (focused) colors.focus else colors.borderStrong,
         animationSpec = HuddleMotion.fast(),
         label = "composer-border",
     )
     val ring by animateColorAsState(
-        if (focused) colors.action.copy(alpha = FOCUS_RING_ALPHA) else Color.Transparent,
+        if (focused) colors.focus.copy(alpha = FOCUS_RING_ALPHA) else Color.Transparent,
         animationSpec = HuddleMotion.fast(),
         label = "composer-ring",
     )
@@ -913,7 +913,7 @@ private fun ComposerBanner(
 }
 
 /** Web composer radius (14); between the control (10) and panel (12) radii on purpose. */
-private val COMPOSER_RADIUS = WaddleTokens.Radius.xl
+private val COMPOSER_RADIUS = WaddleTokens.Huddle.Radius.panel
 private val FOCUS_RING = 1.dp
 private val COMPOSER_ICON = 20.dp
 private val BANNER_BAR = 3.dp
