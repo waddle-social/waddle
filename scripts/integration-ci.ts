@@ -73,7 +73,7 @@ function remapNeeds(value: any, lane: Lane): any {
 
 const utilitySteps = () => [
   { name: "Checkout exact candidate", uses: checkout, with: { ref: "${{ github.sha }}", "fetch-depth": 0, "persist-credentials": false } },
-  { name: "Install Bun", uses: setupBun, with: { "bun-version": "1.4.2" } },
+  { name: "Install Bun", uses: setupBun, with: { "bun-version": "1.4.4" } },
 ];
 
 export function generate(lanes: Lane[]): string {

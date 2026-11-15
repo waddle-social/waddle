@@ -961,6 +961,31 @@
               vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
             }
           );
+          # Bun matches the version developers run locally, so `bun install
+          # --frozen-lockfile` in CI accepts lockfiles written on a laptop
+          # (1.3.x and 1.4.x serialize bun.lock differently).
+          bun = pkgs.bun.overrideAttrs (
+            finalAttrs: prev: {
+              version = "1.4.4";
+              src = finalAttrs.passthru.sources.${system};
+              passthru = prev.passthru // {
+                sources =
+                  let
+                    release =
+                      file: hash:
+                      pkgs.fetchurl {
+                        url = "https://github.com/oven-sh/bun/releases/download/bun-v${finalAttrs.version}/bun-${file}.zip";
+                        inherit hash;
+                      };
+                  in
+                  {
+                    "aarch64-darwin" = release "darwin-aarch64" "sha256-wkDX8My5DCY6hJ/NsJt+5iYw2SE0jtaq/ahrnVd7xRA=";
+                    "aarch64-linux" = release "linux-aarch64" "sha256-uqa7NvUdblhWHgK76oJQOKnfRU9nPW13bou/hvjHhQ4=";
+                    "x86_64-linux" = release "linux-x64-baseline" "sha256-4ERutVmVdy65iUvrrppr42jZhai5Jx7hJEhvmUbu3XY=";
+                  };
+              };
+            }
+          );
         in
         {
           default = pkgs.mkShell {
@@ -971,7 +996,7 @@
             PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
             packages = [
               rustToolchain
-              pkgs.bun
+              bun
               pkgs.nodejs_22
               pkgs.python3
               pkgs.go
