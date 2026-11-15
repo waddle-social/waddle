@@ -504,8 +504,13 @@ struct HostGrantCallDenial {
 /// A call in a room an enrolled host-grant scope manages is participation
 /// in the room: the caller's canonical grants must allow `send_message`,
 /// whatever occupancy, role or voice the room actor still holds for them.
-/// Every verification of a call (its setup on either replica of a relayed
-/// initiate, and the re-check before a token is released) passes here.
+/// Every decision that leads to a minted token passes here: the setup on
+/// either replica of a relayed initiate, and the re-check before the token
+/// is released. The media capabilities minted into the token still follow
+/// the voice the room actor mirrors, so the mirror can only narrow what
+/// `send_message` allows. The later re-assertion and eviction of a live
+/// participant's grants (the LiveKit webhook and the voice reconciler)
+/// follow occupancy and voice only; they do not pass here.
 async fn host_grant_call_participation(
     state: &WebSocketState,
     full_jid: &FullJid,

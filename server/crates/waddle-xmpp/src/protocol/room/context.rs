@@ -148,6 +148,12 @@ pub struct RoomContext<'a> {
     /// `Some(SyntheticSenderAuthority::ServerAuthored)` is the
     /// explicit, audited bypass.
     pub synthetic_sender_authority: Option<SyntheticSenderAuthority>,
+    /// Whether the sender may broadcast a channel-wide mention, when the
+    /// interpreter decided it before dispatch from something other than
+    /// the sender's role. In a room an enrolled host-grant scope manages,
+    /// the room's canonical grants decide it (the `moderate` action), not
+    /// the role the room actor mirrors. `None` leaves it to the role check.
+    pub channel_mention_decision: Option<bool>,
     /// Single dispatch timestamp (Unix epoch seconds) shared across
     /// every groupchat inbox
     /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]

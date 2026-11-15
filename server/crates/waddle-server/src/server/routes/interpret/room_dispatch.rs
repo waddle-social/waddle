@@ -629,6 +629,7 @@ pub(super) async fn dispatch_to_room(
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
         synthetic_sender_authority: None,
+        channel_mention_decision: None,
         dispatch_timestamp,
     };
     let mut gate_working = prototype.clone();
@@ -794,6 +795,12 @@ pub(super) async fn dispatch_to_room(
         );
     }
 
+    // XEP-0513 channel-wide mentions are a moderator's: in a room an
+    // enrolled host-grant scope manages, the sender's canonical grants
+    // decide (the `moderate` action), not the role the room actor mirrors.
+    // When the grants cannot be read the mention is not broadcast.
+    let channel_mention_decision = host_grant_channel_mention(state, &room_jid, &sender_full).await;
+
     // 8. Build context + run the rest of the chain (canonicalize,
     //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
     //    snapshot, same managed-room flag, same id-gen.
@@ -823,6 +830,7 @@ pub(super) async fn dispatch_to_room(
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
         synthetic_sender_authority: None,
+        channel_mention_decision,
         dispatch_timestamp,
     };
     let mut working = prototype;
@@ -1309,5 +1317,31 @@ async fn revised_archive_target(
             );
             None
         }
+    }
+}
+
+/// Whether `sender` may broadcast a channel-wide mention in `room`, when an
+/// enrolled host-grant scope manages the room: its canonical grants allow
+/// `moderate`. `None` for a room no scope manages, whose role check applies.
+async fn host_grant_channel_mention(
+    state: &WebSocketState,
+    room: &BareJid,
+    sender: &jid::FullJid,
+) -> Option<bool> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .allows(
+            RoomBinding::Room(room),
+            &sender.to_bare(),
+            HostGrantAction::Moderate,
+        )
+        .await
+    {
+        RoomGate::Unmanaged => None,
+        RoomGate::Managed(allowed) => Some(allowed),
+        RoomGate::Unavailable => Some(false),
     }
 }

@@ -311,16 +311,15 @@ pub(super) async fn broadcast_room_system_message_with_identity(
 /// The occupants a room's own message is delivered to: every seated
 /// occupant of a room no enrolled scope manages; in a managed room, those
 /// whose canonical grants allow `read`. `None` when a managed room's grants
-/// cannot be read.
+/// cannot be read, and when the interpreter holds no WebSocket state, whose
+/// host-grant gate is the only way to tell whether a scope manages the room.
 async fn system_message_audience<'o>(
     deps: &Deps<'_>,
     room: &BareJid,
     occupants: &'o [RoomChainOccupant],
 ) -> Option<Vec<&'o RoomChainOccupant>> {
     use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
-    let Some(state) = deps.web_socket_state else {
-        return Some(occupants.iter().collect());
-    };
+    let state = deps.web_socket_state?;
     match state
         .deps
         .app_state

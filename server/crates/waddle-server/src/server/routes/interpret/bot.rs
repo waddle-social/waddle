@@ -228,6 +228,7 @@ pub(super) async fn plan_bot_groupchat_message(
         synthetic_sender_authority: Some(
             waddle_xmpp::protocol::room::SyntheticSenderAuthority::ServerAuthored,
         ),
+        channel_mention_decision: None,
         dispatch_timestamp: bot_ctx.dispatch_timestamp,
     };
 
