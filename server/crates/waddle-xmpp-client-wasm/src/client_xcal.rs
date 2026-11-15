@@ -49,6 +49,7 @@ pub(crate) struct JsVEvent {
     pub description: Option<String>,
     pub location: Option<String>,
     pub organizer: Option<String>,
+    pub workspace_room: Option<String>,
     pub dtstamp: Option<String>,
     pub dtstart: Option<JsCalendarDateValue>,
     pub dtend: Option<JsCalendarDateValue>,
@@ -256,6 +257,7 @@ pub(crate) struct JsVEventInput {
     pub description: Option<String>,
     pub location: Option<String>,
     pub organizer: Option<String>,
+    pub workspace_room: Option<String>,
     pub dtstart: Option<JsCalendarDateValue>,
     pub dtend: Option<JsCalendarDateValue>,
     pub rrule: Option<JsRrule>,
@@ -404,6 +406,7 @@ impl JsVEvent {
             description: event.description,
             location: event.location,
             organizer: event.organizer,
+            workspace_room: event.workspace_room.map(|room| room.to_string()),
             dtstamp: event.dtstamp.map(|ts| ts.to_rfc3339()),
             dtstart: event.dtstart.as_ref().map(JsCalendarDateValue::from),
             dtend: event.dtend.as_ref().map(JsCalendarDateValue::from),
@@ -448,6 +451,7 @@ fn build_rsvp_publish_iq(
         description: None,
         location: None,
         organizer: None,
+        workspace_room: None,
         rrule: None,
         attendees: vec![Attendee::new(format!("xmpp:{self_jid}"), partstat)],
         recurrence_id: None,
@@ -499,6 +503,11 @@ fn vevent_from_input(uid: &str, input: JsVEventInput) -> Result<VEvent, JsValue>
     if let Some(organizer) = input.organizer {
         event = event.with_organizer(organizer);
     }
+    event.workspace_room = input
+        .workspace_room
+        .map(|room| room.parse())
+        .transpose()
+        .map_err(|_| js_error("invalid workspace room JID"))?;
     if let Some(rrule) = input.rrule {
         event = event.with_rrule(rrule.into_rrule()?);
     }

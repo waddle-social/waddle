@@ -104,6 +104,9 @@ class RoomSettingsViewModel(
                     description = state.description.trim(),
                     forum = null,
                     pinPermission = state.pinPermission,
+                    membersOnly = null,
+                    publicRoom = null,
+                    persistentRoom = null,
                 ),
             )
             if (result == RoomAdminResult.Ok) {

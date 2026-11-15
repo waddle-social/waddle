@@ -10,11 +10,13 @@ use tokio::sync::Mutex;
 use url::Url;
 
 mod boundary_convert;
+mod calendar;
 mod calls;
 mod community_admin;
 mod consistent_color;
 mod convert;
 mod error;
+mod event_planning;
 mod extension_commands;
 mod group_dm;
 mod inbox_verbs;
@@ -67,6 +69,9 @@ mod status_preference_tests;
 #[cfg(test)]
 mod sticker_verbs_tests;
 
+pub use calendar::{
+    WaddleCalendarDate, WaddleEvent, WaddleEventAttendee, WaddleEventParticipation,
+};
 pub use community_admin::{
     WaddleAdminChannelAffiliationEntry, WaddleAdminChannelListEntry,
     WaddleAdminChannelOccupantEntry, WaddleAdminChannelRef, WaddleAdminChannelsAffiliationsArgs,
@@ -80,6 +85,10 @@ pub use community_admin::{
     WaddleAdminUserEntry, WaddleAdminUsersPage, WaddleSpaceRole,
 };
 pub use error::WaddleError;
+pub use event_planning::{
+    WaddleAttendanceStatus, WaddlePlanningItem, WaddlePlanningKind, WaddlePlanningOption,
+    WaddlePlanningStatus,
+};
 pub use group_dm::WaddleGroupDmHistoryAccess;
 pub use inbox_verbs::{WaddleInboxMessageContent, WaddleInboxReadFilter};
 pub use messaging_verbs::WaddleMessageAudience;

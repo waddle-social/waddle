@@ -39,6 +39,7 @@ import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.dm.GroupDmScreen
+import social.waddle.android.feature.events.EventsScreen
 import social.waddle.android.feature.home.HomeViewModel
 import social.waddle.android.feature.members.MembersScreen
 import social.waddle.android.feature.people.PeopleScreen
@@ -101,6 +102,7 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
             fromSidebar(
                 when (page) {
                     SidebarPage.PEOPLE -> WaddleNavKey.People
+                    SidebarPage.EVENTS -> WaddleNavKey.Events
                 },
             )
         },
@@ -118,6 +120,7 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                 actions = sidebarActions,
                 current = when (backStack.lastOrNull()) {
                     WaddleNavKey.People -> SidebarPage.PEOPLE
+                    WaddleNavKey.Events -> SidebarPage.EVENTS
                     else -> null
                 },
                 tab = !sidebarPane,
@@ -293,6 +296,13 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                         onBack = { backStack.popSafely() },
                         onOpenCommunityUsers = { backStack.add(WaddleNavKey.CommunityUsers) },
                         onOpenProfile = { backStack.add(WaddleNavKey.Profile) },
+                    )
+                }
+                entry<WaddleNavKey.Events>(metadata = ListDetailSceneStrategy.detailPane()) {
+                    EventsScreen(
+                        onBack = { backStack.popSafely() },
+                        onOpenConversation = { jid, name -> backStack.add(WaddleNavKey.Channel(jid, name)) },
+                        onOpenMembers = { jid, name -> backStack.add(WaddleNavKey.Members(jid, name)) },
                     )
                 }
                 entry<WaddleNavKey.Profile> {

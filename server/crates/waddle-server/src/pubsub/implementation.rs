@@ -100,6 +100,30 @@ impl PubSubStorage for DatabasePubSubStorage {
         self.retract_item_impl(owner, node_name, item_id).await
     }
 
+    async fn retract_item_if_publisher(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item_id: &str,
+        publisher: &BareJid,
+    ) -> Result<bool, XmppError> {
+        // Other node types maintain derived projections during retraction.
+        // Decline them until their conditional deletion has the same atomic
+        // projection contract; event planning has no secondary projection.
+        if !node_name
+            .strip_prefix(waddle_xmpp_core::event_planning::NODE_EVENT_PLANNING)
+            .is_some_and(|suffix| suffix.starts_with(':'))
+        {
+            return Err(XmppError::feature_not_implemented(None));
+        }
+        self.execute(
+                "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ? AND publisher_jid = ?",
+                crate::db_params![owner.to_string(), node_name, item_id, publisher.to_string()],
+            )
+            .await
+            .map(|affected| affected > 0)
+    }
+
     async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError> {
         self.list_nodes_impl(owner).await
     }

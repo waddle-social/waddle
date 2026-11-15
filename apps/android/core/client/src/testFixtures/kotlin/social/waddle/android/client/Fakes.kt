@@ -41,7 +41,9 @@ import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
+import social.waddle.client.ffi.WaddleEvent
 import social.waddle.client.ffi.WaddleEventListener
+import social.waddle.client.ffi.WaddleEventParticipation
 import social.waddle.client.ffi.WaddleExtensionCommand
 import social.waddle.client.ffi.WaddleExtensionCommandResult
 import social.waddle.client.ffi.WaddleExtensionFormField
@@ -61,6 +63,7 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePepProfile
 import social.waddle.client.ffi.WaddlePinEntry
+import social.waddle.client.ffi.WaddlePlanningItem
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddlePushVapidLookup
@@ -855,6 +858,18 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
  * dispatcher. Cohesive verb families live in sliced-out fakes.
  */
 class FakeWaddleClient : FakeRoomAndAdminClient() {
+    override suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent> = emptyList()
+    override suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent = event
+    override suspend fun retractCommunityEvent(communityJid: String, itemId: String) = Unit
+    override suspend fun rsvpCommunityEvent(
+        communityJid: String, uid: String, selfJid: String, status: WaddleEventParticipation,
+    ) = Unit
+    override suspend fun createEventRoom(name: String, privateRoom: Boolean): String =
+        "event-test@conference.example.com"
+    override suspend fun eventPlanningItems(roomJid: String): List<WaddlePlanningItem> = emptyList()
+    override suspend fun eventPlanningPublish(roomJid: String, item: WaddlePlanningItem): WaddlePlanningItem = item
+    override suspend fun eventPlanningRetract(roomJid: String, id: String) = Unit
+
     @Volatile
     var connectCalls = 0
 

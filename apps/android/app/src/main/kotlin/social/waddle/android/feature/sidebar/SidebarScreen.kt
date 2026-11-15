@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.List
+import androidx.compose.material.icons.outlined.Event
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.People
@@ -87,7 +88,7 @@ import social.waddle.android.ui.huddle.HuddleAvatar
 import social.waddle.android.ui.huddle.LiveDot
 
 /** The pages the sidebar opens; [current] marks the one shown beside it on wide layouts. */
-enum class SidebarPage { PEOPLE }
+enum class SidebarPage { PEOPLE, EVENTS }
 
 /** What the sidebar lists. */
 internal data class SidebarState(
@@ -164,6 +165,7 @@ fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null, tab: Bo
 object SidebarTestTags {
     const val SCREEN = "sidebar-screen"
     const val PEOPLE = "sidebar-people"
+    const val EVENTS = "sidebar-events"
     const val BROWSE_ROOMS = "sidebar-browse-rooms"
     const val ALL_DMS = "sidebar-all-dms"
     const val YOU = "sidebar-you"
@@ -220,6 +222,17 @@ internal fun SidebarContent(
                         current = current == SidebarPage.PEOPLE,
                         modifier = Modifier.testTag(SidebarTestTags.PEOPLE),
                         onClick = { actions.onOpenPage(SidebarPage.PEOPLE) },
+                    )
+                }
+            }
+            if (query.isBlank()) {
+                item {
+                    NavRow(
+                        icon = Icons.Outlined.Event,
+                        label = stringResource(R.string.events_title),
+                        current = current == SidebarPage.EVENTS,
+                        modifier = Modifier.testTag(SidebarTestTags.EVENTS),
+                        onClick = { actions.onOpenPage(SidebarPage.EVENTS) },
                     )
                 }
             }

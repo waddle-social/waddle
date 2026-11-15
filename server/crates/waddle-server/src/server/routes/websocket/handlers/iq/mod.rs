@@ -85,6 +85,8 @@ mod conn_state;
 mod disco_info;
 mod disco_items;
 pub(crate) mod errors;
+mod event_planning;
+pub(crate) mod event_planning_access;
 mod extension_forms;
 mod extension_route_items;
 mod full_jid_forward;

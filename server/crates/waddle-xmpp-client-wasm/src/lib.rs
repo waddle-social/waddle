@@ -79,6 +79,7 @@ mod client_admin;
 mod client_admin_v2;
 mod client_calls;
 mod client_core;
+mod client_event_planning;
 mod client_extensions;
 mod client_history;
 mod client_messaging;

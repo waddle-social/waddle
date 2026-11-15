@@ -566,3 +566,42 @@ async fn versioned_push_memory_republication_updates_latest_order_and_retention(
         ["A", "C"]
     );
 }
+
+#[tokio::test]
+async fn event_planning_conditional_retraction_preserves_other_publishers_items() {
+    let storage = InMemoryPubSubStorage::new();
+    let room: BareJid = "trip@muc.example.com".parse().expect("room");
+    let alice: BareJid = "alice@example.com".parse().expect("alice");
+    let bob: BareJid = "bob@example.com".parse().expect("bob");
+    let node = "urn:waddle:event-planning:0:test-generation";
+    let item = PubSubItem {
+        id: Some("dinner".into()),
+        publisher: Some(alice.clone()),
+        payload: Some(minidom::Element::builder("item", "urn:waddle:event-planning:0").build()),
+    };
+    storage
+        .publish_item(&room, node, &item, Some(&alice), true)
+        .await
+        .expect("publish");
+    assert!(storage
+        .retract_item_if_publisher(&room, node, "dinner", &bob)
+        .await
+        .is_err());
+    assert_eq!(
+        storage
+            .get_items(&room, node, None, &[])
+            .await
+            .expect("items")
+            .len(),
+        1
+    );
+    assert!(storage
+        .retract_item_if_publisher(&room, node, "dinner", &alice)
+        .await
+        .expect("author retract"));
+    assert!(storage
+        .get_items(&room, node, None, &[])
+        .await
+        .expect("items")
+        .is_empty());
+}

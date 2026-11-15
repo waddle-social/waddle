@@ -45,7 +45,9 @@
 //! aggregates per-user RSVP items into the master event and expands
 //! recurring instances client-side.
 
+use crate::event_planning::NODE_EVENT_PLANNING;
 use chrono::{DateTime, NaiveDate, Utc};
+use jid::BareJid;
 use minidom::Element;
 
 /// xCal namespace (RFC 5545 in XML serialisation — xCal-Basic
@@ -390,6 +392,8 @@ pub struct VEvent {
     pub location: Option<String>,
     /// Organizer URI — typically `xmpp:user@example.com`.
     pub organizer: Option<String>,
+    /// Public event planning workspace; private event metadata stays inside its room.
+    pub workspace_room: Option<BareJid>,
     /// Optional RRULE for recurring events.
     pub rrule: Option<Rrule>,
     /// ATTENDEE list. Empty for events with no RSVPs yet; the chat
@@ -449,6 +453,7 @@ impl VEvent {
             description: None,
             location: None,
             organizer: None,
+            workspace_room: None,
             rrule: None,
             attendees: Vec::new(),
             recurrence_id: None,
@@ -735,6 +740,13 @@ fn build_vevent_element(event: &VEvent) -> Element {
     if let Some(ref org) = event.organizer {
         append_text_child(&mut vevent, "organizer", org);
     }
+    if let Some(ref room) = event.workspace_room {
+        vevent.append_child(
+            Element::builder("workspace", NODE_EVENT_PLANNING)
+                .attr(minidom::rxml::xml_ncname!("room").to_owned(), room.as_str())
+                .build(),
+        );
+    }
     if let Some(ref rrule) = event.rrule {
         vevent.append_child(build_rrule_element(rrule));
     }
@@ -910,6 +922,10 @@ fn parse_vevent_element(item_id: &str, vevent: &Element) -> Option<VEvent> {
     let description = xcal_text(vevent, "description");
     let location = xcal_text(vevent, "location");
     let organizer = xcal_text(vevent, "organizer");
+    let workspace_room = match vevent.get_child("workspace", NODE_EVENT_PLANNING) {
+        Some(workspace) => Some(workspace.attr("room")?.parse::<BareJid>().ok()?),
+        None => None,
+    };
     let rrule = xcal_child(vevent, "rrule").and_then(parse_rrule);
     let attendees = vevent
         .children()
@@ -931,6 +947,7 @@ fn parse_vevent_element(item_id: &str, vevent: &Element) -> Option<VEvent> {
         description,
         location,
         organizer,
+        workspace_room,
         rrule,
         attendees,
         recurrence_id,
@@ -1537,5 +1554,25 @@ mod tests {
         // Rejects non-xmpp URIs and malformed values.
         assert_eq!(xmpp_uri_to_bare_jid("mailto:alice@example.com"), None);
         assert_eq!(xmpp_uri_to_bare_jid("xmpp:not-a-jid"), None);
+    }
+    #[test]
+    fn planning_workspace_round_trips_in_waddle_namespace() {
+        let mut event = VEvent::new("london", "London maintainers");
+        event.workspace_room = Some("event-london@muc.example.test".parse().expect("room"));
+        let xml = build_vcalendar_with_event(&event);
+        assert_eq!(parse_vcalendar_event("london", &xml).expect("event"), event);
+        let workspace = xml
+            .get_child("vevent", NS_XCAL)
+            .and_then(|event| event.get_child("workspace", NODE_EVENT_PLANNING))
+            .expect("workspace extension");
+        assert_eq!(
+            workspace.attr("room"),
+            Some("event-london@muc.example.test")
+        );
+    }
+    #[test]
+    fn invalid_workspace_address_is_rejected() {
+        let xml: Element = "<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'><vevent><uid>london</uid><summary>London</summary><workspace xmlns='urn:waddle:event-planning:0' room='not a jid'/></vevent></vcalendar>".parse().expect("xml");
+        assert!(parse_vcalendar_event("london", &xml).is_none());
     }
 }

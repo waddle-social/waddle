@@ -1,3 +1,4 @@
+import type { PlanningItem, EventPlanningWasmClient } from "./event-planning";
 import { RoomIdBindings } from "./room-id-bindings";
 import { withSpan } from "@/lib/telemetry";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
@@ -2656,6 +2657,37 @@ export class BrowserXmppClient {
    * per XEP-0492 §3.
    */
   async fetchUserBookmarks(): Promise<UserBookmarkItem[]> { return this.pubsub.fetchUserBookmarks(); }
+
+  async fetchEventPlanning(roomJid: string): Promise<PlanningItem[]> {
+    const xmpp = await this.requireConnectedXmpp() as EventPlanningWasmClient;
+    if (!xmpp.event_planning_items) throw new Error("Event planning is unavailable in this client.");
+    return xmpp.event_planning_items(roomJid);
+  }
+
+  async publishEventPlanning(roomJid: string, item: PlanningItem): Promise<PlanningItem> {
+    const xmpp = await this.requireConnectedXmpp() as EventPlanningWasmClient;
+    if (!xmpp.event_planning_publish) throw new Error("Event planning is unavailable in this client.");
+    return xmpp.event_planning_publish(roomJid, item);
+  }
+
+  async retractEventPlanning(roomJid: string, itemId: string): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp() as EventPlanningWasmClient;
+    if (!xmpp.event_planning_retract) throw new Error("Event planning is unavailable in this client.");
+    await xmpp.event_planning_retract(roomJid, itemId);
+  }
+
+  async createEventRoom(name: string, privateRoom = true): Promise<string> {
+    const xmpp = await this.requireConnectedXmpp() as EventPlanningWasmClient;
+    if (!xmpp.event_room_create) throw new Error("Event creation is unavailable in this client.");
+    return xmpp.event_room_create(name, privateRoom);
+  }
+
+  async setEventRoomAffiliation(roomJid: string, memberJid: string, affiliation: "member" | "admin" | "none"): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.set_room_affiliation) throw new Error("Event membership changes are unavailable.");
+    await xmpp.set_room_affiliation(roomJid, memberJid, affiliation);
+  }
+
 
   async setRoomNotificationMode(opts: {
     roomJid: string;

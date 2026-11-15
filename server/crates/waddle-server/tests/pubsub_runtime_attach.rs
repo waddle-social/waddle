@@ -718,6 +718,16 @@ async fn run_sql(f: &Fixture, statement: &str) {
 
 async fn run_concurrent_pubsub_index_race(f: &Fixture, runtime: Database) {
     let target = format!("{}.pubsub_nodes", f.target);
+    // This witness deliberately creates then deletes 300,000 rows. Keep
+    // autovacuum from taking SHARE UPDATE EXCLUSIVE during later attachment
+    // assertions: that background lock legitimately yields ConcurrentSchemaChange
+    // and would hide the malformed index/sequence each assertion is inspecting.
+    // Only this disposable fixture table is affected; production gates stay strict.
+    run_sql(
+        f,
+        &format!("ALTER TABLE {target} SET (autovacuum_enabled = false)"),
+    )
+    .await;
     sqlx::query(&format!(
         "INSERT INTO {}.pubsub_nodes \
            (owner_jid, node_name, access_model, publish_model, max_items, persist_items, \
@@ -1719,12 +1729,17 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
         ),
     )
     .await;
-    assert!(matches!(
-        DatabasePubSubStorage::attach_existing(runtime.clone()).await,
-        Err(PubSubRuntimeAttachError::InvalidIndex {
-            table: "pubsub_items"
-        })
-    ));
+    let malformed_index = DatabasePubSubStorage::attach_existing(runtime.clone()).await;
+    assert!(
+        matches!(
+            &malformed_index,
+            Err(PubSubRuntimeAttachError::InvalidIndex {
+                table: "pubsub_items"
+            })
+        ),
+        "malformed index must be rejected as InvalidIndex; observed error: {:?}",
+        malformed_index.as_ref().err()
+    );
     run_sql(
         &f,
         &format!("DROP INDEX {}.idx_pubsub_items_owner_item", f.target),
@@ -1951,10 +1966,15 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
         ),
     )
     .await;
-    assert!(matches!(
-        DatabasePubSubStorage::attach_existing(runtime.clone()).await,
-        Err(PubSubRuntimeAttachError::InvalidSequence)
-    ));
+    let invalid_sequence = DatabasePubSubStorage::attach_existing(runtime.clone()).await;
+    assert!(
+        matches!(
+            &invalid_sequence,
+            Err(PubSubRuntimeAttachError::InvalidSequence)
+        ),
+        "invalid sequence must be rejected as InvalidSequence; observed error: {:?}",
+        invalid_sequence.as_ref().err()
+    );
     run_sql(&f, &format!("SELECT pg_catalog.setval('{}.pubsub_items_seq_seq', (SELECT max(seq) FROM {}.pubsub_items), true)", f.target, f.target)).await;
     run_sql(
         &f,
@@ -1979,10 +1999,15 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
         ),
     )
     .await;
-    assert!(matches!(
-        DatabasePubSubStorage::attach_existing(runtime.clone()).await,
-        Err(PubSubRuntimeAttachError::InvalidSequence)
-    ));
+    let invalid_sequence = DatabasePubSubStorage::attach_existing(runtime.clone()).await;
+    assert!(
+        matches!(
+            &invalid_sequence,
+            Err(PubSubRuntimeAttachError::InvalidSequence)
+        ),
+        "invalid sequence must be rejected as InvalidSequence; observed error: {:?}",
+        invalid_sequence.as_ref().err()
+    );
     run_sql(
         &f,
         &format!(
