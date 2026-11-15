@@ -435,13 +435,13 @@
     <string name="presence_in_huddle">in a huddle</string>
     <string name="presence_speaking">speaking</string>
     <!-- Huddle: shell, home, rooms, people -->
+    <string name="tab_home">Home</string>
     <string name="tab_rooms">Rooms</string>
     <string name="tab_people">People</string>
+    <string name="sidebar_open">Open navigation</string>
     <string name="sidebar_search_hint">Search or jump to…</string>
     <string name="sidebar_browse_rooms">Browse rooms</string>
     <string name="sidebar_all_dms">All direct messages</string>
-    <string name="shell_wordmark">waddle</string>
-    <string name="shell_account_action">You: profile and settings</string>
     <string name="shell_clear_search">Clear search</string>
     <string name="home_strip_more">+%1$d</string>
     <plurals name="home_strip_more_description">

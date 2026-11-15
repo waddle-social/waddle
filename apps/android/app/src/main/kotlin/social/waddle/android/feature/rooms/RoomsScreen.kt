@@ -19,7 +19,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.SnackbarHost
@@ -65,6 +68,7 @@ fun RoomsScreen(
     speaking: Set<String> = emptySet(),
     clock: Clock = Clock.systemDefaultZone(),
     onBack: (() -> Unit)? = null,
+    onOpenMenu: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: RoomsViewModel = viewModel(factory = RoomsViewModel.factory(graph))
@@ -90,7 +94,15 @@ fun RoomsScreen(
         topBar = {
             WaddleTopBar(
                 title = { Text(stringResource(R.string.rooms_browse_title)) },
-                navigationIcon = { BackArrow(onBack) },
+                navigationIcon = {
+                    if (onOpenMenu != null) {
+                        IconButton(onClick = onOpenMenu, modifier = Modifier.testTag(RoomsScreenTestTags.MENU)) {
+                            Icon(Icons.Outlined.Menu, contentDescription = stringResource(R.string.sidebar_open))
+                        }
+                    } else {
+                        BackArrow(onBack)
+                    }
+                },
                 actions = {
                     if (canCreate) {
                         NewRoomPill(onCreate = { create.open = true })
@@ -121,6 +133,7 @@ fun RoomsScreen(
 /** Semantics tags shared with instrumented tests. */
 object RoomsScreenTestTags {
     const val SCREEN = "rooms-screen"
+    const val MENU = "rooms-menu"
     const val NEW_ROOM = "rooms-new-room"
 }
 

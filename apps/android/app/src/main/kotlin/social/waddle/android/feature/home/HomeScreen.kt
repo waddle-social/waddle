@@ -2,40 +2,32 @@ package social.waddle.android.feature.home
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
-import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.feature.people.PersonRow
@@ -44,10 +36,9 @@ import social.waddle.android.feature.people.personRowsOf
 import social.waddle.android.feature.people.whoIsHereOf
 import social.waddle.android.feature.rooms.RoomActivity
 import social.waddle.android.feature.rooms.rememberHuddleJoiner
-import social.waddle.android.jid.bareJidOf
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.BackArrow
-import social.waddle.android.ui.huddle.AvatarSize
+import social.waddle.android.ui.WaddleTopBar
 import java.time.Clock
 import java.time.ZonedDateTime
 
@@ -56,27 +47,24 @@ class HomeActions(
     val onOpenRoom: (RoomActivity) -> Unit = {},
     val onJoin: (RoomActivity) -> Unit = {},
     val onOpenPerson: (PersonRow) -> Unit = {},
-    val onOpenYou: () -> Unit = {},
     val onOpenPeople: () -> Unit = {},
     val onBrowseRooms: () -> Unit = {},
-    val onCreateRoom: () -> Unit = {},
     val onRetry: () -> Unit = {},
-    /** Back to the sidebar; `null` hides the arrow. */
+    /** Back to the sidebar (wide layouts); `null` hides the arrow. */
     val onBack: (() -> Unit)? = null,
+    /** Opens the sidebar drawer (phones, folded); wins over [onBack]. */
+    val onOpenMenu: (() -> Unit)? = null,
 )
 
 /** Everything Home shows, resolved. */
 data class HomeContentState(
     /** What the greeting calls the account holder; `null` greets without a name. */
     val greetingName: String?,
-    val accountName: String,
-    val accountJid: String?,
     val rooms: List<RoomActivity>,
     val people: List<PersonRow>,
     val dmUnread: Int,
     val connection: ConnectionState,
     val settled: Boolean,
-    val canCreateRoom: Boolean,
 )
 
 /**
@@ -89,22 +77,19 @@ fun HomeScreen(
     onOpenChannel: (roomJid: String, name: String) -> Unit,
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
     onOpenDm: (peerJid: String, name: String) -> Unit = { _, _ -> },
-    onOpenYou: () -> Unit = {},
     onOpenPeople: () -> Unit = {},
     onOpenRooms: () -> Unit = {},
     speaking: Set<String> = emptySet(),
     clock: Clock = Clock.systemDefaultZone(),
     onBack: (() -> Unit)? = null,
+    onOpenMenu: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: HomeViewModel = viewModel(factory = HomeViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val canCreate by viewModel.canCreateChannel.collectAsStateWithLifecycle()
     val session by graph.currentSession.collectAsStateWithLifecycle()
     val vcard by graph.sessionManager.profileStore.selfVcard.collectAsStateWithLifecycle()
     val now by rememberNow(clock)
-    val snackbar = remember { SnackbarHostState() }
-    val create = viewModel.createRoom
 
     fun open(room: RoomActivity) {
         viewModel.openChannel(room.roomJid)
@@ -112,37 +97,28 @@ fun HomeScreen(
     }
     // The joiner already joined the room: opening it is navigation only.
     val join = rememberHuddleJoiner(onJoined = { room -> onOpenChannel(room.roomJid, room.name) })
-    val accountJid = session?.jid?.let(::bareJidOf)
-    val accountName = vcard?.fullName?.takeIf { it.isNotBlank() }
-        ?: vcard?.nickname?.takeIf { it.isNotBlank() }
-        ?: session?.username
-        ?: accountJid.orEmpty()
     val roomNames = state.rooms.associate { normalizedBareJid(it.roomJid) to it.name }
 
-    Scaffold(contentWindowInsets = contentWindowInsets, snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+    Scaffold(contentWindowInsets = contentWindowInsets) { padding ->
         HomeContent(
             state = HomeContentState(
                 greetingName = greetingNameOf(vcard?.nickname, vcard?.fullName, session?.username),
-                accountName = accountName,
-                accountJid = accountJid,
                 rooms = state.rooms,
                 people = personRowsOf(state.people, roomNames, speaking),
                 dmUnread = state.dmUnreadCount,
                 connection = state.connectionState,
                 settled = state.settled,
-                canCreateRoom = canCreate,
             ),
             now = now,
             actions = HomeActions(
                 onOpenRoom = ::open,
                 onJoin = join,
                 onOpenPerson = { onOpenDm(it.jid, it.name) },
-                onOpenYou = onOpenYou,
                 onOpenPeople = onOpenPeople,
                 onBrowseRooms = onOpenRooms,
-                onCreateRoom = { create.open = true },
                 onRetry = viewModel::retryConnection,
                 onBack = onBack,
+                onOpenMenu = onOpenMenu,
             ),
             speaking = speaking,
             modifier = Modifier
@@ -150,7 +126,6 @@ fun HomeScreen(
                 .consumeWindowInsets(padding),
         )
     }
-    CreateRoomHost(viewModel = viewModel, state = create, snackbar = snackbar, onOpenChannel = onOpenChannel)
 }
 
 /**
@@ -167,8 +142,7 @@ private val WHITESPACE = Regex("\\s+")
 /** Semantics tags shared with instrumented tests. */
 object HomeScreenTestTags {
     const val SCREEN = "home-screen"
-    const val CREATE_CHANNEL_ACTION = "home-create-channel-action"
-    const val ACCOUNT_ACTION = "home-account-action"
+    const val MENU = "home-menu"
 }
 
 /** The Home tab, stateless: header, connection, then the scrolling body. */
@@ -181,42 +155,28 @@ fun HomeContent(
     speaking: Set<String> = emptySet(),
 ) {
     Column(modifier = modifier.fillMaxSize().testTag(HomeScreenTestTags.SCREEN)) {
-        HomeHeader(state = state, actions = actions)
+        HomeHeader(actions = actions)
         ConnectionBanner(state = state.connection, onRetry = actions.onRetry)
         HomeBody(state = state, now = now, actions = actions, speaking = speaking)
     }
 }
 
-/** `waddle.` on the left; "+" for owners and your avatar (to You) on the right. */
+/** Chat's mobile bar: ☰ for the sidebar on phones, else back to it, and the page's name. */
 @Composable
-private fun HomeHeader(state: HomeContentState, actions: HomeActions) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = HEADER_HEIGHT)
-            .padding(start = if (actions.onBack != null) Waddle.space.xxs else Waddle.space.md, end = Waddle.space.xxs),
-    ) {
-        BackArrow(actions.onBack)
-        Wordmark(modifier = Modifier.weight(1f))
-        if (state.canCreateRoom) {
-            IconButton(
-                onClick = actions.onCreateRoom,
-                modifier = Modifier.testTag(HomeScreenTestTags.CREATE_CHANNEL_ACTION),
-            ) {
-                Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.create_channel_title))
+private fun HomeHeader(actions: HomeActions) {
+    WaddleTopBar(
+        title = { Text(stringResource(R.string.tab_home)) },
+        navigationIcon = {
+            val openMenu = actions.onOpenMenu
+            if (openMenu != null) {
+                IconButton(onClick = openMenu, modifier = Modifier.testTag(HomeScreenTestTags.MENU)) {
+                    Icon(Icons.Outlined.Menu, contentDescription = stringResource(R.string.sidebar_open))
+                }
+            } else {
+                BackArrow(actions.onBack)
             }
-        }
-        val you = stringResource(R.string.shell_account_action)
-        IconButton(
-            onClick = actions.onOpenYou,
-            modifier = Modifier
-                .testTag(HomeScreenTestTags.ACCOUNT_ACTION)
-                .semantics { contentDescription = you },
-        ) {
-            PeerAvatar(jid = state.accountJid, displayName = state.accountName, size = AvatarSize.MD.dp)
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -348,4 +308,3 @@ private fun LazyListScope.needsYou(rooms: List<RoomActivity>, actions: HomeActio
 }
 
 private const val SKELETON_CARDS = 2
-private val HEADER_HEIGHT = Waddle.control.touch + Waddle.space.md
