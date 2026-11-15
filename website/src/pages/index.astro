@@ -345,7 +345,7 @@ const sponsorText = css({
 						</button>
 					</div>
 					<input type="hidden" name="cf-turnstile-response" value="" />
-					<div data-waitlist-turnstile class={css({ position: "absolute" })}></div>
+					<div data-waitlist-turnstile class={css({ _empty: { display: "none" } })}></div>
 					<p
 						id="waitlist-status"
 						role="status"
@@ -731,7 +731,9 @@ const sponsorText = css({
 				widgetId = window.turnstile.render(turnstileContainer, {
 					sitekey: turnstileSiteKey,
 					action: turnstileAction,
-					// Invisible mode is set on the widget in the Cloudflare dashboard; we run the check ourselves.
+					// Stay out of sight unless Cloudflare needs the visitor to interact; we run the check ourselves.
+					appearance: "interaction-only",
+					size: "flexible",
 					execution: "execute",
 					callback: (token) => {
 						turnstileResponseInput.value = token;
