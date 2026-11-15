@@ -11,9 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
@@ -51,6 +54,7 @@ fun YouScreen(
     onOpenProfile: () -> Unit,
     onOpenSettings: () -> Unit,
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
+    onBack: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val session by graph.currentSession.collectAsStateWithLifecycle()
@@ -67,6 +71,7 @@ fun YouScreen(
         onOpenProfile = onOpenProfile,
         onOpenSettings = onOpenSettings,
         contentWindowInsets = contentWindowInsets,
+        onBack = onBack,
     )
 }
 
@@ -77,11 +82,26 @@ internal fun YouContent(
     onOpenProfile: () -> Unit,
     onOpenSettings: () -> Unit,
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
+    onBack: (() -> Unit)? = null,
 ) {
     Scaffold(
         contentWindowInsets = contentWindowInsets,
         containerColor = Waddle.colors.bg,
-        topBar = { WaddleTopBar(title = { Text(text = stringResource(R.string.you_title)) }) },
+        topBar = {
+            WaddleTopBar(
+                title = { Text(text = stringResource(R.string.you_title)) },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.AutoMirrored.Outlined.ArrowBack,
+                                contentDescription = stringResource(R.string.action_back),
+                            )
+                        }
+                    }
+                },
+            )
+        },
     ) { padding ->
         Column(
             verticalArrangement = Arrangement.spacedBy(Waddle.space.xs),
@@ -191,13 +211,13 @@ private fun IdentityCard(identity: YouIdentity, onClick: () -> Unit) {
  * a ready stream shows the green dot; a lost one shows hollow; while
  * connecting nothing is claimed.
  */
-private fun presenceOf(connection: ConnectionState): PresenceShow? = when (connection) {
+internal fun presenceOf(connection: ConnectionState): PresenceShow? = when (connection) {
     ConnectionState.Ready -> PresenceShow.AVAILABLE
     ConnectionState.Offline, ConnectionState.AuthFailed, ConnectionState.Paused -> PresenceShow.OFFLINE
     else -> null
 }
 
-private fun connectionLabelOf(connection: ConnectionState): Int = when (connection) {
+internal fun connectionLabelOf(connection: ConnectionState): Int = when (connection) {
     ConnectionState.Ready -> R.string.huddle_you_connected
     ConnectionState.Connecting, is ConnectionState.Reconnecting -> R.string.huddle_you_connecting
     ConnectionState.Paused -> R.string.huddle_you_paused

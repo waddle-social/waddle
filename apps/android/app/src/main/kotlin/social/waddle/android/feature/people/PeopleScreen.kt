@@ -1,6 +1,7 @@
 package social.waddle.android.feature.people
 
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,19 +12,15 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridScope
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ExpandMore
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
@@ -35,7 +32,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -54,15 +50,16 @@ import social.waddle.android.feature.home.SectionLabel
 import social.waddle.android.feature.home.ShellSearchField
 import social.waddle.android.feature.home.rememberStableOrder
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.ChoiceOption
+import social.waddle.android.ui.SegmentedChoice
 import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.HuddleAvatar
-import social.waddle.android.ui.huddle.HuddleMotion
 import social.waddle.android.ui.huddle.SkeletonBlock
 import social.waddle.android.ui.huddle.SpeakingBars
 
 /**
- * The People tab (web people rail): who is in a huddle, who is around,
- * and — folded away — who is away or offline. Tapping someone opens the
+ * The People page (web people grid): here now — in a huddle, then
+ * around — or everyone, away and offline included. Tapping someone opens the
  * conversation with them. Order holds still while you look.
  */
 @Composable
@@ -75,15 +72,15 @@ fun PeopleScreen(
     val viewModel: PeopleViewModel = viewModel(factory = PeopleViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
-    var awayOpen by rememberSaveable { mutableStateOf(false) }
+    var everyone by rememberSaveable { mutableStateOf(false) }
     Scaffold(contentWindowInsets = contentWindowInsets) { padding ->
         PeopleContent(
             people = personRowsOf(state.people, state.roomNames, speaking),
             settled = state.settled,
             query = query,
             onQueryChange = { query = it },
-            awayOpen = awayOpen,
-            onToggleAway = { awayOpen = !awayOpen },
+            everyone = everyone,
+            onEveryoneChange = { everyone = it },
             onOpen = { person -> onOpenDm(person.jid, person.name) },
             modifier = Modifier
                 .padding(padding)
@@ -95,26 +92,26 @@ fun PeopleScreen(
 /** Semantics tags shared with instrumented tests. */
 object PeopleScreenTestTags {
     const val SCREEN = "people-screen"
-    const val AWAY_TOGGLE = "people-away-toggle"
+    const val EVERYONE_TOGGLE = "people-everyone-toggle"
 }
 
-/** The People tab body, stateless. */
+/** The People page, stateless: Here now or Everyone, as a grid of cards. */
 @Composable
 fun PeopleContent(
     people: List<PersonRow>,
     settled: Boolean,
     query: String,
     onQueryChange: (String) -> Unit,
-    awayOpen: Boolean,
-    onToggleAway: () -> Unit,
+    everyone: Boolean,
+    onEveryoneChange: (Boolean) -> Unit,
     onOpen: (PersonRow) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
     val ordered = rememberStableOrder(
         sorted = people.sortedWith(PersonOrder),
         keyOf = PersonRow::jid,
-        interacting = listState.isScrollInProgress,
+        interacting = gridState.isScrollInProgress,
     )
     // Groups are live (someone who joins a huddle moves up a section);
     // inside a group, people keep the place they had.
@@ -123,182 +120,146 @@ fun PeopleContent(
         members.sortedBy { rank[it.jid] ?: Int.MAX_VALUE }
     }
     val needle = query.trim()
-    LazyColumn(
-        state = listState,
+    // While searching, everyone matches.
+    val showAway = everyone || needle.isNotEmpty()
+    val shown = groups.filterKeys { it != PeopleGroup.AWAY || showAway }
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = CARD_MIN_WIDTH),
+        state = gridState,
         contentPadding = PaddingValues(
             start = Waddle.space.md,
             end = Waddle.space.md,
-            top = Waddle.space.lg,
+            top = Waddle.space.xs,
             bottom = Waddle.space.xl,
         ),
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = modifier
             .fillMaxSize()
             .imePadding()
             .testTag(PeopleScreenTestTags.SCREEN),
     ) {
-        item(key = "header", contentType = "header") {
+        fullWidth("header") {
             PageHeader(
                 title = stringResource(R.string.people_title),
                 kicker = pluralStringResource(R.plurals.people_count, people.size, people.size),
                 lead = stringResource(R.string.people_lead),
             )
         }
-        item(key = "search", contentType = "search") {
-            ShellSearchField(
-                value = query,
-                onValueChange = onQueryChange,
-                placeholder = stringResource(R.string.people_search),
-                modifier = Modifier.padding(top = Waddle.space.md),
-            )
+        fullWidth("filter") {
+            Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.sm)) {
+                SegmentedChoice(
+                    options = listOf(
+                        ChoiceOption(false, stringResource(R.string.people_here_now)),
+                        ChoiceOption(true, stringResource(R.string.people_everyone)),
+                    ),
+                    selected = everyone,
+                    onSelect = onEveryoneChange,
+                    modifier = Modifier.testTag(PeopleScreenTestTags.EVERYONE_TOGGLE),
+                )
+                ShellSearchField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    placeholder = stringResource(R.string.people_search),
+                )
+            }
         }
         when {
-            people.isEmpty() && !settled -> loadingRows()
-            people.isEmpty() -> item(key = "empty") {
+            people.isEmpty() && !settled -> loadingCards()
+            people.isEmpty() -> fullWidth("empty") { DashedNote(text = stringResource(R.string.people_empty)) }
+            shown.values.all { it.isEmpty() } -> fullWidth("no-match") {
                 DashedNote(
-                    text = stringResource(R.string.people_empty),
-                    modifier = Modifier.padding(top = Waddle.space.lg),
+                    text = if (needle.isEmpty()) {
+                        stringResource(R.string.people_empty_around)
+                    } else {
+                        stringResource(R.string.people_no_match, needle)
+                    },
                 )
             }
-            groups.values.all { it.isEmpty() } -> item(key = "no-match") {
-                DashedNote(
-                    text = stringResource(R.string.people_no_match, needle),
-                    modifier = Modifier.padding(top = Waddle.space.lg),
-                )
-            }
-            else -> {
-                // While searching, empty sections only add noise.
-                val searching = needle.isNotEmpty()
-                group(PeopleGroup.HUDDLE, groups.getValue(PeopleGroup.HUDDLE), searching, onOpen)
-                group(PeopleGroup.AROUND, groups.getValue(PeopleGroup.AROUND), searching, onOpen)
-                awayGroup(groups.getValue(PeopleGroup.AWAY), open = awayOpen || searching, onToggleAway, onOpen)
-            }
+            else -> shown.forEach { (group, members) -> group(group, members, onOpen) }
         }
     }
 }
 
-private fun LazyListScope.group(
-    group: PeopleGroup,
-    members: List<PersonRow>,
-    searching: Boolean,
-    onOpen: (PersonRow) -> Unit,
-) {
-    if (members.isEmpty() && searching) return
-    item(key = "group-$group", contentType = "group") {
+private fun LazyGridScope.fullWidth(key: String, content: @Composable () -> Unit) {
+    item(key = key, span = { GridItemSpan(maxLineSpan) }, contentType = key) { content() }
+}
+
+private fun LazyGridScope.group(group: PeopleGroup, members: List<PersonRow>, onOpen: (PersonRow) -> Unit) {
+    if (members.isEmpty()) return
+    fullWidth("group-$group") {
         val title = stringResource(
-            if (group == PeopleGroup.HUDDLE) R.string.people_group_huddle else R.string.people_group_around,
+            when (group) {
+                PeopleGroup.HUDDLE -> R.string.people_group_huddle
+                PeopleGroup.AROUND -> R.string.people_group_around
+                PeopleGroup.AWAY -> R.string.people_group_away
+            },
         )
         SectionLabel(
-            text = if (members.isEmpty()) title else stringResource(R.string.people_group_kicker, title, members.size),
-            live = group == PeopleGroup.HUDDLE && members.isNotEmpty(),
-            modifier = Modifier.padding(top = Waddle.space.xl, bottom = Waddle.space.xs),
+            text = stringResource(R.string.people_group_kicker, title, members.size),
+            live = group == PeopleGroup.HUDDLE,
+            modifier = Modifier.padding(top = Waddle.space.md),
         )
     }
-    if (members.isEmpty()) {
-        item(key = "group-$group-empty", contentType = "group-empty") {
-            Text(
-                text = stringResource(
-                    if (group == PeopleGroup.HUDDLE) R.string.people_empty_huddle else R.string.people_empty_around,
-                ),
-                style = MaterialTheme.typography.bodyMedium,
-                color = Waddle.colors.fgMuted,
-                modifier = Modifier.padding(vertical = Waddle.space.xs),
-            )
-        }
-    }
     items(items = members, key = { "person-${it.jid}" }, contentType = { "person" }) { person ->
-        PersonListRow(person = person, onClick = { onOpen(person) }, modifier = Modifier.animateItem())
-    }
-}
-
-/** "Away and offline · N": a header that folds the quiet half of the list away. */
-private fun LazyListScope.awayGroup(
-    members: List<PersonRow>,
-    open: Boolean,
-    onToggle: () -> Unit,
-    onOpen: (PersonRow) -> Unit,
-) {
-    if (members.isEmpty()) return
-    item(key = "group-away", contentType = "group") {
-        val title = stringResource(R.string.people_group_away)
-        val action = stringResource(if (open) R.string.people_group_hide else R.string.people_group_show)
-        val turn by animateFloatAsState(if (open) HALF_TURN else 0f, HuddleMotion.fast(), label = "away-chevron")
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .padding(top = Waddle.space.xl)
-                .fillMaxWidth()
-                .heightIn(min = Waddle.control.touch)
-                .clip(RoundedCornerShape(Waddle.radius.control))
-                .clickable(onClickLabel = action, role = Role.Button, onClick = onToggle)
-                .testTag(PeopleScreenTestTags.AWAY_TOGGLE),
-        ) {
-            SectionLabel(
-                text = stringResource(R.string.people_group_kicker, title, members.size),
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                Icons.Outlined.ExpandMore,
-                contentDescription = null,
-                tint = Waddle.colors.fgMuted,
-                modifier = Modifier.rotate(turn),
-            )
-        }
-    }
-    if (open) {
-        items(items = members, key = { "person-${it.jid}" }, contentType = { "person" }) { person ->
-            PersonListRow(person = person, onClick = { onOpen(person) }, modifier = Modifier.animateItem())
-        }
+        PersonCard(person = person, onClick = { onOpen(person) }, modifier = Modifier.animateItem())
     }
 }
 
 /**
- * One person (web people-rail row): avatar with presence and huddle
- * ring, name, a status line (ember when they are live), speaking bars at
- * the end. The whole row is one target that opens the DM.
+ * One person (web people grid card): face with presence and huddle
+ * ring, name, a status line (live colour when they are in a huddle),
+ * speaking bars beside the face. The whole card opens the DM.
  */
 @Composable
-fun PersonListRow(person: PersonRow, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun PersonCard(person: PersonRow, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val colors = Waddle.colors
     val live = person.speaking || person.inHuddle
     val message = stringResource(R.string.people_message, person.name)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+    val shape = RoundedCornerShape(Waddle.radius.panel)
+    Column(
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = ROW_HEIGHT)
-            .clip(RoundedCornerShape(Waddle.radius.control))
+            .clip(shape)
+            .background(colors.surface)
+            .border(1.dp, colors.borderSoft, shape)
             .clickable(onClickLabel = message, role = Role.Button, onClick = onClick)
-            .padding(horizontal = Waddle.space.xs, vertical = Waddle.space.xs),
+            .padding(Waddle.space.sm),
     ) {
-        // The status line says it in words; the dot's own label would repeat it.
-        Box(Modifier.clearAndSetSemantics { }) {
-            HuddleAvatar(
-                jid = person.jid,
-                name = person.name,
-                size = AvatarSize.MD,
-                presence = person.show,
-                inHuddle = person.inHuddle,
-                speaking = person.speaking,
-            )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+        ) {
+            // The status line says it in words; the dot's own label would repeat it.
+            Box(Modifier.clearAndSetSemantics { }) {
+                HuddleAvatar(
+                    jid = person.jid,
+                    name = person.name,
+                    size = AvatarSize.LG,
+                    presence = person.show,
+                    inHuddle = person.inHuddle,
+                    speaking = person.speaking,
+                    ground = colors.surface,
+                )
+            }
+            if (person.speaking) SpeakingBars()
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = person.name,
-                style = MaterialTheme.typography.bodyLarge,
-                color = colors.fg,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = statusOf(person),
-                style = MaterialTheme.typography.bodySmall,
-                color = if (live) colors.liveText else colors.fgMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (person.speaking) SpeakingBars()
+        Text(
+            text = person.name,
+            style = Waddle.type.author,
+            color = colors.fg,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = Waddle.space.xxs),
+        )
+        Text(
+            text = statusOf(person),
+            style = Waddle.type.time,
+            color = if (live) colors.liveText else colors.fgMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -317,40 +278,12 @@ fun statusOf(person: PersonRow): String = when {
     }
 }
 
-private fun LazyListScope.loadingRows() {
-    item(key = "loading-label") {
-        SkeletonBlock(
-            Modifier
-                .padding(top = Waddle.space.xl, bottom = Waddle.space.xs)
-                .fillMaxWidth(SKELETON_LABEL),
-        )
-    }
-    items(count = SKELETON_ROWS, key = { "skeleton-$it" }) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
-            modifier = Modifier
-                .heightIn(min = ROW_HEIGHT)
-                .padding(horizontal = Waddle.space.xs),
-        ) {
-            SkeletonBlock(
-                // SkeletonBlock insets itself vertically; give the inset back so the face stays round.
-                Modifier.size(width = AvatarSize.MD.dp, height = AvatarSize.MD.dp + SKELETON_INSET * 2),
-                height = AvatarSize.MD.dp,
-                radius = Waddle.radius.pill,
-            )
-            Column(Modifier.weight(1f)) {
-                SkeletonBlock(Modifier.fillMaxWidth(SKELETON_NAME))
-                SkeletonBlock(Modifier.fillMaxWidth(SKELETON_STATUS))
-            }
-        }
+private fun LazyGridScope.loadingCards() {
+    items(count = SKELETON_CARDS, key = { "skeleton-$it" }) {
+        SkeletonBlock(Modifier.fillMaxWidth(), height = SKELETON_CARD, radius = Waddle.radius.panel)
     }
 }
 
-private val ROW_HEIGHT = 56.dp
-private val SKELETON_INSET = 3.dp
-private const val HALF_TURN = 180f
-private const val SKELETON_ROWS = 6
-private const val SKELETON_LABEL = 0.3f
-private const val SKELETON_NAME = 0.45f
-private const val SKELETON_STATUS = 0.3f
+private val CARD_MIN_WIDTH = 150.dp
+private val SKELETON_CARD = 112.dp
+private const val SKELETON_CARDS = 6

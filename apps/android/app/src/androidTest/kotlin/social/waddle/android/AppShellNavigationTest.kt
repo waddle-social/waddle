@@ -10,7 +10,6 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -28,13 +27,13 @@ import org.junit.runner.RunWith
 import social.waddle.android.feature.home.HomeScreenTestTags
 import social.waddle.android.feature.people.PeopleScreenTestTags
 import social.waddle.android.feature.rooms.RoomsScreenTestTags
-import social.waddle.android.navigation.MainTab
+import social.waddle.android.feature.sidebar.SidebarTestTags
 
 /**
  * App-state switch and the Navigation 3 shell over a fully-faked graph:
- * SignedOut lands on login, Ready composes Home, the five tabs
- * (Home · Rooms · People · DMs · You) each open their screen, back from
- * a tab returns to Home, and the selected tab survives recreation.
+ * SignedOut lands on login, Ready composes the sidebar, each page it
+ * opens pushes over it and back returns, and an open page survives
+ * recreation.
  */
 @RunWith(AndroidJUnit4::class)
 class AppShellNavigationTest {
@@ -86,10 +85,14 @@ class AppShellNavigationTest {
         }
     }
 
-    private fun waitForHome() = waitForTag(HomeScreenTestTags.SCREEN)
+    private fun waitForHome() = waitForTag(SidebarTestTags.SCREEN)
 
-    private fun openTab(tab: MainTab) {
-        composeRule.onNodeWithTag(tab.testTag).performClick()
+    private fun tap(tag: String) {
+        composeRule.onNodeWithTag(tag).performClick()
+    }
+
+    private fun back() {
+        composeRule.runOnUiThread { composeRule.activity.onBackPressedDispatcher.onBackPressed() }
     }
 
     @Test
@@ -100,31 +103,48 @@ class AppShellNavigationTest {
     }
 
     @Test
-    fun readyGraphComposesHomeShell() {
+    fun readyGraphComposesSidebar() {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        // The wordmark reads as the app's name.
-        composeRule.onNodeWithContentDescription("Waddle").assertExists()
-        MainTab.entries.forEach { composeRule.onNodeWithTag(it.testTag).assertExists() }
+        listOf(
+            SidebarTestTags.DASHBOARD,
+            SidebarTestTags.PEOPLE,
+            SidebarTestTags.BROWSE_ROOMS,
+            SidebarTestTags.ALL_DMS,
+            SidebarTestTags.YOU,
+            SidebarTestTags.SETTINGS,
+        ).forEach { composeRule.onNodeWithTag(it).assertExists() }
     }
 
     @Test
-    fun everyTabOpensItsScreen() {
+    fun everySidebarPageOpensAndBackReturns() {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        openTab(MainTab.ROOMS)
+        tap(SidebarTestTags.DASHBOARD)
+        waitForTag(HomeScreenTestTags.SCREEN)
+        back()
+        waitForHome()
+        tap(SidebarTestTags.BROWSE_ROOMS)
         waitForTag(RoomsScreenTestTags.SCREEN)
-        openTab(MainTab.PEOPLE)
+        back()
+        waitForHome()
+        tap(SidebarTestTags.PEOPLE)
         waitForTag(PeopleScreenTestTags.SCREEN)
-        openTab(MainTab.DMS)
+        back()
+        waitForHome()
+        tap(SidebarTestTags.ALL_DMS)
         // From the resource, so a copy change cannot strand the test.
         waitForText(composeRule.activity.getString(R.string.dm_list_empty_title))
-        openTab(MainTab.YOU)
-        waitForText("Settings")
-        openTab(MainTab.HOME)
+        back()
         waitForHome()
+        tap(SidebarTestTags.YOU)
+        waitForText(composeRule.activity.getString(R.string.you_profile))
+        // The on-screen arrow pops too.
+        composeRule.onNodeWithContentDescription("Back").performClick()
+        waitForHome()
+        assertFalse("back from a page must not leave the app", composeRule.activity.isFinishing)
     }
 
     @Test
@@ -132,60 +152,57 @@ class AppShellNavigationTest {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        openTab(MainTab.ROOMS)
+        tap(SidebarTestTags.BROWSE_ROOMS)
         // The fake topology is empty: once it settles, an invitation.
         waitForText("No rooms yet. Create the first one and invite people in.")
     }
 
     @Test
-    fun backFromATabReturnsHome() {
+    fun dashboardLinksPushOverTheDashboard() {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        openTab(MainTab.PEOPLE)
-        waitForTag(PeopleScreenTestTags.SCREEN)
-        composeRule.runOnUiThread { composeRule.activity.onBackPressedDispatcher.onBackPressed() }
-        waitForHome()
-        assertFalse("back from a tab must not leave the app", composeRule.activity.isFinishing)
+        tap(SidebarTestTags.DASHBOARD)
+        waitForTag(HomeScreenTestTags.SCREEN)
+        // The account avatar in the dashboard header leads to You.
+        tap(HomeScreenTestTags.ACCOUNT_ACTION)
+        waitForText(composeRule.activity.getString(R.string.you_profile))
+        back()
+        // Back lands on the dashboard, not the sidebar.
+        waitForTag(HomeScreenTestTags.SCREEN)
     }
 
     @Test
-    fun navigatesHomeToSettingsAndBack() {
+    fun navigatesSidebarToSettingsAndBack() {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        // The account avatar in the Home header leads to You.
-        composeRule.onNodeWithTag(HomeScreenTestTags.ACCOUNT_ACTION).performClick()
-        waitForText("Settings")
-        composeRule.onNodeWithText("Settings").performClick()
+        tap(SidebarTestTags.SETTINGS)
         waitForText("Appearance")
         composeRule.onNodeWithContentDescription("Back").performClick()
-        // Back lands on the tab Settings was opened from.
-        waitForText("Settings")
-        openTab(MainTab.HOME)
         waitForHome()
     }
 
     @Test
-    fun selectedTabSurvivesRecreation() {
+    fun openPageSurvivesRecreation() {
         harness.signInAndConnect()
         val restoration = StateRestorationTester(composeRule)
         restoration.setContent { shell() }
         waitForHome()
-        openTab(MainTab.ROOMS)
+        tap(SidebarTestTags.BROWSE_ROOMS)
         waitForTag(RoomsScreenTestTags.SCREEN)
         restoration.emulateSavedInstanceStateRestore()
         waitForTag(RoomsScreenTestTags.SCREEN)
     }
 
     @Test
-    fun tabTopBarsClearTheStatusBar() {
+    fun pageTopBarsClearTheStatusBar() {
         // The app draws edge to edge; the bare test activity does not by default.
         composeRule.runOnUiThread { composeRule.activity.enableEdgeToEdge() }
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        openTab(MainTab.ROOMS)
+        tap(SidebarTestTags.BROWSE_ROOMS)
         waitForTag(RoomsScreenTestTags.SCREEN)
         // The CI emulator image has no system UI, so it reports no status
         // bar: hand the window one, as a phone would.
@@ -197,13 +214,12 @@ class AppShellNavigationTest {
         }
         composeRule.waitForIdle()
 
-        // The tab label says "Rooms" too; the page title is the higher one.
-        val titleTop = composeRule.onAllNodesWithText("Rooms")
-            .fetchSemanticsNodes()
-            .minOf { it.boundsInWindow.top }
+        val backTop = composeRule.onNodeWithContentDescription("Back")
+            .fetchSemanticsNode()
+            .boundsInWindow.top
         assertTrue(
-            "title at $titleTop px sits under the $FAKE_STATUS_BAR_PX px status bar",
-            titleTop >= FAKE_STATUS_BAR_PX,
+            "back arrow at $backTop px sits under the $FAKE_STATUS_BAR_PX px status bar",
+            backTop >= FAKE_STATUS_BAR_PX,
         )
     }
 
