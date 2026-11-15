@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 // Admin V2 — single affiliation row used by ChannelDetailDrawer.
 // Decoupled from the drawer so the mutation choice (set new
 // affiliation) is composed via a v-model-style event and the parent
@@ -8,7 +9,7 @@ import type { WasmAdminChannelAffiliationEntry } from "@/lib/xmpp";
 import { adminClasses as a } from "@/components/admin/admin-classes";
 
 type Affiliation = "owner" | "admin" | "member" | "none" | "outcast";
-const AFFILIATIONS: Affiliation[] = ["owner", "admin", "member", "none", "outcast"];
+const AFFILIATION_OPTIONS = (["owner", "admin", "member", "none", "outcast"] as const satisfies readonly Affiliation[]).map((value) => ({ value, label: value }));
 
 defineProps<{
   entry: WasmAdminChannelAffiliationEntry;
@@ -21,11 +22,6 @@ const emit = defineEmits<{
 
 const jidClass = css({ font: "12px {fonts.mono}", color: "fg", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 
-function onSelect(event: Event) {
-  const target = event.target as HTMLSelectElement;
-  const value = target.value as Affiliation;
-  emit("change", value);
-}
 </script>
 
 <template>
@@ -34,14 +30,13 @@ function onSelect(event: Event) {
       <span :class="jidClass">{{ entry.jid }}</span>
       <span v-if="entry.reason" :class="a.sub">{{ entry.reason }}</span>
     </div>
-    <select
-      :value="entry.affiliation"
+    <AppSelect
+      :model-value="entry.affiliation"
+      :options="AFFILIATION_OPTIONS"
       :disabled="mutating"
       :class="a.smallSelect"
       :aria-label="`Affiliation for ${entry.jid}`"
-      @change="onSelect"
-    >
-      <option v-for="aff in AFFILIATIONS" :key="aff" :value="aff">{{ aff }}</option>
-    </select>
+      @update:model-value="emit('change', $event)"
+    />
   </div>
 </template>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 // Admin V2 — slide-from-right drawer for editing a single space.
 // Three sections: editor, members, danger (delete) (Admin-Spaces board).
 import { computed, onMounted, ref, watch } from "vue";
@@ -206,15 +207,14 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
           <ul :class="a.plain" role="list">
             <li v-for="m in members" :key="m.jid" :class="a.subRow">
               <span :class="[a.jid, a.grow]">{{ m.jid }}</span>
-              <select
-                :value="m.role"
+              <AppSelect
+                :model-value="m.role"
+                :options="ROLES.map((r) => ({ value: r, label: r }))"
                 :disabled="memberMutating === m.jid || membersLoadingMore || membersLoading"
                 :class="a.smallSelect"
                 :aria-label="`Role for ${m.jid}`"
-                @change="changeMemberRole(m, ($event.target as HTMLSelectElement).value as Role)"
-              >
-                <option v-for="r in ROLES" :key="r" :value="r">{{ r }}</option>
-              </select>
+                @update:model-value="changeMemberRole(m, $event)"
+              />
             </li>
           </ul>
           <button

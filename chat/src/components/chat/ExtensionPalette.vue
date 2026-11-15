@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, ref } from "vue";
 import { css } from "styled-system/css";
 import { btn, iconbtn, input } from "styled-system/recipes";
@@ -93,7 +94,7 @@ function setSingleValue(command: DiscoveredExtensionCommand, field: ExtensionCom
 }
 
 function setSingleValueFromEvent(command: DiscoveredExtensionCommand, field: ExtensionCommandFormField, event: Event) {
-  setSingleValue(command, field, (event.target as HTMLInputElement | HTMLSelectElement).value);
+  setSingleValue(command, field, (event.target as HTMLInputElement).value);
 }
 
 function setBooleanValue(command: DiscoveredExtensionCommand, field: ExtensionCommandFormField, checked: boolean) {
@@ -307,18 +308,15 @@ const textarea = css({ height: "auto", minHeight: "96px", py: "2" });
               :class="fieldClass"
             >
               <span>{{ field.label }}<span v-if="field.required" aria-hidden="true"> *</span></span>
-              <select
+              <AppSelect
                 :class="input()"
-                :value="field.value"
+                :model-value="field.value"
+                :options="field.options"
+                placeholder="Select"
                 :required="field.required"
                 :disabled="!!blockedReason(command)"
-                @change="setSingleValueFromEvent(command, field, $event)"
-              >
-                <option value="">Select</option>
-                <option v-for="option in field.options" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
+                @update:model-value="setSingleValue(command, field, $event)"
+              />
               <span v-if="field.description" :class="muted">{{ field.description }}</span>
             </label>
 

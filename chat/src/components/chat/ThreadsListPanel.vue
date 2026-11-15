@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, onMounted } from "vue";
 import { Search } from "lucide-vue-next";
 import spotEmpty from "@waddle/design/assets/spot-empty.svg?url";
@@ -148,19 +149,7 @@ onMounted(() => {
           {{ option.label }}
         </button>
       </div>
-      <select
-        v-model="sort"
-        :class="sortClass"
-        aria-label="Sort discussions"
-      >
-        <option
-          v-for="option in SORT_OPTIONS"
-          :key="option.value"
-          :value="option.value"
-        >
-          {{ option.label }}
-        </option>
-      </select>
+      <AppSelect v-model="sort" :options="SORT_OPTIONS" :class="sortClass" aria-label="Sort discussions" />
     </div>
 
     <p v-if="resultSummary" :class="summaryClass">{{ resultSummary }}</p>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 // Admin V2 — Channels panel. Mirrors `SpacesPanel.vue` plus a row of
 // space-filter chips above the search input.
 import { computed, onMounted, ref, watch } from "vue";
@@ -247,10 +248,13 @@ const dialogSpaces = computed(() =>
         placeholder="Search channels"
         aria-label="Filter channels by prefix"
       />
-      <select v-if="spaces.length > 0" v-model="spaceFilterNode" :class="spaceSelectClass" aria-label="Filter by space">
-        <option value="">All spaces</option>
-        <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
-      </select>
+      <AppSelect
+        v-if="spaces.length > 0"
+        v-model="spaceFilterNode"
+        :options="[{ value: '', label: 'All spaces' }, ...spaces.map((s) => ({ value: s.space_node, label: s.name }))]"
+        :class="spaceSelectClass"
+        aria-label="Filter by space"
+      />
     </div>
 
     <div v-if="errorMessage" :class="a.alert" role="alert">{{ errorMessage }}</div>

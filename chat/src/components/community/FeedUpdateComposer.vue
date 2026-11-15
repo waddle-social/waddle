@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, reactive, ref, watch, type Component } from "vue";
 import {
   Briefcase,
@@ -434,12 +435,13 @@ async function publishProfile() {
       <div :class="ui.gridLead">
         <label :class="fieldClass">
           <span>Mood</span>
-          <select v-model="moodDraft.kind" :class="inputClass" :disabled="pepBusy === 'mood'">
-            <option value="">Choose mood</option>
-            <option v-for="kind in MOOD_KINDS" :key="kind" :value="kind">
-              {{ formatPepKeyword(kind) }}
-            </option>
-          </select>
+          <AppSelect
+            v-model="moodDraft.kind"
+            :options="MOOD_KINDS.map((kind) => ({ value: kind, label: formatPepKeyword(kind) }))"
+            placeholder="Choose mood"
+            :class="inputClass"
+            :disabled="pepBusy === 'mood'"
+          />
         </label>
         <label :class="fieldClass">
           <span>Text</span>
@@ -469,12 +471,13 @@ async function publishProfile() {
       <div :class="ui.gridLead">
         <label :class="fieldClass">
           <span>Activity</span>
-          <select v-model="activityDraft.general" :class="inputClass" :disabled="pepBusy === 'activity'">
-            <option value="">Choose activity</option>
-            <option v-for="general in GENERAL_ACTIVITIES" :key="general" :value="general">
-              {{ formatPepKeyword(general) }}
-            </option>
-          </select>
+          <AppSelect
+            v-model="activityDraft.general"
+            :options="GENERAL_ACTIVITIES.map((general) => ({ value: general, label: formatPepKeyword(general) }))"
+            placeholder="Choose activity"
+            :class="inputClass"
+            :disabled="pepBusy === 'activity'"
+          />
           <span v-if="activityErrors.general" :class="ui.fieldError">{{ activityErrors.general }}</span>
         </label>
         <label :class="fieldClass">

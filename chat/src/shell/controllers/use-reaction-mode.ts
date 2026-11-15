@@ -134,7 +134,8 @@ export function useReactionMode(deps: ReactionModeDeps) {
   function isEditableKeyTarget(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
     if (target.closest("[contenteditable='true']")) return true;
-    return !!target.closest("input, textarea, select");
+    // [role=combobox]/[role=listbox]: AppSelect (Ark Select) trigger and open list.
+    return !!target.closest("input, textarea, select, [role='combobox'], [role='listbox']");
   }
 
   function isComposerEditorTarget(target: EventTarget | null): boolean {
