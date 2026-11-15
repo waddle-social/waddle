@@ -86,6 +86,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: None,
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -118,11 +119,12 @@ where
     where
         Tm: Into<Option<Duration>>,
     {
-        let signal = Signal::Message {
+        let mut signal = Signal::Message {
             message: Box::new(self.msg),
             actor_ref: self.actor_ref.clone(),
             reply: None,
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -141,6 +143,10 @@ where
 
         tokio::spawn(async move {
             tokio::time::sleep(duration).await;
+            // The timer is not mailbox wait: restart the queue-wait clock.
+            if let Signal::Message { enqueued_at, .. } = &mut signal {
+                *enqueued_at = std::time::Instant::now();
+            }
             match mailbox_timeout {
                 Some(timeout) => Ok(tx.send_timeout(signal, timeout).await?),
                 None => Ok(tx.send(signal).await?),
@@ -161,6 +167,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: None,
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -176,6 +183,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: None,
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),

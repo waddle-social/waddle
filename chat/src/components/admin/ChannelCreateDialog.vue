@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 // Admin V2 — modal for `adminChannelsCreate`.
 import { ref, watch } from "vue";
 import { Dialog } from "@ark-ui/vue/dialog";
@@ -23,6 +24,11 @@ const emit = defineEmits<{
 
 const name = ref("");
 const topic = ref("");
+const CHANNEL_TYPE_OPTIONS: Array<{ value: WasmAdminChannelType; label: string }> = [
+  { value: "text", label: "Text" },
+  { value: "announcement", label: "Announcement" },
+  { value: "forum", label: "Forum" },
+];
 const channelType = ref<WasmAdminChannelType>("text");
 const spaceNode = ref("");
 const isPublic = ref(true);
@@ -102,18 +108,15 @@ function onSubmit() {
       <div :class="a.grid2">
         <label v-if="spaces && spaces.length > 0" :class="a.field">
           Space (optional)
-          <select v-model="spaceNode" :class="a.input">
-            <option value="">No space</option>
-            <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
-          </select>
+          <AppSelect
+            v-model="spaceNode"
+            :options="[{ value: '', label: 'No space' }, ...spaces.map((s) => ({ value: s.space_node, label: s.name }))]"
+            :class="a.input"
+          />
         </label>
         <label :class="a.field">
           Type
-          <select v-model="channelType" :class="a.input">
-            <option value="text">Text</option>
-            <option value="announcement">Announcement</option>
-            <option value="forum">Forum</option>
-          </select>
+          <AppSelect v-model="channelType" :options="CHANNEL_TYPE_OPTIONS" :class="a.input" />
         </label>
       </div>
       <div :class="a.checks">

@@ -151,13 +151,14 @@ fun ChannelScreen(
         )
     }
 
-    val title = stringResource(R.string.home_channel_label, name)
     ConversationScreen(
-        title = title,
-        kind = ConversationKind.Room(title),
+        title = stringResource(R.string.home_channel_label, name),
+        kind = ConversationKind.Room(stringResource(R.string.home_channel_label, name)),
         titleSubline = {
             RoomHeaderSubline(
+                community = session?.jid?.let(::bareJidOf)?.substringAfter('@'),
                 here = headcount?.here,
+                onOpenMembers = onOpenMembers,
                 huddle = resolvedNicks.size.takeIf { it > 0 }?.let { HeaderHuddle(it, video = roomHasVideoCall) },
             )
         },

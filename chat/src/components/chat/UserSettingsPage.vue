@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, reactive, ref } from "vue";
 import spotError from "@waddle/design/assets/spot-error.svg?url";
 import { css } from "styled-system/css";
@@ -464,12 +465,7 @@ async function clearTuneStatus() {
           <div :class="sc.grid">
             <label :class="sc.label">
               Mood
-              <select v-model="moodDraft.kind" :class="sc.input">
-                <option value="">Choose a mood</option>
-                <option v-for="option in moodOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
+              <AppSelect v-model="moodDraft.kind" :options="moodOptions" placeholder="Choose a mood" :class="sc.input" />
             </label>
             <label :class="sc.label">
               Note (optional)
@@ -497,12 +493,13 @@ async function clearTuneStatus() {
           <div :class="sc.grid">
             <label :class="sc.label">
               Activity
-              <select v-model="activityDraft.general" :class="sc.input" :aria-invalid="activityErrors.general ? 'true' : undefined">
-                <option value="">Choose an activity</option>
-                <option v-for="option in activityOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
+              <AppSelect
+                v-model="activityDraft.general"
+                :options="activityOptions"
+                placeholder="Choose an activity"
+                :class="sc.input"
+                :aria-invalid="activityErrors.general ? 'true' : undefined"
+              />
               <small v-if="activityErrors.general" :class="sc.hintError">{{ activityErrors.general }}</small>
             </label>
             <label :class="sc.label">

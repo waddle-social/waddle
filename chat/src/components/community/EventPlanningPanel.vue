@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { CalendarDays, Check, ExternalLink, MessageSquare, Pin, Plus, RefreshCw, Trash2, Users } from "lucide-vue-next";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -30,6 +31,21 @@ const activeTab = ref("overview");
 const inviteJid = ref("");
 const inviteRole = ref<"member" | "admin">("member");
 const notifyMode = ref<"always" | "on-mention" | "never">("on-mention");
+const INVITE_ROLE_OPTIONS = [
+  { value: "member", label: "Attendee" },
+  { value: "admin", label: "Co-organiser" },
+] as const;
+const NOTIFICATION_OPTIONS = [
+  { value: "always", label: "All messages" },
+  { value: "on-mention", label: "Mentions only" },
+  { value: "never", label: "Muted" },
+] as const;
+const STATUS_OPTIONS = [
+  { value: "proposed", label: "Proposed" },
+  { value: "confirmed", label: "Confirmed" },
+  { value: "cancelled", label: "Cancelled" },
+] as const;
+
 let request = 0;
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 let destroyed = false;
@@ -315,10 +331,10 @@ onUnmounted(() => { destroyed = true; request++; if (refreshTimer) clearInterval
         <h4 v-if="visibleItems.length" :class="kicker()">Pinned for everyone</h4>
       </div>
       <div v-if="activeTab === 'people'" :class="ui.list">
-        <form v-if="canOrganise" :class="ui.form" @submit.prevent="invite"><h4>Invite a member or co-organiser</h4><div :class="ui.grid"><label :class="ui.field">Waddle address<input v-model="inviteJid" :class="inputClass" type="text" placeholder="name@example.com" required /></label><label :class="ui.field">Role<select v-model="inviteRole" :class="inputClass"><option value="member">Attendee</option><option value="admin">Co-organiser</option></select></label></div><button type="submit" :class="primaryClass" :disabled="busy || !inviteJid.trim()"><Users :size="16" aria-hidden="true" /> Grant access and send invitation</button></form>
+        <form v-if="canOrganise" :class="ui.form" @submit.prevent="invite"><h4>Invite a member or co-organiser</h4><div :class="ui.grid"><label :class="ui.field">Waddle address<input v-model="inviteJid" :class="inputClass" type="text" placeholder="name@example.com" required /></label><label :class="ui.field">Role<AppSelect v-model="inviteRole" :options="INVITE_ROLE_OPTIONS" :class="inputClass" aria-label="Role" /></label></div><button type="submit" :class="primaryClass" :disabled="busy || !inviteJid.trim()"><Users :size="16" aria-hidden="true" /> Grant access and send invitation</button></form>
         <div v-for="member in members" :key="member.jid" :class="ui.card"><div :class="ui.between"><span>{{ member.jid }} · {{ member.affiliation }}</span><button v-if="canOrganise && member.jid !== self && member.affiliation !== 'owner'" type="button" :class="buttonClass" :disabled="busy" @click="mutate(async () => { await client!.setEventRoomAffiliation(selectedRoom!, member.jid, 'none'); members = members.filter(person => person.jid !== member.jid); })">Remove access</button></div><span :class="ui.subtitle">{{ attendance.find(item => item.author === member.jid)?.attendance || 'Invited · no response yet' }}</span></div>
         <div v-for="person in attendance.filter(person => !members.some(member => member.jid === person.author))" :key="person.id" :class="ui.card">{{ person.author }} · {{ person.attendance }}</div>
-        <form :class="ui.row" @submit.prevent="setNotifications"><label :class="ui.field">Event notifications<select v-model="notifyMode" :class="inputClass"><option value="always">All messages</option><option value="on-mention">Mentions only</option><option value="never">Muted</option></select></label><button :class="buttonClass" type="submit" :disabled="busy">Save notifications</button></form>
+        <form :class="ui.row" @submit.prevent="setNotifications"><label :class="ui.field">Event notifications<AppSelect v-model="notifyMode" :options="NOTIFICATION_OPTIONS" :class="inputClass" aria-label="Event notifications" /></label><button :class="buttonClass" type="submit" :disabled="busy">Save notifications</button></form>
       </div>
       <div v-if="activeTab !== 'overview' && activeTab !== 'people'" :class="ui.between"><p :class="ui.subtitle">{{ activeTab === 'travel' ? 'Travel details are shared with all invited event members. Add only what you want to share.' : activeTab === 'expense' ? `Recorded expenses${totals.length ? ': ' + totals.join(' · ') : ''}` : 'Keep everyone up to date as plans take shape.' }}</p><button type="button" :class="primaryClass" :disabled="busy" @click="addItem"><Plus :size="16" aria-hidden="true" />Add {{ kindLabels[activeTab] }}</button></div>
       <form v-if="editor" :class="ui.form" @submit.prevent="saveEditor">
@@ -331,7 +347,7 @@ onUnmounted(() => { destroyed = true; request++; if (refreshTimer) clearInterval
           <label v-if="['event', 'itinerary', 'travel'].includes(editor.kind)" :class="ui.field">Place<input v-model="editor.location" :class="inputClass" /></label>
           <label v-if="['task', 'itinerary'].includes(editor.kind)" :class="ui.field">Owner's Waddle address<input v-model="editor.assignee" :class="inputClass" placeholder="name@example.com" :disabled="!!editor.author && editor.author !== self && !canOrganise" /></label>
           <template v-if="['event', 'itinerary', 'travel', 'task'].includes(editor.kind)"><label :class="ui.field">{{ editor.kind === 'task' ? 'Due' : 'Starts' }} (optional)<input v-model="startsLocal" :class="inputClass" type="datetime-local" /></label><label v-if="editor.kind !== 'task'" :class="ui.field">Ends (optional)<input v-model="endsLocal" :class="inputClass" type="datetime-local" /></label><label :class="ui.field">Time zone<input v-model="editor.timezone" :class="inputClass" placeholder="Europe/London" required /></label></template>
-          <label v-if="['event', 'itinerary', 'decision'].includes(editor.kind)" :class="ui.field">Status<select v-model="editor.status" :class="inputClass"><option value="proposed">Proposed</option><option value="confirmed">Confirmed</option><option value="cancelled">Cancelled</option></select></label>
+          <label v-if="['event', 'itinerary', 'decision'].includes(editor.kind)" :class="ui.field">Status<AppSelect :model-value="editor.status ?? 'proposed'" :options="STATUS_OPTIONS" :class="inputClass" aria-label="Status" @update:model-value="editor.status = $event" /></label>
           <template v-if="editor.kind === 'expense'"><label :class="ui.field">Amount paid<input v-model="amountText" :class="inputClass" type="number" step="any" min="0" required /></label><label :class="ui.field">Currency<input v-model="editor.currency" :class="inputClass" placeholder="GBP" pattern="[A-Za-z]{3}" maxlength="3" /></label><label :class="ui.field">Shared by (Waddle addresses, comma separated)<input v-model="participantsText" :class="inputClass" /></label></template>
         </div>
         <label v-if="editor.kind === 'poll'" :class="ui.field">Options, one per line<textarea v-model="optionsText" :class="cx(inputClass, ui.full)" rows="4" required /></label>

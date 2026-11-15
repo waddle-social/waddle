@@ -128,6 +128,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(reply),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -194,6 +195,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(reply),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -246,6 +248,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(sender.boxed()),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -285,6 +288,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(sender.boxed()),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -315,6 +319,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(reply),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -374,6 +379,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(reply),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -414,6 +420,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(reply),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -442,6 +449,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(sender.boxed()),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),
@@ -496,6 +504,7 @@ where
             actor_ref: self.actor_ref.clone(),
             reply: Some(reply),
             sent_within_actor: self.actor_ref.is_current(),
+            enqueued_at: std::time::Instant::now(),
             message_name: self.message_name,
             #[cfg(feature = "tracing")]
             caller_span: tracing::Span::current(),

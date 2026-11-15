@@ -26,11 +26,8 @@
     <!-- Home -->
     <string name="home_settings">Settings</string>
     <string name="home_channel_label">#%1$s</string>
-    <string name="tab_home">Home</string>
     <string name="no_conversation_title">No conversation open</string>
     <string name="no_conversation_body">Pick a channel or a direct message.</string>
-    <string name="tab_dms">DMs</string>
-    <string name="tab_you">You</string>
     <string name="you_title">You</string>
     <string name="you_profile">Profile and status</string>
     <string name="you_profile_body">Name, avatar, mood and what you\'re listening to</string>
@@ -132,7 +129,7 @@
     <string name="composer_send">Send</string>
     <string name="conversation_more">More options</string>
     <string name="call_start">Call</string>
-    <string name="composer_more">Add attachment, GIF or sticker</string>
+    <string name="composer_more">More message options</string>
     <string name="composer_formatting">Formatting</string>
     <string name="composer_mention">Mention someone</string>
     <string name="composer_command">Run a command</string>
@@ -438,15 +435,20 @@
     <string name="presence_in_huddle">in a huddle</string>
     <string name="presence_speaking">speaking</string>
     <!-- Huddle: shell, home, rooms, people -->
+    <string name="tab_home">Home</string>
     <string name="tab_rooms">Rooms</string>
     <string name="tab_people">People</string>
+    <string name="sidebar_open">Open navigation</string>
+    <string name="tab_dms">DMs</string>
+    <string name="tab_you">You</string>
     <plurals name="tab_unread_badge">
         <item quantity="one">%1$d unread message</item>
         <item quantity="other">%1$d unread messages</item>
     </plurals>
-    <string name="tab_rooms_live">a huddle is live</string>
-    <string name="shell_wordmark">waddle</string>
-    <string name="shell_account_action">You: profile and settings</string>
+    <string name="tab_home_live">a huddle is live</string>
+    <string name="sidebar_search_hint">Search or jump to…</string>
+    <string name="sidebar_browse_rooms">Browse rooms</string>
+    <string name="sidebar_all_dms">All direct messages</string>
     <string name="shell_clear_search">Clear search</string>
     <string name="home_strip_more">+%1$d</string>
     <plurals name="home_strip_more_description">
@@ -527,16 +529,7 @@
     <string name="connection_banner_attention_title">Connection needs attention</string>
     <string name="connection_banner_attention_body">Your session expired. Sign in again to reconnect.</string>
     <string name="connection_banner_back">Back online</string>
-    <string name="rooms_title">Rooms</string>
-    <string name="rooms_lead">Sorted by what is happening: huddles first, then mentions and unread.</string>
-    <plurals name="rooms_count">
-        <item quantity="one">%1$d room</item>
-        <item quantity="other">%1$d rooms</item>
-    </plurals>
-    <plurals name="rooms_live">
-        <item quantity="one">%1$d live</item>
-        <item quantity="other">%1$d live</item>
-    </plurals>
+    <string name="rooms_browse_title">Browse rooms</string>
     <string name="rooms_new">New room</string>
     <string name="rooms_search">Find a room</string>
     <string name="rooms_loading">Finding your rooms.</string>
@@ -561,6 +554,7 @@
     <string name="room_kicker_video_huddle">Video huddle · %1$d in</string>
     <string name="room_quiet_line">It is quiet in here. Be the one who breaks the silence.</string>
     <string name="room_enter">Enter</string>
+    <string name="room_open">Open</string>
     <string name="room_join">Join</string>
     <string name="room_enter_description">Enter %1$s</string>
     <string name="room_join_description">Join the huddle in %1$s</string>
@@ -573,19 +567,13 @@
         <item quantity="other">%1$d unread</item>
     </plurals>
     <string name="people_title">People</string>
-    <string name="people_lead">Everyone in your rooms. Tap someone to message them.</string>
-    <plurals name="people_count">
-        <item quantity="one">%1$d person</item>
-        <item quantity="other">%1$d people</item>
-    </plurals>
     <string name="people_search">Find people</string>
     <string name="people_group_huddle">In a huddle</string>
     <string name="people_group_around">Around</string>
     <string name="people_group_away">Away and offline</string>
     <string name="people_group_kicker">%1$s · %2$d</string>
-    <string name="people_group_show">Show away and offline</string>
-    <string name="people_group_hide">Hide away and offline</string>
-    <string name="people_empty_huddle">Nobody is in a huddle right now. Start one.</string>
+    <string name="people_here_now">Here now</string>
+    <string name="people_everyone">Everyone</string>
     <string name="people_empty_around">Nobody around right now.</string>
     <string name="people_empty">Nobody is around right now. Be the one who is here first.</string>
     <string name="people_no_match">Nobody matches “%1$s”.</string>
@@ -708,8 +696,8 @@
     <string name="timeline_empty_thread_title">No replies yet</string>
     <string name="timeline_empty_thread_body">Start the thread. Your reply lands here and under the message it answers.</string>
     <plurals name="room_header_here">
-        <item quantity="one">%d here</item>
-        <item quantity="other">%d here</item>
+        <item quantity="one">%d online</item>
+        <item quantity="other">%d online</item>
     </plurals>
     <plurals name="room_header_huddle">
         <item quantity="one">Huddle · %d in</item>

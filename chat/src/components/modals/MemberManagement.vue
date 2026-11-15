@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { X, Search } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
 import { iconbtn, input, seg, waddle } from "styled-system/recipes";
@@ -140,14 +141,13 @@ const note = css({ py: "6", justifyContent: "center", textAlign: "center", font:
           </span>
         </div>
         <template v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.affiliation !== 'owner'">
-          <select
-            :value="member.affiliation"
+          <AppSelect
+            :model-value="member.affiliation"
+            :options="affiliations.map((value) => ({ value, label: affiliationLabel(value) }))"
             :class="affiliationSelect"
             :aria-label="`Affiliation for ${member.username}`"
-            @change="emit('updateAffiliation', member, ($event.target as HTMLSelectElement).value as EditableAffiliation)"
-          >
-            <option v-for="affiliation in affiliations" :key="affiliation" :value="affiliation">{{ affiliationLabel(affiliation) }}</option>
-          </select>
+            @update:model-value="emit('updateAffiliation', member, $event)"
+          />
           <button
             :class="iconbtn({ size: 'sm' })"
             type="button"

@@ -5,7 +5,9 @@ Rules here are written and linted but not evaluated anywhere. The sync in
 nothing under `staged/` reaches a ruler.
 
 A rule is staged when its series cannot be confirmed in production yet:
-the instrument is new, or it is declared without a call site. A
+the instrument is new, or it is declared without a call site, or a live rule
+may not read it until its metric contract exists (the `waddle_clustering_*`
+series; see `../tests/alert_metric_contract.py`). A
 missing-series rule for such a metric would fire the moment it was
 uploaded.
 

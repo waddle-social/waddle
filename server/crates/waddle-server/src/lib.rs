@@ -7,6 +7,7 @@ pub mod account_bindings;
 /// state and the durable binding rows. Routing reads it only through its
 /// typed selector.
 pub mod account_coordinator;
+pub mod actor_telemetry;
 pub mod admin;
 pub mod auth;
 pub mod call_teardown_outbox;

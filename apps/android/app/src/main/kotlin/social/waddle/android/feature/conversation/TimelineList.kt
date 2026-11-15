@@ -104,6 +104,7 @@ fun TimelineList(
     val jumpActions = remember(actions, indexByKey) {
         MessageRowActions(
             onLongPress = actions.onLongPress,
+            onReply = actions.onReply,
             onToggleReaction = actions.onToggleReaction,
             onOpenThread = actions.onOpenThread,
             onRetry = actions.onRetry,
@@ -138,7 +139,7 @@ fun TimelineList(
                 )
             }
             val awayFromLive by remember {
-                derivedStateOf { listState.firstVisibleItemIndex > JUMP_THRESHOLD }
+                derivedStateOf { listState.firstVisibleItemIndex > 0 }
             }
             AnimatedVisibility(
                 visible = awayFromLive,
@@ -517,7 +518,6 @@ private const val UNREAD_BORDER_ALPHA = 0.3f
 private const val UNREAD_RULE_ALPHA = 0.35f
 private const val FRESH_WINDOW = 2
 private const val LOAD_MORE_THRESHOLD = 3
-private const val JUMP_THRESHOLD = 6
 private const val LOADING_KEY = "loading-older"
 private const val START_KEY = "history-start"
 private const val CONTENT_CALL = "call"

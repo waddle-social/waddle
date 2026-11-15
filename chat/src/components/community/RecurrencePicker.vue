@@ -1,10 +1,18 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, ref, watch } from "vue";
 import { css, cx } from "styled-system/css";
 import { input, kicker } from "styled-system/recipes";
 import type { Freq, Rrule, Weekday } from "@/lib/xmpp-client";
 
 type Mode = "none" | "daily" | "weekly" | "monthly" | "yearly";
+const MODE_OPTIONS: Array<{ value: Mode; label: string }> = [
+  { value: "none", label: "Doesn't repeat" },
+  { value: "daily", label: "Daily" },
+  { value: "weekly", label: "Weekly" },
+  { value: "monthly", label: "Monthly" },
+  { value: "yearly", label: "Yearly" },
+];
 type EndKind = "never" | "count" | "until";
 
 interface RecurrencePickerProps {
@@ -174,17 +182,7 @@ watch(
 <template>
   <fieldset :class="ui.root">
     <legend :class="ui.legend">Repeats</legend>
-    <select
-      v-model="mode"
-      :class="ui.select"
-      aria-label="Recurrence frequency"
-    >
-      <option value="none">Doesn't repeat</option>
-      <option value="daily">Daily</option>
-      <option value="weekly">Weekly</option>
-      <option value="monthly">Monthly</option>
-      <option value="yearly">Yearly</option>
-    </select>
+    <AppSelect v-model="mode" :options="MODE_OPTIONS" :class="ui.select" aria-label="Recurrence frequency" />
 
     <template v-if="mode !== 'none'">
       <div :class="ui.row">

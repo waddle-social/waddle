@@ -836,6 +836,8 @@ pub enum Signal<A: Actor> {
         sent_within_actor: bool,
         /// The message name.
         message_name: &'static str,
+        /// When the sender built this signal (Waddle patch: observer queue wait).
+        enqueued_at: std::time::Instant,
         /// The span that was active when the message was sent, for cross-actor span propagation.
         #[cfg(feature = "tracing")]
         caller_span: tracing::Span,

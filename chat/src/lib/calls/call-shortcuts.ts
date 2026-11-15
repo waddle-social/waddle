@@ -56,7 +56,7 @@ const CALL_SURFACE_SELECTOR = ".call-split, .call-expanded";
  * guard used elsewhere in the chat shell (`isEditableKeyTarget`) so typing
  * in the composer, a search box, or a settings field never toggles the call.
  */
-const EDITABLE_SELECTOR = "input, textarea, select, [contenteditable='true']";
+const EDITABLE_SELECTOR = "input, textarea, select, [role='combobox'], [role='listbox'], [contenteditable='true']";
 
 /**
  * Controls whose default keyboard action is Space/Enter activation. When one

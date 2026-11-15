@@ -376,3 +376,17 @@ fn test_ops(actor: ActorRef<LiveConnectionActor>) -> crate::websocket_transport:
         kill: Box::new(move || actor.kill()),
     }
 }
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::LiveConnectionActor;
+    use waddle_xmpp::telemetry::attributes::ActorKind;
+
+    #[test]
+    fn maps_to_its_own_actor_kind() {
+        assert_eq!(
+            crate::actor_telemetry::actor_kind(<LiveConnectionActor as kameo::Actor>::name()),
+            ActorKind::Connection
+        );
+    }
+}

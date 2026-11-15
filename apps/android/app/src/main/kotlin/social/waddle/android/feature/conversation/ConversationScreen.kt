@@ -218,6 +218,7 @@ private fun ConversationScaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             WaddleTopBar(
+                containerColor = Waddle.colors.surface2,
                 title = {
                     ConversationTitle(title = title, leading = chrome.titleLeading, subline = chrome.titleSubline)
                 },
@@ -299,18 +300,20 @@ private fun ConversationScaffold(
             val rowActions = remember(viewModel, onOpenThread) {
                 MessageRowActions(
                     onLongPress = { item -> sheetTarget = item },
+                    onReply = viewModel::startReply,
                     onToggleReaction = viewModel::toggleReaction,
                     onOpenThread = onOpenThread?.let { open -> { item -> open(viewModel.threadIdFor(item)) } },
                     onRetry = viewModel::retry,
                     onOpenProfile = { author -> profileTarget = author },
                 )
             }
-            val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin) {
+            val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin, kind) {
                 MessageRowContext(
                     selfBareJid = selfBareJid,
                     authorPresence = authorPresence,
                     declaredBotJids = declaredBotJids,
                     trustedMediaOrigin = trustedMediaOrigin,
+                    bubbles = kind is ConversationKind.Dm,
                 )
             }
             val timeline: @Composable ColumnScope.() -> Unit = {

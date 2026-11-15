@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, onUnmounted, ref, useId } from "vue";
 import {
   CalendarDays,
@@ -1186,15 +1187,7 @@ function isMine(event: CommunityEvent): boolean {
               </label>
               <label :class="ui.field">
                 Duration
-                <select v-model="durationChoice" :class="ui.fieldInput">
-                  <option
-                    v-for="option in DURATION_OPTIONS"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </option>
-                </select>
+                <AppSelect v-model="durationChoice" :options="DURATION_OPTIONS" :class="ui.fieldInput" />
               </label>
               <label v-if="durationChoice === 'custom'" :class="[ui.field, ui.span2]">
                 Ends

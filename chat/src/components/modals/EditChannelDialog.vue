@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 import { btn, iconbtn } from "styled-system/recipes";
@@ -8,6 +9,11 @@ import { dialogParts } from "@/ui/part-classes";
 import { formClasses as f } from "@/components/modals/form-classes";
 import type { ChannelEditFormData } from "@/lib/chat-ui";
 import type { ChannelSummary, PinPermission, SpaceSummary } from "@/lib/chat-types";
+
+const PIN_PERMISSION_OPTIONS: Array<{ value: PinPermission; label: string }> = [
+  { value: "admins-only", label: "Admins only" },
+  { value: "anyone", label: "Anyone" },
+];
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -91,16 +97,14 @@ const strong = css({ color: "fg", fontWeight: 700 });
 
       <div :class="f.field">
         <label for="edit-channel-pin-permission" :class="f.label">Who can pin messages</label>
-        <select
+        <AppSelect
           id="edit-channel-pin-permission"
-          :value="form.pinPermission ?? ''"
+          :model-value="form.pinPermission ?? ''"
+          :options="PIN_PERMISSION_OPTIONS"
+          placeholder="Keep current setting"
           :class="f.input"
-          @change="$emit('update:form', { ...form, pinPermission: ($event.target as HTMLSelectElement).value as PinPermission })"
-        >
-          <option value="" disabled>Keep current setting</option>
-          <option value="admins-only">Admins only</option>
-          <option value="anyone">Anyone</option>
-        </select>
+          @update:model-value="$emit('update:form', { ...form, pinPermission: $event })"
+        />
       </div>
 
       <!-- XEP-0503 Space membership. Distinct from name/description
@@ -114,18 +118,15 @@ const strong = css({ color: "fg", fontWeight: 700 });
       <div v-if="canMoveChannel" :class="f.field">
         <label for="edit-channel-space" :class="f.label">Space</label>
         <div :class="moveRow">
-          <select
+          <AppSelect
             id="edit-channel-space"
-            :value="pendingTargetSpaceId ?? ''"
+            :model-value="pendingTargetSpaceId ?? ''"
+            :options="spaces.map((space) => ({ value: space.id, label: space.name }))"
+            placeholder="No other spaces"
             :class="f.input"
             :disabled="isSubmitting || spaces.length === 0"
-            @change="pendingTargetSpaceId = (($event.target as HTMLSelectElement).value || null)"
-          >
-            <option v-if="spaces.length === 0" value="" disabled>No other spaces</option>
-            <option v-for="space in spaces" :key="space.id" :value="space.id">
-              {{ space.name }}
-            </option>
-          </select>
+            @update:model-value="pendingTargetSpaceId = $event || null"
+          />
           <button
             :class="btn()"
             type="button"

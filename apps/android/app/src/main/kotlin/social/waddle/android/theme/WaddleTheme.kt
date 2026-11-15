@@ -300,6 +300,12 @@ private val WaddleShapes = Shapes(
 
 private val LocalWaddleColors = staticCompositionLocalOf { NightPalette.extended }
 
+/** Draws [content] with [colors] in place of the theme's (an own message bubble, say). */
+@Composable
+internal fun ProvideWaddleColors(colors: WaddleColors, content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalWaddleColors provides colors, content = content)
+}
+
 /** Accessors for the Waddle-specific theme values. */
 object Waddle {
     val colors: WaddleColors

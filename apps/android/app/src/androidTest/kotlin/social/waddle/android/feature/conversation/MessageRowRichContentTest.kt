@@ -208,7 +208,7 @@ class MessageRowRichContentTest {
     }
 
     @Test
-    fun ownerBadgeRendersNextToTheAuthor() {
+    fun ownerBadgeDoesNotRepeatInTheTimeline() {
         setCard(
             testMessage(
                 from = "room@muc.waddle.test/alice",
@@ -223,6 +223,6 @@ class MessageRowRichContentTest {
                 ),
             ),
         )
-        composeRule.onNodeWithText("OWNER").assertExists()
+        composeRule.onNodeWithText("OWNER").assertDoesNotExist()
     }
 }
