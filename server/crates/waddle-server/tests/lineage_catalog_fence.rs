@@ -253,7 +253,7 @@ async fn assert_clean_retry_window(admin: &PgPool, application: &str) -> i32 {
             } else {
                 samples = 0;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
