@@ -45,95 +45,6 @@ let _setupSteps = [
 	},
 ]
 
-// Only GitHub-redacted logs are retained, with bounded context and tail.
-let _failureDiagnostics = {
-	"runs-on":         "ubuntu-24.04"
-	"timeout-minutes": 5
-	permissions: actions: "read"
-	steps: [
-		{
-			name:  "Collect bounded GitHub-redacted failure log"
-			shell: "bash"
-			env: {
-				GH_TOKEN:      "${{ github.token }}"
-				GH_REPOSITORY: "${{ github.repository }}"
-				GH_RUN_ID:     "${{ github.run_id }}"
-			}
-			run: #"""
-				set -euo pipefail
-				mkdir -p failure-diagnostics
-				python3 - <<'PYLOG'
-				import collections
-				import json
-				import os
-				import pathlib
-				import urllib.request
-				import urllib.parse
-
-				class SafeRedirect(urllib.request.HTTPRedirectHandler):
-				    def redirect_request(self, req, fp, code, msg, headers, newurl):
-				        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-				        if redirected and urllib.parse.urlsplit(req.full_url).netloc != urllib.parse.urlsplit(newurl).netloc:
-				            redirected.remove_header("Authorization")
-				        return redirected
-
-				opener = urllib.request.build_opener(SafeRedirect())
-				job_id = os.environ.get("GH_PREVIOUS_JOB_ID")
-				if not job_id:
-				    jobs_url = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions/runs/{os.environ['GH_RUN_ID']}/jobs?per_page=100"
-				    jobs_request = urllib.request.Request(jobs_url, headers={
-				        "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-				        "Accept": "application/vnd.github+json",
-				    })
-				    with opener.open(jobs_request, timeout=60) as response:
-				        jobs = json.load(response)["jobs"]
-				    job_id = next(job["id"] for job in jobs if job["name"] == "nixTest (compile and four isolated shards)" and job["conclusion"] == "failure")
-				url = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions/jobs/{job_id}/logs"
-				request = urllib.request.Request(url, headers={
-				    "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-				    "Accept": "application/vnd.github+json",
-				    "X-GitHub-Api-Version": "2022-11-28",
-				})
-				# GitHub serves an already-redacted plain-text job log through a
-				# temporary redirect. Keep only its last 200 KiB, never the token.
-				tail = bytearray()
-				excerpts = bytearray()
-				before = collections.deque(maxlen=40)
-				after = 0
-				with opener.open(request, timeout=60) as response:
-				    for line in response:
-				        tail.extend(line)
-				        del tail[:-204800]
-				        matches = any(word in line.lower() for word in (
-				            b"fail", b"panicked", b"assertion",
-				        ))
-				        if matches:
-				            if not after:
-				                excerpts.extend(b"\n--- failure context ---\n" + b"".join(before))
-				            after = 41
-				        if after:
-				            excerpts.extend(line)
-				            del excerpts[:-2097152]
-				            after -= 1
-				        before.append(line)
-				pathlib.Path(f"failure-diagnostics/job-{job_id}-tail.log").write_bytes(tail)
-				pathlib.Path(f"failure-diagnostics/job-{job_id}-failure-context.log").write_bytes(excerpts)
-				PYLOG
-				"""#
-		},
-		{
-			name: "Upload bounded failure log"
-			uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-			with: {
-				name:                "rust-qualification-failure-log-${{ github.job }}"
-				path:                "failure-diagnostics"
-				"if-no-files-found": "error"
-				"retention-days":    3
-			}
-		},
-	]
-}
-
 workflow: {
 	name: "waddle-server-rustTests"
 	on: pull_request: paths: list.SortStrings([for pattern, _ in _paths {pattern}])
@@ -177,16 +88,6 @@ workflow: {
 					}
 				},
 			]])
-		}
-		"nixTest-failure-diagnostics": _failureDiagnostics & {
-			name: "Rust qualification failure diagnostics"
-			needs: ["nixTest-builder"]
-			if: "${{ always() && needs['nixTest-builder'].result == 'failure' }}"
-		}
-		// Temporary backfill for the already-completed failure; remove after triage.
-		"nixTest-previous-failure-diagnostics": _failureDiagnostics & {
-			name: "Previous Rust qualification failure diagnostics"
-			env: GH_PREVIOUS_JOB_ID: "132955406834"
 		}
 		nixTest: {
 			name:              "nixTest"
