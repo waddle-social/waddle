@@ -174,6 +174,11 @@ describe("own avatar", () => {
     expect(html).not.toContain("idp.example");
   });
 
+  test("never lazy-loads: Ark hides the image until it loads, and a hidden lazy image never does", async () => {
+    await seedAvatars(["me@example.com"]);
+    expect(await renderOwnAvatar()).not.toContain('loading="lazy"');
+  });
+
   test("falls back to the sign-in picture only while the store has not resolved the JID", async () => {
     expect(await renderOwnAvatar()).toContain('src="https://idp.example/me.png"');
   });
