@@ -349,7 +349,8 @@ const segItemClass = css({
   _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
   _narrow: { width: "46px", height: "46px" },
 });
-const dividerClass = css({ width: "1px", height: "24px", bg: "border.soft", mx: "1", _narrow: { display: "none" } });
+// Dividers mark nothing once the bar wraps (400px huddle column, phones).
+const dividerClass = css({ width: "1px", height: "24px", bg: "border.soft", mx: "1", _narrow: { display: "none" }, "@container (max-width: 480px)": { display: "none" } });
 const countClass = css({
   display: "inline-flex",
   alignItems: "center",
