@@ -87,11 +87,30 @@ const ogImageAlt =
 		<slot />
 
 		<script>
+			// Tri-state: System (nothing saved) -> Night -> Daylight -> System.
 			const root = document.documentElement;
 			const toggles = document.querySelectorAll<HTMLButtonElement>("[data-theme-toggle]");
+			const prefersLight = matchMedia("(prefers-color-scheme: light)");
+			const LABELS = { system: "System", night: "Night", daylight: "Daylight" } as const;
+			const NEXT = { system: "night", night: "daylight", daylight: "system" } as const;
+			type Choice = keyof typeof LABELS;
+			const readChoice = (): Choice => {
+				let saved = null;
+				try {
+					saved = localStorage.getItem("waddle-theme");
+				} catch {}
+				if (saved === "light" || saved === "daylight") return "daylight";
+				if (saved === "dark" || saved === "night") return "night";
+				return "system";
+			};
+			let choice = readChoice();
 			const sync = () => {
-				const pressed = String(root.dataset.theme === "daylight");
-				toggles.forEach((el) => el.setAttribute("aria-pressed", pressed));
+				const label = `Theme: ${LABELS[choice]}. Switch to ${LABELS[NEXT[choice]]}.`;
+				toggles.forEach((el) => {
+					el.dataset.choice = choice;
+					el.setAttribute("aria-label", label);
+					el.title = label;
+				});
 			};
 			sync();
 			// The head script still switches the theme when the system setting changes.
@@ -101,13 +120,17 @@ const ogImageAlt =
 			}).observe(root, { attributeFilter: ["data-theme"] });
 			toggles.forEach((el) => {
 				el.addEventListener("click", () => {
-					const next = root.dataset.theme === "daylight" ? "night" : "daylight";
-					root.dataset.theme = next;
+					choice = NEXT[choice];
 					try {
-						localStorage.setItem("waddle-theme", next === "daylight" ? "light" : "dark");
+						if (choice === "system") localStorage.removeItem("waddle-theme");
+						else localStorage.setItem("waddle-theme", choice === "daylight" ? "light" : "dark");
 					} catch {}
+					const isLight = choice === "system" ? prefersLight.matches : choice === "daylight";
+					root.dataset.theme = isLight ? "daylight" : "night";
+					sync();
 				});
 			});
+		</script>
 		</script>
 	</body>
 </html>

@@ -52,7 +52,8 @@ const srOnly = css({ srOnly: true });
     <script is:inline>
       (function () {
         try {
-          if (localStorage.getItem("waddle:theme") === "daylight") {
+          var theme = localStorage.getItem("waddle:theme");
+          if (theme === "daylight" || (theme === "system" && matchMedia("(prefers-color-scheme: light)").matches)) {
             document.documentElement.setAttribute("data-theme", "daylight");
           }
         } catch (e) {}

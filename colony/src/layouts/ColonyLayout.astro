@@ -18,7 +18,7 @@ const widths = {
 };
 
 // One toggle in the corner: the sun (daylight) and moon (night) swap inside it,
-// the inactive body setting below the horizon.
+// the inactive body setting below the horizon. It cycles System, then Night, then Daylight.
 const toggle = css({
   position: "absolute",
   top: "8%",
@@ -51,6 +51,26 @@ const sun = css({
 const moon = css({
   color: "ice.100",
   _daylight: { ...set, transform: "translate(-140px, 420px) rotate(-55deg) scale(0.7)" },
+});
+// The System choice: a small "A" (auto) badge on the corner of the sun or moon.
+const auto = css({
+  position: "absolute",
+  right: "-6%",
+  bottom: "-6%",
+  display: "none",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "42%",
+  aspectRatio: "1",
+  borderRadius: "pill",
+  bg: "surface",
+  color: "fg",
+  border: "1px solid {colors.border}",
+  fontFamily: "mono",
+  fontSize: "clamp(0.625rem, 1.1vw, 0.875rem)",
+  fontWeight: "bold",
+  lineHeight: 1,
+  "[data-choice=system] > &": { display: "flex" },
 });
 const orbit = (animation: string) =>
   css({ display: "block", width: "full", height: "full", _motionSafe: { animation } });
@@ -109,7 +129,7 @@ const orbit = (animation: string) =>
         }),
       )}
     >
-      <button type="button" class={toggle} data-theme-toggle aria-label="Daylight theme" aria-pressed="false">
+      <button type="button" class={toggle} data-theme-toggle aria-label="Theme">
         <span class={cx(body, sun)}><svg class={orbit("spin 40s linear infinite")} viewBox="0 0 100 100" aria-hidden="true">
           <circle cx="50" cy="50" r="18" fill="currentColor" />
           <g stroke="currentColor" stroke-width="3" stroke-linecap="round">
@@ -125,6 +145,7 @@ const orbit = (animation: string) =>
           <circle cx="74" cy="58" r="4" fill="var(--colors-ice-300)" opacity="0.6" />
           <circle cx="52" cy="62" r="2.5" fill="var(--colors-ice-300)" opacity="0.5" />
         </svg></span>
+        <span class={auto} aria-hidden="true">A</span>
       </button>
       <section class={cx(card(), css({ borderRadius: "panel", p: "8" }), widths[width])}>
         <div class={css({ display: "flex", alignItems: "center", gap: "3" })}>
@@ -151,20 +172,41 @@ const orbit = (animation: string) =>
       </p>
     </main>
     <script>
+      // Tri-state: System (nothing saved) -> Night -> Daylight -> System.
       const root = document.documentElement;
       const toggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]")!;
-      const sync = () => toggle.setAttribute("aria-pressed", String(root.dataset.theme === "daylight"));
-      sync();
-      // The head script may still switch the theme when the system setting changes.
-      new MutationObserver(sync).observe(root, { attributeFilter: ["data-theme"] });
-      toggle.addEventListener("click", () => {
-        const next = root.dataset.theme === "night" ? "daylight" : "night";
-        root.dataset.theme = next;
+      const prefersLight = matchMedia("(prefers-color-scheme: light)");
+      const LABELS = { system: "System", night: "Night", daylight: "Daylight" } as const;
+      const NEXT = { system: "night", night: "daylight", daylight: "system" } as const;
+      type Choice = keyof typeof LABELS;
+      const readChoice = (): Choice => {
+        let saved = null;
         try {
-          localStorage.setItem("waddle-theme", next === "daylight" ? "light" : "dark");
+          saved = localStorage.getItem("waddle-theme");
+        } catch {
+          // Storage blocked: follow the system setting.
+        }
+        return saved === "light" ? "daylight" : saved === "dark" ? "night" : "system";
+      };
+      let choice = readChoice();
+      const sync = () => {
+        const label = `Theme: ${LABELS[choice]}. Switch to ${LABELS[NEXT[choice]]}.`;
+        toggle.dataset.choice = choice;
+        toggle.setAttribute("aria-label", label);
+        toggle.title = label;
+      };
+      sync();
+      toggle.addEventListener("click", () => {
+        choice = NEXT[choice];
+        try {
+          if (choice === "system") localStorage.removeItem("waddle-theme");
+          else localStorage.setItem("waddle-theme", choice === "daylight" ? "light" : "dark");
         } catch {
           // Storage blocked: the choice lasts for this page only.
         }
+        const isLight = choice === "system" ? prefersLight.matches : choice === "daylight";
+        root.dataset.theme = isLight ? "daylight" : "night";
+        sync();
       });
     </script>
   </body>
