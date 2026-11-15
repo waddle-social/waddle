@@ -307,13 +307,12 @@ private fun ConversationScaffold(
                     onOpenProfile = { author -> profileTarget = author },
                 )
             }
-            val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin, kind) {
+            val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin) {
                 MessageRowContext(
                     selfBareJid = selfBareJid,
                     authorPresence = authorPresence,
                     declaredBotJids = declaredBotJids,
                     trustedMediaOrigin = trustedMediaOrigin,
-                    bubbles = kind is ConversationKind.Dm,
                 )
             }
             val timeline: @Composable ColumnScope.() -> Unit = {

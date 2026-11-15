@@ -41,20 +41,25 @@ impl NotificationOutboxStore {
         context: &Element,
         rich: &RichSummary,
         now_ms: i64,
-    ) -> Result<bool, NotificationOutboxError> {
+    ) -> Result<Option<Vec<NotificationOutboxJobId>>, NotificationOutboxError> {
         let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_candidate_ancestry_tx(&mut tx, candidate).await?;
         let claimed = mark_candidate_outboxed_tx(&mut tx, candidate, now_ms).await?;
         if claimed == 0 {
             tx.commit().await?;
-            return Ok(false);
+            return Ok(None);
         }
+        let mut job_ids = Vec::with_capacity(targets.len());
         for target in targets {
-            enqueue_outbox_job_tx(&mut tx, candidate, target, context, rich, now_ms).await?;
+            let job_id =
+                enqueue_outbox_job_tx(&mut tx, candidate, target, context, rich, now_ms).await?;
+            if !job_ids.contains(&job_id) {
+                job_ids.push(job_id);
+            }
         }
         settle_candidate_ancestry_tx(&mut tx, candidate).await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(job_ids))
     }
 
     pub(super) async fn persist_exhausted_candidate(
@@ -253,19 +258,19 @@ pub(super) async fn enqueue_outbox_job_tx(
     context: &Element,
     rich: &RichSummary,
     now_ms: i64,
-) -> Result<(), NotificationOutboxError> {
+) -> Result<NotificationOutboxJobId, NotificationOutboxError> {
     // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
     lock_candidate_ancestry_tx(tx, candidate).await?;
     let context_xml = String::from(context);
     for _ in 0..8 {
-        let inserted =
-            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?;
-        if inserted > 0 {
-            return Ok(());
+        if let Some(job_id) =
+            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?
+        {
+            return Ok(job_id);
         }
         match merge_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?
         {
-            OutboxMergeOutcome::Merged => return Ok(()),
+            OutboxMergeOutcome::Merged(job_id) => return Ok(job_id),
             OutboxMergeOutcome::MalformedExistingJobFailed
             | OutboxMergeOutcome::QueuedJobNotFound
             | OutboxMergeOutcome::QueuedJobChanged => {}
@@ -281,7 +286,7 @@ async fn insert_outbox_job_tx(
     context_xml: &str,
     rich: &RichSummary,
     now_ms: i64,
-) -> Result<u64, NotificationOutboxError> {
+) -> Result<Option<NotificationOutboxJobId>, NotificationOutboxError> {
     let job_id = NotificationOutboxJobId::fresh();
     let sender_jids = encode_sender_jids(std::slice::from_ref(&candidate.sender_jid))?;
     let changed = tx
@@ -336,12 +341,13 @@ async fn insert_outbox_job_tx(
         .await?;
     if changed > 0 {
         copy_candidate_ancestry_tx(tx, candidate, job_id.as_str()).await?;
+        return Ok(Some(job_id));
     }
-    Ok(changed)
+    Ok(None)
 }
 
 enum OutboxMergeOutcome {
-    Merged,
+    Merged(NotificationOutboxJobId),
     MalformedExistingJobFailed,
     QueuedJobNotFound,
     QueuedJobChanged,
@@ -473,7 +479,7 @@ async fn merge_outbox_job_tx(
         return Ok(OutboxMergeOutcome::QueuedJobChanged);
     }
     copy_candidate_ancestry_tx(tx, candidate, &job_id_raw).await?;
-    Ok(OutboxMergeOutcome::Merged)
+    Ok(OutboxMergeOutcome::Merged(job_id_raw.into()))
 }
 
 async fn mark_malformed_outbox_job_failed_tx(

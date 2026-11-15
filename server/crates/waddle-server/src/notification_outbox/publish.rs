@@ -14,6 +14,7 @@ use super::{
 use super::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
 use crate::push_service::CanonicalNotificationTerminalProof;
 use crate::push_service::DatabasePushServiceStore;
+use tracing::Instrument;
 
 pub(super) const MAX_OUTBOX_ATTEMPTS: i64 = 5;
 const BASE_RETRY_DELAY_MS: i64 = 5_000;
@@ -202,27 +203,51 @@ impl NotificationOutboxStore {
         let jobs = self.claim_due_outbox_jobs(batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            let outcome = match self
-                .publish_claimed_job(
-                    &job,
-                    push_service,
-                    push_store,
-                    inbox_storage,
-                    blocking_storage,
-                    first_party_service_jid,
-                )
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    tracing::warn!(job_id = job.job_id.as_str(), %error, "notification publish failed");
-                    self.retry_or_fail_outcome_for_claimed_job(
+            let span = tracing::info_span!(
+                "notification.job.publish",
+                job_id = job.job_id.as_str(),
+                notification_class = job.class().as_db_value(),
+                attempt_count = job.attempt_count,
+                outcome = tracing::field::Empty,
+            );
+            let outcome = async {
+                let outcome = match self
+                    .publish_claimed_job(
                         &job,
-                        PublishFailure::from_store_error(&error),
+                        push_service,
+                        push_store,
+                        inbox_storage,
+                        blocking_storage,
+                        first_party_service_jid,
                     )
-                    .await?
-                }
-            };
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::warn!(job_id = job.job_id.as_str(), %error, "notification publish failed");
+                        self.retry_or_fail_outcome_for_claimed_job(
+                            &job,
+                            PublishFailure::from_store_error(&error),
+                        )
+                        .await
+                        .inspect_err(|_| {
+                            tracing::Span::current().record("outcome", "error");
+                        })?
+                    }
+                };
+                tracing::Span::current().record(
+                    "outcome",
+                    match &outcome {
+                        NotificationOutboxPublishOutcome::Published { .. } => "published",
+                        NotificationOutboxPublishOutcome::RetryScheduled { .. } => "retry_scheduled",
+                        NotificationOutboxPublishOutcome::Failed { .. } => "failed",
+                        NotificationOutboxPublishOutcome::Suppressed { .. } => "suppressed",
+                    },
+                );
+                Ok::<_, NotificationOutboxError>(outcome)
+            }
+            .instrument(span)
+            .await?;
             // #531 push-pipeline observability: bucket the typed
             // outcome into the parallel counter so a single drain
             // pass produces a histogram-like cardinality on the

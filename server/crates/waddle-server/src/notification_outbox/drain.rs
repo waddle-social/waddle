@@ -63,6 +63,7 @@ impl NotificationOutboxStore {
                         .await?;
                     if claimed {
                         tracing::info!(
+                            stanza_id = candidate.archive_stanza_id.id.as_str(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = SuppressedReason::Xep0191Blocked.as_db_value(),
@@ -152,6 +153,7 @@ impl NotificationOutboxStore {
                         .await?;
                     if claimed {
                         tracing::info!(
+                            stanza_id = candidate.archive_stanza_id.id.as_str(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = reason.as_db_value(),
@@ -206,6 +208,7 @@ impl NotificationOutboxStore {
                     .await?;
                 if claimed {
                     tracing::info!(
+                        stanza_id = candidate.archive_stanza_id.id.as_str(),
                         notification_class = candidate.class().as_db_value(),
                         push_stage = "suppressed",
                         suppression_reason = reason.as_db_value(),
@@ -220,10 +223,19 @@ impl NotificationOutboxStore {
             }
             let context = build_waddle_context(&candidate);
             let now_ms = crate::time::now_ms();
-            if self
+            if let Some(job_ids) = self
                 .persist_candidate_targets(&candidate, &targets, &context, &rich, now_ms)
                 .await?
             {
+                for job_id in job_ids {
+                    tracing::info!(
+                        stanza_id = candidate.archive_stanza_id.id.as_str(),
+                        delivery_id = candidate.delivery_id.map(tracing::field::display),
+                        job_id = job_id.as_str(),
+                        notification_class = candidate.class().as_db_value(),
+                        "notification candidate queued as job"
+                    );
+                }
                 processed += 1;
             }
         }
@@ -243,6 +255,7 @@ impl NotificationOutboxStore {
                 .await?;
             if claimed {
                 tracing::info!(
+                    stanza_id = candidate.archive_stanza_id.id.as_str(),
                     notification_class = candidate.class().as_db_value(),
                     push_stage = "suppressed",
                     suppression_reason = reason.as_db_value(),

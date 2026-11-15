@@ -564,6 +564,11 @@ async fn insert_prepared_notification(
         .await
     {
         Ok(NotificationCandidateInsertOutcome::Inserted) => {
+            info!(
+                stanza_id = candidate.archive_stanza_id().id.as_str(),
+                notification_class = candidate.class().as_db_value(),
+                "notification candidate recorded"
+            );
             NotificationCandidateQueueOutcome::Inserted
         }
         Ok(NotificationCandidateInsertOutcome::Duplicate) => {

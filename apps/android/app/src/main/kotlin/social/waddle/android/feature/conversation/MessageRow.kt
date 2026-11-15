@@ -1,7 +1,6 @@
 package social.waddle.android.feature.conversation
 
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -53,9 +51,7 @@ import social.waddle.android.client.richBlocksOf
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
-import social.waddle.android.theme.ProvideWaddleColors
 import social.waddle.android.theme.Waddle
-import social.waddle.android.theme.WaddleColors
 import social.waddle.android.theme.WaddleTokens
 import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.HuddleAvatar
@@ -83,8 +79,6 @@ class MessageRowContext(
     val declaredBotJids: Set<String> = emptySet(),
     /** Origin whose cached XEP-0363 preview images may load (web parity). */
     val trustedMediaOrigin: String? = null,
-    /** 1:1 conversations draw bubbles (web `wd-bubble`): yours on the right, theirs on the left. */
-    val bubbles: Boolean = false,
 )
 
 /**
@@ -126,7 +120,6 @@ private fun RowFrame(
     endsGroup: Boolean,
     taps: RowTaps,
     modifier: Modifier = Modifier,
-    bubble: Bubble? = null,
     header: @Composable () -> Unit,
     content: @Composable () -> Unit,
 ) {
@@ -180,16 +173,8 @@ private fun RowFrame(
                 top = if (entry.startsGroup) Waddle.space.sm else ROW_GAP,
                 bottom = if (endsGroup) Waddle.space.sm else ROW_GAP,
             ),
-        horizontalArrangement = when {
-            bubble == null -> Arrangement.spacedBy(Waddle.space.sm)
-            bubble.own -> Arrangement.End
-            else -> Arrangement.Start
-        },
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
     ) {
-        if (bubble != null) {
-            BubbleBox(bubble = bubble, tail = endsGroup, content = content)
-            return@Row
-        }
         Box(modifier = Modifier.width(AvatarSize.MESSAGE.dp)) {
             if (entry.startsGroup) AuthorAvatar(jid = entry.authorJid, author = author, onClick = taps.onOpenProfile)
         }
@@ -200,73 +185,6 @@ private fun RowFrame(
             if (entry.startsGroup) header()
             content()
         }
-    }
-}
-
-/** A bubble's side and its foot: the time and marks, inside it at the end. */
-private class Bubble(val own: Boolean, val footer: @Composable () -> Unit)
-
-/**
- * One 1:1 message (web `wd-bubble`): theirs on surface 2, yours in the
- * action fill with its colours. The last of a burst gets a tight corner
- * on the sender's side, under where their face would be.
- */
-@Composable
-private fun RowScope.BubbleBox(bubble: Bubble, tail: Boolean, content: @Composable () -> Unit) {
-    val colors = Waddle.colors
-    val round = Waddle.radius.panel
-    val tight = if (tail) BUBBLE_TAIL else round
-    val shape = if (bubble.own) {
-        RoundedCornerShape(topStart = round, topEnd = round, bottomEnd = tight, bottomStart = round)
-    } else {
-        RoundedCornerShape(topStart = round, topEnd = round, bottomEnd = round, bottomStart = tight)
-    }
-    val inside = if (bubble.own) ownBubbleColors(colors) else colors
-    Column(
-        horizontalAlignment = Alignment.End,
-        verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
-        modifier = Modifier
-            .weight(1f, fill = false)
-            .padding(start = if (bubble.own) BUBBLE_GUTTER else 0.dp, end = if (bubble.own) 0.dp else BUBBLE_GUTTER)
-            .clip(shape)
-            .background(if (bubble.own) colors.action else colors.surface2)
-            .padding(horizontal = Waddle.space.sm, vertical = Waddle.space.xs),
-    ) {
-        ProvideWaddleColors(inside) {
-            Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) { content() }
-            bubble.footer()
-        }
-    }
-}
-
-/** Text on the action fill: its foreground for everything that reads. */
-private fun ownBubbleColors(colors: WaddleColors): WaddleColors {
-    val fg = colors.actionFg
-    val muted = fg.copy(alpha = BUBBLE_MUTED_ALPHA)
-    return colors.copy(
-        fg = fg,
-        fgMuted = muted,
-        fgSoft = muted,
-        actionText = fg,
-        goldText = fg,
-        goldSubtle = fg.copy(alpha = BUBBLE_WASH_ALPHA),
-        surfaceCode = fg.copy(alpha = BUBBLE_WASH_ALPHA),
-        codeForeground = fg,
-        codeBorder = muted,
-        quoteBorder = muted,
-    )
-}
-
-/** Time and marks at the foot of a bubble. */
-@Composable
-private fun BubbleFooter(sentAt: Instant, marks: MetaMarks, onRetry: (Long) -> Unit = {}) {
-    val clock = rememberConversationClock()
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        MetaMarkItems(marks, onRetry)
-        Text(text = clock.time(sentAt), style = Waddle.type.badge, color = Waddle.colors.fgMuted, maxLines = 1)
     }
 }
 
@@ -349,13 +267,6 @@ private fun StoredMessageRow(
             onOpenProfile = openProfile,
         ),
         modifier = modifier,
-        bubble = if (context.bubbles) {
-            Bubble(own = entry.authorJid != null && entry.authorJid == context.selfBareJid) {
-                BubbleFooter(entry.sentAt, marks)
-            }
-        } else {
-            null
-        },
         header = {
             MessageHeader(
                 author = author,
@@ -400,8 +311,8 @@ private fun StoredMessageBody(
     context: MessageRowContext,
 ) {
     MessageContent(item, context)
-    // A continuation row has no author line to carry its marks; a bubble's foot carries them.
-    if (!context.bubbles && !entry.startsGroup && !marks.isEmpty) MetaLine(marks)
+    // A continuation row has no author line to carry its marks.
+    if (!entry.startsGroup && !marks.isEmpty) MetaLine(marks)
     if (item.reactions.isNotEmpty()) {
         ReactionPills(item.reactions) { emoji -> actions.onToggleReaction(item, emoji) }
     }
@@ -441,11 +352,6 @@ private fun PendingMessageRow(
         endsGroup = endsGroup,
         taps = RowTaps(onLongPress = null, onOpenThread = null, onOpenProfile = openProfile),
         modifier = modifier,
-        bubble = if (context.bubbles) {
-            Bubble(own = true) { BubbleFooter(entry.sentAt, marks, actions.onRetry) }
-        } else {
-            null
-        },
         header = {
             MessageHeader(
                 author = author,
@@ -464,7 +370,7 @@ private fun PendingMessageRow(
             color = Waddle.colors.fg,
             modifier = Modifier.alpha(if (message.acked) 1f else PENDING_ALPHA),
         )
-        if (!context.bubbles && !entry.startsGroup && !marks.isEmpty) MetaLine(marks, onRetry = actions.onRetry)
+        if (!entry.startsGroup && !marks.isEmpty) MetaLine(marks, onRetry = actions.onRetry)
     }
 }
 
@@ -591,7 +497,3 @@ private val MIN_TOUCH_TARGET: Dp = 48.dp
 private val MENTION_BAR: Dp = 3.dp
 private val HAT_MAX_WIDTH: Dp = 120.dp
 private const val PENDING_ALPHA = 0.72f
-private val BUBBLE_TAIL: Dp = 4.dp
-private val BUBBLE_GUTTER: Dp = 48.dp
-private const val BUBBLE_MUTED_ALPHA = 0.72f
-private const val BUBBLE_WASH_ALPHA = 0.14f

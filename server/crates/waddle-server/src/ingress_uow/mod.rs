@@ -135,10 +135,12 @@ use crate::ingress_substrate::{
     IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest,
     IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };
+use crate::notification_outbox::NotificationClass;
 use uuid::Uuid;
 use waddle_xmpp::ingress::ProtocolEpoch;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp_core::xep0359::StanzaId;
 
 /// Ownership authority available to an ingress unit of work.
 #[derive(Clone)]
@@ -530,6 +532,7 @@ impl IngressUnitOfWork {
             lineage,
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
+            recorded_notification_candidates: Vec::new(),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
         })
@@ -552,6 +555,8 @@ pub enum IngressLineage {
 /// [`Self::commit`] rolls back the underlying database transaction.
 pub struct IngressUowTransaction<'a> {
     observations: bool,
+    /// Emit candidate hand-offs only after the owning transaction commits.
+    recorded_notification_candidates: Vec<(StanzaId, NotificationClass)>,
     /// The transaction as the typed ingress entry returned it: the proven
     /// epoch and, on an attested pool, the receipt-writer evidence captured
     /// while only the epoch relation prelock was held. Receipt operations
@@ -724,7 +729,15 @@ impl<'a> IngressUowTransaction<'a> {
 
     /// Commit all ingress and related durable writes atomically.
     pub async fn commit(self) -> Result<(), IngressUowError> {
-        self.entry.commit().await.map_err(IngressUowError::from)
+        self.entry.commit().await?;
+        for (stanza_id, notification_class) in self.recorded_notification_candidates {
+            tracing::info!(
+                stanza_id = stanza_id.id.as_str(),
+                notification_class = notification_class.as_db_value(),
+                "notification candidate recorded"
+            );
+        }
+        Ok(())
     }
 
     /// Raw SQL remains confined to ingress repositories so callers cannot

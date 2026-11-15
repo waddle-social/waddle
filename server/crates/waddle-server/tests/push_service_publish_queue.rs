@@ -178,6 +178,73 @@ async fn publish_notification_fans_out_to_active_devices_only() {
     assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FCM_DELIVERED);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn push_job_attempt_span_exports_identity_without_device_secrets() {
+    let store = store().await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("push node");
+    let device_id = "span-private-device";
+    let endpoint = "https://push.example.com/span-private-endpoint";
+    let registration =
+        PushDeviceRegistration::new(device_id, node.node(), PushDevicePlatform::Web, "test")
+            .with_provider_endpoint(Some(endpoint.to_string()));
+    store
+        .upsert_device(&owner, registration.clone())
+        .await
+        .expect("device");
+    store
+        .disable_device_for_owner(&owner, node.node(), device_id, None)
+        .await
+        .expect("disable device");
+    store
+        .publish_notification_from_user_server(
+            node.node(),
+            &notification_item("span-public-item"),
+            &owner,
+        )
+        .await
+        .expect("queue without active devices");
+    let jobs = store.queued_publish_jobs().await.expect("queued jobs");
+    assert_eq!(jobs.len(), 1);
+    let job_id = jobs[0].job_id().to_string();
+    store
+        .upsert_device(&owner, registration)
+        .await
+        .expect("reactivate device");
+
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let results = store
+        .drain_queued_notification_publish_jobs(1)
+        .await
+        .expect("process queued job");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].attempted_devices(), 1);
+    let attempt = spans
+        .exported()
+        .into_iter()
+        .find(|span| span.name == "push.job.attempt")
+        .expect("push attempt span");
+    for (key, expected) in [
+        ("job_id", job_id.as_str()),
+        ("item_id", "span-public-item"),
+        ("attempted_devices", "1"),
+        ("outcome", "processed"),
+    ] {
+        assert!(
+            attempt.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == key && attribute.value.to_string() == expected
+            }),
+            "missing {key}={expected}"
+        );
+    }
+    for secret in [device_id, node.node(), endpoint] {
+        assert!(attempt
+            .attributes
+            .iter()
+            .all(|attribute| !attribute.value.to_string().contains(secret)));
+    }
+}
+
 #[tokio::test]
 async fn publish_notification_requires_xep0357_payload() {
     let store = store().await;

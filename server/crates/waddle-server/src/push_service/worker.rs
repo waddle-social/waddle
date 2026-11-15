@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use jid::BareJid;
+use tracing::Instrument;
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
@@ -464,7 +465,44 @@ impl DatabasePushServiceStore {
         Ok(results)
     }
 
+    /// One attempt at a push publish job, traced as `push.job.attempt`.
+    ///
+    /// The span carries the job's identity and counts only: never the node,
+    /// device ids, endpoints, tokens or payload.
     pub(super) async fn process_publish_job_with_retention_limit(
+        &self,
+        job_id: &str,
+        retention_limit: i64,
+    ) -> Result<Option<PushFanoutResult>, XmppError> {
+        let span = tracing::info_span!(
+            "push.job.attempt",
+            job_id,
+            ancestry_job_id = tracing::field::Empty,
+            item_id = tracing::field::Empty,
+            attempted_devices = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let result = self
+            .publish_job_attempt(job_id, retention_limit)
+            .instrument(span.clone())
+            .await;
+        let outcome = match &result {
+            Ok(Some(fanout)) => {
+                span.record("attempted_devices", fanout.attempted_devices);
+                if fanout.attempted_devices == 0 {
+                    "nothing_sent"
+                } else {
+                    "processed"
+                }
+            }
+            Ok(None) => "skipped",
+            Err(_) => "error",
+        };
+        span.record("outcome", outcome);
+        result
+    }
+
+    async fn publish_job_attempt(
         &self,
         job_id: &str,
         retention_limit: i64,
@@ -567,6 +605,11 @@ impl DatabasePushServiceStore {
         let Some(lock_target) = get_publish_job_tx(&mut tx, job_id).await? else {
             return Ok(Phase1Outcome::ShortCircuit(None));
         };
+        let span = tracing::Span::current();
+        span.record("item_id", lock_target.item_id());
+        if let Some(ancestry_job_id) = lock_target.ancestry_job_id() {
+            span.record("ancestry_job_id", tracing::field::display(ancestry_job_id));
+        }
         super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &lock_target).await?;
         lock_owner_tx(&mut tx, lock_target.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, lock_target.node(), now_ms).await?;

@@ -54,7 +54,7 @@ import {
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
 import { css, cx } from "styled-system/css";
-import { bubble as bubbleRecipe, kicker, msg } from "styled-system/recipes";
+import { kicker, msg } from "styled-system/recipes";
 
 const props = defineProps<{
   message: TimelineMessage;
@@ -108,9 +108,6 @@ const props = defineProps<{
   callRoomJid?: string | null;
   callChannelId?: string | null;
   hideCallAnchorCard?: boolean;
-  /** Direct-message layout (App-DM): bubbles instead of room rows.
-   * "group" also names the author above the first bubble of a run. */
-  bubble?: "direct" | "group";
 }>();
 
 const emit = defineEmits<{
@@ -389,15 +386,14 @@ function onRowClick(event: MouseEvent) {
 }
 
 const isPending = computed(() => props.message.deliveryStatus === "sending" || props.message.deliveryStatus === "queued");
-const showBubbleAuthor = computed(() => props.bubble === "group" && !props.grouped && !props.message.isSelf);
 const swipeArmed = computed(() => {
   if (!swipe.isArmed.value) return undefined;
   return swipe.direction.value === -1 ? "thread" : "reply";
 });
 
-// --- Presentation (Polar Huddle): rooms use the `msg` row, direct
-// messages the `bubble`. Row states ride on data attributes so the
-// swipe hints, grouped time gutter and touch trigger can follow them.
+// --- Presentation (Polar Huddle): every conversation uses the `msg` row.
+// Row states ride on data attributes so the swipe hints, grouped time
+// gutter and touch trigger can follow them.
 const c = {
   row: css({
     width: "100%",
@@ -408,24 +404,6 @@ const c = {
     _coarse: { pr: "52px" },
     "@media (pointer: fine)": { touchAction: "auto" },
     "&[data-swiping]": { transition: "none", willChange: "transform" },
-  }),
-  bubbleRow: css({
-    position: "relative",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: "1",
-    width: "100%",
-    px: "4",
-    pt: "1",
-    touchAction: "pan-y",
-    transition: "transform 180ms {easings.out}",
-    _motionReduce: { transition: "none" },
-    "@media (pointer: fine)": { touchAction: "auto" },
-    "&[data-own]": { alignItems: "flex-end" },
-    "&[data-grouped]": { pt: "0" },
-    "&[data-swiping]": { transition: "none", willChange: "transform" },
-    _coarse: { pr: "52px" },
   }),
   pending: css({ opacity: 0.5 }),
   selected: css({ bg: "state.selected", boxShadow: "inset 0 0 0 1px {colors.border.strong}" }),
@@ -459,7 +437,6 @@ const c = {
     _coarse: { "[data-msg-row]:active &": { opacity: 1 } },
   }),
   stack: css({ position: "relative", display: "flex", minWidth: 0, flexDirection: "column", alignItems: "flex-start", gap: "1", "& > [data-fill]": { alignSelf: "stretch" } }),
-  bubbleStack: css({ position: "relative", display: "flex", minWidth: 0, width: "100%", flexDirection: "column", alignItems: "inherit", gap: "1" }),
   meta: css({ minWidth: 0, maxWidth: "100%", overflow: "hidden", whiteSpace: "nowrap" }),
   authorBtn: css({
     minWidth: 0,
@@ -479,21 +456,6 @@ const c = {
     textUnderlineOffset: "2px",
     transition: "text-decoration-color {durations.fast} {easings.out}",
     _hover: { textDecorationColor: "currentColor" },
-    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "2px", borderRadius: "xs" },
-  }),
-  bubbleAuthor: css({
-    maxWidth: "min(20rem, 60vw)",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    p: "{spacing.1.5} 0 0 {spacing.3}",
-    border: 0,
-    bg: "transparent",
-    textStyle: "caption",
-    color: "fg.muted",
-    textAlign: "left",
-    cursor: "pointer",
-    _hover: { color: "fg" },
     _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "2px", borderRadius: "xs" },
   }),
   badge: css({
@@ -519,13 +481,6 @@ const c = {
     "&[data-tone=warning]": { color: "warning.text" },
     "&[data-tone=danger]": { color: "danger.text" },
   }),
-  bubbleTime: css({ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: "1.5", "& [data-tone]": { color: "inherit" }, "& span": { color: "inherit" } }),
-  bubbleBody: css({
-    minWidth: 0,
-    overflowWrap: "anywhere",
-    "&[data-own] a, &[data-own] .rich-mention": { color: "inherit", textDecorationColor: "currentColor" },
-    "&[data-own] .rich-mention, &[data-own] code": { bg: "color-mix(in srgb, currentColor 14%, transparent)" },
-  }),
   deleted: css({
     display: "inline-flex",
     alignItems: "center",
@@ -534,27 +489,8 @@ const c = {
     color: "fg.muted",
     "& svg": { width: "14px", height: "14px", flex: "none", opacity: 0.7 },
   }),
-  deletedBubble: css({ px: "3.5", py: "2", borderRadius: "bubble", border: "1px dashed {colors.border}", fontSize: "sm" }),
   pinEvent: css({ fontSize: "sm", fontStyle: "italic", color: "fg.muted", "& > span": { ml: "2", fontStyle: "normal" } }),
   timeInline: css({ textStyle: "timestamp", color: "fg.muted", fontVariantNumeric: "tabular-nums" }),
-  callEndedRow: css({ display: "flex", justifyContent: "center", py: "2", px: "4" }),
-  callEndedPill: css({
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "1.5",
-    px: "3",
-    py: "1",
-    borderRadius: "pill",
-    border: "1px solid {colors.border.soft}",
-    bg: "surface",
-    color: "fg.muted",
-    font: "500 13px/1.4 {fonts.body}",
-    cursor: "pointer",
-    "& svg": { width: "14px", height: "14px" },
-    _hover: { color: "fg" },
-    _disabled: { cursor: "default", _hover: { color: "fg.muted" } },
-    _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
-  }),
   callFallback: css({
     display: "inline-flex",
     alignItems: "center",
@@ -770,27 +706,6 @@ watch(bubbleEl, (row, previous) => {
     />
   </template>
 
-  <!-- Huddle-DM: a finished call in a direct message is a centred pill row. -->
-  <div
-    v-else-if="message.callThread && !hideCallAnchorCard && bubble && callAnchorCardState?.status !== 'live'"
-    :data-message-id="message.id"
-    :data-message-row-key="timelineRowKey(message)"
-    :data-message-created-at="message.createdAt"
-    :class="c.callEndedRow"
-  >
-    <button
-      type="button"
-      :class="c.callEndedPill"
-      :disabled="!callThreadId"
-      @click="openCallThreadAnchor"
-    >
-      <PhoneCall aria-hidden="true" />
-      <span>{{ callThreadLabel }}</span>
-      <span aria-hidden="true">·</span>
-      <time :datetime="message.createdAt">{{ formatTimelineTimeOfDay(message.createdAt) }}</time>
-    </button>
-  </div>
-
   <div
     v-else-if="message.callThread && !hideCallAnchorCard"
     :data-message-id="message.id"
@@ -819,22 +734,6 @@ watch(bubbleEl, (row, previous) => {
         <span :class="c.timeInline">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
       </button>
     </div>
-  </div>
-
-  <!-- Retracted tombstone in a direct message: a quiet dashed bubble. -->
-  <div
-    v-else-if="message.isRetracted && bubble"
-    :data-message-id="message.id"
-    :data-message-row-key="timelineRowKey(message)"
-    :data-message-created-at="message.createdAt"
-    :data-own="message.isSelf || undefined"
-    :data-grouped="grouped || undefined"
-    :class="c.bubbleRow"
-  >
-    <p :class="cx(c.deleted, c.deletedBubble)">
-      <Trash2 aria-hidden="true" />
-      <span>This message was deleted.</span>
-    </p>
   </div>
 
   <!-- Retracted tombstone — body is gone but author/time/avatar
@@ -877,7 +776,7 @@ watch(bubbleEl, (row, previous) => {
     </div>
   </div>
 
-  <!-- Normal message: a room row (`msg`) or, in a direct message, a bubble. -->
+  <!-- Normal message: a room row (`msg`). -->
   <div
     v-else
     ref="bubbleEl"
@@ -886,13 +785,12 @@ watch(bubbleEl, (row, previous) => {
     :data-message-created-at="message.createdAt"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
     data-msg-row
-    :data-own="(bubble && message.isSelf) || undefined"
-    :data-grouped="(bubble && grouped) || undefined"
     :data-swiping="swipe.isSwiping.value || undefined"
     :data-swipe-armed="swipeArmed"
     :class="cx(
-      bubble ? c.bubbleRow : cx(msg({ cont: grouped, mention: isMentioned, new: message.deliveryStatus === 'sending' }), c.row),
-      !bubble && isForumTopic && c.forum,
+      msg({ cont: grouped, mention: isMentioned, new: message.deliveryStatus === 'sending' }),
+      c.row,
+      isForumTopic && c.forum,
       isPending && c.pending,
       reactionModeSelected && c.selected,
     )"
@@ -911,29 +809,20 @@ watch(bubbleEl, (row, previous) => {
   >
     <span :class="cx(c.hint, c.hintReply)" aria-hidden="true"><Reply /></span>
     <span :class="cx(c.hint, c.hintThread)" aria-hidden="true"><MessageSquare /></span>
-    <template v-if="!bubble">
-      <div v-if="grouped" :class="c.gutter" aria-hidden="true">
-        <span>{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
-      </div>
-      <button
-        v-else
-        :class="c.avatarBtn"
-        type="button"
-        :aria-label="`${message.author}, open profile`"
-        @click.stop="emitAvatarClick"
-      >
-        <UserAvatar :name="message.author" :jid="avatarJid" :presence="presence" :last-seen="lastSeen" size="message" />
-      </button>
-    </template>
+    <div v-if="grouped" :class="c.gutter" aria-hidden="true">
+      <span>{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
+    </div>
     <button
-      v-else-if="showBubbleAuthor"
+      v-else
+      :class="c.avatarBtn"
       type="button"
-      :class="c.bubbleAuthor"
       :aria-label="`${message.author}, open profile`"
       @click.stop="emitAvatarClick"
-    >{{ message.author }}</button>
-    <div :class="bubble ? c.bubbleStack : c.stack">
-      <div v-if="!bubble && !grouped" :class="cx('wd-msg__meta', c.meta)">
+    >
+      <UserAvatar :name="message.author" :jid="avatarJid" :presence="presence" :last-seen="lastSeen" size="message" />
+    </button>
+    <div :class="c.stack">
+      <div v-if="!grouped" :class="cx('wd-msg__meta', c.meta)">
         <button
           type="button"
           :class="cx('wd-msg__author', c.authorBtn)"
@@ -986,7 +875,7 @@ watch(bubbleEl, (row, previous) => {
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or
          hasn't loaded from history yet. -->
-    <div v-if="message.replyTo && !hideReplyChip" :data-fill="bubble ? undefined : ''">
+    <div v-if="message.replyTo && !hideReplyChip" data-fill>
       <AppTooltip :label="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'">
       <button
         type="button"
@@ -1017,31 +906,6 @@ watch(bubbleEl, (row, previous) => {
       @save="submitEdit"
       @close="closeEdit"
     />
-
-    <div
-      v-else-if="bubble"
-      :class="cx(bubbleRecipe({ own: message.isSelf, new: message.deliveryStatus === 'sending' }), c.bubbleBody)"
-      :data-own="message.isSelf || undefined"
-    >
-      <MessageBody
-        :message="message"
-        :invoke-extension-action="invokeExtensionAction"
-      />
-      <span :class="cx('wd-bubble__time', c.bubbleTime)">
-        <span>{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
-        <span
-          v-for="bit in statusBits"
-          :key="bit.key"
-          :class="c.status"
-          :data-tone="bit.tone"
-          :title="bit.title"
-          :aria-label="bit.label"
-        >
-          <component :is="bit.icon" v-if="bit.icon" aria-hidden="true" />
-          <template v-if="bit.text">{{ bit.text }}</template>
-        </span>
-      </span>
-    </div>
 
     <MessageBody
       v-else
