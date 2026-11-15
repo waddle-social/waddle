@@ -162,7 +162,8 @@ pub(super) struct Session {
     /// Dropping the receiver cancels the verification.
     pending_dialback: Option<oneshot::Receiver<DialbackOutcome>>,
     /// An outbound stream sent its dialback key and awaits the answer, which
-    /// telemetry has not counted yet.
+    /// telemetry has not counted yet. Telemetry counts the answer itself
+    /// when it arrives; this covers a stream that ends without one.
     awaiting_dialback_result: bool,
     negotiation: Option<NegotiationSlot>,
     registered: Option<StreamSlot>,
@@ -436,13 +437,20 @@ impl Session {
                 }
             }
             Output::Close(reason) => {
-                if self.awaiting_dialback_result {
-                    self.awaiting_dialback_result = false;
+                if self.direction == StreamDirection::Outbound {
+                    // The receiving server's answer, also when it arrived
+                    // with the features in one read; otherwise a stream that
+                    // ends after its key was sent counts as an error.
                     let result = match reason {
-                        CloseReason::DialbackRefused => S2sDialbackResult::Invalid,
-                        _ => S2sDialbackResult::Error,
+                        CloseReason::DialbackRefused => Some(S2sDialbackResult::Invalid),
+                        CloseReason::DialbackFailed => Some(S2sDialbackResult::Error),
+                        _ if self.awaiting_dialback_result => Some(S2sDialbackResult::Error),
+                        _ => None,
                     };
-                    telemetry::dialback(S2sDialbackRole::Initiating, result);
+                    if let Some(result) = result {
+                        telemetry::dialback(S2sDialbackRole::Initiating, result);
+                    }
+                    self.awaiting_dialback_result = false;
                 }
                 Err(self.close_outcome(reason))
             }
@@ -709,10 +717,12 @@ impl Session {
         };
         self.negotiation = None;
         self.expiry = Some(self.expiry_instant(verified.as_ref()));
-        if self.awaiting_dialback_result {
-            self.awaiting_dialback_result = false;
+        if strength == AuthenticationStrength::Dialback
+            && self.direction == StreamDirection::Outbound
+        {
             telemetry::dialback(S2sDialbackRole::Initiating, S2sDialbackResult::Valid);
         }
+        self.awaiting_dialback_result = false;
         match &mut self.role {
             Role::Inbound { slot, .. } => slot.authenticated(),
             Role::Outbound {

@@ -241,10 +241,11 @@ Decisions completing D3's table from the IANA registries:
 
 ## The peer scope (lifting the loopback and `.test` restriction)
 
-`peer_scope = "test"` is the default and keeps the restriction the
-connection manager introduced: every configured domain except denylist
-entries within `.test`, the listener and every configured endpoint on a
-loopback address, and admission refusing every domain outside `.test`.
+`peer_scope = "test"` is the default and restricts peers as the
+connection-manager design describes: every configured domain except
+denylist entries within `.test`, the listener and every configured
+endpoint on a loopback address, and admission refusing every domain
+outside `.test`.
 
 `peer_scope = "public"` lifts it: local domains, allowlist, dialback,
 trusted-home and private-CA entries may be any fully qualified DNS domain,
@@ -252,18 +253,18 @@ admission admits domains outside `.test` by its lists, the listener and
 configured endpoints may be any address, discovery may be enabled, and an
 inherited `s2s` listener must still be bound to exactly the configured
 address (on any interface rather than loopback only). Nothing else
-changes: the identity profile
-still refuses IP-address, numeric IPv4 and single-label names in every
-list and at stream open; the denylist, which could already name any
-domain, overrides every list in both scopes; DNS-derived addresses are
-checked against the blocked classes in both scopes.
+differs between the scopes: the identity profile refuses IP-address,
+numeric IPv4 and single-label names in every list and at stream open; the
+denylist, which may name any domain, overrides every list in both
+scopes; DNS-derived addresses are checked against the blocked classes in
+both scopes.
 
 Discovery is available only in the public scope. Lifting the scope on a
 deployment is part of its activation decision (G20 and G22), not of this
-slice. The connection manager accepted the per-address limits and the
-inbound socket reserve only while the scope is `.test`; for the public
-scope the per-address limits are kept and the inbound socket reserve
-(NB1) stays open until the switch to `open` and G20, as recorded below.
+slice. The connection-manager design sizes the per-address limits and the
+inbound socket reserve for the test scope; for the public scope the
+per-address limits are kept and the inbound socket reserve (NB1) stays
+open until the switch to `open` and G20, as recorded below.
 
 ## Connection-manager follow-ups decided here (G6)
 
@@ -352,11 +353,13 @@ verification connections as `resource="verifications"` or
 
 ## Follow-ups
 
-- W10: discovery against real SRV records for the pinned Prosody and
-  ejabberd, including `_xmpps-server` targets; until then the stub suite
-  and the loopback `SystemDnsLookup` tests are the only evidence for
-  discovery, since the harness reaches its peers through configured
-  endpoints.
+- Discovery against real SRV records, including `_xmpps-server`
+  targets, is outside the W10 harness: its peers are on loopback, which
+  the address checks refuse for any DNS-derived address, so it reaches
+  them through configured endpoints and there is no test-only way around
+  those checks. It needs peers at public addresses with published records
+  and is decided with activation (G20); until then the stub suite and the
+  loopback `SystemDnsLookup` tests are the evidence for discovery.
 - W5a and G20: per-sender fairness of the dial rate (above).
 - DNSSEC validation, with DANE (D2's later slice).
 - NB1 and the per-address limits at the switch to `open` and at G20.

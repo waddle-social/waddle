@@ -248,8 +248,8 @@ classified here.
   dialback (the peer may be an Initiating Server for a listed domain). The
   claimed domain is known from the pre-TLS header, so this is decided
   before the handshake. Everywhere else a certificate is mandatory. This
-  settles the connection-manager design's follow-up on absent client
-  certificates.
+  is the answer to the connection-manager design's follow-up on absent
+  client certificates.
 - An absent certificate is detected after a completed handshake in which
   the peer sent no certificate and the verifier was never asked about
   one (`PeerVerifier::completed_without_certificate`). A certificate that

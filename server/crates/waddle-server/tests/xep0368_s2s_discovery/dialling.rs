@@ -234,7 +234,10 @@ async fn a_dns_derived_address_in_a_blocked_class_is_never_dialled() {
     );
 
     // The same loopback address as a fallback address is refused too.
-    let b_spec = Spec::new(HOME_A, "other.test");
+    let mut b_spec = Spec::new(HOME_A, "other.test");
+    // The refused attempt backs other.test off; a short wait lets the
+    // configured endpoint below be dialled at once.
+    b_spec.limits = vec!["backoff_initial_ms = 1".to_owned()];
     let resolver = FixedResolver::new(Ok(vec![starttls_endpoint(
         target_address,
         EndpointOrigin::Fallback,
@@ -255,6 +258,7 @@ async fn a_dns_derived_address_in_a_blocked_class_is_never_dialled() {
     );
 
     // A configured endpoint is exempt and is dialled.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     resolver.set(Ok(vec![starttls_endpoint(
         target_address,
         EndpointOrigin::Configured,
