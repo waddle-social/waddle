@@ -72,8 +72,9 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
     LaunchedEffect(sidebarPane) {
         if (sidebarPane) {
             drawer.snapTo(DrawerValue.Closed)
-            // Something beside the sidebar from the start: Home.
-            if (backStack.size == 1) backStack.add(WaddleNavKey.Dashboard)
+            // Home beside the sidebar, under whatever a phone had open, so
+            // backing out after unfolding lands on it, not a placeholder.
+            if (backStack.getOrNull(1) != WaddleNavKey.Dashboard) backStack.add(1, WaddleNavKey.Dashboard)
         } else {
             // Home is the root now; a pushed copy would only stack on it.
             backStack.removeAll { it == WaddleNavKey.Dashboard }
