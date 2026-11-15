@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 // Admin V2 — slide-from-right drawer for editing a channel. Three
 // tabs (Config / Affiliations / Occupants) + a danger section with a
 // destroy-room confirm flow.
@@ -43,6 +44,11 @@ const tab = ref<Tab>("config");
 // Config edit state
 const editName = ref(props.channel.name);
 const editTopic = ref(props.channel.topic ?? "");
+const CHANNEL_TYPE_OPTIONS: Array<{ value: WasmAdminChannelType; label: string }> = [
+  { value: "text", label: "Text" },
+  { value: "announcement", label: "Announcement" },
+  { value: "forum", label: "Forum" },
+];
 const editChannelType = ref<WasmAdminChannelType>(props.channel.channel_type);
 const editIsPublic = ref(props.channel.is_public);
 const editMembersOnly = ref(props.channel.members_only);
@@ -253,11 +259,7 @@ const occupantCountLabel = computed(() => {
         </label>
         <label :class="a.field">
           Type
-          <select v-model="editChannelType" :class="a.input">
-            <option value="text">Text</option>
-            <option value="announcement">Announcement</option>
-            <option value="forum">Forum</option>
-          </select>
+          <AppSelect v-model="editChannelType" :options="CHANNEL_TYPE_OPTIONS" :class="a.input" />
         </label>
         <div :class="a.checks">
           <label>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, type Component } from "vue";
 import { FolderPlus, Hash, LayoutGrid, MessagesSquare, Sparkles, X } from "lucide-vue-next";
 import { iconbtn, btn, option } from "styled-system/recipes";
@@ -200,15 +201,14 @@ const dialogTitle = computed(() => {
         <div :class="f.field">
           <label for="create-spacemuc-space" :class="f.label">Space</label>
           <template v-if="spaces && spaces.length > 0">
-            <select
+            <AppSelect
               id="create-spacemuc-space"
-              :value="form.space_node"
+              :model-value="form.space_node"
+              :options="spaces.map((s) => ({ value: s.node, label: s.name }))"
+              placeholder="Select a space…"
               :class="f.input"
-              @change="$emit('update:form', { ...form, space_node: ($event.target as HTMLSelectElement).value })"
-            >
-              <option value="" disabled>Select a space…</option>
-              <option v-for="s in spaces" :key="s.node" :value="s.node">{{ s.name }}</option>
-            </select>
+              @update:model-value="$emit('update:form', { ...form, space_node: $event })"
+            />
           </template>
           <template v-else>
             <input
