@@ -99,8 +99,10 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     // a captured subscriber list is not an admission, and the scope's
     // authority is its canonical grants, which PubSub does not consult.
     // Whether a node is enrolled is asked once more if it cannot be told,
-    // then the event is dropped.
-    if !is_pep && owner.as_str() == state.deps.service_domains.spaces {
+    // then the event is dropped. The Spaces and extensions services are
+    // recognised by the owner alone: a request addressed to a service
+    // counts as a PEP request for `is_pep`.
+    if owner.as_str() == state.deps.service_domains.spaces {
         let host_grants = &state.deps.app_state.host_grants;
         let enrolled = match host_grants.space_enrolled(node).await {
             Err(_) => host_grants.space_enrolled(node).await,
@@ -127,12 +129,9 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     }
     // A room-bound extension node is resolved to its room once; each
     // subscriber is then asked for its right in that room.
-    let route_room = if is_pep {
-        crate::server::routes::websocket::handlers::iq::ExtensionRouteRoom::NotRoomBound
-    } else {
+    let route_room =
         crate::server::routes::websocket::handlers::iq::extension_route_room(state, owner, node)
-            .await
-    };
+            .await;
 
     let node_cfg = match storage.get_node(owner, node).await {
         Ok(Some(record)) => record.config,
