@@ -135,8 +135,43 @@ async function scrollToMessageId(messageId: string, align: "start" | "center" | 
   return true;
 }
 
+// Rows keep growing after the pin settles (late measurement, images, link
+// previews), which pushes the newest text below the fold. While the reader
+// is parked at the bottom edge, follow every growth of the list.
+const STICK_TOLERANCE_PX = 64;
+let followBottom = false;
+let bottomMode = false;
+const listElement = ref<HTMLDivElement | null>(null);
+
+function distanceFromBottom(el: HTMLElement): number {
+  return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+function onScroll(event: Event) {
+  const el = scrollElement.value;
+  if (el && bottomMode) followBottom = distanceFromBottom(el) <= STICK_TOLERANCE_PX;
+  emit("scroll", event);
+  maybeLoadOlder();
+}
+
+let followObserver: ResizeObserver | null = null;
+watch(listElement, (list) => {
+  followObserver?.disconnect();
+  followObserver = null;
+  if (!list || typeof ResizeObserver === "undefined") return;
+  followObserver = new ResizeObserver(() => {
+    const el = scrollElement.value;
+    if (el && followBottom && distanceFromBottom(el) > 0) el.scrollTop = el.scrollHeight;
+  });
+  followObserver.observe(list);
+  if (scrollElement.value) followObserver.observe(scrollElement.value);
+}, { flush: "post" });
+onBeforeUnmount(() => followObserver?.disconnect());
+
 async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   if (props.items.length === 0) return false;
+  bottomMode = !isTopPinnedScrollDirection(mode);
+  followBottom = bottomMode;
   const itemIndex = isTopPinnedScrollDirection(mode) ? 0 : props.items.length - 1;
   virtualizer.value.scrollToIndex(virtualIndexForItemIndex(itemIndex), {
     align: isTopPinnedScrollDirection(mode) ? "start" : "end",
@@ -201,9 +236,9 @@ const sentinelClass = css({ display: "flex", alignItems: "center", justifyConten
     ref="scrollElement"
     :class="scrollClass"
     :aria-label="ariaLabel"
-    @scroll="(event) => { emit('scroll', event); maybeLoadOlder(); }"
+    @scroll="onScroll"
   >
-    <div :class="cx(listClass, contentClass)" :style="{ height: `${totalSize}px` }">
+    <div ref="listElement" :class="cx(listClass, contentClass)" :style="{ height: `${totalSize}px` }">
       <div
         v-for="virtualRow in virtualItems"
         :key="virtualRow.key"
