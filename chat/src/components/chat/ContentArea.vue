@@ -786,11 +786,25 @@ const cls = {
     "&:has(> .call-split)": { flexWrap: { xl: "wrap" } },
     "&:has(> .call-split) > [data-part=main]": { flexBasis: { xl: "100%" }, width: { xl: "calc(100% - 400px)" } },
     "&:has(> .call-split) > .call-split + [role=separator]": { width: { xl: "400px" } },
+    // HuddlePanel: the stage fills the 400px column edge to edge (no card inset).
     "&:has(> .call-split) > .call-split": {
       width: { xl: "400px" },
+      margin: { xl: 0 },
+      borderRadius: { xl: 0 },
+      boxShadow: { xl: "none" },
       borderLeft: { xl: "1px solid {colors.border.soft}" },
     },
     "&:not(:has(> .call-split)) > [data-part=thread]": { display: "none" },
+    // Huddle-Expanded: the stage takes the main column and the thread stays
+    // in the right-hand column; immersive still covers everything.
+    "&:has(> .call-expanded:not(.call-expanded--immersive)) > [data-part=thread]": {
+      display: { xl: "flex" },
+      position: { xl: "absolute" },
+      insetBlock: { xl: 0 },
+      insetInlineEnd: { xl: 0 },
+      zIndex: { xl: 30 },
+    },
+    "& > .call-expanded:not(.call-expanded--immersive)": { insetInlineEnd: { xl: "400px" } },
   }),
   main: css({ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, width: "100%" }),
   callThread: css({
