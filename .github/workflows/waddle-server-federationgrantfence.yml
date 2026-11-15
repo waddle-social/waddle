@@ -43,12 +43,59 @@ jobs:
       uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
       with:
         use-gha-cache: disabled
+    - name: Fetch Hestia
+      run: |-
+        set -euo pipefail
+        hestia_platform="$(uname -s)-$(uname -m)"
+        case "$hestia_platform" in
+          Darwin-arm64|Darwin-aarch64)
+            hestia_asset="hestia-aarch64-darwin"
+            hestia_sha256="bb3da08432fb28436dd617359c3516d1c1373585311b88dc6fb50f8f6f40ffbe"
+            ;;
+          Linux-aarch64|Linux-arm64)
+            hestia_asset="hestia-aarch64-linux"
+            hestia_sha256="67c849c35a07b4562afccf4b0fb4b0f82ff6732cd8d4503c5f6d02b7e1e5637a"
+            ;;
+          Linux-x86_64|Linux-amd64)
+            hestia_asset="hestia-x86_64-linux"
+            hestia_sha256="f6c8fe84dc425e99e14f893ca708bba8254d587536e591471df1fc79beb5aed5"
+            ;;
+          *) echo "Unsupported Hestia platform: $hestia_platform" >&2; exit 1 ;;
+        esac
+        test -d "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+        hestia_dir="$RUNNER_TEMP/hestia-release"
+        mkdir -p "$hestia_dir"
+        hestia_binary="$hestia_dir/hestia"
+        hestia_url="https://github.com/Mic92/hestia/releases/download/v2.0.0/${hestia_asset}"
+        hestia_verified=false
+        for hestia_attempt in 1 2 3 4 5; do
+          rm -f "$hestia_binary"
+          if curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 20 --max-time 120 \
+            --retry 3 --retry-all-errors -o "$hestia_binary" "$hestia_url"; then
+            case "$hestia_platform" in
+              Darwin-*) hestia_actual="$(shasum -a 256 "$hestia_binary" | cut -d ' ' -f 1)" ;;
+              *) hestia_actual="$(sha256sum "$hestia_binary" | cut -d ' ' -f 1)" ;;
+            esac
+            if [ "$hestia_actual" = "$hestia_sha256" ]; then
+              hestia_verified=true
+              break
+            fi
+            echo "Hestia download digest $hestia_actual differs from the pinned $hestia_sha256" >&2
+          fi
+          echo "Hestia download attempt $hestia_attempt failed" >&2
+          if [ "$hestia_attempt" -lt 5 ]; then sleep $((hestia_attempt * 10)); fi
+        done
+        if [ "$hestia_verified" != true ]; then
+          echo "Could not download a verified Hestia v2.0.0 binary" >&2
+          exit 1
+        fi
+        chmod 0755 "$hestia_binary"
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
+        binary: ${{ runner.temp }}/hestia-release/hestia
         drain-timeout: '900'
         upstream-cache-filter: 'true'
-        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail

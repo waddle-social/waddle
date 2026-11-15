@@ -2236,87 +2236,60 @@ async fn superseded_mid_pass_renewal_aborts_delivery_and_unblocks_terminal_drain
         .expect("prefill blocked recipient channel");
     let (tail_tx, mut tail_rx) = mpsc::channel::<OutboundStanza>(4);
     register_test_connection(state.as_ref(), &stale_tail_recipient, tail_tx).await;
-    let terminal_recipient_for_supersede = terminal_recipient.clone();
-
-    let state_for_supersede = Arc::clone(&state);
-    let config_key_for_supersede = config_key.clone();
-    let supersede = tokio::spawn(async move {
-        loop {
-            let row = state_for_supersede
-                .deps
-                .protocol
-                .room_effect_outbox
-                .find(&config_key_for_supersede)
-                .await
-                .expect("find leased config row")
-                .expect("leased config row exists");
-            if row
-                .leased_at_ms
-                .is_some_and(|leased_at_ms| leased_at_ms > 0)
-            {
-                let mut tx = state_for_supersede
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .database()
-                    .begin()
-                    .await
-                    .expect("transaction");
-                state_for_supersede
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .supersede_non_terminal_in_tx(&mut tx, lifecycle, 0)
-                    .await
-                    .expect("supersede leased config row");
-                let destroy = state_for_supersede
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .enqueue_in_tx(
-                        &mut tx,
-                        RoomEffectEnqueue {
-                            lifecycle,
-                            revision: initial_revision().next().expect("next revision"),
-                            effects: &destroy_effects_for(
-                                &room,
-                                vec![terminal_recipient_for_supersede.clone()],
-                            ),
-                            origin: &origin(),
-                            producing_node: &producing_node(),
-                            now_ms: 0,
-                        },
-                    )
-                    .await
-                    .expect("enqueue destroy");
-                tx.commit().await.expect("commit destroy");
-                state_for_supersede
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .arm_reservation(&destroy, 0)
-                    .await
-                    .expect("arm destroy");
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    });
-
+    // Supersede the row while the drain holds its lease, after the
+    // pre-render renewal and before the first recipient's renewal, so that
+    // checkpoint (not a race with the drain's progress) decides the abort.
+    let (renewal_reached, release_renewal) = store.pause_lease_renewal_for_test(&config_key, 1);
     let state_for_drain = Arc::clone(&state);
     let first_drain =
         tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 1, 8).await });
-    supersede.await.expect("supersede task");
+    renewal_reached
+        .await
+        .expect("the drain reaches the first recipient's lease renewal");
+    let leased = store
+        .find(&config_key)
+        .await
+        .expect("find leased config row")
+        .expect("leased config row exists");
     assert!(
-        tokio::time::timeout(Duration::from_secs(6), tail_rx.recv())
-            .await
-            .is_err(),
-        "a superseded row must not emit later-recipient frames after the lease-renew barrier fails"
+        leased.lease_token.is_some(),
+        "the drain holds the config row's lease"
     );
+    let mut tx = store.database().begin().await.expect("transaction");
+    store
+        .supersede_non_terminal_in_tx(&mut tx, lifecycle, 0)
+        .await
+        .expect("supersede leased config row");
+    let destroy = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: initial_revision().next().expect("next revision"),
+                effects: &destroy_effects_for(&room, vec![terminal_recipient.clone()]),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue destroy");
+    tx.commit().await.expect("commit destroy");
+    store
+        .arm_reservation(&destroy, 0)
+        .await
+        .expect("arm destroy");
+    release_renewal
+        .send(())
+        .expect("the paused renewal is still waiting");
     let first_summary = first_drain
         .await
         .expect("first drain join")
         .expect("first drain result");
+    assert!(
+        tail_rx.try_recv().is_err(),
+        "a superseded row must not emit later-recipient frames after the lease-renew barrier fails"
+    );
     assert_eq!(first_summary.drained, 0);
     assert_eq!(first_summary.requeued, 0);
     assert_eq!(

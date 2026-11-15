@@ -1824,6 +1824,31 @@ pub(super) async fn resume(
     };
     let claim = held_claim.fence.clone();
 
+    // Read the session again now that this node holds its claim. A resume
+    // that committed on another connection while the claim was being moved
+    // here stored that connection's principal; the commit below checks the
+    // principal this attempt resolved against the stored one, so resolving
+    // the one read before the claim was held would refuse a resume this node
+    // is now the only one able to make.
+    let candidate = match store.resume_candidate(&operation).await {
+        Ok(Some(current)) if current.session == candidate.session => current,
+        Ok(_) => return failed(stream_id, SmResumeOutcome::NotFound),
+        Err(error) => {
+            warn!(%stream_id, %error, "durable SM resume candidate could not be read again");
+            return failed(stream_id, SmResumeOutcome::Storage);
+        }
+    };
+    if candidate.full_jid.to_bare() != bare_jid {
+        return DurableResumeStep::Failed(SmResumeTerminal::identity_mismatch(
+            stream_id,
+            candidate.full_jid,
+        ));
+    }
+    if let Some(reason) = candidate.terminal {
+        info!(%stream_id, ?reason, "durable SM resume rejected: the session is terminal");
+        return failed(stream_id, SmResumeOutcome::NotFound);
+    }
+
     let inbound_checkpoint = match state
         .deps
         .protocol

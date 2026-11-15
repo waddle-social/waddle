@@ -109,10 +109,16 @@ pub struct TestServer {
     http_port: u16,
     port_file: std::path::PathBuf,
     upload_dir: std::path::PathBuf,
+    /// The server's stdout and stderr, unless the caller asked to inherit
+    /// them. A test that panics prints its tail when the server is dropped.
+    log_file: Option<std::path::PathBuf>,
     seam_dir: Option<std::path::PathBuf>,
     fixed_account_password: String,
     test_profile_publish_token: String,
 }
+
+/// Lines of a server's captured output a failing test prints.
+const FAILURE_LOG_TAIL_LINES: usize = 400;
 
 /// File-backed rendezvous for one server process's failed-resume lifecycle
 /// characterization. The unique directory is owned and removed by its
@@ -327,11 +333,25 @@ impl TestServer {
         for (key, value) in extra_envs {
             command.env(*key, *value);
         }
-        if std::env::var("WADDLE_TEST_SERVER_STDIO").as_deref() == Ok("inherit") {
+        // Capture the server's output so a failing test can show what the
+        // server did; a flake on a CI runner is otherwise undiagnosable.
+        let log_file = if std::env::var("WADDLE_TEST_SERVER_STDIO").as_deref() == Ok("inherit") {
             command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            None
         } else {
-            command.stdout(Stdio::null()).stderr(Stdio::null());
-        }
+            let path = std::env::temp_dir()
+                .join(format!("waddle-test-server-{}.log", uuid::Uuid::new_v4()));
+            match std::fs::File::create(&path).and_then(|file| Ok((file.try_clone()?, file))) {
+                Ok((stdout, stderr)) => {
+                    command.stdout(stdout).stderr(stderr);
+                    Some(path)
+                }
+                Err(_) => {
+                    command.stdout(Stdio::null()).stderr(Stdio::null());
+                    None
+                }
+            }
+        };
         let mut child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {}: {e}", bin.display()));
@@ -377,6 +397,7 @@ impl TestServer {
             http_port,
             port_file,
             upload_dir,
+            log_file,
             seam_dir: None,
             fixed_account_password,
             test_profile_publish_token,
@@ -439,11 +460,35 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+        if let Some(log_file) = &self.log_file {
+            if std::thread::panicking() {
+                print_log_tail(self.http_port, log_file);
+            }
+            let _ = std::fs::remove_file(log_file);
+        }
         let _ = std::fs::remove_file(&self.port_file);
         let _ = std::fs::remove_dir_all(&self.upload_dir);
         if let Some(directory) = &self.seam_dir {
             let _ = std::fs::remove_dir_all(directory);
         }
+    }
+}
+
+/// Print the last lines of a server's captured output to stderr, where the
+/// test runner reports it with the failing test.
+fn print_log_tail(http_port: u16, log_file: &std::path::Path) {
+    let Ok(contents) = std::fs::read_to_string(log_file) else {
+        return;
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(FAILURE_LOG_TAIL_LINES)..];
+    eprintln!(
+        "---- waddle-server on port {http_port}: last {} of {} output lines ----",
+        tail.len(),
+        lines.len()
+    );
+    for line in tail {
+        eprintln!("{line}");
     }
 }
 

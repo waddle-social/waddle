@@ -280,7 +280,11 @@ frames reach offline delivery when it expires.
 A detach or a resume on the holder leaves the claim epoch unchanged, so a
 session resumed on the holder between this node's last read of the row and
 its swap is taken from a live owner. That owner is superseded like any
-other: its next write fails.
+other: its next write fails. The taking node reads the session again once it
+holds the claim and resolves the principal from that read, because the
+superseded resume stored its own connection's principal; resolving the one
+read before the swap would refuse this resume too, and two racing resumes
+would both fail instead of one completing.
 
 A write refused because the claim row is gone (`ClaimFenceMissing`) retires
 the binding that named it. A claim never returns to a binding that lost it,

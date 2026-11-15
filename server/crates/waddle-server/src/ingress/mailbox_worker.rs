@@ -140,8 +140,14 @@ impl IngressAuthority {
             .uow
             .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
             .await?;
+        // Every `Idle` outcome below has only read, and it ends the
+        // transaction before returning. Dropping it instead would queue the
+        // rollback on a background task, and until that task runs the lane
+        // stays row-locked, so the next claim of the lane by any worker
+        // (`SKIP LOCKED`) would see it as held and report `Idle` as well.
         let Some(locked) = MailboxRepository::claim_backlogged_lane(&mut tx, lane, target).await?
         else {
+            tx.commit().await?;
             return Ok(MailboxLaneHead::Idle);
         };
         let Some(entry) = MailboxRepository::read_after_cursor(&mut tx, &locked, 1)
@@ -149,12 +155,14 @@ impl IngressAuthority {
             .into_iter()
             .next()
         else {
+            tx.commit().await?;
             return Ok(MailboxLaneHead::Idle);
         };
         if entry.disposition != MailboxEntryDisposition::Pending
             || entry.dead_letter.is_some()
             || MailboxRepository::attempt_deferred(&mut tx, &entry).await?
         {
+            tx.commit().await?;
             return Ok(MailboxLaneHead::Idle);
         }
         // An entry whose parent is a direct request is prepared from that
@@ -199,7 +207,10 @@ impl IngressAuthority {
                 return Ok(MailboxLaneHead::ReadyRequest(Box::new(claimed)));
             }
             #[cfg(not(feature = "clustering"))]
-            return Ok(MailboxLaneHead::Idle);
+            {
+                tx.commit().await?;
+                return Ok(MailboxLaneHead::Idle);
+            }
         };
         let room = match locked.key().encoding().decode() {
             Ok(MailboxLaneIdentity {

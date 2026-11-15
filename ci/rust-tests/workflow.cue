@@ -40,8 +40,15 @@ let _setupSteps = [
 	for contributor in [wc.#Nix, wc.#FlakeHubCache, wc.#Hestia]
 	for task in contributor.tasks {
 		name: task.label
-		uses: task.provider.github.uses
-		with: task.provider.github.with
+		// A contributor task is either a GitHub Action or a shell script.
+		if task.provider != _|_ {
+			uses: task.provider.github.uses
+			with: task.provider.github.with
+		}
+		if task.provider == _|_ {
+			shell: "bash"
+			run:   task.script
+		}
 	},
 ]
 
@@ -59,7 +66,7 @@ workflow: {
 			// Namespace documents privileged runner containers for Nix mount
 			// and user namespaces. Each job still has its own ephemeral VM.
 			"runs-on": [
-				"nscloud-ubuntu-24.04-amd64-32x64-with-features",
+				"nscloud-ubuntu-24.04-amd64-16x32-with-features",
 				"namespace-features:container.privileged=true;job.priority=1",
 			]
 			"timeout-minutes": 60
