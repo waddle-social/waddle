@@ -662,7 +662,10 @@ which pass the same issuance rules as any grant, and retirement stamps
 ledger and nothing else, so PostgreSQL refuses either on a runtime handle
 before anything is changed, and the store reports `OwnerPhaseRequired`. A
 retirement that finds no generation left has stamped the ledger and closes
-the scope as exhausted.
+the scope as exhausted. Serving replicas learn of an enrollment within one
+reload of their enrolled set, and the enrollment procedure waits for that
+before the scope is relied on ([enrolling a
+scope](#rollout-part-of-the-writer-fence-g24)).
 
 The owner phase refuses a schema with a relation the matrix does not classify
 and a runtime role that already holds a privilege beyond it.
@@ -1154,66 +1157,112 @@ grant of an account of a domain the replica does not serve honoured as no
 grant. `HostGrantGate` (`permissions/host_grant/gate.rs`) is that decision
 outside room-manifest acceptance. For a room it answers:
 
-- *unmanaged*: no enrolled scope manages the room, and the surface keeps
-  its existing checks;
-- *managed*: the room's canonical grants, read in one bounded
-  `REPEATABLE READ` snapshot that takes no row lock
-  (`HostGrantStore::room_grants`), together with the account domains the
-  replica serves;
-- *unavailable*: the store could not be read, the room's address is not in
-  the identity profile's canonical form, or the replica holds no verified
-  attachment (B1). Every surface fails closed on it.
+- *unmanaged*: the replica's enrolled set (below) does not name the room,
+  and the surface keeps its existing checks. Nothing is read from
+  PostgreSQL for it;
+- *managed*: the room's canonical grants, read in one `REPEATABLE READ`
+  snapshot that takes no row lock (`HostGrantStore::room_grants`), bounded
+  by 500 ms for a lock, 1 s for a statement and 1.5 s for the whole read,
+  together with the account domains the replica serves;
+- *unavailable*: the enrolled set has not loaded, the room's address
+  reaches an enrolled room in a form that is not the identity profile's
+  canonical form, the grants could not be read within the bounds, or the
+  replica holds no verified attachment (B1). Every surface fails closed on
+  it. A room address that is not canonical and reaches no enrolled room is
+  unmanaged.
 
-The gate holds the same attachment as the ingress unit of work: a replica
-that attaches to the store attaches both, from one check, and the served
-account domains both use come from that attachment. On SQLite, and on a
-PostgreSQL schema without the host-grant relations, every room is
-unmanaged. Legacy tuples, durable room affiliations, PubSub affiliations
-and subscriptions, Space membership, deployment roles and the room actor's
-own affiliation list admit nothing in a managed room.
+Enrolled set. Whether a channel, a room address or a Space node belongs to
+an enrolled scope is answered from the replica's in-memory copy of the
+enrolled set (`EnrolledScopes`, `permissions/host_grant/enrolled.rs`): the
+room bindings and Space nodes of every scope, retired ones included, each
+with its scope lifecycle. It is read in one background snapshot under the
+read bounds of the store (5 s for a lock, 10 s for a statement), never on a
+request path:
+
+- A PostgreSQL replica loads it before it serves: startup retries the load
+  every second for up to 30 s and exits if it cannot load it, like a replica
+  whose database is unreachable at startup. A schema without the host-grant
+  relations holds no scope, and every object is unmanaged there.
+- It is reloaded every 5 seconds (`ENROLLED_SET_REFRESH_INTERVAL`). A reload
+  that fails keeps the set loaded before, so a room outside the set keeps
+  its legacy checks while PostgreSQL is unreadable; only managed rooms,
+  whose grants are read per decision, fail closed then. A reload that finds
+  the host-grant relations gone after a load is a failed reload too, never
+  a schema without scopes: migrations only add them.
+- Until the first load succeeds, every channel, room address and Space node
+  is undecided and fails closed, on every surface and in the permission
+  actor's legacy reads; a reader waits up to 2 s for that load before it
+  answers.
+- Enrollment only adds to the set: a room binding is immutable and a
+  retired scope's objects stay enrolled. A scope enrolled on any replica is
+  therefore managed on each replica within one refresh interval, and
+  decided as unmanaged there until then. Room-manifest acceptance reads the
+  bindings in its own transaction (first slice) and is not delayed.
+
+The gate holds the same attachment as the ingress unit of work: a replica that
+attaches to the store attaches both, from one check, and the served account
+domains both use come from that attachment. The gate and the permission actor
+share one enrolled set. On SQLite, and on a PostgreSQL schema without the
+host-grant relations, every room is unmanaged. Legacy tuples, durable room
+affiliations, PubSub affiliations and subscriptions, Space membership,
+deployment roles and the room actor's own affiliation list admit nothing in a
+managed room.
 
 ### B1: writer and reader exclusion (G11)
 
 Reader exclusion. The permission actor answers no legacy read of a managed
 room's channel or of an enrolled scope's Space: `CheckPermission` is not
 allowed, and `ListRelations`, `ListSubjects` and `LookupSubjects` are empty;
-`LookupResources` leaves such objects out. The answer is decided from
-PostgreSQL on every read, with the bounds of the first slice's write
-refusal (500 ms lock, 1 s statement), and a store that cannot be read fails
-the read. So a projection that holds a managed room's affiliations, a
-relationship an older binary or an operator tool wrote, and relation-name
-checks (`owner`, `member`, `outcast`, which subtract no ban) decide nothing
-there, whichever surface asks. Surfaces that serve managed rooms ask the gate
-instead; a surface this slice did not convert therefore denies a managed
-room rather than deciding it from the graph.
+`LookupResources` leaves such objects out. The answer is decided from the
+replica's enrolled set, in memory, so no legacy read waits on PostgreSQL
+inside the permission actor's mailbox; until the set has loaded, a read of a
+channel or a Space object fails (other objects are unaffected). Legacy writes
+are still refused from PostgreSQL on every write (first slice). So a
+projection that holds a managed room's affiliations, a relationship an older
+binary or an operator tool wrote, and relation-name checks (`owner`, `member`,
+`outcast`, which subtract no ban) decide nothing there, whichever surface
+asks. Surfaces that serve managed rooms ask the gate instead; a surface this
+slice did not convert therefore denies a managed room rather than deciding it
+from the graph.
 
 Writer exclusion. Every writer the fresh sweep found that can write channel,
 Space, room or PubSub grant state is listed here with its disposition for an
-enrolled scope. *Store* means it goes through the host-grant store;
+enrolled scope, together with the readers that decide a protected effect or
+disclose a managed room. *Store* means it goes through the host-grant store;
 *refused* means it changes nothing for an enrolled scope and answers an
-error or skips; *out of scope* names why the writer cannot reach grant state
-of an enrolled scope.
+error or skips; *gate* means it decides from the canonical grants (B2);
+*out of scope* names why the writer cannot reach grant state of an enrolled
+scope.
 
-| Writer | Disposition for an enrolled scope |
+| Writer or reader | Disposition for an enrolled scope |
 | --- | --- |
 | Permission actor `WriteTuple`, `DeleteTuple`, `ReplaceExclusiveRelation`, `SwapExclusiveRelation` (every legacy caller below) | Refused (first slice): object, Space subject or channel subject of an enrolled scope. |
 | XEP-0045 affiliation change (`iq/muc_admin.rs`, graph-first `persist_managed_channel_affiliation` and its `SwapExclusiveRelation` rollback) | Store: the change is recorded in the host-grant store before the room actor applies it; no relationship is written and nothing is rolled back. The graph-first write and its rollback remain for unmanaged channels only. |
 | XEP-0045 role change and moderator role | Authority from the store (`moderate`); the moderator role is granted to served accounts only. Roles are occupancy, not grants. |
 | XEP-0045 owner configuration (`muc_owner_config.rs` channel owner tuple) | Store authority (`manage`); writes no owner relationship; members-only is kept. |
 | XEP-0045 destroy | Refused: no room affiliation confers `delete`; a managed room ends when its scope is retired. |
-| Mediated invitation (`message/muc_invite.rs` member grant, its rollback and rebuild) | Refused when planned; an invitation accepted before enrollment is delivered without granting membership. |
-| Room actor durable affiliations (`muc_durable`, `ChangeAffiliation`, `ApplyAdminItems`, resolver sync) | Out of scope as grants: for a managed room the actor's list is a mirror written only from canonical decisions (join resolution, administration after its canonical commit). Admission never reads it. |
+| Mediated invitation (`message/muc_invite.rs` member grant, its rollback and rebuild) | Refused when planned; an invitation accepted before enrollment is delivered without granting membership. Its rollback writes neither the legacy relation nor the room actor's list of a managed room, or of a room whose management cannot be told. |
+| Group-DM invitation rollback (`message/group_dm_invite.rs`) | Refused for an identifier that is a managed room's channel, or whose enrollment cannot be told: it writes nothing there. |
+| Room actor durable affiliations (`muc_durable`, `ChangeAffiliation`, `ApplyAdminItems`, resolver sync) | Out of scope as grants: for a managed room the actor's list is a mirror written only from canonical decisions (join resolution, administration after its canonical commit, and the repair below). Admission never reads it. |
+| Mirror repair (`iq/muc_admin_host_grant.rs` `MirrorRepair`) | Store-derived: when the room actor did not apply a recorded change (refused, failed, timed out, ambiguous), each changed subject's entry is set to its recorded grant in the background, after 0.25, 1, 4, 16 and 60 s until an attempt succeeds. |
+| Claim-move re-seating (`clustering/route_bridge/mailbox.rs`) | Gate: a recovered occupant is seated again only while its grants allow `read`, with the standing they honour and the moderator role only with `moderate`; the room is not seated when the grants cannot be read. |
+| Room actor configuration (every actor the room registry spawns) | Members-only binding: an actor spawned for a room the enrolled set names, or while it is unknown, keeps `members_only` through its creation spec, durable restores and configuration changes (`RoomActor::with_members_only_binding`, asked through the durable membership source). |
 | Admin channel commands (`admin/channels.rs`: update, delete, set-affiliation, kick, occupants, affiliations, creation in an enrolled Space) | Refused. |
 | Admin Space commands (`admin/spaces.rs`: update, delete and its cascade, members, set-role, create on an enrolled node) | Refused; a Space deletion whose cascade would reach a managed room is refused whole. |
 | Group-DM member mirror (`admin/channels.rs` direct SQL on `permission_tuples` and its actor pair) | Refused before either statement for an identifier that is a managed room's channel. |
-| Spaces publish, retract and bookmark cleanup (`iq/spaces_publish.rs`, `iq/spaces_retract.rs`, `iq/spaces_bookmark_cleanup.rs`) and channel-space links | Refused for a managed room and for an enrolled Space node. |
+| Spaces publish, retract and bookmark cleanup (`iq/spaces_publish.rs`, `iq/spaces_retract.rs`, `iq/spaces_bookmark_cleanup.rs`) and channel-space links | Refused for a managed room and for an enrolled Space node. Placing any other channel follows the placement rule (B2). |
 | PubSub on the Spaces service (`iq/pubsub_dispatch.rs`, `iq/pubsub_admin.rs`: create, configure, delete, purge, affiliations, subscriptions, publish, retract, items, subscribe) | Refused for an enrolled Space node; leaving a subscription is kept. Request kinds the build does not classify are refused on the Spaces service. |
 | Owner reseed (`spaces_pubsub_seed.rs`, from topology, node creation and admin Space creation) | Retired as an overwriting writer for every node: an existing outcast is kept, in one conditional statement. Enrolled Space nodes are never seeded. |
 | Topology bootstrap (`server/topology.rs`: channel rows, General Space, bookmarks, parent tuples, room actor configuration) | Refused for managed rooms and an enrolled General Space; managed rooms' actors are opened members-only. |
 | Join parent repair (`presence/muc/access.rs`) | Refused: a managed room is resolved from the store before any repair. |
 | Spaces items backfill (`iq/spaces_items.rs`) | Refused for an enrolled Space node (PubSub refusal); the parent writes it would make for a managed room are refused by the actor. |
 | Extension route reads (`iq/extension_route_items.rs` member affiliation on room-bound nodes) | Refused for a managed room: it serves no extension state. |
-| Extension PubSub publication (`extension_commands/pubsub.rs`) | Decided from the store for a managed room's channel; no explicit affiliation is an extension's, so none is admitted. |
+| Extension PubSub publication (`extension_commands/pubsub.rs`) | Refused for a managed room's channel, and for one whose enrollment cannot be told: such a room serves no extension state. |
+| Extension bot seating (`interpret/bot.rs`) | Refused: no grant is an extension bot's, so a bot is never seated in a managed room. |
+| Legacy permission reads (`CheckPermission`, `ListRelations`, `ListSubjects`, `LookupSubjects`, `LookupResources`) | Answer nothing for an enrolled object, decided from the enrolled set; fail before it has loaded. |
+| Extension host tools (`extension_host_adapter`: room send, archive query, member and channel lists, Space list) | Gate, with no deployment-owner fallback; an enrolled Space node is left out of the Space list. |
+| XEP-0425 moderation, call setup, pin list, room system messages | Gate (B2). |
+| Channel search, Spaces node disco#info, admin channel and Space listings | Gate (B2): a managed room is disclosed only to a subject with `view`, and an enrolled Space node to nobody. |
 | `set_room_affiliation` facade (`xmpp_permission_state.rs`, `xmpp_state.rs`, `waddle-xmpp` `AppState`) | Retired: removed. |
 | Account bootstrap and reconciliation (`server/bootstrap_membership.rs`) | Out of scope as a scope writer: it writes deployment relations only. Deployment ownership is provisioned only for an account of the served domain (D8). |
 | Host-grant projection (`WriteHostGrantProjection`) | Store: the only writer of an enrolled scope's affiliation family (first slice). |
@@ -1237,11 +1286,37 @@ The sweep is lexical and the table is its review, not a call graph.
 | Role change | `moderate` |
 | Owner configuration | `manage` |
 | Destroy | `delete`, which no affiliation confers |
-| Channel permission checks (extension PubSub, extension route reads) | `view`, `read`, `send_message`, `moderate`, `manage`, `delete` map to the table; any relation name or other permission is refused. The default channels' deployment-membership fallback does not apply. |
+| XEP-0425 moderation | `moderate`; the occupant role the room actor holds decides nothing. |
+| Call setup (LiveKit token) | `send_message`, at every verification of the call; the occupant's voice still bounds the media capabilities. |
+| Pin list | `read` |
+| Room system messages (pin and unpin notices, call-thread anchors and endings) | Archived as the room's own; delivered to the seated occupants whose grants allow `read`. |
+| Channel search | `view`; nobody else is shown the room. |
+| Admin channel listing | `view`; the community-owner role the command needs is not a grant. A listed room shows members-only and its recorded grants as counts. |
+| Spaces node disco#info, admin Space listing, extension Space list | An enrolled Space node is described to nobody: no grant of the scope is a Space's, so no `view` of it can be decided, and its name, owners and counts are PubSub state the scope does not consult. |
+| Channel permission checks (extension host tools, extension route access) | `view`, `read`, `send_message`, `moderate`, `manage`, `delete` map to the table; any relation name or other permission is refused. Neither the default channels' deployment-membership fallback nor the host adapter's deployment-owner fallback applies, so a ban denies everything. |
+| Extension state (room-bound extension nodes, extension PubSub publication) | Not served. |
+| Extension bots | Never seated. |
 
 Extension observers in a managed room observe nothing: the acceptance drops
 them like any other unadmitted reader (first slice), its room-bound
 extension nodes are not served, and extension bots hold no grant.
+
+Channel placement in a Space (every room no scope manages). Publishing a
+room's bookmark to a Space node moves the channel's link to the node and
+writes the Space as its parent, so it is decided in code from explicit
+relationships, alike on every permission backend
+(`iq/spaces_publish.rs`):
+
+- A publish that moves no authority needs only the Space node's own
+  rights: the channel's link or a parent relationship names the node, and
+  neither names another Space. When the link and a parent disagree, the
+  publish would move one of them, and the rule below applies.
+- Otherwise the publisher holds an owner, admin or manager relationship on
+  the channel, or an owner or admin relationship on a Space that is the
+  channel's parent now (the authority the channel inherits from its current
+  Space), and is not the channel's outcast; or the publisher is the
+  deployment owner, who can place any channel through the channel
+  administration commands.
 
 Remote privilege (D8). Every surface above honours a privileged or moderator
 grant only for an account of a domain the replica serves, as the first
@@ -1286,37 +1361,64 @@ change stays recorded, and it is what every admission reads.
   ejection and the presence an occupant still sees until then are the
   revocation fence's (W5d), which defines what a revoke's acknowledgement
   promises.
-- **Protected reads.** An archive page and a room description are admitted
-  by a decision taken after they were read: the gate is asked before the
-  read (to refuse early) and again after, and the response is sent only if
-  the second decision admits it. Its snapshot follows every read the response
-  holds, so nothing read after a revoke that committed before the decision is
-  sent; a response admitted before a revoke may still be sent after the
-  revoke's acknowledgement, as already accepted work. Neither decision holds
-  a lock, so no read delays a mutation.
+- **Protected reads.** An archive page and a room description are admitted by
+  a decision taken after they were read: the gate is asked before the read (to
+  refuse early) and again after, and the response is sent only if the second
+  decision admits it. A pin list is decided once, after it was read. Its
+  snapshot follows every read the response holds, so nothing read after a
+  revoke that committed before the decision is sent; a response admitted
+  before a revoke may still be sent after the revoke's acknowledgement, as
+  already accepted work. Neither decision holds a lock, so no read delays a
+  mutation.
 - **PubSub and stream-management fan-out.** No PubSub admission identity is
   built: the Space node of an enrolled scope and the room-bound extension
-  nodes of managed rooms accept no subscription, publication or items
-  request, and fan-out from an enrolled Space node delivers nothing to a
-  live queue or a detached stream-management buffer. A subscriber list
-  captured for those nodes is therefore never acceptance, because nothing is
-  delivered from it. Serving a scope's Space through PubSub needs that
-  identity and is not built; the revocation slice's #2056 control is its
-  evidence for unenrolled Spaces.
+  nodes of managed rooms accept no subscription, publication or items request,
+  and fan-out from an enrolled Space node delivers nothing to a live queue or
+  a detached stream-management buffer. Fan-out recognises the Spaces and
+  extensions services by the node's owner, not by the request's PEP
+  classification, which a request addressed to a service also carries. When
+  whether a Spaces node is enrolled cannot be told, fan-out asks once more and
+  then drops the event, logging only that a Space node's event was dropped. A
+  subscriber list captured for those nodes is therefore never acceptance,
+  because nothing is delivered from it. Serving a scope's Space through PubSub
+  needs that identity and is not built; the revocation slice's #2056 control
+  is its evidence for unenrolled Spaces.
 - **Queued work.** The groupchat audience is the first slice's manifest
   acceptance. Invitations, which would queue a membership grant, are refused.
   Room effects of an administration request are produced by the room actor
   after the canonical commit, from the change that was recorded.
+- **Room system messages.** The room's own message is archived like any
+  groupchat; its audience is the room actor's seated occupants reduced to
+  those whose grants allow `read`, decided after the actor's snapshot and
+  before the route intents are captured, so a recovered delivery replays the
+  reduced audience. When the grants cannot be read nothing is archived or
+  sent, and the caller's own retry applies (a call-thread ending is
+  retried from its persisted fence). A system message planned inside a
+  room-manifest acceptance is refused by the first slice's plan reduction.
+- **Call tokens.** A call is verified on the replica that receives it, on
+  the room's owner when relayed, and again before the token is released;
+  each verification asks the gate for `send_message`, so a revoke that
+  commits before the last one withholds the token. A token already released
+  stays valid until the media server ends it; that is the revocation slice's
+  (W5d).
+- **Mirror of the room actor.** The actor's affiliation list follows the
+  canonical grants, never the other way: administration applies a change
+  only after its commit, a change the actor did not apply is repaired from
+  the recorded grants in the background, invitation rollbacks do not write
+  it, and a room re-seated after a claim move seats only occupants whose
+  grants allow `read`, with their canonical standing.
 - **Room-bound extension nodes of unmanaged rooms** are decided by the room
   as it stands: subscribe and event delivery need the channel's `view` and
   no ban, publication its `send_message`, whatever PubSub affiliation an
-  earlier read left.
+  earlier read left. A fan-out resolves the node's room and its enrollment
+  once per event and asks each subscriber's right in that room.
 
 ### B4: lock order of the surfaces (G12)
 
-- The gate's reads and the actor's reader and writer refusals take no row
-  lock; they read the scope's guard row without `FOR SHARE`. A mutation never
-  waits for them and they never wait for one.
+- The gate's reads, the enrolled set's background reload and the actor's
+  writer refusal take no row lock; they read the scope's guard row without
+  `FOR SHARE`. A mutation never waits for them and they never wait for one.
+  The actor's reader refusal reads no database at all.
 - An affiliation change is a store transaction with the first slice's order
   (protocol epoch row shared, the scope guard exclusive, host-grant rows) and
   its bounds (3 s lock, 5 s statement, `Busy` after). It takes no ownership
@@ -1325,8 +1427,8 @@ change stays recorded, and it is what every admission reads.
   the handler holds is taken before the store transaction and is not a
   PostgreSQL lock.
 - The projection reconciliation of a recorded change runs on a task of its
-  own after the commit, outside every lock, as does the recovery pass a
-  replica runs when it attaches.
+  own after the commit, outside every lock, as do its retries, the mirror
+  repair and the recovery pass a replica runs when it attaches.
 - Fresh-manifest acceptance keeps the first slice's order; no surface of this
   slice takes the guard shared.
 
@@ -1338,68 +1440,145 @@ or a socket write.
 The only fenced writer that records grants is the XEP-0045 affiliation
 change. Each recorded change starts one reconciliation pass of its scope
 (`HostGrantAuthority::reconcile`) without waiting for it; the reply reports
-the recorded change. A replica that attaches to the store runs one recovery
-pass (`HostGrantAuthority::recover_pending`) and logs its outcome by kind.
-A pass that cannot finish leaves the increase recorded and not effective;
-reductions are effective at their commit regardless. No other writer writes
+the recorded change. A pass that does not finish (the projection did not
+answer, another operation got ahead, the store failed) is repeated after
+1, 2, 4, 8, 16 and 32 s; a contradiction, and a scope that was retired,
+exhausted or bound to another incarnation or policy version, is not
+retried. A replica that attaches to the store runs one recovery pass
+(`HostGrantAuthority::recover_pending`) and logs its outcome by kind. A
+change whose passes all fail stays recorded and not effective until the
+scope's next reconciliation; reductions are effective at their commit
+regardless. No other writer writes
 the projection, and no admission reads it.
 
 ### Rollout part of the writer fence (G24)
 
 With no scope enrolled, these changes alter behaviour for every room:
 
+- A PostgreSQL replica loads the enrolled set before it serves: startup
+  retries the load every second for up to 30 s and exits if it cannot load
+  it. The set is then reloaded every 5 s in the background, one read-only
+  snapshot of two small relations.
 - Every permission check, relation and subject listing of a channel or Space
-  object now reads PostgreSQL once, as the first slice's writes do, and fails
-  when the host-grant store cannot be read (PostgreSQL deployments only).
-- Every room join, archive query, room disco#info, MUC and Spaces service
-  listing, owner IQ, MUC administration request, mediated invitation, Spaces
-  publish and retract, PubSub request on the Spaces service and fan-out from
-  it, and admin channel or Space command makes one bounded host-grant read,
-  and fails closed when it cannot be made.
-- A Spaces publish of an existing channel needs the channel's `manage`
-  permission or deployment ownership, unless the channel already belongs to
-  that Space by its link or its parent relationship (all rooms).
+  object is answered from that set in memory; it fails only while the set
+  has never loaded. Legacy writes still read PostgreSQL once per object
+  (first slice).
+- Every surface the gate decides (joins, archive and pin reads, room
+  disco#info, service and Spaces listings, channel search, owner and
+  administration IQs, moderation, call setup, room system messages,
+  invitations, Spaces publish and retract, Spaces PubSub and its fan-out,
+  extension host tools, extension bots and state, admin channel and Space
+  commands) decides an unmanaged room in memory, with no PostgreSQL read,
+  and keeps its existing checks; it fails closed only while the set has
+  never loaded. A room address that is not canonical and reaches no
+  enrolled room keeps its existing checks too.
+- A Spaces publish of an existing channel follows the placement rule (B2):
+  a publish that names a Space the channel's link and parents already name,
+  and no other, needs no more than before; otherwise the publisher is an
+  owner, admin or manager of the channel, an owner or admin of one of its
+  current parent Spaces, or the deployment owner, read from explicit
+  relationships whatever the permission backend computes for `manage`.
 - Subscribing to, receiving events from and publishing to a room-bound
   extension node follow the room's current right (all rooms).
 - The owner reseed no longer lifts a ban on any node; Owner seeds and
   deployment ownership are written only for accounts of the served domain.
+  A Spaces node creation whose account domain yields no seed issuance
+  policy seeds no owner, and an admin Space creation is refused before
+  anything is written.
 - `AppState::set_room_affiliation` is removed from `waddle-xmpp`.
 
 A binary built before this slice decides managed rooms from the legacy
 stores on these surfaces. Retiring such binaries before any scope is
 enrolled is part of the rollout and activation runbooks (G24, G22).
 
+Enrolling a scope (owner phase). A replica decides the scope's rooms as
+unmanaged until its next reload of the enrolled set, at most
+`ENROLLED_SET_REFRESH_INTERVAL` (5 s) after the enrollment commits; only
+room-manifest acceptance fences them at once. The enrollment procedure
+therefore enrolls with every serving replica running this slice's binary,
+waits at least one refresh interval after the enrollment transaction
+commits (longer while any replica logs that the enrolled set could not be
+refreshed), and only then relies on the scope: announces its rooms, makes
+grants or retires the legacy state of its rooms.
+
 ### Evidence of the writer fence
 
-Written, compiled, not executed:
+The suites, all under `crates/waddle-server/tests/`:
 
-- `tests/xep0045_host_grant_fence.rs` (PostgreSQL): joins, archive reads and
-  disco follow the grants; administration is recorded in the store and writes
-  no relationship, with D8 refusal, one change per request, member and mirror
-  authority refused, owner configuration and destroy; invitations and Space
-  PubSub grant nothing; legacy reads of an enrolled channel or Space answer
-  nothing; durable membership is the admitted grants; the owner reseed keeps
-  bans, skips enrolled Space nodes and refuses remote privileged seeds.
-- `tests/xep0503_channel_placement.rs`: channel placement in a Space.
-- `tests/xep0060_extension_route_room_access.rs`: room-bound extension nodes
+- `xep0045_host_grant_fence.rs` (PostgreSQL), on a WebSocket state wired as
+  a PostgreSQL deployment (a fenced permission actor, one enrolled set
+  shared with the gate, room actors with the members-only binding): joins,
+  archive reads and disco follow the grants; administration is recorded in
+  the store and writes no relationship, with D8 refusal, one change per
+  request, member and mirror authority refused, owner configuration and
+  destroy; invitations and Space PubSub grant nothing; legacy reads of an
+  enrolled channel or Space answer nothing; durable membership is the
+  admitted grants; the owner reseed keeps bans, skips enrolled Space nodes
+  and refuses remote privileged seeds. Its `sinks` cases cover XEP-0425
+  moderation by a stale mirror moderator, the pin list after a ban, a
+  room system message reaching only readers, channel search, Spaces and
+  service discovery, Spaces retract, a managed room without a channel row,
+  an unattached replica, extension bots, the extension host (a ban and the
+  deployment owner), admin refusals including a Space-deletion cascade,
+  admin listings, the group-DM writers, the read re-decision after a ban,
+  a lost commit reply read back, a change overtaken by another recorded
+  at the current generation, fan-out from an enrolled Space node delivering
+  nothing whatever the request's PEP classification, the moderator role
+  refused to a seated remote occupant, and the topology bootstrap leaving
+  an enrolled default channel and General Space alone.
+- `host_grant_enrolled_set.rs` (PostgreSQL): loading, refresh after an
+  enrollment, a failed refresh and vanished relations keeping the set, a
+  schema without the relations, non-canonical addresses, the gate without
+  an attachment, and legacy reads before the first load.
+- `spaces_pubsub_owner_seed.rs`: the owner seed's writes, idempotence, kept
+  bans and refused subjects.
+- `xep0503_channel_placement.rs`: the placement rule, including authority
+  inherited from the channel's current Space, a destination Space owner
+  without it, and a link that disagrees with the channel's parent.
+- `xep0060_extension_route_room_access.rs`: room-bound extension nodes
   after a ban.
+
+They run like the first slice's focused set (above), with this filter:
+
+```sh
+cargo nextest run -p waddle-server --features test-support --locked \
+    --run-ignored all \
+    -E 'binary(xep0045_host_grant_fence) | binary(xep0503_channel_placement) | binary(xep0060_extension_route_room_access) | binary(host_grant_projection) | binary(host_grant_enrolled_set) | binary(spaces_pubsub_owner_seed)'
+```
+
+`xep0045_host_grant_fence` and `host_grant_enrolled_set` need PostgreSQL
+only, and each case creates and drops its own database;
+`host_grant_projection` needs both stores; `xep0503_channel_placement`,
+`xep0060_extension_route_room_access` and `spaces_pubsub_owner_seed` run
+on the in-memory test state. The set was executed on 2026-11-15 against
+PostgreSQL 17.11 and SpiceDB 1.56.1 (memory datastore) with nextest's
+default parallelism and passed 59 of 59 cases.
+
+The recovery pass a replica runs when it attaches is covered by the first
+slice's suites (`xep0045_host_grant_admission.rs`, `host_grant_projection.rs`).
+Not covered by a test: the call-token gate (the fenced state configures no
+media server), the mirror repair, claim-move re-seating and the invitation
+rollbacks (they need actor-failure injection or clustering), and the
+reconciliation retries.
 
 The acceptance-matrix rows marked W5c map to them as follows: "Delayed
 repair or compensation by any other writer" to the administration and
 reseed cases (the rollback is gone for managed rooms, and every other
 compensation path is a refused legacy write); "Bootstrap, owner reseed and
-actor restoration after revoke/Outcast" to the reseed case and the banned
-member's join with a stale mirror; "Space, room or node deletion and
-recreation" to the destroy and Space PubSub cases (recreation of a scope is
-not built); "Privileged or moderator grant ... written by bootstrap or
-repair" to the reseed case. None of them yet uses two replicas; that is
-verification step 4.
+actor restoration after revoke/Outcast" to the reseed and topology cases
+and the banned member's join with a stale mirror; "Space, room or node
+deletion and recreation" to the destroy, Space-deletion cascade and Space
+PubSub cases (recreation of a scope is not built); "Privileged or moderator
+grant ... written by bootstrap or repair" to the reseed case. None of them
+yet uses two replicas; that is verification step 4.
 
 ### Not decided here
 
 - Occupant ejection and presence after a revoke (W5d).
 - A PubSub admission identity for serving an enrolled Space (needed before a
-  scope's Space is served; W7a depends on it).
+  scope's Space is served; W7a depends on it), and with it what `view` of a
+  scope's Space means: until then its node is described and listed to
+  nobody.
 - Remote principals at these surfaces (W5e, W6a).
 - Recreation of a scope, a room or a node under a new lifecycle.
 - A deployment-wide policy guard; the first slice's community generation
