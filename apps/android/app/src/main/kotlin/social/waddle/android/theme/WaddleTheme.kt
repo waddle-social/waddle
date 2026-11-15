@@ -51,6 +51,8 @@ data class WaddleColors(
     val border: Color,
     /** Hairline separators between regions; quieter than [border]. */
     val borderSoft: Color,
+    /** The 3:1 edge for inputs, the composer and unchecked switches. */
+    val borderStrong: Color,
     val fg: Color,
     val fgMuted: Color,
     /** Placeholder and tertiary text; not for anything that must be read. */
@@ -132,6 +134,7 @@ private object NightPalette {
         surfaceCode = h.surfaceCode,
         border = h.border,
         borderSoft = h.borderSoft,
+        borderStrong = h.borderStrong,
         fg = h.fg,
         fgMuted = h.fgMuted,
         fgSoft = h.fgSoft,
@@ -188,6 +191,7 @@ private object DaylightPalette {
         surfaceCode = h.surfaceCode,
         border = h.border,
         borderSoft = h.borderSoft,
+        borderStrong = h.borderStrong,
         fg = h.fg,
         fgMuted = h.fgMuted,
         fgSoft = h.fgSoft,
@@ -331,6 +335,7 @@ internal fun WaddleColors.withWallpaper(m: ColorScheme): WaddleColors = copy(
     surfaceCode = m.surfaceContainerLowest,
     border = m.outlineVariant,
     borderSoft = m.outlineVariant,
+    borderStrong = m.outline,
     fg = m.onSurface,
     fgMuted = m.onSurfaceVariant,
     fgSoft = m.outline,

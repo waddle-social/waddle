@@ -1,6 +1,8 @@
 package social.waddle.android.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,15 +10,16 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
-import androidx.compose.material3.ButtonGroupDefaults
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItemColors
@@ -27,17 +30,18 @@ import androidx.compose.material3.SwitchColors
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldColors
-import androidx.compose.material3.ToggleButton
-import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import social.waddle.android.theme.Waddle
 
 /**
@@ -141,41 +145,40 @@ fun RowChevron() {
 }
 
 /**
- * Huddle switch colours, one recipe in both themes: on is a teal knob
- * on a teal-washed track, off is a soft knob on the raised surface.
- * Never a near-black knob on a bright track.
+ * Polar Huddle switch (web `wd-switch`): on is the action track with an
+ * action-fg knob; off is a muted knob on surface 2 inside a strong edge.
  */
 @Composable
 fun huddleSwitchColors(): SwitchColors {
     val colors = Waddle.colors
     return SwitchDefaults.colors(
-        checkedThumbColor = colors.action,
-        checkedTrackColor = colors.actionSubtle,
+        checkedThumbColor = colors.actionFg,
+        checkedTrackColor = colors.action,
         checkedBorderColor = colors.action,
-        checkedIconColor = colors.actionFg,
-        uncheckedThumbColor = colors.fgSoft,
+        checkedIconColor = colors.action,
+        uncheckedThumbColor = colors.fgMuted,
         uncheckedTrackColor = colors.surface2,
-        uncheckedBorderColor = colors.border,
+        uncheckedBorderColor = colors.borderStrong,
         uncheckedIconColor = colors.surface2,
     )
 }
 
-/** Huddle text fields: radius 10, quiet border, teal focus, readable labels. */
+/** Polar Huddle text fields (web `wd-input`): radius 12, a 3:1 edge, floe focus, readable labels. */
 @Composable
 fun huddleFieldColors(): TextFieldColors {
     val colors = Waddle.colors
     return OutlinedTextFieldDefaults.colors(
         focusedTextColor = colors.fg,
         unfocusedTextColor = colors.fg,
-        focusedBorderColor = colors.action,
-        unfocusedBorderColor = colors.border,
-        focusedLabelColor = colors.actionText,
+        focusedBorderColor = colors.focus,
+        unfocusedBorderColor = colors.borderStrong,
+        focusedLabelColor = colors.fg,
         unfocusedLabelColor = colors.fgMuted,
         focusedPlaceholderColor = colors.fgSoft,
         unfocusedPlaceholderColor = colors.fgSoft,
         focusedLeadingIconColor = colors.fgMuted,
         unfocusedLeadingIconColor = colors.fgMuted,
-        cursorColor = colors.action,
+        cursorColor = colors.focus,
         focusedContainerColor = Color.Transparent,
         unfocusedContainerColor = Color.Transparent,
         errorBorderColor = colors.dangerText,
@@ -191,12 +194,10 @@ val HuddleFieldShape = RoundedCornerShape(Waddle.radius.control)
 data class ChoiceOption<out T>(val value: T, val label: String, val icon: ImageVector? = null)
 
 /**
- * A single-choice control as Material 3 Expressive's connected button
- * group: equal-width toggle buttons joined by a 2dp seam, the chosen one
- * filled teal and rounded fully. It stands on its own (never inside a
- * second outline) and exposes radio-group semantics.
+ * A single-choice control (web `wd-seg`): equal-width pills on a surface-2
+ * track; the chosen one is lifted onto the surface with a hairline. It
+ * exposes radio-group semantics.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun <T> SegmentedChoice(
     options: List<ChoiceOption<T>>,
@@ -205,42 +206,52 @@ fun <T> SegmentedChoice(
     modifier: Modifier = Modifier,
 ) {
     val colors = Waddle.colors
+    val pill = RoundedCornerShape(Waddle.radius.pill)
     Row(
-        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
+        horizontalArrangement = Arrangement.spacedBy(SEG_GAP),
         modifier = modifier
             .fillMaxWidth()
+            .background(colors.surface2, pill)
+            .padding(SEG_PADDING)
             .selectableGroup(),
     ) {
-        options.forEachIndexed { index, option ->
+        options.forEach { option ->
             val checked = option.value == selected
-            ToggleButton(
-                checked = checked,
-                onCheckedChange = { onSelect(option.value) },
-                shapes = when (index) {
-                    0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                    options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                    else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                },
-                colors = ToggleButtonDefaults.colors(
-                    containerColor = colors.surface2,
-                    contentColor = colors.fg,
-                    checkedContainerColor = colors.action,
-                    checkedContentColor = colors.actionFg,
-                ),
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = Waddle.control.touch)
-                    .semantics { this.selected = checked },
+                    .height(SEG_ITEM)
+                    .clip(pill)
+                    .selectedSegment(checked, colors.surface, colors.border, pill)
+                    .selectable(selected = checked, role = Role.RadioButton, onClick = { onSelect(option.value) })
+                    .padding(horizontal = Waddle.space.sm),
             ) {
+                val tint = if (checked) colors.fg else colors.fgMuted
                 option.icon?.let {
-                    Icon(it, contentDescription = null, modifier = Modifier.size(ToggleButtonDefaults.IconSize))
-                    Spacer(Modifier.size(ToggleButtonDefaults.IconSpacing))
+                    Icon(it, contentDescription = null, tint = tint, modifier = Modifier.size(SEG_ICON))
+                    Spacer(Modifier.width(SEG_ICON_GAP))
                 }
-                Text(text = option.label, style = Waddle.type.control, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = option.label,
+                    style = Waddle.type.control.copy(fontSize = 13.sp),
+                    color = tint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
 }
 
+private fun Modifier.selectedSegment(selected: Boolean, fill: Color, edge: Color, shape: Shape): Modifier =
+    if (selected) background(fill, shape).border(1.dp, edge, shape) else this
+
+private val SEG_GAP = 2.dp
+private val SEG_PADDING = 3.dp
+private val SEG_ITEM = 38.dp
+private val SEG_ICON = 16.dp
+private val SEG_ICON_GAP = 6.dp
 private val GROUPED_ROW = 56.dp
 private val CHEVRON = 20.dp

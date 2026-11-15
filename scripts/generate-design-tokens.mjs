@@ -313,8 +313,9 @@ function kotlinName(dotted) {
   return name;
 }
 
-// Hard keywords a token name can collide with (`easings.in`) need backticks.
-const ktIdentifier = (name) => (["in", "is", "as", "do", "if"].includes(name) ? `\`${name}\`` : name);
+// Token names that are Kotlin keywords (`easings.in`) get a readable name instead.
+const KT_KEYWORD_NAMES = { in: "easeIn" };
+const ktIdentifier = (name) => KT_KEYWORD_NAMES[name] ?? name;
 
 const pascal = (name) => kotlinName(name).replace(/^./, (c) => c.toUpperCase());
 

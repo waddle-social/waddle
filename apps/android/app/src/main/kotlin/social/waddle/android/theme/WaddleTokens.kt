@@ -470,7 +470,7 @@ object WaddleTokens {
 
         object Easing {
             val out = CubicBezierEasing(0.2f, 0.7f, 0.2f, 1f)
-            val `in` = CubicBezierEasing(0.4f, 0f, 1f, 1f)
+            val easeIn = CubicBezierEasing(0.4f, 0f, 1f, 1f)
             val inOut = CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
             val spring = CubicBezierEasing(0.34f, 1.56f, 0.64f, 1f)
         }
