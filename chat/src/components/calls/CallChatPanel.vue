@@ -135,6 +135,7 @@ const bodyClass = css({ minWidth: 0, fontSize: "14px", lineHeight: "1.45" });
     <MessageComposer
       :draft="draft"
       channel-name="call chat"
+      :placeholder="inMuc ? 'Reply in the huddle thread' : 'Reply in the call thread'"
       composer-label="Call chat composer"
       :is-forum-channel="false"
       :is-sending="!!isSending"
