@@ -4,13 +4,13 @@ import android.Manifest
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -28,12 +28,13 @@ import org.junit.runner.RunWith
 import social.waddle.android.feature.people.PeopleScreenTestTags
 import social.waddle.android.feature.rooms.RoomsScreenTestTags
 import social.waddle.android.feature.sidebar.SidebarTestTags
+import social.waddle.android.navigation.MainTab
 
 /**
  * App-state switch and the Navigation 3 shell over a fully-faked graph:
- * SignedOut lands on login; on a phone, Ready opens rooms with the
- * sidebar in a ☰ drawer, each page it opens pushes over rooms and back
- * returns, and an open page survives recreation.
+ * SignedOut lands on login; on a phone, Ready opens the Home tab (the
+ * conversation list), each tab keeps its own place and back returns
+ * Home, and an open page survives recreation.
  */
 @RunWith(AndroidJUnit4::class)
 class AppShellNavigationTest {
@@ -85,8 +86,8 @@ class AppShellNavigationTest {
         }
     }
 
-    // The CI emulator is a phone: Rooms are the root, the sidebar a ☰ drawer.
-    private fun waitForRooms() = waitForTag(RoomsScreenTestTags.SCREEN)
+    // The CI emulator is a phone: the tab bar, Home being the conversation list.
+    private fun waitForHome() = waitForTag(SidebarTestTags.SCREEN)
 
     private fun tap(tag: String) {
         composeRule.onNodeWithTag(tag).performClick()
@@ -96,12 +97,7 @@ class AppShellNavigationTest {
         composeRule.runOnUiThread { composeRule.activity.onBackPressedDispatcher.onBackPressed() }
     }
 
-    /** ☰ on the room list, then the sidebar row [tag]. */
-    private fun fromSidebar(tag: String) {
-        tap(RoomsScreenTestTags.MENU)
-        waitForTag(SidebarTestTags.SCREEN)
-        tap(tag)
-    }
+    private fun gone(tag: String) = composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()
 
     @Test
     fun signedOutGraphShowsLoginSurface() {
@@ -111,67 +107,76 @@ class AppShellNavigationTest {
     }
 
     @Test
-    fun readyGraphOpensRoomsWithTheSidebarInADrawer() {
+    fun readyGraphOpensOnTheHomeTab() {
         harness.signInAndConnect()
         composeAppShell()
-        waitForRooms()
-        tap(RoomsScreenTestTags.MENU)
-        waitForTag(SidebarTestTags.SCREEN)
-        listOf(
-            SidebarTestTags.PEOPLE,
-            SidebarTestTags.BROWSE_ROOMS,
-            SidebarTestTags.ALL_DMS,
-            SidebarTestTags.YOU,
-            SidebarTestTags.SETTINGS,
-        ).forEach { composeRule.onNodeWithTag(it).assertExists() }
-        composeRule.onNodeWithTag("sidebar-dashboard").assertDoesNotExist()
-        // Back shuts the drawer and stays in the app.
-        back()
-        // Closing animates the drawer off screen; its content stays composed.
-        composeRule.onNodeWithTag(SidebarTestTags.SCREEN).assertIsNotDisplayed()
-        assertFalse(composeRule.activity.isFinishing)
+        waitForHome()
+        MainTab.entries.forEach { composeRule.onNodeWithTag(it.testTag).assertExists() }
+        listOf(SidebarTestTags.BROWSE_ROOMS, SidebarTestTags.ALL_DMS)
+            .forEach { composeRule.onNodeWithTag(it).assertExists() }
+        // People and You are tabs here, so the list drops them.
+        assertTrue(gone(SidebarTestTags.PEOPLE) && gone(SidebarTestTags.YOU) && gone(SidebarTestTags.SETTINGS))
     }
 
     @Test
-    fun everySidebarPageOpensAndBackReturnsRooms() {
+    fun everyTabOpensAndBackReturnsHome() {
         harness.signInAndConnect()
         composeAppShell()
-        waitForRooms()
-        fromSidebar(SidebarTestTags.PEOPLE)
+        waitForHome()
+        tap(MainTab.PEOPLE.testTag)
         waitForTag(PeopleScreenTestTags.SCREEN)
         back()
-        waitForRooms()
-        fromSidebar(SidebarTestTags.ALL_DMS)
+        waitForHome()
+        tap(MainTab.DMS.testTag)
         // From the resource, so a copy change cannot strand the test.
         waitForText(composeRule.activity.getString(R.string.dm_list_empty_title))
         back()
-        waitForRooms()
-        fromSidebar(SidebarTestTags.YOU)
+        waitForHome()
+        tap(MainTab.YOU.testTag)
         waitForText(composeRule.activity.getString(R.string.you_profile))
-        // The on-screen arrow pops too.
-        composeRule.onNodeWithContentDescription("Back").performClick()
-        waitForRooms()
-        assertFalse("back from a page must not leave the app", composeRule.activity.isFinishing)
+        back()
+        waitForHome()
+        assertFalse("back from a tab must not leave the app", composeRule.activity.isFinishing)
+    }
+
+    @Test
+    fun eachTabKeepsItsPlace() {
+        harness.signInAndConnect()
+        composeAppShell()
+        waitForHome()
+        tap(SidebarTestTags.BROWSE_ROOMS)
+        waitForTag(RoomsScreenTestTags.SCREEN)
+        // The bar stays over pages; only conversations hide it.
+        tap(MainTab.YOU.testTag)
+        waitForText(composeRule.activity.getString(R.string.you_profile))
+        tap(MainTab.HOME.testTag)
+        waitForTag(RoomsScreenTestTags.SCREEN)
+        // The shown tab again: back to its root.
+        tap(MainTab.HOME.testTag)
+        waitForHome()
+        composeRule.waitUntil(timeoutMillis = 10_000) { gone(RoomsScreenTestTags.SCREEN) }
     }
 
     @Test
     fun emptyCommunityInvitesInsteadOfShowingZero() {
         harness.signInAndConnect()
         composeAppShell()
-        waitForRooms()
+        waitForHome()
+        tap(SidebarTestTags.BROWSE_ROOMS)
         // The fake topology is empty: once it settles, an invitation.
         waitForText("No rooms yet. Create the first one and invite people in.")
     }
 
     @Test
-    fun navigatesSidebarToSettingsAndBack() {
+    fun navigatesYouToSettingsAndBack() {
         harness.signInAndConnect()
         composeAppShell()
-        waitForRooms()
-        fromSidebar(SidebarTestTags.SETTINGS)
+        waitForHome()
+        tap(MainTab.YOU.testTag)
+        composeRule.onNodeWithText(composeRule.activity.getString(R.string.you_settings_body)).performClick()
         waitForText("Appearance")
         composeRule.onNodeWithContentDescription("Back").performClick()
-        waitForRooms()
+        waitForText(composeRule.activity.getString(R.string.you_profile))
     }
 
     @Test
@@ -179,11 +184,11 @@ class AppShellNavigationTest {
         harness.signInAndConnect()
         val restoration = StateRestorationTester(composeRule)
         restoration.setContent { shell() }
-        waitForRooms()
-        fromSidebar(SidebarTestTags.PEOPLE)
-        waitForTag(PeopleScreenTestTags.SCREEN)
+        waitForHome()
+        tap(SidebarTestTags.BROWSE_ROOMS)
+        waitForTag(RoomsScreenTestTags.SCREEN)
         restoration.emulateSavedInstanceStateRestore()
-        waitForTag(PeopleScreenTestTags.SCREEN)
+        waitForTag(RoomsScreenTestTags.SCREEN)
     }
 
     @Test
@@ -192,9 +197,10 @@ class AppShellNavigationTest {
         composeRule.runOnUiThread { composeRule.activity.enableEdgeToEdge() }
         harness.signInAndConnect()
         composeAppShell()
-        waitForRooms()
-        fromSidebar(SidebarTestTags.PEOPLE)
-        waitForTag(PeopleScreenTestTags.SCREEN)
+        waitForHome()
+        // A pushed page: tab roots have no back arrow.
+        tap(SidebarTestTags.BROWSE_ROOMS)
+        waitForTag(RoomsScreenTestTags.SCREEN)
         // The CI emulator image has no system UI, so it reports no status
         // bar: hand the window one, as a phone would.
         composeRule.runOnUiThread {

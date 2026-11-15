@@ -1,6 +1,7 @@
 package social.waddle.android.screenshots
 
 import android.app.Application
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -21,6 +22,7 @@ import social.waddle.android.feature.dm.DmListRow
 import social.waddle.android.feature.home.HomeActions
 import social.waddle.android.feature.home.HomeContent
 import social.waddle.android.feature.home.HomeContentState
+import social.waddle.android.feature.home.homeSectionsOf
 import social.waddle.android.feature.people.PeopleContent
 import social.waddle.android.feature.people.PersonRow
 import social.waddle.android.feature.rooms.HuddleParticipant
@@ -34,6 +36,9 @@ import social.waddle.android.feature.sidebar.SidebarPage
 import social.waddle.android.feature.sidebar.SidebarState
 import social.waddle.android.feature.sidebar.sidebarRoomsOf
 import social.waddle.android.feature.you.YouIdentity
+import social.waddle.android.navigation.MainTab
+import social.waddle.android.navigation.MainTabBar
+import social.waddle.android.navigation.TabBadges
 import social.waddle.android.ui.LocalOpenConversation
 import social.waddle.android.ui.huddle.LocalReducedMotion
 import java.time.ZoneOffset
@@ -125,6 +130,23 @@ class ShellScreenshotTest {
         Shell {
             CompositionLocalProvider(LocalOpenConversation provides "general@muc.waddle.test") {
                 SidebarContent(state = Fixtures.sidebar, actions = SidebarActions())
+            }
+        }
+    }
+
+    /** The phone's Home tab: live huddles, rooms and DMs over the tab bar. */
+    @Test
+    fun homeTab() = captureThemed("home_tab") {
+        Shell {
+            Column {
+                Box(Modifier.weight(1f)) {
+                    SidebarContent(
+                        state = Fixtures.sidebar.copy(live = homeSectionsOf(Fixtures.rooms).live),
+                        actions = SidebarActions(),
+                        tab = true,
+                    )
+                }
+                MainTabBar(selected = MainTab.HOME, badges = TabBadges(dmUnread = 3, live = true), onSelect = {})
             }
         }
     }

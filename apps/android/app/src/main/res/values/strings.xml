@@ -439,6 +439,13 @@
     <string name="tab_rooms">Rooms</string>
     <string name="tab_people">People</string>
     <string name="sidebar_open">Open navigation</string>
+    <string name="tab_dms">DMs</string>
+    <string name="tab_you">You</string>
+    <plurals name="tab_unread_badge">
+        <item quantity="one">%1$d unread message</item>
+        <item quantity="other">%1$d unread messages</item>
+    </plurals>
+    <string name="tab_home_live">a huddle is live</string>
     <string name="sidebar_search_hint">Search or jump to…</string>
     <string name="sidebar_browse_rooms">Browse rooms</string>
     <string name="sidebar_all_dms">All direct messages</string>
