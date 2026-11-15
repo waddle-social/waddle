@@ -4772,6 +4772,21 @@ async fn managed_space_bookmark_join_repairs_missing_parent_tuple() {
         .publish_item(&spaces_jid, "alpha", &item, None, false)
         .await
         .expect("publish bookmark");
+    // A join fills a missing parent only from the channel's link.
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: "legacy@muc.example.com".parse().expect("channel jid"),
+            space_jid: format!("alpha@{}", spaces_jid.domain())
+                .parse()
+                .expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            created_at: 0,
+        })
+        .await
+        .expect("channel-space link");
 
     let viewer = create_test_session(state.as_ref(), "viewer").await;
     state
