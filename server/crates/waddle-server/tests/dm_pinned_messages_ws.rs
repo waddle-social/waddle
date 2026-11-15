@@ -645,8 +645,12 @@ async fn dm_retraction_from_non_author_does_not_clear_pin() {
     );
 }
 
+/// A message for a domain the deployment does not serve goes to the remote
+/// route before the DM pin handler sees it, so a pin marker for a remote
+/// peer records nothing and, with S2S disabled, is answered with
+/// `remote-server-not-found` (RFC 6120 §10.4.3).
 #[tokio::test]
-async fn dm_pin_to_remote_domain_returns_forbidden() {
+async fn dm_pin_to_remote_domain_returns_remote_server_not_found() {
     let _guard = TEST_SERIAL.lock().await;
     let server = TestServer::start_with_extra_accounts(&[("alice", "alice-pass")]);
     let mut alice = user_client(&server, "alice", "alice-pass", "dm-pin-remote-alice").await;
@@ -661,7 +665,9 @@ async fn dm_pin_to_remote_domain_returns_forbidden() {
         .expect("send remote-domain DM pin request");
 
     let error = alice
-        .recv_matching(|frame| frame.contains("dm-pin-remote") && frame.contains("<forbidden"))
+        .recv_matching(|frame| {
+            frame.contains("dm-pin-remote") && frame.contains("<remote-server-not-found")
+        })
         .await
         .expect("remote-domain DM pin is rejected");
     assert!(
