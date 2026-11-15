@@ -478,12 +478,16 @@ impl RecoveryReceiptRepository {
             return Err(IngressUowError::EffectIntentConflict);
         }
         if let Some(candidate) = candidate {
-            NotificationOutboxStore::insert_candidate_in_transaction(
+            let outcome = NotificationOutboxStore::insert_candidate_in_transaction(
                 tx.transaction_mut(),
                 candidate,
                 fresh.row.original_receipt_at.timestamp_millis(),
             )
             .await?;
+            if outcome == NotificationCandidateInsertOutcome::Inserted {
+                tx.recorded_notification_candidates
+                    .push((candidate.archive_stanza_id().clone(), candidate.class()));
+            }
             for source in &fresh.sources {
                 Self::attach_candidate_lineage(
                     tx,
@@ -547,6 +551,10 @@ impl RecoveryReceiptRepository {
         .await?;
         Self::attach_candidate_lineage(tx, message_key, &authority.semantic_key(), candidate)
             .await?;
+        if outcome == NotificationCandidateInsertOutcome::Inserted {
+            tx.recorded_notification_candidates
+                .push((candidate.archive_stanza_id().clone(), candidate.class()));
+        }
         Ok(outcome)
     }
 
