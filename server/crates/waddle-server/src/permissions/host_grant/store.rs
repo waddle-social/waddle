@@ -628,6 +628,17 @@ impl HostGrantStore {
             tx.rollback().await?;
             return recorded.replay(fingerprint);
         }
+        // A group direct-message room is never enrolled: its catalog row's
+        // type says so, and the row is read in this transaction.
+        for room in &command.rooms {
+            if channel_is_group_direct_message(&mut tx, room.channel_id())
+                .await
+                .map_err(statement_failure)?
+            {
+                tx.rollback().await?;
+                return Err(HostGrantError::GroupDirectMessageRoom);
+            }
+        }
         let incarnation = load_incarnation(&mut tx).await.map_err(statement_failure)?;
         let inserted = tx
             .execute(
@@ -1233,6 +1244,27 @@ fn refuse_unusable_scope(
         return Err(HostGrantError::PolicyVersionUnsupported);
     }
     Ok(())
+}
+
+/// Whether the catalog row of the channel `channel_id` is a group
+/// direct-message room. A channel without a row is not one.
+async fn channel_is_group_direct_message(
+    tx: &mut Transaction<'_>,
+    channel_id: &str,
+) -> Result<bool, HostGrantError> {
+    let mut rows = tx
+        .query(
+            "SELECT channel_type FROM channels WHERE id = ?",
+            crate::db_params![channel_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        waddle_xmpp::ChannelType::parse(&row.get::<String>(0)?),
+        Some(waddle_xmpp::ChannelType::GroupDm)
+    ))
 }
 
 pub(super) async fn load_incarnation(

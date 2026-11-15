@@ -154,7 +154,7 @@ use extension_forms::{
 };
 pub(crate) use extension_route_items::{
     extension_route_account_access, extension_route_room, extension_route_room_access,
-    ExtensionRouteAccess,
+    ExtensionRouteAccess, ExtensionRouteRoom,
 };
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::route_full_jid_iq;

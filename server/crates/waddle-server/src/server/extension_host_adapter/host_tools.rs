@@ -249,6 +249,21 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                 .map_err(|error: jid::Error| {
                     host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
                 })?;
+        // A node bound to a room serves only a room that serves extension
+        // state: never a room an enrolled host-grant scope manages, nor one
+        // whose management cannot be told now.
+        use crate::server::routes::websocket::handlers::iq::{
+            extension_route_room, ExtensionRouteRoom,
+        };
+        if extension_route_room(&self.state, &owner, node_name).await == ExtensionRouteRoom::Denied
+        {
+            return Err(ext_host::HostToolError::denied(
+                DisplayText::try_new(format!(
+                    "pubsub node {node_name} is bound to a room that serves no extension state"
+                ))
+                .expect("denied message non-empty"),
+            ));
+        }
         let id_filter = request
             .item_ids
             .iter()

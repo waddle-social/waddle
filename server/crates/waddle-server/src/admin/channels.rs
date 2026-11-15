@@ -1352,10 +1352,11 @@ async fn withhold_managed_rooms(
                 config.members_only = true;
                 managed.insert(key.clone(), grants);
             }
-            RoomGate::Managed(_) | RoomGate::Unavailable => withheld.push(key.clone()),
-            // The enrolled set named it; a room that is unmanaged after all
-            // keeps its listing.
-            RoomGate::Unmanaged => {}
+            // The enrolled set named it, so a room the gate then answers as
+            // unmanaged is not one to describe either.
+            RoomGate::Managed(_) | RoomGate::Unavailable | RoomGate::Unmanaged => {
+                withheld.push(key.clone());
+            }
         }
     }
     for key in withheld {

@@ -26,6 +26,7 @@ use waddle_ws_test_support::stanza::{get, is_error, is_result, result_payload, s
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
+use waddle_xmpp::xep::xep0272::{Muji, NS_MUJI};
 use waddle_xmpp::xep::xep0424::NS_MESSAGE_RETRACT;
 use waddle_xmpp::xep::xep0425::NS_MESSAGE_MODERATE;
 use waddle_xmpp::xep::xep0433::{build_search_request, parse_search_results, SearchRequest};
@@ -323,6 +324,92 @@ async fn the_pin_list_is_refused_to_a_seated_occupant_whose_grant_was_revoked() 
     assert!(
         is_error(&reply, DefinedCondition::Forbidden),
         "a banned occupant read the pin list: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+/// A Muji presence of the occupant `nick` of `room`.
+fn muji_presence(room: &BareJid, nick: &str) -> String {
+    String::from(
+        &Element::builder("presence", "jabber:client")
+            .attr(attribute("to"), format!("{room}/{nick}"))
+            .append(Muji::preparing().to_element())
+            .build(),
+    )
+}
+
+/// The next presence `client` receives from the occupant `nick` of `room`
+/// that carries a Muji element or an error, within `wait`.
+async fn muji_or_error_from(
+    client: &mut WsXmppClient,
+    room: &BareJid,
+    nick: &str,
+    wait: Duration,
+) -> Option<Element> {
+    let occupant = format!("{room}/{nick}");
+    let frame = client
+        .recv_matching_within(wait, |frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                element.name() == "presence"
+                    && element.attr("from") == Some(occupant.as_str())
+                    && (element.attr("type") == Some("error") || element.has_child("muji", NS_MUJI))
+            })
+        })
+        .await
+        .ok()?;
+    frame.parse().ok()
+}
+
+#[tokio::test]
+async fn a_call_is_not_started_by_a_seated_occupant_whose_grant_was_revoked() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_muji").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut alice = fixture.server.client("alice", "phone").await;
+    let mut romeo = fixture.server.client("romeo", "laptop").await;
+    for (client, nick) in [(&mut alice, "alice"), (&mut romeo, "romeo")] {
+        let joined = join(client, &room, nick).await;
+        assert_eq!(error_condition(&joined), None, "{nick}'s join: {joined:?}");
+    }
+
+    // A member may prepare a call: the other occupant sees it.
+    romeo
+        .send(&muji_presence(&room, "romeo"))
+        .await
+        .expect("send Muji");
+    let seen = muji_or_error_from(&mut alice, &room, "romeo", Duration::from_secs(5)).await;
+    assert!(
+        seen.as_ref()
+            .is_some_and(|presence| error_condition(presence).is_none()),
+        "a member's Muji presence was not reflected: {seen:?}"
+    );
+
+    // The store revokes Alice's grant; the room actor still seats her until
+    // the revocation fence ejects her. Preparing a call is participation
+    // and is refused, and nobody sees it.
+    fixture
+        .grants
+        .set(OWNER, PEER, RoomAffiliation::None)
+        .await
+        .expect("revoke");
+    alice
+        .send(&muji_presence(&room, "alice"))
+        .await
+        .expect("send Muji");
+    let reply = muji_or_error_from(&mut alice, &room, "alice", Duration::from_secs(5))
+        .await
+        .expect("a reply to the Muji presence");
+    assert_eq!(
+        error_condition(&reply).as_deref(),
+        Some("forbidden"),
+        "a revoked occupant prepared a call: {reply:?}"
+    );
+    let reflected =
+        muji_or_error_from(&mut romeo, &room, "alice", Duration::from_millis(500)).await;
+    assert!(
+        reflected.is_none(),
+        "the refused Muji presence reached another occupant: {reflected:?}"
     );
     fixture.close().await;
 }
@@ -787,6 +874,67 @@ async fn group_dm_member_writers_refuse_a_managed_rooms_channel() {
     .await;
     assert!(refused.is_err(), "a group-DM writer wrote a managed room");
     assert!(fixture.legacy_relations(CAROL).await.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_group_dm_room_is_never_enrolled() {
+    use waddle_server::permissions::host_grant::{
+        BootstrapGrant, EnrollScope, GrantOperationId, HostGrantError, ManagedRoom as BoundRoom,
+        ScopeKey, ScopeLifecycleId,
+    };
+    let Some(fixture) = ManagedRoom::start("hg_sink_group_dm_enroll").await else {
+        return;
+    };
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let room = bare(&format!("group-dm-{tag}@{MUC}"));
+    let bound = BoundRoom::new(room.clone()).expect("managed room");
+    let channel_id = bound.channel_id().to_owned();
+    // The catalog row says the channel is a group DM.
+    fixture.server.channel(&channel_id, true).await;
+    fixture
+        .grants
+        .ingress
+        .execute(
+            "UPDATE channels SET channel_type = 'group-dm' WHERE id = ?",
+            waddle_server::db_params![channel_id.clone()],
+        )
+        .await;
+    let refused = fixture
+        .grants
+        .store
+        .enroll_scope(
+            &EnrollScope {
+                operation: GrantOperationId::generate(),
+                lifecycle: ScopeLifecycleId::generate(),
+                key: ScopeKey::new(bare(SPACES), format!("space-{tag}").as_str())
+                    .expect("scope key"),
+                rooms: vec![bound],
+                bootstrap: vec![BootstrapGrant {
+                    room: room.clone(),
+                    subject: super::host_grant_support::subject(OWNER),
+                    affiliation: RoomAffiliation::Owner,
+                }],
+            },
+            &fixture.grants.policy,
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(HostGrantError::GroupDirectMessageRoom)),
+        "a group DM was enrolled: {refused:?}"
+    );
+    fixture.refresh_enrolled().await;
+    assert_eq!(
+        fixture
+            .server
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .channel_enrolled(&channel_id)
+            .await,
+        Ok(false)
+    );
     fixture.close().await;
 }
 

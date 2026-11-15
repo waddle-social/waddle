@@ -81,7 +81,7 @@ pub(super) async fn handle_channel_search_iq(
         if !result.matches_query(&request.query) {
             continue;
         }
-        if managed && !managed_room_viewable(state, &room_jid, requester).await {
+        if managed && !managed_room_viewable(state, &channel.id, requester).await {
             continue;
         }
         results.push(result);
@@ -90,12 +90,15 @@ pub(super) async fn handle_channel_search_iq(
     vec![iq_to_xml(build_search_response_with_rsm(iq, &page, &rsm))]
 }
 
-/// Whether `requester` may view a room an enrolled host-grant scope
-/// manages: its canonical grants allow `view`. A room whose grants cannot
-/// be read now is left out.
+/// Whether `requester` may view the room of the channel `channel_id`, which
+/// an enrolled host-grant scope manages: its canonical grants allow `view`.
+/// The grants are read by the channel, the key the enrolled check used, so
+/// they are the binding's whatever domain the result's address is built
+/// with. A room whose grants cannot be read now, or that the store does not
+/// hold as managed after all, is left out.
 async fn managed_room_viewable(
     state: &WebSocketState,
-    room_jid: &jid::BareJid,
+    channel_id: &str,
     requester: Option<&jid::BareJid>,
 ) -> bool {
     use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
@@ -108,7 +111,7 @@ async fn managed_room_viewable(
             .app_state
             .host_grants
             .allows(
-                RoomBinding::Room(room_jid),
+                RoomBinding::Channel(channel_id),
                 requester,
                 HostGrantAction::View
             )

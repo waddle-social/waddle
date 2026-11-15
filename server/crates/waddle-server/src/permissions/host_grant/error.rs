@@ -65,6 +65,11 @@ pub enum HostGrantError {
          exceeds a scope's bounds"
     )]
     InvalidEnrollment,
+    /// A room of the enrollment is a group direct-message room. Its members
+    /// are its conversation's participants, not grant subjects, so no
+    /// scope manages it.
+    #[error("a room of the enrollment is a group direct-message room")]
+    GroupDirectMessageRoom,
     #[error("the scope key already holds a lifecycle, or the lifecycle identity is in use")]
     ScopeAlreadyEnrolled,
     #[error("a room is already bound to a scope")]
@@ -149,6 +154,7 @@ impl HostGrantError {
             Self::InvalidScopeKey => "invalid_scope_key",
             Self::UnmanagedRoom => "unmanaged_room",
             Self::InvalidEnrollment => "invalid_enrollment",
+            Self::GroupDirectMessageRoom => "group_direct_message_room",
             Self::ScopeAlreadyEnrolled => "scope_already_enrolled",
             Self::RoomAlreadyBound => "room_already_bound",
             Self::UnknownScope => "unknown_scope",
