@@ -27,8 +27,37 @@
         system:
         import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+          overlays = [
+            rust-overlay.overlays.default
+            nextestOverlay
+          ];
         };
+      # cargo-nextest 0.9.151 fixes a scheduler bug (nextest-rs/nextest#3697,
+      # future-queue #603): a test queued for its test group could be dropped
+      # without running when the threads it waited for were freed by a test
+      # outside that group. The `postgres` group mixes one-thread tests with
+      # `threads-required = 'num-cpus'` ones, so a run could end with tests
+      # "not run" and no failing or cancelled test to name. Drop this overlay
+      # once nixpkgs ships cargo-nextest >= 0.9.151. The binary cache has no
+      # build of this version, so CI compiles it; nextest's own suite is
+      # skipped to keep that compile short.
+      nextestOverlay = final: prev: {
+        cargo-nextest = prev.cargo-nextest.overrideAttrs (_: rec {
+          version = "0.9.151";
+          doCheck = false;
+          src = final.fetchFromGitHub {
+            owner = "nextest-rs";
+            repo = "nextest";
+            tag = "cargo-nextest-${version}";
+            hash = "sha256-dSQu45aAZoI1l1YjK5f0RkRJxsQbGRaGhCfFsMuSMXc=";
+          };
+          cargoDeps = final.rustPlatform.fetchCargoVendor {
+            inherit src;
+            name = "cargo-nextest-${version}";
+            hash = "sha256-g9nr7TM7VSXnfewSJ6LGTeLmsgKwey/TcWE/hQOHSIA=";
+          };
+        });
+      };
       # Registry crates need the patched dependencies' real APIs even
       # when Crane replaces application sources with dependency stubs.
       patchedDependenciesDummyScript = ''

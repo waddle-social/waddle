@@ -120,17 +120,28 @@ def run(prometheus):
                     })
                     expected[entry["prometheus_name"]] = value
                     expected[entry["recording_name"]] = value
-                # Clustering instruments are f64 gauges; the translated name
-                # must be the one the alert rules read, and no other spelling.
+                # Each clustering instrument is sent as its exported kind (an
+                # f64 gauge or a cumulative monotonic u64 counter, which gains
+                # `_total`); the translated name must be the one the alert
+                # rules read, and no other spelling.
                 cluster_expected = set()
                 unexported = set()
                 for entry in cluster_contract:
-                    metrics.append({
-                        "name": entry["name"], "unit": entry["unit"],
-                        "gauge": {"dataPoints": [{
+                    if entry["kind"] == "gauge":
+                        data = {"gauge": {"dataPoints": [{
                             "timeUnixNano": str(timestamp), "asDouble": float(entry["value"]),
-                        }]},
-                    })
+                        }]}}
+                    elif entry["kind"] == "counter":
+                        data = {"sum": {
+                            "aggregationTemporality": 2, "isMonotonic": True,
+                            "dataPoints": [{
+                                "startTimeUnixNano": str(timestamp - 60_000_000_000),
+                                "timeUnixNano": str(timestamp), "asInt": str(entry["value"]),
+                            }],
+                        }}
+                    else:
+                        raise AssertionError(f"{entry['name']} has unknown kind {entry['kind']!r}")
+                    metrics.append({"name": entry["name"], "unit": entry["unit"], **data})
                     expected[entry["prometheus_name"]] = entry["value"]
                     cluster_expected.add(entry["prometheus_name"])
                     unexported.update(entry["unexported_rule_spellings"])

@@ -1,5 +1,5 @@
 rule_files:
-  - waddle-authority.yaml
+  - waddle-reliability.yaml
 evaluation_interval: 1m
 
 tests:
@@ -34,8 +34,11 @@ tests:
         values: '0x60'
       - series: 'xmpp_sm_resume_results_total{instance="a",outcome="resumed"}'
         values: '0+10x60'
+    # Only the authority alerts: this fixture omits the series the other
+    # groups in waddle-reliability.yaml read, so their missing-series alerts
+    # fire here by design.
     promql_expr_test:
-      - expr: 'ALERTS{alertstate="firing"}'
+      - expr: 'ALERTS{alertstate="firing",alertname=~"IngressEntryRefused|TransportTaskPanickedOrAbandoned|KeypairLeaseFencingLost|DestroyCompletionAge|ConnectionActorMailboxBacklog|ConnectionActorMailboxRejecting|PendingRemoteAcceptanceBacklog|RelayOutcomeUncertain|RelayRefusedOrTimedOut|RemoteDispatchUncertain|FencingRejectionSpike|RestrictedStartupRefusing|RestrictedAttachFailing|KeypoolActivationPendingTooLong|SmResumeFailureRate|SmEnableFailing|AuthoritySeriesMissing|DestroyCompletionSnapshotMissing|OtlpPipelineSilent"}'
         eval_time: 59m
         exp_samples: []
 

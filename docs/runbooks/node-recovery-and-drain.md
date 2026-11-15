@@ -8,8 +8,10 @@ Status: written from the source at this commit. None of these procedures
 has been rehearsed on a cluster. Where a step reads a metric, the metric
 name is the OpenTelemetry instrument name from
 [the metrics reference](../operations/server-metrics.md); the Prometheus
-name is derived there. Alerts named below that live under
-`infrastructure/waddle.cloud/rules/staged/` are not evaluated anywhere yet.
+name is derived there. The alerts named below are in the
+`waddle-authority-*` groups of
+`infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml`, which the
+Grafana Cloud Mimir ruler evaluates once a main push syncs them.
 
 SQL is read as the `postgres` superuser inside the primary instance pod:
 

@@ -18,8 +18,8 @@ for rule_file in "$rules_dir"/mimir/*.yaml; do
 done
 [ "$rule_files" -gt 0 ] || { echo "no Mimir rule files under $rules_dir/mimir" >&2; exit 1; }
 
-# Staged rule files are not uploaded and their tests are not evaluated here,
-# but each must still be a valid rule file.
+# Staged rule files (see staged/README.md) are not uploaded and their tests
+# are not evaluated here, but each must still be a valid rule file.
 for rule_file in "$rules_dir"/staged/mimir/*.yaml; do
   [ -e "$rule_file" ] || continue
   mkdir -p "$test_dir/staged"
