@@ -1168,6 +1168,67 @@ pub async fn record_room_affiliation_under_commit_fault(
     .map_err(|error| error.defined_condition)
 }
 
+/// Record one affiliation change of a managed room as an XEP-0045
+/// administration request does, against `grants`, the room's grants as the
+/// request read them: a snapshot older than the scope's generation is the
+/// request that another change overtook between its read and its commit.
+/// Answers with the request's reply: `Ok` when the change is recorded,
+/// otherwise the stanza error's defined condition.
+#[cfg(feature = "test-support")]
+pub async fn record_room_affiliation_with_grants(
+    state: &WebSocketState,
+    grants: &crate::permissions::host_grant::ManagedRoomGrants,
+    initiator: &jid::BareJid,
+    target: &jid::BareJid,
+    affiliation: waddle_xmpp::Affiliation,
+) -> Result<(), xmpp_parsers::stanza_error::DefinedCondition> {
+    crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::record_host_grant_affiliation(
+        state,
+        grants,
+        initiator,
+        target,
+        affiliation,
+    )
+    .await
+    .map_err(|error| error.defined_condition)
+}
+
+/// Fan out the publication of `payload` as item `item_id` on the node
+/// `node` of `owner`, as a publish request does once the item is stored.
+/// `is_pep` is the request's PEP classification, which is `true` for a
+/// request addressed to a service as well as for one to an account.
+#[cfg(feature = "test-support")]
+pub async fn fan_out_published_item(
+    state: &WebSocketState,
+    owner: &jid::BareJid,
+    node: &str,
+    item_id: &str,
+    payload: xmpp_parsers::minidom::Element,
+    is_pep: bool,
+) {
+    use crate::server::routes::websocket::handlers::pubsub_fanout::{
+        fan_out_publish, FanOutRequest,
+    };
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(item_id.to_owned()),
+        publisher: None,
+        payload: Some(payload),
+    };
+    fan_out_publish(
+        state,
+        FanOutRequest {
+            owner,
+            node,
+            published_item: &item,
+            item_id,
+            publisher: None,
+            publisher_full: None,
+            is_pep,
+        },
+    )
+    .await;
+}
+
 /// Run the topology bootstrap a WebSocket server runs at startup against
 /// this state: its catalog, Spaces and community nodes, room actors and
 /// seeds.

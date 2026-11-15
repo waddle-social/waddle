@@ -35,7 +35,9 @@ use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
 use super::host_grant_support::{bare, OWNER, PEER, SENDER};
-use super::{error_condition, join, ManagedRoom, CAROL, MUC, NS_DISCO_INFO, NS_MUC_ADMIN, SPACES};
+use super::{
+    error_condition, join, ManagedRoom, CAROL, MUC, NS_DISCO_INFO, NS_MUC_ADMIN, REMOTE, SPACES,
+};
 
 const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
@@ -160,6 +162,25 @@ async fn receives_room_message(
                     && element
                         .children()
                         .any(|child| child.name() == "body" && child.text() == body)
+            })
+        })
+        .await
+        .is_ok()
+}
+
+/// Whether `client` receives a PubSub event of the node `node` within
+/// `wait`.
+async fn receives_node_event(client: &mut WsXmppClient, node: &str, wait: Duration) -> bool {
+    client
+        .recv_matching_within(wait, |frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                element.name() == "message"
+                    && element.children().any(|event| {
+                        event.name() == "event"
+                            && event
+                                .children()
+                                .any(|items| items.attr("node") == Some(node))
+                    })
             })
         })
         .await
@@ -931,6 +952,181 @@ async fn the_topology_bootstrap_leaves_an_enrolled_default_channel_and_general_s
     assert!(
         parents.is_empty(),
         "the bootstrap parented chat: {parents:?}"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn an_affiliation_change_overtaken_by_another_is_recorded_at_the_current_generation() {
+    use waddle_server::permissions::host_grant::{RoomBinding, RoomGate};
+    use waddle_server::test_support::record_room_affiliation_with_grants;
+    let Some(fixture) = ManagedRoom::start("hg_sink_stale").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let state = &fixture.server.state;
+    let read = || async {
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(&room))
+            .await
+        {
+            RoomGate::Managed(grants) => grants,
+            _ => panic!("the fixture room is managed"),
+        }
+    };
+
+    // The request read the room's grants; another change committed before
+    // its own.
+    let stale = read().await;
+    fixture
+        .grants
+        .set(OWNER, CAROL, RoomAffiliation::Member)
+        .await
+        .expect("the overtaking change");
+    assert_ne!(read().await.grants.generation, stale.grants.generation);
+
+    // The request is retried at the current generation and recorded; the
+    // overtaking change is kept.
+    let dave = "dave@example.com";
+    assert_eq!(
+        record_room_affiliation_with_grants(
+            state,
+            &stale,
+            &bare(OWNER),
+            &bare(dave),
+            waddle_xmpp::Affiliation::Member,
+        )
+        .await,
+        Ok(())
+    );
+    assert_eq!(
+        fixture
+            .grants
+            .affiliations(dave)
+            .await
+            .map(|(recorded, _)| recorded),
+        Some(RoomAffiliation::Member)
+    );
+    assert_eq!(
+        fixture
+            .grants
+            .affiliations(CAROL)
+            .await
+            .map(|(recorded, _)| recorded),
+        Some(RoomAffiliation::Member)
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn fan_out_from_an_enrolled_space_node_delivers_nothing() {
+    use waddle_server::test_support::fan_out_published_item;
+    let Some(fixture) = ManagedRoom::start("hg_sink_fanout").await else {
+        return;
+    };
+    let state = &fixture.server.state;
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    let enrolled = fixture.grants.scope.space_node.clone();
+    let storage = &state.deps.protocol.pubsub_storage;
+    // CAROL holds a subscription on the enrolled Space node, as one taken
+    // before enrollment or written by an older binary would be, and on a
+    // Space node no scope enrolls.
+    for node in [enrolled.as_str(), PLAIN_SPACE] {
+        storage
+            .get_or_create_node(&spaces, node)
+            .await
+            .expect("Space node");
+        storage
+            .update_node_config(&spaces, node, &NodeConfig::spaces_public())
+            .await
+            .expect("Space node configuration");
+        storage
+            .subscribe(&spaces, node, &Jid::from(bare(CAROL)))
+            .await
+            .expect("subscription");
+    }
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let payload = || Element::builder("note", "urn:example:space-note").build();
+    // Whatever the request's PEP classification, the enrolled node's event
+    // reaches no subscriber.
+    for is_pep in [false, true] {
+        fan_out_published_item(state, &spaces, &enrolled, "item-1", payload(), is_pep).await;
+        assert!(
+            !receives_node_event(&mut carol, &enrolled, Duration::from_millis(500)).await,
+            "an enrolled Space node's event was delivered (is_pep: {is_pep})"
+        );
+    }
+    // The unenrolled node delivers to the same subscription.
+    fan_out_published_item(state, &spaces, PLAIN_SPACE, "item-1", payload(), false).await;
+    assert!(
+        receives_node_event(&mut carol, PLAIN_SPACE, Duration::from_secs(5)).await,
+        "an unenrolled Space node's event was not delivered"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn the_moderator_role_is_granted_to_served_accounts_only() {
+    use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room_registry_actor::GetRoom;
+    let Some(fixture) = ManagedRoom::start("hg_sink_remote_moderator").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let mut owner = fixture.server.client("owner", "phone").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "the owner's join: {joined:?}"
+    );
+
+    // An account of a home this deployment does not serve is seated in the
+    // room; how it got there (federation) is not what this case decides.
+    let actor = fixture
+        .server
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("room lookup")
+        .expect("room actor");
+    let admission_revision = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot")
+        .admission_revision;
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: format!("{REMOTE}/phone")
+                .parse()
+                .expect("remote occupant JID"),
+            nick: "eve".into(),
+            affiliation_grant: JoinAffiliationGrant::HostOwned,
+            local_domain: DOMAIN.into(),
+            admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        })
+        .await
+        .expect("remote occupant seated");
+
+    // The owner holds `moderate`, but the moderator role is not granted to
+    // the remote occupant.
+    let reply = round_trip(
+        &mut owner,
+        set("voice", room.as_str(), role_item("eve", "moderator")),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::NotAllowed),
+        "a remote occupant was made a moderator: {reply:?}"
     );
     fixture.close().await;
 }
