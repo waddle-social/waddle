@@ -1,13 +1,14 @@
 //! The disposable SpiceDB the live host-grant suites empty before each case.
 //!
 //! Emptying a store deletes every projection marker and witness in it,
-//! position witnesses included, which is what tells a production deployment
-//! that its database was restored. A suite therefore empties only a store it
-//! marked itself: after its first case it writes a test-store marker beside
-//! the witnesses, and it refuses to empty a store that holds a position
-//! witness without that marker. Each suite run is meant to have a SpiceDB
-//! endpoint of its own; the marker is the guard against one that is not
-//! disposable after all.
+//! which is what tells a production deployment that its database was
+//! restored. A suite therefore empties only a store it marked itself: each
+//! case writes a test-store marker beside the markers and witnesses as soon
+//! as its replica has started, and a store that holds any projection marker
+//! or witness (a journal head, a room binding, a position witness, a latch
+//! or a witnessed epoch) without that marker is refused. Each suite run is
+//! meant to have a SpiceDB endpoint of its own; the marker is the guard
+//! against one that is not disposable after all.
 
 use futures::StreamExt;
 use prescience::{
@@ -45,14 +46,14 @@ pub fn disposable_spicedb_env() -> (String, String) {
 }
 
 /// Empty the store, markers and witnesses included, after checking that it
-/// holds no position witness a test suite did not write. The check fails
-/// closed: a store whose schema defines the projection and whose
+/// holds no projection marker or witness a test suite did not write. The
+/// check fails closed: a store whose schema defines the projection and whose
 /// relationships cannot be read is not emptied. A store without a schema,
 /// or whose schema lacks the projection definition, holds no witness. A
 /// definition the stored schema lacks makes its delete fail; that is the
 /// state wanted.
 pub async fn empty_disposable_store(raw: &Client) {
-    let mut position_witness = false;
+    let mut projection_state = false;
     let mut marked = false;
     if schema_defines_projection(raw).await {
         let mut stream = raw
@@ -68,14 +69,18 @@ pub async fn empty_disposable_store(raw: &Client) {
                 panic!("refusing to empty a SpiceDB whose witnesses cannot be read: {error}")
             });
             let resource = item.relationship.resource.object_id().to_owned();
-            position_witness |= resource.starts_with("position_");
-            marked |= resource == TEST_STORE_RESOURCE;
+            if resource == TEST_STORE_RESOURCE {
+                marked = true;
+            } else {
+                projection_state = true;
+            }
         }
     }
     assert!(
-        marked || !position_witness,
-        "refusing to empty a SpiceDB that holds a host-grant position witness no test suite \
-         marked: point WADDLE_TEST_SPICEDB_ENDPOINT at a disposable SpiceDB of this run"
+        marked || !projection_state,
+        "refusing to empty a SpiceDB that holds host-grant projection markers or witnesses no \
+         test suite marked: point WADDLE_TEST_SPICEDB_ENDPOINT at a disposable SpiceDB of this \
+         run"
     );
     for definition in guarded_resource_definitions().chain([
         AUTHZ_CODEC_MARKER_DEFINITION,
@@ -108,7 +113,8 @@ async fn schema_defines_projection(raw: &Client) -> bool {
 
 /// Mark the store as one a test suite empties. It is written once the
 /// store's codec is marked, since the codec guard refuses a store that
-/// holds relationships without its marker.
+/// holds relationships without its marker, and before the case writes any
+/// projection marker or witness. Writing it again changes nothing.
 pub async fn mark_test_store(raw: &Client) {
     let marker = Relationship::new(
         ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, TEST_STORE_RESOURCE)

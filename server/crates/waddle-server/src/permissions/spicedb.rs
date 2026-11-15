@@ -856,8 +856,10 @@ impl SpiceDbPermissionBackend {
 
     /// Remove every relationship each of `resources` holds, one
     /// `DeleteRelationships` request per resource in order, each
-    /// conditioned on `condition`. A failed condition stops at that
-    /// resource; an error leaves the outcome of that request unknown.
+    /// conditioned on `condition`. Every resource, and the condition's,
+    /// must be the position witness, latch or witnessed epoch of one
+    /// authority. A failed condition stops at that resource; an error
+    /// leaves the outcome of that request unknown.
     pub async fn clear_host_grant_witnesses(
         &self,
         resources: &[String],
@@ -866,6 +868,20 @@ impl SpiceDbPermissionBackend {
         if condition.previous.is_none() || condition.previous != condition.next {
             return Err(PermissionError::InvalidTuple(
                 "a witness removal is conditioned on a witness it does not change".to_owned(),
+            ));
+        }
+        // Only an authority's position witness, latch and witnessed epoch
+        // are ever removed, and only together under one authority.
+        let authority = super::host_grant::position_resource_authority(&condition.resource);
+        if authority.is_none()
+            || resources.iter().any(|resource| {
+                super::host_grant::position_resource_authority(resource) != authority
+            })
+        {
+            return Err(PermissionError::InvalidTuple(
+                "a witness removal names a resource other than one authority's position \
+                 witness, latch or witnessed epoch"
+                    .to_owned(),
             ));
         }
         for resource in resources {

@@ -18,7 +18,10 @@
 //!   from the projection, and admits again only after an operator reopens
 //!   it; an operator's revoke applies what SpiceDB cannot show;
 //! - a replica that finds the authority changed verifies the fence again in
-//!   place, and reports itself not ready while that fails.
+//!   place and refuses managed rooms while that fails; it reports itself not
+//!   ready only while its configured restore epoch predates the declared
+//!   one, and a runtime role corrected by the owner phase attaches it
+//!   without a restart.
 //!
 //! A restore is simulated by copying every host-grant relation into a
 //! schema of its own (the backup) and later rewriting the relations from
@@ -81,9 +84,9 @@ use waddle_server::permissions::host_grant::{
     HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
 use waddle_server::permissions::{
-    CheckPermission, EnsureAuthzCodecIncarnation, EnsureSchema, Object, ObjectType, Permission,
-    PermissionActor, ReadHostGrantWitness, RecordAuthzSchemaVersion, Relation,
-    ReplaceHostGrantWitnesses, Subject, Tuple,
+    CheckPermission, ClearHostGrantWitnesses, EnsureAuthzCodecIncarnation, EnsureSchema, Object,
+    ObjectType, Permission, PermissionActor, ReadHostGrantWitness, RecordAuthzSchemaVersion,
+    Relation, ReplaceHostGrantWitnesses, Subject, Tuple,
 };
 use waddle_server::test_support::{
     activate_host_grant_marker, host_grant_readiness_response, spicedb_wire,
@@ -1352,7 +1355,8 @@ async fn a_replica_verifies_a_changed_authority_in_place() {
     assert!(starting.drain_and_join(Duration::from_secs(5)).await);
 
     // A replica configured ahead of the declared epoch (the owner phase has
-    // not declared it yet) is not ready either.
+    // not declared it yet, which every replica of a rollout shares) stays
+    // ready, refuses managed rooms and names the failure.
     let ahead = fixture.ingress.authority().await;
     let gate = ahead.host_grant_gate();
     gate.install_verifier_for_test(
@@ -1367,10 +1371,12 @@ async fn a_replica_verifies_a_changed_authority_in_place() {
     );
     assert_eq!(
         gate.readiness(),
-        GateReadiness::NotReady(ReplicaFailure::ConfigurationAheadOfRestore)
+        GateReadiness::Refusing(ReplicaFailure::ConfigurationAheadOfRestore)
     );
+    assert!(gate.ready());
     let (status, body) = host_grant_readiness_response(&gate);
-    assert_eq!(status, 503);
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ready");
     assert_eq!(body["host_grants"], "configuration_ahead_of_restore");
     assert!(ahead.drain_and_join(Duration::from_secs(5)).await);
     fixture.close().await;
@@ -1534,23 +1540,23 @@ async fn the_periodic_pass_keeps_or_drops_the_attachment() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(gate.current().is_none());
-    // Verifications that keep failing to complete past the grace are this
-    // replica's failure: it reports itself not ready.
+    // Verifications that keep failing to complete past the grace are named
+    // by readiness, which stays ready: an outage every replica shares must
+    // not take every replica out of the endpoint set.
     let deadline = started
         + waddle_server::permissions::host_grant::INCOMPLETE_READINESS_GRACE
         + Duration::from_secs(60);
-    while gate.ready() {
+    while gate.readiness() != GateReadiness::Refusing(ReplicaFailure::FenceIncomplete) {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "incomplete verifications kept the replica ready"
+            "incomplete verifications were not named by readiness"
         );
+        assert!(gate.ready());
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(
-        gate.readiness(),
-        GateReadiness::NotReady(ReplicaFailure::FenceIncomplete)
-    );
-    assert_eq!(host_grant_readiness_response(&gate).0, 503);
+    let (status, body) = host_grant_readiness_response(&gate);
+    assert_eq!(status, 200);
+    assert_eq!(body["host_grants"], "fence_incomplete");
     // Released, the gate attaches again by itself.
     blocker.rollback().await.expect("release the lock");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -1567,7 +1573,8 @@ async fn the_periodic_pass_keeps_or_drops_the_attachment() {
     assert!(replica.drain_and_join(Duration::from_secs(5)).await);
 
     // A verifier that checks the runtime role's privileges, on a login that
-    // owns the schema: the periodic pass drops the attachment for good.
+    // owns the schema: the periodic pass drops the attachment, and each
+    // later pass that verifies again is refused the same way.
     let replica = Arc::new(fixture.ingress.authority().await);
     let gate = replica.host_grant_gate();
     let stop = tokio_util::sync::CancellationToken::new();
@@ -1595,14 +1602,142 @@ async fn the_periodic_pass_keeps_or_drops_the_attachment() {
     assert!(gate.current().is_none());
     gate.settled().await;
     assert_eq!(gate.state(), GateState::ReverifyFailed);
-    // A runtime role that does not match the profile is this replica's
-    // failure while a scope is enrolled: not ready.
+    // A runtime role that does not match the profile is the owner phase's
+    // grant matrix, which every replica shares: readiness names it and
+    // stays ready.
     assert_eq!(
         gate.readiness(),
-        GateReadiness::NotReady(ReplicaFailure::RuntimeProfileMismatch)
+        GateReadiness::Refusing(ReplicaFailure::RuntimeProfileMismatch)
     );
+    assert_eq!(host_grant_readiness_response(&gate).0, 200);
     stop.cancel();
     assert!(replica.drain_and_join(Duration::from_secs(5)).await);
+    fixture.close().await;
+}
+
+/// A replica whose runtime role does not match the profile stays ready,
+/// refuses managed rooms and verifies again at each periodic pass: once the
+/// owner phase corrects the role's grants, it attaches without a restart.
+#[tokio::test]
+async fn a_corrected_runtime_role_attaches_without_a_restart() {
+    let Some(fixture) = GrantFixture::active("hg_restore_profile").await else {
+        return;
+    };
+    let admin = owner_pool(&fixture).await;
+    let role = format!("hg_restore_profile_{}", Uuid::new_v4().simple());
+    let password = Uuid::new_v4().simple().to_string();
+    let database: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&admin)
+        .await
+        .expect("database name");
+    // Exactly the runtime profile on the host-grant relations, plus the
+    // lineage the fence reads, and one privilege too many: DELETE on the
+    // grant rows. The database is this case's own, so its default TEMP
+    // privilege is revoked from PUBLIC as the owner phase's provisioning
+    // does.
+    for statement in [
+        format!(
+            "CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB \
+             NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        ),
+        format!("REVOKE TEMP ON DATABASE {database} FROM PUBLIC"),
+        format!("GRANT CONNECT ON DATABASE {database} TO {role}"),
+        format!("GRANT USAGE ON SCHEMA public TO {role}"),
+        format!(
+            "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
+             host_grant_rooms, _lineage TO {role}"
+        ),
+        format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
+        format!(
+            "GRANT SELECT, INSERT ON host_grant_operations, host_grant_operation_changes \
+             TO {role}"
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    let mut runtime_url = url::Url::parse(fixture.ingress.db.database_url()).expect("URL");
+    runtime_url.set_username(&role).expect("runtime user");
+    runtime_url
+        .set_password(Some(&password))
+        .expect("runtime password");
+    let runtime_db = Database::from_config(
+        "host-grant-restore-profile",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, runtime_url.to_string()),
+    )
+    .await
+    .expect("runtime database");
+    let runtime = HostGrantStore::open(runtime_db.clone()).expect("runtime store");
+
+    let replica = Arc::new(fixture.ingress.authority().await);
+    let gate = replica.host_grant_gate();
+    let stop = tokio_util::sync::CancellationToken::new();
+    gate.install_verifier(
+        runtime.clone(),
+        local_permissions(&fixture),
+        served(),
+        RestoreEpoch::INITIAL,
+        stop.clone(),
+    );
+    assert!(matches!(
+        gate.verify_once().await,
+        Err(HostGrantError::UnsafeRuntimePrivileges {
+            component: "host_grants"
+        })
+    ));
+    assert_eq!(gate.state(), GateState::Unattached);
+    assert_eq!(
+        gate.readiness(),
+        GateReadiness::Refusing(ReplicaFailure::RuntimeProfileMismatch)
+    );
+    let (status, body) = host_grant_readiness_response(&gate);
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["host_grants"], "runtime_profile_mismatch");
+    let refused = fixture.room_submission("profile-refused", "refused");
+    let decision = replica.commit(&refused).await;
+    assert_eq!(decision.class, IngressDecisionClass::PolicyDenied);
+    assert_eq!(host_grant_support::refusal(&decision), SERVICE_UNAVAILABLE);
+
+    // The periodic pass verifies again; the corrected grants attach it.
+    gate.watch(Duration::from_millis(100));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(gate.state(), GateState::Unattached);
+    sqlx::query(&format!("REVOKE DELETE ON host_grants FROM {role}"))
+        .execute(&admin)
+        .await
+        .expect("correct the grants");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while gate.state() != GateState::Attached {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a corrected runtime role was not attached"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(gate.readiness(), GateReadiness::Verified);
+    stop.cancel();
+    assert!(replica.drain_and_join(Duration::from_secs(5)).await);
+
+    drop(runtime);
+    drop(runtime_db);
+    for statement in [
+        format!(
+            "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity \
+             WHERE usename = '{role}'"
+        ),
+        format!("DROP OWNED BY {role}"),
+        format!("DROP ROLE {role}"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    admin.close().await;
     fixture.close().await;
 }
 
@@ -3946,4 +4081,452 @@ async fn live_spicedb_another_deployments_spicedb_gets_no_position_witness() {
     assert!(report.holds_authority);
     assert!(live.position_witness(&actor).await.is_some());
     live.close().await;
+}
+
+/// The history both cases of a second restore during restore handling
+/// start from: a revoke witnessed and never projected, a restore to before
+/// it declared, and the backup of the database right after that
+/// declaration, before reconciliation found the lost revoke.
+async fn restored_during_restore_handling(
+    label: &str,
+) -> (
+    Live,
+    HostGrantAuthority,
+    ActorRef<PermissionActor>,
+    AuthorityBackup,
+) {
+    let live = Live::start(label).await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let (authority, actor) = live.replica().await;
+    authority.reconcile(lifecycle).await.expect("first pass");
+    fence_and_witness(&live.fixture.store, &actor, RestoreEpoch::INITIAL).await;
+    authority
+        .sync_witnesses(lifecycle)
+        .await
+        .expect("witnesses");
+    let before_revoke = AuthorityBackup::take(&live.fixture).await;
+    let command = live
+        .fixture
+        .command(OWNER, SENDER, RoomAffiliation::None)
+        .await;
+    let revoke = authority.set_affiliation(&command).await.expect("revoke");
+    authority
+        .sync_witnesses(lifecycle)
+        .await
+        .expect("witness of the revoke");
+    let head = live.stamps_of(&head_witness_resource(lifecycle)).await;
+    assert_eq!(head.len(), 1);
+    assert!(head[0].contains(&revoke.record().operation.to_storage()));
+
+    // Restore #1, to before the revoke, declared.
+    before_revoke.restore(&live.fixture).await;
+    declare(&live.fixture, 1).await;
+    let declared = AuthorityBackup::take(&live.fixture).await;
+    assert_eq!(
+        current_kind(&live.fixture, lifecycle).await,
+        OperationKind::Restore
+    );
+
+    // Reconciliation finds the lost revoke through the journal witness and
+    // marks the scope under an operation of its own; the projection it then
+    // writes names that operation, not the restore's.
+    assert!(matches!(
+        authority
+            .reconcile(lifecycle)
+            .await
+            .expect("reconstruction"),
+        Reconciliation::Reconstructed(_)
+    ));
+    let state = live.fixture.state(&live.fixture.scope).await;
+    assert_eq!(state.closed_reason, Some(ClosedReason::Reconstructed));
+    assert!(state.lost_operations);
+    assert_eq!(
+        current_kind(&live.fixture, lifecycle).await,
+        OperationKind::Reconstruct
+    );
+    let marker = live.current_marker().await;
+    assert_eq!(marker.operation, state.operation);
+    assert_eq!(live.stamps().await, vec![marker.stamp()]);
+    assert_eq!(
+        live.stamps_of(&head_witness_resource(lifecycle)).await,
+        vec![marker.stamp()]
+    );
+
+    // Restore #2: PostgreSQL goes back to after the declaration, before the
+    // mark. SpiceDB keeps the marker of the operation that recorded it.
+    declared.restore(&live.fixture).await;
+    let state = live.fixture.state(&live.fixture.scope).await;
+    assert_eq!(state.closed_reason, Some(ClosedReason::Restored));
+    assert!(!state.lost_operations);
+    (live, authority, actor, declared)
+}
+
+/// A second restore, declared, to a database that predates the lost
+/// operations mark: the marker names an operation the restored journal does
+/// not hold, so the reconstruction marks the scope again and a reopen of
+/// every scope leaves it closed.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_a_second_declared_restore_keeps_the_lost_operations_mark() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let (live, authority, _actor, _declared) =
+        restored_during_restore_handling("hg_restore_twice_declared").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    declare(&live.fixture, 2).await;
+    assert!(matches!(
+        authority
+            .reconcile(lifecycle)
+            .await
+            .expect("reconstruction"),
+        Reconciliation::Reconstructed(_)
+    ));
+    let state = live.fixture.state(&live.fixture.scope).await;
+    assert_eq!(state.closed_reason, Some(ClosedReason::Reconstructed));
+    assert!(state.lost_operations);
+    assert_eq!(
+        live.fixture
+            .store
+            .reopen_scopes(ReopenSelection::All)
+            .await
+            .expect("reopen of every scope"),
+        ReopenReport {
+            reopened: 0,
+            not_reconstructed: 0,
+            lost_operations: 1,
+        }
+    );
+    assert!(!sql_admits(&live.fixture, PEER, HostGrantAction::Read).await);
+    assert!(!sql_admits(&live.fixture, SENDER, HostGrantAction::Read).await);
+    live.close().await;
+}
+
+/// The same second restore, met with an acknowledged position instead of a
+/// declaration: the restored scope's marker is ahead of its journal, so the
+/// pass fences it, marked, and a reopen of every scope leaves it closed.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_a_second_acknowledged_restore_keeps_the_scope_closed() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let (live, authority, actor, _declared) =
+        restored_during_restore_handling("hg_restore_twice_acknowledged").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let witnessed = live
+        .position_witness(&actor)
+        .await
+        .expect("the position witness");
+    live.fixture
+        .store
+        .acknowledge_position(witnessed)
+        .await
+        .expect("acknowledge the position");
+    assert_eq!(
+        authority.reconcile(lifecycle).await.expect("pass"),
+        Reconciliation::Contradiction(ProjectionContradiction::AheadOfCanonical)
+    );
+    let state = live.fixture.state(&live.fixture.scope).await;
+    assert_eq!(state.closed_reason, Some(ClosedReason::Fenced));
+    assert!(state.lost_operations);
+    assert_eq!(
+        current_kind(&live.fixture, lifecycle).await,
+        OperationKind::Fence
+    );
+    assert_eq!(
+        live.fixture
+            .store
+            .reopen_scopes(ReopenSelection::All)
+            .await
+            .expect("reopen of every scope"),
+        ReopenReport::default()
+    );
+    assert_eq!(
+        live.fixture.state(&live.fixture.scope).await.closed_reason,
+        Some(ClosedReason::Fenced)
+    );
+    assert!(!sql_admits(&live.fixture, PEER, HostGrantAction::Read).await);
+    live.close().await;
+}
+
+/// No first projection is written while scopes admit and SpiceDB holds
+/// nothing of this authority: the fence refuses that state as a SpiceDB
+/// that is empty or another deployment's, and a first projection written
+/// into it would clear the refusal and let the fence close every scope
+/// that admits.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_no_first_projection_is_written_into_a_spicedb_without_the_authority() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_restore_absent_first").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let store = &live.fixture.store;
+    let (authority, actor) = live.replica().await;
+    assert!(matches!(
+        authority.reconcile(lifecycle).await.expect("first pass"),
+        Reconciliation::Activated(_)
+    ));
+
+    // The replica now reaches a SpiceDB that holds nothing of this
+    // authority, while the scope admits.
+    live.raw
+        .delete_relationships(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
+        .await
+        .expect("empty the projection");
+    mark_test_store(&live.raw).await;
+    assert_eq!(
+        fence_refusal(
+            verify_restore_fence(store, &actor, RestoreEpoch::INITIAL)
+                .await
+                .expect_err("a SpiceDB without the authority")
+        ),
+        RestoreFenceRefusal::ProjectionAbsent
+    );
+
+    // A scope enrolled now gets no first projection.
+    let later = live.fixture.enroll_another().await;
+    assert!(matches!(
+        authority.reconcile(later.lifecycle).await,
+        Err(HostGrantError::RestoreFence(
+            RestoreFenceRefusal::ProjectionAbsent
+        ))
+    ));
+    assert!(live
+        .stamps_of(&later.lifecycle.to_storage())
+        .await
+        .is_empty());
+    assert!(live
+        .stamps_of(&room_witness_resource(&later.channel_id))
+        .await
+        .is_empty());
+    // The refusal stands and nothing was closed.
+    assert_eq!(
+        fence_refusal(
+            verify_restore_fence(store, &actor, RestoreEpoch::INITIAL)
+                .await
+                .expect_err("still a SpiceDB without the authority")
+        ),
+        RestoreFenceRefusal::ProjectionAbsent
+    );
+    assert_eq!(
+        live.fixture.state(&live.fixture.scope).await.admission,
+        AdmissionState::Active
+    );
+    live.close().await;
+}
+
+/// A journal witness whose stamp is not a canonical one cannot show what a
+/// restored database lost: the reconstruction marks the scope, under an
+/// operation of its own, and stops without moving the witness or taking
+/// the projection over. Once an operator removes the witness the scope is
+/// reconstructed, and a reopen of every scope still leaves it closed.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_an_unreadable_journal_witness_keeps_a_restored_scope_closed() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_restore_head_unreadable").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let (authority, actor) = live.replica().await;
+    authority.reconcile(lifecycle).await.expect("first pass");
+    authority
+        .sync_witnesses(lifecycle)
+        .await
+        .expect("witnesses");
+    let head = head_witness_resource(lifecycle);
+    let witnessed = live.stamps_of(&head).await;
+    assert_eq!(witnessed.len(), 1);
+    replace_witness(
+        &actor,
+        head.clone(),
+        Some(witnessed[0].clone()),
+        Some("not_a_marker".to_owned()),
+    )
+    .await;
+    let projected = live.stamps().await;
+    declare(&live.fixture, 1).await;
+
+    for _ in 0..2 {
+        assert_eq!(
+            authority.reconcile(lifecycle).await.expect("pass"),
+            Reconciliation::Contradiction(ProjectionContradiction::MalformedJournalWitness)
+        );
+    }
+    let state = live.fixture.state(&live.fixture.scope).await;
+    assert_eq!(state.closed_reason, Some(ClosedReason::Restored));
+    assert!(state.lost_operations);
+    // One operation recorded the mark; the second pass recorded nothing.
+    assert_eq!(
+        current_kind(&live.fixture, lifecycle).await,
+        OperationKind::Reconstruct
+    );
+    assert_eq!(state.generation, generation(3));
+    assert_eq!(live.stamps_of(&head).await, vec!["not_a_marker".to_owned()]);
+    assert_eq!(live.stamps().await, projected);
+
+    // The operator removes the witness; the scope is reconstructed, and
+    // reopens only by name with the confirmation.
+    replace_witness(&actor, head.clone(), Some("not_a_marker".to_owned()), None).await;
+    assert!(matches!(
+        authority
+            .reconcile(lifecycle)
+            .await
+            .expect("reconstruction"),
+        Reconciliation::Reconstructed(_)
+    ));
+    assert_eq!(
+        live.fixture
+            .store
+            .reopen_scopes(ReopenSelection::All)
+            .await
+            .expect("reopen of every scope"),
+        ReopenReport {
+            reopened: 0,
+            not_reconstructed: 0,
+            lost_operations: 1,
+        }
+    );
+    reopen_after_reapplying(&live.fixture, lifecycle).await;
+    live.close().await;
+}
+
+/// The unreadable position witnesses are removed after a declared restore
+/// only when nothing readable beside them was written under the declared
+/// epoch, and a removal names one authority's position witness, latch and
+/// witnessed epoch only.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_unreadable_witnesses_beside_one_of_the_declared_epoch_are_kept() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_restore_clear_epoch").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let store = &live.fixture.store;
+    let (authority, actor) = live.replica().await;
+    authority.reconcile(lifecycle).await.expect("first pass");
+    fence_and_witness(store, &actor, RestoreEpoch::INITIAL).await;
+    let authority_id = live.authority_id().await;
+    let position = position_witness_resource(&authority_id);
+    let latch = latch_witness_resource(&authority_id);
+    let epoch = epoch_witness_resource(&authority_id);
+    assert_eq!(live.stamps_of(&epoch).await, vec!["0".to_owned()]);
+
+    // After a declared restore, a position witness of the declared epoch
+    // sits beside an unreadable latch and the witnessed epoch of before.
+    declare(&live.fixture, 1).await;
+    let declared = PositionWitness {
+        epoch: RestoreEpoch::new(1),
+        position: store.postgres_position().await.expect("position"),
+    };
+    live.write_position_witness(&actor, declared).await;
+    live.touch_stamp(&latch, "not_a_latch").await;
+    assert_eq!(
+        fence_refusal(
+            verify_restore_fence(store, &actor, RestoreEpoch::new(1))
+                .await
+                .expect_err("an unreadable latch beside a witness of the declared epoch")
+        ),
+        RestoreFenceRefusal::PositionUnverified
+    );
+    assert_eq!(live.stamps_of(&position).await, vec![declared.stamp()]);
+    assert_eq!(live.stamps_of(&latch).await, vec!["not_a_latch".to_owned()]);
+    assert_eq!(live.stamps_of(&epoch).await, vec!["0".to_owned()]);
+
+    // A removal of anything but one authority's position witnesses is
+    // refused before a request is sent.
+    let condition = WitnessChange {
+        resource: position.clone(),
+        previous: Some(declared.stamp()),
+        next: Some(declared.stamp()),
+    };
+    for resources in [
+        vec![head_witness_resource(lifecycle)],
+        vec![lifecycle.to_storage()],
+        vec![epoch_witness_resource(&"0".repeat(32))],
+    ] {
+        assert!(actor
+            .ask(ClearHostGrantWitnesses {
+                resources,
+                condition: condition.clone(),
+            })
+            .await
+            .is_err());
+    }
+    assert!(actor
+        .ask(ClearHostGrantWitnesses {
+            resources: vec![latch.clone()],
+            condition: WitnessChange {
+                resource: head_witness_resource(lifecycle),
+                previous: Some("x".to_owned()),
+                next: Some("x".to_owned()),
+            },
+        })
+        .await
+        .is_err());
+    assert_eq!(live.stamps_of(&latch).await, vec!["not_a_latch".to_owned()]);
+    live.close().await;
+}
+
+/// A witnessed epoch that cannot be read beside a readable position
+/// witness is not needed: the fence passes, and the next move of the
+/// witness replaces it, also when it holds more than one stamp.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_an_unreadable_epoch_beside_a_readable_witness_is_replaced() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_restore_epoch_unreadable").await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let store = &live.fixture.store;
+    let (authority, actor) = live.replica().await;
+    authority.reconcile(lifecycle).await.expect("first pass");
+    fence_and_witness(store, &actor, RestoreEpoch::INITIAL).await;
+    let epoch = epoch_witness_resource(&live.authority_id().await);
+
+    // One stamp that is not an epoch.
+    replace_witness(
+        &actor,
+        epoch.clone(),
+        Some("0".to_owned()),
+        Some("not_an_epoch".to_owned()),
+    )
+    .await;
+    verify_restore_fence(store, &actor, RestoreEpoch::INITIAL)
+        .await
+        .expect("the fence passes beside a readable witness");
+    advance_wal(&live.fixture).await;
+    assert_eq!(
+        sync_position_witness(store, &actor, PositionWriter::Commit, None)
+            .await
+            .expect("position writer"),
+        (WitnessSync::Written, Some(PositionStanding::Advanced))
+    );
+    assert_eq!(live.stamps_of(&epoch).await, vec!["0".to_owned()]);
+
+    // Two stamps: no write can be conditioned on them, so they are removed
+    // first.
+    live.touch_stamp(&epoch, "7").await;
+    assert_eq!(live.stamps_of(&epoch).await.len(), 2);
+    verify_restore_fence(store, &actor, RestoreEpoch::INITIAL)
+        .await
+        .expect("the fence passes beside a readable witness");
+    advance_wal(&live.fixture).await;
+    assert_eq!(
+        sync_position_witness(store, &actor, PositionWriter::Commit, None)
+            .await
+            .expect("position writer"),
+        (WitnessSync::Written, Some(PositionStanding::Advanced))
+    );
+    assert_eq!(live.stamps_of(&epoch).await, vec!["0".to_owned()]);
+    let witness = live
+        .position_witness(&actor)
+        .await
+        .expect("the position witness");
+    assert_eq!(witness.epoch, RestoreEpoch::INITIAL);
+    live.close().await;
+}
+
+/// Commit a transaction that writes write-ahead log, so the flushed
+/// position moves forward.
+async fn advance_wal(fixture: &GrantFixture) {
+    let pool = owner_pool(fixture).await;
+    let _: i64 = sqlx::query_scalar("SELECT pg_catalog.txid_current()")
+        .fetch_one(&pool)
+        .await
+        .expect("assign a transaction ID");
+    pool.close().await;
 }

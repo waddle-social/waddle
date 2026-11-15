@@ -338,16 +338,16 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
 /// attested, by what its host-grant gate says (see
 /// `permissions::host_grant::runtime_attach`, "Readiness").
 ///
-/// A failure of this replica alone while an unretired scope is enrolled (a
-/// configured restore epoch the database does not record, a runtime role
-/// that does not match the profile, verifications that cannot complete)
-/// takes it out of the endpoint set, so that a broken replica does not keep
-/// receiving the managed rooms it refuses. A refusal of the whole authority
-/// is shared by every replica: failing readiness would take every one out
-/// of the endpoint set, rooms no scope manages included, while managed
-/// rooms are refused either way, so the replica stays ready and says so;
-/// the gate logs and counts the failure. A deployment with no unretired
-/// scope reports `unmanaged`.
+/// Only a configured restore epoch below the one the database records,
+/// while an unretired scope is enrolled, takes the replica out of the
+/// endpoint set: that configuration is this replica's alone and predates a
+/// declared restore. Readiness never depends on SpiceDB or on a failure
+/// every replica shares (a refused authority, a configuration ahead of the
+/// owner phase, the runtime role's grants, verifications that cannot
+/// complete): failing it would take every replica out of the endpoint set,
+/// rooms no scope manages included, while managed rooms are refused either
+/// way. The replica stays ready and names the failure; the gate logs and
+/// counts it. A deployment with no unretired scope reports `unmanaged`.
 pub(crate) fn attested_readiness_response(
     gate: Option<&crate::permissions::host_grant::HostGrantGate>,
 ) -> (StatusCode, Json<serde_json::Value>) {

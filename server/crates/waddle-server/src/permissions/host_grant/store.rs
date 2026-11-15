@@ -364,6 +364,55 @@ impl HostGrantStore {
         }))
     }
 
+    /// The authority identity and up to `limit` scopes that admit, in
+    /// lifecycle order, read in one snapshot: what a first projection checks
+    /// SpiceDB against before it writes (`restore::projection_absent`).
+    /// `None` without the host-grant relations.
+    pub(crate) async fn admitting_scopes(
+        &self,
+        limit: i64,
+    ) -> Result<Option<(String, Vec<ScopeLifecycleId>)>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        if !query_flag(
+            &mut tx,
+            "SELECT pg_catalog.to_regclass('host_grant_authority') IS NOT NULL",
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT authority_id FROM host_grant_authority WHERE singleton",
+                (),
+            )
+            .await?;
+        let authority_id = rows
+            .next()
+            .await?
+            .ok_or(corrupt("authority incarnation"))?
+            .get::<String>(0)?;
+        drop(rows);
+        let mut rows = tx
+            .query(
+                "SELECT lifecycle_id FROM host_grant_scopes WHERE admission_state = 'active' \
+                 ORDER BY lifecycle_id LIMIT ?",
+                crate::db_params![limit],
+            )
+            .await?;
+        let mut admitting = Vec::new();
+        while let Some(row) = rows.next().await? {
+            admitting.push(
+                ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                    .ok_or(corrupt("lifecycle_id"))?,
+            );
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some((authority_id, admitting)))
+    }
+
     /// Where the PostgreSQL server stands: its system identifier, the
     /// timeline it writes on and its flushed WAL position.
     ///
@@ -901,42 +950,6 @@ impl HostGrantStore {
         Ok(heads)
     }
 
-    /// Record that the restored database lost operations of a scope, as a
-    /// reconstruction found from its projection or its journal witness. The
-    /// mark stays until an operator reopens the scope by name, confirming
-    /// that what was lost has been applied again (see
-    /// [`Self::reopen_scopes`]). A scope that is not closed for a restore
-    /// is left as it is; the answer is whether the mark is recorded.
-    pub(crate) async fn record_lost_operations(
-        &self,
-        lifecycle: ScopeLifecycleId,
-    ) -> Result<bool, HostGrantError> {
-        let store = self.clone();
-        own(async move {
-            let mut tx = store.begin_write().await?;
-            let Some(scope) = load_scope(&mut tx, lifecycle, true)
-                .await
-                .map_err(statement_failure)?
-            else {
-                tx.rollback().await?;
-                return Ok(false);
-            };
-            if !scope
-                .closed_reason
-                .is_some_and(ClosedReason::awaits_restore_handling)
-            {
-                tx.rollback().await?;
-                return Ok(false);
-            }
-            if !scope.lost_operations {
-                mark_lost_operations(&mut tx, lifecycle).await?;
-            }
-            commit(tx, CommitMode::Acknowledged).await?;
-            Ok(true)
-        })
-        .await
-    }
-
     /// Read the policy state for one subject and action outside any
     /// acceptance transaction, honouring grants as admission does for a
     /// deployment that serves `served`. The answer is a candidate: it holds
@@ -1124,7 +1137,10 @@ impl HostGrantStore {
     }
 
     /// Record the changes a reconstruction found before it rebuilds the
-    /// projection of a scope a restore transition closed.
+    /// projection of a scope a restore transition closed, and mark the
+    /// scope as one the restored database lost operations in when
+    /// `lost_operations` says so, in one `reconstruct` operation at the
+    /// next generation.
     ///
     /// The scope must still be closed as `restored` and at
     /// `expected_generation`. A change that would not lower the subject's
@@ -1134,7 +1150,14 @@ impl HostGrantStore {
     /// at `none` instead, and a change to a subject without a row records
     /// one at `none` or `outcast`, within the scope's row bound
     /// ([`HostGrantError::GrantLimit`] otherwise). The scope stays closed.
-    /// `None` when nothing is left to change.
+    ///
+    /// The mark is only ever set in the commit of an operation that
+    /// advances the generation, never alone: the projection written after
+    /// it names that operation (see [`ReconstructScope`]). `None` when no
+    /// grant is left to change and the scope needs no mark, or holds one
+    /// already: a scope is marked by the operation that recorded the mark,
+    /// at or before its current generation, so every database that holds
+    /// the current operation holds the mark too.
     pub(crate) async fn record_reconstruction(
         &self,
         command: &ReconstructScope,
@@ -2308,8 +2331,9 @@ impl HostGrantStore {
             Ok(writes)
         }
         .await;
+        let mark = command.lost_operations && !scope.lost_operations;
         let writes = match decision {
-            Ok(writes) if writes.is_empty() => {
+            Ok(writes) if writes.is_empty() && !mark => {
                 tx.rollback().await?;
                 return Ok(None);
             }
@@ -2366,6 +2390,9 @@ impl HostGrantStore {
             .await?;
         }
         advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        if mark {
+            mark_lost_operations(&mut tx, command.lifecycle).await?;
+        }
         let digest = current_digest(&mut tx, &scope).await?;
         let record = OperationRecord {
             operation: command.operation,
@@ -2497,7 +2524,8 @@ async fn lower_effective_standing(
 }
 
 /// Mark a scope as one the restored database lost operations in, under the
-/// guard its caller holds.
+/// guard its caller holds, in the commit of the operation that advances its
+/// generation.
 async fn mark_lost_operations(
     tx: &mut Transaction<'_>,
     lifecycle: ScopeLifecycleId,

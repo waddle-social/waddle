@@ -93,6 +93,7 @@ pub use runtime_attach::{
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
 pub use store::{Activation, HostGrantStore, RESTORE_TRANSITION_BATCH};
+pub(crate) use witness::position_resource_authority;
 #[cfg(feature = "test-support")]
 pub use witness::with_host_grant_witness_write_fault;
 pub use witness::{

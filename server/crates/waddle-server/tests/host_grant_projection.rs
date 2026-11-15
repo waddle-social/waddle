@@ -110,8 +110,9 @@ impl Live {
             .await
             .expect("raw SpiceDB client");
         // Empty the store, markers included, so that this build's schema is
-        // installed whatever an earlier test left; a store holding a
-        // position witness no test suite marked is refused instead.
+        // installed whatever an earlier test left; a store holding markers
+        // or witnesses no test suite marked is refused instead. Each replica
+        // marks the store as a test store once it has started.
         live_spicedb::empty_disposable_store(&raw).await;
         let mut config = ServerConfig::test_homeserver();
         config.spicedb = Some(SpiceDbConfig {
@@ -119,11 +120,16 @@ impl Live {
             preshared_key,
             insecure: true,
         });
-        Self {
+        let live = Self {
             fixture,
             config,
             raw,
-        }
+        };
+        // The store's codec is marked by a replica's startup steps; then it
+        // is marked as a test store, before the case writes anything.
+        live.actor(&live.fixture.store).await;
+        live_spicedb::mark_test_store(&live.raw).await;
+        live
     }
 
     /// A replica's permission actor: the production backend, started with

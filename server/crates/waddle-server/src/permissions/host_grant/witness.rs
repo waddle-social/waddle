@@ -160,6 +160,21 @@ impl WitnessResource {
     }
 }
 
+/// The authority a position witness, regression latch or witnessed epoch
+/// resource is filed under; `None` for any other resource. The removal of
+/// unreadable position witnesses touches these three kinds only.
+pub(crate) fn position_resource_authority(resource: &str) -> Option<String> {
+    match WitnessResource::classify(resource) {
+        WitnessResource::Position(authority)
+        | WitnessResource::Latch(authority)
+        | WitnessResource::Epoch(authority) => Some(authority),
+        WitnessResource::Marker(_)
+        | WitnessResource::Head(_)
+        | WitnessResource::Room(_)
+        | WitnessResource::Unknown => None,
+    }
+}
+
 fn is_hex(text: &str, length: usize) -> bool {
     text.len() == length
         && text
@@ -639,52 +654,72 @@ struct StoredPosition {
     witness_stamp: Option<String>,
     latch: Option<PositionLatch>,
     latch_stamp: Option<String>,
+    /// The one stamp the witnessed epoch holds, whether or not it is a
+    /// canonical epoch: beside a readable witness or latch, which carries
+    /// its own epoch, the next write replaces it either way.
     epoch_stamp: Option<String>,
+    /// The witnessed epoch holds more than one relationship, or one that is
+    /// not a plain marker relationship, beside a readable witness or latch.
+    /// No write can be conditioned on it; it is removed before the next
+    /// write.
+    epoch_malformed: bool,
 }
 
 /// Read the authority's position witnesses. `Ok(None)` when the backend
-/// holds no projection; `Err(MalformedWitness)` inside when one of them
-/// cannot be read, which is counted and warned about.
+/// holds no projection; `Err(MalformedWitness)` inside when the position
+/// witness or the latch cannot be read, or the witnessed epoch cannot be
+/// read and nothing beside it carries an epoch, which is counted and warned
+/// about.
 async fn read_stored_position(
     permissions: &ActorRef<PermissionActor>,
     authority_id: &str,
 ) -> Result<Option<Result<StoredPosition, MalformedWitness>>, HostGrantError> {
-    let mut stamps = Vec::with_capacity(3);
+    let mut listed = Vec::with_capacity(3);
     for resource in [
         position_witness_resource(authority_id),
         latch_witness_resource(authority_id),
         epoch_witness_resource(authority_id),
     ] {
-        let Some(listed) = read_witness(permissions, &resource).await? else {
+        let Some(read) = read_witness(permissions, &resource).await? else {
             return Ok(None);
         };
-        match listed.single_stamp() {
-            Ok(stamp) => stamps.push(stamp.map(str::to_owned)),
-            Err(malformed) => {
-                witness_write_failed("malformed", "position");
-                return Ok(Some(Err(malformed)));
-            }
-        }
+        listed.push(read);
     }
-    let mut stamps = stamps.into_iter();
-    let (witness_stamp, latch_stamp, epoch_stamp) = (
-        stamps.next().flatten(),
-        stamps.next().flatten(),
-        stamps.next().flatten(),
-    );
-    let witness = witness_stamp.as_deref().map(PositionWitness::parse);
-    let latch = latch_stamp.as_deref().map(PositionLatch::parse);
-    let epoch = epoch_stamp.as_deref().map(parse_epoch_stamp);
-    if matches!(witness, Some(None)) || matches!(latch, Some(None)) || matches!(epoch, Some(None)) {
+    let malformed = || {
         witness_write_failed("malformed", "position");
-        return Ok(Some(Err(MalformedWitness)));
+        Ok(Some(Err(MalformedWitness)))
+    };
+    let (Ok(witness_stamp), Ok(latch_stamp)) = (listed[0].single_stamp(), listed[1].single_stamp())
+    else {
+        return malformed();
+    };
+    let witness = witness_stamp.map(PositionWitness::parse);
+    let latch = latch_stamp.map(PositionLatch::parse);
+    if matches!(witness, Some(None)) || matches!(latch, Some(None)) {
+        return malformed();
     }
+    let (witness, latch) = (witness.flatten(), latch.flatten());
+    let carries_epoch = witness.is_some() || latch.is_some();
+    let (epoch_stamp, epoch_malformed) = match listed[2].single_stamp() {
+        Ok(None) => (None, false),
+        Ok(Some(stamp)) if parse_epoch_stamp(stamp).is_some() => (Some(stamp.to_owned()), false),
+        Ok(Some(stamp)) if carries_epoch => {
+            witness_write_failed("malformed", "epoch");
+            (Some(stamp.to_owned()), false)
+        }
+        Err(MalformedWitness) if carries_epoch => {
+            witness_write_failed("malformed", "epoch");
+            (None, true)
+        }
+        Ok(Some(_)) | Err(MalformedWitness) => return malformed(),
+    };
     Ok(Some(Ok(StoredPosition {
-        witness: witness.flatten(),
-        witness_stamp,
-        latch: latch.flatten(),
-        latch_stamp,
+        witness,
+        witness_stamp: witness_stamp.map(str::to_owned),
+        latch,
+        latch_stamp: latch_stamp.map(str::to_owned),
         epoch_stamp,
+        epoch_malformed,
     })))
 }
 
@@ -701,8 +736,11 @@ async fn read_stored_position(
 /// under, all in the same request; a latch is written conditioned on the
 /// exact position witness it names. `latched` is a regression this replica
 /// saw and keeps in memory; it counts like a stored latch that names the
-/// same witness. A witness that cannot be read is left alone, counted and
-/// warned about; the fence removes it once a restore is declared.
+/// same witness. A witness or latch that cannot be read is left alone,
+/// counted and warned about; the fence removes it once a restore is
+/// declared. A witnessed epoch that cannot be read beside a readable
+/// witness or latch is replaced with the next move, after it is removed
+/// first when no write can be conditioned on it.
 pub async fn sync_position_witness(
     store: &HostGrantStore,
     permissions: &ActorRef<PermissionActor>,
@@ -738,6 +776,24 @@ pub async fn sync_position_witness(
                 if standing.writes() && previous.is_none() && writer == PositionWriter::Commit =>
             {
                 return Ok((WitnessSync::Skipped, Some(standing)));
+            }
+            _ if standing.writes() && stored.epoch_malformed => {
+                // Removed conditioned on the readable witness or latch
+                // beside it, then read again.
+                let (condition, stamp) = match (&stored.witness_stamp, &stored.latch_stamp) {
+                    (Some(stamp), _) => (resource.clone(), stamp.clone()),
+                    (None, Some(stamp)) => (latch_resource.clone(), stamp.clone()),
+                    (None, None) => return Ok((WitnessSync::Malformed, None)),
+                };
+                let condition = WitnessChange {
+                    resource: condition,
+                    previous: Some(stamp.clone()),
+                    next: Some(stamp),
+                };
+                match clear_witnesses(permissions, vec![epoch_resource.clone()], condition).await? {
+                    Some(_) => continue,
+                    None => return Ok((WitnessSync::Skipped, None)),
+                }
             }
             standing if standing.writes() => vec![
                 WitnessChange {

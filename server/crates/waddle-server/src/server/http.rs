@@ -898,12 +898,15 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 /// (a statement that failed, a bound that expired, SpiceDB that did not
 /// answer, a fence refusal an operator can clear) is retried in the
 /// background with a capped exponential backoff until the check passes,
-/// finds that the role does not match the profile, or the replica stops.
-/// While the authority is unattached every acceptance for a managed room is
-/// refused with a committed stanza error, and rooms that no scope manages
-/// are unaffected, except the rooms of an enrollment only SpiceDB holds.
-/// Once attached, the gate runs the fence again about every
-/// [`REVERIFY_INTERVAL`](crate::permissions::host_grant::REVERIFY_INTERVAL).
+/// finds that the role does not match the profile, or the replica stops. A
+/// role that does not match the profile is checked again about every
+/// [`REVERIFY_INTERVAL`](crate::permissions::host_grant::REVERIFY_INTERVAL),
+/// so the owner phase's corrected grants attach the replica without a
+/// restart. While the authority is unattached every acceptance for a
+/// managed room is refused with a committed stanza error, and rooms that no
+/// scope manages are unaffected, except the rooms of an enrollment only
+/// SpiceDB holds. Once attached, the gate runs the fence again at the same
+/// interval.
 /// SQLite holds no canonical grant store and no enrolled scope, so there is
 /// nothing to attach.
 async fn attach_host_grant_store(

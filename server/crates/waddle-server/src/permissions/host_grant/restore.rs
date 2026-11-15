@@ -78,7 +78,7 @@ use super::store::{FenceSnapshot, HostGrantStore};
 use super::witness::{
     apply_witness_changes, clear_witnesses, effective_latch, epoch_witness_resource, latch_changes,
     latch_witness_resource, parse_epoch_stamp, position_standing, position_witness_resource,
-    regression, witness_write_failed, ListedWitness, PositionLatch, PositionStanding,
+    read_witness, regression, witness_write_failed, ListedWitness, PositionLatch, PositionStanding,
     PositionWitness, WitnessChange, WitnessResource,
 };
 use crate::permissions::{ListHostGrantWitnesses, PermissionActor};
@@ -491,6 +491,54 @@ pub(crate) async fn refresh_refused_rooms(
     Ok(())
 }
 
+/// Most scopes that admit whose markers [`projection_absent`] reads.
+const ABSENT_PROBE_SCOPES: i64 = 16;
+
+/// Whether SpiceDB holds nothing of this authority while scopes admit: the
+/// state in which the fence refuses the whole authority as
+/// [`RestoreFenceRefusal::ProjectionAbsent`]. A first projection of a
+/// lifecycle is not written then. Written into a SpiceDB that is empty or
+/// another deployment's, it would make that SpiceDB hold a marker of this
+/// authority: the refusal would clear, and the next fence pass would close
+/// every scope that admits as having lost its marker, where the refusal is
+/// meant to clear only once the replica reaches the SpiceDB it belongs
+/// beside.
+///
+/// The check reads the authority's position witness, latch and witnessed
+/// epoch, and then the markers of up to [`ABSENT_PROBE_SCOPES`] scopes that
+/// admit, until one of them is present. It errs towards refusing: the fence
+/// also counts room witnesses and every scope's marker, so a SpiceDB that
+/// holds only those of scopes past the probe is refused here and passed by
+/// the fence, which then closes the scopes whose markers are missing; once
+/// none of them admits, the first projection is written. A backend that
+/// holds no projection writes none, and is not refused.
+pub(crate) async fn projection_absent(
+    store: &HostGrantStore,
+    permissions: &ActorRef<PermissionActor>,
+) -> Result<bool, HostGrantError> {
+    let Some((authority_id, admitting)) = store.admitting_scopes(ABSENT_PROBE_SCOPES).await? else {
+        return Ok(false);
+    };
+    if admitting.is_empty() {
+        return Ok(false);
+    }
+    let resources = [
+        position_witness_resource(&authority_id),
+        latch_witness_resource(&authority_id),
+        epoch_witness_resource(&authority_id),
+    ]
+    .into_iter()
+    .chain(admitting.iter().map(|lifecycle| lifecycle.to_storage()));
+    for resource in resources {
+        match read_witness(permissions, &resource).await? {
+            None => return Ok(false),
+            Some(listed) if !listed.stamps.is_empty() => return Ok(false),
+            Some(_) => {}
+        }
+    }
+    Ok(true)
+}
+
 /// The PostgreSQL time one fence pass may spend. Each step draws what it
 /// took; a step that would overrun what is left is cut off as
 /// [`HostGrantError::Busy`].
@@ -764,7 +812,9 @@ async fn latch_regression(
 /// Remove the authority's position witness, latch and witnessed epoch when
 /// one of them cannot be read. An unreadable witness carries no epoch, so it
 /// is removed only when what can be read of the three shows a restore was
-/// declared since they were written: an epoch below `declared`. Otherwise,
+/// declared since they were written: an epoch below `declared`, and none at
+/// or above it (a readable one written under the declared epoch shows the
+/// unreadable one may have been written after the declaration). Otherwise,
 /// or when the removal does not complete, the authority is refused as
 /// unverified, and nothing is removed without a declared restore.
 ///
@@ -809,6 +859,12 @@ async fn clear_unreadable_position(
                 .map(|latch| (latch.witness.epoch, latch.stamp())),
         ),
     ];
+    if resources
+        .iter()
+        .any(|(_, read)| read.as_ref().is_some_and(|(epoch, _)| *epoch >= declared))
+    {
+        return Err(RestoreFenceRefusal::PositionUnverified.into());
+    }
     let Some((proving, stamp)) = resources.iter().find_map(|(resource, read)| {
         read.as_ref()
             .filter(|(epoch, _)| *epoch < declared)
@@ -1006,8 +1062,12 @@ impl Witnesses {
     }
 
     /// The authority's position witness and latch, when each is absent or
-    /// readable and so is the witnessed epoch; `None` when one of them
-    /// cannot be read.
+    /// readable; `None` when one of them cannot be read. The witnessed epoch
+    /// only stands in for the epoch of a witness or latch that cannot be
+    /// read: beside a readable one, which carries its own epoch, an epoch
+    /// witness that cannot be read is not needed, and the next position
+    /// witness written replaces it. Without either, one that cannot be read
+    /// is refused like them.
     fn readable_position(
         &self,
         authority_id: &str,
@@ -1020,7 +1080,10 @@ impl Witnesses {
             None => None,
             Some(latch) => Some((*latch)?),
         };
-        if matches!(self.epochs.get(authority_id), Some(None)) {
+        if witness.is_none()
+            && latch.is_none()
+            && matches!(self.epochs.get(authority_id), Some(None))
+        {
             return None;
         }
         Some((witness, latch))
@@ -1157,16 +1220,31 @@ pub(crate) struct ReconstructionChange {
 }
 
 /// Record the changes of a reconstruction for a scope a restore transition
-/// closed. Every change lowers a grant or records a subject at `none` or
-/// `outcast`; none raises one.
+/// closed, and whether the restored database lost operations in it. Every
+/// change lowers a grant or records a subject at `none` or `outcast`; none
+/// raises one.
+///
+/// A scope found to have lost operations is marked in the same commit as a
+/// `reconstruct` operation at its next generation, even when no grant
+/// changes. The projection the reconstruction writes next names that
+/// operation, so a database restored to before the mark cannot hold the
+/// marker SpiceDB then holds: the next pass finds the marker ahead of the
+/// journal (or of another incarnation the journal does not record) and the
+/// scope is marked again or fenced, never reopened in bulk.
 #[derive(Clone, Debug)]
 pub(crate) struct ReconstructScope {
     pub(crate) operation: GrantOperationId,
     pub(crate) lifecycle: ScopeLifecycleId,
     pub(crate) expected_generation: GrantGeneration,
     /// The marker of the projection whose relationships the changes were
-    /// read from.
-    pub(crate) replaced: ProjectionMarker,
+    /// read from; `None` for a scope that was never projected.
+    pub(crate) replaced: Option<ProjectionMarker>,
+    /// The journal witness as it was read, if any.
+    pub(crate) witnessed_head: Option<String>,
+    /// The projection or the journal witness shows that the restored
+    /// database lost operations of the scope, or the journal witness cannot
+    /// be read.
+    pub(crate) lost_operations: bool,
     pub(crate) changes: Vec<ReconstructionChange>,
 }
 
@@ -1175,7 +1253,14 @@ impl ReconstructScope {
         let mut fingerprint = Fingerprint::new("waddle:host-grant:reconstruct:v1");
         fingerprint.text(&self.lifecycle.to_storage());
         fingerprint.number(self.expected_generation.value());
-        fingerprint.text(&self.replaced.stamp());
+        fingerprint.text(
+            &self
+                .replaced
+                .as_ref()
+                .map_or_else(String::new, ProjectionMarker::stamp),
+        );
+        fingerprint.text(self.witnessed_head.as_deref().unwrap_or_default());
+        fingerprint.number(i64::from(self.lost_operations));
         let mut changes: Vec<(&str, &str, &str)> = self
             .changes
             .iter()

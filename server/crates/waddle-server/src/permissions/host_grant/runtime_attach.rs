@@ -34,41 +34,45 @@
 //! PostgreSQL, where every replica's acceptances read it; a refusal of the
 //! whole authority, or a runtime role that no longer matches the profile,
 //! drops the attachment; and an attachment no pass has confirmed for
-//! [`MAX_INCOMPLETE_PASSES`] passes in a row is dropped as well.
+//! [`MAX_INCOMPLETE_PASSES`] passes in a row is dropped as well. A gate
+//! that holds no attachment and is not verifying (its runtime role did not
+//! match the profile, which no backoff retries) verifies again at the same
+//! interval, so a corrected role is attached without a restart.
 //!
 //! The gate also keeps what the fence found independently of the
 //! attachment ([`FenceMemory`]): the rooms of lifecycles only SpiceDB holds
 //! (an enrollment the restored database lost), which are refused whether or
 //! not the replica is attached, and a position regression it latched.
 //!
-//! Readiness ([`HostGrantGate::readiness`]). A refusal of the whole
-//! authority (an adopted lineage, a position that regressed or that a
-//! failover leaves unverified, a SpiceDB that holds nothing of this
-//! deployment's) keeps the replica ready: every replica sees the same
-//! authority, so failing readiness would take every replica out of the
-//! endpoint set and the rooms no scope manages with them, while managed
-//! rooms are refused either way. The failure is an error log at most once a
-//! minute and the `waddle.host_grant.authority.unverified` gauge. A failure
-//! of this replica alone takes it out of the endpoint set while an
-//! unretired scope is enrolled, so that a broken replica does not keep
-//! receiving the managed rooms it refuses:
+//! Readiness ([`HostGrantGate::readiness`]) fails for one cause only: this
+//! replica's configured restore epoch is below the one the database
+//! records (`configuration_predates_restore`). That is a configuration of
+//! this replica alone that predates a declared restore, which only a
+//! restart with the declared epoch corrects, so the replica leaves the
+//! endpoint set. Every other failure keeps the replica ready, refuses
+//! managed rooms, logs an error at most once a minute and sets the
+//! `waddle.host_grant.authority.unverified` gauge, and readiness names it:
 //!
-//! - its configured restore epoch differs from the one the database
-//!   records, above or below (`configuration_predates_restore`,
-//!   `configuration_ahead_of_restore`): a restart with the declared
-//!   configuration, or the owner phase that declares it, clears it;
-//! - its runtime role does not match the profile, or its store cannot be
-//!   read as the profile requires (`runtime_profile_mismatch`), which no
-//!   later attempt changes;
-//! - [`MAX_INCOMPLETE_PASSES`] verifications in a row could not complete
-//!   over at least [`INCOMPLETE_READINESS_GRACE`]
+//! - a refusal of the whole authority (an adopted lineage, a position that
+//!   regressed or that a failover leaves unverified, a SpiceDB that holds
+//!   nothing of this deployment's), which every replica shares: failing
+//!   readiness would take every replica out of the endpoint set and the
+//!   rooms no scope manages with them (`unverified`);
+//! - a configured epoch above the recorded one, which the owner phase that
+//!   declares the restore clears (`configuration_ahead_of_restore`): during
+//!   a rollout every replica configured ahead of the owner phase shares it;
+//! - a runtime role that does not match the profile, or a store that
+//!   cannot be read as the profile requires (`runtime_profile_mismatch`),
+//!   which is the owner phase's grant matrix and so, again, every
+//!   replica's;
+//! - [`MAX_INCOMPLETE_PASSES`] verifications in a row that could not
+//!   complete over at least [`INCOMPLETE_READINESS_GRACE`]
 //!   (`spicedb_unreachable` when the last one failed on SpiceDB,
-//!   `fence_incomplete` otherwise).
+//!   `fence_incomplete` otherwise), which an outage every replica shares
+//!   causes as well.
 //!
-//! A verification that completes, passed or refused for the whole
-//! authority, makes the replica ready again. A SpiceDB outage every replica
-//! shares outlasting the grace therefore takes every replica out of the
-//! endpoint set while a scope is enrolled.
+//! Readiness therefore never couples a replica to SpiceDB or to a failure
+//! every replica shares; the alert does.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -300,8 +304,9 @@ pub enum GateState {
     ReverifyFailed,
 }
 
-/// Why a replica reports itself not ready: a failure of its own, not of
-/// the authority every replica shares.
+/// Why a replica's verification failed, besides a refusal of the whole
+/// authority. Only [`Self::ConfigurationPredatesRestore`] makes the replica
+/// not ready; readiness names the others while the replica stays ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplicaFailure {
     /// The configured restore epoch is below the one the database records.
@@ -343,8 +348,14 @@ pub enum GateReadiness {
     /// No attachment yet, or the authority is refused as a whole. Managed
     /// rooms are refused; ready.
     Unverified,
-    /// A failure of this replica alone while an unretired scope is enrolled
-    /// (or that cannot be read): not ready.
+    /// No attachment, for the failure named, which this replica shares with
+    /// every replica or which an operator's act elsewhere clears. Managed
+    /// rooms are refused; ready.
+    Refusing(ReplicaFailure),
+    /// This replica's configured restore epoch predates the declared one
+    /// while an unretired scope is enrolled (or that cannot be read): not
+    /// ready. It always holds
+    /// [`ReplicaFailure::ConfigurationPredatesRestore`].
     NotReady(ReplicaFailure),
 }
 
@@ -360,7 +371,7 @@ impl GateReadiness {
             Self::Verified => "verified",
             Self::Unmanaged => "unmanaged",
             Self::Unverified => "unverified",
-            Self::NotReady(failure) => failure.as_str(),
+            Self::Refusing(failure) | Self::NotReady(failure) => failure.as_str(),
         }
     }
 }
@@ -455,9 +466,9 @@ impl HostGrantGate {
         self.read().state
     }
 
-    /// Whether the replica may report itself ready: not after a failure of
-    /// its own while an unretired scope is enrolled (see the module
-    /// documentation).
+    /// Whether the replica may report itself ready: not while its
+    /// configured restore epoch predates the declared one and an unretired
+    /// scope is enrolled (see the module documentation).
     pub fn ready(&self) -> bool {
         self.readiness().ready()
     }
@@ -473,7 +484,10 @@ impl HostGrantGate {
             return GateReadiness::Unmanaged;
         }
         match inner.failure {
-            Some(failure) => GateReadiness::NotReady(failure),
+            Some(failure @ ReplicaFailure::ConfigurationPredatesRestore) => {
+                GateReadiness::NotReady(failure)
+            }
+            Some(failure) => GateReadiness::Refusing(failure),
             None => GateReadiness::Unverified,
         }
     }
@@ -643,14 +657,17 @@ impl HostGrantGate {
     }
 
     /// Run the restore fence again about every `interval` (plus a jitter of
-    /// up to a tenth of it) while the gate holds an attachment, until the
-    /// replica stops. A pass that succeeds replaces the attachment. One the
-    /// fence refuses for the whole authority drops it and keeps verifying
-    /// until a pass succeeds; a runtime role that no longer matches the
-    /// profile drops it for good. A pass that cannot complete (SpiceDB or
-    /// PostgreSQL not answering) keeps the attachment, up to
+    /// up to a tenth of it) until the replica stops. While the gate holds an
+    /// attachment, a pass that succeeds replaces it. One the fence refuses
+    /// for the whole authority drops it and keeps verifying until a pass
+    /// succeeds; a runtime role that no longer matches the profile drops it,
+    /// and the next interval verifies again. A pass that cannot complete
+    /// (SpiceDB or PostgreSQL not answering) keeps the attachment, up to
     /// [`MAX_INCOMPLETE_PASSES`] in a row; then it is dropped and the gate
-    /// keeps verifying. Evidence about one scope closes that scope in
+    /// keeps verifying. A gate that holds no attachment and runs no
+    /// verification (one stopped on a runtime role that did not match the
+    /// profile) verifies again each interval, so a corrected role attaches
+    /// without a restart. Evidence about one scope closes that scope in
     /// PostgreSQL either way. One watch runs per gate; the production
     /// interval is [`REVERIFY_INTERVAL`].
     pub fn watch(self: &Arc<Self>, interval: Duration) {
@@ -668,25 +685,17 @@ impl HostGrantGate {
                     () = tokio::time::sleep(with_jitter(interval)) => {}
                 }
                 if gate.state() != GateState::Attached {
-                    // A gate that stopped verifying (a runtime role that does
-                    // not match the profile) still learns whether a scope was
-                    // enrolled since, which decides its readiness, and reads
-                    // the rooms of lost enrollments again, which it refuses
-                    // whether or not it is attached.
-                    if !gate.verifying.load(Ordering::Acquire) {
-                        gate.refresh_scope_enrolled(verifier).await;
-                        if let Err(error) = refresh_refused_rooms(
-                            &verifier.store,
-                            &verifier.permissions,
-                            &gate.memory,
-                        )
-                        .await
-                        {
-                            tracing::debug!(
-                                kind = error.kind(),
-                                "the rooms of lifecycles only SpiceDB holds were not read"
-                            );
-                        }
+                    // A gate that stopped verifying (a runtime role that did
+                    // not match the profile) verifies again: a corrected
+                    // role attaches without a restart. A verification that
+                    // fails again reads whether a scope is enrolled, which
+                    // decides what the alert says, and the rooms of lost
+                    // enrollments, which the gate refuses whether or not it
+                    // is attached.
+                    if !gate.verifying.swap(true, Ordering::AcqRel) {
+                        let after_change = gate.state() != GateState::Unattached;
+                        gate.verify_until_attached(after_change).await;
+                        gate.verifying.store(false, Ordering::Release);
                     }
                     continue;
                 }
@@ -718,8 +727,9 @@ impl HostGrantGate {
                             "the periodic host-grant restore fence did not complete"
                         );
                         if incomplete >= MAX_INCOMPLETE_PASSES {
+                            // Counted above; only the alert is raised.
                             gate.drop_attachment();
-                            gate.failed(verifier, &error, true).await;
+                            gate.alert(verifier, &error, true).await;
                             gate.verify_until_attached(true).await;
                         }
                     }
@@ -855,16 +865,16 @@ impl HostGrantGate {
         inner.incomplete_since_ms = None;
     }
 
-    /// Read again whether an unretired scope is enrolled.
-    async fn refresh_scope_enrolled(&self, verifier: &GateVerifier) {
-        let enrolled = verifier.store.holds_unretired_scope().await;
-        self.write().scope_enrolled = enrolled.ok();
-    }
-
     /// A verification failed: classify it for readiness, and raise the
     /// alert by kind only, at most once a minute.
     async fn failed(&self, verifier: &GateVerifier, error: &HostGrantError, retrying: bool) {
         self.classify(error);
+        self.alert(verifier, error, retrying).await;
+    }
+
+    /// Read whether an unretired scope is enrolled, set the gauge, and log
+    /// `error` by kind only, at most once a minute.
+    async fn alert(&self, verifier: &GateVerifier, error: &HostGrantError, retrying: bool) {
         let unserved = verifier.store.holds_unretired_scope().await;
         self.write().scope_enrolled = unserved.as_ref().ok().copied();
         record_unverified(!matches!(unserved, Ok(false)));
@@ -904,12 +914,13 @@ fn with_jitter(interval: Duration) -> Duration {
     interval.saturating_add(Duration::from_millis(jitter))
 }
 
-/// Whether a later verification may pass after `error`. A runtime role that
-/// does not match the profile, or a store that cannot be read as the
-/// profile requires, does not change by itself; everything else, a refusal
-/// of the restore fence included, may change with an operator's act (a
-/// declared restore, an acknowledged position, a corrected configuration)
-/// and is tried again.
+/// Whether a verification is repeated with backoff after `error`. A runtime
+/// role that does not match the profile, or a store that cannot be read as
+/// the profile requires, changes only with the owner phase's grants, so it
+/// is not; the periodic pass ([`HostGrantGate::watch`]) verifies again at
+/// its interval. Everything else, a refusal of the restore fence included,
+/// may change with an operator's act (a declared restore, an acknowledged
+/// position, a corrected configuration) and is tried again.
 pub fn verification_retried(error: &HostGrantError) -> bool {
     !matches!(
         error,
