@@ -236,7 +236,11 @@ export class PresenceManager {
         delete roomAuthority[nick];
         roomPresence[nick] = "offline";
         delete roomMemberJids[nick];
-        this.emitOccupantPresence();
+        // Once we have left (or were removed), the room tells us nothing more,
+        // so its remaining occupants would show stale presence app-wide. A
+        // rejoin rebuilds the cache from the room's fresh occupant list.
+        if (this.isOwnMucSelfPresence(presence) && !isNickChange) this.clearRoom(room);
+        else this.emitOccupantPresence();
         if (isFocusedRoom) {
           this.deps.events.emit("hats", { ...roomHats });
           this.deps.events.emit("authority", { ...roomAuthority });

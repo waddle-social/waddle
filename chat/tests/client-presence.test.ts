@@ -343,6 +343,22 @@ describe("PresenceManager occupant presence by real JID", () => {
     manager.clearRoom(ROOM);
     expect(snapshots.at(-1)).toEqual({});
   });
+
+  test("our own departure drops the room's other occupants; a nick change keeps them", () => {
+    const { manager, events } = createManager();
+    const snapshots: Record<string, string[]>[] = [];
+    events.on("occupantPresence", (byJid) => snapshots.push(byJid));
+    const occupant = { muc_affiliation: "member", muc_role: "participant" } as const;
+    manager.handle(directPresence({ from: `${ROOM}/bob`, ...occupant, muc_jid: "bob@example.com/phone" }));
+    manager.handle(directPresence({ from: `${ROOM}/alice`, ...occupant, muc_jid: "alice@example.com/web-1", muc_status_codes: [110] }));
+
+    manager.handle(directPresence({ from: `${ROOM}/alice`, presence_type: "unavailable", muc_status_codes: [110, 303] }));
+    expect(snapshots.at(-1)).toEqual({ "bob@example.com": ["online"] });
+
+    // Removed from the room (XEP-0045 §9.2 kick): we hear nothing more from it.
+    manager.handle(directPresence({ from: `${ROOM}/alice_2`, presence_type: "unavailable", muc_status_codes: [110, 307] }));
+    expect(snapshots.at(-1)).toEqual({});
+  });
 });
 
 describe("PresenceManager outbound presence", () => {
