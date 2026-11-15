@@ -122,16 +122,16 @@ pub(super) async fn admit_host_grants(
         return Ok(HostGrantAcceptance::Unmanaged);
     };
     let refused = |refusal| Ok(HostGrantAcceptance::Refused(refusal));
-    // An unmanaged room costs one indexed lookup, and a set lookup when the
-    // restore fence found rooms of a lifecycle only SpiceDB holds: such a
-    // room belongs to an enrollment the database lost and is refused rather
-    // than served as unmanaged.
+    // An unmanaged room costs one indexed lookup and a set lookup in the
+    // rooms the replica's restore fence found to belong to a lifecycle only
+    // SpiceDB holds: such a room belongs to an enrollment the database lost
+    // and is refused rather than served as unmanaged, whether or not the
+    // replica is attached. Until a fence pass has read those rooms, the
+    // gate asks SpiceDB about this one (bounded, remembered).
     let scope = match HostGrantAdmissionRepository::managing_scope(tx, room).await? {
         RoomManagement::Unmanaged => {
-            if tx
-                .host_grant_attachment()
-                .is_some_and(|attachment| attachment.refuses_unmanaged(room))
-            {
+            let gate = tx.host_grant_gate();
+            if gate.refuses_unmanaged(room).await {
                 return refused(HostGrantRefusal::Denied(AdmissionDenial::ScopeClosed));
             }
             return Ok(HostGrantAcceptance::Unmanaged);

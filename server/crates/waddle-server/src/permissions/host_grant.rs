@@ -80,19 +80,24 @@ pub use projection::{
     HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
 };
 pub use restore::{
-    reconstruction_targets, verify_restore_fence, AuthorityBinding, FenceEvidence, OperatorRevoke,
-    ReconstructionTarget, ReopenReport, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal,
-    RestoreFenceReport, HOST_GRANT_RESTORE_FENCE_DEADLINE, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+    reconstruction_targets, verify_restore_fence, verify_restore_fence_with, AuthorityBinding,
+    FenceEvidence, FenceMemory, OperatorRevoke, ReconstructionTarget, ReopenReport,
+    ReopenSelection, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal, RestoreFenceReport,
+    HOST_GRANT_RESTORE_FENCE_DEADLINE, HOST_GRANT_RESTORE_FENCE_SCOPE_ALLOWANCE,
+    HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
 pub use runtime_attach::{
-    log_unverified, verification_retried, GateState, HostGrantAttachment, HostGrantGate,
+    verification_retried, GateState, HostGrantAttachment, HostGrantGate, MAX_INCOMPLETE_PASSES,
     REVERIFY_INTERVAL,
 };
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
 pub use store::{Activation, HostGrantStore, RESTORE_TRANSITION_BATCH};
 pub use witness::{
-    head_witness_resource, position_standing, position_witness_resource, room_witness_digest,
-    room_witness_resource, sync_journal_witness, sync_position_witness, ListedWitness,
-    PositionStanding, PositionWitness, PostgresPosition, WitnessSync,
+    head_witness_resource, latch_witness_resource, position_standing, position_witness_resource,
+    read_position_witness, regression, room_witness_digest, room_witness_resource,
+    sync_journal_witness, sync_journal_witnesses, sync_position_witness,
+    sync_witnesses_after_fence, LatchKind, ListedWitness, MalformedWitness,
+    PositionAcknowledgement, PositionLatch, PositionStanding, PositionWitness, PositionWriter,
+    PostgresPosition, WitnessChange, WitnessPass, WitnessSync,
 };

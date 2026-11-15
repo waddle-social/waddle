@@ -520,6 +520,11 @@ pub struct ScopeState {
     pub projected_generation: Option<GrantGeneration>,
     pub admission: AdmissionState,
     pub closed_reason: Option<ClosedReason>,
+    /// Whether a restore lost operations of the scope, as a fence pass, a
+    /// reconciliation or a reconstruction found from SpiceDB. Such a scope
+    /// is reopened only by name, with the operator's confirmation that what
+    /// was lost has been applied again.
+    pub lost_operations: bool,
 }
 
 impl ScopeState {

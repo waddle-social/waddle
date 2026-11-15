@@ -286,9 +286,10 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 })),
             )
         }
-        // The host-grant authority changed under this replica and verifying
-        // it again has not passed: managed rooms are refused here until it
-        // does, so the replica leaves the endpoint set.
+        // This replica's configured host-grant restore epoch is below the
+        // one the database records: its configuration predates a declared
+        // restore, and only a restart with the current one serves managed
+        // rooms again, so it leaves the endpoint set.
         Ok(Ok((Ok(health), Ok(report))))
             if health.is_healthy()
                 && report.is_attested()
@@ -305,20 +306,33 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                     "version": env!("CARGO_PKG_VERSION"),
                     "database": "ready",
                     "lineage": "attested",
-                    "host_grants": "authority_changed"
+                    "host_grants": "configuration_predates_restore"
                 })),
             )
         }
-        Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() && report.is_attested() => (
-            StatusCode::OK,
-            Json(json!({
+        // Any other host-grant failure (a failover the position witness
+        // cannot verify, a refused authority, SpiceDB not answering) is
+        // shared by every replica: failing readiness would take every one
+        // out of the endpoint set, rooms no scope manages included, while
+        // managed rooms are refused either way. The replica stays ready and
+        // says so; the gate logs and counts the failure.
+        Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() && report.is_attested() => {
+            let mut body = json!({
                 "status": "ready",
                 "service": "waddle-server",
                 "version": env!("CARGO_PKG_VERSION"),
                 "database": "ready",
                 "lineage": "attested"
-            })),
-        ),
+            });
+            if state
+                .host_grant_gate
+                .get()
+                .is_some_and(|gate| !gate.verified())
+            {
+                body["host_grants"] = json!("unverified");
+            }
+            (StatusCode::OK, Json(body))
+        }
         Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() => {
             lineage_not_ready_response(report)
         }

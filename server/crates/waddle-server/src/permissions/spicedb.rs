@@ -24,11 +24,12 @@ use super::authz_schema_version::{
     AUTHZ_SCHEMA_VERSION,
 };
 use super::host_grant::{
-    room_witness_resource, ListedWitness, MarkerObservation, ProjectedRelationship,
-    ProjectionIntent, ProjectionMarker, ProjectionObservation, ProjectionRefusal, ProjectionWrite,
-    RestoredPlan, RoomAffiliation, ScopeLifecycleId, HOST_GRANT_PROJECTION_DEFINITION,
-    HOST_GRANT_PROJECTION_MARKER_RELATION, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
-    HOST_GRANT_RESTORE_SCAN_TIMEOUT, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    head_witness_resource, room_witness_resource, ListedWitness, MarkerObservation,
+    ProjectedRelationship, ProjectionIntent, ProjectionMarker, ProjectionObservation,
+    ProjectionRefusal, ProjectionWrite, RestoredPlan, RoomAffiliation, ScopeLifecycleId,
+    WitnessChange, HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
+    HOST_GRANT_PROJECTION_RPC_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -280,12 +281,7 @@ impl SpiceDbPermissionBackend {
                 );
                 Ok(())
             }
-            Err(prescience::Error::Status { code, .. })
-                if matches!(
-                    format!("{code:?}").as_str(),
-                    "FailedPrecondition" | "AlreadyExists"
-                ) =>
-            {
+            Err(error) if is_write_conflict(&error) => {
                 // Another replica marked the store first, or relationships
                 // appeared after the scan. Decide again from what is stored.
                 match self.codec_marker_state().await? {
@@ -546,11 +542,7 @@ impl SpiceDbPermissionBackend {
             .await
         {
             Ok(_) => Ok(ExclusiveRelationSwap::Swapped),
-            Err(prescience::Error::Status { code, .. })
-                if format!("{code:?}") == "FailedPrecondition" =>
-            {
-                Ok(ExclusiveRelationSwap::Mismatch)
-            }
+            Err(error) if is_failed_precondition(&error) => Ok(ExclusiveRelationSwap::Mismatch),
             Err(error) => Err(map_spicedb_error(error)),
         }
     }
@@ -775,7 +767,7 @@ impl SpiceDbPermissionBackend {
         intent: &ProjectionIntent,
     ) -> Result<ProjectionWrite, PermissionError> {
         intent.check_replaces(previous)?;
-        self.write_projection_request(previous, intent).await
+        self.write_projection_request(previous, intent, None).await
     }
 
     /// Replace the projection of a scope a restore transition closed: write
@@ -789,10 +781,18 @@ impl SpiceDbPermissionBackend {
         &self,
         previous: &ProjectionMarker,
         plan: &RestoredPlan,
+        head: Option<&WitnessChange>,
     ) -> Result<ProjectionWrite, PermissionError> {
         let intent = &plan.plan().intent;
         intent.check_takes_over(previous)?;
-        self.write_projection_request(Some(previous), intent).await
+        if head.is_some_and(|head| {
+            head.resource != head_witness_resource(intent.marker.lifecycle)
+                || head.next.as_deref() != Some(intent.marker.stamp().as_str())
+        }) {
+            return Err(ProjectionRefusal::NotATakeover.into());
+        }
+        self.write_projection_request(Some(previous), intent, head)
+            .await
     }
 
     /// Read every resource of the projection definition, markers and
@@ -820,31 +820,18 @@ impl SpiceDbPermissionBackend {
         }))
     }
 
-    /// Replace one witness in one request: `next` touched, `previous`
-    /// deleted, conditioned on the resource holding exactly `previous`, or
-    /// nothing when `previous` is `None`.
-    pub async fn replace_host_grant_witness(
+    /// Apply one write of witnesses in one request: each change's resource
+    /// must hold exactly its `previous` stamp, or nothing when that is
+    /// `None`, and holds its `next` stamp, or nothing, after the request.
+    pub async fn apply_host_grant_witness_changes(
         &self,
-        resource: &str,
-        previous: Option<&str>,
-        next: &str,
+        changes: &[WitnessChange],
     ) -> Result<ProjectionWrite, PermissionError> {
         let mut preconditions = Vec::new();
         let mut updates = Vec::new();
-        match previous {
-            Some(previous) => {
-                preconditions.push(Precondition::must_exist(grant_witness_filter(
-                    resource, previous,
-                )));
-                updates.push(RelationshipUpdate::delete(grant_witness(
-                    resource, previous,
-                )?));
-            }
-            None => preconditions.push(Precondition::must_not_exist(
-                RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION).resource_id(resource),
-            )),
+        for change in changes {
+            push_witness_change(change, &mut preconditions, &mut updates)?;
         }
-        updates.push(RelationshipUpdate::touch(grant_witness(resource, next)?));
         match self
             .client
             .write_relationships(updates)
@@ -853,11 +840,7 @@ impl SpiceDbPermissionBackend {
             .await
         {
             Ok(_) => Ok(ProjectionWrite::Applied),
-            Err(prescience::Error::Status { code, .. })
-                if format!("{code:?}") == "FailedPrecondition" =>
-            {
-                Ok(ProjectionWrite::PreconditionFailed)
-            }
+            Err(error) if is_failed_precondition(&error) => Ok(ProjectionWrite::PreconditionFailed),
             Err(error) => Err(map_spicedb_error(error)),
         }
     }
@@ -906,10 +889,14 @@ impl SpiceDbPermissionBackend {
         &self,
         previous: Option<&ProjectionMarker>,
         intent: &ProjectionIntent,
+        head: Option<&WitnessChange>,
     ) -> Result<ProjectionWrite, PermissionError> {
         intent.check_distinct()?;
         let mut preconditions = Vec::new();
         let mut updates = Vec::new();
+        if let Some(head) = head {
+            push_witness_change(head, &mut preconditions, &mut updates)?;
+        }
         match previous {
             Some(previous) => {
                 preconditions.push(Precondition::must_exist(grant_projection_marker_filter(
@@ -981,11 +968,7 @@ impl SpiceDbPermissionBackend {
             .await
         {
             Ok(_) => Ok(ProjectionWrite::Applied),
-            Err(prescience::Error::Status { code, .. })
-                if format!("{code:?}") == "FailedPrecondition" =>
-            {
-                Ok(ProjectionWrite::PreconditionFailed)
-            }
+            Err(error) if is_failed_precondition(&error) => Ok(ProjectionWrite::PreconditionFailed),
             Err(error) => Err(map_spicedb_error(error)),
         }
     }
@@ -1094,6 +1077,14 @@ fn refuse_newer_schema(stored: u32) -> PermissionError {
     })
 }
 
+/// A write refused because its preconditions no longer held.
+fn is_failed_precondition(error: &prescience::Error) -> bool {
+    matches!(
+        error,
+        prescience::Error::Status { code, .. } if format!("{code:?}") == "FailedPrecondition"
+    )
+}
+
 /// A write refused because its preconditions no longer held, or because the
 /// relationship it creates already exists.
 fn is_write_conflict(error: &prescience::Error) -> bool {
@@ -1176,6 +1167,40 @@ fn grant_witness_filter(resource: &str, stamp: &str) -> RelationshipFilter {
         .resource_id(resource)
         .relation(HOST_GRANT_PROJECTION_MARKER_RELATION)
         .subject_filter(SubjectFilter::new(HOST_GRANT_PROJECTION_DEFINITION).subject_id(stamp))
+}
+
+/// The precondition and updates of one witness change: the resource holds
+/// exactly `previous` (or nothing), and `previous` is replaced by `next`.
+fn push_witness_change(
+    change: &WitnessChange,
+    preconditions: &mut Vec<Precondition>,
+    updates: &mut Vec<RelationshipUpdate>,
+) -> Result<(), PermissionError> {
+    match &change.previous {
+        Some(previous) => preconditions.push(Precondition::must_exist(grant_witness_filter(
+            &change.resource,
+            previous,
+        ))),
+        None => preconditions.push(Precondition::must_not_exist(
+            RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION).resource_id(&change.resource),
+        )),
+    }
+    if change.previous == change.next {
+        return Ok(());
+    }
+    if let Some(previous) = &change.previous {
+        updates.push(RelationshipUpdate::delete(grant_witness(
+            &change.resource,
+            previous,
+        )?));
+    }
+    if let Some(next) = &change.next {
+        updates.push(RelationshipUpdate::touch(grant_witness(
+            &change.resource,
+            next,
+        )?));
+    }
+    Ok(())
 }
 
 /// The filter that matches exactly `marker` and nothing else.

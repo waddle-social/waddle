@@ -21,7 +21,7 @@ use waddle_xmpp::identity::CanonicalDomain;
 use crate::db::lineage::PgSchemaName;
 use crate::db::physical_attestation::{validate_identifier, PgRoleName, PhysicalAttestationError};
 use crate::db::runtime_startup::valid_git_sha;
-use crate::permissions::host_grant::{GrantSubject, ScopeLifecycleId};
+use crate::permissions::host_grant::{GrantSubject, PositionWitness, ScopeLifecycleId};
 
 const ABOUT: &str = "Waddle XMPP server";
 
@@ -100,13 +100,20 @@ existing file atomically and refuses a symbolic link.";
 
 const HOST_GRANT_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
-  WADDLE_DATABASE_URL  PostgreSQL URL of the migrator login, as for
-                       owner-phase.
+  WADDLE_DATABASE_URL           PostgreSQL URL of the migrator login, as for
+                                owner-phase.
+  WADDLE_SPICEDB_ENDPOINT       Optional: the servers' SpiceDB, with
+  WADDLE_SPICEDB_PRESHARED_KEY  its key (and WADDLE_SPICEDB_INSECURE as the
+                                servers set it). With it, the action's
+                                witnesses are written at once instead of by
+                                the next fence pass of a server, and
+                                acknowledge-position reads the position
+                                witness itself.
 
 Each action is one or more short transactions on the host-grant store and can
-run while the servers run. `reopen` and `revoke` print what they recorded as
-JSON; repeat `revoke` with the same --operation-id after an unknown outcome.
-See docs/operations/authz-host-grant-restore.md.";
+run while the servers run. The actions print what they recorded as JSON;
+repeat `revoke` with the same --operation-id after an unknown outcome. See
+docs/operations/authz-host-grant-restore.md.";
 
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -328,13 +335,27 @@ pub(super) enum HostGrantActionArgs {
     /// verified; the operator's acknowledgement of the restore
     Reopen {
         /// Lifecycle of the one scope to reopen (32 lowercase hex characters);
-        /// every reconstructed scope when absent
+        /// every reconstructed scope the restore lost no operations in when
+        /// absent
         #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
         scope: Option<ScopeLifecycleId>,
+        /// Confirm that the revokes and bans the restore lost in this scope
+        /// have been applied again (with `revoke`); a scope the restore lost
+        /// operations in reopens only with it
+        #[arg(long, requires = "scope")]
+        lost_operations_reapplied: bool,
     },
-    /// Acknowledge the PostgreSQL system and timeline the server now writes
-    /// on, after a promotion or a move the position witness cannot verify
-    AcknowledgePosition,
+    /// Acknowledge the position witness for the PostgreSQL system and
+    /// timeline the server now writes on: after a promotion the witness
+    /// cannot verify, or a regression on the witnessed timeline the operator
+    /// accepts
+    AcknowledgePosition {
+        /// The position witness this acknowledgement supersedes, as SpiceDB
+        /// holds it (`<epoch>_<system>_<timeline>_<lsn>`); read from SpiceDB
+        /// when WADDLE_SPICEDB_ENDPOINT is set and the flag is absent
+        #[arg(long, value_name = "STAMP", value_parser = parse_position_witness)]
+        witnessed: Option<PositionWitness>,
+    },
     /// Revoke or ban one account in one managed room, in a closed scope too
     Revoke {
         /// Lifecycle of the scope (32 lowercase hex characters)
@@ -445,6 +466,8 @@ pub(super) enum ArgumentError {
     Subject,
     #[error("expected a canonical domain (lowercase, no trailing dot, A-labels)")]
     Domain,
+    #[error("expected a position witness: <epoch>_<system>_<timeline>_<lsn> in decimal")]
+    PositionWitness,
     #[cfg(feature = "clustering")]
     #[error("expected a whole number followed by ms, s, m or h, such as 30s")]
     Duration,
@@ -452,6 +475,10 @@ pub(super) enum ArgumentError {
 
 fn parse_lifecycle(value: &str) -> Result<ScopeLifecycleId, ArgumentError> {
     ScopeLifecycleId::from_storage(value).ok_or(ArgumentError::Lifecycle)
+}
+
+fn parse_position_witness(value: &str) -> Result<PositionWitness, ArgumentError> {
+    PositionWitness::parse(value).ok_or(ArgumentError::PositionWitness)
 }
 
 fn parse_bare_jid(value: &str) -> Result<BareJid, ArgumentError> {

@@ -17,10 +17,20 @@
 --   never changed. The PostgreSQL position witness a replica keeps in
 --   SpiceDB is filed under it, so a restored copy of this database finds the
 --   witness of the database it was copied from.
--- - `position_acknowledgement`: the PostgreSQL system identifier and
---   timeline an operator acknowledged (`waddle-server host-grant
---   acknowledge-position`) after a promotion or a move to another cluster,
---   which the position witness cannot verify on its own.
+-- - `position_acknowledgement`: an operator's acknowledgement
+--   (`waddle-server host-grant acknowledge-position`) of the exact position
+--   witness it supersedes, `<epoch>_<system>_<timeline>_<lsn>`, for the
+--   PostgreSQL system and timeline the server wrote on when it was recorded,
+--   `/<system>_<timeline>`: a promotion the position witness cannot verify
+--   on its own, or a regression on the witnessed timeline the operator
+--   accepts. It applies only while the witness it names is current, so once
+--   applied it is spent.
+--
+-- `host_grant_scopes.lost_operations` marks a scope a restore lost
+-- operations in, as a fence pass, a reconciliation or a reconstruction
+-- found from SpiceDB. Such a scope is reopened only by name, with the
+-- operator's confirmation that what was lost has been applied again; the
+-- reopen clears the mark.
 --
 -- A declared restore closes every scope as `restored`; reconstruction
 -- leaves it `reconstructed` until an operator reopens it (`reopen`); a
@@ -40,7 +50,10 @@ ALTER TABLE host_grant_authority
         CHECK (restore_epoch >= 0 AND restore_epoch <= 4294967295),
     ADD CONSTRAINT host_grant_authority_id CHECK (authority_id ~ '^[0-9a-f]{32}$'),
     ADD CONSTRAINT host_grant_authority_position_acknowledgement
-        CHECK (position_acknowledgement ~ '^-?(0|[1-9][0-9]{0,18})_(0|[1-9][0-9]{0,9})$');
+        CHECK (position_acknowledgement ~
+            '^(0|[1-9][0-9]{0,9})_(0|[1-9][0-9]{0,19})_(0|[1-9][0-9]{0,9})_(0|[1-9][0-9]{0,19})/(0|[1-9][0-9]{0,19})_(0|[1-9][0-9]{0,9})$');
+
+ALTER TABLE host_grant_scopes ADD COLUMN lost_operations BOOLEAN NOT NULL DEFAULT FALSE;
 
 ALTER TABLE host_grant_scopes DROP CONSTRAINT host_grant_scopes_reason;
 ALTER TABLE host_grant_scopes ADD CONSTRAINT host_grant_scopes_reason CHECK (

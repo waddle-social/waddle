@@ -901,7 +901,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 /// finds that the role does not match the profile, or the replica stops.
 /// While the authority is unattached every acceptance for a managed room is
 /// refused with a committed stanza error, and rooms that no scope manages
-/// are unaffected. Once attached, the gate runs the fence again every
+/// are unaffected, except the rooms of an enrollment only SpiceDB holds.
+/// Once attached, the gate runs the fence again about every
 /// [`REVERIFY_INTERVAL`](crate::permissions::host_grant::REVERIFY_INTERVAL).
 /// SQLite holds no canonical grant store and no enrolled scope, so there is
 /// nothing to attach.
@@ -913,7 +914,7 @@ async fn attach_host_grant_store(
     stop: tokio_util::sync::CancellationToken,
 ) {
     use crate::permissions::host_grant::ServedAccountDomains;
-    use crate::permissions::host_grant::{log_unverified, verification_retried, HostGrantStore};
+    use crate::permissions::host_grant::{verification_retried, HostGrantStore};
     let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
         return;
     };
@@ -926,10 +927,9 @@ async fn attach_host_grant_store(
         restore_epoch,
         stop,
     );
+    // A failure is logged and counted by the gate.
     if let Err(error) = gate.verify_once().await {
-        let retrying = verification_retried(&error);
-        log_unverified(&store, &error, retrying).await;
-        if retrying {
+        if verification_retried(&error) {
             gate.verify_in_background();
         }
     }

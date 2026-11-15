@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use super::host_grant::{
     HostGrantStore, ListedWitness, ProjectionIntent, ProjectionMarker, ProjectionObservation,
-    ProjectionWrite, RestoredPlan, ScopeLifecycleId, HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT,
-    HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+    ProjectionWrite, RestoredPlan, ScopeLifecycleId, WitnessChange,
+    HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
 use super::schema::SPICEDB_SCHEMA;
 use super::spicedb::SpiceDbPermissionBackend;
@@ -124,7 +124,14 @@ impl PermissionActor {
             .spicedb
             .as_ref()
             .ok_or(PermissionError::SpiceDbConfigMissing)?;
-        let backend = SpiceDbPermissionBackend::connect(spicedb).await?;
+        Self::connect(spicedb).await
+    }
+
+    /// An actor on the SpiceDB `config` names, without the server's startup
+    /// steps: for an operator tool that reads and writes host-grant
+    /// witnesses beside servers that ran them.
+    pub async fn connect(config: &crate::config::SpiceDbConfig) -> Result<Self, PermissionError> {
+        let backend = SpiceDbPermissionBackend::connect(config).await?;
         Ok(Self::new(backend))
     }
 
@@ -175,9 +182,6 @@ impl PermissionActor {
         Ok(())
     }
 
-    /// The backend a host-grant projection is read from and written to.
-    /// The local backend is not a projection target: it establishes neither
-    /// SpiceDB nor cross-store behaviour.
     /// The SpiceDB backend, if this actor uses one.
     fn spicedb_backend(&self) -> Option<SpiceDbPermissionBackend> {
         match &self.backend {
@@ -186,6 +190,9 @@ impl PermissionActor {
         }
     }
 
+    /// The backend a host-grant projection is read from and written to.
+    /// The local backend is not a projection target: it establishes neither
+    /// SpiceDB nor cross-store behaviour.
     fn host_grant_projection_backend(&self) -> Result<SpiceDbPermissionBackend, PermissionError> {
         match &self.backend {
             PermissionActorBackend::SpiceDb(backend) => Ok(backend.as_ref().clone()),
@@ -636,12 +643,15 @@ impl kameo::message::Message<WriteHostGrantProjection> for PermissionActor {
 
 /// Replace the projection of a host-grant scope that a restore transition
 /// closed: write its plan's intent conditioned on the exact marker
-/// `previous`, which another authority incarnation wrote. Only the store
-/// produces a [`RestoredPlan`], so no other plan can take a projection over.
-/// An error leaves the outcome unknown. See `permissions::host_grant::restore`.
+/// `previous`, which another authority incarnation wrote, and apply `head`,
+/// which moves the scope's journal witness to the plan's operation, in the
+/// same request. Only the store produces a
+/// [`RestoredPlan`], so no other plan can take a projection over. An error
+/// leaves the outcome unknown. See `permissions::host_grant::restore`.
 pub struct TakeOverHostGrantProjection {
     pub previous: ProjectionMarker,
     pub plan: RestoredPlan,
+    pub head: Option<WitnessChange>,
 }
 
 /// Runs on a task of its own, like [`WriteHostGrantProjection`].
@@ -656,7 +666,7 @@ impl kameo::message::Message<TakeOverHostGrantProjection> for PermissionActor {
         let backend = self.host_grant_projection_backend();
         ctx.spawn(async move {
             backend?
-                .take_over_host_grant_projection(&msg.previous, &msg.plan)
+                .take_over_host_grant_projection(&msg.previous, &msg.plan, msg.head.as_ref())
                 .await
         })
     }
@@ -725,23 +735,22 @@ impl kameo::message::Message<ReadHostGrantWitness> for PermissionActor {
     }
 }
 
-/// Replace one host-grant witness: write `next`, conditioned on the
-/// resource holding exactly `previous`, or nothing when `previous` is
-/// `None`. `None` when the backend holds no projection. An error leaves the
-/// outcome unknown. See `permissions::host_grant::witness`.
-pub struct ReplaceHostGrantWitness {
-    pub resource: String,
-    pub previous: Option<String>,
-    pub next: String,
+/// Apply one write of host-grant witnesses: each change's resource must
+/// hold exactly its `previous` stamp (or nothing), and holds its `next`
+/// stamp (or nothing) after the request, in one request. `None` when the
+/// backend holds no projection. An error leaves the outcome unknown. See
+/// `permissions::host_grant::witness`.
+pub struct ReplaceHostGrantWitnesses {
+    pub changes: Vec<WitnessChange>,
 }
 
 /// Runs on a task of its own, like [`WriteHostGrantProjection`].
-impl kameo::message::Message<ReplaceHostGrantWitness> for PermissionActor {
+impl kameo::message::Message<ReplaceHostGrantWitnesses> for PermissionActor {
     type Reply = kameo::reply::DelegatedReply<Result<Option<ProjectionWrite>, PermissionError>>;
 
     async fn handle(
         &mut self,
-        msg: ReplaceHostGrantWitness,
+        msg: ReplaceHostGrantWitnesses,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let backend = self.spicedb_backend();
@@ -750,7 +759,7 @@ impl kameo::message::Message<ReplaceHostGrantWitness> for PermissionActor {
                 return Ok(None);
             };
             backend
-                .replace_host_grant_witness(&msg.resource, msg.previous.as_deref(), &msg.next)
+                .apply_host_grant_witness_changes(&msg.changes)
                 .await
                 .map(Some)
         })

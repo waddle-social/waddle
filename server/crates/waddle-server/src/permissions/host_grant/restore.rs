@@ -57,6 +57,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use kameo::actor::ActorRef;
@@ -73,15 +74,25 @@ use super::model::{
 use super::projection::{MarkerObservation, ProjectedRelationship, ProjectionIntent};
 use super::store::{FenceSnapshot, HostGrantStore};
 use super::witness::{
-    position_standing, ListedWitness, PositionStanding, PositionWitness, WitnessResource,
+    apply_witness_changes, effective_latch, latch_changes, latch_witness_resource,
+    position_standing, position_witness_resource, regression, witness_write_failed, ListedWitness,
+    PositionLatch, PositionStanding, PositionWitness, WitnessResource,
 };
 use crate::permissions::{ListHostGrantWitnesses, PermissionActor};
 
 /// Deadline of the read of every projection marker and witness.
 pub const HOST_GRANT_RESTORE_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Deadline of all PostgreSQL reads and fence closures of one fence pass.
+/// Budget of the PostgreSQL reads and fence closures of one fence pass,
+/// besides [`HOST_GRANT_RESTORE_FENCE_SCOPE_ALLOWANCE`] for each scope the
+/// pass compares. The read of SpiceDB has its own deadline
+/// ([`HOST_GRANT_RESTORE_SCAN_TIMEOUT`]) and does not draw on it.
 pub const HOST_GRANT_RESTORE_FENCE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// What a fence pass's PostgreSQL budget grows by for each scope SpiceDB
+/// names and the store holds, so that a deployment with many scopes is
+/// compared within a budget that grows with it rather than refused as busy.
+pub const HOST_GRANT_RESTORE_FENCE_SCOPE_ALLOWANCE: Duration = Duration::from_millis(100);
 
 /// Passes a fence makes before it gives up on an authority that changes
 /// while it is verified.
@@ -180,10 +191,17 @@ pub enum RestoreFenceRefusal {
     )]
     PositionUnverified,
     #[error(
-        "the PostgreSQL position cannot be read by this role: pg_control_system(), \
-         pg_current_wal_flush_lsn() and pg_walfile_name() must be executable"
+        "the PostgreSQL position cannot be read by this role: pg_current_wal_flush_lsn() and \
+         pg_walfile_name() must be executable, and outside the attested pool \
+         pg_control_system() as well"
     )]
     PositionUnreadable,
+    #[error(
+        "scopes admit and SpiceDB holds no projection marker and no position witness of this \
+         authority: the replica is connected to a SpiceDB that is empty or not this \
+         deployment's"
+    )]
+    ProjectionAbsent,
     #[error("the host-grant authority changed while its restore fence was verified")]
     AuthorityMoved,
 }
@@ -197,6 +215,7 @@ impl RestoreFenceRefusal {
             Self::PositionRegressed => "position_regressed",
             Self::PositionUnverified => "position_unverified",
             Self::PositionUnreadable => "position_unreadable",
+            Self::ProjectionAbsent => "projection_absent",
             Self::AuthorityMoved => "authority_moved",
         }
     }
@@ -243,6 +262,15 @@ pub enum FenceEvidence {
 }
 
 impl FenceEvidence {
+    /// Whether the evidence shows that the database lost operations of the
+    /// scope, rather than that SpiceDB lost its projection.
+    pub fn shows_lost_operations(&self) -> bool {
+        match self {
+            Self::ProjectionAhead(_) | Self::UnknownIncarnation(_) | Self::JournalAhead(_) => true,
+            Self::MarkerMissing => false,
+        }
+    }
+
     /// A stable name of the evidence for logs.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -279,6 +307,73 @@ pub struct RestoreFenceReport {
     /// How the PostgreSQL position relates to its witness; `None` when the
     /// backend holds no projection or the pass did not reach it.
     pub position: Option<PositionStanding>,
+    /// Whether the permission backend holds a projection whose markers and
+    /// witnesses the pass read.
+    pub projection_listed: bool,
+    /// The journal witness of each scope, as the pass read it, for the
+    /// witness writers that follow a pass that passed.
+    pub witnessed_heads: BTreeMap<ScopeLifecycleId, String>,
+}
+
+/// What a replica keeps between passes of its restore fence.
+///
+/// - The rooms of lifecycles only SpiceDB holds (lost enrollments). Every
+///   pass that reads SpiceDB and the store's scopes replaces the set, before
+///   it decides anything about the whole authority, so the set stays known
+///   while the authority is refused. `None` until a pass got that far.
+/// - A position regression the replica saw. It counts like a stored latch
+///   naming the same witness, so the replica keeps refusing it when the
+///   latch could not be written to SpiceDB; it is lost on a restart.
+#[derive(Debug, Default)]
+pub struct FenceMemory {
+    refused_rooms: RwLock<Option<Arc<BTreeSet<String>>>>,
+    latch: Mutex<Option<PositionLatch>>,
+}
+
+impl FenceMemory {
+    /// The room witness digests a replica refuses, if a pass read them.
+    pub fn refused_rooms(&self) -> Option<Arc<BTreeSet<String>>> {
+        self.refused_rooms
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn publish_rooms(&self, rooms: BTreeSet<String>) {
+        *self
+            .refused_rooms
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(rooms));
+    }
+
+    /// The regression this replica latched, if any.
+    pub fn latch(&self) -> Option<PositionLatch> {
+        *self
+            .latch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_latch(&self, latch: Option<PositionLatch>) {
+        *self
+            .latch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = latch;
+    }
+}
+
+/// The scopes an operator's reopen considers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReopenSelection {
+    /// Every reconstructed scope the restore lost no operations in.
+    All,
+    /// One scope. One the restore lost operations in reopens only when
+    /// `lost_operations_reapplied` confirms that the operator has applied
+    /// again what it lost.
+    Scope {
+        lifecycle: ScopeLifecycleId,
+        lost_operations_reapplied: bool,
+    },
 }
 
 /// Verify, before a replica admits a managed room, that the canonical store
@@ -287,39 +382,64 @@ pub struct RestoreFenceReport {
 ///
 /// One pass reads the authority binding, the lineage, the scopes that admit
 /// and the scope counts in one PostgreSQL snapshot, then every marker and
-/// witness SpiceDB holds, then the PostgreSQL position, then each named
-/// scope. It refuses the whole authority when:
+/// witness SpiceDB holds, then every scope the store holds. From those it
+/// first finds the lifecycles only SpiceDB holds and the rooms their room
+/// witnesses name, which stay refused whatever the pass decides next. It
+/// then refuses the whole authority when:
 ///
 /// - the database lineage differs from the one the incarnation is bound to;
 /// - the configured restore epoch is not the stored one;
-/// - the PostgreSQL position regressed, or changed system or timeline
-///   without an acknowledgement ([`position_standing`]).
+/// - scopes admit and SpiceDB holds no marker and no position witness of
+///   this authority (a SpiceDB that is empty or another deployment's);
+/// - the PostgreSQL position regressed, a regression is latched, or the
+///   system or timeline changed without an acknowledgement
+///   ([`position_standing`]).
 ///
 /// About each scope it decides alone: a marker or journal witness the
 /// journal contradicts, or a scope that admits without a marker, closes that
-/// scope as `fenced` in PostgreSQL; a lifecycle the store does not hold
-/// refuses the rooms its witnesses name. A database that holds no scope,
-/// beside a projection that names none, passes. A replica whose permission
-/// backend holds no projection compares only the epoch and the lineage.
+/// scope as `fenced` in PostgreSQL. A database that holds no scope, beside a
+/// projection that names none, passes. A replica whose permission backend
+/// holds no projection compares only the epoch and the lineage.
 ///
 /// Canonical state is read after what SpiceDB holds, so an operation another
 /// replica recorded and projected meanwhile is found in the journal. The
 /// binding is read again at the end of the pass, and the pass is repeated
-/// when it changed: the report's binding is the one the whole pass saw.
-/// The PostgreSQL reads of a pass share one deadline
+/// when it changed: the report's binding is the one the whole pass saw. The
+/// PostgreSQL reads of a pass share one budget
 /// ([`HOST_GRANT_RESTORE_FENCE_DEADLINE`]).
 pub async fn verify_restore_fence(
     store: &HostGrantStore,
     permissions: &ActorRef<PermissionActor>,
     configured: RestoreEpoch,
 ) -> Result<RestoreFenceReport, HostGrantError> {
+    verify_restore_fence_with(store, permissions, configured, &FenceMemory::default()).await
+}
+
+/// [`verify_restore_fence`] for a replica that keeps `memory` between
+/// passes: the pass publishes the refused rooms into it and counts the
+/// regression it latched.
+pub async fn verify_restore_fence_with(
+    store: &HostGrantStore,
+    permissions: &ActorRef<PermissionActor>,
+    configured: RestoreEpoch,
+    memory: &FenceMemory,
+) -> Result<RestoreFenceReport, HostGrantError> {
     for _ in 0..FENCE_ATTEMPTS {
-        let deadline = tokio::time::Instant::now() + HOST_GRANT_RESTORE_FENCE_DEADLINE;
-        let Some(snapshot) = bounded(deadline, store.fence_snapshot()).await? else {
+        let mut budget = PostgresBudget::new(HOST_GRANT_RESTORE_FENCE_DEADLINE);
+        let Some(snapshot) = budget.bounded(store.fence_snapshot()).await? else {
+            memory.publish_rooms(BTreeSet::new());
             return Ok(RestoreFenceReport::default());
         };
-        let report = fence_pass(store, permissions, configured, &snapshot, deadline).await?;
-        let reread = bounded(deadline, store.authority_binding()).await?;
+        let report = fence_pass(
+            store,
+            permissions,
+            configured,
+            &snapshot,
+            &mut budget,
+            memory,
+        )
+        .await?;
+        let reread = budget.bounded(store.authority_binding()).await?;
         if reread == snapshot.binding {
             return Ok(report);
         }
@@ -327,15 +447,57 @@ pub async fn verify_restore_fence(
     Err(RestoreFenceRefusal::AuthorityMoved.into())
 }
 
-/// A PostgreSQL step of the fence, within the pass's deadline; an expired
-/// deadline is [`HostGrantError::Busy`].
-async fn bounded<T>(
-    deadline: tokio::time::Instant,
-    step: impl Future<Output = Result<T, HostGrantError>>,
-) -> Result<T, HostGrantError> {
-    tokio::time::timeout_at(deadline, step)
+/// Read every marker and witness SpiceDB holds and the store's scopes, and
+/// publish the rooms of lifecycles only SpiceDB holds into `memory`. For a
+/// replica that cannot run the fence (its runtime role does not match the
+/// profile) and still has to refuse those rooms.
+pub(crate) async fn refresh_refused_rooms(
+    store: &HostGrantStore,
+    permissions: &ActorRef<PermissionActor>,
+    memory: &FenceMemory,
+) -> Result<(), HostGrantError> {
+    let listed = permissions
+        .ask(ListHostGrantWitnesses)
         .await
-        .unwrap_or(Err(HostGrantError::Busy))
+        .map_err(projection_store_error)?;
+    let Some(listed) = listed else {
+        memory.publish_rooms(BTreeSet::new());
+        return Ok(());
+    };
+    let witnesses = Witnesses::from_listing(&listed);
+    let mut budget = PostgresBudget::new(HOST_GRANT_RESTORE_FENCE_DEADLINE);
+    let scopes = budget.bounded(store.scopes()).await?;
+    memory.publish_rooms(witnesses.orphaned(&scopes).1);
+    Ok(())
+}
+
+/// The PostgreSQL time one fence pass may spend. Each step draws what it
+/// took; a step that would overrun what is left is cut off as
+/// [`HostGrantError::Busy`].
+struct PostgresBudget {
+    left: Duration,
+}
+
+impl PostgresBudget {
+    fn new(budget: Duration) -> Self {
+        Self { left: budget }
+    }
+
+    fn grant(&mut self, extra: Duration) {
+        self.left = self.left.saturating_add(extra);
+    }
+
+    async fn bounded<T>(
+        &mut self,
+        step: impl Future<Output = Result<T, HostGrantError>>,
+    ) -> Result<T, HostGrantError> {
+        let started = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout(self.left, step)
+            .await
+            .unwrap_or(Err(HostGrantError::Busy));
+        self.left = self.left.saturating_sub(started.elapsed());
+        outcome
+    }
 }
 
 async fn fence_pass(
@@ -343,81 +505,130 @@ async fn fence_pass(
     permissions: &ActorRef<PermissionActor>,
     configured: RestoreEpoch,
     snapshot: &FenceSnapshot,
-    deadline: tokio::time::Instant,
+    budget: &mut PostgresBudget,
+    memory: &FenceMemory,
 ) -> Result<RestoreFenceReport, HostGrantError> {
     let listed = permissions
         .ask(ListHostGrantWitnesses)
         .await
         .map_err(projection_store_error)?;
-    let witnesses = listed.as_deref().map(Witnesses::from_listing);
     let mut report = RestoreFenceReport {
         binding: Some(snapshot.binding.clone()),
         awaiting_reconstruction: snapshot.restored,
         awaiting_reopen: snapshot.reconstructed,
         ..RestoreFenceReport::default()
     };
-    // A database that holds no scope, beside a projection that names none,
-    // has no authority a restore could reopen.
-    if !snapshot.holds_scope && !witnesses.as_ref().is_some_and(Witnesses::names_scope) {
-        return Ok(report);
-    }
-    if let Some(bound) = &snapshot.bound_lineage {
-        if snapshot.live_lineage.as_ref() != Some(bound) {
-            return Err(RestoreFenceRefusal::LineageChanged.into());
+    let Some(listed) = listed else {
+        // No projection, so no witness either: no room can belong to a lost
+        // enrollment.
+        memory.publish_rooms(BTreeSet::new());
+        if snapshot.holds_scope {
+            check_lineage_and_epoch(snapshot, configured)?;
         }
-    }
-    if snapshot.binding.restore_epoch != configured {
-        return Err(RestoreFenceRefusal::EpochMismatch {
-            configured,
-            stored: snapshot.binding.restore_epoch,
-        }
-        .into());
-    }
-    let Some(witnesses) = witnesses else {
         return Ok(report);
     };
+    let witnesses = Witnesses::from_listing(&listed);
+    report.projection_listed = true;
     report.markers = witnesses.markers.len();
+    report.witnessed_heads = witnesses
+        .heads
+        .iter()
+        .filter_map(|(lifecycle, head)| match head {
+            MarkerObservation::Present(head) => Some((*lifecycle, head.stamp())),
+            MarkerObservation::Absent | MarkerObservation::Malformed => None,
+        })
+        .collect();
+
+    // The store's scopes, read after SpiceDB. The rooms of lifecycles only
+    // SpiceDB holds are refused before anything is decided about the whole
+    // authority, so they stay refused when it is refused.
+    let scopes = budget.bounded(store.scopes()).await?;
+    let (orphaned, refused_rooms) = witnesses.orphaned(&scopes);
+    memory.publish_rooms(refused_rooms.clone());
+    report.orphaned = orphaned.len();
+    report.refused_rooms = refused_rooms;
+
+    // A database that holds no scope, beside a projection that names none,
+    // has no authority a restore could reopen.
+    if !snapshot.holds_scope && !witnesses.names_scope() {
+        return Ok(report);
+    }
+    check_lineage_and_epoch(snapshot, configured)?;
 
     let witnessed = match witnesses.positions.get(&snapshot.authority_id) {
         None => None,
         Some(Some(witness)) => Some(*witness),
         Some(None) => return Err(RestoreFenceRefusal::PositionUnverified.into()),
     };
+    // Scopes admit, so their markers were written; a SpiceDB that holds none
+    // of them and no position witness either is not this deployment's
+    // projection. Nothing is closed for it: the refusal clears when the
+    // replica reaches the SpiceDB it belongs beside.
+    if !snapshot.admitting.is_empty() && witnesses.markers.is_empty() && witnessed.is_none() {
+        return Err(RestoreFenceRefusal::ProjectionAbsent.into());
+    }
+    let stored_latch = match witnesses.latches.get(&snapshot.authority_id) {
+        None => None,
+        Some(Some(latch)) => Some(*latch),
+        Some(None) => return Err(RestoreFenceRefusal::PositionUnverified.into()),
+    };
     let current = PositionWitness {
         epoch: snapshot.binding.restore_epoch,
-        position: bounded(deadline, store.postgres_position()).await?,
+        position: budget.bounded(store.postgres_position()).await?,
     };
+    let latch = effective_latch(
+        witnessed.as_ref(),
+        stored_latch.as_ref(),
+        memory.latch().as_ref(),
+    );
     let standing = position_standing(
         witnessed.as_ref(),
         &current,
-        snapshot.position_acknowledgement,
+        snapshot.position_acknowledgement.as_ref(),
+        latch.as_ref(),
     );
     match standing {
-        PositionStanding::Regressed => return Err(RestoreFenceRefusal::PositionRegressed.into()),
+        PositionStanding::Regressed => {
+            latch_regression(
+                permissions,
+                &snapshot.authority_id,
+                witnessed,
+                &current,
+                latch,
+                stored_latch,
+                memory,
+            )
+            .await;
+            return Err(RestoreFenceRefusal::PositionRegressed.into());
+        }
         PositionStanding::Unverified => return Err(RestoreFenceRefusal::PositionUnverified.into()),
-        _ => report.position = Some(standing),
+        PositionStanding::Rebased | PositionStanding::Acknowledged => {
+            memory.set_latch(None);
+            report.position = Some(standing);
+        }
+        PositionStanding::Unrecorded | PositionStanding::Current | PositionStanding::Advanced => {
+            report.position = Some(standing);
+        }
     }
 
     for lifecycle in witnesses.lifecycles() {
-        let Some(scope) = bounded(deadline, store.scope(lifecycle)).await? else {
-            report.orphaned += 1;
-            report
-                .refused_rooms
-                .extend(witnesses.rooms_of(lifecycle).cloned());
+        let Some(scope) = scopes.get(&lifecycle) else {
             continue;
         };
-        let evidence = bounded(
-            deadline,
-            scope_evidence(
+        budget.grant(HOST_GRANT_RESTORE_FENCE_SCOPE_ALLOWANCE);
+        let evidence = budget
+            .bounded(scope_evidence(
                 store,
-                &scope,
+                scope,
                 witnesses.markers.get(&lifecycle),
                 witnesses.heads.get(&lifecycle),
-            ),
-        )
-        .await?;
+            ))
+            .await?;
         if let Some(evidence) = evidence {
-            if bounded(deadline, store.fence_scope(lifecycle, &evidence)).await? {
+            if budget
+                .bounded(store.fence_scope(lifecycle, &evidence))
+                .await?
+            {
                 tracing::error!(
                     evidence = evidence.kind(),
                     "A host-grant scope was closed: SpiceDB records what its canonical store \
@@ -434,7 +645,10 @@ async fn fence_pass(
             continue;
         }
         let evidence = FenceEvidence::MarkerMissing;
-        if bounded(deadline, store.fence_scope(*lifecycle, &evidence)).await? {
+        if budget
+            .bounded(store.fence_scope(*lifecycle, &evidence))
+            .await?
+        {
             tracing::error!(
                 evidence = evidence.kind(),
                 "A host-grant scope was closed: SpiceDB holds no projection of it \
@@ -444,6 +658,73 @@ async fn fence_pass(
         }
     }
     Ok(report)
+}
+
+/// Refuse a database adopted without a declared restore, and a configured
+/// epoch the database does not record.
+fn check_lineage_and_epoch(
+    snapshot: &FenceSnapshot,
+    configured: RestoreEpoch,
+) -> Result<(), HostGrantError> {
+    if let Some(bound) = &snapshot.bound_lineage {
+        if snapshot.live_lineage.as_ref() != Some(bound) {
+            return Err(RestoreFenceRefusal::LineageChanged.into());
+        }
+    }
+    if snapshot.binding.restore_epoch != configured {
+        return Err(RestoreFenceRefusal::EpochMismatch {
+            configured,
+            stored: snapshot.binding.restore_epoch,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Keep a regression the fence saw: in `memory` at once, and in SpiceDB as
+/// the authority's latch, beside the exact position witness it names. The
+/// write is best effort; a failure is counted and logged by kind.
+async fn latch_regression(
+    permissions: &ActorRef<PermissionActor>,
+    authority_id: &str,
+    witnessed: Option<PositionWitness>,
+    current: &PositionWitness,
+    latch: Option<PositionLatch>,
+    stored: Option<PositionLatch>,
+    memory: &FenceMemory,
+) {
+    let Some(seen) = witnessed else {
+        return;
+    };
+    let Some(latch) = latch.or_else(|| {
+        regression(&seen, current).map(|kind| PositionLatch {
+            kind,
+            witness: seen,
+        })
+    }) else {
+        return;
+    };
+    if memory.latch() != Some(latch) {
+        tracing::error!(
+            latch = ?latch.kind,
+            "A regression of the PostgreSQL position was latched: the host-grant authority stays \
+             refused until a restore is declared (docs/operations/authz-host-grant-restore.md)"
+        );
+        memory.set_latch(Some(latch));
+    }
+    if stored == Some(latch) {
+        return;
+    }
+    let stored = stored.map(|stored| stored.stamp());
+    let changes = latch_changes(
+        &position_witness_resource(authority_id),
+        &latch_witness_resource(authority_id),
+        &latch,
+        stored.as_deref(),
+    );
+    if let Err(error) = apply_witness_changes(permissions, changes).await {
+        witness_write_failed(&error, "latch");
+    }
 }
 
 /// What SpiceDB holds that one known scope's canonical state contradicts,
@@ -493,12 +774,18 @@ async fn scope_evidence(
             .await?
             .as_ref()
             == Some(head);
+        // A head of another incarnation is explained while a restore is
+        // handled, or once a declared restore that superseded an incarnation
+        // this journal held was reopened under the current one.
         let explained = recorded
             || (head.incarnation != scope.authority_incarnation
                 && (restore_handling
-                    || store
+                    || (store
                         .journal_holds_reopen(lifecycle, scope.authority_incarnation)
-                        .await?));
+                        .await?
+                        && store
+                            .journal_holds_incarnation(lifecycle, head.incarnation)
+                            .await?)));
         if !explained {
             return Ok(Some(FenceEvidence::JournalAhead(head.clone())));
         }
@@ -515,6 +802,8 @@ pub(crate) struct Witnesses {
     pub(crate) rooms: BTreeMap<String, BTreeSet<ScopeLifecycleId>>,
     /// Each authority's position witness; `None` when it is malformed.
     pub(crate) positions: BTreeMap<String, Option<PositionWitness>>,
+    /// Each authority's regression latch; `None` when it is malformed.
+    pub(crate) latches: BTreeMap<String, Option<PositionLatch>>,
 }
 
 impl Witnesses {
@@ -544,9 +833,16 @@ impl Witnesses {
                 WitnessResource::Position(authority) => {
                     let witness = match listed.single_stamp() {
                         Ok(Some(stamp)) => PositionWitness::parse(stamp),
-                        Ok(None) | Err(()) => None,
+                        Ok(None) | Err(_) => None,
                     };
                     witnesses.positions.insert(authority, witness);
+                }
+                WitnessResource::Latch(authority) => {
+                    let latch = match listed.single_stamp() {
+                        Ok(Some(stamp)) => PositionLatch::parse(stamp),
+                        Ok(None) | Err(_) => None,
+                    };
+                    witnesses.latches.insert(authority, latch);
                 }
                 WitnessResource::Unknown => {}
             }
@@ -569,12 +865,24 @@ impl Witnesses {
             .collect()
     }
 
-    /// The room witness digests that name `lifecycle`.
-    fn rooms_of(&self, lifecycle: ScopeLifecycleId) -> impl Iterator<Item = &String> {
-        self.rooms
+    /// The lifecycles a marker or witness names that `scopes` does not
+    /// hold, and the room witness digests that name any of them.
+    fn orphaned(
+        &self,
+        scopes: &BTreeMap<ScopeLifecycleId, ScopeState>,
+    ) -> (BTreeSet<ScopeLifecycleId>, BTreeSet<String>) {
+        let orphaned: BTreeSet<ScopeLifecycleId> = self
+            .lifecycles()
+            .into_iter()
+            .filter(|lifecycle| !scopes.contains_key(lifecycle))
+            .collect();
+        let rooms = self
+            .rooms
             .iter()
-            .filter(move |(_, named)| named.contains(&lifecycle))
-            .map(|(digest, _)| digest)
+            .filter(|(_, named)| named.iter().any(|lifecycle| orphaned.contains(lifecycle)))
+            .map(|(digest, _)| digest.clone())
+            .collect();
+        (orphaned, rooms)
     }
 }
 
@@ -583,7 +891,7 @@ fn observe_marker(lifecycle: ScopeLifecycleId, listed: &ListedWitness) -> Marker
         Ok(Some(stamp)) => ProjectionMarker::parse(lifecycle, stamp)
             .map_or(MarkerObservation::Malformed, MarkerObservation::Present),
         Ok(None) => MarkerObservation::Absent,
-        Err(()) => MarkerObservation::Malformed,
+        Err(_) => MarkerObservation::Malformed,
     }
 }
 
@@ -806,4 +1114,8 @@ pub struct ReopenReport {
     /// Scopes closed by a restore whose reconstruction is not yet verified
     /// and activated, or which a fence closed since: left closed.
     pub not_reconstructed: usize,
+    /// Reconstructed scopes the restore lost operations in, left closed:
+    /// each reopens only by name, once the operator confirms that what was
+    /// lost has been applied again.
+    pub lost_operations: usize,
 }

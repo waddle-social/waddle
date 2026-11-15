@@ -48,12 +48,15 @@
 //! pass first records what the projection and the journal witness prove
 //! the restored database lost (`restore::reconstruction_targets`: only
 //! lowerings, and the subjects only the projection holds, at `none` or
-//! `outcast`), then takes the projection over: it writes the current intent
-//! conditioned on exactly that marker, reads it back and activates it. The
-//! scope is then `reconstructed`, and admits again once an operator reopens
-//! it. A marker that is missing after an activation or malformed, a family
-//! that holds what the projection never writes, and changes beyond the
-//! scope's row bound leave the scope closed.
+//! `outcast`) and, when it lost anything, marks the scope as one that lost
+//! operations; then it takes the projection over: it writes the current
+//! intent conditioned on exactly that marker, and moves the journal witness
+//! from exactly what it read to the current operation, in one request, reads
+//! the projection back and activates it. The scope is then `reconstructed`,
+//! and admits again once an operator reopens it. A marker that is missing
+//! after an activation or malformed, a family that holds what the
+//! projection never writes, and changes beyond the scope's row bound leave
+//! the scope closed.
 //!
 //! Every committed mutation brings the scope's journal witness and the
 //! position witness up to date on a task of its own
@@ -69,8 +72,8 @@ use super::error::HostGrantError;
 use super::issuance::{IssuanceBasis, IssuancePolicy};
 use super::marker::ProjectionMarker;
 use super::model::{
-    EnrollScope, GrantGeneration, GrantOperationId, GrantSubject, MutationReceipt, RoomAffiliation,
-    ScopeLifecycleId, SetAffiliation,
+    EnrollScope, GrantGeneration, GrantOperationId, GrantSubject, MutationReceipt, RetireScope,
+    RoomAffiliation, ScopeLifecycleId, SetAffiliation,
 };
 use super::projection::{
     MarkerObservation, ProjectedRelationship, ProjectionObservation, ProjectionPlan,
@@ -82,7 +85,7 @@ use super::restore::{
 use super::store::{Activation, HostGrantStore};
 use super::witness::{
     head_witness_resource, sync_journal_witness, sync_position_witness,
-    sync_witnesses_after_commit, WitnessSync,
+    sync_witnesses_after_commit, PositionWriter, WitnessChange, WitnessSync,
 };
 use crate::permissions::{
     ObserveHostGrantProjection, PermissionActor, PermissionError, ReadHostGrantWitness,
@@ -228,16 +231,29 @@ impl HostGrantAuthority {
         Ok(receipt)
     }
 
-    /// Bring a scope's journal witness and the position witness up to date
-    /// now, and answer what the journal witness writer did. A committed
-    /// mutation does this on a task of its own; this is for a caller that
-    /// wants to wait for it.
+    /// Close a scope for good, as [`HostGrantStore::retire_scope`] does,
+    /// and witness the retirement after the commit. Owner phase only.
+    pub async fn retire_scope(
+        &self,
+        command: &RetireScope,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let receipt = self.store.retire_scope(command).await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
+    }
+
+    /// Bring a scope's journal witness and an existing position witness up
+    /// to date now, and answer what the journal witness writer did. A
+    /// committed mutation does this on a task of its own; this is for a
+    /// caller that wants to wait for it. The first position witness is
+    /// written only after a fence pass that passed
+    /// (`witness::sync_witnesses_after_fence`).
     pub async fn sync_witnesses(
         &self,
         lifecycle: ScopeLifecycleId,
     ) -> Result<WitnessSync, HostGrantError> {
         let journal = sync_journal_witness(&self.store, &self.permissions, lifecycle).await?;
-        sync_position_witness(&self.store, &self.permissions).await?;
+        sync_position_witness(&self.store, &self.permissions, PositionWriter::Commit, None).await?;
         Ok(journal)
     }
 
@@ -291,12 +307,14 @@ impl HostGrantAuthority {
         &self,
         plan: &RestoredPlan,
         previous: &ProjectionMarker,
+        head: Option<WitnessChange>,
     ) -> Result<ProjectionWrite, HostGrantError> {
         plan.plan().intent.check_takes_over(previous)?;
         self.permissions
             .ask(TakeOverHostGrantProjection {
                 previous: previous.clone(),
                 plan: plan.clone(),
+                head,
             })
             .await
             .map_err(projection_store_error)
@@ -474,10 +492,13 @@ impl HostGrantAuthority {
             .await?
             .as_ref()
             != Some(&previous);
-        let Ok(journal_lost) = self.journal_witness_lost(lifecycle).await else {
+        let Ok(head) = self.journal_witness(lifecycle).await else {
             return Ok(Reconciliation::ProjectionUnknown);
         };
-        let lost = projection_lost || journal_lost;
+        let lost = projection_lost || head.lost;
+        if lost {
+            self.store.record_lost_operations(lifecycle).await?;
+        }
         let changes: Vec<ReconstructionChange> =
             reconstruction_targets(&plan.plan().intent, observed, lost)
                 .into_iter()
@@ -523,7 +544,16 @@ impl HostGrantAuthority {
                 None => return Ok(Reconciliation::Superseded),
             };
         }
-        match self.take_over(&plan, &previous).await {
+        // The journal witness moves with the takeover, from exactly what was
+        // read: what it showed lost is recorded by now, and a head of an
+        // incarnation this journal never held is not left to fence the
+        // scope after it is reopened. A malformed witness is left alone.
+        let head = head.previous.map(|previous| WitnessChange {
+            resource: head_witness_resource(lifecycle),
+            previous,
+            next: Some(plan.plan().marker().stamp()),
+        });
+        match self.take_over(&plan, &previous, head).await {
             Ok(ProjectionWrite::Applied) => self.verify_and_activate(plan.plan(), None).await,
             // The marker changed since it was read: another pass took the
             // projection over, or a writer replaced it. This pass stops.
@@ -533,14 +563,14 @@ impl HostGrantAuthority {
         }
     }
 
-    /// Whether the scope's journal witness names an operation the journal
-    /// does not record: the restored database lost it, whether or not its
-    /// projection was written. An absent or malformed witness shows
-    /// nothing.
-    async fn journal_witness_lost(
+    /// The scope's journal witness as SpiceDB holds it, and whether it
+    /// names an operation the journal does not record: the restored
+    /// database lost it, whether or not its projection was written. An
+    /// absent or malformed witness shows nothing.
+    async fn journal_witness(
         &self,
         lifecycle: ScopeLifecycleId,
-    ) -> Result<bool, HostGrantError> {
+    ) -> Result<ObservedHead, HostGrantError> {
         let listed = self
             .permissions
             .ask(ReadHostGrantWitness {
@@ -548,18 +578,35 @@ impl HostGrantAuthority {
             })
             .await
             .map_err(projection_store_error)?;
-        let Some(Ok(Some(stamp))) = listed.as_ref().map(|listed| listed.single_stamp()) else {
-            return Ok(false);
+        let stamp = match listed.as_ref().map(|listed| listed.single_stamp()) {
+            Some(Ok(stamp)) => stamp,
+            None | Some(Err(_)) => {
+                return Ok(ObservedHead {
+                    previous: None,
+                    lost: false,
+                })
+            }
         };
-        let Some(head) = ProjectionMarker::parse(lifecycle, stamp) else {
-            return Ok(false);
+        let Some(stamp) = stamp else {
+            return Ok(ObservedHead {
+                previous: Some(None),
+                lost: false,
+            });
         };
-        Ok(self
-            .store
-            .recorded_marker(lifecycle, head.generation)
-            .await?
-            .as_ref()
-            != Some(&head))
+        let lost = match ProjectionMarker::parse(lifecycle, stamp) {
+            Some(head) => {
+                self.store
+                    .recorded_marker(lifecycle, head.generation)
+                    .await?
+                    .as_ref()
+                    != Some(&head)
+            }
+            None => false,
+        };
+        Ok(ObservedHead {
+            previous: Some(Some(stamp.to_owned())),
+            lost,
+        })
     }
 
     /// Close a scope on evidence a pass found, as the restore fence does.
@@ -632,6 +679,16 @@ impl HostGrantAuthority {
             Activation::Superseded => Reconciliation::Superseded,
         })
     }
+}
+
+/// A scope's journal witness as a reconstruction read it.
+struct ObservedHead {
+    /// What the takeover conditions the witness on: the stamp it held, or
+    /// `Some(None)` when it held none. `None` when it is malformed (or the
+    /// backend holds no projection) and is left alone.
+    previous: Option<Option<String>>,
+    /// The witness names an operation the journal does not record.
+    lost: bool,
 }
 
 /// A failed ask of the permission actor: the projection's answer is unknown.

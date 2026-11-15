@@ -26,8 +26,9 @@
 //! runtime role may close a scope on fence evidence, which takes the
 //! scope's state row like any mutation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -48,10 +49,11 @@ use super::policy::{grant_allows, honoured_affiliation, initiator_may_change, Ho
 use super::projection::{projection_digest, ProjectedGrant, ProjectionIntent, ProjectionPlan};
 use super::restore::{
     fence_fingerprint, reopen_fingerprint, restore_fingerprint, AuthorityBinding, FenceEvidence,
-    OperatorRevoke, ReconstructScope, ReopenReport, RestoreDeclaration, RestoreEpoch,
-    RestoreFenceRefusal,
+    OperatorRevoke, ReconstructScope, ReopenReport, ReopenSelection, RestoreDeclaration,
+    RestoreEpoch, RestoreFenceRefusal,
 };
-use super::witness::PostgresPosition;
+use super::witness::{PositionAcknowledgement, PositionWitness, PostgresPosition};
+use crate::db::lineage::PgSystemIdentifier;
 use crate::db::read_only_timeout::{bound_postgres_waits, ReadOnlyTimeoutError};
 use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use crate::ingress_substrate::{
@@ -74,7 +76,7 @@ const ENROLLED_LOOKUP_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const ENROLLED_LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const SCOPE_COLUMNS: &str = "lifecycle_id, authority_incarnation, policy_version, generation, \
-     operation_id, projected_generation, admission_state, closed_reason";
+     operation_id, projected_generation, admission_state, closed_reason, lost_operations";
 const GRANT_COLUMNS: &str = "room_jid, subject_jid, affiliation, effective_affiliation, \
      changed_generation, operation_id, issuance_basis";
 const OPERATION_COLUMNS: &str =
@@ -159,8 +161,9 @@ pub(crate) struct FenceSnapshot {
     pub(crate) restored: usize,
     /// Scopes closed as `reconstructed`.
     pub(crate) reconstructed: usize,
-    /// The system identifier and timeline an operator acknowledged.
-    pub(crate) position_acknowledgement: Option<(i64, u32)>,
+    /// The position witness an operator acknowledged, and for which
+    /// system and timeline.
+    pub(crate) position_acknowledgement: Option<PositionAcknowledgement>,
 }
 
 /// What a position witness is filed and compared under.
@@ -168,7 +171,7 @@ pub(crate) struct FenceSnapshot {
 pub(crate) struct PositionAuthority {
     pub(crate) authority_id: String,
     pub(crate) restore_epoch: RestoreEpoch,
-    pub(crate) position_acknowledgement: Option<(i64, u32)>,
+    pub(crate) position_acknowledgement: Option<PositionAcknowledgement>,
 }
 
 /// A scope's latest recorded operation, as a journal witness states it.
@@ -311,10 +314,7 @@ impl HostGrantStore {
         let row = rows.next().await?.ok_or(corrupt("authority incarnation"))?;
         let bound_lineage = row.get::<Option<String>>(0)?;
         let authority_id = row.get::<String>(1)?;
-        let position_acknowledgement = row
-            .get::<Option<String>>(2)?
-            .map(|text| parse_acknowledgement(&text).ok_or(corrupt("position_acknowledgement")))
-            .transpose()?;
+        let position_acknowledgement = decode_acknowledgement(row.get::<Option<String>>(2)?)?;
         drop(rows);
         let live_lineage = load_live_lineage(&mut tx).await?;
         let mut rows = tx
@@ -365,29 +365,61 @@ impl HostGrantStore {
     }
 
     /// Where the PostgreSQL server stands: its system identifier, the
-    /// timeline it writes on and its flushed WAL position. A role that may
-    /// not run the functions is refused with
+    /// timeline it writes on and its flushed WAL position.
+    ///
+    /// On the physically attested pool the restricted runtime role serves
+    /// from, the role may not call `pg_control_system()` (the attestor's
+    /// precondition): the transaction is attested first, and the system
+    /// identifier is the one the attested physical identity names, which
+    /// the attestor has just compared with the live one. On any other
+    /// handle (the owner phase, an unattested deployment) it is read from
+    /// `pg_control_system()`. The timeline and the position come from
+    /// `pg_current_wal_flush_lsn()` and `pg_walfile_name()`, which PostgreSQL
+    /// grants to every role and the provisioning leaves in place. A role
+    /// that may not run what it needs is refused with
     /// [`RestoreFenceRefusal::PositionUnreadable`].
     pub async fn postgres_position(&self) -> Result<PostgresPosition, HostGrantError> {
+        let capability = self.db.attested_pg_writer_capability();
         let mut tx = self.begin_read().await?;
+        let unreadable = |error: DatabaseError| match HostGrantError::from_database(error) {
+            HostGrantError::OwnerPhaseRequired => RestoreFenceRefusal::PositionUnreadable.into(),
+            other => other,
+        };
+        let system_identifier = match &capability {
+            Some(capability) => {
+                self.db
+                    .verify_attested_pg_writer_capability(capability)
+                    .map_err(DatabaseError::from)?;
+                capability.attest_transaction(&mut tx).await?;
+                capability.identity().system_identifier.0
+            }
+            None => {
+                let mut rows = tx
+                    .query(
+                        "SELECT system_identifier::text FROM pg_catalog.pg_control_system()",
+                        (),
+                    )
+                    .await
+                    .map_err(unreadable)?;
+                let row = rows.next().await?.ok_or(corrupt("postgres position"))?;
+                let text = row.get::<String>(0)?;
+                drop(rows);
+                PgSystemIdentifier::from_str(&text)
+                    .map_err(|_| corrupt("postgres system identifier"))?
+                    .0
+            }
+        };
         let mut rows = tx
             .query(
-                "SELECT (SELECT system_identifier FROM pg_catalog.pg_control_system()), \
-                 pg_catalog.pg_walfile_name(pg_catalog.pg_current_wal_flush_lsn()), \
+                "SELECT pg_catalog.pg_walfile_name(pg_catalog.pg_current_wal_flush_lsn()), \
                  (pg_catalog.pg_current_wal_flush_lsn() - '0/0'::pg_lsn)::text",
                 (),
             )
             .await
-            .map_err(|error| match HostGrantError::from_database(error) {
-                HostGrantError::OwnerPhaseRequired => {
-                    RestoreFenceRefusal::PositionUnreadable.into()
-                }
-                other => other,
-            })?;
+            .map_err(unreadable)?;
         let row = rows.next().await?.ok_or(corrupt("postgres position"))?;
-        let system_identifier = row.get::<i64>(0)?;
-        let walfile = row.get::<String>(1)?;
-        let lsn = row.get::<String>(2)?;
+        let walfile = row.get::<String>(0)?;
+        let lsn = row.get::<String>(1)?;
         drop(rows);
         tx.rollback().await?;
         let timeline = walfile
@@ -405,11 +437,22 @@ impl HostGrantStore {
     }
 
     /// The authority identity, its restore epoch and the acknowledged
-    /// PostgreSQL system and timeline, which the position witness is filed
-    /// and compared under. `None` without the host-grant relations.
+    /// position, which the position witness is filed and compared under.
+    /// `None` without the host-grant relations, and while no scope is
+    /// enrolled: without a scope there is no authority a position could
+    /// protect.
     pub(crate) async fn position_authority(
         &self,
     ) -> Result<Option<PositionAuthority>, HostGrantError> {
+        Ok(self
+            .position_authority_row()
+            .await?
+            .and_then(|(authority, holds_scope)| holds_scope.then_some(authority)))
+    }
+
+    async fn position_authority_row(
+        &self,
+    ) -> Result<Option<(PositionAuthority, bool)>, HostGrantError> {
         let mut tx = self.begin_read().await?;
         if !query_flag(
             &mut tx,
@@ -433,16 +476,12 @@ impl HostGrantStore {
             authority_id: row.get::<String>(0)?,
             restore_epoch: RestoreEpoch::from_storage(row.get::<i64>(1)?)
                 .ok_or(corrupt("restore_epoch"))?,
-            position_acknowledgement: row
-                .get::<Option<String>>(2)?
-                .map(|text| parse_acknowledgement(&text).ok_or(corrupt("position_acknowledgement")))
-                .transpose()?,
+            position_acknowledgement: decode_acknowledgement(row.get::<Option<String>>(2)?)?,
         };
         let holds_scope = row.get::<bool>(3)?;
         drop(rows);
         tx.rollback().await?;
-        // Without a scope there is no authority a position could protect.
-        Ok(holds_scope.then_some(authority))
+        Ok(Some((authority, holds_scope)))
     }
 
     /// Whether a scope's journal records an operation under `incarnation`:
@@ -559,36 +598,95 @@ impl HostGrantStore {
     }
 
     /// Reopen the scopes whose reconstruction after a declared restore was
-    /// verified and activated: `lifecycle`, or every such scope. Each is
-    /// reopened in a transaction of its own, under a `reopen` operation at
-    /// its next generation, and admits from that commit; its projection
-    /// follows with the next reconciliation pass. A scope that is not
-    /// `reconstructed`, or whose latest operation is not yet verified, is
-    /// left closed and counted.
+    /// verified and activated (see [`ReopenSelection`]). Each is reopened in
+    /// a transaction of its own, under a `reopen` operation at its next
+    /// generation, and admits from that commit; its projection follows with
+    /// the next reconciliation pass. A scope that is not `reconstructed`, or
+    /// whose latest operation is not yet verified, is left closed and
+    /// counted. So is a scope the restore lost operations in, unless it is
+    /// named and the operator confirms that what was lost has been applied
+    /// again; reopening it clears the mark.
     ///
     /// Owner phase only by convention: it is the operator's
     /// acknowledgement of the restore, run as the migrator login.
     pub async fn reopen_scopes(
         &self,
-        lifecycle: Option<ScopeLifecycleId>,
+        selection: ReopenSelection,
     ) -> Result<ReopenReport, HostGrantError> {
         let store = self.clone();
         let mode = commit_mode();
-        own(async move { store.reopen_owned(lifecycle, mode).await }).await
+        own(async move { store.reopen_owned(selection, mode).await }).await
     }
 
-    /// Record the PostgreSQL system and timeline the server now writes on
-    /// as acknowledged by an operator, after a promotion or a move to
-    /// another cluster that the position witness cannot verify. The next
-    /// fence pass moves the witness to the current position. Returns the
-    /// acknowledged system identifier and timeline.
+    /// Record an operator's acknowledgement of `witnessed`, the position
+    /// witness SpiceDB holds, for the PostgreSQL system and timeline the
+    /// server now writes on (see [`PositionAcknowledgement`]). It replaces
+    /// any earlier acknowledgement. The next fence pass, or witness writer,
+    /// moves the witness to the current position when the acknowledgement
+    /// applies: after a promotion to a later timeline whose position is not
+    /// below the witness, or after a regression on the witnessed timeline.
+    /// An acknowledgement that could never apply (another system, an earlier
+    /// timeline) is refused with [`HostGrantError::AcknowledgementRefused`]
+    /// and nothing is recorded.
     ///
     /// Owner phase only: the runtime role cannot update the authority row.
-    pub async fn acknowledge_position(&self) -> Result<(i64, u32), HostGrantError> {
+    pub async fn acknowledge_position(
+        &self,
+        witnessed: PositionWitness,
+    ) -> Result<PositionAcknowledgement, HostGrantError> {
         let position = self.postgres_position().await?;
+        let acknowledgement = PositionAcknowledgement {
+            supersedes: witnessed,
+            system_identifier: position.system_identifier,
+            timeline: position.timeline,
+        };
+        if !acknowledgement.admissible() {
+            return Err(HostGrantError::AcknowledgementRefused);
+        }
         let store = self.clone();
         let mode = commit_mode();
-        own(async move { store.acknowledge_position_owned(position, mode).await }).await
+        own(async move {
+            store
+                .acknowledge_position_owned(acknowledgement, mode)
+                .await
+        })
+        .await
+    }
+
+    /// Remove `acknowledgement` once an operator's tool has seen it applied
+    /// (the witness it superseded was replaced), so that it is spent in the
+    /// database as well. Another acknowledgement recorded since is kept; the
+    /// answer is whether this one was removed. Owner phase only.
+    pub async fn consume_position_acknowledgement(
+        &self,
+        acknowledgement: &PositionAcknowledgement,
+    ) -> Result<bool, HostGrantError> {
+        let store = self.clone();
+        let spelling = acknowledgement.spelling();
+        own(async move {
+            let mut tx = store.begin_write().await?;
+            let removed = tx
+                .execute(
+                    "UPDATE host_grant_authority SET position_acknowledgement = NULL \
+                     WHERE singleton AND position_acknowledgement = ?",
+                    crate::db_params![spelling],
+                )
+                .await
+                .map_err(HostGrantError::from_database)?;
+            commit(tx, CommitMode::Acknowledged).await?;
+            Ok(removed == 1)
+        })
+        .await
+    }
+
+    /// The fixed identity the authority's position witness is filed under,
+    /// for an operator who reads the witness from SpiceDB. `None` without
+    /// the host-grant relations.
+    pub async fn authority_id(&self) -> Result<Option<String>, HostGrantError> {
+        Ok(self
+            .position_authority_row()
+            .await?
+            .map(|(authority, _)| authority.authority_id))
     }
 
     /// Record an operator's revoke or ban (see [`OperatorRevoke`]). The
@@ -745,33 +843,97 @@ impl HostGrantStore {
         Ok(scopes)
     }
 
-    /// One page of the scopes that are not retired or exhausted, in
-    /// lifecycle order, starting after `after`.
-    pub(crate) async fn scope_page(
+    /// Every scope the store holds, retired and exhausted ones included, by
+    /// lifecycle, read in one snapshot. The restore fence reads it after
+    /// SpiceDB, in one statement however many scopes are enrolled.
+    pub(crate) async fn scopes(
         &self,
-        after: Option<ScopeLifecycleId>,
-    ) -> Result<Vec<ScopeLifecycleId>, HostGrantError> {
-        let after = after.map_or_else(String::new, ScopeLifecycleId::to_storage);
+    ) -> Result<BTreeMap<ScopeLifecycleId, ScopeState>, HostGrantError> {
         let mut tx = self.begin_read().await?;
         let mut rows = tx
             .query(
-                "SELECT lifecycle_id FROM host_grant_scopes \
-                 WHERE (closed_reason IS NULL OR closed_reason NOT IN ('retired', 'exhausted')) \
-                   AND lifecycle_id > ? \
-                 ORDER BY lifecycle_id LIMIT ?",
-                crate::db_params![after, PENDING_SCOPE_PAGE],
+                &format!("SELECT {SCOPE_COLUMNS} FROM host_grant_scopes ORDER BY lifecycle_id"),
+                (),
             )
             .await?;
-        let mut scopes = Vec::new();
+        let mut scopes = BTreeMap::new();
         while let Some(row) = rows.next().await? {
-            scopes.push(
-                ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
-                    .ok_or(corrupt("lifecycle_id"))?,
-            );
+            let scope = decode_scope(&row)?;
+            scopes.insert(scope.lifecycle, scope);
         }
         drop(rows);
         tx.rollback().await?;
         Ok(scopes)
+    }
+
+    /// The stamp of every scope's latest recorded operation, in the
+    /// marker's spelling, retired and exhausted scopes included, read in one
+    /// statement. A journal witness that holds it is current.
+    pub(crate) async fn journal_heads(
+        &self,
+    ) -> Result<BTreeMap<ScopeLifecycleId, String>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let mut rows = tx
+            .query(
+                "SELECT o.operation_id, o.lifecycle_id, o.generation, o.fingerprint, o.kind, \
+                 o.authority_incarnation, o.projection_digest \
+                 FROM host_grant_scopes s \
+                 JOIN host_grant_operations o ON o.operation_id = s.operation_id \
+                 ORDER BY s.lifecycle_id",
+                (),
+            )
+            .await?;
+        let mut heads = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            let record = decode_operation(&row)?.record;
+            let marker = ProjectionMarker {
+                lifecycle: record.lifecycle,
+                incarnation: record.authority_incarnation,
+                generation: record.generation,
+                operation: record.operation,
+                digest: record.projection_digest,
+            };
+            heads.insert(record.lifecycle, marker.stamp());
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(heads)
+    }
+
+    /// Record that the restored database lost operations of a scope, as a
+    /// reconstruction found from its projection or its journal witness. The
+    /// mark stays until an operator reopens the scope by name, confirming
+    /// that what was lost has been applied again (see
+    /// [`Self::reopen_scopes`]). A scope that is not closed for a restore
+    /// is left as it is; the answer is whether the mark is recorded.
+    pub(crate) async fn record_lost_operations(
+        &self,
+        lifecycle: ScopeLifecycleId,
+    ) -> Result<bool, HostGrantError> {
+        let store = self.clone();
+        own(async move {
+            let mut tx = store.begin_write().await?;
+            let Some(scope) = load_scope(&mut tx, lifecycle, true)
+                .await
+                .map_err(statement_failure)?
+            else {
+                tx.rollback().await?;
+                return Ok(false);
+            };
+            if !scope
+                .closed_reason
+                .is_some_and(ClosedReason::awaits_restore_handling)
+            {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            if !scope.lost_operations {
+                mark_lost_operations(&mut tx, lifecycle).await?;
+            }
+            commit(tx, CommitMode::Acknowledged).await?;
+            Ok(true)
+        })
+        .await
     }
 
     /// Read the policy state for one subject and action outside any
@@ -1619,9 +1781,11 @@ impl HostGrantStore {
             });
         }
         let incarnation = AuthorityIncarnation::generate();
+        // A declared restore replaces the position witness whatever it
+        // names, so no acknowledgement recorded before it applies after it.
         tx.execute(
             "UPDATE host_grant_authority SET incarnation = ?, restore_epoch = ?, \
-             lineage_uuid = ? WHERE singleton",
+             lineage_uuid = ?, position_acknowledgement = NULL WHERE singleton",
             crate::db_params![incarnation.to_storage(), configured.to_storage(), live],
         )
         .await
@@ -1727,10 +1891,16 @@ impl HostGrantStore {
                     let restore_handling = scope
                         .closed_reason
                         .is_some_and(ClosedReason::awaits_restore_handling);
+                    // A head of another incarnation is explained while a
+                    // restore is handled, or once a declared restore that
+                    // superseded an incarnation this journal held was
+                    // reopened under the current one.
                     let superseded = head.incarnation != scope.authority_incarnation
                         && (restore_handling
-                            || holds_reopen(&mut tx, lifecycle, scope.authority_incarnation)
-                                .await?);
+                            || (holds_reopen(&mut tx, lifecycle, scope.authority_incarnation)
+                                .await?
+                                && holds_incarnation(&mut tx, lifecycle, head.incarnation)
+                                    .await?));
                     !recorded && !superseded
                 }
                 FenceEvidence::MarkerMissing => scope.admission == AdmissionState::Active,
@@ -1773,6 +1943,9 @@ impl HostGrantStore {
         )
         .await?;
         lower_effective_standing(&mut tx, lifecycle).await?;
+        if evidence.shows_lost_operations() {
+            mark_lost_operations(&mut tx, lifecycle).await?;
+        }
         let record = OperationRecord {
             operation,
             lifecycle,
@@ -1788,12 +1961,15 @@ impl HostGrantStore {
 
     async fn reopen_owned(
         &self,
-        selection: Option<ScopeLifecycleId>,
+        selection: ReopenSelection,
         mode: CommitMode,
     ) -> Result<ReopenReport, HostGrantError> {
-        let candidates = match selection {
-            Some(lifecycle) => vec![lifecycle],
-            None => {
+        let (candidates, reapplied) = match selection {
+            ReopenSelection::Scope {
+                lifecycle,
+                lost_operations_reapplied,
+            } => (vec![lifecycle], lost_operations_reapplied),
+            ReopenSelection::All => {
                 let mut tx = self.begin_read().await?;
                 let mut rows = tx
                     .query(
@@ -1812,7 +1988,7 @@ impl HostGrantStore {
                 }
                 drop(rows);
                 tx.rollback().await?;
-                candidates
+                (candidates, false)
             }
         };
         let mut report = ReopenReport::default();
@@ -1836,13 +2012,18 @@ impl HostGrantStore {
                 report.not_reconstructed += 1;
                 continue;
             };
+            if scope.lost_operations && !reapplied {
+                tx.rollback().await?;
+                report.lost_operations += 1;
+                continue;
+            }
             let operation = GrantOperationId::generate();
             let digest = current_digest(&mut tx, &scope).await?;
             let updated = tx
                 .execute(
                     "UPDATE host_grant_scopes SET generation = ?, operation_id = ?, \
-                     admission_state = 'active', closed_reason = NULL, updated_at_ms = ? \
-                     WHERE lifecycle_id = ? AND generation = ?",
+                     admission_state = 'active', closed_reason = NULL, lost_operations = FALSE, \
+                     updated_at_ms = ? WHERE lifecycle_id = ? AND generation = ?",
                     crate::db_params![
                         generation.value(),
                         operation.to_storage(),
@@ -1880,19 +2061,18 @@ impl HostGrantStore {
 
     async fn acknowledge_position_owned(
         &self,
-        position: PostgresPosition,
+        acknowledgement: PositionAcknowledgement,
         mode: CommitMode,
-    ) -> Result<(i64, u32), HostGrantError> {
+    ) -> Result<PositionAcknowledgement, HostGrantError> {
         let mut tx = self.begin_write().await?;
-        let acknowledged = (position.system_identifier, position.timeline);
         tx.execute(
             "UPDATE host_grant_authority SET position_acknowledgement = ? WHERE singleton",
-            crate::db_params![format!("{}_{}", acknowledged.0, acknowledged.1)],
+            crate::db_params![acknowledgement.spelling()],
         )
         .await
         .map_err(HostGrantError::from_database)?;
         commit(tx, mode).await?;
-        Ok(acknowledged)
+        Ok(acknowledgement)
     }
 
     async fn operator_revoke_owned(
@@ -2315,6 +2495,21 @@ async fn lower_effective_standing(
     Ok(())
 }
 
+/// Mark a scope as one the restored database lost operations in, under the
+/// guard its caller holds.
+async fn mark_lost_operations(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+) -> Result<(), HostGrantError> {
+    tx.execute(
+        "UPDATE host_grant_scopes SET lost_operations = TRUE WHERE lifecycle_id = ?",
+        crate::db_params![lifecycle.to_storage()],
+    )
+    .await
+    .map_err(HostGrantError::from_database)?;
+    Ok(())
+}
+
 /// Run a transaction on a task of its own, so that a caller that stops
 /// waiting does not abandon it.
 ///
@@ -2516,11 +2711,14 @@ async fn load_binding(
     Ok(binding)
 }
 
-/// `<system identifier>_<timeline>`, as `position_acknowledgement` holds it.
-fn parse_acknowledgement(text: &str) -> Option<(i64, u32)> {
-    let (system, timeline) = text.split_once('_')?;
-    let parsed = (system.parse::<i64>().ok()?, timeline.parse::<u32>().ok()?);
-    (format!("{}_{}", parsed.0, parsed.1) == text).then_some(parsed)
+/// The acknowledgement `position_acknowledgement` holds, if any.
+fn decode_acknowledgement(
+    text: Option<String>,
+) -> Result<Option<PositionAcknowledgement>, HostGrantError> {
+    text.map(|text| {
+        PositionAcknowledgement::parse(&text).ok_or(corrupt("position_acknowledgement"))
+    })
+    .transpose()
 }
 
 /// The marker the journal records for one generation of a lifecycle.
@@ -2654,6 +2852,7 @@ fn decode_scope(row: &Row) -> Result<ScopeState, HostGrantError> {
         projected_generation,
         admission,
         closed_reason,
+        lost_operations: row.get::<bool>(8)?,
     })
 }
 

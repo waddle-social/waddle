@@ -104,6 +104,15 @@ pub enum HostGrantError {
     /// configuration does not match the declared one.
     #[error(transparent)]
     RestoreFence(#[from] RestoreFenceRefusal),
+    /// An operator's position acknowledgement names a witness of another
+    /// PostgreSQL system, or of a later timeline than the server writes on:
+    /// it could never apply, and only a declared restore replaces such a
+    /// witness.
+    #[error(
+        "the position acknowledgement names another PostgreSQL system or a later timeline than \
+         the server writes on; declare a restore instead"
+    )]
+    AcknowledgementRefused,
     #[error("the scope was enrolled under an admission policy this build does not evaluate")]
     PolicyVersionUnsupported,
     #[error(transparent)]
@@ -174,6 +183,7 @@ impl HostGrantError {
             Self::ScopeNotRestored => "scope_not_restored",
             Self::ScopeFenced => "scope_fenced",
             Self::RestoreFence(_) => "restore_fence",
+            Self::AcknowledgementRefused => "acknowledgement_refused",
             Self::PolicyVersionUnsupported => "policy_version_unsupported",
             Self::Subject(_) => "subject",
             Self::Issuance(_) => "issuance",

@@ -15,7 +15,7 @@ pub use actor::{
     CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation, EnsureSchema, ExclusiveRelationSwap,
     ListHostGrantWitnesses, ListRelations, ListSubjects, LookupResources, LookupSubjects,
     ObserveHostGrantProjection, Permission, PermissionActor, ReadHostGrantWitness,
-    RecordAuthzSchemaVersion, ReplaceExclusiveRelation, ReplaceHostGrantWitness,
+    RecordAuthzSchemaVersion, ReplaceExclusiveRelation, ReplaceHostGrantWitnesses,
     SwapExclusiveRelation, TakeOverHostGrantProjection, WriteHostGrantProjection, WriteTuple,
 };
 pub use authz_id::{
