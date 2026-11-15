@@ -61,40 +61,6 @@ fun Wordmark(modifier: Modifier = Modifier) {
 }
 
 /**
- * A page's opening (web `community-page__header`): a mono kicker, the
- * page title in the display style and one lead line, with an optional action
- * on the right. The title is the screen's heading.
- */
-@Composable
-fun PageHeader(
-    title: String,
-    kicker: String,
-    lead: String,
-    modifier: Modifier = Modifier,
-    live: Boolean = false,
-    action: @Composable () -> Unit = {},
-) {
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
-        Kicker(text = kicker, live = live)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = title,
-                style = Waddle.type.headline,
-                color = Waddle.colors.fg,
-                modifier = Modifier
-                    .weight(1f)
-                    .semantics { heading() },
-            )
-            action()
-        }
-        Text(text = lead, style = MaterialTheme.typography.bodyMedium, color = Waddle.colors.fgMuted)
-    }
-}
-
-/**
  * A list section's label: a mono kicker heading, ember with a live dot
  * for what is happening now, and an optional caption at the far end.
  */

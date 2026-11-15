@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -88,6 +90,15 @@ fun WaddleTopBar(
             actionIconContentColor = colors.fgMuted,
         ),
     )
+}
+
+/** The top bar's back arrow; nothing when [onBack] is null (a root screen). */
+@Composable
+fun BackArrow(onBack: (() -> Unit)?) {
+    if (onBack == null) return
+    IconButton(onClick = onBack) {
+        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.action_back))
+    }
 }
 
 /**

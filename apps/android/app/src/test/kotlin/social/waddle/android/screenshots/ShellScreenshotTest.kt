@@ -16,6 +16,8 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.store.PresenceShow
+import social.waddle.android.feature.dm.DmListItem
+import social.waddle.android.feature.dm.DmListRow
 import social.waddle.android.feature.home.HomeActions
 import social.waddle.android.feature.home.HomeContent
 import social.waddle.android.feature.home.HomeContentState
@@ -26,9 +28,13 @@ import social.waddle.android.feature.rooms.RoomActivity
 import social.waddle.android.feature.rooms.RoomActivityOrder
 import social.waddle.android.feature.rooms.RoomsContent
 import social.waddle.android.feature.rooms.RoomsUiState
-import social.waddle.android.navigation.MainTab
-import social.waddle.android.navigation.MainTabBar
-import social.waddle.android.navigation.TabBadges
+import social.waddle.android.feature.sidebar.SidebarActions
+import social.waddle.android.feature.sidebar.SidebarContent
+import social.waddle.android.feature.sidebar.SidebarPage
+import social.waddle.android.feature.sidebar.SidebarState
+import social.waddle.android.feature.sidebar.sidebarRoomsOf
+import social.waddle.android.feature.you.YouIdentity
+import social.waddle.android.ui.LocalOpenConversation
 import social.waddle.android.ui.huddle.LocalReducedMotion
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
@@ -36,8 +42,8 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * The shell's root tabs, rendered from their real stateless content
- * composables over fixed fixtures, with the real tab bar under them.
+ * The shell's sidebar and the pages it opens, rendered from their real
+ * stateless content composables over fixed fixtures.
  * Locale, zone, clock and reduced motion are pinned.
  */
 @RunWith(AndroidJUnit4::class)
@@ -52,21 +58,21 @@ class ShellScreenshotTest {
 
     @Test
     fun homeBusy() = captureThemed("home_busy") {
-        Shell(MainTab.HOME, TabBadges(dmUnread = 3, roomsLive = true)) {
+        Shell {
             HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions())
         }
     }
 
     @Test
     fun homeQuiet() = captureThemed("home_quiet") {
-        Shell(MainTab.HOME, TabBadges()) {
+        Shell {
             HomeContent(state = Fixtures.quietHome, now = Fixtures.EVENING, actions = HomeActions())
         }
     }
 
     @Test
     fun homeLoading() = captureThemed("home_loading") {
-        Shell(MainTab.HOME, TabBadges()) {
+        Shell {
             HomeContent(state = Fixtures.loadingHome, now = Fixtures.MORNING, actions = HomeActions())
         }
     }
@@ -76,7 +82,7 @@ class ShellScreenshotTest {
     fun homeBusyLargeText() = captureThemed("home_busy_large_text") {
         val density = LocalDensity.current
         CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = LARGE_TEXT)) {
-            Shell(MainTab.HOME, TabBadges(dmUnread = 3, roomsLive = true)) {
+            Shell {
                 HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions())
             }
         }
@@ -84,7 +90,7 @@ class ShellScreenshotTest {
 
     @Test
     fun rooms() = captureThemed("rooms") {
-        Shell(MainTab.ROOMS, TabBadges(dmUnread = 3, roomsLive = true)) {
+        Shell {
             RoomsContent(
                 state = RoomsUiState(rooms = Fixtures.rooms.sortedWith(RoomActivityOrder), settled = true),
                 query = "",
@@ -100,26 +106,43 @@ class ShellScreenshotTest {
 
     @Test
     fun people() = captureThemed("people") {
-        Shell(MainTab.PEOPLE, TabBadges(dmUnread = 3, roomsLive = true)) {
+        Shell {
             PeopleContent(
                 people = Fixtures.people,
                 settled = true,
                 query = "",
                 onQueryChange = {},
-                awayOpen = false,
-                onToggleAway = {},
+                everyone = false,
+                onEveryoneChange = {},
                 onOpen = {},
             )
         }
     }
 
-    @Composable
-    private fun Shell(tab: MainTab, badges: TabBadges, content: @Composable () -> Unit) {
-        CompositionLocalProvider(LocalReducedMotion provides true) {
-            Column(Modifier.fillMaxSize()) {
-                Column(Modifier.weight(1f)) { content() }
-                MainTabBar(selected = tab, badges = badges, onSelect = {})
+    /** The start screen: community, Home and People, rooms, direct messages and you. */
+    @Test
+    fun sidebar() = captureThemed("sidebar") {
+        Shell {
+            CompositionLocalProvider(LocalOpenConversation provides "general@muc.waddle.test") {
+                SidebarContent(state = Fixtures.sidebar, actions = SidebarActions())
             }
+        }
+    }
+
+    @Test
+    fun sidebarLargeText() = captureThemed("sidebar_large_text") {
+        val density = LocalDensity.current
+        CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = LARGE_TEXT)) {
+            Shell {
+                SidebarContent(state = Fixtures.sidebar, actions = SidebarActions(), current = SidebarPage.DASHBOARD)
+            }
+        }
+    }
+
+    @Composable
+    private fun Shell(content: @Composable () -> Unit) {
+        CompositionLocalProvider(LocalReducedMotion provides true) {
+            Column(Modifier.fillMaxSize()) { content() }
         }
     }
 
@@ -248,5 +271,20 @@ private object Fixtures {
         settled = false,
         canCreateRoom = false,
         connection = ConnectionState.Offline,
+    )
+
+    val sidebar = SidebarState(
+        community = "waddle.test",
+        identity = YouIdentity(name = "David Flanagan", jid = "david@waddle.test", connection = ConnectionState.Ready),
+        rooms = sidebarRoomsOf(rooms),
+        dms = listOf(
+            DmListItem(
+                DmListRow.Peer("mara@waddle.test", "mara", unreadCount = 2),
+                PresenceShow.AVAILABLE,
+                inHuddle = true,
+            ),
+            DmListItem(DmListRow.Peer("lena@waddle.test", "lena", unreadCount = 0), PresenceShow.AWAY),
+            DmListItem(DmListRow.Group("infra-dm@muc.waddle.test", "mara, sol, priya", unreadCount = 1)),
+        ),
     )
 }

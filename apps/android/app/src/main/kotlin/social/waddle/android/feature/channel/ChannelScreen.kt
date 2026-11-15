@@ -151,12 +151,13 @@ fun ChannelScreen(
         )
     }
 
-    val title = stringResource(R.string.home_channel_label, name)
     ConversationScreen(
-        title = title,
-        kind = ConversationKind.Room(title),
+        // Chat's header: the bare name over the community; "#" stays in the composer's placeholder.
+        title = name,
+        kind = ConversationKind.Room(stringResource(R.string.home_channel_label, name)),
         titleSubline = {
             RoomHeaderSubline(
+                community = session?.jid?.let(::bareJidOf)?.substringAfter('@'),
                 here = headcount?.here,
                 huddle = resolvedNicks.size.takeIf { it > 0 }?.let { HeaderHuddle(it, video = roomHasVideoCall) },
             )

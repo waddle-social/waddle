@@ -68,7 +68,7 @@ class ConversationScreenshotTest {
     fun roomBusy() = captureThemed("conversation_room") {
         ConversationFixtures.Pinned {
             ConversationScreen(
-                title = "#general",
+                title = "general",
                 viewModel = ConversationFixtures.viewModel(
                     conversationJid = ConversationFixtures.ROOM,
                     isGroupchat = true,
@@ -81,7 +81,13 @@ class ConversationScreenshotTest {
                 searchTarget = MessageSearchTarget(ConversationFixtures.ROOM, isGroupchat = true),
                 selfBareJid = ConversationFixtures.SELF,
                 kind = ConversationKind.Room("#general"),
-                titleSubline = { RoomHeaderSubline(here = 12, huddle = HeaderHuddle(participants = 3, video = false)) },
+                titleSubline = {
+                    RoomHeaderSubline(
+                        community = "waddle.test",
+                        here = 12,
+                        huddle = HeaderHuddle(participants = 3, video = false),
+                    )
+                },
             )
         }
     }
@@ -90,7 +96,7 @@ class ConversationScreenshotTest {
     fun roomEmpty() = captureThemed("conversation_room_empty") {
         ConversationFixtures.Pinned {
             ConversationScreen(
-                title = "#design-crit",
+                title = "design-crit",
                 viewModel = ConversationFixtures.viewModel(
                     conversationJid = "design-crit@muc.waddle.test",
                     isGroupchat = true,
@@ -101,7 +107,7 @@ class ConversationScreenshotTest {
                 searchTarget = MessageSearchTarget("design-crit@muc.waddle.test", isGroupchat = true),
                 selfBareJid = ConversationFixtures.SELF,
                 kind = ConversationKind.Room("#design-crit"),
-                titleSubline = { RoomHeaderSubline(here = 1, huddle = null) },
+                titleSubline = { RoomHeaderSubline(community = "waddle.test", here = 1, huddle = null) },
             )
         }
     }
@@ -162,7 +168,7 @@ class ConversationScreenshotTest {
                 ),
                 onBack = {},
                 selfBareJid = ConversationFixtures.SELF,
-                titleSubline = { RoomHeaderSubline(here = null, huddle = null) },
+                titleSubline = { RoomHeaderSubline(community = "waddle.test", here = null, huddle = null) },
             )
         }
     }
