@@ -8,7 +8,9 @@
 //!    can be referenced by clients (jump-to-from-pin-list).
 //! 2. Persists the message to MAM via the regular groupchat archive
 //!    helper.
-//! 3. Routes a copy to every joined occupant (per-resource fan-out).
+//! 3. Routes a copy to every joined occupant (per-resource fan-out). In a
+//!    room an enrolled host-grant scope manages, only to the occupants
+//!    whose canonical grants allow reading the room.
 //!
 //! Bypasses the occupancy gate, rich-target validation, and extension
 //! enrichment — the sender is the room itself.
@@ -19,6 +21,7 @@ use super::{
     ArchiveGroupchatOutcome, BareJid, Deps, GetRoom, GetRoomSnapshot, Jid, Message, Stanza,
 };
 use crate::ingress::RoomManifestSnapshot;
+use waddle_xmpp::muc::room_actor::RoomChainOccupant;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
 pub(super) async fn broadcast_room_system_message_event(
@@ -101,6 +104,20 @@ pub(super) async fn broadcast_room_system_message_with_identity(
                 error = ?error,
                 "BroadcastRoomSystemMessage: GetRoomSnapshot failed; dropping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
+            return None;
+        }
+    };
+
+    // A room an enrolled host-grant scope manages archives its own message
+    // like any other, but delivers it only to occupants whose canonical
+    // grants allow reading the room: the actor's roster may still seat an
+    // occupant whose grant was revoked. When that cannot be decided nothing
+    // is archived or sent, and the caller's own retry applies.
+    let occupants = match system_message_audience(deps, &room, &snapshot.occupants).await {
+        Some(occupants) => occupants,
+        None => {
             deps.effects
                 .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return None;
@@ -253,7 +270,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
     // per-recipient personalization. Without this, downstream
     // recipient-pass logic (incoming-blocking, archive, inbox) sees
     // a stanza addressed to the room bare JID and may misroute.
-    for occupant in &snapshot.occupants {
+    for occupant in &occupants {
         let mut copy = (*message).clone();
         copy.to = Some(Jid::from(occupant.full_jid.clone()));
         route_to_connection(
@@ -265,7 +282,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         )
         .await;
     }
-    if !snapshot.occupants.is_empty() {
+    if !occupants.is_empty() {
         let room_generation = snapshot
             .claim_fence
             .as_ref()
@@ -275,8 +292,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         deps.capture_intent(
             waddle_xmpp::ingress::IngressEffectIntent::RouteMucSystemBroadcast {
                 room: room.clone(),
-                occupants: snapshot
-                    .occupants
+                occupants: occupants
                     .iter()
                     .map(|occupant| occupant.full_jid.clone())
                     .collect(),
@@ -290,6 +306,38 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         );
     }
     Some(stanza_id)
+}
+
+/// The occupants a room's own message is delivered to: every seated
+/// occupant of a room no enrolled scope manages; in a managed room, those
+/// whose canonical grants allow `read`. `None` when a managed room's grants
+/// cannot be read, and when the interpreter holds no WebSocket state, whose
+/// host-grant gate is the only way to tell whether a scope manages the room.
+async fn system_message_audience<'o>(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    occupants: &'o [RoomChainOccupant],
+) -> Option<Vec<&'o RoomChainOccupant>> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    let state = deps.web_socket_state?;
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room))
+        .await
+    {
+        RoomGate::Unmanaged => Some(occupants.iter().collect()),
+        RoomGate::Managed(grants) => Some(
+            occupants
+                .iter()
+                .filter(|occupant| {
+                    grants.allows(&occupant.full_jid.to_bare(), HostGrantAction::Read)
+                })
+                .collect(),
+        ),
+        RoomGate::Unavailable => None,
+    }
 }
 
 fn system_archive_sequence(

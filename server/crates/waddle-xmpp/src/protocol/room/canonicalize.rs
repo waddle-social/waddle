@@ -243,6 +243,7 @@ mod tests {
             sender_nickname_generation: 0,
             project_sender_inbox: true,
             synthetic_sender_authority: None,
+            channel_mention_decision: None,
             dispatch_timestamp: 0,
         };
         match MucCanonicalizeHandler.handle(msg, &ctx) {
@@ -298,6 +299,7 @@ mod tests {
             sender_nickname_generation: 0,
             project_sender_inbox: true,
             synthetic_sender_authority: None,
+            channel_mention_decision: None,
             dispatch_timestamp: 0,
         };
         assert!(ctx.sender_snapshot().is_none(), "test requires no snapshot");

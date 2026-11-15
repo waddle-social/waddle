@@ -983,6 +983,43 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             .as_ref()
             .map(|snapshot| snapshot.admission_revision)
             .unwrap_or(0);
+        // A room an enrolled host-grant scope manages is entered through its
+        // channel row and its canonical grants only. Without a channel row it
+        // would be joined as an instant room under the room actor's own
+        // admission, so it is refused instead, as is a room whose management
+        // cannot be read.
+        if managed_channel.is_none() {
+            use crate::permissions::host_grant::{RoomBinding, RoomGate};
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .room(RoomBinding::Room(room_jid))
+                .await
+            {
+                RoomGate::Unmanaged => {}
+                RoomGate::Managed(_) | RoomGate::Unavailable => {
+                    return deny_join_admission(
+                        room_jid,
+                        sender_jid,
+                        &nick,
+                        false,
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ServiceUnavailable,
+                            error_type: ErrorType::Cancel,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::ManagedChannelLookup,
+                            resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+                            message: "The room is not available.",
+                        },
+                    );
+                }
+            }
+        }
+        // Whether an enrolled host-grant scope manages the room: its actor
+        // is then created members-only whatever its channel row says.
+        let mut host_grant_managed = false;
         let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
             let Some(session) = authenticated_session else {
                 return deny_join_admission(
@@ -1022,7 +1059,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     },
                 );
             };
-            match resolve_managed_channel_affiliation(
+            let resolved = resolve_managed_channel_affiliation(
                 state,
                 &session_bare,
                 room_jid,
@@ -1031,8 +1068,15 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 // Join admission repairs a stale Space→channel projection.
                 true,
             )
-            .await
-            {
+            .await;
+            let admission_members_only = match &resolved {
+                Ok(resolved) => {
+                    host_grant_managed = resolved.host_grant_managed;
+                    resolved.members_only
+                }
+                Err(()) => admission_members_only,
+            };
+            match resolved.map(|resolved| resolved.affiliation) {
                 Ok(Some(Affiliation::Outcast)) => {
                     // The resolver's Outcast comes from the permission
                     // graph (resolver-derived), so mirror it into a live
@@ -1166,7 +1210,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     );
                 }
 
-                let config = managed_channel
+                let mut config = managed_channel
                     .as_ref()
                     .map(XmppChannelRecord::room_config)
                     .unwrap_or_else(|| RoomConfig {
@@ -1177,6 +1221,9 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                         members_only: false,
                         ..Default::default()
                     });
+                // The room binding of an enrolled scope is members-only
+                // (`host_grant_rooms.access_model`).
+                config.members_only |= host_grant_managed;
 
                 let (waddle_id, channel_id) = managed_channel
                     .as_ref()

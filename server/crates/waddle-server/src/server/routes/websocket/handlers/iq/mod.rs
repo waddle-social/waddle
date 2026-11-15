@@ -98,6 +98,7 @@ pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
 mod mentions_permissions;
 mod muc_admin;
+pub(crate) mod muc_admin_host_grant;
 #[cfg(feature = "clustering")]
 pub(crate) mod muc_admin_relay;
 // XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
@@ -151,6 +152,10 @@ use extension_forms::{
     extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
     CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
+pub(crate) use extension_route_items::{
+    extension_route_account_access, extension_route_room, extension_route_room_access,
+    ExtensionRouteAccess, ExtensionRouteRoom,
+};
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::{outgoing_block_frames, route_full_jid_iq};
 use last_activity::handle_last_activity_iq;
@@ -202,7 +207,7 @@ use super::super::{
     is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::{
-    get_managed_channel_for_room, resolve_muc_room_archive_access,
+    get_managed_channel_for_room, host_grant_read_still_admitted, resolve_muc_room_archive_access,
     send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
     RoomArchiveAccess,
 };

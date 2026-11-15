@@ -19,7 +19,11 @@
 //! transaction in `xep0045_host_grant_admission.rs`.
 #![cfg(feature = "test-support")]
 
+// The shared host-grant and ingress fixtures serve several suites; this one
+// uses a subset of each.
+#[allow(dead_code)]
 mod host_grant_support;
+#[allow(dead_code)]
 mod ingress_support;
 
 use std::time::Duration;

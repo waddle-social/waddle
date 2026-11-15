@@ -54,7 +54,9 @@ const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const PENDING_SCOPE_PAGE: i64 = 256;
 /// Longest the lookup behind a legacy permission write waits for a lock, and
 /// longest it runs. The lookup reads one indexed row and takes no row lock;
-/// the bounds keep a stalled database from holding the permission actor.
+/// the bounds keep a stalled database from holding the permission actor. A
+/// managed room's decision on an interactive surface reads under the same
+/// bounds ([`HostGrantStore::begin_interactive_read`]).
 const ENROLLED_LOOKUP_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const ENROLLED_LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -187,8 +189,31 @@ impl HostGrantStore {
         Ok(begin_guarded_store_writer(&self.db, LOCK_TIMEOUT, STATEMENT_TIMEOUT).await?)
     }
 
+    /// A read-only snapshot for a decision a request waits on: the same
+    /// isolation as [`Self::begin_read`], with the bounds of the legacy
+    /// write refusal (500 ms for a lock, 1 s for a statement) instead of the
+    /// background bounds.
+    pub(super) async fn begin_interactive_read(&self) -> Result<Transaction<'_>, HostGrantError> {
+        let mut tx = self.db.begin().await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            (),
+        )
+        .await?;
+        if !set_local_transaction_timeouts(
+            &mut tx,
+            ENROLLED_LOOKUP_LOCK_TIMEOUT,
+            ENROLLED_LOOKUP_STATEMENT_TIMEOUT,
+        )
+        .await?
+        {
+            return Err(HostGrantError::BoundsUnproven);
+        }
+        Ok(tx)
+    }
+
     /// A bounded read-only snapshot.
-    async fn begin_read(&self) -> Result<Transaction<'_>, HostGrantError> {
+    pub(super) async fn begin_read(&self) -> Result<Transaction<'_>, HostGrantError> {
         let mut tx = self.db.begin().await?;
         tx.execute(
             "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
@@ -602,6 +627,17 @@ impl HostGrantStore {
         {
             tx.rollback().await?;
             return recorded.replay(fingerprint);
+        }
+        // A group direct-message room is never enrolled: its catalog row's
+        // type says so, and the row is read in this transaction.
+        for room in &command.rooms {
+            if channel_is_group_direct_message(&mut tx, room.channel_id())
+                .await
+                .map_err(statement_failure)?
+            {
+                tx.rollback().await?;
+                return Err(HostGrantError::GroupDirectMessageRoom);
+            }
         }
         let incarnation = load_incarnation(&mut tx).await.map_err(statement_failure)?;
         let inserted = tx
@@ -1122,7 +1158,7 @@ async fn commit(tx: EnteredTransaction<'_>, mode: CommitMode) -> Result<(), Host
     }
 }
 
-fn corrupt(field: &'static str) -> HostGrantError {
+pub(super) fn corrupt(field: &'static str) -> HostGrantError {
     HostGrantError::CorruptRow { field }
 }
 
@@ -1185,7 +1221,7 @@ fn validate_enrollment(
 }
 
 /// Whether a scope admits anything at all.
-fn scope_admits(scope: &ScopeState, current: AuthorityIncarnation) -> bool {
+pub(super) fn scope_admits(scope: &ScopeState, current: AuthorityIncarnation) -> bool {
     scope.admission == AdmissionState::Active
         && scope.authority_incarnation == current
         && scope.policy_version == HOST_GRANT_POLICY_VERSION
@@ -1210,7 +1246,28 @@ fn refuse_unusable_scope(
     Ok(())
 }
 
-async fn load_incarnation(
+/// Whether the catalog row of the channel `channel_id` is a group
+/// direct-message room. A channel without a row is not one.
+async fn channel_is_group_direct_message(
+    tx: &mut Transaction<'_>,
+    channel_id: &str,
+) -> Result<bool, HostGrantError> {
+    let mut rows = tx
+        .query(
+            "SELECT channel_type FROM channels WHERE id = ?",
+            crate::db_params![channel_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        waddle_xmpp::ChannelType::parse(&row.get::<String>(0)?),
+        Some(waddle_xmpp::ChannelType::GroupDm)
+    ))
+}
+
+pub(super) async fn load_incarnation(
     tx: &mut Transaction<'_>,
 ) -> Result<AuthorityIncarnation, HostGrantError> {
     let mut rows = tx
@@ -1224,7 +1281,7 @@ async fn load_incarnation(
         .ok_or(corrupt("authority incarnation"))
 }
 
-async fn load_scope(
+pub(super) async fn load_scope(
     tx: &mut Transaction<'_>,
     lifecycle: ScopeLifecycleId,
     lock: bool,
@@ -1331,7 +1388,7 @@ async fn load_grants(
     Ok(grants)
 }
 
-fn affiliation_column(
+pub(super) fn affiliation_column(
     row: &Row,
     index: usize,
     field: &'static str,

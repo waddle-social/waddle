@@ -18,6 +18,20 @@ pub(super) async fn handle_spaces_disco_info<'a>(
     }
 
     if let Some(node) = req.node {
+        // The Space node of an enrolled host-grant scope is not served: no
+        // grant of the scope is a Space's, so nobody's `view` of it can be
+        // decided, and its name, owners and the requester's affiliation
+        // would come from PubSub state the scope does not consult. It is
+        // described like a node that does not exist, as is a node whose
+        // enrollment cannot be told now.
+        if state.deps.app_state.host_grants.space_enrolled(node).await != Ok(false) {
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                None,
+                None,
+                item_not_found_iq_error("Requested item not found."),
+            ));
+        }
         let Ok(spaces_jid) = spaces_service_bare_jid(req.spaces_domain) else {
             return Some(DiscoInfoResponse::error(
                 req.id,

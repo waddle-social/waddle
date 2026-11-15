@@ -568,6 +568,9 @@ async fn seat_room_occupancy_in(
                 seat: record.seat,
             })
             .collect();
+        let Some(occupants) = host_grant_reseating(state, room, occupants).await else {
+            return false;
+        };
         match actor
             .ask(SeedRecoveredOccupants {
                 occupants,
@@ -610,6 +613,58 @@ async fn seat_room_occupancy_in(
     }
     authority.mark_room_occupancy_seated(room.clone(), epoch);
     true
+}
+
+/// The recovered occupants of `room` whose seats are restored.
+///
+/// A room an enrolled host-grant scope manages seats an occupant again only
+/// while its canonical grants allow reading the room, with the standing
+/// they honour and the moderator role only with their `moderate`: the
+/// recorded role and affiliation are what the room's earlier actor
+/// mirrored, which a revoke since then has not changed. `None` when the
+/// grants cannot be read, so the room is not seated. Any other room seats
+/// every recovered occupant as recorded.
+async fn host_grant_reseating(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+    occupants: Vec<RecoveredOccupant>,
+) -> Option<Vec<RecoveredOccupant>> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomAffiliation, RoomBinding, RoomGate};
+    let grants = match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room))
+        .await
+    {
+        RoomGate::Unmanaged => return Some(occupants),
+        RoomGate::Unavailable => return None,
+        RoomGate::Managed(grants) => grants,
+    };
+    Some(
+        occupants
+            .into_iter()
+            .filter_map(|mut occupant| {
+                let account = occupant.real_jid.to_bare();
+                if !grants.allows(&account, HostGrantAction::Read) {
+                    return None;
+                }
+                occupant.affiliation = match grants.standing(&account) {
+                    RoomAffiliation::Owner => waddle_xmpp::Affiliation::Owner,
+                    RoomAffiliation::Admin => waddle_xmpp::Affiliation::Admin,
+                    RoomAffiliation::Member => waddle_xmpp::Affiliation::Member,
+                    RoomAffiliation::None => waddle_xmpp::Affiliation::None,
+                    RoomAffiliation::Outcast => waddle_xmpp::Affiliation::Outcast,
+                };
+                if occupant.role == waddle_xmpp::Role::Moderator
+                    && !grants.allows(&account, HostGrantAction::Moderate)
+                {
+                    occupant.role = waddle_xmpp::Role::Participant;
+                }
+                Some(occupant)
+            })
+            .collect(),
+    )
 }
 
 /// Ask `room`'s actor to write its roster to the durable occupancy record.

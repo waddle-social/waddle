@@ -37,6 +37,21 @@ impl ExtensionManager {
             launch_signing_key: None,
         }
     }
+
+    /// A manager that loads no extension and declares `routes`, for suites
+    /// that exercise how a host serves route state nodes without running an
+    /// extension.
+    #[must_use]
+    pub fn with_route_descriptors_for_test(
+        routes: Vec<crate::types::ExtensionRouteDescriptor>,
+    ) -> Self {
+        Self {
+            actors: Vec::new(),
+            feature_namespaces: Vec::new(),
+            route_descriptors: routes,
+            launch_signing_key: None,
+        }
+    }
 }
 
 #[cfg(test)]

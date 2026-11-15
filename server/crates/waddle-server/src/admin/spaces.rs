@@ -361,7 +361,11 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_create(&state, &args).await {
+    // Admin commands reach the server only from authenticated accounts of
+    // this deployment, so the caller's domain is its account domain: the
+    // one a privileged seed may name (ADR-0020 D8).
+    let account_domain = ctx.from.domain().as_str().to_owned();
+    match run_create(&state, &args, &account_domain).await {
         Ok(space) => CommandResult::Completed {
             session_id: None,
             form: Some(build_space_form(NODE_CREATE, &space)),
@@ -678,6 +682,13 @@ async fn run_list(state: &AppState, args: &SpacesListArgs) -> Result<SpacesListR
     if let Some(cursor) = args.after_cursor.as_deref() {
         rows.retain(|row| row.space_node.as_str() > cursor);
     }
+    // The Space of an enrolled host-grant scope is left out: no grant of the
+    // scope is a Space's, so no caller holds canonical standing on it, and
+    // its counts would come from PubSub state the scope does not consult.
+    let Some(enrolled) = state.host_grants.enrolled().settled_snapshot().await else {
+        return Err(internal_err("the host-grant authority is unavailable"));
+    };
+    rows.retain(|row| enrolled.space_node(row.space_node.as_str()).is_none());
 
     let limit = args.page_size as usize;
     let total = rows.len();
@@ -940,15 +951,25 @@ fn channel_type_from_catalog_or_room_config(
         .unwrap_or_else(|| channel_type_from_room_config(config).to_string())
 }
 
-async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRef, AdminErr> {
+async fn run_create(
+    state: &AppState,
+    args: &SpacesCreateArgs,
+    account_domain: &str,
+) -> Result<SpaceRef, AdminErr> {
     // Mint a fresh localpart for this space. Mirror the chat-side
     // convention of slugified-name + short-id by lowercasing+slugifying
     // the name and appending a short UUID tail.
+    // A privileged seed names an account of this deployment's account
+    // domain (ADR-0020 D8); a domain that yields no issuance policy refuses
+    // the creation before anything is written.
+    let issuance = crate::spaces_pubsub_seed::account_domain_seed_issuance(account_domain)
+        .ok_or_else(|| internal_err("the account domain yields no owner seed issuance policy"))?;
     let localpart = mint_space_localpart(&args.name);
     let domain = state.spaces_jid.domain();
     let space_jid: BareJid = format!("{localpart}@{domain}")
         .parse()
         .map_err(|e| internal_err(format!("constructed space JID is invalid: {e}")))?;
+    super::refuse_host_grant_space(state, &localpart).await?;
 
     let now = now_unix_seconds();
     // Create the pubsub node that backs the space's channel list.
@@ -984,6 +1005,10 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
         &state.spaces_jid,
         &localpart,
         &state.server_owner_jids,
+        crate::spaces_pubsub_seed::OwnerSeedPolicy {
+            issuance: &issuance,
+            host_grants: &state.host_grants,
+        },
     )
     .await;
 
@@ -1035,6 +1060,7 @@ fn mint_space_localpart(name: &str) -> String {
 async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRef, AdminErr> {
     let (node_name, space_jid) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node_name).await?;
     let space_node = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node_name)
@@ -1111,6 +1137,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     // under its canonical id is on this node too.
     let (node_name, space_jid) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node_name).await?;
 
     // Collect channels-to-destroy from both sources.
     let mut targets: BTreeSet<BareJid> = BTreeSet::new();
@@ -1133,6 +1160,12 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         if let Ok(room_jid) = stored.id.parse::<BareJid>() {
             targets.insert(room_jid);
         }
+    }
+    // A room an enrolled host-grant scope manages is never destroyed by a
+    // Space's deletion, nor unlinked from it: it ends only when its scope is
+    // retired. The whole deletion is refused before anything changes.
+    for room_jid in &targets {
+        super::refuse_host_grant_room(state, room_jid).await?;
     }
     let bookmarked_rooms: BTreeSet<BareJid> = items
         .iter()
@@ -1417,6 +1450,7 @@ async fn run_members(
 ) -> Result<SpacesMembersResult, AdminErr> {
     let (node, _) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node).await?;
 
     let mut affiliations = state
         .pubsub_storage
@@ -1459,6 +1493,7 @@ async fn run_set_role(
 ) -> Result<SpacesSetRoleResult, AdminErr> {
     let (node, _) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node).await?;
     let exists = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node)

@@ -25,7 +25,7 @@ mod state;
 pub(crate) mod state_inventory;
 pub(crate) mod state_inventory_metrics;
 pub(crate) mod state_inventory_route;
-mod topology;
+pub(crate) mod topology;
 mod trace;
 #[cfg(test)]
 mod xmpp_account_state;

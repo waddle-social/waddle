@@ -994,9 +994,15 @@ async fn secondary_room_snapshot_failure(fixture: IngressFixture, subject: bool,
             .await
             .expect("MAM"),
     );
+    // A room's own message is delivered only through the WebSocket state's
+    // host-grant gate.
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let mut deps = Deps::registry_only(&registry);
     deps.room_registry = Some(&rooms);
     deps.mam_storage = Some(&mam);
+    deps.web_socket_state = Some(&state);
     let mut submission = fixture.submission(Some("secondary-snapshot-retry"), "offered");
     submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());
     submission.plan.sanitized_message.to = Some(room.clone().into());

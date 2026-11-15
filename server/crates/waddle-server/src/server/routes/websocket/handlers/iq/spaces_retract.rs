@@ -42,6 +42,20 @@ pub(super) async fn handle_spaces_retract(
             let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
             };
+            // A room an enrolled host-grant scope manages is placed by its
+            // canonical topology only; a Spaces retract does not move it.
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .channel_enrolled(&channel_id)
+                .await
+            {
+                Ok(false) => {}
+                Ok(true) | Err(_) => {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+                }
+            }
             Some(ParentGrant {
                 room_jid,
                 channel_id,

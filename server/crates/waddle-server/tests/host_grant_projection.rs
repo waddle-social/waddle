@@ -21,7 +21,11 @@
 //! after a given stage, and another starts afterwards and recovers.
 #![cfg(feature = "test-support")]
 
+// The shared fixtures serve several host-grant suites; this binary uses a
+// subset of each.
+#[allow(dead_code)]
 mod host_grant_support;
+#[allow(dead_code)]
 mod ingress_support;
 
 use std::sync::Arc;
@@ -262,14 +266,17 @@ impl Live {
     }
 }
 
-/// What SpiceDB itself answers for a channel permission.
+/// What SpiceDB itself answers for a channel permission. It is read
+/// through a permission actor without the host-grant guard: a guarded
+/// actor answers no legacy read of an enrolled scope's objects.
 async fn spicedb_allows(
-    actor: &ActorRef<PermissionActor>,
+    live: &Live,
     account: &str,
     permission: Permission,
     channel: &Object,
 ) -> bool {
-    actor
+    live.unguarded_actor()
+        .await
         .ask(CheckPermission {
             subject: Subject::user(account),
             permission,
@@ -304,13 +311,12 @@ async fn live_spicedb_first_projection_activates_the_bootstrap_grants() {
     let live = Live::start("hg_first_projection").await;
     let authority = live.replica().await;
     let lifecycle = live.fixture.scope.lifecycle;
-    let actor = live.actor(&live.fixture.store).await;
     let channel = live.channel();
 
     // Recorded, not projected, not effective.
     assert!(live.stamps().await.is_empty());
     assert!(!sql_admits(&live.fixture, SENDER, HostGrantAction::SendMessage).await);
-    assert!(!spicedb_allows(&actor, SENDER, Permission::SendMessage, &channel).await);
+    assert!(!spicedb_allows(&live, SENDER, Permission::SendMessage, &channel).await);
 
     assert_eq!(
         authority.reconcile(lifecycle).await.expect("first pass"),
@@ -338,10 +344,10 @@ async fn live_spicedb_first_projection_activates_the_bootstrap_grants() {
 
     // Both stores now agree, each by its own evaluation.
     assert!(sql_admits(&live.fixture, SENDER, HostGrantAction::SendMessage).await);
-    assert!(spicedb_allows(&actor, SENDER, Permission::SendMessage, &channel).await);
-    assert!(spicedb_allows(&actor, OWNER, Permission::Manage, &channel).await);
-    assert!(!spicedb_allows(&actor, SENDER, Permission::Manage, &channel).await);
-    assert!(!spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(spicedb_allows(&live, SENDER, Permission::SendMessage, &channel).await);
+    assert!(spicedb_allows(&live, OWNER, Permission::Manage, &channel).await);
+    assert!(!spicedb_allows(&live, SENDER, Permission::Manage, &channel).await);
+    assert!(!spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
 
     assert_eq!(
         authority.reconcile(lifecycle).await.expect("second pass"),
@@ -358,7 +364,6 @@ async fn live_spicedb_a_grant_is_effective_only_after_its_projection_is_verified
     let live = Live::start("hg_grant_projection").await;
     let authority = live.replica().await;
     let lifecycle = live.fixture.scope.lifecycle;
-    let actor = live.actor(&live.fixture.store).await;
     let channel = live.channel();
     authority.reconcile(lifecycle).await.expect("first pass");
 
@@ -369,13 +374,13 @@ async fn live_spicedb_a_grant_is_effective_only_after_its_projection_is_verified
         .await;
     authority.set_affiliation(&grant).await.expect("grant");
     assert!(!sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
-    assert!(!spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(!spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
     assert_eq!(
         authority.reconcile(lifecycle).await.expect("grant pass"),
         Reconciliation::Activated(GrantGeneration::new(2).expect("generation"))
     );
     assert!(sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
-    assert!(spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
     assert_eq!(
         live.stamps().await,
         vec![live.current_marker().await.stamp()]
@@ -388,13 +393,13 @@ async fn live_spicedb_a_grant_is_effective_only_after_its_projection_is_verified
         .await
         .expect("revoke");
     assert!(!sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
-    assert!(spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
     assert_eq!(
         authority.reconcile(lifecycle).await.expect("revoke pass"),
         Reconciliation::Activated(GrantGeneration::new(3).expect("generation"))
     );
     assert!(!sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
-    assert!(!spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(!spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
 
     // A ban replaces the member relationship by the outcast one, and the
     // schema's outcast precedence then denies every channel permission.
@@ -426,7 +431,7 @@ async fn live_spicedb_a_grant_is_effective_only_after_its_projection_is_verified
         Permission::Delete,
     ] {
         assert!(
-            !spicedb_allows(&actor, PEER, permission.clone(), &channel).await,
+            !spicedb_allows(&live, PEER, permission.clone(), &channel).await,
             "{}",
             permission.as_str()
         );
@@ -762,7 +767,7 @@ async fn live_spicedb_a_delayed_grant_cannot_follow_a_newer_revoke() {
         Some((RoomAffiliation::None, RoomAffiliation::None))
     );
     assert!(!sql_admits(&live.fixture, CAROL, HostGrantAction::Read).await);
-    assert!(!spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(!spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
     // The stale replica's next pass starts from the canonical state.
     assert_eq!(
         stale.reconcile(lifecycle).await.expect("pass"),
@@ -1062,7 +1067,7 @@ async fn live_spicedb_legacy_writes_are_refused_for_an_enrolled_scope_after_a_re
         &plan,
         &restarted.observe(&plan).await.expect("observation")
     ));
-    assert!(!spicedb_allows(&actor, SENDER, Permission::SendMessage, &channel).await);
+    assert!(!spicedb_allows(&live, SENDER, Permission::SendMessage, &channel).await);
 
     // A writer without the guard can still put an owner relationship beside
     // the projection. SpiceDB keeps denying the banned sender, because the
@@ -1078,7 +1083,7 @@ async fn live_spicedb_legacy_writes_are_refused_for_an_enrolled_scope_after_a_re
         })
         .await
         .expect("unguarded legacy write");
-    assert!(!spicedb_allows(&actor, SENDER, Permission::SendMessage, &channel).await);
+    assert!(!spicedb_allows(&live, SENDER, Permission::SendMessage, &channel).await);
     assert_eq!(
         live.fixture.affiliations(SENDER).await,
         Some((RoomAffiliation::Outcast, RoomAffiliation::Outcast))

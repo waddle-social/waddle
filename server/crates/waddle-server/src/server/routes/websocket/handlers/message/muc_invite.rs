@@ -249,6 +249,42 @@ pub(super) async fn handle_muc_mediated_invite(
     }
     let (invitee, inbound_invite) = mediated_invitee(incoming)?;
 
+    // An invitation to a room an enrolled host-grant scope manages would
+    // grant membership outside its canonical grants; such a room's members
+    // are made by its administrators through the host-grant store.
+    {
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(&room_jid))
+            .await
+        {
+            RoomGate::Unmanaged => {}
+            RoomGate::Managed(_) => {
+                return Some(vec![error_frame(
+                    incoming,
+                    bound_jid,
+                    deps,
+                    ErrorType::Cancel,
+                    DefinedCondition::NotAllowed,
+                    "Membership of this room is granted by its administrators.",
+                )]);
+            }
+            RoomGate::Unavailable => {
+                return Some(vec![error_frame(
+                    incoming,
+                    bound_jid,
+                    deps,
+                    ErrorType::Cancel,
+                    DefinedCondition::ServiceUnavailable,
+                    "The room is not available.",
+                )]);
+            }
+        }
+    }
+
     if authenticated_session.is_none() {
         return Some(vec![error_frame(
             incoming,
@@ -585,6 +621,25 @@ pub(crate) async fn execute_muc_membership(
     else {
         return EffectOutcome::Unavailable;
     };
+    // An invitation accepted before its room was enrolled grants nothing
+    // once a host-grant scope manages the room: membership there is a
+    // canonical grant. The invitation itself is still delivered.
+    {
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(&room_jid))
+            .await
+        {
+            RoomGate::Unmanaged => {}
+            RoomGate::Managed(_) => {
+                return EffectOutcome::Membership(MembershipOutcome::Preserved);
+            }
+            RoomGate::Unavailable => return EffectOutcome::Unavailable,
+        }
+    }
     let previous_invitee_affiliation = snapshot.room.affiliation(&invitee);
     let granted_membership = snapshot.room.config.members_only
         && previous_invitee_affiliation < waddle_xmpp::Affiliation::Member;
@@ -740,6 +795,22 @@ async fn rollback_invite_grant(
 ) {
     if !granted_membership {
         return;
+    }
+    // A room an enrolled host-grant scope manages, or one whose management
+    // cannot be told now, is left alone: its members are its canonical
+    // grants, and its actor's affiliation list is written only from them.
+    {
+        use crate::permissions::host_grant::{Enrollment, RoomBinding};
+        if state
+            .deps
+            .app_state
+            .host_grants
+            .room_enrollment(RoomBinding::Room(room_jid))
+            .await
+            != Enrollment::Unmanaged
+        {
+            return;
+        }
     }
     if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
         if let Err(error) = super::super::iq::persist_managed_channel_affiliation(

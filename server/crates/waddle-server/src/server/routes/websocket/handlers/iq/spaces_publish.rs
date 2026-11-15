@@ -1,13 +1,15 @@
 use super::permissions::{
-    delete_channel_parent_tuple, write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
+    channel_parent_spaces, delete_channel_parent_tuple, server_permission_allowed,
+    write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::{
     build_pubsub_error, build_pubsub_publish_result, chrono, get_xmpp_channel, iq_to_xml,
-    spaces_node_mutation_allowed, spaces_service_bare_jid, warn, BareJid, PubSubError, PubSubItem,
-    WebSocketState,
+    spaces_node_mutation_allowed, spaces_service_bare_jid, warn, BareJid, Object, ObjectType,
+    Permission, PubSubError, PubSubItem, WebSocketState,
 };
 use crate::channel_space_links::ChannelSpaceLink;
+use crate::permissions::{ListRelations, Subject};
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
@@ -76,6 +78,23 @@ pub(super) async fn handle_spaces_publish(
                 iq,
                 PubSubError::InternalServerError,
             ))];
+        }
+    }
+    match channel_placement_allowed(
+        state,
+        principal,
+        &spaces_jid,
+        node,
+        &bookmark.jid,
+        &channel_id,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(error = %error, "Failed to authorize channel placement in a Space");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
 
@@ -282,6 +301,8 @@ pub(super) async fn handle_spaces_publish(
                         ))];
                     }
                 };
+            // A placement moves the channel: every other Space stops being
+            // its parent, whether or not that Space listed a bookmark of it.
             if let Err(error) = cleanup_stale_space_bookmarks(
                 state,
                 &spaces_jid,
@@ -362,6 +383,124 @@ pub(super) async fn handle_spaces_publish(
             ))]
         }
     }
+}
+
+/// Whether the publisher may place the existing channel `channel_id` in the
+/// Space `node` of the Spaces service `spaces_jid`.
+///
+/// Authority over the Space node lets its owner list rooms in it, but
+/// placing a channel in a Space also moves the channel's link to that
+/// Space, makes the Space the channel's parent (so the Space's admins gain
+/// the channel's `manage`, `moderate` and `delete`), and lets deleting the
+/// Space destroy the channel. That is the channel's decision, taken here
+/// from explicit relationships so that every permission backend decides it
+/// alike:
+///
+/// - A publish that moves no authority is the Space's own: the channel
+///   already belongs to this Space (its link or a parent relationship names
+///   it) and to no other (neither names another Space). When the link and a
+///   parent name different Spaces, the publish would move one of them, and
+///   it needs the authority below.
+/// - Otherwise the publisher holds explicit authority over the channel: an
+///   owner, admin or manager relationship on the channel itself, or an owner
+///   or admin relationship on a Space that is the channel's parent now (the
+///   authority the channel inherits from its current Space), and no ban in
+///   the channel; or the publisher is the deployment owner, who can already
+///   place any channel through the channel administration commands.
+///
+/// A room an enrolled host-grant scope manages is placed by its canonical
+/// topology only, never by a Spaces publish.
+async fn channel_placement_allowed(
+    state: &WebSocketState,
+    principal: Option<ResolvedPrincipal<'_>>,
+    spaces_jid: &BareJid,
+    node: &str,
+    channel_jid: &BareJid,
+    channel_id: &str,
+) -> Result<bool, String> {
+    if state
+        .deps
+        .app_state
+        .host_grants
+        .channel_enrolled(channel_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    let link = state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(channel_jid)
+        .await
+        .map_err(|error| format!("channel-space link lookup failed: {error}"))?;
+    let parents = channel_parent_spaces(state, channel_id).await?;
+    let link_here = link.as_ref().is_some_and(|link| {
+        link.space_node.as_str() == node && link.space_jid.domain() == spaces_jid.domain()
+    });
+    let link_elsewhere = link.is_some() && !link_here;
+    let parent_here = parents.iter().any(|parent| parent == node);
+    let parent_elsewhere = parents.iter().any(|parent| parent != node);
+    if (link_here || parent_here) && !link_elsewhere && !parent_elsewhere {
+        return Ok(true);
+    }
+    if channel_authority(state, principal, channel_id, &parents).await? {
+        return Ok(true);
+    }
+    server_permission_allowed(state, principal, Permission::Owner).await
+}
+
+/// Whether the publisher holds explicit authority over the channel: an
+/// owner, admin or manager relationship on it, or an owner or admin
+/// relationship on one of its current parent Spaces, and no ban in it.
+async fn channel_authority(
+    state: &WebSocketState,
+    principal: Option<ResolvedPrincipal<'_>>,
+    channel_id: &str,
+    parents: &[String],
+) -> Result<bool, String> {
+    let Some(principal) = principal else {
+        return Ok(false);
+    };
+    let relations = |object: Object| async move {
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(ListRelations {
+                subject: Subject::user(&principal.user_jid),
+                object,
+            })
+            .await
+            .map(|relations| {
+                relations
+                    .into_iter()
+                    .map(|relation| relation.name)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| format!("relationship lookup failed: {error}"))
+    };
+    let on_channel = relations(Object::new(ObjectType::Channel, channel_id)).await?;
+    if on_channel.iter().any(|relation| relation == "outcast") {
+        return Ok(false);
+    }
+    if on_channel
+        .iter()
+        .any(|relation| matches!(relation.as_str(), "owner" | "admin" | "manager"))
+    {
+        return Ok(true);
+    }
+    for parent in parents {
+        let on_space = relations(Object::new(ObjectType::Space, parent.as_str())).await?;
+        if on_space
+            .iter()
+            .any(|relation| matches!(relation.as_str(), "owner" | "admin"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn restore_channel_space_link_projection(

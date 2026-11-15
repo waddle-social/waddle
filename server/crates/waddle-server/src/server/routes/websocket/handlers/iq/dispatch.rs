@@ -301,7 +301,16 @@ pub async fn handle_iq_with_conn_state(
         )
         .await
     } else if is_search_request(&iq) {
-        handle_channel_search_iq(&iq, muc_domain, state, response_from, response_to).await
+        let requester = phase.bound_jid().map(|jid| jid.to_bare());
+        handle_channel_search_iq(
+            &iq,
+            muc_domain,
+            state,
+            requester.as_ref(),
+            response_from,
+            response_to,
+        )
+        .await
     } else if payload_ns == "jabber:iq:search" {
         handle_user_search_iq(&iq, domain, state, response_from, response_to).await
     } else {

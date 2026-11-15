@@ -95,6 +95,44 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     let is_pep = req.is_pep;
     let storage = &state.deps.protocol.pubsub_storage;
 
+    // The Space node of an enrolled host-grant scope delivers no event:
+    // a captured subscriber list is not an admission, and the scope's
+    // authority is its canonical grants, which PubSub does not consult.
+    // Whether a node is enrolled is asked once more if it cannot be told,
+    // then the event is dropped. The Spaces and extensions services are
+    // recognised by the owner alone: a request addressed to a service
+    // counts as a PEP request for `is_pep`.
+    if owner.as_str() == state.deps.service_domains.spaces {
+        let host_grants = &state.deps.app_state.host_grants;
+        let enrolled = match host_grants.space_enrolled(node).await {
+            Err(_) => host_grants.space_enrolled(node).await,
+            decided => decided,
+        };
+        match enrolled {
+            Ok(false) => {}
+            Ok(true) => {
+                info!(
+                    node_kind = "enrolled_space",
+                    "Fan-out skipped: the node belongs to an enrolled host-grant scope"
+                );
+                return;
+            }
+            Err(_) => {
+                warn!(
+                    node_kind = "space",
+                    "Fan-out dropped: whether the node belongs to an enrolled host-grant scope \
+                     could not be told"
+                );
+                return;
+            }
+        }
+    }
+    // A room-bound extension node is resolved to its room once; each
+    // subscriber is then asked for its right in that room.
+    let route_room =
+        crate::server::routes::websocket::handlers::iq::extension_route_room(state, owner, node)
+            .await;
+
     let node_cfg = match storage.get_node(owner, node).await {
         Ok(Some(record)) => record.config,
         Ok(None) => {
@@ -198,6 +236,19 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     }
 
     for sub in subscribers {
+        // A room-bound extension node delivers to whoever may read the room
+        // now: a subscription and its affiliation outlive a ban.
+        if crate::server::routes::websocket::handlers::iq::extension_route_account_access(
+            state,
+            &route_room,
+            &sub.subscriber.to_bare(),
+            crate::permissions::Permission::View,
+        )
+        .await
+            == crate::server::routes::websocket::handlers::iq::ExtensionRouteAccess::Denied
+        {
+            continue;
+        }
         if is_private_pep_node
             && !private_node_subscriber_allowed(
                 state,

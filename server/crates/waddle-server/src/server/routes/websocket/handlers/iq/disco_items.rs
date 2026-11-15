@@ -519,6 +519,14 @@ pub(super) async fn handle_disco_items_iq(
                                 let Some(space) = space_details_from_node(&space_node) else {
                                     continue;
                                 };
+                                // The Space node of an enrolled host-grant
+                                // scope is not served through PubSub, so it
+                                // is not listed either.
+                                if state.deps.app_state.host_grants.space_enrolled(&node).await
+                                    != Ok(false)
+                                {
+                                    continue;
+                                }
                                 let visible = match requester.as_ref() {
                                     Some(requester) => crate::pubsub_authz::can_subscribe(
                                         &state.deps.protocol.pubsub_storage,
@@ -778,6 +786,26 @@ async fn live_public_instant_room_items(
     channel_backed
         .drop_unlisted_channel_rooms(state, &mut candidates)
         .await;
+    // A room an enrolled host-grant scope manages is never listed, with or
+    // without a channel row; if that cannot be read, no instant room is.
+    let channel_ids: Vec<String> = candidates
+        .iter()
+        .filter_map(waddle_xmpp::parse_managed_room_jid)
+        .collect();
+    let channel_refs: Vec<&str> = channel_ids.iter().map(String::as_str).collect();
+    let Ok(enrolled) = state
+        .deps
+        .app_state
+        .host_grants
+        .enrolled_channels(&channel_refs)
+        .await
+    else {
+        return Vec::new();
+    };
+    candidates.retain(|room_jid| {
+        waddle_xmpp::parse_managed_room_jid(room_jid)
+            .is_none_or(|channel_id| !enrolled.contains(&channel_id))
+    });
     let mut items = Vec::new();
     for room_jid in candidates {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
@@ -835,7 +863,27 @@ async fn canonical_channel_disco_items(
     )
     .await
     {
-        Ok(channels) => {
+        Ok(mut channels) => {
+            // A room an enrolled host-grant scope manages is members-only
+            // and is never listed by the service: only its grant holders
+            // learn of it.
+            let listed: Vec<&str> = channels
+                .iter()
+                .filter(|channel| channel.public_room)
+                .map(|channel| channel.id.as_str())
+                .collect();
+            let enrolled = state
+                .deps
+                .app_state
+                .host_grants
+                .enrolled_channels(&listed)
+                .await
+                .map_err(|error| error.to_string())?;
+            for channel in &mut channels {
+                if enrolled.contains(&channel.id) {
+                    channel.public_room = false;
+                }
+            }
             let channel_backed = ChannelBackedRooms {
                 jids: channels
                     .iter()

@@ -641,7 +641,31 @@ pub(super) async fn apply_muc_owner_config(
     if let Some(channel_type) = existing_channel_type {
         project_channel_type_to_config(&mut config, channel_type);
     }
-    if let (Some(channel_id), Some(session)) = (channel_id.as_deref(), session) {
+    // A room an enrolled host-grant scope manages stays members-only (its
+    // binding's access model) and its owners are its canonical grants, so
+    // configuring it writes no owner relationship.
+    let host_grant_managed = {
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(room_jid))
+            .await
+        {
+            RoomGate::Unmanaged => false,
+            RoomGate::Managed(_) => true,
+            RoomGate::Unavailable => {
+                return Err("the host-grant authority is unavailable".to_string());
+            }
+        }
+    };
+    if host_grant_managed {
+        config.members_only = true;
+    }
+    if let (Some(channel_id), Some(session), false) =
+        (channel_id.as_deref(), session, host_grant_managed)
+    {
         write_tuple_if_absent(
             state,
             Tuple::new(

@@ -150,6 +150,44 @@ impl IssuancePolicy {
         })
     }
 
+    /// A policy whose account domains are exactly `served`, as a replica's
+    /// [`HostGrantAttachment`](super::HostGrantAttachment) holds them, so
+    /// that issuance records an owner or admin grant as `local` for exactly
+    /// the accounts admission honours it for. The other inputs are checked
+    /// as [`Self::new`] checks them.
+    pub fn for_served(
+        served: &ServedAccountDomains,
+        service_domains: impl IntoIterator<Item = CanonicalDomain>,
+        trusted_homes: impl IntoIterator<Item = CanonicalDomain>,
+    ) -> Result<Self, IssuanceRefusal> {
+        let mut policy = Self::new([], service_domains, [])?;
+        policy.account_domains = served.clone();
+        for home in trusted_homes {
+            if !home.kind().names_federation_peer() {
+                return Err(IssuanceRefusal::InvalidTrustedHome);
+            }
+            if policy.account_domains.contains(home.as_str())
+                || policy.service_domains.contains(home.as_str())
+            {
+                return Err(IssuanceRefusal::TrustedHomeIsLocal);
+            }
+            policy.trusted_homes.insert(home.as_str().to_owned());
+        }
+        Ok(policy)
+    }
+
+    /// Whether a privileged grant at any scope (deployment, community or
+    /// room owner, admin or manager standing, or room moderation) may be
+    /// written for `subject` under this policy: an account of a served
+    /// domain, or of a trusted home. Bootstrap and repair writers ask this
+    /// before they write such a grant to a legacy store (ADR-0020 D8).
+    pub fn admits_privileged_subject(&self, subject: &jid::BareJid) -> bool {
+        let domain = subject.domain().as_str();
+        subject.node().is_some()
+            && !self.service_domains.contains(domain)
+            && (self.account_domains.contains(domain) || self.trusted_homes.contains(domain))
+    }
+
     /// The account domains this deployment serves.
     pub fn served_account_domains(&self) -> &ServedAccountDomains {
         &self.account_domains

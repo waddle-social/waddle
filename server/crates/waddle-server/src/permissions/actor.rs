@@ -8,8 +8,9 @@ use crate::db::Database;
 use std::sync::Arc;
 
 use super::host_grant::{
-    HostGrantStore, ProjectionIntent, ProjectionMarker, ProjectionObservation, ProjectionWrite,
-    ScopeLifecycleId, HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT,
+    EnrolledScopes, Enrollment, HostGrantStore, ProjectionIntent, ProjectionMarker,
+    ProjectionObservation, ProjectionWrite, ScopeLifecycleId,
+    HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT,
 };
 use super::schema::SPICEDB_SCHEMA;
 use super::spicedb::SpiceDbPermissionBackend;
@@ -98,23 +99,56 @@ pub struct PermissionActor {
     backend: PermissionActorBackend,
     /// The canonical host-grant store, when this deployment has one. The
     /// tuple-writing messages refuse an object that belongs to one of its
-    /// enrolled scopes: only the authority's own projection writes there.
+    /// enrolled scopes, decided from the store on every write: only the
+    /// authority's own projection writes there.
     host_grants: Option<HostGrantStore>,
+    /// The replica's enrolled set. The reading messages answer nothing for
+    /// an object it holds (only the host-grant authority decides there),
+    /// without any PostgreSQL read in this actor's mailbox.
+    enrolled: EnrolledScopes,
 }
+
+/// At most one warning a minute that a legacy read was refused because the
+/// enrolled set has not loaded.
+static READ_UNDECIDED: super::host_grant::RateLimitedWarning =
+    super::host_grant::RateLimitedWarning::new();
+/// At most one warning a minute that a legacy write was refused because the
+/// store could not be read.
+static WRITE_UNREADABLE: super::host_grant::RateLimitedWarning =
+    super::host_grant::RateLimitedWarning::new();
 
 impl PermissionActor {
     pub fn new(backend: SpiceDbPermissionBackend) -> Self {
         Self {
             backend: PermissionActorBackend::SpiceDb(Box::new(backend)),
             host_grants: None,
+            enrolled: EnrolledScopes::default(),
         }
     }
 
-    /// Refuse legacy tuple writes to the objects of scopes enrolled in
-    /// `store`. The refusal is decided from the store on every write, so it
-    /// holds after a restart and on every replica.
-    pub fn with_host_grant_store(mut self, store: HostGrantStore) -> Self {
+    /// Fence the legacy stores against the scopes enrolled in `store`, with
+    /// an enrolled set of the actor's own (see
+    /// [`Self::with_host_grant_authority`]).
+    pub fn with_host_grant_store(self, store: HostGrantStore) -> Self {
+        let enrolled = EnrolledScopes::watch(store.clone());
+        self.with_host_grant_authority(store, enrolled)
+    }
+
+    /// Fence the legacy stores against the scopes enrolled in `store`.
+    ///
+    /// A legacy tuple write to an object of an enrolled scope is refused,
+    /// decided from the store on every write, so the refusal holds after a
+    /// restart and on every replica. A legacy read of such an object answers
+    /// nothing, decided from `enrolled`, the replica's in-memory enrolled set
+    /// that the host-grant gate shares; until that set has loaded, a read of
+    /// a channel or a Space fails.
+    pub fn with_host_grant_authority(
+        mut self,
+        store: HostGrantStore,
+        enrolled: EnrolledScopes,
+    ) -> Self {
         self.host_grants = Some(store);
+        self.enrolled = enrolled;
         self
     }
 
@@ -139,6 +173,7 @@ impl PermissionActor {
                 checker: Box::new(checker),
             },
             host_grants: None,
+            enrolled: EnrolledScopes::default(),
         }
     }
 
@@ -163,15 +198,45 @@ impl PermissionActor {
                 Ok(false) => {}
                 Ok(true) => return Err(PermissionError::HostGrantScopeEnrolled),
                 Err(error) => {
-                    tracing::warn!(
-                        kind = error.kind(),
-                        "Refusing a permission write: the host-grant authority could not be read"
-                    );
+                    if WRITE_UNREADABLE.due() {
+                        tracing::warn!(
+                            kind = error.kind(),
+                            "Refusing a permission write: the host-grant authority could not be \
+                             read"
+                        );
+                    }
                     return Err(PermissionError::HostGrantAuthorityUnavailable);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether a legacy read of `object` may answer from the tuple store.
+    ///
+    /// The channel of a managed room and the Space of an enrolled scope are
+    /// decided by the host-grant authority alone (`host_grant::HostGrantGate`),
+    /// so a legacy read of either answers nothing: a check is not allowed and
+    /// a listing is empty, whatever the projection or a stale mirror holds.
+    /// The answer comes from the replica's enrolled set, in memory; until it
+    /// has loaded, a read of a channel or a Space fails.
+    async fn legacy_read_answers(&self, object: &Object) -> Result<bool, PermissionError> {
+        if self.host_grants.is_none() {
+            return Ok(true);
+        }
+        match self.enrolled.settled_object(object).await {
+            Enrollment::Unmanaged => Ok(true),
+            Enrollment::Enrolled => Ok(false),
+            Enrollment::Undecided => {
+                if READ_UNDECIDED.due() {
+                    tracing::warn!(
+                        kind = "enrollment_undecided",
+                        "Refusing a permission read: the host-grant enrolled set has not loaded"
+                    );
+                }
+                Err(PermissionError::HostGrantAuthorityUnavailable)
+            }
+        }
     }
 
     /// The backend a host-grant projection is read from and written to.
@@ -446,6 +511,12 @@ impl kameo::message::Message<CheckPermission> for PermissionActor {
         msg: CheckPermission,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(CheckResponse {
+                allowed: false,
+                reason: None,
+            });
+        }
         self.check(&msg.subject, msg.permission.as_str(), &msg.object)
             .await
     }
@@ -639,6 +710,9 @@ impl kameo::message::Message<ListRelations> for PermissionActor {
         msg: ListRelations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(Vec::new());
+        }
         let relations = self.list_relations(&msg.subject, &msg.object).await?;
         Ok(relations.into_iter().map(Relation::new).collect())
     }
@@ -658,6 +732,9 @@ impl kameo::message::Message<ListSubjects> for PermissionActor {
         msg: ListSubjects,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(Vec::new());
+        }
         self.list_subjects(&msg.object, &msg.relation.name).await
     }
 }
@@ -677,8 +754,16 @@ impl kameo::message::Message<LookupResources> for PermissionActor {
         msg: LookupResources,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.lookup_resources(&msg.subject, msg.permission.as_str(), msg.object_type)
-            .await
+        let resources = self
+            .lookup_resources(&msg.subject, msg.permission.as_str(), msg.object_type)
+            .await?;
+        let mut answered = Vec::with_capacity(resources.len());
+        for resource in resources {
+            if self.legacy_read_answers(&resource).await? {
+                answered.push(resource);
+            }
+        }
+        Ok(answered)
     }
 }
 
@@ -697,6 +782,9 @@ impl kameo::message::Message<LookupSubjects> for PermissionActor {
         msg: LookupSubjects,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.object).await? {
+            return Ok(Vec::new());
+        }
         self.lookup_subjects(&msg.object, msg.permission.as_str(), msg.subject_type)
             .await
     }

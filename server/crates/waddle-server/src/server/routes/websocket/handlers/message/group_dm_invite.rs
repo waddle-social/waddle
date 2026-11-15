@@ -774,6 +774,20 @@ pub(crate) async fn rollback_group_dm_membership(
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&grant.grant.room) else {
         return;
     };
+    // A group DM shares the channel identifier space with managed rooms. A
+    // room an enrolled host-grant scope manages, or one whose management
+    // cannot be told now, is left alone: its actor's affiliation list is
+    // written only from its canonical grants.
+    if state
+        .deps
+        .app_state
+        .host_grants
+        .channel_enrolled(&channel_id)
+        .await
+        != Ok(false)
+    {
+        return;
+    }
     let Ok(Some(actor)) = state
         .deps
         .protocol

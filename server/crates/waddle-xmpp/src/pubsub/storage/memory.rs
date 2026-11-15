@@ -614,6 +614,39 @@ impl PubSubStorage for InMemoryPubSubStorage {
         Ok(prev.unwrap_or(Affiliation::None))
     }
 
+    async fn set_affiliation_unless_outcast(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<bool, XmppError> {
+        let key = (owner.to_string(), node_name.to_string(), entity.to_string());
+        // The entry holds the map shard's lock until it is dropped, so the
+        // check and the write are one step.
+        match self.affiliations.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(entry)
+                if *entry.get() == Affiliation::Outcast =>
+            {
+                Ok(false)
+            }
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if affiliation == Affiliation::None {
+                    entry.remove();
+                } else {
+                    entry.insert(affiliation);
+                }
+                Ok(true)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                if affiliation != Affiliation::None {
+                    entry.insert(affiliation);
+                }
+                Ok(true)
+            }
+        }
+    }
+
     async fn affiliation(
         &self,
         owner: &BareJid,
