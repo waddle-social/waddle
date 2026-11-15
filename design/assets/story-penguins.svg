@@ -1,0 +1,247 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Waddle together</title>
+  <desc id="desc">Three penguin friends on an ice floe. Germany waves with happy closed eyes, a black-red-gold scarf and a salted pretzel. Scotland stands tallest in front, wearing a tartan tam with a red pom-pom and a metal saltire badge. Norway wears a red ribbed hat with a white pom-pom, a Nordic rose band and a red, white and navy scarf. Soft light falls from the upper left.</desc>
+  <defs>
+    
+    <linearGradient id="body" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#1f2733"></stop><stop offset=".42" stop-color="#1f2733"></stop><stop offset="1" stop-color="#14181e"></stop>
+    </linearGradient>
+    <linearGradient id="bodyGermany" href="#body" gradientTransform="scale(1 0.991881661389)"></linearGradient>
+    <linearGradient id="bodyNorway" href="#body" gradientTransform="scale(1 0.936193100553)"></linearGradient>
+    <linearGradient id="bodyScotland" href="#body" gradientTransform="scale(1 0.970920701463)"></linearGradient>
+    <linearGradient id="belly" x1=".15" y1="0" x2=".8" y2="1">
+      <stop offset=".25" stop-color="#ffffff"></stop><stop offset="1" stop-color="#eef4f8"></stop>
+    </linearGradient>
+    <linearGradient id="foot" x1="0" y1="0" x2=".8" y2="1">
+      <stop offset=".3" stop-color="#ff8a3d"></stop><stop offset="1" stop-color="#e8702a"></stop>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#ffffff" stop-opacity=".2"></stop><stop offset=".42" stop-color="#ffffff" stop-opacity="0"></stop><stop offset="1" stop-color="#14181e" stop-opacity=".16"></stop>
+    </linearGradient>
+    <linearGradient id="headLight" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#cfeaff" stop-opacity=".14"></stop><stop offset="1" stop-color="#cfeaff" stop-opacity="0"></stop>
+    </linearGradient>
+    <radialGradient id="blush">
+      <stop stop-color="#ff9fb0" stop-opacity=".65"></stop><stop offset=".65" stop-color="#ff9fb0" stop-opacity=".4"></stop><stop offset="1" stop-color="#ff9fb0" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="iceTop" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#ffffff"></stop><stop offset=".6" stop-color="#eef4f8"></stop><stop offset="1" stop-color="#cfeaff"></stop>
+    </linearGradient>
+    <linearGradient id="iceSide" x1="0" y1="0" x2=".9" y2="1">
+      <stop stop-color="#cfeaff"></stop><stop offset="1" stop-color="#9cc9ec"></stop>
+    </linearGradient>
+    <radialGradient id="shadow">
+      <stop stop-color="#14181e" stop-opacity=".22"></stop><stop offset=".55" stop-color="#14181e" stop-opacity=".1"></stop><stop offset="1" stop-color="#14181e" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ffffff"></stop><stop offset=".35" stop-color="#eef4f8"></stop><stop offset=".6" stop-color="#9cc9ec"></stop><stop offset=".78" stop-color="#cfeaff"></stop><stop offset="1" stop-color="#9cc9ec"></stop>
+    </linearGradient>
+    <linearGradient id="glaze" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#e9ad60"></stop><stop offset=".45" stop-color="#d38a42"></stop><stop offset="1" stop-color="#a65324"></stop>
+    </linearGradient>
+
+    
+    <g id="toe">
+      <path class="edge" d="M-10 1C-9-3-5-5 0-5S9-2 10 2C7 6-7 6-10 1Z" fill="url(#foot)"></path>
+      <path class="fine" d="M-6-1Q-3-3 0-3" stroke="#ffffff" opacity=".4"></path>
+    </g>
+    <g id="eyes">
+      <ellipse cx="-11.5" cy="0" rx="5.7" ry="7.3" fill="#14181e"></ellipse>
+      <ellipse cx="11.5" cy="0" rx="5.7" ry="7.3" fill="#14181e"></ellipse>
+      <g fill="#ffffff">
+        <circle cx="-13.2" cy="-2.6" r="2.1"></circle><circle cx="9.8" cy="-2.6" r="2.1"></circle>
+        <circle cx="-9.4" cy="2.8" r=".85"></circle><circle cx="13.6" cy="2.8" r=".85"></circle>
+      </g>
+    </g>
+    <g id="cheeksBeak">
+      <ellipse cx="-18" cy="11.5" rx="6.2" ry="4" fill="url(#blush)"></ellipse>
+      <ellipse cx="18" cy="11.5" rx="6.2" ry="4" fill="url(#blush)"></ellipse>
+      <path d="M-6.6 9.5Q0 6.8 6.6 9.5Q8 10.7 6.2 12.5L2.2 15.8Q0 17.5-2.2 15.8L-6.2 12.5Q-8 10.7-6.6 9.5Z" fill="#ff8a3d"></path>
+      <path d="M-7 11Q0 13.2 7 11L6.2 12.5 2.2 15.8Q0 17.5-2.2 15.8L-6.2 12.5Z" fill="#e8702a"></path>
+      <path d="M-4.7 9.9Q-2 8.8.5 9.1Q-1 9.7-4.7 10.5Z" fill="#ffffff" opacity=".4"></path>
+    </g>
+    <path id="scarfWrap" d="M-29 0Q0 10 29 0L29 11Q0 22-29 11Z"></path>
+    <path id="scarfTail" d="M-23 7L-12 10-14 29Q-19 32-24 28Z"></path>
+    <path id="scarfKnot" d="M-23 5Q-18 4-13 8L-14 16Q-19 18-24 14Z"></path>
+    <clipPath id="wrapClip"><use href="#scarfWrap"></use></clipPath>
+    <clipPath id="tailClip"><use href="#scarfTail"></use></clipPath>
+    <g id="wrapRibs" class="fine" stroke="#ffffff" opacity=".22">
+      <path d="M-26 1L-26 12M-22 2L-22 13M-18 3L-18 14M-14 4L-14 15M-10 5L-10 16M-6 5L-6 16M-2 5L-2 17M2 5L2 17M6 5L6 16M10 5L10 16M14 4L14 15M18 3L18 14M22 2L22 13M26 1L26 12"></path>
+    </g>
+    <g id="tailRibs" class="fine" stroke="#ffffff" opacity=".22">
+      <path d="M-21 9L-22 28M-18 10L-19 29M-15 11L-16 29"></path>
+    </g>
+    <g id="fringe" class="fine" stroke="#14181e">
+      <path d="M-23 29L-23.5 33M-20 30L-20.5 34M-17 30L-17.5 34M-14 29L-14.5 33"></path>
+    </g>
+    <g id="rose" fill="#ffffff">
+      <path d="M0-3.6 1-2.2 0-.8-1-2.2ZM3.6 0 2.2 1 .8 0 2.2-1ZM0 3.6-1 2.2 0 .8 1 2.2ZM-3.6 0-2.2-1-.8 0-2.2 1Z"></path>
+      <path d="M-2.7-2.7-1-2-1-1-2-1ZM2.7-2.7 2-1 1-1 1-2ZM2.7 2.7 1 2 1 1 2 1ZM-2.7 2.7-2 1-1 1-1 2Z"></path>
+      <circle r=".55"></circle>
+    </g>
+    <g id="snowflake" class="fine" stroke="#9cc9ec">
+      <path d="M0-4V4M-3.5-2 3.5 2M-3.5 2 3.5-2M-1.3-3 0-2 1.3-3M-1.3 3 0 2 1.3 3"></path>
+    </g>
+    <path id="tamShape" d="M86 72C77 70 76 62 82 55C92 43 110 40 127 42C145 42 159 49 160 58C161 66 151 71 142 72Z"></path>
+    <path id="tamBand" d="M86 69Q120 62 153 69L151 77Q120 70 88 78Z"></path>
+    <clipPath id="tamClip"><use href="#tamShape"></use></clipPath>
+    <clipPath id="bandClip"><use href="#tamBand"></use></clipPath>
+    <pattern id="weave" width="4" height="4" patternUnits="userSpaceOnUse">
+      <path class="fine" d="M-1 1 1-1M0 4 4 0M3 5 5 3" stroke="#cfeaff" opacity=".2"></path>
+    </pattern>
+    <clipPath id="badgeClip"><rect x="124" y="142" width="15" height="12" rx="1"></rect></clipPath>
+  </defs>
+
+  
+  <use href="#snowflake" x="39" y="55"></use>
+  <use href="#snowflake" x="208" y="45"></use>
+  <use href="#snowflake" x="19" y="149"></use>
+
+  
+  <ellipse cx="123" cy="210" rx="93" ry="10" fill="url(#shadow)"></ellipse>
+  <path class="edge" d="M20 180C26 169 52 165 75 167L160 166C186 166 212 171 220 181L218 193C206 204 176 209 144 210L69 207C45 205 26 198 21 191Z" fill="url(#iceSide)"></path>
+  <path d="M23 184 45 191 48 201Q29 197 23 191ZM71 196 78 197 81 207 73 206Z" fill="#ffffff" opacity=".26"></path>
+  <path d="M171 194 204 188 203 200 176 206Z" fill="#9cc9ec" opacity=".28"></path>
+  <path class="edge" d="M20 180C26 169 52 165 75 167L160 166C186 166 212 171 220 181C215 189 190 194 170 196L113 199 65 195C43 192 26 187 20 180Z" fill="url(#iceTop)"></path>
+  <path class="fine" d="M26 179Q35 173 49 172M28 185Q57 196 106 197M180 196 177 204M47 193 49 200" stroke="#ffffff" opacity=".9"></path>
+  <ellipse cx="122" cy="180" rx="78" ry="11" fill="url(#shadow)"></ellipse>
+  <path d="M44 176 45.4 180.6 50 182 45.4 183.4 44 188 42.6 183.4 38 182 42.6 180.6ZM195 180 196 183 199 184 196 185 195 188 194 185 191 184 194 183Z" fill="#ffffff"></path>
+
+  
+  <g transform="translate(-5 0) rotate(-7 65 135)">
+    <use href="#toe" x="46" y="175"></use><use href="#toe" x="80" y="175"></use>
+    <path class="edge rim" d="M36 117C27 113 17 103 18 96C19 91 24 92 28 97L44 110Z" fill="url(#body)"></path>
+    <path class="fine" d="M21 97Q24 106 34 111" stroke="#cfeaff" opacity=".45"></path>
+    <path class="edge rim" d="M62 75 60 69Q65 70 68 74L70 69Q73 71 74 75C94 78 106 98 105 123C105 152 92 173 66 173C59.102267 173 53.11951 171.733111 48.051727 169.367384L34.417411 173.73836Q31.317903 174.365298 32.676058 171.509529L36.123582 159.842714C30.041194 152.012812 27 141.059127 27 128C24 99 36 77 62 75Z" fill="url(#bodyGermany)"></path>
+    <path d="M31 116C29 92 43 79 60 79Q74 78 87 87C64 79 43 91 37 115Z" fill="url(#headLight)"></path>
+    <path class="fine" d="M31 107Q33 86 53 80" stroke="#cfeaff" opacity=".28"></path>
+    <path d="M36 115C36 102 41 94 49 94C55 94 59 99 62 104C67 98 72 94 79 96C90 97 96 109 96 122C96 148 85 164 65 164C44 164 34 148 35 130Z" fill="url(#belly)"></path>
+    <g transform="translate(61 116)">
+      <path d="M-17.2 1.5Q-11.5-8-5.8 1.5Q-5.2 3-6.8 3Q-11.5-3.2-16.2 3Q-17.8 3-17.2 1.5ZM5.8 1.5Q11.5-8 17.2 1.5Q17.8 3 16.2 3Q11.5-3.2 6.8 3Q5.2 3 5.8 1.5Z" fill="#14181e"></path>
+      <use href="#cheeksBeak"></use>
+    </g>
+    <g transform="translate(61 134)">
+      <use href="#fringe"></use>
+      <use href="#scarfTail" fill="#ffcc00"></use>
+      <g clip-path="url(#tailClip)">
+        <path d="M-25 6H-10V15H-25Z" fill="#000000"></path>
+        <path d="M-25 15H-10V23H-25Z" fill="#dd0000"></path>
+        <use href="#scarfTail" fill="url(#sheen)"></use><use href="#tailRibs"></use>
+      </g>
+      <use href="#scarfTail" class="edge"></use>
+      <use href="#scarfWrap" fill="#ffcc00"></use>
+      <g clip-path="url(#wrapClip)">
+        <path d="M-30-1H30V3.7Q0 14-30 3.7Z" fill="#000000"></path>
+        <path d="M-30 3.7Q0 14 30 3.7V7.3Q0 18-30 7.3Z" fill="#dd0000"></path>
+        <use href="#scarfWrap" fill="url(#sheen)"></use><use href="#wrapRibs"></use>
+      </g>
+      <use href="#scarfWrap" class="edge"></use>
+      <use href="#scarfKnot" fill="#dd0000" class="edge"></use>
+      <path class="fine" d="M-21 7-22 13M-18 8-19 15M-15 9-16 14" stroke="#ffffff" opacity=".25"></path>
+    </g>
+    <path class="edge" d="M86 142Q78 142 71 150Q69 153 72 155Q80 156 88 148" fill="url(#body)"></path>
+    <path class="fine" d="M75 150Q80 146 84 146" stroke="#cfeaff" opacity=".4"></path>
+    
+    <path fill="url(#glaze)" fill-rule="evenodd" d="M62 145C57 136 49 139 49 146C49 152 56 158 62 160C68 158 75 153 75 146C75 139 67 137 62 145ZM58 146C56 141 52 142 53 146Q54 149 58 151L60 148ZM66 146C68 141 72 142 71 146Q70 149 66 151L64 148ZM58.5 154 62 149 65.5 154Q62 157 58.5 154Z"></path>
+    <path class="edge" d="M62 145C57 136 49 139 49 146C49 152 56 158 62 160C68 158 75 153 75 146C75 139 67 137 62 145Z"></path>
+    <path class="fine" stroke="#14181e" d="M58 146C56 141 52 142 53 146Q54 149 58 151L60 148ZM66 146C68 141 72 142 71 146Q70 149 66 151L64 148ZM58.5 154 62 149 65.5 154Q62 157 58.5 154Z"></path>
+    <path class="fine" d="M51 145Q51 140 55 141M67 141Q72 139 73 144M59 152 61 149M65 150 67 153" stroke="#ffffff" opacity=".45"></path>
+    <g fill="#ffffff">
+      <ellipse cx="52" cy="148" rx=".65" ry=".9"></ellipse><ellipse cx="56.5" cy="143.5" rx=".85" ry=".6"></ellipse>
+      <ellipse cx="61" cy="146" rx=".65" ry=".9"></ellipse><ellipse cx="69" cy="142" rx=".8" ry=".55"></ellipse>
+      <ellipse cx="72" cy="149" rx=".6" ry=".85"></ellipse><ellipse cx="68" cy="155" rx=".8" ry=".6"></ellipse>
+      <ellipse cx="61.5" cy="158" rx=".9" ry=".55"></ellipse><ellipse cx="55" cy="153" rx=".6" ry=".8"></ellipse>
+    </g>
+  </g>
+
+  
+  <g transform="translate(7 0) rotate(7 179 136)">
+    <use href="#toe" x="161" y="176"></use><use href="#toe" x="194" y="176"></use>
+    <path class="edge rim" d="M209 126C217 130 223 144 219 149C215 152 209 144 205 138Z" fill="url(#body)"></path>
+    <path class="fine" d="M211 132Q216 138 217 143" stroke="#cfeaff" opacity=".4"></path>
+    <path class="edge rim" d="M178 73C154 73 140 91 139 116C137.258912 139.504694 142.338448 156.94661 155.558089 166.346529L155.035429 178.500822Q154.408491 181.60033 157.26426 180.242175L169.436144 172.702597C179.401106 175.112285 189.612851 173.193575 196 170C213 162 219 141 216 113C214 88 200 73 178 73Z" fill="url(#bodyNorway)"></path>
+    <path d="M143 117C143 93 157 78 177 78Q194 77 202 89C177 80 154 94 149 116Z" fill="url(#headLight)"></path>
+    <path class="fine" d="M143 111Q145 98 152 90" stroke="#cfeaff" opacity=".28"></path>
+    <path d="M149 117C149 104 154 96 163 95C170 94 175 99 178 104C182 98 188 95 195 97C205 100 208 112 207 125C207 148 198 165 179 166C158 166 148 149 149 130Z" fill="url(#belly)"></path>
+    <g transform="translate(179 115)"><use href="#eyes"></use><use href="#cheeksBeak"></use></g>
+    <g transform="translate(179 135)">
+      <g transform="translate(40 0)">
+        <use href="#fringe"></use>
+        <use href="#scarfTail" fill="#ba0c2f"></use>
+        <g clip-path="url(#tailClip)">
+          <path d="M-25 18H-10V25H-25Z" fill="#ffffff"></path>
+          <path d="M-25 20H-10V23H-25Z" fill="#00205b"></path>
+          <use href="#scarfTail" fill="url(#sheen)"></use><use href="#tailRibs"></use>
+        </g>
+        <use href="#scarfTail" class="edge"></use>
+      </g>
+      <use href="#scarfWrap" fill="#ba0c2f"></use>
+      <g clip-path="url(#wrapClip)">
+        <path d="M-30 3Q0 13 30 3V8Q0 19-30 8Z" fill="#ffffff"></path>
+        <path d="M-30 4.5Q0 15 30 4.5V6.5Q0 17-30 6.5Z" fill="#00205b"></path>
+        <use href="#scarfWrap" fill="url(#sheen)"></use><use href="#wrapRibs"></use>
+      </g>
+      <use href="#scarfWrap" class="edge"></use>
+      <g transform="translate(40 0)">
+        <use href="#scarfKnot" fill="#ba0c2f" class="edge"></use>
+        <path class="fine" d="M-21 7-22 13M-18 8-19 15M-15 9-16 14" stroke="#ffffff" opacity=".25"></path>
+      </g>
+    </g>
+    
+    <path class="edge rim" d="M149 88C150 68 161 58 179 58C197 58 207 70 208 90L205 97Q178 90 150 96Z" fill="#ba0c2f"></path>
+    <path d="M149 88C150 68 161 58 179 58C197 58 207 70 208 90L205 97Q178 90 150 96Z" fill="url(#sheen)"></path>
+    <g class="fine" stroke="#ffffff" opacity=".25">
+      <path d="M153 83Q155 67 168 62M158 83Q159 66 172 61M164 82Q164 66 175 61M170 82Q169 66 178 61M176 82Q174 68 180 61M182 82Q181 68 182 61M188 83Q188 69 184 62M194 83Q194 70 187 63M200 85Q201 73 191 65M205 86Q206 77 197 70"></path>
+    </g>
+    <path class="edge rim" d="M148 85Q178 80 208 87L208 99Q179 92 149 98Z" fill="url(#belly)"></path>
+    <path d="M150 88Q179 83 206 90L206 96Q179 89 151 95Z" fill="#00205b"></path>
+    <use href="#rose" x="156" y="91"></use><use href="#rose" x="167" y="89.7"></use>
+    <use href="#rose" x="178" y="89.5"></use><use href="#rose" x="189" y="90.4"></use>
+    <use href="#rose" x="200" y="92.2"></use>
+    <path class="fine" d="M153 86 153 87M159 85 159 86M165 84.5 165 85.5M171 84 171 85M177 84 177 85M183 84.3 183 85.3M189 85 189 86M195 86 195 87M201 87 201 88" stroke="#9cc9ec"></path>
+    <path class="edge rim" d="M177 44Q179 42 181 45Q185 43 186 47Q190 48 187 51Q190 55 186 57Q185 61 181 59Q178 62 176 59Q172 60 171 56Q167 54 170 51Q168 47 172 47Q173 43 177 44Z" fill="url(#belly)"></path>
+    <path class="fine" d="M174 48 176 50M181 46 180 49M184 52 182 53M174 55 177 54M180 57 180 55" stroke="#9cc9ec" opacity=".65"></path>
+  </g>
+
+  
+  <use href="#toe" x="103" y="181"></use><use href="#toe" x="138" y="181"></use>
+  <path class="edge rim" d="M120 59C92 59 77 79 77 107C74 128 75 150 89 164C89.711749 164.800718 90.447245 165.561859 91.205783 166.284127L89.205783 178.284127Q88.205783 181.284127 91.205783 180.284127L104.205783 174.284127C109.30037 176.128602 114.932336 177 121 177C151 177 166 157 165 133L163 107C163 79 148 59 120 59Z" fill="url(#bodyScotland)"></path>
+  <path d="M80 105C81 78 95 64 120 63Q142 63 153 81C127 67 98 77 88 106Z" fill="url(#headLight)"></path>
+  <path class="fine" d="M80 102Q81 86 91 77" stroke="#cfeaff" opacity=".28"></path>
+  <path d="M86 107C86 93 92 84 103 84C111 84 116 89 120 95C124 89 129 84 137 84C148 84 154 93 154 107L156 133C157 154 144 168 121 168C98 168 84 154 85 133Z" fill="url(#belly)"></path>
+  <g transform="translate(120 107) scale(1.1)"><use href="#eyes"></use><use href="#cheeksBeak"></use></g>
+  <path class="edge rim" d="M84 128C78 130 73 136 75 141C78 144 85 138 90 132" fill="url(#body)"></path>
+  <path class="edge rim" d="M156 128C162 130 167 136 165 141C162 144 155 138 150 132" fill="url(#body)"></path>
+  <path class="fine" d="M78 137Q80 133 85 131M154 131Q160 134 162 138" stroke="#cfeaff" opacity=".4"></path>
+
+  
+  <use href="#tamShape" fill="#214e66"></use>
+  <g clip-path="url(#tamClip)">
+    <path d="M88 40H103V75H88ZM115 40H130V75H115ZM142 40H157V75H142Z" fill="#286354"></path>
+    <path d="M77 47H163V56H77ZM77 65H163V74H77Z" fill="#14181e" opacity=".4"></path>
+    <path d="M92 40H95V75H92ZM119 40H122V75H119ZM146 40H149V75H146Z" fill="#00205b" opacity=".65"></path>
+    <path d="M77 57H163V60H77Z" fill="#286354"></path>
+    <path class="fine" d="M83 40V76M110 40V76M137 40V76M77 44H163M77 62H163" stroke="#ba0c2f"></path>
+    <path class="fine" d="M96 40V76M123 40V76M150 40V76M77 53H163M77 71H163" stroke="#cfeaff" opacity=".3"></path>
+    <use href="#tamShape" fill="url(#weave)" opacity=".45"></use>
+    <use href="#tamShape" fill="url(#sheen)"></use>
+  </g>
+  <use href="#tamShape" class="edge rim"></use>
+  <use href="#tamBand" fill="#173e54"></use>
+  <g clip-path="url(#bandClip)">
+    <path d="M92 65H97V79H92ZM104 65H109V79H104ZM116 64H121V78H116ZM128 64H133V78H128ZM140 65H145V79H140Z" fill="#286354"></path>
+    <use href="#tamBand" fill="url(#weave)"></use>
+    <path class="fine" d="M86 71Q120 64 153 71M87 75Q120 68 152 75" stroke="#9cc9ec" opacity=".35"></path>
+  </g>
+  <use href="#tamBand" class="edge rim"></use>
+  <path class="edge rim" d="M126 34Q128 32 130 34Q134 34 134 38Q136 41 133 43Q132 46 129 45Q126 47 124 44Q121 43 122 40Q120 37 123 36Q123 33 126 34Z" fill="#ba0c2f"></path>
+  <path d="M124 36Q128 33 131 36Q126 35 124 40Z" fill="#ffffff" opacity=".25"></path>
+  <path class="fine" d="M125 38 127 39M131 39 130 41M126 43 127 41" stroke="#14181e" opacity=".25"></path>
+
+  <rect class="edge" x="122" y="140" width="19" height="16" rx="3" fill="url(#metal)"></rect>
+  <rect x="124" y="142" width="15" height="12" rx="1" fill="#005eb8"></rect>
+  <g clip-path="url(#badgeClip)" fill="#ffffff">
+    <path d="M122 141 124 140 141 154 139 156ZM139 140 141 142 124 156 122 154Z"></path>
+  </g>
+  <path class="fine" d="M125 141H136M123 143V150" stroke="#ffffff" opacity=".9"></path>
+</svg>

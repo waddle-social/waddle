@@ -1,0 +1,28 @@
+{
+  "name": "@waddle/design",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/preset.ts",
+    "./astro-fonts": "./src/astro-fonts.ts",
+    "./assets/*": "./assets/*"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "5.3.0"
+  },
+  "peerDependencies": {
+    "@pandacss/dev": "2.5.0",
+    "astro": "~7.3.8"
+  },
+  "devDependencies": {
+    "@pandacss/dev": "2.5.0",
+    "@pandacss/preset-base": "2.5.0",
+    "@pandacss/types": "2.5.0",
+    "astro": "~7.3.8"
+  }
+}
