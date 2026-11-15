@@ -31,34 +31,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.huddle.Kicker
-
-/** The `waddle.` wordmark: display weight, lowercase, an ember full stop. */
-@Composable
-fun Wordmark(modifier: Modifier = Modifier) {
-    val appName = stringResource(R.string.app_name)
-    Text(
-        text = buildAnnotatedString {
-            append(stringResource(R.string.shell_wordmark))
-            withStyle(SpanStyle(color = Waddle.colors.live)) { append(".") }
-        },
-        style = MaterialTheme.typography.headlineMedium,
-        color = Waddle.colors.fg,
-        maxLines = 1,
-        modifier = modifier.semantics {
-            contentDescription = appName
-            heading()
-        },
-    )
-}
 
 /**
  * A list section's label: a mono kicker heading, ember with a live dot
