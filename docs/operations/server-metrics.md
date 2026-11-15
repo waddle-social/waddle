@@ -30,8 +30,8 @@ are relative to `server/crates/`.
 | Custody | `ingress.effects.unresolved`, `xmpp.push.queue.parked`, `xmpp.push.queue.unresolved_failed`, `waddle.room_effect_outbox.depth`, `waddle.call.teardown.outbox.depth`, `waddle.muc.destroy_completion.depth`, `xmpp.remote_owner_mirror.pending`, the `xmpp.pending_delivery.*` counters |
 | Completion uncertainty | `waddle.relay.ordered.outcomes{outcome="uncertain"}`, `waddle.muc.remote_dispatch.outcomes{outcome="uncertain"}`, `xmpp.push.failure_class`, `waddle.clustering.claim.cancellations`, `waddle.clustering.fence.results{result="cancelled"}` |
 | Fencing rejection | `waddle.clustering.fence.results`, `waddle.clustering.keypair_lease.outcomes{outcome="fencing_lost"}`, `waddle.clustering.ingress_append.authorization_failed`, `xmpp.sm.detached.append.rejected`, `ingress.decisions` |
-| Mailbox bytes, depth and age | `waddle.connection_actor.mailbox.depth`, `.bytes`, `.oldest_age`; `xmpp.actor.mailbox.depth`, `xmpp.actor.mailbox.latency` |
-| Actor and transport progress | `waddle.connection_actor.turn.duration`, `waddle.connection_actor.retirements`, `waddle.io.pump.exits`, `waddle.io.custodian.retirements`, `waddle.io.writer.blocked.duration`, `waddle.janitor.sweeps` |
+| Mailbox bytes, depth and age | `waddle.connection_actor.mailbox.depth`, `.bytes`, `.oldest_age`; `xmpp.actor.mailbox.depth`, `xmpp.actor.mailbox.latency`, `waddle.actor.message.queue_wait` |
+| Actor and transport progress | `waddle.actor.message.handle.duration`, `waddle.actor.started`, `waddle.actor.stopped`, `waddle.connection_actor.turn.duration`, `waddle.connection_actor.retirements`, `waddle.io.pump.exits`, `waddle.io.custodian.retirements`, `waddle.io.writer.blocked.duration`, `waddle.janitor.sweeps` |
 | Pending acceptance | `waddle.muc.remote_acceptance.pending`, `waddle.muc.remote_acceptance.oldest_pending_age` |
 | Replay | `xmpp.sm.resume.results`, `xmpp.sm.resume.replayed`, `xmpp.sm.unacked.depth`, `xmpp.sm.unacked_evicted`, `xmpp.sm.handled_progress` |
 | Recovery | `ingress.maintenance.*`, `ingress.gc.*`, `ingress.recovery.reachability_blocked`, `xmpp.remote_owner_mirror.attempts`, `waddle.muc.destroy_completion.outcomes` |
@@ -130,6 +130,10 @@ Which of these are recorded today:
 | `ingress.tx.duration` | histogram | `s` | — | `ingress_tx_duration_seconds_bucket / _sum / _count` | Ingress authority transaction duration. |
 | `ingress.tx.retries` | counter | `{transaction}` | — | `ingress_tx_retries_total` | Ingress authority transaction retries. |
 | `muc.ghost_occupants.evicted` | counter | `{occupant}` | — | `muc_ghost_occupants_evicted_total` | MUC occupants evicted because a stalled groupchat obligation proved their occupancy abandoned. |
+| `waddle.actor.message.handle.duration` | histogram | `s` | `actor` | `waddle_actor_message_handle_duration_seconds_bucket / _sum / _count` | Time a message handler occupied its actor, excluding work handed off through a delegated reply. |
+| `waddle.actor.message.queue_wait` | histogram | `s` | `actor` | `waddle_actor_message_queue_wait_seconds_bucket / _sum / _count` | Time from the sender building a message to its handler starting, for messages that reach a handler. |
+| `waddle.actor.started` | counter | `{actor}` | `actor` | `waddle_actor_started_total` | Actors whose `on_start` succeeded and that began processing their mailbox. |
+| `waddle.actor.stopped` | counter | `{actor}` | `actor`, `reason` | `waddle_actor_stopped_total` | Started actors that left their message loop, by actor kind and reason (`panicked` \| `stopped`). |
 | `waddle.auth.failures` | counter | `1` | `stage`, `error_code` | `waddle_auth_failures_total` | Authentication rejections by stage and enumerated error code. |
 | `waddle.auth.success` | counter | `1` | `stage` | `waddle_auth_success_total` | Successful authentication outcomes by stage. |
 | `waddle.call.admin.call_failed` | counter | `1` | `op` | `waddle_call_admin_call_failed_total` | LiveKit admin control-plane calls that failed after final normalization, by operation. |
@@ -238,6 +242,8 @@ Declarations for the table above are in
 - `waddle-xmpp/src/ownership/observe.rs`: `waddle.clustering.claim.cancellations`,
   `waddle.clustering.claim.mutations`, `waddle.clustering.fence.results`.
 - `waddle-xmpp/src/protocol/handlers/extdisco.rs`: `waddle.call.turn_credentials`.
+- `waddle-xmpp/src/telemetry/actor.rs`: `waddle.actor.message.handle.duration`,
+  `waddle.actor.message.queue_wait`, `waddle.actor.started`, `waddle.actor.stopped`.
 - `waddle-xmpp/src/telemetry/call.rs`: `waddle.call.admin.call_failed`,
   `waddle.call.control.rate_limited`, `waddle.call.reconcile.occupancy_failures`,
   `waddle.call.reconcile.pass_duration`, `waddle.call.reconcile.rooms_adopted`,
@@ -253,6 +259,31 @@ Declarations for the table above are in
 - `waddle-xmpp/src/telemetry/remote_owner.rs`: `xmpp.remote_owner_mirror.attempts`,
   `xmpp.remote_owner_mirror.inventory`, `xmpp.remote_owner_mirror.oldest_pending_age`,
   `xmpp.remote_owner_mirror.pending`.
+
+The `waddle.actor.*` instruments are recorded for every kameo actor through
+one process-wide observer in `waddle-server/src/actor_telemetry.rs`. The
+`actor` allowlist in `waddle-xmpp/src/telemetry/attributes/actor.rs` is
+`room_registry`, `room`, `user_registry`, `user`, `permission`,
+`account_coordinator`, `db`, `relay`, `connection` and `other`. The message
+type is not a metric attribute; use the `actor.handle_message` span's
+`message` attribute in Tempo.
+
+Queue wait includes sender backpressure and, for messages buffered during
+startup, `on_start`. It is recorded only for messages that reach a handler:
+a stuck actor shows as a handled-message rate that stops, not a long wait.
+The handler-duration histogram's `_count` gives handled-message throughput;
+failing asks are not counted as errors here. Handler duration measures the
+time the handler occupied the actor, excluding work handed off through a
+delegated reply. The room registry delegates replies; its end-to-end request
+latency is `xmpp.actor.mailbox.latency`. For `actor="connection"`, these
+message timings cover only binding commands; stanza turns are measured by
+`waddle.connection_actor.turn.duration`.
+
+Starts are counted after `on_start` succeeds, and stops only after a started
+actor leaves its message loop. `reason="panicked"` covers a lifecycle hook or
+handler panic or fatal error; `stopped` covers other stops, including normal
+completion, a kill or a linked actor's death. Starts minus stops is a live
+actor estimate that resets per pod restart.
 
 Attribute-free reliability counters declared through the table in
 `waddle-xmpp/src/telemetry/reliability.rs`, all created at zero at startup:

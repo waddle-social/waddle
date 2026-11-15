@@ -371,6 +371,24 @@ impl MetricsTestGuard {
         total
     }
 
+    /// Sum of every `f64` histogram data point for `name` whose
+    /// attributes contain all `required` pairs.
+    pub fn histogram_sum(&self, name: &str, required: &[(&str, &str)]) -> Option<f64> {
+        let mut total = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+                return;
+            };
+            let entry = total.get_or_insert(0.0);
+            for point in histogram.data_points() {
+                if attributes_contain(point.attributes(), required) {
+                    *entry += point.sum();
+                }
+            }
+        });
+        total
+    }
+
     /// Explicit bucket boundaries the named `f64` histogram exported.
     /// `None` when the instrument never exported as an f64 histogram.
     ///

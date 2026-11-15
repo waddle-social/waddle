@@ -41,7 +41,7 @@ const BYTE_BUCKETS: [f64; 9] = [
 ];
 
 /// Boundaries for histograms that sample how long work has waited.
-const AGE_BUCKETS: [f64; 11] = [
+pub(super) const AGE_BUCKETS: [f64; 11] = [
     0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 900.0, 3600.0,
 ];
 

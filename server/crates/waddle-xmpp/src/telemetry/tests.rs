@@ -553,6 +553,22 @@ async fn muc_seconds_histograms_export_seconds_scale_boundaries() {
 }
 
 #[tokio::test]
+async fn call_teardown_backlog_age_is_resolved_up_to_an_hour() {
+    let guard = test_support::acquire().await;
+
+    crate::telemetry::call::record_call_teardown_outbox_oldest_age(1800.0);
+
+    let bounds = guard
+        .histogram_bounds("waddle.call.teardown.outbox.oldest_age")
+        .expect("teardown age histogram");
+    assert_eq!(
+        bounds.last().copied(),
+        Some(3600.0),
+        "a backlog older than the top boundary reads as that boundary in a quantile"
+    );
+}
+
+#[tokio::test]
 async fn consecutive_guards_observe_only_their_own_increments() {
     {
         let _first = test_support::acquire().await;

@@ -198,6 +198,7 @@ where
         match start_res {
             Ok(actor) => {
                 let mut state = ActorBehaviour::new_from_actor(actor, actor_ref.clone());
+                crate::observer::actor_started::<A>();
 
                 let reason = Abortable::new(
                     abortable_actor_loop(
@@ -232,6 +233,7 @@ where
                     .notify_links(id, reason.clone(), mailbox_rx);
 
                 log_actor_stop_reason(id, name, &reason);
+                crate::observer::actor_stopped::<A>(&reason);
                 let on_stop_res = actor.on_stop(actor_ref.clone(), reason.clone()).await;
 
                 unregister_actor(&id).await;
@@ -356,6 +358,7 @@ where
                 reply,
                 sent_within_actor,
                 message_name,
+                enqueued_at,
                 #[cfg(feature = "tracing")]
                 caller_span,
             }) => {
@@ -366,6 +369,7 @@ where
                         reply,
                         sent_within_actor,
                         message_name,
+                        enqueued_at,
                         #[cfg(feature = "tracing")]
                         caller_span,
                     )

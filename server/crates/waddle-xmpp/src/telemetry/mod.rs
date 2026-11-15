@@ -82,6 +82,7 @@
 //! `test`/`test-utils`).
 
 pub mod account_coordinator;
+pub mod actor;
 pub mod attributes;
 pub mod authority;
 pub mod call;

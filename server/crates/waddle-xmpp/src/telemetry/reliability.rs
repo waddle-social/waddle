@@ -368,9 +368,13 @@ pub fn register_reliability_counters() {
     register_table_counters();
     super::authority::register_authority_counters();
     super::account_coordinator::register_counters();
+    super::actor::register_actor_counters();
     super::remote_owner::add_mirror_attempt(0, super::attributes::RemoteOwnerMirrorOutcome::Failed);
     for path in SmEvictionPath::ALL {
         add_sm_unacked_evicted(0, path);
+    }
+    for outcome in SmResumeOutcome::ALL {
+        add_sm_resume_results(0, outcome);
     }
     for reason in SmDetachedAppendRejectionReason::ALL {
         add_sm_detached_append_rejected(0, reason);
@@ -1388,6 +1392,9 @@ mod tests {
     const REGISTERED_SM_COUNTERS: &[&str] = &[
         "xmpp.sm.unacked_evicted",
         "xmpp.sm.detached.append.rejected",
+        "xmpp.sm.resume.results",
+        // Zero-registered by `authority::register_authority_counters`.
+        "xmpp.sm.enable.results",
     ];
 
     /// The counters `register_reliability_counters` zeroes that carry
