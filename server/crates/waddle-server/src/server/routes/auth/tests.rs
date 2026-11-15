@@ -393,3 +393,70 @@ async fn xmpp_authorize_refuses_unsafe_redirects_and_missing_pkce() {
         assert_eq!(json["error"], "invalid_request", "{query}");
     }
 }
+
+/// The session id is a bearer credential: whoever holds it is the user. No
+/// span on the session lookup, validation, or logout path may record it.
+#[tokio::test(flavor = "current_thread")]
+async fn session_id_never_becomes_a_span_field() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _actor) = create_test_auth_state(&server_config).await;
+    let session = Session::new("alice@example.com", "alice", "alice");
+    auth_state
+        .session_manager
+        .create_session(&session)
+        .await
+        .unwrap();
+    let spans = test_support::acquire_spans();
+
+    let response = router(auth_state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/auth/session?session_id={}", session.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    auth_state
+        .session_manager
+        .validate_session(&session.id)
+        .await
+        .unwrap();
+    let response = router(auth_state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "session_id": session.id }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        spans.recorded_field_containing(&session.id),
+        None,
+        "a span recorded the bearer session id"
+    );
+}
+
+/// A failed lookup is logged and returned to the caller, so the error must
+/// not carry the presented credential either.
+#[tokio::test]
+async fn unknown_session_error_does_not_carry_the_presented_id() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _actor) = create_test_auth_state(&server_config).await;
+
+    let error = auth_state
+        .session_manager
+        .validate_session("presented-bearer-credential")
+        .await
+        .expect_err("unknown session");
+
+    assert!(!format!("{error} {error:?}").contains("presented-bearer-credential"));
+}

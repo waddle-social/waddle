@@ -186,6 +186,18 @@ impl SpanTestGuard {
             .map(|(_, _, value)| value.clone())
     }
 
+    /// The `(span name, field name)` of the first recorded span field whose
+    /// rendered value contains `needle`, if any. Use it to prove a secret
+    /// never becomes a span attribute, whichever span or field would carry it.
+    pub fn recorded_field_containing(&self, needle: &str) -> Option<(String, String)> {
+        self.recorded_fields
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(_, _, value)| value.contains(needle))
+            .map(|(span, field, _)| (span.clone(), field.clone()))
+    }
+
     /// Flush and return every completed span exported since acquisition.
     pub fn exported(&self) -> Vec<SpanData> {
         self.provider
