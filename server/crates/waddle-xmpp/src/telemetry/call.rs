@@ -284,7 +284,9 @@ pub fn record_call_teardown_outbox_oldest_age(seconds: f64) {
         "waddle.call.teardown.outbox.oldest_age",
         "s",
         "Age of the oldest queued durable call teardown intent.",
-        buckets: crate::telemetry::SECOND_SCALE_BUCKETS,
+        // A backlog is minutes to an hour old; the 10 s ceiling of
+        // `SECOND_SCALE_BUCKETS` would cap every quantile there.
+        buckets: super::authority::AGE_BUCKETS,
         seconds,
     );
 }
