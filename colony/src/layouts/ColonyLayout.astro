@@ -69,7 +69,12 @@ const orbit = (animation: string) =>
       // A saved choice wins; otherwise follow the system setting live.
       const light = matchMedia("(prefers-color-scheme: light)");
       const applyTheme = () => {
-        const saved = localStorage.getItem("waddle-theme");
+        let saved = null;
+        try {
+          saved = localStorage.getItem("waddle-theme");
+        } catch {
+          // Storage blocked: follow the system setting.
+        }
         const isLight = saved ? saved === "light" : light.matches;
         document.documentElement.dataset.theme = isLight ? "daylight" : "night";
       };
@@ -90,6 +95,9 @@ const orbit = (animation: string) =>
           bgImage: "radial-gradient(90% 70% at 50% 0%, {colors.sea.shallow}, {colors.sea} 55%, {colors.sea.deep})",
           minHeight: "100dvh",
           boxSizing: "border-box",
+          // Clips the toggle's off-screen sun and moon so they add no scroll.
+          position: "relative",
+          overflow: "clip",
           flexDirection: "column",
           alignItems: "center",
           gap: "5",
@@ -149,7 +157,11 @@ const orbit = (animation: string) =>
       toggle.addEventListener("click", () => {
         const next = root.dataset.theme === "night" ? "daylight" : "night";
         root.dataset.theme = next;
-        localStorage.setItem("waddle-theme", next === "daylight" ? "light" : "dark");
+        try {
+          localStorage.setItem("waddle-theme", next === "daylight" ? "light" : "dark");
+        } catch {
+          // Storage blocked: the choice lasts for this page only.
+        }
       });
     </script>
   </body>

@@ -1,6 +1,5 @@
 ---
 import ColonyLayout from "../../layouts/ColonyLayout.astro";
-import { getAuth } from "../../lib/auth";
 import { css, cx } from "../../../styled-system/css";
 import { btn } from "../../../styled-system/recipes";
 import { heading, kicker, lead, mono, sheet } from "../../styles/text";
@@ -14,19 +13,8 @@ if (!user) {
 const clientId = Astro.url.searchParams.get("client_id");
 const scopes = Astro.url.searchParams.get("scope")?.split(" ").filter(Boolean) ?? [];
 
-let clientName = clientId ?? "An app";
-if (clientId) {
-  try {
-    const auth = await getAuth();
-    const client = await auth.api.getOAuthClientPublic({
-      query: { client_id: clientId },
-      headers: Astro.request.headers,
-    });
-    clientName = client.client_name?.trim() || clientId;
-  } catch {
-    // Unknown or disabled client: show the raw client_id.
-  }
-}
+// The client_id only: names come from open dynamic registration and are unverified.
+const clientName = clientId ?? "An app";
 const clientMark = clientName.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2).toLowerCase();
 
 const scopeCopy: Record<string, string> = {
