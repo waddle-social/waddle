@@ -185,16 +185,21 @@ async fn the_process_entry_point_is_off_without_the_flag() {
         "{enabled:?}"
     );
 
-    // The flag and a valid file start S2S with that file.
+    // The flag and a valid file start S2S with that file. The fixture's
+    // certificates are valid only at the fixed test time, so the file the
+    // variables name is loaded with the test clock rather than the
+    // process's.
     let path = pki.file("entry.toml", &Spec::new(HOME_A, HOME_B).toml(&pki));
     let path = path.to_str().expect("a UTF-8 path");
-    let config = load_enabled_config_from(
-        &xmpp,
-        variables(&[(ENABLED_VARIABLE, "true"), (CONFIG_FILE_VARIABLE, path)]),
-    )
-    .await
-    .expect("a valid configuration")
+    let activation = S2sActivation::from_variables(variables(&[
+        (ENABLED_VARIABLE, "true"),
+        (CONFIG_FILE_VARIABLE, path),
+    ]))
     .expect("S2S on");
+    let config = load_config(activation, &xmpp, settings())
+        .await
+        .expect("a valid configuration")
+        .expect("S2S on");
     assert_eq!(config.local_domains(), &[domain(HOME_A)]);
 }
 
