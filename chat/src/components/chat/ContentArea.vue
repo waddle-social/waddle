@@ -46,7 +46,6 @@ import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHead
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
 import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
 import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
-import CallChatPanel from "@/components/calls/CallChatPanel.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -415,27 +414,6 @@ const callChatMessages = computed(() =>
     : [],
 );
 
-// Replies sent from the right-hand huddle thread go on the call's thread,
-// exactly as the expanded surface's Chat tab sends them.
-const callThreadDraft = ref("");
-async function onSendCallThread(
-  body: string,
-  markup: MarkupSpan[],
-  references: MessageReference[],
-  files?: Array<File | Blob>,
-  linkPreview?: ComposerLinkPreviewSendPayload,
-): Promise<void> {
-  const threadId = activeCallThreadId.value?.trim();
-  if (!threadId) return;
-  const override = { threadId };
-  if (props.sendCallChatMessage) {
-    await props.sendCallChatMessage(body, markup, references, files, undefined, override, linkPreview);
-  } else {
-    emit("sendCallChat", body, markup, references, files, undefined, override, linkPreview);
-  }
-  callThreadDraft.value = "";
-}
-
 // Drive the Chat tab's unread badge: inbound (non-self) call-thread messages
 // accumulate while the Chat tab isn't the focused dock tab and clear once it is.
 const callDockOpen = useStore($callDockOpen);
@@ -762,16 +740,11 @@ function dayDividerLabel(createdAt: string): string {
   return formatTimelineDayDivider(createdAt);
 }
 
-/** DMs (1:1 and group) read as bubbles in a centred lane (App-DM); rooms use message rows. */
-const bubbleKind = computed<"direct" | "group" | undefined>(() => {
-  if (props.dmPeer) return "direct";
-  return props.channel && props.sidebarMode === "dms" ? "group" : undefined;
-});
 
 const cls = {
-  // Column-wrap flex: the call stage (`.call-split`, whose flex-basis is the
-  // persisted split percent of this box) and its thread wrap into a 400px
-  // right-hand column at xl; below xl the stage stacks above the room.
+  // Column-wrap flex: the call stage (`.call-split`) wraps into a full-height
+  // 400px right-hand column at xl; below xl it stacks above the room, sized by
+  // the persisted split percent and its resize handle.
   root: css({
     position: "relative",
     flex: 1,
@@ -782,55 +755,22 @@ const cls = {
     bg: "bg",
     // The stage and its resize handle stack above the room below xl.
     "& > .call-split, & > .call-split + [role=separator]": { order: { base: -1, xl: 0 } },
-    "& > [data-part=thread]": { display: { base: "none", xl: "flex" } },
     "&:has(> .call-split)": { flexWrap: { xl: "wrap" } },
     "&:has(> .call-split) > [data-part=main]": { flexBasis: { xl: "100%" }, width: { xl: "calc(100% - 400px)" } },
-    "&:has(> .call-split) > .call-split + [role=separator]": { width: { xl: "400px" } },
+    // Nothing to resize against in the right-hand column.
+    "&:has(> .call-split) > .call-split + [role=separator]": { display: { xl: "none" } },
     // HuddlePanel: the stage fills the 400px column edge to edge (no card inset).
     "&:has(> .call-split) > .call-split": {
+      // Beats the inline split-percent flex-basis.
+      flexBasis: { xl: "100% !important" },
       width: { xl: "400px" },
       margin: { xl: 0 },
       borderRadius: { xl: 0 },
       boxShadow: { xl: "none" },
       borderLeft: { xl: "1px solid {colors.border.soft}" },
     },
-    "&:not(:has(> .call-split)) > [data-part=thread]": { display: "none" },
-    // Huddle-Expanded: the stage takes the main column and the thread stays
-    // in the right-hand column; immersive still covers everything.
-    "&:has(> .call-expanded:not(.call-expanded--immersive)) > [data-part=thread]": {
-      display: { xl: "flex" },
-      position: { xl: "absolute" },
-      insetBlock: { xl: 0 },
-      insetInlineEnd: { xl: 0 },
-      zIndex: { xl: 30 },
-    },
-    "& > .call-expanded:not(.call-expanded--immersive)": { insetInlineEnd: { xl: "400px" } },
   }),
   main: css({ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, width: "100%" }),
-  callThread: css({
-    flex: 1,
-    flexDirection: "column",
-    width: "400px",
-    minHeight: 0,
-    borderLeft: "1px solid {colors.border.soft}",
-    bg: "bg.rail",
-    "& > :last-child": { flex: 1, minHeight: 0 },
-    // 400px column: keep the composer to attach, emoji and send.
-    "& [data-composer-wide]": { display: "none" },
-  }),
-  callThreadHead: css({
-    display: "flex",
-    alignItems: "center",
-    gap: "2",
-    px: "4",
-    py: "3",
-    borderTop: "1px solid {colors.border.soft}",
-    borderBottom: "1px solid {colors.border.soft}",
-  }),
-  callThreadTitle: css({ margin: 0, font: "700 16px/1.25 {fonts.display}", color: "fg" }),
-  callThreadCount: css({ textStyle: "caption", color: "fg.muted" }),
-  // Bubbles keep a readable lane on wide screens.
-  dmLane: css({ width: "100%", maxWidth: "760px", mx: "auto" }),
   dropZone: css({
     position: "absolute",
     inset: "3",
@@ -886,8 +826,6 @@ const cls = {
   liveEdgeEnd: css({ mt: "auto" }),
   pane: css({ position: "relative", display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0 }),
   dayMarker: css({ flex: "none", pt: "1" }),
-  // A centred caption for DMs (App-DM "Today"), a ruled divider in rooms.
-  dayCaption: css({ display: "flex", justifyContent: "center", pt: "1", pb: "3", textStyle: "caption", color: "fg.muted" }),
   jump: css({
     position: "absolute",
     left: "50%",
@@ -1048,9 +986,8 @@ const cls = {
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
-      :class="bubbleKind && cls.dmLane"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
-      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : bubbleKind ? `Message ${channel?.name ?? 'conversation'}` : undefined"
+      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : channel && sidebarMode === 'dms' ? `Message ${channel.name}` : undefined"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
@@ -1091,7 +1028,6 @@ const cls = {
     <!-- Typing indicator (social / top-pinned mode) -->
     <TypingIndicator
       v-if="typingUsers.length > 0 && isTopPinned"
-      :class="bubbleKind && cls.dmLane"
       variant="social"
       :typing-users="typingUsers"
       :avatar-jid-for="typingAvatarJid"
@@ -1100,7 +1036,7 @@ const cls = {
 
     <div
       v-if="currentDayMarkerLabel"
-      :class="cx(separator(), cls.dayMarker, bubbleKind && cls.dmLane)"
+      :class="cx(separator(), cls.dayMarker)"
       role="status"
       aria-live="polite"
     >
@@ -1153,7 +1089,7 @@ const cls = {
       :has-older="hasOlderMessages"
       :loading-older="isLoadingOlderMessages"
       :sentinel-position="olderSentinelPosition"
-      :content-class="cx(bubbleKind && cls.dmLane, !isTopPinned && cls.liveEdgeEnd)"
+      :content-class="cx(!isTopPinned && cls.liveEdgeEnd)"
       aria-label="Messages"
       @scroll="onMessagesScroll"
       @load-older="emit('loadOlder')"
@@ -1161,7 +1097,7 @@ const cls = {
       <template #item="{ item: msg }">
           <div
             v-if="showDayDividerBefore(msg)"
-            :class="bubbleKind ? cls.dayCaption : separator()"
+            :class="separator()"
             :data-day-marker-created-at="msg.createdAt"
             role="separator"
             :aria-label="dayDividerLabel(msg.createdAt)"
@@ -1200,7 +1136,6 @@ const cls = {
             :link-preview-scope="linkPreviewScope"
             :call-room-jid="callAnchorConversationJid"
             :call-channel-id="channel?.id ?? null"
-            :bubble="bubbleKind"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -1240,7 +1175,6 @@ const cls = {
     <!-- Typing indicator (chat / bottom-pinned mode) -->
     <TypingIndicator
       v-if="typingUsers.length > 0 && !isTopPinned"
-      :class="bubbleKind && cls.dmLane"
       variant="chat"
       :typing-users="typingUsers"
       :avatar-jid-for="typingAvatarJid"
@@ -1253,9 +1187,8 @@ const cls = {
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
-      :class="bubbleKind && cls.dmLane"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
-      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : bubbleKind ? `Message ${channel?.name ?? 'conversation'}` : undefined"
+      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : channel && sidebarMode === 'dms' ? `Message ${channel.name}` : undefined"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
@@ -1315,32 +1248,6 @@ const cls = {
       :space-id="waddle?.id"
       :channel-id="channel?.id"
     />
-    <section
-      v-if="callRoomJid || dmPeer?.peerJid"
-      data-part="thread"
-      :class="cls.callThread"
-      :aria-label="dmPeer ? 'Call thread' : 'Huddle thread'"
-    >
-      <header :class="cls.callThreadHead">
-        <h2 :class="cls.callThreadTitle">{{ dmPeer ? "Call thread" : "Huddle thread" }}</h2>
-        <span :class="cls.callThreadCount">{{ callChatMessages.length === 1 ? "1 reply" : `${callChatMessages.length} replies` }}</span>
-      </header>
-      <CallChatPanel
-        v-model:draft="callThreadDraft"
-        :messages="callChatMessages"
-        :visible="true"
-        :avatar-jid-for="avatarJidFor"
-        :is-sending="isSending"
-        :disabled="!canShowComposer || !activeCallThreadId"
-        :mention-candidates="mentionCandidates"
-        :slow-mode-cooldown="slowModeCooldown"
-        :upload-progress="uploadProgress"
-        :in-muc="!dmPeer"
-        :link-preview-lookup="linkPreviewLookup"
-        :link-preview-scope="linkPreviewScope"
-        @send="onSendCallThread"
-      />
-    </section>
     <!-- Expanded call surface: absolutely positioned over the chat
          content pane (this root has `position: relative`) so the
          surrounding app shell — waddles rail, channel list, thread
