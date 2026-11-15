@@ -68,17 +68,49 @@ tests:
           - labels: 'ALERTS{alertname="TransportTaskPanickedOrAbandoned",alertstate="firing",severity="critical",team="waddle"}'
             value: 1
 
-  - name: a refused restricted start fires at once
+  - name: a refused restricted start fires from its first sample, with no zero baseline
     interval: 1m
     input_series:
+      # The refusing process exports its count once and exits.
       - series: 'waddle_restricted_runtime_startup_refusals_total{instance="b",stage="preflight"}'
-        values: '0x5 2x30'
+        values: '_x5 1 1'
+      - series: 'waddle_restricted_runtime_attach_failures_total{instance="b",store="sm_persistence"}'
+        values: '_x5 1 1'
+      - series: 'waddle_restricted_runtime_startup_refusals_total{instance="a",stage="preflight"}'
+        values: '0x60'
     promql_expr_test:
       - expr: 'ALERTS{alertname="RestrictedStartupRefusing",alertstate="firing"}'
         eval_time: 7m
         exp_samples:
           - labels: 'ALERTS{alertname="RestrictedStartupRefusing",alertstate="firing",stage="preflight",severity="critical",team="waddle"}'
             value: 1
+      - expr: 'ALERTS{alertname="RestrictedAttachFailing",alertstate="firing"}'
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RestrictedAttachFailing",alertstate="firing",store="sm_persistence",severity="critical",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="RestrictedStartupRefusing",alertstate="firing"}'
+        eval_time: 40m
+        exp_samples: []
+
+  - name: starts refused for half an hour fire the keypool alert and one refusal does not
+    interval: 1m
+    input_series:
+      # A restart loop: one sample every five minutes, no zero in between.
+      - series: 'waddle_restricted_runtime_startup_refusals_total{instance="a",stage="startup"}'
+        values: '1 _x4 1 _x4 1 _x4 1 _x4 1 _x4 1 _x4 1 _x4 1 _x4 1 _x49'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="KeypoolActivationPendingTooLong",alertstate="firing"}'
+        eval_time: 20m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="KeypoolActivationPendingTooLong",alertstate="firing"}'
+        eval_time: 35m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KeypoolActivationPendingTooLong",alertstate="firing",severity="critical",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="KeypoolActivationPendingTooLong",alertstate="firing"}'
+        eval_time: 85m
+        exp_samples: []
 
   - name: an old destroy completion fires after its hold and uses max across pods
     interval: 1m

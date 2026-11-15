@@ -119,7 +119,7 @@ where
     where
         Tm: Into<Option<Duration>>,
     {
-        let signal = Signal::Message {
+        let mut signal = Signal::Message {
             message: Box::new(self.msg),
             actor_ref: self.actor_ref.clone(),
             reply: None,
@@ -143,6 +143,10 @@ where
 
         tokio::spawn(async move {
             tokio::time::sleep(duration).await;
+            // The timer is not mailbox wait: restart the queue-wait clock.
+            if let Signal::Message { enqueued_at, .. } = &mut signal {
+                *enqueued_at = std::time::Instant::now();
+            }
             match mailbox_timeout {
                 Some(timeout) => Ok(tx.send_timeout(signal, timeout).await?),
                 None => Ok(tx.send(signal).await?),

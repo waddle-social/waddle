@@ -491,8 +491,12 @@ groups:
             summary: Submissions to a remote room owner ended without a known outcome.
     - name: waddle-authority-restricted-runtime
       rules:
+        # A process that refuses or fails an attachment exits after flushing
+        # its count, so its first exported sample is already non-zero and
+        # `increase()` has no baseline to rise from. Any non-zero sample is
+        # a refusal: a serving pod only ever exports the registered zero.
         - alert: RestrictedStartupRefusing
-          expr: sum by (stage) (increase(waddle_restricted_runtime_startup_refusals_total[15m])) > 0
+          expr: sum by (stage) (max_over_time(waddle_restricted_runtime_startup_refusals_total[15m])) > 0
           labels:
             severity: critical
             team: waddle
@@ -500,7 +504,7 @@ groups:
             runbook: docs/runbooks/node-recovery-and-drain.md, "Restricted attach refusal at startup". The `stage` label says where. The pod exits after flushing this count, so the series comes from pods that have since restarted.
             summary: A server pod refused to start under the restricted database role.
         - alert: RestrictedAttachFailing
-          expr: sum by (store) (increase(waddle_restricted_runtime_attach_failures_total[15m])) > 0
+          expr: sum by (store) (max_over_time(waddle_restricted_runtime_attach_failures_total[15m])) > 0
           labels:
             severity: critical
             team: waddle
@@ -508,13 +512,13 @@ groups:
             runbook: docs/runbooks/node-recovery-and-drain.md, "Restricted attach refusal at startup". The `store` label names the store.
             summary: A store failed its attachment verification under the restricted database role.
         - alert: KeypoolActivationPendingTooLong
-          expr: sum(increase(waddle_restricted_runtime_startup_refusals_total{stage="startup"}[30m])) > 5
+          expr: sum(max_over_time(waddle_restricted_runtime_startup_refusals_total{stage="startup"}[10m])) > 0
           for: 30m
           labels:
             severity: critical
             team: waddle
           annotations:
-            runbook: docs/runbooks/node-recovery-and-drain.md, "Stuck keypool activation". Read `SELECT state, activation_after FROM clustering_keypool` as the schema owner; a pending generation needs the owner phase run again after its activation time. In the week before 2026-11-15 production refused 20 starts in two hours on 2026-11-14 while pods restarted in a loop, and none otherwise.
+            runbook: docs/runbooks/node-recovery-and-drain.md, "Stuck keypool activation". Read `SELECT state, activation_after FROM clustering_keypool` as the schema owner; a pending generation needs the owner phase run again after its activation time. The 10-minute window outlasts the restart back-off, so the condition holds for 30 minutes only while starts keep being refused. In the week before 2026-11-15 production refused starts for about two hours on 2026-11-14 while pods restarted in a loop, and at no other time.
             summary: Pods have refused to start for 30 minutes at the store attachment stage.
     - name: waddle-authority-stream-management
       rules:

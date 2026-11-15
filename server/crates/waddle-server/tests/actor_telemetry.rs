@@ -185,6 +185,33 @@ async fn a_message_sent_during_startup_waits_out_on_start() {
 }
 
 #[tokio::test]
+async fn a_scheduled_send_does_not_count_its_delay_as_queue_wait() {
+    let metrics = test_support::acquire().await;
+    install();
+
+    let probe = Probe::spawn(Probe);
+    probe.wait_for_startup().await;
+    probe
+        .tell(Work)
+        .send_after(Duration::from_millis(150))
+        .await
+        .expect("scheduled task")
+        .expect("scheduled send");
+    probe
+        .ask(Work)
+        .await
+        .expect("ask after the scheduled message");
+
+    let waited = metrics
+        .histogram_sum("waddle.actor.message.queue_wait", OTHER)
+        .expect("queue wait sum");
+    assert!(
+        waited < 0.1,
+        "the 150 ms timer is not mailbox congestion, got {waited}"
+    );
+}
+
+#[tokio::test]
 async fn an_actor_that_fails_to_start_is_neither_started_nor_stopped() {
     let metrics = test_support::acquire().await;
     install();
