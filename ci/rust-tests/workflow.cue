@@ -108,6 +108,7 @@ workflow: {
 						set -euo pipefail
 						mkdir -p failure-diagnostics
 						python3 - <<'PYLOG'
+						import collections
 						import os
 						import pathlib
 						import urllib.request
@@ -131,11 +132,27 @@ workflow: {
 						# GitHub serves an already-redacted plain-text job log through a
 						# temporary redirect. Keep only its last 200 KiB, never the token.
 						tail = bytearray()
+						excerpts = bytearray()
+						before = collections.deque(maxlen=40)
+						after = 0
 						with opener.open(request, timeout=60) as response:
-						    while chunk := response.read(65536):
-						        tail.extend(chunk)
+						    for line in response:
+						        tail.extend(line)
 						        del tail[:-204800]
+						        matches = any(word in line.lower() for word in (
+						            b"lineage_catalog_fence", b"panicked", b"assertion",
+						        ))
+						        if matches:
+						            if not after:
+						                excerpts.extend(b"\n--- failure context ---\n" + b"".join(before))
+						            after = 41
+						        if after:
+						            excerpts.extend(line)
+						            del excerpts[:-2097152]
+						            after -= 1
+						        before.append(line)
 						pathlib.Path(f"failure-diagnostics/job-{job_id}-tail.log").write_bytes(tail)
+						pathlib.Path(f"failure-diagnostics/job-{job_id}-failure-context.log").write_bytes(excerpts)
 						PYLOG
 						"""#
 				},
