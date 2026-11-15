@@ -19,8 +19,10 @@ use waddle_server::ingress_uow::{
     IngressUnitOfWork, IngressUowError, MailboxAppendOutcome, MailboxError, MailboxRepository,
     MailboxTargetFence,
 };
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::mailbox::DirectRequestKey;
 use waddle_xmpp::ingress::mailbox::{
-    DirectRequestKey, MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxDispositionChange,
+    MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxDispositionChange,
     MailboxDispositionError, MailboxEntryDisposition, MailboxLaneFence, MailboxLaneIdentity,
     MailboxLaneOrigin, MailboxLaneRecipient, MailboxLaneSequence, MailboxOperationKey,
     MailboxOwnerDecision, MailboxRoomLane,
@@ -857,6 +859,10 @@ impl Fixture {
 /// it, and its mailbox entry has the request as parent, not the message.
 /// The collector keeps the message while that entry is not consumed and
 /// takes the request and the entry with the message afterwards.
+///
+/// Direct requests exist only with clustering; without it their parent
+/// lookup always reports the parent missing.
+#[cfg(feature = "clustering")]
 #[tokio::test]
 async fn unconsumed_direct_request_retains_the_message_it_copies() {
     let Some(fixture) = Fixture::open("retain_direct").await else {
