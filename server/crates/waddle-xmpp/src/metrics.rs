@@ -419,6 +419,7 @@ impl Drop for MucOccupancyHandlerTimer {
             .f64_histogram("waddle.muc.occupancy.handler.duration")
             .with_description("Seconds from occupancy message receipt to reply")
             .with_unit("s")
+            .with_boundaries(crate::telemetry::SECOND_SCALE_BUCKETS.to_vec())
             .build()
             .record(
                 self.started.elapsed().as_secs_f64(),
@@ -433,6 +434,7 @@ pub fn record_muc_projection_commit_duration(projection: &str, seconds: f64) {
         .f64_histogram("waddle.muc.projection.commit.duration")
         .with_description("Seconds spent committing a MUC projection revision")
         .with_unit("s")
+        .with_boundaries(crate::telemetry::SECOND_SCALE_BUCKETS.to_vec())
         .build()
         .record(
             seconds,

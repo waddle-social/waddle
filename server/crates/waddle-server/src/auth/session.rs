@@ -199,7 +199,7 @@ impl SessionManager {
             .await
             .map_err(Self::ask_err)?;
 
-        debug!(session_id = %session.id, user_jid = %session.user_jid, "Session created");
+        debug!(user_jid = %session.user_jid, "Session created");
         Ok(())
     }
 
@@ -231,7 +231,7 @@ impl SessionManager {
 
         let native_resume_only = is_native_resume_token_hash(&token_hash);
         if !native_resume_only && token_hash != self.token_hash(&id) {
-            return Err(AuthError::SessionNotFound(id));
+            return Err(AuthError::SessionNotFound);
         }
 
         let expires_at = row_value(row, 3)
@@ -265,7 +265,7 @@ impl SessionManager {
         let auth_context_id = row_value(row, 8)
             .and_then(ValueExt::as_optional_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get auth context id: {e}")))?
-            .ok_or_else(|| AuthError::SessionNotFound(id.clone()))?
+            .ok_or(AuthError::SessionNotFound)?
             .parse()
             .map_err(|e| AuthError::DatabaseError(format!("invalid auth context id: {e}")))?;
         let auth_context_version = integer_column(row, 9, "auth context version")?;
@@ -286,7 +286,7 @@ impl SessionManager {
         })
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
         let sql = r#"
             SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
@@ -314,7 +314,7 @@ impl SessionManager {
             // they are indistinguishable from absent here.
             Some(values) => match self.values_to_session(&values) {
                 Ok(session) => Ok((!session.native_resume_only).then_some(session)),
-                Err(AuthError::SessionNotFound(_)) => Ok(None),
+                Err(AuthError::SessionNotFound) => Ok(None),
                 Err(error) => Err(error),
             },
             None => Ok(None),
@@ -375,7 +375,7 @@ impl SessionManager {
         PrincipalResolution::Resolved(session)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn touch_session(&self, session_id: &str) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
 
@@ -392,7 +392,7 @@ impl SessionManager {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         self.actor
             .ask(DbExecute {
@@ -404,7 +404,7 @@ impl SessionManager {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn validate_session(&self, session_id: &str) -> Result<Session, AuthError> {
         let session = self.validate_session_without_touch(session_id).await?;
         self.touch_session(session_id).await?;
@@ -419,10 +419,10 @@ impl SessionManager {
         let session = self
             .get_session(session_id)
             .await?
-            .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
+            .ok_or(AuthError::SessionNotFound)?;
 
         if session.is_expired() {
-            warn!(session_id = %session_id, "Session expired");
+            warn!("Session expired");
             return Err(AuthError::SessionExpired);
         }
 
@@ -553,7 +553,7 @@ mod tests {
             .is_none());
         assert!(matches!(
             manager.validate_session(&session.id).await,
-            Err(super::AuthError::SessionNotFound(_))
+            Err(super::AuthError::SessionNotFound)
         ));
     }
 
@@ -674,7 +674,7 @@ mod tests {
             .is_none());
         assert!(matches!(
             manager.validate_session(&session.id).await,
-            Err(super::AuthError::SessionNotFound(_))
+            Err(super::AuthError::SessionNotFound)
         ));
 
         // The SM resume fence still resolves it as a durable principal.

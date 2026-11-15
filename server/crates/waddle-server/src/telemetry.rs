@@ -291,6 +291,80 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq)]
+    struct NoticesPassed {
+        warn: usize,
+        error: usize,
+    }
+
+    /// Emit one WARN and one ERROR Postgres notice under `filter` and count
+    /// what gets through.
+    fn postgres_notices_passing(filter: tracing_subscriber::EnvFilter) -> NoticesPassed {
+        #[derive(Clone, Default)]
+        struct Count {
+            warn: Arc<AtomicUsize>,
+            error: Arc<AtomicUsize>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let counter = if *event.metadata().level() == tracing::Level::ERROR {
+                    &self.error
+                } else {
+                    &self.warn
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let count = Count::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(count.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "sqlx::postgres::notice", "there is no transaction in progress");
+            tracing::error!(target: "sqlx::postgres::notice", "a real server error");
+        });
+        NoticesPassed {
+            warn: count.warn.load(Ordering::SeqCst),
+            error: count.error.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Every pool checkout issues a defensive `ROLLBACK`; Postgres answers
+    /// with a NOTICE that sqlx logs at WARN, once per checkout.
+    #[test]
+    fn postgres_notices_below_error_are_silenced_by_default() {
+        for (rust_log, waddle_log_level) in [
+            (None, None),
+            (Some("info"), None),
+            (None, Some("debug")),
+            // Unparseable directives fall back to the default, still quiet.
+            (Some("info,sqlx::postgres::notice=bogus"), None),
+            // A different target that merely shares the prefix is no opt-in.
+            (Some("info,sqlx::postgres::notice_extra=debug"), None),
+        ] {
+            assert_eq!(
+                postgres_notices_passing(super::log_filter_from(rust_log, waddle_log_level)),
+                NoticesPassed { warn: 0, error: 1 },
+                "RUST_LOG={rust_log:?} WADDLE_LOG_LEVEL={waddle_log_level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_operator_can_turn_postgres_notices_back_on() {
+        assert_eq!(
+            postgres_notices_passing(super::log_filter_from(
+                Some("info,sqlx::postgres::notice=warn"),
+                None
+            )),
+            NoticesPassed { warn: 1, error: 1 }
+        );
+    }
+
     #[test]
     fn test_log_bridge_filter_directives_parse() {
         // Constructing the filter parses every `<target>=off` directive
@@ -453,6 +527,8 @@ pub use implementation::init_local;
 use implementation::is_known_sampler;
 #[cfg(test)]
 use implementation::log_bridge_filter;
+#[cfg(test)]
+use implementation::log_filter_from;
 pub(crate) use implementation::mark_span_error;
 #[cfg(test)]
 use implementation::resolve_service_instance_id;

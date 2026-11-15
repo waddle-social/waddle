@@ -211,7 +211,7 @@ pub(in crate::server::routes) fn auth_error_to_response(
         AuthError::InvalidProvider(_) | AuthError::InvalidRequest(_) | AuthError::InvalidState => {
             StatusCode::BAD_REQUEST
         }
-        AuthError::SessionNotFound(_) => StatusCode::NOT_FOUND,
+        AuthError::SessionNotFound => StatusCode::NOT_FOUND,
         AuthError::SessionExpired => StatusCode::UNAUTHORIZED,
         AuthError::AuthorizationFailed(_)
         | AuthError::TokenExchangeFailed(_)
@@ -226,7 +226,7 @@ pub(in crate::server::routes) fn auth_error_to_response(
         AuthError::InvalidProvider(_) => "invalid_provider",
         AuthError::InvalidRequest(_) => "invalid_request",
         AuthError::InvalidState => "invalid_state",
-        AuthError::SessionNotFound(_) => "session_not_found",
+        AuthError::SessionNotFound => "session_not_found",
         AuthError::SessionExpired => "session_expired",
         AuthError::AuthorizationFailed(_) => "authorization_failed",
         AuthError::TokenExchangeFailed(_) => "token_exchange_failed",
@@ -419,7 +419,7 @@ pub async fn start_handler(
     }
 }
 
-#[instrument(skip(state, headers))]
+#[instrument(skip_all)]
 pub async fn session_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<super::SessionQuery>,
@@ -430,10 +430,7 @@ pub async fn session_handler(
         .or_else(|| AuthState::extract_session_cookie(&headers));
 
     let Some(session_id) = session_id else {
-        return auth_error_to_response(AuthError::SessionNotFound(
-            "missing session identifier".to_string(),
-        ))
-        .into_response();
+        return auth_error_to_response(AuthError::SessionNotFound).into_response();
     };
 
     match state.session_manager.get_session(&session_id).await {
@@ -467,12 +464,12 @@ pub async fn session_handler(
             )
                 .into_response()
         }
-        Ok(None) => auth_error_to_response(AuthError::SessionNotFound(session_id)).into_response(),
+        Ok(None) => auth_error_to_response(AuthError::SessionNotFound).into_response(),
         Err(err) => auth_error_to_response(err).into_response(),
     }
 }
 
-#[instrument(skip(state, headers))]
+#[instrument(skip_all)]
 pub async fn logout_handler(
     State(state): State<Arc<AuthState>>,
     headers: axum::http::HeaderMap,
