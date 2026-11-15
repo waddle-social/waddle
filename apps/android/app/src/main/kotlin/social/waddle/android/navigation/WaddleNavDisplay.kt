@@ -28,7 +28,6 @@ import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.dm.GroupDmScreen
-import social.waddle.android.feature.home.HomeScreen
 import social.waddle.android.feature.members.MembersScreen
 import social.waddle.android.feature.people.PeopleScreen
 import social.waddle.android.feature.profile.ProfileScreen
@@ -42,7 +41,7 @@ import social.waddle.android.ui.EmptyState
 import social.waddle.android.ui.LocalOpenConversation
 
 /**
- * Navigation 3 host: a saveable [NavBackStack] rooted at Home rendered by
+ * Navigation 3 host: a saveable [NavBackStack] rooted at the conversation list rendered by
  * [NavDisplay]. [sideEffects] lets the shell attach back-stack effects
  * (notification-tap navigation) without owning the stack.
  */
@@ -76,7 +75,6 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                             onOpenPage = { page ->
                                 backStack.showConversation(
                                     when (page) {
-                                        SidebarPage.DASHBOARD -> WaddleNavKey.Dashboard
                                         SidebarPage.PEOPLE -> WaddleNavKey.People
                                     },
                                 )
@@ -96,7 +94,6 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                             onOpenSettings = { backStack.add(WaddleNavKey.Settings) },
                         ),
                         current = when (backStack.lastOrNull()) {
-                            WaddleNavKey.Dashboard -> SidebarPage.DASHBOARD
                             WaddleNavKey.People -> SidebarPage.PEOPLE
                             else -> null
                         },
@@ -105,18 +102,6 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
             }
             // Pages opened from the sidebar; what they open is pushed on
             // top, so back returns to the page.
-            entry<WaddleNavKey.Dashboard>(metadata = ListDetailSceneStrategy.detailPane()) {
-                val speaking by LocalAppGraph.current.callSessionController.speakingJids.collectAsStateWithLifecycle()
-                HomeScreen(
-                    onOpenChannel = { roomJid, name -> backStack.add(WaddleNavKey.Channel(roomJid, name)) },
-                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid, name)) },
-                    onOpenYou = { backStack.add(WaddleNavKey.You) },
-                    onOpenPeople = { backStack.add(WaddleNavKey.People) },
-                    onOpenRooms = { backStack.add(WaddleNavKey.Rooms) },
-                    speaking = speaking,
-                    onBack = { backStack.popSafely() },
-                )
-            }
             entry<WaddleNavKey.Rooms>(metadata = ListDetailSceneStrategy.detailPane()) {
                 val speaking by LocalAppGraph.current.callSessionController.speakingJids.collectAsStateWithLifecycle()
                 RoomsScreen(

@@ -47,9 +47,9 @@ class ListDetailNavigationTest {
     fun `a sidebar page replaces the open conversation`() {
         val backStack = NavBackStack<NavKey>(WaddleNavKey.Home, general)
 
-        backStack.showConversation(WaddleNavKey.Dashboard)
+        backStack.showConversation(WaddleNavKey.People)
 
-        assertEquals(listOf(WaddleNavKey.Home, WaddleNavKey.Dashboard), backStack.toList())
+        assertEquals(listOf(WaddleNavKey.Home, WaddleNavKey.People), backStack.toList())
         assertNull(openConversationJidOf(backStack))
     }
 

@@ -13,6 +13,7 @@ import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
@@ -160,6 +161,16 @@ class TimelineFollowTest {
 
         compose.onNodeWithText("message 5").assertIsDisplayed()
         compose.onNodeWithText("message 41").assertIsNotDisplayed()
+    }
+
+    @Test
+    fun `jump to latest appears as soon as the newest message is off screen`() {
+        showTimeline()
+        compose.onNode(hasScrollAction()).performScrollToIndex(1)
+
+        compose.onNodeWithText("Latest").assertIsDisplayed().performClick()
+
+        compose.onNodeWithText("message 40").assertIsDisplayed()
     }
 
     @Test

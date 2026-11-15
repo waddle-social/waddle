@@ -65,6 +65,7 @@ import java.time.Instant
 /** Everything a timeline row can do, bundled so rows take one parameter. */
 class MessageRowActions(
     val onLongPress: (TimelineItem) -> Unit = {},
+    val onReply: ((TimelineItem) -> Unit)? = null,
     val onToggleReaction: (TimelineItem, String) -> Unit = { _, _ -> },
     val onOpenThread: ((TimelineItem) -> Unit)? = null,
     val onQuoteClick: (TimelineItem) -> Unit = {},
@@ -114,6 +115,7 @@ private class RowTaps(
     /** The post itself: opens its thread when it has replies. */
     val onOpenThread: (() -> Unit)?,
     val onOpenProfile: (() -> Unit)?,
+    val onReply: (() -> Unit)? = null,
 )
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -139,9 +141,16 @@ private fun RowFrame(
             true
         }
     }
+    val replyAction = taps.onReply?.let { reply ->
+        CustomAccessibilityAction(stringResource(R.string.action_reply)) {
+            reply()
+            true
+        }
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .swipeToReply(taps.onReply)
             .then(if (entry.mentionsSelf) Modifier.mentionWash(colors.gold, colors.goldSubtle) else Modifier)
             .then(
                 if (onLongPress != null) {
@@ -163,7 +172,7 @@ private fun RowFrame(
                 },
             )
             .semantics(mergeDescendants = true) {
-                if (profileAction != null) customActions = listOf(profileAction)
+                customActions = listOfNotNull(profileAction, replyAction)
             }
             .padding(
                 start = Waddle.space.md,
@@ -331,6 +340,12 @@ private fun StoredMessageRow(
         taps = RowTaps(
             onLongPress = if (item.rejected) null else ({ actions.onLongPress(item) }),
             onOpenThread = openThread,
+            onReply = actions.onReply
+                ?.takeIf {
+                    !item.rejected && item.tombstone == null && item.from != null &&
+                        actionTargetIdOf(item, groupchat, item.conversationJid) != null
+                }
+                ?.let { reply -> { reply(item) } },
             onOpenProfile = openProfile,
         ),
         modifier = modifier,
@@ -470,7 +485,9 @@ private fun MessageHeader(
         itemVerticalAlignment = Alignment.CenterVertically,
     ) {
         AuthorName(author = author, onClick = onAuthorClick)
-        badge?.let { HatTag(it) }
+        badge?.takeIf {
+            it.kind == AuthorBadgeKind.BOT || it.kind == AuthorBadgeKind.HAT || it.kind == AuthorBadgeKind.VERIFIED
+        }?.let { HatTag(it) }
         Text(
             text = clock.time(sentAt),
             style = Waddle.type.time,

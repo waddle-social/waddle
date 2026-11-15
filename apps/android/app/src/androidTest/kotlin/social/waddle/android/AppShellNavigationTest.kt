@@ -24,7 +24,6 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import social.waddle.android.feature.home.HomeScreenTestTags
 import social.waddle.android.feature.people.PeopleScreenTestTags
 import social.waddle.android.feature.rooms.RoomsScreenTestTags
 import social.waddle.android.feature.sidebar.SidebarTestTags
@@ -103,28 +102,24 @@ class AppShellNavigationTest {
     }
 
     @Test
-    fun readyGraphComposesSidebar() {
+    fun readyGraphOpensConversationListWithoutDashboard() {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
         listOf(
-            SidebarTestTags.DASHBOARD,
             SidebarTestTags.PEOPLE,
             SidebarTestTags.BROWSE_ROOMS,
             SidebarTestTags.ALL_DMS,
             SidebarTestTags.YOU,
             SidebarTestTags.SETTINGS,
         ).forEach { composeRule.onNodeWithTag(it).assertExists() }
+        composeRule.onNodeWithTag("sidebar-dashboard").assertDoesNotExist()
     }
 
     @Test
     fun everySidebarPageOpensAndBackReturns() {
         harness.signInAndConnect()
         composeAppShell()
-        waitForHome()
-        tap(SidebarTestTags.DASHBOARD)
-        waitForTag(HomeScreenTestTags.SCREEN)
-        back()
         waitForHome()
         tap(SidebarTestTags.BROWSE_ROOMS)
         waitForTag(RoomsScreenTestTags.SCREEN)
@@ -155,21 +150,6 @@ class AppShellNavigationTest {
         tap(SidebarTestTags.BROWSE_ROOMS)
         // The fake topology is empty: once it settles, an invitation.
         waitForText("No rooms yet. Create the first one and invite people in.")
-    }
-
-    @Test
-    fun dashboardLinksPushOverTheDashboard() {
-        harness.signInAndConnect()
-        composeAppShell()
-        waitForHome()
-        tap(SidebarTestTags.DASHBOARD)
-        waitForTag(HomeScreenTestTags.SCREEN)
-        // The account avatar in the dashboard header leads to You.
-        tap(HomeScreenTestTags.ACCOUNT_ACTION)
-        waitForText(composeRule.activity.getString(R.string.you_profile))
-        back()
-        // Back lands on the dashboard, not the sidebar.
-        waitForTag(HomeScreenTestTags.SCREEN)
     }
 
     @Test

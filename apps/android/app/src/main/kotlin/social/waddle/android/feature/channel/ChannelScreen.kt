@@ -152,13 +152,13 @@ fun ChannelScreen(
     }
 
     ConversationScreen(
-        // Chat's header: the bare name over the community; "#" stays in the composer's placeholder.
-        title = name,
+        title = stringResource(R.string.home_channel_label, name),
         kind = ConversationKind.Room(stringResource(R.string.home_channel_label, name)),
         titleSubline = {
             RoomHeaderSubline(
                 community = session?.jid?.let(::bareJidOf)?.substringAfter('@'),
                 here = headcount?.here,
+                onOpenMembers = onOpenMembers,
                 huddle = resolvedNicks.size.takeIf { it > 0 }?.let { HeaderHuddle(it, video = roomHasVideoCall) },
             )
         },

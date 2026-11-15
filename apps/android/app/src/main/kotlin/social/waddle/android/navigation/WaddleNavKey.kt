@@ -14,10 +14,6 @@ sealed interface WaddleNavKey : NavKey {
     @Serializable
     data object Home : WaddleNavKey
 
-    /** The Home dashboard, opened from the sidebar. */
-    @Serializable
-    data object Dashboard : WaddleNavKey
-
     /** Browse rooms. */
     @Serializable
     data object Rooms : WaddleNavKey

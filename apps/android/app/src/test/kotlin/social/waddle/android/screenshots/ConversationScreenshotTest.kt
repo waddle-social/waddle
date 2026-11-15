@@ -68,7 +68,7 @@ class ConversationScreenshotTest {
     fun roomBusy() = captureThemed("conversation_room") {
         ConversationFixtures.Pinned {
             ConversationScreen(
-                title = "general",
+                title = "#general",
                 viewModel = ConversationFixtures.viewModel(
                     conversationJid = ConversationFixtures.ROOM,
                     isGroupchat = true,
@@ -96,7 +96,7 @@ class ConversationScreenshotTest {
     fun roomEmpty() = captureThemed("conversation_room_empty") {
         ConversationFixtures.Pinned {
             ConversationScreen(
-                title = "design-crit",
+                title = "#design-crit",
                 viewModel = ConversationFixtures.viewModel(
                     conversationJid = "design-crit@muc.waddle.test",
                     isGroupchat = true,

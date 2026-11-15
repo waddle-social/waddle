@@ -130,7 +130,7 @@
     <string name="composer_send">Send</string>
     <string name="conversation_more">More options</string>
     <string name="call_start">Call</string>
-    <string name="composer_more">Add attachment, GIF or sticker</string>
+    <string name="composer_more">More message options</string>
     <string name="composer_formatting">Formatting</string>
     <string name="composer_mention">Mention someone</string>
     <string name="composer_command">Run a command</string>
@@ -690,8 +690,8 @@
     <string name="timeline_empty_thread_title">No replies yet</string>
     <string name="timeline_empty_thread_body">Start the thread. Your reply lands here and under the message it answers.</string>
     <plurals name="room_header_here">
-        <item quantity="one">%d here</item>
-        <item quantity="other">%d here</item>
+        <item quantity="one">%d online</item>
+        <item quantity="other">%d online</item>
     </plurals>
     <plurals name="room_header_huddle">
         <item quantity="one">Huddle · %d in</item>

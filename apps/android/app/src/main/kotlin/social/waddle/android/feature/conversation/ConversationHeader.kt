@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,18 +60,40 @@ data class HeaderHuddle(val participants: Int, val video: Boolean)
 
 /**
  * Under a room's name, as chat's header has it: the community, then who
- * is here ("5 here", from the people directory's headcount) and, when a
+ * is online (from the people directory's headcount) and, when a
  * huddle is live, the live part: "● Huddle · 3 in".
  */
 @Composable
-fun RoomHeaderSubline(community: String?, here: Int?, huddle: HeaderHuddle?) {
+fun RoomHeaderSubline(
+    community: String?,
+    here: Int?,
+    huddle: HeaderHuddle?,
+    onOpenMembers: (() -> Unit)? = null,
+) {
     if (community == null && here == null && huddle == null) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
     ) {
-        if (community != null) DmHeaderSubline(community)
-        if (here != null) Kicker(text = pluralStringResource(R.plurals.room_header_here, here, here))
+        if (community != null) {
+            Text(
+                text = community,
+                style = MetaStyle,
+                color = Waddle.colors.fgMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+        }
+        if (community != null && here != null) DmHeaderSubline("·")
+        if (here != null) {
+            Text(
+                text = pluralStringResource(R.plurals.room_header_here, here, here),
+                style = MetaStyle,
+                color = Waddle.colors.fgMuted,
+                modifier = if (onOpenMembers != null) Modifier.clickable(onClick = onOpenMembers) else Modifier,
+            )
+        }
         if (huddle != null) {
             Kicker(
                 text = pluralStringResource(

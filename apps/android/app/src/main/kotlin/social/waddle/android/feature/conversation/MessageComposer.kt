@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -103,7 +102,7 @@ import social.waddle.android.ui.huddle.HuddleMotion
 
 /**
  * The composer card (web/iOS parity): reply/edit/upload context, an
- * optional formatting bar, the text, then + menu · Aa · @ · / and a
+ * optional formatting bar and a compact + menu · text ·
  * filled send button. Send clears the draft optimistically.
  * Group chats pass [mentionCandidates]: an active `@token` under the
  * cursor opens [MentionPopover], and accepted mentions travel with the
@@ -327,7 +326,7 @@ fun MessageComposer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(colors.bg)
+            .background(colors.surface2)
             .drawBehind {
                 // The hairline parts the composer from the timeline.
                 val y = if (pinnedTop) size.height else 0f
@@ -366,28 +365,29 @@ fun MessageComposer(
             AnimatedVisibility(visible = formattingOpen) {
                 FormattingBar(onFormat = { format -> insert { applyFormat(it, format) } })
             }
-            ComposerTextField(
-                value = draft,
-                placeholder = placeholder ?: stringResource(R.string.composer_placeholder),
-                // One upload at a time: content arriving meanwhile is left alone.
-                onImage = onImage?.takeIf { uploadState != UploadState.Uploading },
-                onFocusChanged = { focused = it },
-                onValueChange = { value ->
-                    if (value.text != draft.text) onDraftChanged()
-                    updateDraft(value)
-                },
-            )
             ComposerActionRow(
                 canAttach = onAttach != null && uploadState != UploadState.Uploading,
                 onAttach = onAttach,
                 onGif = onGif,
                 onSticker = onSticker,
-                formattingOpen = formattingOpen,
                 onToggleFormatting = { formattingOpen = !formattingOpen },
                 onMention = if (mentionCandidates.isNotEmpty()) ({ insert { insertTrigger(it, "@") } }) else null,
                 onSlash = if (slashDispatch != null) ({ insert { insertTrigger(it, "/") } }) else null,
                 canSend = draft.text.isNotBlank() && !slashDispatching,
                 onSend = ::submit,
+                textField = {
+                    ComposerTextField(
+                        value = draft,
+                        placeholder = placeholder ?: stringResource(R.string.composer_placeholder),
+                        // One upload at a time: content arriving meanwhile is left alone.
+                        onImage = onImage?.takeIf { uploadState != UploadState.Uploading },
+                        onFocusChanged = { focused = it },
+                        onValueChange = { value ->
+                            if (value.text != draft.text) onDraftChanged()
+                            updateDraft(value)
+                        },
+                    )
+                },
             )
         }
         if (pinnedTop) popovers()
@@ -449,6 +449,7 @@ private fun ComposerTextField(
     onImage: ((Uri) -> Unit)?,
     onFocusChanged: (Boolean) -> Unit,
     onValueChange: (TextFieldValue) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val state = remember { TextFieldState(value.text, value.selection) }
     // What both sides last agreed on: an echo of the user's own edit is
@@ -481,11 +482,11 @@ private fun ComposerTextField(
         cursorBrush = SolidColor(colors.action),
         lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = COMPOSER_MAX_LINES),
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .imageReceiver(onImage)
             .onFocusChanged { onFocusChanged(it.isFocused) }
-            .padding(start = Waddle.space.md, end = Waddle.space.md, top = Waddle.space.sm),
+            .padding(horizontal = Waddle.space.xs, vertical = Waddle.space.sm),
         decorator = { inner ->
             Box {
                 if (state.text.isEmpty()) {
@@ -588,19 +589,19 @@ private fun ComposerContext(
     }
 }
 
-/** + · Aa · @ · / … send; every control is a 48dp target. */
+/** + menu · expanding text · send; every control is a 48dp target. */
 @Composable
 private fun ComposerActionRow(
     canAttach: Boolean,
     onAttach: (() -> Unit)?,
     onGif: (() -> Unit)?,
     onSticker: (() -> Unit)?,
-    formattingOpen: Boolean,
     onToggleFormatting: () -> Unit,
     onMention: (() -> Unit)?,
     onSlash: (() -> Unit)?,
     canSend: Boolean,
     onSend: () -> Unit,
+    textField: @Composable () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
@@ -609,58 +610,52 @@ private fun ComposerActionRow(
             .fillMaxWidth()
             .padding(horizontal = Waddle.space.xxs),
     ) {
-        if (onAttach != null || onGif != null || onSticker != null) {
-            Box {
-                PlusButton(open = menuOpen, onClick = { menuOpen = true })
-                DropdownMenu(
-                    expanded = menuOpen,
-                    onDismissRequest = { menuOpen = false },
-                    shape = RoundedCornerShape(Waddle.radius.panel),
-                    containerColor = Waddle.colors.surface,
-                    border = BorderStroke(1.dp, Waddle.colors.border),
-                ) {
-                    onAttach?.let { attach ->
-                        ComposerMenuItem(Icons.Outlined.AttachFile, R.string.composer_attach, enabled = canAttach) {
-                            menuOpen = false
-                            attach()
-                        }
+        Box {
+            PlusButton(open = menuOpen, onClick = { menuOpen = true })
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+                shape = RoundedCornerShape(Waddle.radius.panel),
+                containerColor = Waddle.colors.surface,
+                border = BorderStroke(1.dp, Waddle.colors.border),
+            ) {
+                ComposerMenuItem(Icons.Outlined.TextFields, R.string.composer_formatting) {
+                    menuOpen = false
+                    onToggleFormatting()
+                }
+                onMention?.let { mention ->
+                    ComposerMenuItem(Icons.Outlined.AlternateEmail, R.string.composer_mention) {
+                        menuOpen = false
+                        mention()
                     }
-                    onGif?.let { gif ->
-                        ComposerMenuItem(Icons.Outlined.Gif, R.string.composer_gif) {
-                            menuOpen = false
-                            gif()
-                        }
+                }
+                onSlash?.let { slash ->
+                    ComposerMenuItem(Icons.Outlined.Terminal, R.string.composer_command) {
+                        menuOpen = false
+                        slash()
                     }
-                    onSticker?.let { sticker ->
-                        ComposerMenuItem(Icons.Outlined.EmojiEmotions, R.string.composer_sticker) {
-                            menuOpen = false
-                            sticker()
-                        }
+                }
+                onAttach?.let { attach ->
+                    ComposerMenuItem(Icons.Outlined.AttachFile, R.string.composer_attach, enabled = canAttach) {
+                        menuOpen = false
+                        attach()
+                    }
+                }
+                onGif?.let { gif ->
+                    ComposerMenuItem(Icons.Outlined.Gif, R.string.composer_gif) {
+                        menuOpen = false
+                        gif()
+                    }
+                }
+                onSticker?.let { sticker ->
+                    ComposerMenuItem(Icons.Outlined.EmojiEmotions, R.string.composer_sticker) {
+                        menuOpen = false
+                        sticker()
                     }
                 }
             }
         }
-        ComposerIconButton(
-            icon = Icons.Outlined.TextFields,
-            contentDescription = stringResource(R.string.composer_formatting),
-            onClick = onToggleFormatting,
-            selected = formattingOpen,
-        )
-        onMention?.let {
-            ComposerIconButton(
-                icon = Icons.Outlined.AlternateEmail,
-                contentDescription = stringResource(R.string.composer_mention),
-                onClick = it,
-            )
-        }
-        onSlash?.let {
-            ComposerIconButton(
-                icon = Icons.Outlined.Terminal,
-                contentDescription = stringResource(R.string.composer_command),
-                onClick = it,
-            )
-        }
-        Spacer(Modifier.weight(1f))
+        Box(Modifier.weight(1f)) { textField() }
         SendButton(enabled = canSend, onClick = onSend)
     }
 }

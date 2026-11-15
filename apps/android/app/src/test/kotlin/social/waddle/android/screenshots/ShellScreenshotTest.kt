@@ -119,7 +119,7 @@ class ShellScreenshotTest {
         }
     }
 
-    /** The start screen: community, Home and People, rooms, direct messages and you. */
+    /** The start screen: community, People, rooms, direct messages and you. */
     @Test
     fun sidebar() = captureThemed("sidebar") {
         Shell {
@@ -134,7 +134,7 @@ class ShellScreenshotTest {
         val density = LocalDensity.current
         CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = LARGE_TEXT)) {
             Shell {
-                SidebarContent(state = Fixtures.sidebar, actions = SidebarActions(), current = SidebarPage.DASHBOARD)
+                SidebarContent(state = Fixtures.sidebar, actions = SidebarActions(), current = SidebarPage.PEOPLE)
             }
         }
     }

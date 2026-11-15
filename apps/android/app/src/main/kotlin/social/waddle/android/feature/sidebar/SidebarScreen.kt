@@ -31,7 +31,6 @@ import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Groups
-import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Tag
@@ -85,7 +84,7 @@ import social.waddle.android.ui.huddle.HuddleAvatar
 import social.waddle.android.ui.huddle.LiveDot
 
 /** The pages the sidebar opens; [current] marks the one shown beside it on wide layouts. */
-enum class SidebarPage { DASHBOARD, PEOPLE }
+enum class SidebarPage { PEOPLE }
 
 /** What the sidebar lists. */
 internal data class SidebarState(
@@ -111,7 +110,7 @@ class SidebarActions(
 
 /**
  * The start screen, as chat's sidebar is on phones: the community, a
- * filter over everything listed, Home and People, the rooms and the
+ * filter over everything listed, People, the rooms and the
  * direct messages, and you at the bottom.
  */
 @Composable
@@ -144,7 +143,6 @@ fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null) {
 /** Semantics tags shared with instrumented tests. */
 object SidebarTestTags {
     const val SCREEN = "sidebar-screen"
-    const val DASHBOARD = "sidebar-dashboard"
     const val PEOPLE = "sidebar-people"
     const val BROWSE_ROOMS = "sidebar-browse-rooms"
     const val ALL_DMS = "sidebar-all-dms"
@@ -181,15 +179,6 @@ internal fun SidebarContent(state: SidebarState, actions: SidebarActions, curren
             ),
         ) {
             if (query.isBlank()) {
-                item {
-                    NavRow(
-                        icon = Icons.Outlined.Home,
-                        label = stringResource(R.string.tab_home),
-                        current = current == SidebarPage.DASHBOARD,
-                        modifier = Modifier.testTag(SidebarTestTags.DASHBOARD),
-                        onClick = { actions.onOpenPage(SidebarPage.DASHBOARD) },
-                    )
-                }
                 item {
                     NavRow(
                         icon = Icons.Outlined.People,

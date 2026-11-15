@@ -74,6 +74,7 @@ fun WaddleTopBar(
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
+    containerColor: Color = Waddle.colors.bg,
 ) {
     val colors = Waddle.colors
     TopAppBar(
@@ -83,7 +84,7 @@ fun WaddleTopBar(
         modifier = modifier,
         scrollBehavior = scrollBehavior,
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = colors.bg,
+            containerColor = containerColor,
             scrolledContainerColor = colors.bgRail,
             titleContentColor = colors.fg,
             navigationIconContentColor = colors.fg,
