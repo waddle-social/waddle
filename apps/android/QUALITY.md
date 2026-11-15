@@ -69,6 +69,6 @@ other session of the account is online.
 | Community: feed (0472), stories (0501) | ✅ | ❌ | — | — |
 | Events: create/edit/delete, RSVP and private trip workspaces (links, tasks, itinerary, decisions, polls, travel, expenses, calendar export) | 🟡 | No churn coverage; `EventDatesTest` and `PlanningValidationTest` cover 7 date/timezone, URL and export cases | — | — |
 
-Event creation and planning compile in the Android app. The seven JVM validation cases do not cover reconnects, room permissions, native rendering or an on-device planning flow; those remain separate verification work.
+Event creation and planning compile in the Android app. The seven JVM validation cases do not cover reconnects, room permissions, native rendering or an on-device planning flow; those remain separate verification work. The Events sidebar entry affects six shell goldens: `sidebar`, `sidebar_large_text`, and `home_tab`, each in light and dark mode. The Home dashboard goldens are unchanged from main; updating and reviewing the six sidebar images requires the native renderer.
 
 Resume community surfaces only once the rows above are verified on device.
