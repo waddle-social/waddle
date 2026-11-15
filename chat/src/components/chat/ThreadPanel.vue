@@ -195,6 +195,7 @@ const {
 type VirtualTimelineHandle = ComponentPublicInstance & {
   scrollElement: HTMLDivElement | null;
   scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
+  followEdge: (mode: ScrollDirectionMode) => void;
 };
 const virtualTimelineRef = ref<VirtualTimelineHandle | null>(null);
 
@@ -246,6 +247,7 @@ const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
           mode,
         );
         if (!target) return false;
+        instance.followEdge(mode);
         return instance.scrollToMessageId(
           timelineRowKey(target),
           isTopPinnedScrollDirection(mode) ? "start" : "end",

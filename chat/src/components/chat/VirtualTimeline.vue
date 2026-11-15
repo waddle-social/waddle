@@ -168,10 +168,16 @@ watch(listElement, (list) => {
 }, { flush: "post" });
 onBeforeUnmount(() => followObserver?.disconnect());
 
-async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
-  if (props.items.length === 0) return false;
+/** Starts following the live edge; edge scrolls that bypass
+ * `scrollToPinnedEdge` (thread panels) call this directly. */
+function followEdge(mode: ScrollDirectionMode) {
   bottomMode = !isTopPinnedScrollDirection(mode);
   followBottom = bottomMode;
+}
+
+async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
+  if (props.items.length === 0) return false;
+  followEdge(mode);
   const itemIndex = isTopPinnedScrollDirection(mode) ? 0 : props.items.length - 1;
   virtualizer.value.scrollToIndex(virtualIndexForItemIndex(itemIndex), {
     align: isTopPinnedScrollDirection(mode) ? "start" : "end",
@@ -212,7 +218,7 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   return true;
 }
 
-defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
+defineExpose({ scrollElement, followEdge, scrollToMessageId, scrollToPinnedEdge });
 
 // Chat panes never scroll sideways: long text wraps, <pre> scrolls itself.
 const scrollClass = css({
