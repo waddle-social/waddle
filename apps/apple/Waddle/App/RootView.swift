@@ -65,6 +65,7 @@ private struct SignedInRoot: View {
         .environment(session.coordinator)
         .environment(session.navigation)
         .environment(\.callMediaControls, session.callMedia)
+        .advertisingSelfMute(calls: session.coordinator.calls, media: session.callMedia)
         .sheet(item: $navigation.sheet) { route in
             SheetHost(route: route)
                 .environment(app)
