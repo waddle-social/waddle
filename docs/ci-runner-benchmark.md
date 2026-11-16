@@ -192,13 +192,17 @@ many such jobs fit under the limit at once.
 
 ### Running it
 
-Push the commit to measure to a branch named `ci-benchmark/<anything>`:
-
 ```sh
-git push origin HEAD:refs/heads/ci-benchmark/runner-shapes
+bash scripts/run-runner-benchmark.sh
 ```
 
-Push again to measure a newer commit; delete the branch afterwards. After the
+This pushes the current commit, plus one throwaway commit that appends a
+comment to the server crate, to `ci-benchmark/runner-shapes`. The extra commit
+gives every variant a source tree no cache has seen, as a pull request that
+edits the server does; without it a later pass substitutes earlier archives
+and reports no compile time. Each benchmark lane also has its own archive
+derivation, including `32x64`, which repeats the production settings. Run the
+script again for another pass and delete the branch afterwards. After the
 workflow is on `main` it can also be dispatched manually. The comparison table
 is in the run's `runner-benchmark/summary` job; raw samples and metrics are in
 the `runner-benchmark-*` artifacts.
@@ -224,4 +228,21 @@ about two hours of wall time.
 
 ## Results
 
-None yet.
+### Preliminary: tests only, 2026-11-16
+
+[Run 43779552061](https://github.com/waddle-social/waddle/actions/runs/43779552061)
+ran the production lane on 32x64 and was then cancelled: the compiled archive
+came from a cache, so there is no compile measurement and it is not a
+baseline. Its test phase is the first whole-machine measurement of the lane:
+
+| Measure | Value |
+| --- | ---: |
+| Lane time, tests only | 14.4 min |
+| Busy cores during tests, mean / p95 / max | 1.4 / 4.8 / 10.0 of 32 |
+| Peak memory during tests | 3.4 GB of 64 |
+| Shard times | 749 s, 590 s, 598 s, 391 s |
+
+The job waited 58 minutes for a runner. During the test phase the machine was
+about 95% idle, PostgreSQL included.
+
+Full passes follow here.

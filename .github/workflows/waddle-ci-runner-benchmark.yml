@@ -40,7 +40,7 @@ jobs:
       matrix:
         include:
           - variant: 32x64
-            lane: ""
+            lane: 32x64
             vcpu: 32
             memory: 64
           - variant: 32x64-j16

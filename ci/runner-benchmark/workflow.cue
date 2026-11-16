@@ -10,7 +10,8 @@ import (
 // run one at a time, without `job.priority`, so the benchmark never holds
 // more than one machine and ordinary CI is scheduled ahead of it.
 //
-// Push a commit to a `ci-benchmark/**` branch to measure it. This is not a
+// scripts/run-runner-benchmark.sh pushes a commit to a `ci-benchmark/**`
+// branch to measure it. This is not a
 // `pull_request` workflow on purpose: scripts/integration-ci.ts mirrors every
 // one of those into the merge queue as a verification lane.
 let _checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
@@ -18,9 +19,10 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 let _download = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 let _usage = "python3 scripts/ci-machine-usage.py"
 
-// `lane` names a flake.nix benchmarkShardLanes entry; empty is production.
+// `lane` names a flake.nix benchmarkShardLanes entry. `32x64` repeats the
+// production settings as its own derivation, so the baseline compiles too.
 let _variants = [
-	{variant: "32x64", lane: "", vcpu: 32, memory: 64},
+	{variant: "32x64", lane: "32x64", vcpu: 32, memory: 64},
 	{variant: "32x64-j16", lane: "32x64-j16", vcpu: 32, memory: 64},
 	{variant: "16x32", lane: "16x32", vcpu: 16, memory: 32},
 	{variant: "16x32-j8", lane: "16x32-j8", vcpu: 16, memory: 32},

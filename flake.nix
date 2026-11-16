@@ -106,6 +106,10 @@
             minMemoryGiB = 56;
           };
           benchmarkShardLanes = {
+            # The production settings under a benchmark name: its archive is
+            # a derivation no ordinary CI job builds, so the baseline cannot
+            # be substituted from a cache while the other lanes compile.
+            "32x64" = productionShardLane;
             "16x32" = {
               shardCores = 4;
               cargoBuildJobs = 4;
@@ -160,6 +164,9 @@
               "shard4"
             ];
             CARGO_BUILD_JOBS = toString lane.cargoBuildJobs;
+            # Empty for production. Lanes with equal settings still get their
+            # own archive derivation, so each benchmark variant compiles.
+            waddleBenchmarkLane = lane.benchmarkName or "";
             doInstallCargoArtifacts = false;
             # Metadata lives in out; it contains no runtime libraries. Avoid
             # stdenv adding out/lib to every shard's executable RPATH.
@@ -571,7 +578,7 @@
                 )
               ) [ 1 2 3 4 ]
             )
-          ) benchmarkShardLanes
+          ) (lib.mapAttrs (name: lane: lane // { benchmarkName = name; }) benchmarkShardLanes)
         )
       );
 
