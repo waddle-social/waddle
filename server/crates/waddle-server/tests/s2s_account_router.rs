@@ -6,8 +6,9 @@
 //! work, IQ requests to local resources and their correlation, the bound
 //! on remote requests per domain, a domain the account side no longer
 //! admits, and a local account's messages and presence for remote JIDs
-//! once the account side is attached, refused for a retired account and
-//! beyond the account's share of the pair queues.
+//! once the account side is attached, beyond the account's share of each
+//! pair's queue, and everything a retired account sends refused: account
+//! traffic, IQ requests and responses, and room traffic.
 //!
 //! `home-a.test` runs the router; `home-b.test` sends through its own
 //! connection manager and keeps what it receives. No PostgreSQL, SpiceDB or
@@ -477,6 +478,15 @@ async fn a_request_from_a_domain_the_account_side_no_longer_admits_is_not_answer
     accounts.admit.store(true, Ordering::SeqCst);
     accounts.domain_refused.store(true, Ordering::SeqCst);
 
+    // A barrier behind the request on both of its paths: a message from
+    // the same sender, decided after the request on the sender's queue,
+    // whose answer the recording side gives and the router writes on the
+    // pair's reply queue after anything the request caused.
+    let mut answer = Presence::new(PresenceType::Unavailable);
+    answer.from = Some(jid(ALICE_PHONE));
+    answer.to = Some(jid(BOB_PHONE));
+    answer.id = Some("unadmitted-barrier-answer".to_owned());
+    accounts.answer("unadmitted-barrier", vec![Stanza::Presence(answer)]);
     send(
         &b,
         HOME_B,
@@ -488,15 +498,17 @@ async fn a_request_from_a_domain_the_account_side_no_longer_admits_is_not_answer
         &b,
         HOME_B,
         HOME_A,
-        ping(BOB_PHONE, HOME_A, "unadmitted-control"),
+        chat(BOB_PHONE, ALICE, "unadmitted-barrier"),
     )
     .await;
     wait_for(ARRIVES, || {
-        captured.with_id("unadmitted-control").into_iter().next()
+        captured
+            .with_id("unadmitted-barrier-answer")
+            .into_iter()
+            .next()
     })
     .await
-    .expect("the server answers a ping on the same pair");
-    tokio::time::sleep(QUIET).await;
+    .expect("the barrier's answer arrives");
 
     assert!(captured.with_id("unadmitted").is_empty());
     assert!(a.delivery.iqs("unadmitted").is_empty());
@@ -539,9 +551,53 @@ async fn with_an_account_side_a_local_accounts_direct_message_and_subscription_l
 }
 
 #[tokio::test]
-async fn a_retired_accounts_messages_and_presence_never_leave() {
+async fn a_retired_accounts_stanzas_never_leave() {
     let (_pki, a, b, captured, accounts) = with_accounts(RouterLimits::default()).await;
     accounts.retired.store(true, Ordering::SeqCst);
+
+    // Neither an IQ request nor a response.
+    for iq in [
+        ping(ALICE_PHONE, BOB_PHONE, "retired-ping"),
+        Iq::Result {
+            from: Some(jid(ALICE_PHONE)),
+            to: Some(jid(BOB_PHONE)),
+            id: "retired-result".to_owned(),
+            payload: None,
+        },
+    ] {
+        let to = iq.to().cloned().expect("an addressed IQ");
+        let refused = a.offer_iq(to.as_str(), iq).await;
+        assert!(
+            matches!(
+                refused,
+                IqOffer::Refused {
+                    reason: UnroutableReason::RefusedByPolicy,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+    }
+    // Nor room traffic: a join of a remote room.
+    let mut join = presence(
+        ALICE_PHONE,
+        "room@muc.home-b.test/alice",
+        PresenceType::None,
+        "retired-join",
+    );
+    join.payloads
+        .push(Element::builder("x", waddle_xmpp::muc::presence::NS_MUC).build());
+    let refused = offer(&a, Stanza::Presence(join)).await;
+    assert!(
+        matches!(
+            refused,
+            StanzaOffer::Refused {
+                reason: UnroutableReason::RefusedByPolicy,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
 
     for stanza in [
         Stanza::Message(chat(ALICE_PHONE, BOB, "retired-dm")),
@@ -619,6 +675,58 @@ async fn an_account_beyond_its_share_of_the_pair_queues_is_refused_as_a_full_que
         ),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn an_accounts_share_is_per_pair_so_a_silent_domain_holds_back_no_other() {
+    const SILENT: &str = "silent.test";
+    let limits = RouterLimits {
+        account_queue_per_sender: 1,
+        ..RouterLimits::default()
+    };
+    // A domain whose listener accepts connections and never speaks: a
+    // stanza for it holds its place until the negotiation deadline.
+    let (silent, silent_address) = support::listener().await;
+    let pki = support::Pki::new();
+    let (a, _b, captured) = routed_and_capturing(&pki, limits, move |spec| {
+        spec.allow.push(SILENT);
+        spec.private.push(SILENT);
+        spec.endpoints.push((SILENT, silent_address));
+    })
+    .await;
+    assert!(a
+        .router
+        .attach_accounts(Arc::new(RecordingAccounts::default())));
+
+    let held = offer(
+        &a,
+        Stanza::Message(chat(ALICE_PHONE, "carol@silent.test", "held")),
+    )
+    .await;
+    assert!(matches!(held, StanzaOffer::Accepted), "{held:?}");
+    // The share for that pair is full,
+    let beyond = offer(
+        &a,
+        Stanza::Message(chat(ALICE_PHONE, "carol@silent.test", "beyond")),
+    )
+    .await;
+    assert!(
+        matches!(
+            beyond,
+            StanzaOffer::Refused {
+                reason: UnroutableReason::EgressBusy,
+                ..
+            }
+        ),
+        "{beyond:?}"
+    );
+    // but the account's traffic to another domain still leaves.
+    let elsewhere = offer(&a, Stanza::Message(chat(ALICE_PHONE, BOB, "elsewhere"))).await;
+    assert!(matches!(elsewhere, StanzaOffer::Accepted), "{elsewhere:?}");
+    wait_for(ARRIVES, || captured.with_id("elsewhere").into_iter().next())
+        .await
+        .expect("the message to the other domain leaves");
+    drop(silent);
 }
 
 #[tokio::test]
