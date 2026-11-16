@@ -119,12 +119,15 @@ impl Inner {
             // request or are dropped before they are queued.
             return;
         }
-        let received = tokio::time::timeout(
-            self.limits.account_timeout,
-            accounts.receive(&principal, &to, stanza),
-        )
-        .await;
-        let Ok(answers) = received else {
+        // The account side's work runs to its end in a task of its own, so
+        // that a worker that stops waiting for it never cuts it short
+        // between a roster write and the answer that goes with it; answers
+        // that come after the deadline are dropped.
+        let work = self
+            .tasks
+            .spawn(async move { accounts.receive(&principal, &to, stanza).await });
+        let received = tokio::time::timeout(self.limits.account_timeout, work).await;
+        let Ok(Ok(answers)) = received else {
             telemetry::account_traffic_timed_out();
             return;
         };

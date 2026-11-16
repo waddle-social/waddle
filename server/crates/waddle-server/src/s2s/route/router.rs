@@ -706,7 +706,8 @@ impl Inner {
     /// Route a local resource's message or presence for the remote JID
     /// `to`: room traffic for a room the resource joins or occupies is
     /// queued and its effect on the occupancy recorded; anything else is
-    /// account traffic, which D7 refuses.
+    /// account traffic, routed once an account side is attached and
+    /// refused (D7) until then.
     async fn route_room(
         self: &Arc<Self>,
         pair: Pair,
@@ -1663,8 +1664,11 @@ impl Inner {
 
     /// Decide one stanza that may be a room's traffic for `occupant`,
     /// apply what it does to the occupancy, and deliver it if it is
-    /// admitted; refuse it as account traffic otherwise (D7: a message
-    /// receives `service-unavailable`, presence is dropped).
+    /// admitted. A stanza from a JID that is no room the occupant is in is
+    /// account traffic for the account side once one is attached (gate
+    /// G18); a stanza a room's occupancy does not admit, or any account
+    /// traffic while no account side is attached, is refused (D7: a
+    /// message receives `service-unavailable`, presence is dropped).
     async fn room_traffic(
         self: &Arc<Self>,
         stream: &VerifiedPeerStream,
@@ -1835,15 +1839,10 @@ impl Inner {
                     payload_namespace: None,
                 },
             },
-            // ADR-0020 D7: until account traffic is reviewed (gate G18), a
-            // local account's messages and presence for remote JIDs are
-            // refused, and nothing on its roster changes, unless they are
-            // for a remote room the account's resource occupies or is
-            // joining ([`Self::route_room`]). Only a bound resource of a
-            // local account joins rooms.
             // Subscription presence and probes leave from the account's bare
             // JID (RFC 6121 §3.1.2, §4.3.1) once an account side is
-            // attached: account traffic, never room traffic.
+            // attached: account traffic, never room traffic. Without an
+            // account side they are refused below (ADR-0020 D7).
             Stanza::Presence(presence)
                 if self.accounts_attached() && is_account_presence(presence) =>
             {
@@ -1855,6 +1854,10 @@ impl Inner {
                     sender: Jid::from(sender.to_bare()),
                 }
             }
+            // Other messages and presence leave from a bound resource of a
+            // local account: room traffic for a room it occupies or is
+            // joining, and otherwise account traffic, which only an
+            // attached account side enables ([`Self::route_room`]).
             Stanza::Message(_) | Stanza::Presence(_) => {
                 let Ok(sender) = outbound.sender().clone().try_into_full() else {
                     return Err(UnroutableReason::RefusedByPolicy);
