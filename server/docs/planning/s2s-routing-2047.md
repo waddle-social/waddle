@@ -1047,7 +1047,7 @@ then is refused as above and removes it.
 | `muc#admin` request | A room's bare JID | The affiliation and role lists and changes to them (kick, ban, role, affiliation), decided for the requester on its stream's evidence (below). `forbidden` without a standing the effect boundary honours, `not-allowed` for a change D8 does not issue, `item-not-found` for a room that is not federated |
 | `muc#owner` request | A room's bare JID | The configuration form, a configuration change and the room's destruction, for an owner whose standing is honoured; `forbidden` otherwise. A managed room is configured by its grants' `manage` and never destroyed by a request |
 | XEP-0425 `moderate` request | A room's bare JID | A moderator's retraction of another occupant's message, for a requester whose room moderation is honoured; `forbidden` otherwise, `bad-request` for an element that asks to retract nothing |
-| Error presence or message | A room or an occupant | From a seated occupant's address with a delivery-related condition of XEP-0045 §17.1.2 (`gone`, `item-not-found`, `recipient-unavailable`, `redirect`, `remote-server-not-found`, `remote-server-timeout`), or a message error with `service-unavailable`, which a server returns for a `groupchat` message to a full JID with no such resource (RFC 6121 §8.5.3.2.1): the seat ends. Otherwise ignored |
+| Error presence or message | A room or an occupant | From a seated occupant's address with a delivery-related condition of XEP-0045 §17.1.2 (`gone`, `item-not-found`, `recipient-unavailable`, `redirect`, `remote-server-not-found`, `remote-server-timeout`): the seat ends. Otherwise ignored, `service-unavailable` included (below) |
 
 Every error answers with the id of the request it refuses (RFC 6120
 §8.1.3), the error presence that refuses a join included; the room's own
@@ -1971,11 +1971,15 @@ runbook (G24):
   once. A configuration whose per-account rates add up to more than the
   domain's lets one account spend its domain's rate, and the domain's
   stream then waits for it as it waits for all its accounts together.
-- **`service-unavailable` in a message error ends a seat.** A server
-  answers a `groupchat` message for a full JID with no such resource with
-  it (RFC 6121 §8.5.3.2.1), and the room sends a seat no other message. A
-  client that answers a room's message with that condition itself is
-  taken for gone, and enters again.
+- **`service-unavailable` does not end a seat.** Only the conditions
+  XEP-0045 lists for ghost users (§17.1.2) do. A server answers with
+  `service-unavailable` a `groupchat` message for a full JID with no such
+  resource (RFC 6121 §8.5.3.2.1), but also a message from a JID its
+  account blocked (XEP-0191 §3.3): an occupant that blocked another
+  occupant would be removed by the room for every message that occupant
+  sends. A server that answers the room's traffic for a resource that is
+  gone with `service-unavailable` alone leaves a ghost seated until its
+  stream is lost or the occupant's server sends its leave.
 - **A leave that cannot be placed is late, or lost.** A leave or an
   error that ends a seat, for a room whose holder cannot be asked, is
   kept and placed again for up to 120 s; meanwhile the holder still seats

@@ -5,9 +5,10 @@
 //! occupants, sends to the room and receives its messages, and leaves
 //! (§7.2, §7.4, §7.14). Its seat records what its stream proved, is bounded
 //! per room, and ends with status 333 when its stream is lost, when its
-//! server answers the room with a delivery error (§17.1.2) or with
-//! `service-unavailable` for a `groupchat` message (RFC 6121 §8.5.3.2.1),
-//! and when the room's traffic for it cannot be queued (§11.1). A join
+//! server answers the room with a delivery error (§17.1.2), and when the
+//! room's traffic for it cannot be queued (§11.1); `service-unavailable`,
+//! which a server also answers for a JID its account blocked (XEP-0191
+//! §3.3), ends nothing. A join
 //! undone because its stream does not honour its standing is announced
 //! only to the occupants that entered while it was seated, and not to one
 //! that now holds its nickname. A remote principal
@@ -1137,23 +1138,34 @@ async fn a_delivery_error_from_the_occupants_server_removes_it_with_status_333()
 }
 
 #[tokio::test]
-async fn a_groupchat_bounce_for_an_absent_resource_removes_the_occupant_with_status_333() {
+async fn a_service_unavailable_bounce_keeps_the_occupant_seated() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
-    // RFC 6121 §8.5.3.2.1: the occupant's server answers a `groupchat`
-    // message for a full JID with no such resource with
-    // `service-unavailable`; the occupant is gone.
+    // XEP-0045 §17.1.2 lists the delivery-related conditions that remove a
+    // ghost, and `service-unavailable` is not one of them: the occupant's
+    // server answers with it a message from a JID its account blocked
+    // (XEP-0191 §3.3), as well as one for a resource that is gone (RFC 6121
+    // §8.5.3.2.1).
     let mut bounce = Message::new_with_type(MessageType::Error, Some(jid(ROOM)));
     bounce.from = Some(jid(BOB));
     bounce.payloads.push(Element::from(StanzaError::new(
         ErrorType::Cancel,
         DefinedCondition::ServiceUnavailable,
         "en",
-        "No such resource.",
+        "Blocked.",
     )));
     hosted.from_peer(bounce).await;
-    removed_with_333(&mut alice).await;
-    assert!(hosted.unseated(ROOM, BOB).await);
+    let left = local_receives(&mut alice, QUIET, |stanza| {
+        stanza.name() == "presence"
+            && stanza.attr("from") == Some(BOB_OCCUPANT)
+            && stanza.attr("type") == Some("unavailable")
+    })
+    .await;
+    assert!(left.is_none(), "{left:?}");
+    assert!(
+        hosted.seat(ROOM, BOB).is_some(),
+        "a service-unavailable bounce ended the seat"
+    );
 }
 
 #[test]

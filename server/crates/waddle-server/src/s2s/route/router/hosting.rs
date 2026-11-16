@@ -284,20 +284,16 @@ fn presence_nick(stanza: &Stanza, to: &Jid) -> Option<String> {
 
 /// Whether `stanza` is an occupant's server telling the room that its
 /// traffic does not reach the occupant: an error with one of the
-/// delivery-related conditions of XEP-0045 §17.1.2, or a message error
-/// with `service-unavailable`, which a server returns for a `groupchat`
-/// message to a full JID with no such resource (RFC 6121 §8.5.3.2.1). The
-/// only messages a room sends a seat are `groupchat` messages, and a
-/// server ignores presence for an absent resource rather than answer it,
-/// so the condition is read only from a message error.
+/// delivery-related conditions XEP-0045 lists for removing ghost users
+/// (§17.1.2: `gone`, `item-not-found`, `recipient-unavailable`, `redirect`,
+/// `remote-server-not-found`, `remote-server-timeout`). `service-unavailable`
+/// is not one of them: a server also answers with it a message from a JID
+/// its account blocked (XEP-0191 §3.3), so an occupant that blocked another
+/// occupant would be removed for it.
 fn is_delivery_error(stanza: &Stanza) -> bool {
-    let (payloads, message) = match stanza {
-        Stanza::Presence(presence) if presence.type_ == PresenceType::Error => {
-            (&presence.payloads, false)
-        }
-        Stanza::Message(message) if message.type_ == MessageType::Error => {
-            (&message.payloads, true)
-        }
+    let payloads = match stanza {
+        Stanza::Presence(presence) if presence.type_ == PresenceType::Error => &presence.payloads,
+        Stanza::Message(message) if message.type_ == MessageType::Error => &message.payloads,
         Stanza::Presence(_) | Stanza::Message(_) | Stanza::Iq(_) => return false,
     };
     payloads
@@ -313,7 +309,7 @@ fn is_delivery_error(stanza: &Stanza) -> bool {
                     | DefinedCondition::Redirect { .. }
                     | DefinedCondition::RemoteServerNotFound
                     | DefinedCondition::RemoteServerTimeout
-            ) || (message && error.defined_condition == DefinedCondition::ServiceUnavailable)
+            )
         })
 }
 
