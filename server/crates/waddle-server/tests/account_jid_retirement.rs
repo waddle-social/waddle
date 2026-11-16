@@ -7,7 +7,10 @@
 //! session creation creates neither an account row nor a session for it, and
 //! the fixed-account bootstrap does not seed it. Retirement and provisioning
 //! exclude each other, in both orders; a retirement that cannot lock the
-//! account tables in time fails and changes nothing.
+//! account tables in time fails and changes nothing. Retirement also
+//! removes what remote senders left for the account: recorded
+//! subscription requests, remote PubSub subscription records and offline
+//! admissions (gate G18).
 //!
 //! Every case runs on SQLite; the cases that take a store run on PostgreSQL
 //! as well, on a database of their own, and the exclusion cases need
@@ -725,6 +728,73 @@ async fn the_ledger_is_never_updated_or_deleted_by_provisioning() {
         assert!(jid_is_retired(&store.db, &account("kim"))
             .await
             .expect("ledger read"));
+        store.close().await;
+    }
+}
+
+#[tokio::test]
+async fn retirement_removes_what_remote_senders_left_for_the_account() {
+    use waddle_server::db::s2s_accounts::{
+        OfflineAdmission, PendingOutcome, PendingSubscriptions, RemoteOfflineAdmissions,
+        RemotePubSubSubscriptions, SubscriptionOutcome,
+    };
+    use xmpp_parsers::presence::{Presence, Type as PresenceType};
+
+    const TABLES: [&str; 3] = [
+        "SELECT count(*) FROM s2s_pending_subscriptions WHERE account_jid = ?",
+        "SELECT count(*) FROM s2s_remote_pubsub_subscriptions WHERE account_jid = ?",
+        "SELECT count(*) FROM s2s_remote_offline_admissions WHERE account_jid = ?",
+    ];
+    for store in Store::each("retire_s2s").await {
+        let engine = store.engine;
+        let lee = account("lee");
+        let contact: BareJid = "carol@remote.test".parse().expect("a JID");
+        let service: BareJid = "pubsub.remote.test".parse().expect("a JID");
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut request = Presence::new(PresenceType::Subscribe);
+        request.from = Some(contact.clone().into());
+        request.to = Some(lee.clone().into());
+        assert_eq!(
+            PendingSubscriptions::new(store.db.clone())
+                .record(&lee, &contact, &request.into(), now)
+                .await
+                .expect("a recorded request"),
+            PendingOutcome::Recorded,
+            "{engine}"
+        );
+        assert_eq!(
+            RemotePubSubSubscriptions::new(store.db.clone())
+                .record(&lee, &service, "news", now)
+                .await
+                .expect("a recorded subscription"),
+            SubscriptionOutcome::Recorded,
+            "{engine}"
+        );
+        assert_eq!(
+            RemoteOfflineAdmissions::new(store.db.clone())
+                .admit(&lee, &contact, now)
+                .await
+                .expect("an admission"),
+            OfflineAdmission::Admitted,
+            "{engine}"
+        );
+        for sql in TABLES {
+            assert_eq!(
+                store.count(sql, "lee@example.com").await,
+                1,
+                "{engine}: {sql}"
+            );
+        }
+
+        retire_account(&store.db, &lee).await.expect("retirement");
+
+        for sql in TABLES {
+            assert_eq!(
+                store.count(sql, "lee@example.com").await,
+                0,
+                "{engine}: {sql}"
+            );
+        }
         store.close().await;
     }
 }
