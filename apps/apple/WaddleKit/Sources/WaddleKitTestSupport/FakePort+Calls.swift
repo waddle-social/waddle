@@ -2,6 +2,9 @@ import WaddleKit
 
 /// Wire-level observations shared by the store and session coordinator suites.
 enum CallSend: Hashable {
+    case groupPresence(BareJID, String, GroupCallPresenceUpdate)
+    case groupInitiate(BareJID, JID, String, Bool)
+    case groupTerminate(BareJID, String)
     case propose(BareJID, String, CallMedia)
     case ringing(BareJID, String)
     case proceed(JID, String)
@@ -16,6 +19,9 @@ enum CallSend: Hashable {
 
     var verb: String {
         switch self {
+        case .groupPresence: "groupPresence"
+        case .groupInitiate: "groupInitiate"
+        case .groupTerminate: "groupTerminate"
         case .propose: "propose"
         case .ringing: "ringing"
         case .proceed: "proceed"
@@ -32,6 +38,16 @@ enum CallSend: Hashable {
 }
 
 extension FakePort {
+    func updateGroupCallPresence(_ presence: GroupCallPresenceUpdate, in room: BareJID, nick: String) async -> Bool {
+        await recordCall(.groupPresence(room, nick, presence))
+    }
+    func sendGroupCallSessionInitiate(in room: BareJID, initiator: JID, sid: String, video: Bool) async -> Bool {
+        await recordCall(.groupInitiate(room, initiator, sid, video))
+    }
+    func sendGroupCallSessionTerminate(in room: BareJID, sid: String) async -> Bool {
+        await recordCall(.groupTerminate(room, sid))
+    }
+
     func fetchExternalServices() async -> [ExternalService] {
         externalServicesFetchCount += 1
         let result = externalServices

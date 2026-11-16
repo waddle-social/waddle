@@ -48,6 +48,15 @@ public extension CallStage {
             case .connected: self = .inCall(peer: call.peer.bare, media: call.media)
             case .reconnecting: self = .reconnecting(peer: call.peer.bare, media: call.media)
             }
+        // The dedicated group surface is #2495; the existing dock can end this call.
+        case .joiningGroup(let call):
+            self = .connecting(peer: call.room, media: call.media)
+        case .inGroup(let call):
+            switch media {
+            case .idle, .connecting: self = .connecting(peer: call.room, media: call.media)
+            case .connected: self = .inCall(peer: call.room, media: call.media)
+            case .reconnecting: self = .reconnecting(peer: call.room, media: call.media)
+            }
         case .ended(_, let reason):
             self = .ended(reason)
         }

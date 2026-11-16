@@ -341,6 +341,7 @@ public final class SessionCoordinator {
         timelines.clear()
         directory.clear()
         presence.clear()
+        calls.groupPresence.clear()
         roomBots.clear()
         typing.clear()
         unread.clearAll()
@@ -420,6 +421,7 @@ public final class SessionCoordinator {
             // no longer known to be current.
             history.markAllStale()
             presence.clear()
+            calls.groupPresence.clear()
             mdsPublishSupported = nil
             if !isStopped, status.connection != .authenticationFailed {
                 scheduleReconnect()
@@ -430,6 +432,7 @@ public final class SessionCoordinator {
             route(message)
         case let .presence(wirePresence):
             presence.apply(wirePresence)
+            if handlesCalls, !isStopped { calls.handleGroupPresence(wirePresence) }
             refreshRoomBotsIfUndeclared(by: wirePresence)
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)

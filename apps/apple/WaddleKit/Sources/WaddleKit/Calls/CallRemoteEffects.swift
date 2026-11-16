@@ -2,6 +2,7 @@ extension CallStore {
     /// Sends keep arrival order, but the reducer may already have advanced the slot.
     func remoteEffect(_ event: CallEvent, before: CallState, epoch: Int) async {
         guard generation == epoch else { return }
+        if before.isGroupPhase, await endGroupFromRemote(event, epoch: epoch) { return }
         switch event.kind {
         case .propose(let media):
             // A redelivered proposal for the slot's own session needs no answer.

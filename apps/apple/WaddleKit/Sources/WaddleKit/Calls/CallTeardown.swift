@@ -11,6 +11,13 @@ extension CallStore {
     /// Nobody chose this ending, so the slot keeps it on show as an ended
     /// call instead of going idle.
     public func hangUpActive(ifSid sid: String, reason: JingleReason) async {
+        if case .inGroup(let current) = state, current.sid == sid {
+            let epoch = generation
+            cancelTimers()
+            transition(.ended(sid: sid, reason: .finished(reason)))
+            await teardownGroup(.inGroup(current), identity: ownJID(), epoch: epoch)
+            return
+        }
         guard case .active(let current) = state, current.sid == sid else { return }
         cancelTimers()
         transition(.ended(sid: sid, reason: .finished(reason)))
@@ -21,6 +28,10 @@ extension CallStore {
     public func hangUp(reason: JingleReason = .success) async {
         let claimed = claimHangUp()
         let epoch = generation
+        if claimed.isGroupPhase {
+            await teardownGroup(claimed, identity: ownJID(), epoch: epoch)
+            return
+        }
         if case .incoming(let call) = claimed { _ = await answerDeclined(call) }
         if case .outgoing(let call) = claimed {
             guard let responder = call.responder else {
