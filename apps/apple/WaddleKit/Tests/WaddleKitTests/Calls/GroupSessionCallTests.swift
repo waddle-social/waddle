@@ -17,6 +17,20 @@ import Testing
         await coordinator.stop()
     }
 
+    @Test func beingRemovedFromARoomForgetsItsCall() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.start()
+        port.emit(.presence(activePresence))
+        await eventually { !coordinator.calls.groupPresence.participants.isEmpty }
+        // Our own occupant goes unavailable (XEP-0045 status 110): kicked or left.
+        port.emit(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/alice")!, kind: .unavailable,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        await eventually { coordinator.calls.groupPresence.participants.isEmpty }
+        #expect(coordinator.calls.groupPresence.participants.isEmpty)
+        #expect(coordinator.calls.groupPresence.media.isEmpty)
+        await coordinator.stop()
+    }
+
     @Test func optedOutSessionIgnoresRoomCallPresence() async {
         let (coordinator, port) = session(handlesCalls: false)
         coordinator.start()

@@ -126,6 +126,18 @@ struct GroupCallPreparationKey: Hashable {
         for key in awaited.keys where key.room == room && key.participant.nick == nick { awaited[key] = nil }
     }
 
+    /// This client is no longer in `room`: it hears nothing more about the
+    /// room's call, and a rejoin replays only who is there then. Forgetting
+    /// the room keeps a stale preparing entry from stalling every later join.
+    public func clearRoom(_ room: BareJID) {
+        for key in echoes.keys.filter({ $0.room == room }) { echoes.removeValue(forKey: key)?.result.cancel() }
+        for key in peers.keys.filter({ $0.room == room }) { peers.removeValue(forKey: key)?.cancel() }
+        for key in awaited.keys where key.room == room { awaited[key] = nil }
+        preparing[room] = nil
+        active[room] = nil
+        publish(room)
+    }
+
     /// Stream loss forgets room advertisements and completes every pending waiter.
     public func clear() {
         for waiter in echoes.values { waiter.result.cancel() }

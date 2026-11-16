@@ -313,6 +313,29 @@ import WaddleKit
         #expect(await waiting.value)
     }
 
+    @Test func leavingTheRoomForgetsItsCallSoARejoinStartsClean() async {
+        let presence = GroupCallPresence()
+        let bob = JID(parsing: "bob@waddle.test/phone")!
+        presence.apply(active("carol"))
+        presence.apply(preparing("bob", realJID: bob))
+        // We are out of the room: nothing more is heard about Bob or Carol,
+        // and a rejoin replays only who is there then.
+        presence.clearRoom(room)
+        #expect(presence.participants.isEmpty)
+        #expect(presence.media.isEmpty)
+        let waiter = presence.registerPreparingEcho(in: room, nick: "alice", realJID: own)
+        presence.apply(preparing("alice", realJID: own))
+        #expect(await presence.awaitPreparingEcho(waiter, timeout: .milliseconds(50)))
+        #expect(await presence.awaitNoOtherPreparing(in: room, nick: "alice", realJID: own, timeout: .milliseconds(50)))
+    }
+
+    @Test func leavingTheRoomEndsAWaitInIt() async {
+        let presence = GroupCallPresence()
+        let waiter = presence.registerPreparingEcho(in: room, nick: "alice", realJID: own)
+        presence.clearRoom(room)
+        #expect(await !presence.awaitPreparingEcho(waiter, timeout: .seconds(5)))
+    }
+
     @Test func flagsBelongToEachDeviceSharingANick() {
         let presence = GroupCallPresence()
         presence.apply(active("alice", realJID: own, raised: true, muted: true))

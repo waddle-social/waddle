@@ -431,8 +431,16 @@ public final class SessionCoordinator {
         case let .message(message):
             route(message)
         case let .presence(wirePresence):
-            presence.apply(wirePresence)
-            if handlesCalls, !isStopped { calls.handleGroupPresence(wirePresence) }
+            let update = presence.apply(wirePresence)
+            if handlesCalls, !isStopped {
+                switch update {
+                case .left(let room), .joinFailed(let room, _):
+                    // Out of the room, so out of earshot of its call.
+                    calls.groupPresence.clearRoom(room)
+                case .contact, .occupant, .joined, .ignored:
+                    calls.handleGroupPresence(wirePresence)
+                }
+            }
             refreshRoomBotsIfUndeclared(by: wirePresence)
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)
