@@ -109,7 +109,11 @@ pub(super) struct SessionStart {
 /// Which deadline fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineKind {
+    /// The idle timeout, or a negotiation stage's deadline.
     Timeout,
+    /// An established stream's first-level element stayed unfinished for
+    /// longer than the incomplete-element deadline allows.
+    Incomplete,
     Expired,
 }
 
@@ -185,6 +189,11 @@ pub(super) struct Session {
     replaced: bool,
     admission_refused: bool,
     capacity_refusal: Option<S2sResource>,
+    /// The stream ended without an orderly close and may have lost stanzas
+    /// in flight: the transport reached end of file before either side
+    /// closed the stream, a write did not complete within its deadline, or
+    /// the peer left a first-level element unfinished past its deadline.
+    lost: bool,
 }
 
 impl Session {
@@ -226,6 +235,7 @@ impl Session {
             replaced: false,
             admission_refused: false,
             capacity_refusal: None,
+            lost: false,
         }
     }
 
@@ -308,8 +318,18 @@ impl Session {
                 // deadline later; one that is no longer due is not acted on.
                 Event::Deadline(_) if self.deadline().0 > Instant::now() => continue,
                 Event::Deadline(DeadlineKind::Timeout) => self.stream.signal(Signal::Timeout),
+                Event::Deadline(DeadlineKind::Incomplete) => {
+                    self.lost = true;
+                    self.stream.signal(Signal::Timeout)
+                }
                 Event::Deadline(DeadlineKind::Expired) => self.stream.signal(Signal::Expired),
-                Event::Read(Ok(0)) => return S2sOutcome::PeerClosed,
+                // Either side's closing tag ends the connection as soon as
+                // the codec reports it, so end of file here arrived before
+                // any close: the peer dropped the connection.
+                Event::Read(Ok(0)) => {
+                    self.lost = true;
+                    return S2sOutcome::PeerClosed;
+                }
                 Event::Read(Ok(read)) => {
                     let outputs = self.stream.receive(&buffer[..read]);
                     self.after_receive(!outputs.is_empty());
@@ -413,7 +433,12 @@ impl Session {
                     }
                     Ok(Err(TransportError::Tls(_))) => Err(S2sOutcome::Tls),
                     Ok(Err(_)) => Err(S2sOutcome::Io),
-                    Err(_) => Err(S2sOutcome::Timeout),
+                    // The peer did not read in time: what was being written
+                    // may be partly sent.
+                    Err(_) => {
+                        self.lost = true;
+                        Err(S2sOutcome::Timeout)
+                    }
                 }
             }
             Output::StartTls(handoff) => {
@@ -894,10 +919,13 @@ impl Session {
                     self.transport.next_wait(now),
                 )
             });
-            let timeout = incomplete.map_or(idle, |incomplete| incomplete.min(idle));
+            let (timeout, kind) = match incomplete {
+                Some(incomplete) if incomplete < idle => (incomplete, DeadlineKind::Incomplete),
+                _ => (idle, DeadlineKind::Timeout),
+            };
             return match self.expiry {
                 Some(expiry) if expiry <= timeout => (expiry, DeadlineKind::Expired),
-                _ => (timeout, DeadlineKind::Timeout),
+                _ => (timeout, kind),
             };
         }
         let stage = if is_sasl(self.phase) {
@@ -996,16 +1024,24 @@ impl Session {
         self.registered = None;
         telemetry::stream_counts(&self.shared.registry);
         if let Some(stream) = self.peer_stream.take() {
-            self.shared.sink.stream_ended(&stream, stream_end(outcome));
+            self.shared
+                .sink
+                .stream_ended(&stream, stream_end(outcome, self.lost));
         }
     }
 }
 
 /// How an established stream that ended with `outcome` ended, for the
-/// sink. A deadline is the idle timeout on an established stream, an
-/// orderly close; a stream error, a transport failure or a withdrawn
-/// admission may have lost stanzas in flight.
-fn stream_end(outcome: S2sOutcome) -> StreamEnd {
+/// sink. `lost` is whether it ended without an orderly close (end of file
+/// before either side closed the stream, a write past its deadline, or an
+/// element left unfinished past its deadline), which may have lost stanzas
+/// in flight whatever the outcome. Otherwise the idle timeout, the maximum
+/// age and either side's close are orderly, and a stream error, a
+/// transport failure or a withdrawn admission may have lost stanzas.
+fn stream_end(outcome: S2sOutcome, lost: bool) -> StreamEnd {
+    if lost {
+        return StreamEnd::Lost;
+    }
     match outcome {
         S2sOutcome::Io
         | S2sOutcome::Tls
