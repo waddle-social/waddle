@@ -28,12 +28,18 @@ use crate::server::routes::interpret::{
 /// will get.
 ///
 /// It holds the state weakly: the state holds the router, which holds this.
-pub(crate) struct WebSocketLocalDelivery {
+///
+/// A remote room's private message delivered here takes the recipient
+/// pass like any peer stanza, but no `received` carbon of it reaches the
+/// recipient's other resources (XEP-0280 §6.1; the interpreter's
+/// `is_received_room_private_message`).
+pub struct WebSocketLocalDelivery {
     state: Weak<WebSocketState>,
 }
 
 impl WebSocketLocalDelivery {
-    pub(crate) fn new(state: &Arc<WebSocketState>) -> Self {
+    /// Deliver through `state`'s connection registry.
+    pub fn new(state: &Arc<WebSocketState>) -> Self {
         Self {
             state: Arc::downgrade(state),
         }
