@@ -1,0 +1,127 @@
+//! XEP-0410 self-ping to a room on a remote domain: the ping is an IQ
+//! request to the occupant's own JID, routed and correlated like any
+//! request to a remote entity, and the client receives the room's answer
+//! as the room gave it. A room that reflects the ping to the occupant gets
+//! this server's `service-unavailable`, because IQ requests from remote
+//! entities still reach no local client (ADR-0020 D7), and XEP-0410 §3.2
+//! reads that answer as "still joined".
+//!
+//! `home-a.test` runs the S2S router with a recording delivery in place of
+//! WebSocket clients; `home-b.test` serves `muc.home-b.test` with a
+//! hand-written room service. No PostgreSQL, SpiceDB or second process is
+//! involved.
+
+// Each suite uses a different part of the shared fixture.
+#[allow(dead_code, unused_imports)]
+#[path = "s2s_remote_muc_support/mod.rs"]
+mod support;
+
+use minidom::Element;
+use support::{
+    error_condition, full, jid, join, outbound_muc, wait_for, ALICE_PHONE, ARRIVES, ROOM,
+};
+use waddle_server::destination::IqOffer;
+use waddle_server::s2s::route::{LocalOrigin, RouterLimits};
+use waddle_xmpp::xep::xep0199::NS_PING;
+use xmpp_parsers::iq::Iq;
+
+const ROOM_ALICE: &str = "room@muc.home-b.test/alice";
+
+fn self_ping(id: &str) -> Iq {
+    Iq::Get {
+        from: Some(jid(ALICE_PHONE)),
+        to: Some(jid(ROOM_ALICE)),
+        id: id.to_owned(),
+        payload: Element::builder("ping", NS_PING).build(),
+    }
+}
+
+/// The one answer delivered to the pinging resource for `id`.
+async fn answer(a: &support::Routed, id: &str) -> Iq {
+    let (to, iq) = wait_for(ARRIVES, || a.delivery.iqs(id).into_iter().next())
+        .await
+        .expect("the self-ping is answered");
+    assert_eq!(to, full(ALICE_PHONE));
+    assert_eq!(iq.from(), Some(&jid(ROOM_ALICE)));
+    iq
+}
+
+#[tokio::test]
+async fn a_self_ping_while_joined_is_answered_by_the_room() {
+    let pki = support::Pki::new();
+    let (a, _b, _muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    let offered = a.offer_iq(ROOM_ALICE, self_ping("sp1")).await;
+    assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
+    let iq = answer(&a, "sp1").await;
+    assert!(matches!(iq, Iq::Result { .. }), "{iq:?}");
+    assert_eq!(a.delivery.origins("sp1"), vec![LocalOrigin::Remote]);
+}
+
+#[tokio::test]
+async fn a_self_ping_the_room_no_longer_seats_reports_not_acceptable() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+    // The room lost the occupant without telling it: this server still
+    // records the occupancy, and the room's answer says otherwise.
+    muc.forget_occupant(ROOM, ALICE_PHONE);
+    assert_eq!(a.router.remote_rooms(), 1);
+
+    let offered = a.offer_iq(ROOM_ALICE, self_ping("sp2")).await;
+    assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
+    let iq = answer(&a, "sp2").await;
+    assert!(matches!(iq, Iq::Error { .. }), "{iq:?}");
+    assert_eq!(
+        error_condition(&Element::from(iq)).as_deref(),
+        Some("not-acceptable")
+    );
+    assert_eq!(a.delivery.origins("sp2"), vec![LocalOrigin::Remote]);
+}
+
+#[tokio::test]
+async fn a_self_ping_to_a_room_never_joined_is_routed_and_answered() {
+    let pki = support::Pki::new();
+    let (a, _b, _muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    let offered = a.offer_iq(ROOM_ALICE, self_ping("sp3")).await;
+    assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
+    let iq = answer(&a, "sp3").await;
+    assert_eq!(
+        error_condition(&Element::from(iq)).as_deref(),
+        Some("not-acceptable")
+    );
+    assert_eq!(a.router.remote_rooms(), 0);
+}
+
+#[tokio::test]
+async fn a_reflected_self_ping_is_refused_so_the_room_reports_the_occupant_joined() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    muc.reflect_pings();
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    let offered = a.offer_iq(ROOM_ALICE, self_ping("sp4")).await;
+    assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
+    // The reflected request reaches no client: the router refuses it as
+    // it refuses every IQ request to a local account.
+    let refusal = wait_for(ARRIVES, || {
+        muc.received_with_id("iq", "reflected-sp4")
+            .into_iter()
+            .next()
+    })
+    .await
+    .expect("the reflected ping is refused");
+    assert_eq!(refusal.attr("type"), Some("error"));
+    assert_eq!(
+        error_condition(&refusal).as_deref(),
+        Some("service-unavailable")
+    );
+    assert!(a.delivery.iqs("reflected-sp4").is_empty());
+    // The room relays that answer, which XEP-0410 §3.2 reads as joined.
+    let iq = answer(&a, "sp4").await;
+    assert_eq!(
+        error_condition(&Element::from(iq)).as_deref(),
+        Some("service-unavailable")
+    );
+}
