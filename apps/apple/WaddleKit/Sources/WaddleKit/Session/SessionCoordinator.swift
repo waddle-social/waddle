@@ -121,8 +121,8 @@ public final class SessionCoordinator {
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
     /// only as diagnostics, never as a disconnect). `outboxStore`: where
-    /// unsent messages are kept across launches. `handlesCalls` stays false
-    /// until #2102 ships call UI: an invisible invitation must not ring back.
+    /// unsent messages are kept across launches. `handlesCalls` is only for a
+    /// host that shows call UI: an invisible invitation must not ring back.
     public init(
         account: AccountIdentity,
         port: any XmppPort,

@@ -90,7 +90,7 @@ import Observation
         let sent = await port.sendCallPropose(to: peer, sid: sid, media: media)
         guard generation == epoch else { return false }
         if !sent {
-            if case .outgoing(let current) = state, current.sid == sid { state = .idle }
+            if case .outgoing(let current) = state, current.sid == sid { state = .ended(sid: sid, reason: .error) }
             lastError = "call propose failed"
         }
         if sent { scheduleRingTimeout(sid: sid) }

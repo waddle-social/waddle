@@ -10,7 +10,7 @@ Waddle/                      SwiftUI app target
   App/                       AppState (auth → session), navigation, preferences
   Auth/                      device-authorization sign-in, Keychain credential
   Shell/                     iPhone tab shell, iPad/Mac split view, menu commands
-  Features/                  Conversation, Navigation, Details, Account screens
+  Features/                  Conversation, Navigation, Details, Account, Calls screens
   Design/                    Polar Huddle tokens, theme and shared components
   Resources/                 bundled fonts and their licences
   Platform/                  notifications, APNs registration
@@ -114,6 +114,12 @@ credentials in the Jingle transport and publishes the microphone and camera.
 WaddleKit checks the token's grant and maps the server's XEP-0215 services to
 ICE servers before it connects; it never imports the SDK.
 
+`Features/Calls/CallDock.swift` is the one call surface on every platform: a
+card above the signed-in shell, from the first ring to the reason the call
+ended. It derives what to show from the call slot and the media phase
+(`CallStage` in WaddleKit); `CallDockView` draws each stage without a session,
+so the snapshot tests cover them all.
+
 The SDK version is pinned in `project.yml`. To check a new SDK or SFU version,
 run the connect tests against that SFU version locally (they skip without the
 URL):
@@ -164,8 +170,9 @@ When WaddleKit's dependencies change, update it to the same pins as
 
 Signing is automatic for team `6KXCJGJ45W`; Xcode Cloud uses cloud-managed
 certificates and replaces `CURRENT_PROJECT_VERSION` with its own build number.
-The macOS app is sandboxed (App Store requirement) with outbound network
-access and read access to files the user picks.
+The macOS app is sandboxed (App Store requirement) with network access in
+both directions (call media receives on the sockets it opens), the
+microphone and camera, and read access to files the user picks.
 
 ### One-time setup
 

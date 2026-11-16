@@ -37,6 +37,20 @@ final class LiveKitCallMediaTests: XCTestCase {
         await media.disconnect()
     }
 
+    func testThePhaseFollowsTheConnection() async throws {
+        let media = LiveKitCallMediaController()
+        XCTAssertEqual(media.phase, .idle)
+
+        try await media.connect(
+            join: sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac"),
+            media: CallMedia(audio: false, video: false), iceServers: []
+        )
+        XCTAssertEqual(media.phase, .connected)
+        XCTAssertFalse(media.isMicrophoneOn, "a call without audio publishes no microphone")
+        await media.disconnect()
+        XCTAssertEqual(media.phase, .idle)
+    }
+
     func testJoinsWithAdvertisedIceServers() async throws {
         let media = LiveKitCallMediaController()
         let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")

@@ -23,6 +23,14 @@
     func update(_ state: CallState) {
         let active: ActiveCall?
         if case .active(let call) = state { active = call } else { active = nil }
+        // Choices are dropped where a new call begins, not where one ends:
+        // a replaced session can pass through `.ended` on its way to an
+        // already-accepted invitation, and that is still the same call.
+        switch state {
+        case .outgoing: media.forgetCaptureChoices()
+        case .incoming(let call) where !call.isAccepting: media.forgetCaptureChoices()
+        case .idle, .incoming, .active, .ended: break
+        }
         if let active, targetSid == active.sid { return }
 
         revision += 1

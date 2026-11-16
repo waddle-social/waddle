@@ -54,26 +54,35 @@ private struct SignedInRoot: View {
 
     var body: some View {
         @Bindable var navigation = session.navigation
-        shell
-            .environment(session.coordinator)
-            .environment(session.navigation)
-            .sheet(item: $navigation.sheet) { route in
-                SheetHost(route: route)
-                    .environment(app)
-                    .environment(session.coordinator)
-                    .environment(session.navigation)
+        // Above the shell, never over it. A safe-area inset on the shell
+        // does not reach the navigation bars and columns inside it, so the
+        // dock takes its own room and the shell starts below it.
+        VStack(spacing: 0) {
+            CallDock()
+            shell
+        }
+        .background(Theme.Colors.bg)
+        .environment(session.coordinator)
+        .environment(session.navigation)
+        .environment(\.callMediaControls, session.callMedia)
+        .sheet(item: $navigation.sheet) { route in
+            SheetHost(route: route)
+                .environment(app)
+                .environment(session.coordinator)
+                .environment(session.navigation)
+                .environment(\.callMediaControls, session.callMedia)
+        }
+        .onChange(of: session.coordinator.unread.total, initial: true) { _, total in
+            app.notifications.setBadge(total)
+        }
+        .onChange(of: app.preferences.sendsReadReceipts) { _, sends in
+            session.coordinator.sendsReadReceipts = sends
+        }
+        .onChange(of: session.coordinator.connection == .online, initial: true) { _, isOnline in
+            if isOnline {
+                AppDelegate.registerForRemoteNotifications()
             }
-            .onChange(of: session.coordinator.unread.total, initial: true) { _, total in
-                app.notifications.setBadge(total)
-            }
-            .onChange(of: app.preferences.sendsReadReceipts) { _, sends in
-                session.coordinator.sendsReadReceipts = sends
-            }
-            .onChange(of: session.coordinator.connection == .online, initial: true) { _, isOnline in
-                if isOnline {
-                    AppDelegate.registerForRemoteNotifications()
-                }
-            }
+        }
     }
 
     @ViewBuilder
@@ -95,6 +104,11 @@ private struct SheetHost: View {
     let route: SheetRoute
 
     var body: some View {
+        content.carryingCallDock()
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch route {
         case .newMessage:
             NewMessageSheet()

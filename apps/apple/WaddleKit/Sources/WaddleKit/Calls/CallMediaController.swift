@@ -11,4 +11,9 @@
 
     /// Releases the microphone, camera and SFU connection. Safe to call when not connected.
     func disconnect() async
+
+    /// A new call is beginning. What the person chose during the last one
+    /// (muted, camera off) held through any reconnect or replacement
+    /// session, and must not carry into this one.
+    func forgetCaptureChoices()
 }

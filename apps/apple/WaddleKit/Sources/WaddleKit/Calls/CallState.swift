@@ -67,7 +67,8 @@ public enum CallEndReason: Hashable, Sendable {
 }
 
 extension CallState {
-    var sid: String? {
+    /// The session the slot holds, live or ended; nil when idle.
+    public var sid: String? {
         switch self {
         case .idle: nil
         case .incoming(let call): call.sid
@@ -76,7 +77,8 @@ extension CallState {
         case .ended(let sid, _): sid
         }
     }
-    var isLive: Bool {
+    /// A call is ringing, being placed or in progress: the slot is taken.
+    public var isLive: Bool {
         switch self {
         case .incoming, .outgoing, .active: true
         case .idle, .ended: false

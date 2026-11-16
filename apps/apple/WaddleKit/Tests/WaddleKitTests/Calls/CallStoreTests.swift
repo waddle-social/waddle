@@ -213,6 +213,20 @@ import Testing
         f.store.clear()
     }
 
+    @Test func mediaFailureEndsTheCallWithItsReasonOnShow() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.proceed))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        await eventually { f.port.completedCallSends.count == 2 }
+        f.port.callSends = []
+        await f.store.hangUpActive(ifSid: "c1", reason: .connectivityError)
+        // The person sees why the call went away instead of it vanishing.
+        #expect(f.store.state == .ended(sid: "c1", reason: .finished(.connectivityError)))
+        #expect(f.port.callSends == [.terminate(callPeer, "c1", .connectivityError), .finish(callPeer, "c1", nil)])
+        f.store.clear()
+    }
+
     @Test func declinedInvitationIsNotRungAfterwards() async {
         let f = CallFixture()
         let dave = JID(parsing: "dave@waddle.test/tab")!
@@ -315,11 +329,12 @@ import Testing
         f.store.clear()
     }
 
-    @Test func failedProposeReturnsIdleAndReportsError() async {
+    @Test func aCallThatCouldNotBeProposedEndsWithAnErrorOnShow() async {
         let f = CallFixture()
         f.port.callResults["propose"] = false
         #expect(await !f.store.startCall(to: callPeer.bare, media: callAudio))
-        #expect(f.store.state == .idle)
+        // Tapping Call must not look like nothing happened.
+        #expect(f.store.state == .ended(sid: "c1", reason: .error))
         #expect(f.store.lastError == "call propose failed")
     }
 
