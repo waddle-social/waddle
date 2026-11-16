@@ -452,9 +452,35 @@ the fifth refresh:
   grant writer, grant store or acceptance authority was added.
 
 The selected evidence was refreshed a seventh time, through
+`0ac974978f2ba9a664b1964788f37e8fb2a6de18`, after reviewing the delta of
+the reviewed files since the sixth refresh:
+
+- The writer fence's gate (`hg-gate`) reads the attachment only while the
+  attachment gate is attached (`HostGrantAttachmentGate::verified_attachment`).
+  While that gate verifies a changed authority again, and after that
+  verification failed, it still holds the earlier attachment for
+  acceptance's binding comparison, and every surface outside acceptance
+  answers unavailable for a managed room. A second, different attachment
+  gate offered to it makes it refuse every managed room; startup
+  (`startup-call` moved) checks the binding and, when it fails, logs an
+  error and verifies nothing. Projection recovery (`hg-recovery`) moved
+  without changing.
+- Room administration's background reconciliation runs no pass while the
+  attachment gate is not attached; the mirror repair (`hg-mirror-repair`)
+  moved without changing and decides through the gate above.
+- The surfaces still compare no binding per decision and do not ask the
+  attachment gate about rooms of an enrollment only SpiceDB holds; both
+  are recorded in the host-grant design as preconditions for the first
+  enrollment.
+- The raw scan holds 1595 records, unchanged in count and content; only
+  lines moved, in the files above and in the fenced WebSocket test state,
+  which now binds its gate to the ingress authority's attachment gate. No
+  production grant writer, grant store or acceptance authority was added.
+
+The selected evidence was refreshed an eighth time, through
 `80c940af28c8bd4f6cce2b44c3094469bbb8ff3c`, the host-grant revocation fence
 and the non-reuse of retired account JIDs, after reviewing the delta of the
-reviewed files since the sixth refresh. Four files joined the reviewed set:
+reviewed files since the seventh refresh. Four files joined the reviewed set:
 `permissions/host_grant/fence.rs`, `server/host_grant_revocation.rs`,
 `auth/retirement.rs` and `auth/native.rs`.
 

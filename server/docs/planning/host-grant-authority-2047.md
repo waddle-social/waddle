@@ -1218,21 +1218,45 @@ outside room-manifest acceptance. For a room it answers:
 
 The attachment is the one room-manifest acceptance uses: `HostGrantGate`
 reads it, at each decision, from the replica's `HostGrantAttachmentGate`
-(`permissions/host_grant/runtime_attach.rs`), which holds it only while the
-runtime role's privileges and the restore fence are verified (see
-[Restore incarnation decisions](#restore-incarnation-decisions)). When that
-gate drops the attachment (a refusal of the whole authority, a role that
-no longer matches the profile, passes that cannot complete) every surface
-answers *unavailable* for managed rooms until it attaches again. The
-projection recovery pass a replica runs at startup waits for the first
-attachment, so nothing is projected while the fence refuses the authority.
-A closed scope (restored, reconstructed, fenced) admits nothing on these
-surfaces either (`RoomGrants::scope_admits`). Unlike acceptance, they do not
-compare the attachment's binding with the authority they read, and they
-serve a room no enrolled scope manages without asking the attachment gate
-whether it belongs to an enrollment only SpiceDB holds
-(`HostGrantAttachmentGate::refuses_unmanaged`); both are left to a later
-slice.
+(`permissions/host_grant/runtime_attach.rs`), and only while that gate is
+attached (`HostGrantAttachmentGate::verified_attachment`, which reads the
+state and the attachment under one lock): the runtime role's privileges and
+the restore fence were verified and nothing has found the authority changed
+since (see [Restore incarnation decisions](#restore-incarnation-decisions)).
+In every other state every surface answers *unavailable* for managed rooms
+until the gate attaches again: before the first verification passes; when
+the gate drops the attachment (a refusal of the whole authority, a role
+that no longer matches the profile, passes that cannot complete); and while
+it verifies a changed authority again after an acceptance found the binding
+changed, and after that verification failed. In those last two states the
+gate still holds the earlier attachment, because acceptance compares its
+binding with the one it reads and refuses on the difference; the surfaces
+compare no binding, so they do not read it. The XEP-0045 administration
+writers stop with them: an affiliation change is not recorded, and the
+background reconciliation of a recorded one runs no pass, while the gate is
+not attached. A replica binds the surfaces' gate to its attachment gate
+once at startup; a second, different attachment gate offered to it leaves
+every managed room *unavailable*, and the replica then does not verify its
+own gate either. The projection recovery pass a replica runs at startup
+waits for the first attachment, so nothing is projected while the fence
+refuses the authority. A closed scope (restored, reconstructed, fenced)
+admits nothing on these surfaces either (`RoomGrants::scope_admits`).
+
+Two differences from acceptance remain, and closing both is a precondition
+for enrolling the first scope:
+
+- *Per-decision binding comparison.* The surfaces trust the attached state
+  rather than comparing the attachment's binding with the authority each
+  decision reads. A PostgreSQL restart, failover or relation recreation
+  under the running replica is therefore noticed by these surfaces only
+  once an acceptance or a periodic fence pass has noticed it; until then
+  they decide from the changed authority. Each decision has to read the
+  binding in its snapshot and refuse on a difference, as acceptance does.
+- *Rooms of an enrollment only SpiceDB holds.* The surfaces serve a room no
+  enrolled scope manages without asking the attachment gate whether it
+  belongs to an enrollment the restored database lost
+  (`HostGrantAttachmentGate::refuses_unmanaged`); acceptance refuses such a
+  room. Each surface has to consult it for an unmanaged room.
 
 Enrolled set. Whether a channel, a room address or a Space node belongs to
 an enrolled scope is answered from the replica's in-memory copy of the
@@ -2020,8 +2044,9 @@ scope's guard, with its attachment's. On any difference it is refused
 a committed denial) and the replica's `HostGrantAttachmentGate` starts one
 verification (single-flight): it runs the fence, which reads the binding
 before and after, and swaps the attachment for the one the fence produced.
-Until then every managed room is refused, and while it fails the gate keeps
-retrying with the same backoff. A PostgreSQL restart or failover therefore
+Until then every managed room is refused, by acceptance and by every other
+surface, which reads the attachment only while the gate is attached, and
+while it fails the gate keeps retrying with the same backoff. A PostgreSQL restart or failover therefore
 costs a refused acceptance per replica and one fence pass, not a replica
 restart.
 

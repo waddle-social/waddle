@@ -3,9 +3,16 @@
 //!
 //! [`HostGrantGate`] pairs the canonical store with the replica's enrolled
 //! set ([`EnrolledScopes`]) and the [`HostGrantAttachment`] its
-//! [`HostGrantAttachmentGate`] holds: the attachment the restore fence
-//! verified, which the attachment gate replaces when it verifies a changed
-//! authority again and drops while the fence refuses. Whether a room
+//! [`HostGrantAttachmentGate`] holds while it is attached: the attachment
+//! the restore fence verified, which the attachment gate replaces when it
+//! verifies a changed authority again and drops while the fence refuses.
+//! These surfaces do not compare the attachment's binding with the
+//! authority they read, as acceptance does, so they read the attachment
+//! only while the attachment gate's last verification stands
+//! ([`HostGrantAttachmentGate::verified_attachment`]): while it verifies a
+//! changed authority again, or after that verification failed, every
+//! managed room is unavailable even though the gate still holds the
+//! earlier attachment for acceptance to compare with. Whether a room
 //! is managed is answered from the enrolled set, in memory: a room outside
 //! it answers [`RoomGate::Unmanaged`] without touching PostgreSQL, and the
 //! surface keeps its existing checks. A managed room is answered from its
@@ -16,9 +23,10 @@
 //! [`RoomGate::Unavailable`] when the enrolled set has not loaded, when the
 //! address reaches a managed room in a form that is not canonical, when the
 //! grants cannot be read within the bounds, on a replica whose
-//! attachment gate holds no attachment (its runtime role's privileges or
-//! the restore fence not verified), and on a replica that holds no lease of
-//! the revocation fence: a surface fails closed on it.
+//! attachment gate is not attached (its runtime role's privileges or the
+//! restore fence not verified, or verified again and refused), and on a
+//! replica that holds no lease of the revocation fence: a surface fails
+//! closed on it.
 //!
 //! Every decision for a managed room carries the replica's revocation-fence
 //! ticket ([`FenceTicket`]): the registration and the scope generation it
@@ -31,6 +39,7 @@
 //! SQLite holds no canonical store, so every room is unmanaged there.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -77,6 +86,10 @@ pub struct HostGrantGate {
     attachment: Arc<OnceLock<Arc<HostGrantAttachmentGate>>>,
     /// The replica's part of the revocation fence, on PostgreSQL.
     fence: Option<ReplicaFence>,
+    /// Another attachment gate than the bound one was offered: which of
+    /// them speaks for the replica cannot be told, so no managed room is
+    /// decided.
+    conflicting: Arc<AtomicBool>,
 }
 
 /// Whether a room or Space is managed by an enrolled scope cannot be told:
@@ -155,25 +168,47 @@ impl HostGrantGate {
     /// enrolled set `enrolled` with the permission actor.
     pub fn with_enrolled_scopes(store: HostGrantStore, enrolled: EnrolledScopes) -> Self {
         let attachment = Arc::default();
-        let fence = ReplicaFence::new(store.clone(), enrolled.clone(), Arc::clone(&attachment));
+        let conflicting = Arc::default();
+        let fence = ReplicaFence::new(
+            store.clone(),
+            enrolled.clone(),
+            Arc::clone(&attachment),
+            Arc::clone(&conflicting),
+        );
         Self {
             store: Some(store),
             enrolled,
             attachment,
             fence: Some(fence),
+            conflicting,
         }
     }
 
     /// Decide managed rooms with the attachment `gate` holds: the replica's
     /// attachment gate, shared with room-manifest acceptance. Only the first
-    /// gate bound is kept; the answer is whether this call bound it.
+    /// gate bound is kept; the answer is whether this call bound it. A
+    /// different gate offered after one is bound leaves this gate refusing
+    /// every managed room, since it cannot tell which of them speaks for
+    /// the replica; offering the bound gate again changes nothing.
     pub fn bind_attachment(&self, gate: Arc<HostGrantAttachmentGate>) -> bool {
-        self.attachment.set(gate).is_ok()
+        match self.attachment.set(gate) {
+            Ok(()) => true,
+            Err(offered) => {
+                let bound = self.attachment.get();
+                if !bound.is_some_and(|bound| Arc::ptr_eq(bound, &offered)) {
+                    self.conflicting.store(true, Ordering::Release);
+                }
+                false
+            }
+        }
     }
 
     /// Hold `attachment` in the bound attachment gate, binding a gate of
     /// this gate's own when none is bound. The first attachment stays; the
-    /// answer is whether this call set it.
+    /// answer is whether this call set it. For suites that decide rooms
+    /// without a verifier; a replica's gate is attached only by its
+    /// verification.
+    #[cfg(feature = "test-support")]
     pub fn attach(&self, attachment: HostGrantAttachment) -> bool {
         self.attachment.get_or_init(Arc::default).attach(attachment)
     }
@@ -193,9 +228,19 @@ impl HostGrantGate {
         self.fence.as_ref()
     }
 
-    /// The verified attachment the bound attachment gate holds now, if any.
+    /// The verified attachment the bound attachment gate holds now, only
+    /// while that gate is attached
+    /// ([`HostGrantAttachmentGate::verified_attachment`]). `None` while it
+    /// verifies a changed authority again, after that verification failed,
+    /// before it first attaches, when no gate is bound and when another
+    /// gate was offered than the bound one.
     pub fn attachment(&self) -> Option<HostGrantAttachment> {
-        self.attachment.get().and_then(|gate| gate.current())
+        if self.conflicting.load(Ordering::Acquire) {
+            return None;
+        }
+        self.attachment
+            .get()
+            .and_then(|gate| gate.verified_attachment())
     }
 
     /// Whether an enrolled scope manages the room `binding` names, from the
@@ -233,7 +278,8 @@ impl HostGrantGate {
                 tracing::warn!(
                     kind = "authority_unavailable",
                     "A managed room was refused: this replica holds no verified host-grant \
-                     attachment (runtime role privileges or restore fence)"
+                     attachment (runtime role privileges or restore fence, or the authority is \
+                     being verified again)"
                 );
             }
             return RoomGate::Unavailable;
@@ -362,6 +408,7 @@ impl HostGrantGate {
             enrolled: self.enrolled.clone(),
             attachment: Arc::clone(&self.attachment),
             fence: None,
+            conflicting: Arc::clone(&self.conflicting),
         }
     }
 

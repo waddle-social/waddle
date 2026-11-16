@@ -378,6 +378,10 @@ struct Shared {
     store: HostGrantStore,
     enrolled: EnrolledScopes,
     attachment: Arc<OnceLock<Arc<HostGrantAttachmentGate>>>,
+    /// Set when another attachment gate than the bound one was offered: the
+    /// replica's surfaces then decide no managed room, so neither does the
+    /// fence.
+    conflicting: Arc<AtomicBool>,
     /// The lock every validity check reads under and every installation
     /// writes under. It is never held across an await.
     state: RwLock<FenceState>,
@@ -399,13 +403,18 @@ impl Shared {
         self.state.write().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether this replica decides for managed rooms at all: it holds a
-    /// verified attachment and the enrolled set names a scope.
+    /// Whether this replica decides for managed rooms at all: its bound
+    /// attachment gate is attached, as the surfaces require
+    /// ([`HostGrantAttachmentGate::verified_attachment`]), and the enrolled
+    /// set names a scope. While the gate verifies a changed authority again,
+    /// or after that verification failed, the lease is released, so every
+    /// ticket read before it stops being current with the surfaces.
     fn serves(&self) -> bool {
-        let attached = self
-            .attachment
-            .get()
-            .is_some_and(|gate| gate.current().is_some());
+        let attached = !self.conflicting.load(Ordering::Acquire)
+            && self
+                .attachment
+                .get()
+                .is_some_and(|gate| gate.verified_attachment().is_some());
         attached && self.enrolled.snapshot().is_some_and(|set| !set.is_empty())
     }
 
@@ -623,18 +632,21 @@ impl std::fmt::Debug for ReplicaFence {
 impl ReplicaFence {
     /// The fence of the replica whose canonical store is `store`, whose
     /// enrolled set is `enrolled` and whose attachment gate is the one
-    /// `attachment` holds once bound. Nothing runs until
+    /// `attachment` holds once bound; `conflicting` is the gate's flag that
+    /// another attachment gate was offered. Nothing runs until
     /// [`Self::start`] or the first decision.
     pub(super) fn new(
         store: HostGrantStore,
         enrolled: EnrolledScopes,
         attachment: Arc<OnceLock<Arc<HostGrantAttachmentGate>>>,
+        conflicting: Arc<AtomicBool>,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 store,
                 enrolled,
                 attachment,
+                conflicting,
                 state: RwLock::default(),
                 ticks: watch::Sender::new(0),
                 wake: Arc::new(Notify::new()),

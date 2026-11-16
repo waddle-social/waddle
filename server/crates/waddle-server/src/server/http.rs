@@ -943,8 +943,17 @@ async fn attach_host_grant_store(
     let _ = state.host_grant_gate.set(Arc::clone(&gate));
     // Every surface outside manifest acceptance decides managed rooms with
     // the attachment this gate holds, as the fence verifies, replaces and
-    // drops it.
-    state.host_grants.bind_attachment(Arc::clone(&gate));
+    // drops it. When the surfaces' gate is already bound to another
+    // attachment gate, they refuse every managed room; this gate is then
+    // never verified either, so acceptance refuses them as well.
+    if !state.host_grants.bind_attachment(Arc::clone(&gate)) {
+        tracing::error!(
+            kind = "attachment_gate_conflict",
+            "The host-grant attachment gate was not bound: another one is bound already. Every \
+             room an enrolled scope manages is refused on this replica"
+        );
+        return;
+    }
     // The replica registers with the revocation fence once it holds an
     // attachment and a scope is enrolled, and decides nothing for a managed
     // room before that.

@@ -42,6 +42,8 @@ the integration branch itself.
 | `integration-run2-s2s.log` | nextest on integration at `6e4cceebb`: `waddle-xmpp` 133 of 133 passed across 4 binaries, `waddle-server` 361 of 361 passed across 11 binaries; no skips reported. |
 | `integration-run2-hostgrant-b.log` | nextest of the first host-grant slice's set: 110 of 110 passed across 8 binaries, including the `#[ignore]` SpiceDB cases. |
 | `integration-run2-hostgrant-c.log` | nextest of the writer fence's set: 64 of 64 passed across 6 binaries. |
+| `integration-run4-c.log` | nextest of the writer fence's set at `def22148d` (the commit is the log's first line): 66 of 66 passed across 6 binaries, including the `#[ignore]` SpiceDB cases. |
+| `integration-run4-r.log` | nextest of the restore incarnation's set at `def22148d`: 114 of 114 passed across 6 binaries (`host_grant_authority`, `host_grant_projection`, `host_grant_restore`, `restricted_runtime_startup`, `xep0045_host_grant_admission`, `xep0045_host_grant_audience`), including the `#[ignore]` SpiceDB cases. |
 | `server/docs/planning/host-grant-authority-2047.md` | Records the first slice's set passing 110 of 110 on 2026-11-14 (two consecutive runs; an earlier run of that revision failed one admission case with an ingress substrate timeout, which passed alone and in both later runs; cause unconfirmed) and again on 2026-11-15 at `ef5205cf2`, and the writer fence's set passing 64 of 64 on 2026-11-15 at `ef5205cf2`. PostgreSQL 17.11 and SpiceDB 1.56.1 with the memory datastore. |
 
 The two host-grant logs do not record the commit they ran at or the
@@ -106,8 +108,8 @@ tests of `waddle-server`, `bun test` for `chat`, or the `clustering` feature.
 | `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, host-grant-b log |
 | `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, host-grant-b log |
 | `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, host-grant-b log |
-| `xep0045_host_grant_fence` (28 in 2 modules) | W5c | PostgreSQL 17; loopback | Run 28/28, host-grant-c log |
-| `host_grant_enrolled_set` (8) | W5c | PostgreSQL 17 | Run 8/8, host-grant-c log |
+| `xep0045_host_grant_fence` (29 in 2 modules) | W5c, integration | PostgreSQL 17; loopback | Run 29/29, run4-c log |
+| `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run4-c log |
 | `spaces_pubsub_owner_seed` (9) | W5c | none (in-memory state) | Run 9/9, host-grant-c log |
 | `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, host-grant-c log |
 | `xep0060_extension_route_room_access` (3) | W5c | none (in-memory state, loopback) | Run 3/3, host-grant-c log |
@@ -220,6 +222,23 @@ implemented unless the text says so.
   Muji presence path (only the local path is driven), the mirror repair loop
   and its generation check, and the transient publish the Spaces backfill no
   longer makes.
+- **Writer-fence preconditions before the first enrollment (W5c, W5r;
+  `host-grant-authority-2047.md`, "One decision for every surface").** The
+  surfaces outside room-manifest acceptance read the replica's attachment
+  only while its attachment gate is attached, so a re-verification in
+  progress or failed closes them. Two differences from acceptance remain,
+  and both must be closed before the first scope is enrolled: each surface
+  decision compares the attachment's binding with the authority it reads
+  and refuses on a difference, and each surface asks
+  `HostGrantAttachmentGate::refuses_unmanaged` before serving a room no
+  enrolled scope manages.
+- **Reconciliation after a re-attachment (W5c, W5r).** The background
+  reconciliation of a recorded affiliation change runs no pass while the
+  attachment gate is not attached, and gives up after its last retry
+  delay. The projection recovery pass runs only at a replica's first
+  attachment, so such a change stays recorded and not effective until the
+  scope's next reconciliation or the replica's next start; a recovery pass
+  on every re-attachment would close that gap.
 - **Client carry-overs from W3, for the client slice (W8).** Local-id caches
   that assume one client and must hold several; link generation with
   qualified slugs; `selectedSpaceId` keyed by `(service, node)`; and the

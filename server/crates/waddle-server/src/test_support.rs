@@ -1060,9 +1060,13 @@ pub async fn websocket_state_with_ingress(
 /// permission actor is fenced by the global database's host-grant store,
 /// the actor and the state's host-grant gate share one enrolled set, and the
 /// WebSocket routes use the app state's room registry, whose room actors
-/// take the members-only binding of managed rooms. The app state names the
-/// WebSocket test state's MUC and Spaces services, so the admin commands a
-/// suite registers act on the rooms and Spaces its clients see.
+/// take the members-only binding of managed rooms. The host-grant gate is
+/// bound to the ingress authority's attachment gate, so a suite attaches the
+/// surfaces and acceptance together (through `attach_host_grants`, the
+/// gate's verifier, or `host_grants.attach`, which reaches the same gate),
+/// and a re-verification of that gate closes them together. The app state
+/// names the WebSocket test state's MUC and Spaces services, so the admin
+/// commands a suite registers act on the rooms and Spaces its clients see.
 ///
 /// The enrolled set is loaded in the background; a suite that enrolls a
 /// scope after building the state calls `host_grants.enrolled().refresh()`
@@ -1086,6 +1090,13 @@ pub async fn websocket_state_with_host_grant_fence(
             .with_host_grant_authority(store.clone(), enrolled.clone()),
     );
     let host_grants = HostGrantGate::with_enrolled_scopes(store, enrolled);
+    // The surfaces decide managed rooms with the attachment the ingress
+    // authority's attachment gate holds, the one acceptance uses, as a
+    // replica's startup binds them.
+    assert!(
+        host_grants.bind_attachment(ingress.host_grant_gate()),
+        "a fresh host-grant gate binds the ingress authority's attachment gate"
+    );
     let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
     // The admin commands read the app state's services; they are the
     // WebSocket test state's own.
