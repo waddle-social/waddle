@@ -9,9 +9,10 @@
 //! The server domain also asks: before a local resource's join to a remote
 //! room leaves, the server sends the room's domain JID a `disco#info`
 //! request of its own to learn whether it is a multi-user chat service
-//! (XEP-0045 §6.2), and only a response from that domain with that id
-//! completes it; any other response to the server domain, the room's own
-//! included, is dropped unanswered.
+//! (XEP-0045 §6.2), and then the room's bare JID one to learn whether it
+//! is a room (§6.4). Only a response from the JID asked with the request's
+//! id completes each; any other response to the server domain, the room's
+//! own to the domain's request included, is dropped unanswered.
 //!
 //! Two in-process deployments on loopback with the connection-manager
 //! fixture's test CA. No PostgreSQL, SpiceDB or second process is involved.
@@ -52,7 +53,7 @@ fn query(namespace: &str, node: Option<&str>) -> Element {
 }
 
 /// A `disco#info` result naming a multi-user chat service (XEP-0045
-/// §6.2).
+/// §6.2), or a room at one (§6.4).
 fn room_info() -> Element {
     Element::from(DiscoInfoResult {
         node: None,
@@ -244,10 +245,44 @@ async fn a_join_asks_the_rooms_domain_for_disco_info_from_the_server_domain() {
         "the join is still held"
     );
 
-    // The domain's own answer naming a multi-user chat service releases
-    // the join.
+    // The domain's own answer naming a multi-user chat service moves the
+    // join on: the server asks the room's bare JID next.
     let response = Iq::Result {
         from: Some(jid(HOME_B)),
+        to: Some(jid(HOME_A)),
+        id,
+        payload: Some(room_info()),
+    };
+    send(&b, HOME_B, HOME_A, response).await;
+    let asked = wait_for(ARRIVES, || {
+        captured
+            .stanzas()
+            .into_iter()
+            .find(|stanza| stanza.name() == "iq" && stanza.attr("to") == Some(ROOM))
+    })
+    .await
+    .expect("the server asks the room");
+    assert_eq!(asked.attr("type"), Some("get"));
+    assert_eq!(asked.attr("from"), Some(HOME_A));
+    let id = asked.attr("id").expect("an id").to_owned();
+    assert!(id.starts_with("room-"), "{id}");
+    let queries: Vec<&Element> = asked.children().collect();
+    assert_eq!(queries.len(), 1);
+    assert!(queries[0].is("query", DISCO_INFO_NS));
+    assert_eq!(queries[0].attr("node"), None);
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        captured
+            .stanzas()
+            .iter()
+            .all(|stanza| stanza.name() != "presence"),
+        "the join is still held"
+    );
+
+    // The room's own answer naming a conference identity releases the
+    // join.
+    let response = Iq::Result {
+        from: Some(jid(ROOM)),
         to: Some(jid(HOME_A)),
         id,
         payload: Some(room_info()),
