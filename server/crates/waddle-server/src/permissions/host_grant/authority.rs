@@ -5,13 +5,14 @@
 //! no state of its own, so any replica can run it at any time for any scope,
 //! after a crash, a cancelled caller or a lost reply. One pass:
 //!
-//! 1. drops, as an operation of its own, every recorded increase not yet
-//!    effective whose remote initiator this replica's S2S snapshot no longer
-//!    admits or lists as a trusted home
-//!    (`HostGrantStore::drop_unhonoured_increases`), so that such an
-//!    increase is never projected;
-//! 2. reads the scope's current canonical intent in one PostgreSQL snapshot
+//! 1. reads the scope's current canonical intent in one PostgreSQL snapshot
 //!    (only the current operation has an intent; a superseded one has none);
+//! 2. while that intent waits for its projection, drops, as an operation of
+//!    its own, every recorded increase not yet effective whose remote
+//!    initiator this replica's S2S snapshot no longer admits or lists as a
+//!    trusted home (`HostGrantStore::drop_unhonoured_increases`), and reads
+//!    the intent again after a drop, so that such an increase is never
+//!    projected;
 //! 3. reads the scope's projection marker;
 //! 4. decides from the marker:
 //!    - it is the current operation's marker: the write was applied, whether
@@ -308,14 +309,14 @@ impl HostGrantAuthority {
 
     /// Drop the recorded increases of `lifecycle` whose remote initiator
     /// this authority's S2S snapshot no longer admits or trusts, before any
-    /// of them is projected. The S2S snapshot is fixed for the life of the
+    /// of them is projected; `true` when one was dropped. The S2S snapshot is fixed for the life of the
     /// process, so a pass that finds nothing to drop cannot be overtaken by
     /// a change of this replica's own policy; a replica that still runs an
     /// earlier snapshot decides by that one until it restarts.
     async fn drop_unhonoured_increases(
         &self,
         lifecycle: ScopeLifecycleId,
-    ) -> Result<(), HostGrantError> {
+    ) -> Result<bool, HostGrantError> {
         let dropped = self
             .store
             .drop_unhonoured_increases(lifecycle, &self.issuance)
@@ -336,7 +337,7 @@ impl HostGrantAuthority {
             );
             self.after_commit(lifecycle);
         }
-        Ok(())
+        Ok(dropped > 0)
     }
 
     /// Spawn the witness writers for a scope after a commit, so that SpiceDB
@@ -433,12 +434,16 @@ impl HostGrantAuthority {
         &self,
         lifecycle: ScopeLifecycleId,
     ) -> Result<Reconciliation, HostGrantError> {
-        self.drop_unhonoured_increases(lifecycle).await?;
-        let plan = self.store.projection_plan(lifecycle).await?;
-        let generation = plan.marker().generation;
+        let mut plan = self.store.projection_plan(lifecycle).await?;
         if !plan.pending() {
-            return Ok(Reconciliation::AlreadyActive(generation));
+            return Ok(Reconciliation::AlreadyActive(plan.marker().generation));
         }
+        // An increase waits for activation only while the plan is pending,
+        // so a scope with nothing pending has nothing to drop either.
+        if self.drop_unhonoured_increases(lifecycle).await? {
+            plan = self.store.projection_plan(lifecycle).await?;
+        }
+        let generation = plan.marker().generation;
         let Ok(observation) = self.observe(&plan).await else {
             return Ok(Reconciliation::ProjectionUnknown);
         };
