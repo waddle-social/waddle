@@ -450,6 +450,13 @@ delivered, under the headline rules above, only when one of these holds:
   account's presence subscription and its clients' `+notify` features
   establish.
 
+A Space hosted on another server (XEP-0503) is used through this gate and
+nothing else: joining it is the `<subscribe/>` that writes the record, and
+its notifications are the events the record admits. The record admits
+notifications only; it is no grant in any room the Space lists
+([Spaces](s2s-routing-2047.md#spaces-w7a);
+`crates/waddle-server/tests/xep0503_s2s_outbound_spaces_ws.rs`).
+
 Anything else carrying an event is dropped unanswered, whatever the
 account's state. The gate runs before anything else: a message of type
 `error` carrying an event is no notification the account asked for, and is

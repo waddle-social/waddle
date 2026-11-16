@@ -26,6 +26,12 @@ this deployment and read their archives, each request decided for the
 remote principal on the evidence of its stream
 ([Inbound MUC](#inbound-muc-w6a)).
 
+The Spaces slice (W7a) opens the Spaces PubSub service to remote senders
+(D10): accounts at admitted domains discover the Spaces of this deployment
+that are open to other servers, read what they list, subscribe to them and
+are notified of changes, and change a Space only as D8 allows
+([Spaces](#spaces-w7a)).
+
 Nothing here is executed evidence. The evidence is written and compiled but
 not run until verification (D9):
 
@@ -90,7 +96,28 @@ not run until verification (D9):
 - `crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs`,
   `s2s_stream_addresses.rs`, `s2s_pre_authentication.rs` and
   `s2s_codec.rs`: stanzas on established streams, U-label addresses, the
-  delivery of refused spellings and the content namespace mapping.
+  delivery of refused spellings and the content namespace mapping;
+- `crates/waddle-server/tests/xep0503_s2s_inbound_spaces.rs`: a federated
+  Space listed and described to a remote asker, a Space that is not
+  federated and a private Space answered exactly as a missing node in
+  every operation, the rooms a Space lists reduced to those open to other
+  servers, a read that writes nothing, peer admission at the request, and
+  the owner's `federated` field;
+- `crates/waddle-server/tests/xep0060_s2s_inbound_spaces_pubsub.rs`: a
+  remote account's subscription and its bounds, the request share of one
+  account, event notifications to remote subscribers and each condition
+  that withholds one, and the changes a remote owner may make only from a
+  trusted home;
+- `crates/waddle-server/tests/xep0503_s2s_inbound_spaces_host_grant.rs`
+  (PostgreSQL): a managed room's bookmark told only to a principal its
+  grants admit, and an enrolled scope's Space served to nobody;
+- `crates/waddle-server/tests/xep0503_s2s_outbound_spaces_ws.rs`: a local
+  account discovering, reading and subscribing to a Space on another
+  server's PubSub service, its event notifications, and that the
+  subscription grants nothing in the Space's rooms;
+- `crates/waddle-server/tests/spaces_privileged_issuance.rs` and
+  `admin_spaces_ws.rs`: the privileged relations and roles of Spaces
+  written only for served accounts and trusted homes.
 
 The implementation is `crates/waddle-server/src/s2s/route.rs` and `route/`,
 the outbound channel of `crates/waddle-server/src/s2s/conn/` (`outbox.rs`
@@ -105,7 +132,12 @@ presence handler, `s2s_delivery.rs`, the blocking check in
 adds `route/local_rooms.rs`, `route/seats.rs` and `route/router/hosting.rs`,
 the room host `server/routes/websocket/s2s_rooms.rs`, the delivery hook of
 `crates/waddle-xmpp/src/registry/connection_registry.rs` and migration 2007
-(`s2s_local_room_seats`).
+(`s2s_local_room_seats`). Spaces add `route/local_spaces.rs` and
+`route/router/spaces.rs`, the Spaces host
+`server/routes/websocket/s2s_spaces.rs` with
+`handlers/iq/spaces_remote.rs`, the hook in the PubSub fan-out, the stores
+in `db/s2s_spaces.rs` and migrations 2012 (`s2s_federated_spaces`) and 2013
+(`s2s_space_subscriptions`).
 
 ## The router
 
@@ -194,8 +226,15 @@ the WebSocket layer implements for remote senders' traffic to local
 accounts, which startup attaches to the router; a router without one
 refuses it as the interim rule below says.
 
-The MUC service is the one service whose handlers a remote stanza reaches,
-and only on a replica whose router has the room host attached
+The MUC service and the Spaces PubSub service are the services whose
+handlers a remote stanza reaches. The Spaces service is reached only on a
+replica whose router has the Spaces host attached (`S2sRouter::attach_spaces`,
+which startup calls when S2S is enabled), for five operations
+(`SpaceOperation`), each an IQ request: `disco#info`, `disco#items`, ping, a
+XEP-0060 request in the `pubsub` namespace and one in the `pubsub#owner`
+namespace. Each is decided by the host for the remote principal on the
+evidence of its stream ([Spaces](#spaces-w7a)). The MUC service is reached
+only on a replica whose router has the room host attached
 (`S2sRouter::attach_rooms`, which startup calls when S2S is enabled). Nine
 operations reach the host (`RoomOperation`): `disco#info`, `disco#items`,
 ping, a XEP-0313 query, presence, a message, a `muc#admin` request, a
@@ -212,7 +251,8 @@ without the host, the whole service is refused as it was before.
 | Local account, full JID | The account side admits it for a requester the account shares presence with, or a remote room the resource occupies or is joining: registered as an `inbound` correlation and delivered to that resource; otherwise `service-unavailable` (G18) | Delivered to that resource only if it completes a request that resource sent (D7's first exception) | From the bare JID of a remote room at a verified service the resource's join was sent to, or from one of its occupants once the room has sent the resource its own presence, until the leave is answered or its grace ends: delivered to that resource (D7's second exception, below). Otherwise the account side (G18) | From a remote room at a verified service the resource's join was sent to, or has just left: delivered to that resource (D7's second exception). Otherwise the account side (G18) |
 | MUC domain: service, rooms, occupants, where rooms are hosted for remote occupants | `disco#info`, `disco#items` and ping (`get`), a XEP-0313 query, a `muc#admin` request and a `muc#owner` request (`get` or `set`), and a XEP-0425 `moderate` request (`set`) reach the room host; anything else (registration, vCards, pins, call signalling) `service-unavailable` | Dropped: no room sends a request to a remote entity | Reaches the room host, which accepts a `groupchat` message to a room's bare JID from an occupant and answers any other with an error; an error message from a seated occupant's address ends its seat when it names a delivery failure and is otherwise ignored | Reaches the room host: a join, a change of availability or nickname, a leave; an error presence from a seated occupant's address ends its seat when it names a delivery failure; anything else is ignored |
 | MUC domain, on a router without the room host | `service-unavailable` | Dropped | `service-unavailable` | Ignored |
-| Spaces PubSub domain | `service-unavailable` until the Spaces slice (W7a) reviews its handlers | Dropped | `service-unavailable` | Ignored |
+| Spaces PubSub domain, where Spaces are served to remote principals | `disco#info`, `disco#items` and ping (`get`), and a XEP-0060 request in the `pubsub` or the `pubsub#owner` namespace (`get` or `set`) reach the Spaces host; anything else (ad-hoc commands, registration, vCards) `service-unavailable` | Dropped: the service sends no request to a remote entity | `service-unavailable`; an error message is dropped | Ignored |
+| Spaces PubSub domain, on a router without the Spaces host | `service-unavailable` | Dropped | `service-unavailable` | Ignored |
 | HTTP upload, push, community, extensions, call mixer | `service-unavailable` (D10: not enabled) | Dropped | `service-unavailable` | Ignored |
 
 In every row an error stanza is never answered, and presence whose
@@ -230,6 +270,7 @@ here, `http://jabber.org/protocol/disco#info` (XEP-0030 §3.1). Further
 features are advertised to remote askers only once verification has shown
 them (gate G21). `disco#items` lists a service only where remote senders
 reach it: the MUC domain on a router that hosts rooms for remote occupants,
+the Spaces domain on a router that serves its Spaces to remote principals,
 and nothing otherwise. A `node` on either query is `item-not-found`.
 
 Besides the reachability table, a stanza from an S2S stream can cause only
@@ -257,6 +298,13 @@ these effects:
   that request does for a session: an affiliation or role changed, an
   occupant removed, a message retracted by a moderator, the room's
   configuration changed or the room destroyed;
+- for a request that reaches the Spaces host, what the host decides for it
+  ([Spaces](#spaces-w7a)): one answer queued for the sender's domain; for a
+  subscription, a row of the PubSub service's subscriptions and a row of
+  `s2s_space_subscriptions`, removed again by its `<unsubscribe/>`; and,
+  for a change by a principal whose privilege the effect boundary honours,
+  what that request does for a session: a node's configuration, items,
+  affiliations or subscriptions changed, or the node deleted;
 - for a stanza addressed to a room another replica holds, one message on
   the cluster relay that hands it to that replica with the facts of its
   sender's stream ([Several replicas](#inbound-muc-w6a)); everything above
@@ -275,9 +323,9 @@ these effects:
 Enabling a further service, or a further operation of one, for remote
 senders is its own reviewed change to `reach` (or, for room traffic, the
 router's `rooms` module), this inventory and the reachability, outbound or
-inbound MUC suites. Of D10's enabled set the MUC service is open as
-described; the Spaces PubSub service stays refused until W7a's handlers
-accept a remote principal.
+inbound MUC suites, or, for the Spaces service, to `reach`'s Spaces
+operations and the Spaces suites. Of D10's enabled set the MUC service and
+the Spaces PubSub service are open as described.
 
 ## Account traffic in the interim (D7)
 
@@ -1720,6 +1768,284 @@ answered for as one that cannot say, within that budget.
 - Listing rooms or occupants to remote askers.
 - Creating a room.
 
+## Spaces (W7a)
+
+Accounts at admitted remote domains use the Spaces of this deployment that
+are open to other servers, and local accounts use Spaces hosted elsewhere
+(XEP-0503 version 0.3.0 over XEP-0060, with XEP-0030, XEP-0199 and the
+XEP-0402 items a Space lists, pinned at
+4132c531487fe9450ae90b905b8df950d0d478b2; ADR-0020 D4 and D10). The
+router's part is `route/reach.rs` (which requests reach the host),
+`route/local_spaces.rs` (what the router hands the host and expects back)
+and `route/router/spaces.rs` (rates, queueing and the egress of event
+notifications). The host is `server/routes/websocket/s2s_spaces.rs`; the
+stores are in `db/s2s_spaces.rs`.
+
+A Space is a PubSub node in the database every replica shares, so the
+replica a stream lands on decides a request itself. Nothing is carried to
+another replica, no relay message is added, and the ordered relay's
+envelope and its id are unchanged.
+
+### Outbound: a Space hosted elsewhere
+
+A local account uses a remote Space with plain XEP-0030 and XEP-0060
+requests to the remote service's JID, which the router routes like any IQ
+request to a remote entity ([IQ correlation](#iq-correlation-g8)): the
+service's list of Spaces (`disco#items`), a Space's metadata (`disco#info`
+of its node), its content (`<items/>`) and joining it (`<subscribe/>`).
+Nothing in this path is specific to Spaces, so a Space on a stock PubSub
+service is used the same way.
+
+The Space's event notifications reach the account through the gate of
+[the account-traffic design](s2s-account-traffic-2047.md#event-notifications-xep-0060-71-xep-0163):
+only for a node the account subscribed to, recorded when its
+`<subscribe/>` left.
+
+**A subscription is not a room grant.** Subscribing to a remote Space
+writes one record here, the one that admits the Space's notifications. It
+writes no occupancy of any room, no bookmark, no roster entry and no
+permission relationship, and it changes nothing about what the account may
+send. A room a Space lists is entered by a join of that room: the join is
+held until this server has verified the room's service, as for any remote
+room ([Outbound MUC](#outbound-muc-w6b)), and the room's own host decides
+it. Nothing is inherited from a Space to its rooms in either direction
+(ADR-0020 D4).
+
+A Space's avatar and banner items (0.3.0, "Spaces images") carry URLs. The
+server relays such an item to the client that asked, as it relays any item,
+and requests nothing the item names.
+
+### Inbound: the Spaces of this deployment
+
+**Which Spaces are reached.** A Space is reached by remote principals only
+while its `federated` setting is on. The setting is off for every Space
+that existed before it did and for every new one; there is no deployment
+default that turns it on. A Space's owner reads and sets it in the node's
+configuration form (`urn:waddle:spaces:federated`, a boolean field of the
+`pubsub#owner` configure form on the Spaces service). It is stored apart
+from the PubSub node (`s2s_federated_spaces`, migration 2012), as a row
+that exists while the setting is on and names the creation time of the node
+it was turned on for: a Space deleted and created again under the same name
+is not federated, whatever row its predecessor left. Deleting a Space
+through PubSub or the admin command removes the row.
+
+The setting is kept out of the PubSub node's own row because that table
+belongs to the PubSub storage, which creates and verifies its own schema
+and may live in a database of its own.
+
+**The order of decisions.** Each request is decided in this order, and
+nothing later is looked at before the earlier step has passed:
+
+1. *Peer admission* (D1), for the sender's domain under the S2S snapshot
+   the replica runs (`PrincipalPolicy::witness`), where the request is
+   decided: a domain that snapshot does not admit, or a stream below what
+   host policy requires, is refused with `forbidden`, whatever a Space
+   holds for the account.
+2. *The address.* The service is its bare domain. A request to any other
+   address at that domain is `service-unavailable`, whatever it names.
+3. *What the request itself says.* A request that is not well formed is
+   `bad-request`; a `<subscribe/>` for an address that is not the sender's
+   own is `bad-request` with `invalid-jid` semantics (XEP-0060 §6.1.3.1),
+   an `<unsubscribe/>` for one is `forbidden` (§6.2.3.3), and a request to
+   create a node is `forbidden`. These are decided before any node is
+   looked at, so they are the same for every node name.
+4. *Whether the node is a Space open to this asker.* The `federated`
+   setting is read first, by the node's name alone. Then: no enrolled
+   host-grant scope owns the node; the node exists and is the one the
+   setting was turned on for; and the Space is public, or the asker holds
+   an affiliation in it that is honoured for its stream and admits it.
+5. *The operation*, for an open Space.
+
+**No existence leak.** A node that fails step 4 is answered with
+`item-not-found` (type `cancel`, one fixed text, no application condition)
+in every operation: a node that does not exist, a Space whose setting is
+off, the Space of an enrolled scope, and a private Space in which the asker
+holds no honoured affiliation. The session handlers answer several of these
+cases differently (`not-subscribed` for an `<unsubscribe/>`, `forbidden`
+for an owner request); none of them is reached before step 4. `disco#items`
+of the service lists only the Spaces the asker would be answered about.
+While the setting cannot be read, the answer is `internal-server-error`
+(type `wait`) for every name alike; a later read that fails is reached only
+for a name whose setting is on.
+
+**Standing (D8).** A PubSub affiliation of a remote principal is honoured
+as the effect boundary honours any standing (`honoured` in the host):
+
+- a ban (`outcast`) always stands;
+- a membership counts while the principal's grants are honoured at all;
+- the owner and publisher affiliations, which administer a Space and place
+  rooms in it, count only for a trusted home on a `pkix` stream, under a
+  private CA where the home's entry requires one. One that is not honoured
+  contributes nothing: not the membership it would otherwise imply.
+
+**What the host answers.**
+
+| Operation | Answer |
+| --- | --- |
+| `disco#info` of the service | The identity `pubsub`/`service` and the features `disco#info`, `disco#items` and `http://jabber.org/protocol/pubsub`. The further features XEP-0503 has a Spaces service advertise are not told to remote askers until their use across servers has been shown (gate G21) |
+| `disco#info` of a node | The identity `pubsub`/`leaf` and a `pubsub#meta-data` form with `pubsub#type` (`urn:xmpp:spaces:0`, which is how XEP-0503 recognises a Space) and the title. The owners, the creator, the creation date, the access model and the asker's affiliation are not told: they are accounts and policy of this deployment. `forbidden` for an account banned from a public Space |
+| `disco#items` of the service | The Spaces the asker would be answered about, at most 256 |
+| `disco#items` of a node | An empty list for an open Space: a Space's content is read as PubSub items |
+| Ping of the service | An empty result |
+| `<items/>` | The XEP-0402 bookmarks of the rooms the asker may be told of (below), at most 256, without the publisher's address. `forbidden` for an account that may not read the Space. The store is read and nothing is written: a session's read also publishes bookmarks a Space lacks and repairs a room's parent, and a remote principal's read does neither |
+| `<subscribe/>` | For the sender's own bare or full JID: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one |
+| `<unsubscribe/>` | For the sender's own address: both records removed; `unexpected-request` when the address holds no subscription. Leaving is allowed whatever the sender's standing has become |
+| `<publish/>`, `<retract/>` and every `pubsub#owner` request | `forbidden` unless the principal's privilege is honoured (a trusted home on a `pkix` stream); then decided by the checks a session's request meets, for the remote account as their subject (below) |
+| `<create/>` | `forbidden`: no Space is created for a remote principal, since creating one makes its creator the owner |
+| Anything else in the two namespaces | `feature-not-implemented` where the parser names the feature, otherwise `service-unavailable` |
+
+**The rooms a Space lists.** A Space's items are bookmarks of rooms. A
+remote principal is told of a room only where the room's own host would
+describe it to that principal ([Inbound MUC](#inbound-muc-w6a)): the room's
+catalog row says it is open to other servers and is no group conversation;
+and a room an enrolled host-grant scope manages is told only to a principal
+its canonical grants admit to view it, decided through the evidence-naming
+form of the gate (`HostGrantGate::allows_as`) on the evidence of the stream
+that carried the request, behind the revocation fence's ticket. A room that
+cannot be decided now is not told. Nothing else a Space node holds is
+served to a remote principal: an item that is no bookmark of a room of this
+deployment's MUC service is left out. The same rule decides which event
+notifications a remote subscriber receives.
+
+Being told of a room admits nothing in it. Entering it is a join of the
+room, decided by the room for the principal and its stream.
+
+**Changes to a Space.** A remote principal changes a Space only with
+honoured privilege, and the request then runs through the handlers a
+session's request runs through (`spaces_change_for_remote`):
+
+- The `pubsub#owner` requests (the configuration form and its change,
+  purge, deletion, the affiliations and the subscriptions) are decided by
+  the node's Owner affiliation. They are made without a session, so they
+  neither read nor change whether the Space is federated.
+- A publish or a retract places a room in the Space or takes it out, which
+  moves the room's parent. It is decided by the Space's `owner`
+  relationship or the deployment's right to create Spaces, and by authority
+  over the room, for the remote account as the subject of those checks. No
+  writer issues the Space `owner` relationship to a remote account, so a
+  remote principal's PubSub affiliation alone places no room: the request
+  is `forbidden`.
+- An affiliation change is subject to D8 issuance whoever asks (below).
+- An owner's change of subscriptions may record an address at another
+  server. Nothing is sent for it (below).
+
+**D8 at issuance.** A privileged standing on a Space is written only for an
+account of this deployment or of a trusted home of the snapshot the replica
+runs; a standing written for any other home would not be honoured at the
+effect either. Three writers apply it:
+
+- the PubSub `<affiliations/>` change on the Spaces service refuses an
+  Owner, publisher or publish-only affiliation for any other account with
+  `not-allowed`, before any change of the request is applied;
+- the admin command `spaces:set-role` refuses the owner and admin roles
+  (the node's Owner and Publisher affiliations) the same way;
+- the permission actor refuses to write the channel `manager` and
+  `moderator`, the Space `moderator` and the role `manager` relations for
+  any other account (`PermissionError::UntrustedPrivilegedSubject`), in
+  each of its three messages that write a relation. No handler, command or
+  repair path names those four relations, so the actor is the one place
+  that can decide their issuance. A replica attaches the policy at startup
+  (`PermissionActor::with_privileged_issuance`); an actor without one, as
+  the suites build, asks nothing.
+
+Membership, a ban and the removal of a standing are written for any
+account.
+
+**Event notifications to remote subscribers.** A publish or a retract on a
+Space fans out to local subscribers as before; a subscriber at another
+server is skipped there and decided apart (`notify_remote_subscribers`). A
+notification leaves for an address at another server only where all of
+this holds when it is handed over:
+
+- the replica serves its Spaces to remote principals and the Space is
+  federated;
+- the remote account made the subscription itself over an inbound stream
+  (a row of `s2s_space_subscriptions` bound to this node), and the PubSub
+  service's own record still holds it as deliverable, read for this
+  publication. A subscription an owner recorded for a remote address has no
+  such row and sends nothing, so a local owner cannot aim a Space's
+  notifications at an address that never asked;
+- the subscriber's domain is admitted now, and its affiliation, honoured
+  for the evidence its subscription recorded, still lets it read the Space;
+- the room the event names is one the subscriber may be told of.
+
+The notification is the event local subscribers get, addressed to the
+subscribed JID, from the service's bare JID and naming the one node, without
+the publisher's address. The pair's worker checks once more before it
+writes: peer admission must admit the remote domain then.
+
+A subscription outlives the stream that made it, so its row records what
+that stream proved (authentication strength, trust profile and the snapshot
+it was admitted under), as a seat does. Peer admission and trusted-home
+status are not stored: they are evaluated at each notification.
+
+**Bounds.**
+
+| Bound | Default |
+| --- | --- |
+| Requests one remote domain may address to the Spaces service, on average and at once | 50 a second, 200 |
+| Of those, the requests of one remote account, on average and at once | 10 a second, 40 |
+| Refusals of requests beyond an allowance that are answered, for one remote domain (beyond it they are dropped) | 5 a second, 20 |
+| How long the host may take to decide one request | 5 s |
+| Spaces listed, and items returned, in one answer | 256, 256 |
+| Subscriptions accounts at other servers hold to one Space | 256 |
+| Subscriptions of one remote account, under every address | 64 |
+| Subscriptions of one remote domain | 4,096 |
+| Subscriptions accounts at other servers hold in the deployment | 65,536 |
+| Publications of one Space whose notifications leave for other servers, on average and at once, for each replica | 4 a second, 16 |
+| Event notifications waiting for one directional pair's stream | 256 |
+
+A request beyond its account's share or its domain's allowance is answered
+with `resource-constraint` (type `wait`) within the domain's allowance of
+answered refusals and dropped beyond it; it never holds its stream, and the
+account's share is decided first, so one account cannot spend what the
+other accounts of its domain may ask. A request within its allowances is
+queued for the host on the queues account traffic takes, keyed by its
+sender's bare JID, so one account's requests are decided in order under the
+same bounds (64 for one sender, 256 for a worker, 64 of a worker's 256 for
+one remote domain), and a request that finds them full holds its stream
+until it fits. A host that does not decide a request in time leaves it
+unanswered; its work is not cut short, so a subscription may then be
+recorded although its answer was dropped, and subscribing again is
+answered.
+
+The subscription bounds are counted and the row written in one
+transaction; on PostgreSQL the transaction takes an advisory lock keyed on
+the subscriber's domain, so the subscriptions of one domain are counted one
+at a time on every replica. A subscription the address already holds is
+recorded again whatever the bounds.
+
+**Amplification.** One publication sends at most one stanza to each
+subscribed address at another server, at most 256 for a Space, and only
+within the Space's allowance of notified publications; a publication beyond
+it reaches the local subscribers alone. A notification opens its pair's
+queue only within the share of pair queues that what remote senders ask for
+may open (half of them, 32 by default), holds one of the pair's 256 places
+for notifications until it is written or dropped, and keeps no queue alive
+afterwards: unlike a seat, a subscription pins nothing. What finds no
+place, or a domain that is not admitted, is dropped and counted. A
+notification is a headline and is never sent again; a subscriber that
+missed one reads the Space's items. A remote principal can cause traffic to
+another remote JID only by changing a Space, which needs honoured
+privilege, and then only to addresses that subscribed themselves.
+
+**Not enabled for remote principals.**
+
+- The Space of an enrolled host-grant scope. Sessions are served nothing
+  from it either: no grant of a scope is a Space's, so nobody's standing in
+  it can be decided
+  ([host-grant design](host-grant-authority-2047.md#not-decided-here)).
+- Creating a Space, and reading or changing its `federated` setting.
+- The `authorize` access model, pending subscriptions and their approval:
+  Spaces are public (`open`) or private (`whitelist`).
+- Subscription options, retrieval of the asker's own subscriptions and
+  affiliations across the service, and the last published item on
+  subscribing.
+- Ad-hoc commands and everything else addressed to the Spaces domain.
+- An error message a subscriber's server returns for a notification is
+  dropped; it does not end the subscription (XEP-0060 §12.3 allows a
+  service to).
+
 ## Behaviour with S2S off
 
 Outbound MUC changes nothing while S2S is disabled: the remote route still
@@ -1737,8 +2063,28 @@ every join, read and administration request of a local session is decided
 without stream evidence as before. Several of its changes apply whether or
 not S2S is on, and are listed below with the others.
 
+Spaces change nothing for remote senders while S2S is disabled: no router
+exists, so no Spaces host is attached, no notification leaves for an
+address at another server, and migrations 2012 and 2013 create two tables
+that stay empty unless an owner turns a Space's `federated` setting on. The
+setting can be set while S2S is off and takes effect once it is on. Two of
+its changes apply whether or not S2S is on, and are listed below.
+
 These change behaviour while S2S is disabled, and belong to the rollout
 runbook (G24):
+
+- A Space owner's configuration form on the Spaces service carries one
+  more field, `urn:waddle:spaces:federated`, off by default.
+- A privileged standing on a Space is no longer written for an account at
+  a domain the deployment does not serve: `spaces:set-role` refuses the
+  owner and admin roles, the PubSub `<affiliations/>` change refuses the
+  owner, publisher and publish-only affiliations (`not-allowed`), and the
+  permission actor refuses the channel `manager` and `moderator`, the Space
+  `moderator` and the role `manager` relations. With S2S off no home is
+  trusted, so this holds for every such account; standings stored before
+  stay as they are and are honoured for nobody over S2S.
+- A Space's event fan-out no longer looks up connections for a subscriber
+  at a domain the deployment does not serve; it found none before.
 
 - A client message to an unserved domain is now answered with a message
   error `remote-server-not-found` (type `cancel`), from the addressed JID,
@@ -2141,6 +2487,32 @@ runbook (G24):
   occupies its pair's queue until then, although it is never dialled for;
   and one unresponsive remote domain can hold at most 1,024 of a replica's
   4,096 pending requests for their lifetime.
+- **Spaces: a subscription's evidence ages.** A subscription records what
+  the stream that made it proved, and keeps that evidence for as long as it
+  stands. A home that later authenticates only by dialback, or under
+  another trust profile, is still notified on the recorded evidence; where
+  host policy requires `pkix`, that is what decides the subscriber's
+  notifications. Peer admission and the trusted-home list are evaluated at
+  each notification, so removing a domain from either takes effect at once.
+  Subscribing again records the evidence of the new request.
+- **Spaces: a notification dials.** A notification for a subscriber whose
+  domain has no established stream makes this server dial it, within the
+  connection manager's bounds and backoff. A remote account that subscribes
+  and whose server then stops answering costs one attempt for each
+  notified publication until it unsubscribes or its domain is no longer
+  admitted; nothing ends such a subscription today.
+- **Spaces: the allowance of notified publications is per replica and in
+  memory.** A deployment of several replicas notifies up to the allowance
+  on each, and a restart refills it.
+- **Spaces: what a remote owner can do.** A trusted home's owner of a Space
+  can make it private, purge it and delete it over S2S, as a session's
+  owner can through PubSub. PubSub deletion does not run the admin
+  command's cascade over the Space's rooms, for a remote owner as for a
+  session.
+- **Spaces: a private Space's existence under storage errors.** A read that
+  fails after the `federated` setting was read answers
+  `internal-server-error`, which a missing node never does. It is reached
+  only for a name whose setting is on.
 - **Metrics.** The router counts dropped unusable presence, dropped room
   traffic and abandoned room deliveries, and for hosted rooms the requests
   that waited, were given up or timed out at the host, were not taken for
@@ -2156,17 +2528,40 @@ runbook (G24):
 
 ## Follow-ups
 
-- Spaces (W7a): enable its handlers for remote principals in `reach`, the
-  inventory and the reachability suite, and list it in server-domain
-  `disco#items`.
+- Spaces, done ([Spaces](#spaces-w7a)): the Spaces service is reached for
+  the operations reviewed for a remote principal and listed in
+  server-domain `disco#items` where it is.
+- Spaces, an enrolled scope's Space: serving it needs a PubSub admission
+  identity for the scope and a decision on what viewing a scope's Space
+  means ([host-grant design](host-grant-authority-2047.md#not-decided-here));
+  until then it is served to nobody, over S2S as to sessions.
+- Spaces, placement by a remote principal: publishing a room into a Space
+  is decided by the Space's `owner` relationship, which no writer issues to
+  a remote account. A trusted home's administration of a community that
+  includes placing rooms needs that relationship issued, under D8, by a
+  writer of its own.
+- Spaces, the `authorize` access model and its pending subscriptions, which
+  Movim's Spaces use
+  ([survey](../../../docs/planning/xep0503-survey-2047.md)).
+- Spaces, ending a subscription on a delivery error from the subscriber's
+  server (XEP-0060 §12.3), and expiring one whose domain stays unreachable
+  or unadmitted.
+- Spaces, a federated setting for single peers: the setting opens a Space
+  to every admitted domain.
+- Spaces, the web client: offer the `federated` field in a Space's
+  settings.
+- Spaces, the further features XEP-0503 has a Spaces service advertise:
+  with capability advertisement (W11).
 - Inbound MUC, several replicas: route a domain pair's egress through one
   replica if verification with two replicas shows the alternation between
   their streams to one peer.
-- Inbound MUC, D8 issuance in the Spaces relations (W7a):
-  `channel.manager`, `channel.moderator`, `space.moderator` and
-  `role.manager` are still written without asking whether the subject's
-  home is a trusted home. The `muc#admin` writer and the admin command
-  that sets a room affiliation ask.
+- D8 issuance in the Spaces relations, done: no handler, command or repair
+  path names `channel.manager`, `channel.moderator`, `space.moderator` or
+  `role.manager`, so the permission actor decides their issuance for every
+  writer, and the Space affiliation writers decide theirs
+  ([Spaces](#spaces-w7a)). The channel and Space `owner` and `admin`
+  relations keep the checks of their own writers; a check of those at the
+  actor as well would be a second line and is not built.
 - Inbound MUC, further payloads: mentions by remote occupants, with the
   channel-wide mention of a managed room decided on the sender's stream
   evidence (it is decided without one today); references, file sharing and
@@ -2210,11 +2605,10 @@ runbook (G24):
   the ingress commit, without archive, inbox or push; the ingress receipt
   for a remote target, needed for those and for archiving local accounts'
   messages to remote contacts, remains with a remote ingress producer.
-- Remote principals at protected effects (W7a): pass each
-  `RemotePrincipal`'s evidence (`PrincipalEvidence::of`) to the host-grant
-  decision of every protected effect a remote stanza reaches, and decide
-  D1 admission with `PrincipalPolicy::witness` at each effect outside an
-  enrolled scope, as the room host does.
+- Remote principals at protected effects, done for the Spaces service: its
+  host decides D1 with `PrincipalPolicy::witness` at each request and
+  passes the principal's evidence to the host-grant decision of every room
+  a Space lists, as the room host does.
 - Capability advertisement (W11): any further feature in server-domain
   `disco#info` for remote askers.
 - Stanzas the interpreter routes to a remote JID other than IQs, such as a
