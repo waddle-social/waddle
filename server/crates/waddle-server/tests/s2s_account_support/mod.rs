@@ -369,6 +369,7 @@ impl Federated {
             Message::new_with_type(MessageType::Headline, Some(Jid::from(resource.clone())));
         marker.from = Some(jid(LOCAL));
         marker.id = Some(Id(id.clone()));
+        marker.bodies.insert(Lang::new(), "settle".to_owned());
         let delivered = WebSocketLocalDelivery::new(&self.loopback.state)
             .deliver(&resource, Stanza::Message(marker), LocalOrigin::Remote)
             .await;
@@ -392,14 +393,8 @@ impl Federated {
     /// with `priority` and enabled stream management with resumption
     /// (XEP-0198 §3) loses its connection without closing its stream, and
     /// the session waits for a resumption (§5). Waits until the session
-    /// registry holds the resource as detached; the resource and the
-    /// session's stream id.
-    pub async fn detached(
-        &self,
-        localpart: &str,
-        resource: &str,
-        priority: i8,
-    ) -> (FullJid, String) {
+    /// registry holds the resource as detached; the resource.
+    pub async fn detached(&self, localpart: &str, resource: &str, priority: i8) -> FullJid {
         let mut client = self.online(localpart, resource, priority).await;
         let full = full_jid(&client);
         send(
@@ -409,11 +404,7 @@ impl Federated {
                 .build(),
         )
         .await;
-        let enabled = receive_matching(&mut client, |element| element.is("enabled", SM_NS)).await;
-        let stream = enabled
-            .attr("id")
-            .expect("a resumable session names its stream")
-            .to_owned();
+        receive_matching(&mut client, |element| element.is("enabled", SM_NS)).await;
         drop(client);
         assert!(
             routing::wait_for_async(ARRIVES, || async {
@@ -423,7 +414,7 @@ impl Federated {
             .is_some(),
             "{full} detaches"
         );
-        (full, stream)
+        full
     }
 
     /// Whether the session registry holds `resource` as detached.
@@ -439,25 +430,32 @@ impl Federated {
             .contains(resource)
     }
 
-    /// The stanzas the detached session `stream` holds for its resource
-    /// that `from` sent, as the session will replay them.
-    pub async fn held_from(&self, stream: &str, from: &str) -> Vec<Element> {
-        let session = self
-            .loopback
-            .state
-            .deps
-            .protocol
-            .sm_session_registry
-            .peek_session(stream)
-            .await
-            .expect("the session registry is readable")
-            .expect("the session is still detached");
-        session
-            .unacked_stanzas
-            .iter()
-            .filter_map(|held| held.stanza_xml.parse::<Element>().ok())
-            .filter(|held| held.attr("from") == Some(from))
-            .collect()
+    /// The stanzas the detached session of `resource` holds for it that
+    /// `from` sent, as the session will replay them.
+    pub async fn held_from(&self, resource: &FullJid, from: &str) -> Vec<Element> {
+        let registry = &self.loopback.state.deps.protocol.sm_session_registry;
+        let streams = registry
+            .live_session_ids()
+            .expect("the session registry is readable");
+        for stream in streams {
+            let Some(session) = registry
+                .peek_session(&stream)
+                .await
+                .expect("the session registry is readable")
+            else {
+                continue;
+            };
+            if session.jid != *resource {
+                continue;
+            }
+            return session
+                .unacked_stanzas
+                .iter()
+                .filter_map(|held| held.stanza_xml.parse::<Element>().ok())
+                .filter(|held| held.attr("from") == Some(from))
+                .collect();
+        }
+        panic!("{resource} is still detached");
     }
 
     /// Spend `sender`'s whole share of `account`'s offline admissions for

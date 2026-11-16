@@ -581,7 +581,7 @@ async fn a_retired_accounts_stanzas_never_leave() {
     // Nor room traffic: a join of a remote room.
     let mut join = presence(
         ALICE_PHONE,
-        "room@muc.home-b.test/alice",
+        "room@home-b.test/alice",
         PresenceType::None,
         "retired-join",
     );
@@ -733,7 +733,7 @@ async fn an_accounts_share_is_per_pair_so_a_silent_domain_holds_back_no_other() 
 async fn groupchat_outside_a_joined_room_and_the_dm_pin_marker_never_leave() {
     let (_pki, a, _b, _captured, _accounts) = with_accounts(RouterLimits::default()).await;
 
-    let mut groupchat = chat(ALICE_PHONE, "room@muc.home-b.test", "gc");
+    let mut groupchat = chat(ALICE_PHONE, "room@home-b.test", "gc");
     groupchat.type_ = MessageType::Groupchat;
     let refused = offer(&a, Stanza::Message(groupchat)).await;
     assert!(

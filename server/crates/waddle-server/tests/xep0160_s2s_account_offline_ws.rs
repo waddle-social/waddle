@@ -8,8 +8,8 @@
 //! what it holds to the offline store when its resume window closes, so a
 //! stranger's message to one, by full JID or bare JID, is held only within
 //! the same bounds, and what the store would not keep (a chat state alone,
-//! a `headline`, an `error`, directed presence) reaches it only from a
-//! contact. A stored message whose sender's domain is no longer admitted
+//! a `headline` other than an event notification the account asked for,
+//! an `error`, directed presence) reaches it only from a contact. A stored message whose sender's domain is no longer admitted
 //! (ADR-0020 D1) is deleted before the store is flushed. Through the
 //! production `/ws` router, the real S2S router and a loopback peer,
 //! `home-b.test`.
@@ -120,7 +120,7 @@ async fn a_strangers_messages_to_a_detached_full_jid_are_held_within_its_offline
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
-    let (phone, stream) = federated.detached("alice", "phone", 5).await;
+    let phone = federated.detached("alice", "phone", 5).await;
     let to = phone.to_string();
     let mark = federated.peer_mark();
     let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
@@ -151,7 +151,7 @@ async fn a_strangers_messages_to_a_detached_full_jid_are_held_within_its_offline
         federated.is_detached(&phone).await,
         "{phone} is still detached, so nothing reached the offline store instead"
     );
-    let held = federated.held_from(&stream, MALLORY).await;
+    let held = federated.held_from(&phone, MALLORY).await;
     let ids: Vec<&str> = held.iter().filter_map(|stanza| stanza.attr("id")).collect();
     let expected: Vec<String> = (0..bound)
         .map(|index| ["held-", &index.to_string()].concat())
@@ -164,7 +164,7 @@ async fn a_strangers_messages_to_a_detached_full_jid_are_held_within_its_offline
         .from_peer(message(MALLORY, ALICE, MessageType::Chat, "bare", "hello"))
         .await;
     federated.peer_barrier(MALLORY, ALICE).await;
-    assert_eq!(federated.held_from(&stream, MALLORY).await.len(), bound);
+    assert_eq!(federated.held_from(&phone, MALLORY).await.len(), bound);
     assert_eq!(support::offline_count(&federated, ALICE).await, 0);
 }
 
@@ -174,7 +174,7 @@ async fn a_contacts_stanzas_reach_a_detached_full_jid_beyond_a_strangers_bound()
     let federated = federated(&pki).await;
     federated.account("alice").await;
     contact(&federated, ALICE, BOB, "both").await;
-    let (phone, stream) = federated.detached("alice", "phone", 5).await;
+    let phone = federated.detached("alice", "phone", 5).await;
     let to = phone.to_string();
     let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
 
@@ -190,7 +190,7 @@ async fn a_contacts_stanzas_reach_a_detached_full_jid_beyond_a_strangers_bound()
     federated.peer_barrier(BOB_PHONE, ALICE).await;
 
     assert!(federated.is_detached(&phone).await);
-    let held = federated.held_from(&stream, BOB_PHONE).await;
+    let held = federated.held_from(&phone, BOB_PHONE).await;
     assert_eq!(held.len(), bound + 2, "the chat state and every message");
     assert!(held
         .iter()
