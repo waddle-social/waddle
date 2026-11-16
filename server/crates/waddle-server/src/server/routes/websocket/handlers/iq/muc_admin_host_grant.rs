@@ -635,9 +635,14 @@ pub(super) fn privileged_standing_may_be_issued(state: &WebSocketState, account:
         .is_some_and(|policy| policy.admits_privileged_subject(account))
 }
 
-/// Whether `account` is an account of the domain this deployment serves:
-/// its standing is honoured as stored and needs no policy to be read.
+/// Whether `account` is at a domain this deployment serves: its account
+/// domain or one of its services, such as an extension's bot. The
+/// trusted-home rule is about principals of other servers; what the room's
+/// own checks give an address of this deployment is unchanged.
 fn is_local_account(state: &WebSocketState, account: &BareJid) -> bool {
-    account.node().is_some()
-        && account.domain().as_str() == state.deps.auth_state.xmpp_domain.as_str()
+    let local = state.deps.auth_state.xmpp_domain.as_str();
+    match state.deps.service_domains.served_domains(local) {
+        Some(served) => served.serves(account.domain()),
+        None => account.domain().as_str() == local,
+    }
 }

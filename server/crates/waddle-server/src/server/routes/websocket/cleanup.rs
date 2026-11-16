@@ -473,6 +473,40 @@ pub(crate) async fn sweep_abandoned_muc_occupancy(
     }
 }
 
+/// Unseat `jid` from `room` alone, for an occupancy the service found it
+/// can no longer reach there, such as the seat of an occupant at another
+/// server whose stream failed. Only that room's actor is asked, so the cost
+/// does not grow with the rooms this process holds; a failure records a
+/// sweep the local-departure janitor retries, pinned to the same session.
+pub(crate) async fn sweep_abandoned_room_occupancy(
+    state: &WebSocketState,
+    room: &BareJid,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+    removal: MucRemovalCause,
+) -> MucCleanupOutcome {
+    let swept = cleanup_muc_presence_in(
+        state,
+        jid,
+        session,
+        None,
+        LocalSweep {
+            remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            recording: SweepFailureRecording::RecordSweep,
+            scope: LocalRoomSweepScope::EveryRoom,
+            removal,
+        },
+        Some(room),
+    )
+    .await;
+    if swept {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
+}
+
 /// Re-drive the local room traversal after a retained departure becomes due.
 pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
@@ -3060,6 +3094,19 @@ async fn cleanup_muc_presence_with_origin(
     origin: Option<&OrderedRelayRouteOrigin>,
     sweep: LocalSweep,
 ) -> bool {
+    cleanup_muc_presence_in(state, jid, session, origin, sweep, None).await
+}
+
+/// [`cleanup_muc_presence_with_origin`], sweeping `only` that room when one
+/// is named instead of every room this process holds.
+async fn cleanup_muc_presence_in(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+    origin: Option<&OrderedRelayRouteOrigin>,
+    sweep: LocalSweep,
+    only: Option<&BareJid>,
+) -> bool {
     let LocalSweep {
         remote_retry,
         attempt: sweep_attempt,
@@ -3106,10 +3153,15 @@ async fn cleanup_muc_presence_with_origin(
     ))
     .await;
 
-    let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .list_rooms()
-        .await
-    {
+    let listed = match only {
+        Some(room) => Ok(vec![room.clone()]),
+        None => {
+            RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .list_rooms()
+                .await
+        }
+    };
+    let room_jids = match listed {
         Ok(room_jids) => room_jids,
         Err(error) => {
             completed = false;

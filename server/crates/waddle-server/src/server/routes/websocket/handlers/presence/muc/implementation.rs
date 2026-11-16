@@ -1238,23 +1238,27 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             .map(ManagedAdmissionResolverOutcome::Resolved)
             .unwrap_or(ManagedAdmissionResolverOutcome::NotConsulted);
 
-        // A room no channel row backs holds its affiliations in its actor.
-        // An owner or admin entry of a remote principal counts only for a
-        // trusted home on a `pkix` stream (ADR-0020 D8); one that is not
-        // honoured contributes nothing, and the actor would count it, so
-        // the join is refused. Such a room is never created for a remote
-        // principal: creating a room makes its creator the owner.
-        if remote && managed_channel.is_none() {
+        // A room no enrolled scope manages keeps explicit affiliations in
+        // its actor, which a resolver's answer does not replace. An owner
+        // or admin entry of a remote principal counts only for a trusted
+        // home on a `pkix` stream (ADR-0020 D8); one that is not honoured
+        // contributes nothing, and the actor would count it, so the join is
+        // refused. A room without a channel row is never created for a
+        // remote principal: creating a room makes its creator the owner.
+        if remote && !host_grant_managed {
             let stored = existing_room_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.room.affiliation(&sender_jid.to_bare()));
             let refusal = match stored {
-                None => Some((
+                None if managed_channel.is_none() => Some((
                     waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ItemNotFound,
                     ErrorType::Cancel,
                     waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomCreationNotPermitted,
                     "The room does not exist.",
                 )),
+                // A channel-backed room whose actor is not live yet is
+                // decided once it has seated the joiner, below.
+                None => None,
                 Some(stored)
                     if super::access::honoured_legacy_affiliation(
                         state,
@@ -1267,7 +1271,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                         waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
                         ErrorType::Auth,
                         waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
-                        "Your standing in this room is honoured only over a                          certificate-authenticated stream from a trusted server.",
+                        "Your standing in this room is honoured only over a \
+                         certificate-authenticated stream from a trusted server.",
                     ))
                 }
                 Some(_) => None,
@@ -1277,7 +1282,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     room_jid,
                     sender_jid,
                     &nick,
-                    false,
+                    managed_channel.is_some(),
                     JoinAdmissionDenial {
                         condition,
                         error_type,
@@ -1882,6 +1887,49 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 );
             }
         };
+
+        // ADR-0020 D8 where the seat is taken: whatever the room held for a
+        // remote principal, it holds an owner or admin affiliation or the
+        // moderator role only when its home is a trusted home and a `pkix`
+        // stream carried the join. A seat the room gave on a standing that
+        // is not honoured is given up before anyone is told of it.
+        if remote {
+            let privileged = matches!(
+                join_outcome.new_occupant_affiliation,
+                Affiliation::Owner | Affiliation::Admin
+            ) || join_outcome.new_occupant_role == waddle_xmpp::Role::Moderator;
+            let honoured =
+                super::access::principal_witness(state, &sender_jid.to_bare(), &evidence)
+                    .is_some_and(|witness| witness.privilege_honoured());
+            if privileged && !honoured {
+                crate::server::routes::websocket::cleanup::sweep_abandoned_room_occupancy(
+                    state,
+                    room_jid,
+                    sender_jid,
+                    waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                        occupancy_session,
+                    ),
+                    waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                )
+                .await;
+                return deny_join_admission(
+                    room_jid,
+                    sender_jid,
+                    &nick,
+                    managed_channel.is_some(),
+                    JoinAdmissionDenial {
+                        condition:
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                        error_type: ErrorType::Auth,
+                        deny_reason:
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
+                        resolver_outcome,
+                        message: "Your standing in this room is honoured only over a \
+                                  certificate-authenticated stream from a trusted server.",
+                    },
+                );
+            }
+        }
 
         let occupant_count = join_outcome.occupant_count;
         let self_muji = join_outcome
