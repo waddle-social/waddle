@@ -115,6 +115,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         } else {
             _ = try? await room.localParticipant.setCamera(enabled: enabled)
         }
+        // The SDK toggles one publication per device. Off means all of them.
+        if !enabled {
+            for publication in publications(of: kind, in: room) where !publication.isMuted {
+                try? await publication.mute()
+            }
+        }
         // The call ended while a track was starting: `disconnect()` ran
         // before the track was published, so release it here.
         guard self.room === room else {
@@ -153,12 +159,43 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         case .dropped: onFailure?()
         case .reconnecting: phase = .reconnecting
         case .reconnected:
+            // A reconnect that failed reports its end too, after the drop.
+            guard changed.connectionState == .connected else { return }
             phase = .connected
-            refreshTracks()
-            enforceCaptureChoices(in: changed)
+            reconcileTracks(in: changed)
         case .tracks:
-            refreshTracks()
-            enforceCaptureChoices(in: changed)
+            reconcileTracks(in: changed)
+        }
+    }
+
+    private func reconcileTracks(in room: Room) {
+        refreshTracks()
+        dropDuplicatePublications(in: room)
+        enforceCaptureChoices(in: room)
+    }
+
+    /// Every publication of one of our devices. There is normally one.
+    private func publications(of kind: AVMediaType, in room: Room) -> [LocalTrackPublication] {
+        let local = room.localParticipant
+        return kind == .audio
+            ? local.localAudioTracks.filter { $0.source == .microphone }
+            : local.localVideoTracks.filter { $0.source == .camera }
+    }
+
+    /// After a full reconnect the SDK republishes its tracks a moment after
+    /// removing them. A device turned on in between is then published
+    /// twice, and the controls would only ever reach one of the two.
+    private func dropDuplicatePublications(in room: Room) {
+        for kind in [AVMediaType.audio, .video] {
+            let all = publications(of: kind, in: room)
+            guard all.count > 1 else { continue }
+            // Keep a live one, so the device stays as the dock shows it.
+            let kept = all.first { !$0.isMuted } ?? all[0]
+            Task {
+                for extra in all where extra !== kept {
+                    try? await room.localParticipant.unpublish(publication: extra)
+                }
+            }
         }
     }
 
@@ -177,11 +214,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// Reads the room's tracks as they are now, so the order in which the
     /// SDK reports changes cannot leave a stale picture.
     private func refreshTracks() {
-        let local = room?.localParticipant
-        let microphone = local?.isMicrophoneEnabled() ?? false
-        let camera = local?.isCameraEnabled() ?? false
+        // On if any publication of the device is live, so a second one can
+        // never send while the dock shows the device off.
+        let cameras = room.map { publications(of: .video, in: $0) } ?? []
+        let microphone = room.map { publications(of: .audio, in: $0).contains { !$0.isMuted } } ?? false
+        let camera = cameras.contains { !$0.isMuted }
         // A camera that is off shows no picture rather than its last frame.
-        let preview = camera ? local?.firstCameraVideoTrack : nil
+        let preview = cameras.first { !$0.isMuted }?.track as? VideoTrack
         let remote = room?.remoteParticipants.values.lazy
             .filter { $0.isCameraEnabled() }
             .compactMap(\.firstCameraVideoTrack).first
