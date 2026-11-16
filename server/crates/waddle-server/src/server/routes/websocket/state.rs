@@ -1514,6 +1514,18 @@ impl WebSocketState {
             false
         }
     }
+
+    /// Whether `address` is at a domain this deployment serves: its
+    /// account domain or one of its services, such as an extension's bot.
+    /// Any other address is an entity at another server: it holds no
+    /// account, inbox or device here.
+    pub(crate) fn serves(&self, address: &jid::BareJid) -> bool {
+        let local = self.deps.auth_state.xmpp_domain.as_str();
+        match self.deps.service_domains.served_domains(local) {
+            Some(served) => served.serves(address.domain()),
+            None => address.domain().as_str() == local,
+        }
+    }
 }
 
 pub struct WebSocketDeps {

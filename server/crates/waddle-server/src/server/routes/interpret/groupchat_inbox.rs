@@ -51,6 +51,11 @@ pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
 }
 
 pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEvent<'_, '_>) {
+    // The room names its sender and its durable members; one at another
+    // server has no inbox and no device here (ADR-0020 D10).
+    if !input.deps.serves(&input.owner) {
+        return;
+    }
     let notification_recovery = groupchat_notification_recovery_item(&input);
     let ProjectGroupchatInboxEvent {
         deps,

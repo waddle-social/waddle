@@ -37,6 +37,11 @@ pub(super) async fn mark_inbox_read_from_displayed(
     room: BareJid,
     displayed_message_id: String,
 ) {
+    // A marker of an occupant at another server reports read state its own
+    // server keeps: there is no inbox row here to mark.
+    if !deps.serves(&owner) {
+        return;
+    }
     // Notification activity ingest (slice 2b): a XEP-0490 displayed
     // marker advance is a strong "currently engaged" signal for the
     // owner in the named room. Record activity BEFORE the inbox

@@ -43,18 +43,21 @@ use super::Deps;
 
 /// The production
 /// [`crate::notification_activity::NotificationActivityStore`] for
-/// `owner`'s activity. Activity belongs to accounts: an extension bot is
-/// server-spoken, so its posts, joins and leaves record none.
+/// `owner`'s activity. Activity belongs to accounts of this deployment: it
+/// feeds the push filter of their devices. An extension bot is
+/// server-spoken, so its posts, joins and leaves record none, and neither
+/// do those of an occupant at another server, which has no device here.
 fn account_activity_store<'a>(
     state: &'a WebSocketState,
     owner: &BareJid,
 ) -> Option<&'a NotificationActivityStore> {
-    state
-        .deps
-        .service_domains
-        .extension_bot(&jid::Jid::from(owner.clone()))
-        .is_none()
-        .then(|| state.deps.protocol.notification_activity.as_ref())
+    (state.serves(owner)
+        && state
+            .deps
+            .service_domains
+            .extension_bot(&jid::Jid::from(owner.clone()))
+            .is_none())
+    .then(|| state.deps.protocol.notification_activity.as_ref())
 }
 
 /// [`account_activity_store`] from the deps surface. Returns `None` in
