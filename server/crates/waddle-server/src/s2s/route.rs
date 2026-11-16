@@ -11,9 +11,12 @@
 //! - [`IqCorrelations`]: pending IQ requests across S2S, completed at most
 //!   once with expiry, shared by every replica through the deployment's
 //!   database ([`SqlIqCorrelations`]).
-//! - [`LocalDelivery`]: how a correlated response or an error reaches the
-//!   local resource that sent the request, and whether the recipient's
+//! - [`LocalDelivery`]: how a correlated response, an error, or the traffic
+//!   of a remote room reaches a local resource, and whether the recipient's
 //!   blocking list applies to it ([`LocalOrigin`]).
+//! - `rooms`: the remote rooms local resources occupy or are joining, whose
+//!   presence and messages are exempt from D7 in both directions
+//!   (XEP-0045).
 //!
 //! The decisions, the handoff contract and the reachability inventory are
 //! recorded in `server/docs/planning/s2s-routing-2047.md`.
@@ -23,6 +26,7 @@ mod local;
 mod principal;
 mod reach;
 mod replies;
+mod rooms;
 mod router;
 
 pub use correlation::{

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use jid::{DomainRef, FullJid, Jid};
+use jid::{BareJid, DomainRef, FullJid, Jid};
 use minidom::Element;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Semaphore};
@@ -29,13 +29,14 @@ use super::local::{LocalDelivery, LocalOrigin};
 use super::principal::RemotePrincipal;
 use super::reach::{reach, InboundReach, LocalTarget};
 use super::replies;
+use super::rooms::{self, RemoteRooms, RoomBounds, RoomEgress, RoomRefusal};
 use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
     RemoteRouteOutcome, ServedDomains, UnroutableReason,
 };
 use crate::s2s::config::S2sConfig;
 use crate::s2s::conn::{
-    ConnectError, S2sHandle, SinkVerdict, StanzaSink, StreamDirection, TransmitError,
+    ConnectError, S2sHandle, SinkVerdict, StanzaSink, StreamDirection, StreamEnd, TransmitError,
     VerifiedPeerStream,
 };
 
@@ -80,6 +81,19 @@ pub struct RouterLimits {
     /// How long after expiry a request is pruned once its replica has
     /// stopped recording that it is alive for as long.
     pub prune_after: Duration,
+    /// Remote rooms one local resource may occupy or be joining at once; a
+    /// further join is refused with `resource-constraint`.
+    pub rooms_per_resource: usize,
+    /// Remote rooms every local resource on this replica may occupy or be
+    /// joining at once.
+    pub rooms: usize,
+    /// How long a remote room a resource left keeps admitting the room's
+    /// answer to the leave.
+    pub leave_grace: Duration,
+    /// Stanzas from remote rooms waiting to be delivered to their
+    /// occupants, in the order they arrived; a stanza beyond this is
+    /// dropped.
+    pub room_deliveries: usize,
 }
 
 impl Default for RouterLimits {
@@ -97,6 +111,10 @@ impl Default for RouterLimits {
             queue_idle: Duration::from_secs(60),
             sweep_interval: Duration::from_secs(5),
             prune_after: Duration::from_secs(600),
+            rooms_per_resource: 128,
+            rooms: 16_384,
+            leave_grace: Duration::from_secs(30),
+            room_deliveries: 1024,
         }
     }
 }
@@ -147,6 +165,18 @@ enum Purpose {
     },
     /// A response or error the router generated for a stanza it received.
     Reply,
+    /// A local resource's message or presence for a remote room it
+    /// occupies or is joining (ADR-0020 D7's room exception). If it cannot
+    /// be sent, its sender is answered with an error, and a join that never
+    /// left is forgotten.
+    Room {
+        sender: FullJid,
+        /// The room and nickname of a join.
+        join: Option<(BareJid, String)>,
+    },
+    /// The presence leaving a remote room for a local resource that ended:
+    /// nothing is left to answer if it cannot be sent.
+    Departure,
 }
 
 /// Why a queued request was not sent, as the error its sender receives.
@@ -266,6 +296,11 @@ struct Inner {
     local: OnceLock<Arc<dyn LocalDelivery>>,
     queues: Mutex<HashMap<Pair, mpsc::Sender<Queued>>>,
     pending: Mutex<PendingRequests>,
+    /// The remote rooms local resources occupy or are joining. Taken
+    /// before `queues` when both are held.
+    rooms: Mutex<RemoteRooms>,
+    /// Stanzas for the occupants of remote rooms, delivered in order.
+    room_deliveries: mpsc::Sender<RoomDelivery>,
     completions: Arc<Semaphore>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
@@ -303,6 +338,7 @@ impl S2sRouter {
         let shutdown = options
             .stop
             .map_or_else(CancellationToken::new, |stop| stop.child_token());
+        let (room_deliveries, room_receiver) = mpsc::channel(options.limits.room_deliveries.max(1));
         let inner = Arc::new(Inner {
             config: options.config,
             served: options.served,
@@ -314,11 +350,16 @@ impl S2sRouter {
             local: OnceLock::new(),
             queues: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingRequests::default()),
+            rooms: Mutex::new(RemoteRooms::default()),
+            room_deliveries,
             completions: Arc::new(Semaphore::new(options.limits.completions)),
             tasks: TaskTracker::new(),
             shutdown,
         });
         inner.tasks.spawn(sweep(Arc::clone(&inner)));
+        inner
+            .tasks
+            .spawn(deliver_room_traffic(Arc::clone(&inner), room_receiver));
         Self { inner }
     }
 
@@ -339,6 +380,12 @@ impl S2sRouter {
         self.inner.pending().requests.len()
     }
 
+    /// Remote rooms local resources on this replica occupy, are joining or
+    /// have just left.
+    pub fn remote_rooms(&self) -> usize {
+        self.inner.rooms().len()
+    }
+
     /// Stop taking stanzas, end every worker and wait for them, at most
     /// `budget`. Stanzas still queued are answered as if their stream could
     /// not be established. `true` when every task ended.
@@ -356,6 +403,10 @@ impl RemoteRoute for S2sRouter {
     async fn route(&self, outbound: RemoteOutbound) -> RemoteRouteOutcome {
         self.inner.route(outbound)
     }
+
+    async fn resource_ended(&self, resource: &FullJid) {
+        self.inner.leave_rooms(resource);
+    }
 }
 
 impl StanzaSink for S2sRouter {
@@ -366,7 +417,16 @@ impl StanzaSink for S2sRouter {
     fn offer_malformed(&self, stream: &VerifiedPeerStream, stanza: Element) -> SinkVerdict {
         self.inner.inbound(stream, stanza, true)
     }
+
+    fn stream_ended(&self, stream: &VerifiedPeerStream, end: StreamEnd) {
+        if end == StreamEnd::Lost {
+            self.inner.lose_rooms(stream);
+        }
+    }
 }
+
+/// A stanza for the occupant of a remote room.
+type RoomDelivery = (FullJid, Stanza, LocalOrigin);
 
 /// Milliseconds since the Unix epoch, the clock every replica's correlation
 /// expiries share.
@@ -402,6 +462,18 @@ impl Inner {
         lock(&self.pending)
     }
 
+    fn rooms(&self) -> MutexGuard<'_, RemoteRooms> {
+        lock(&self.rooms)
+    }
+
+    fn room_bounds(&self) -> RoomBounds {
+        RoomBounds {
+            per_resource: self.limits.rooms_per_resource,
+            total: self.limits.rooms,
+            leave_grace: self.limits.leave_grace,
+        }
+    }
+
     fn home(&self) -> &DomainRef {
         self.served.local()
     }
@@ -421,13 +493,19 @@ impl Inner {
             Stanza::Iq(iq) => Stanza::Iq(Box::new(without_server_minted_credentials(*iq))),
             other => other,
         };
+        if let Purpose::Room { sender, .. } = purpose {
+            return self.route_room(pair, sender, stanza, outbound);
+        }
         let reserved = match &purpose {
             Purpose::Request {
                 pending,
                 generation,
                 ..
             } => Some((pending.key.clone(), *generation)),
-            Purpose::Response { .. } | Purpose::Reply => None,
+            Purpose::Response { .. }
+            | Purpose::Reply
+            | Purpose::Room { .. }
+            | Purpose::Departure => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
             return RemoteRouteOutcome::Accepted;
@@ -436,6 +514,110 @@ impl Inner {
             self.release_if(&key, Some(generation));
         }
         refuse(UnroutableReason::EgressBusy, outbound)
+    }
+
+    /// Queue a local resource's message or presence for a remote room it
+    /// occupies or is joining, and record what it does to the occupancy;
+    /// anything else is account traffic, which D7 refuses. The occupancy is
+    /// decided and recorded under one lock with the stanza's queueing, so a
+    /// join is recorded exactly when it is queued.
+    fn route_room(
+        self: &Arc<Self>,
+        pair: Pair,
+        sender: FullJid,
+        stanza: Stanza,
+        outbound: RemoteOutbound,
+    ) -> RemoteRouteOutcome {
+        let refuse = |reason, outbound| RemoteRouteOutcome::Unroutable {
+            reason,
+            outbound: Box::new(outbound),
+        };
+        let bounds = self.room_bounds();
+        let mut rooms = self.rooms();
+        let egress = match rooms.outbound(
+            &bounds,
+            &sender,
+            outbound.destination().address(),
+            outbound.stanza(),
+        ) {
+            Ok(egress) => egress,
+            // ADR-0020 D7: a local account's account traffic to remote JIDs
+            // is refused, and nothing on its roster changes.
+            Err(RoomRefusal::NotOccupied) => {
+                return refuse(UnroutableReason::RefusedByPolicy, outbound)
+            }
+            Err(RoomRefusal::Bounds) => return refuse(UnroutableReason::EgressBusy, outbound),
+        };
+        let join = match &egress {
+            RoomEgress::Join { room, nick } => Some((room.clone(), nick.clone())),
+            RoomEgress::Leave { .. } | RoomEgress::Traffic => None,
+        };
+        let queued = Queued {
+            stanza,
+            purpose: Purpose::Room {
+                sender: sender.clone(),
+                join,
+            },
+        };
+        if !self.enqueue(pair, queued) {
+            return refuse(UnroutableReason::EgressBusy, outbound);
+        }
+        rooms.record(&sender, egress, Instant::now(), bounds.leave_grace);
+        RemoteRouteOutcome::Accepted
+    }
+
+    /// Leave every remote room `resource` occupies or is joining, for a
+    /// resource that ended (XEP-0045 §7.14), and forget its occupancies.
+    fn leave_rooms(self: &Arc<Self>, resource: &FullJid) {
+        let left = self.rooms().take_resource(resource);
+        let Ok(local) = CanonicalDomain::from_domain(resource.domain()) else {
+            return;
+        };
+        for (room, nick) in left {
+            let (Some(stanza), Ok(remote)) = (
+                rooms::leave_presence(resource, &room, &nick),
+                CanonicalDomain::from_domain(room.domain()),
+            ) else {
+                continue;
+            };
+            let pair = Pair {
+                local: local.clone(),
+                remote,
+            };
+            let queued = Queued {
+                stanza,
+                purpose: Purpose::Departure,
+            };
+            if !self.enqueue(pair, queued) {
+                tracing::debug!("dropping the leave of a remote room: the queue is full");
+            }
+        }
+    }
+
+    /// The stream between a local domain and a remote one failed: every
+    /// local resource of that local domain in a room at that remote domain
+    /// receives its own unavailable presence from the room with status 333
+    /// (XEP-0045 §11.1), and its occupancy is forgotten. Stanzas either way
+    /// may have been lost, and the room itself removes an occupant it
+    /// cannot reach.
+    fn lose_rooms(&self, stream: &VerifiedPeerStream) {
+        let ended = self.rooms().take_lost(
+            stream.local().as_domain_ref(),
+            stream.remote().as_domain_ref(),
+        );
+        for occupancy in ended {
+            if let Some(presence) = rooms::removed_by_error(&occupancy) {
+                self.deliver_room(occupancy.resource, presence, LocalOrigin::Server);
+            }
+        }
+    }
+
+    /// Queue `stanza` for the occupant `to`, behind the room traffic already
+    /// queued; dropped when the queue is full.
+    fn deliver_room(&self, to: FullJid, stanza: Stanza, origin: LocalOrigin) {
+        if self.room_deliveries.try_send((to, stanza, origin)).is_err() {
+            tracing::debug!("dropping room traffic for a local occupant: the queue is full");
+        }
     }
 
     /// Decide whether a local entity's stanza may go to its remote
@@ -479,10 +661,18 @@ impl Inner {
             },
             // ADR-0020 D7: until account traffic is reviewed (gate G18), a
             // local account's messages and presence for remote JIDs are
-            // refused, and nothing on its roster changes. Messages and
-            // presence for a remote room are enabled with outbound MUC.
+            // refused, and nothing on its roster changes, unless they are
+            // for a remote room the account's resource occupies or is
+            // joining ([`Self::route_room`]). Only a bound resource of a
+            // local account joins rooms.
             Stanza::Message(_) | Stanza::Presence(_) => {
-                return Err(UnroutableReason::RefusedByPolicy)
+                let Ok(sender) = outbound.sender().clone().try_into_full() else {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                };
+                if *sender.domain() != *self.served.local() {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                }
+                Purpose::Room { sender, join: None }
             }
         };
         Ok((Pair { local, remote }, purpose))
@@ -645,13 +835,28 @@ impl Inner {
     /// both answered and completed. Responses and replies are dropped:
     /// nothing answers them (RFC 6120 §8.3.1).
     async fn answer(&self, queued: Queued, failure: Failure, registered: bool) {
-        let Purpose::Request {
-            sender,
-            pending,
-            generation,
-        } = queued.purpose
-        else {
-            return;
+        let (sender, pending, generation) = match queued.purpose {
+            Purpose::Request {
+                sender,
+                pending,
+                generation,
+            } => (sender, pending, generation),
+            // A message or presence for a remote room that did not leave:
+            // its sender learns why (RFC 6120 §10.4.3), and a join the room
+            // never saw is forgotten.
+            Purpose::Room { sender, join } => {
+                if let Some((room, nick)) = &join {
+                    self.rooms().forget_join(&sender, room, nick);
+                }
+                if let Some(reply) =
+                    replies::error_reply(&queued.stanza, failure.error(self.home()))
+                {
+                    self.deliver_local(&sender, reply, LocalOrigin::Server)
+                        .await;
+                }
+                return;
+            }
+            Purpose::Response { .. } | Purpose::Reply | Purpose::Departure => return,
         };
         if registered {
             match self.correlations.withdraw(&pending.key).await {
@@ -719,6 +924,20 @@ impl Inner {
         let Some(target) = LocalTarget::of(&destination) else {
             return SinkVerdict::Refuse;
         };
+        // ADR-0020 D7's second exception: traffic from a remote room to the
+        // full JID of a local resource that occupies, is joining or has just
+        // left it, delivered to that resource only.
+        if target == LocalTarget::AccountResource && !matches!(stanza, Stanza::Iq(_)) {
+            if let Ok(occupant) = to.clone().try_into_full() {
+                let admitted =
+                    self.rooms()
+                        .inbound(&occupant, principal.address(), &stanza, Instant::now());
+                if admitted {
+                    self.deliver_room(occupant, stanza, LocalOrigin::Remote);
+                    return SinkVerdict::Accepted;
+                }
+            }
+        }
         match reach(target, &stanza) {
             InboundReach::ServerDiscoInfo => self.answer_disco_info(stream, &stanza, &home),
             InboundReach::ServerDiscoItems => self.answer_disco_items(stream, &stanza, &home),
@@ -1057,6 +1276,7 @@ async fn sweep(router: Arc<Inner>) {
         }
         router.sweep_expired().await;
         router.sweep_completed_elsewhere().await;
+        router.rooms().sweep(Instant::now());
         if router
             .correlations
             .heartbeat(&router.owner, now_ms())
@@ -1080,6 +1300,23 @@ async fn sweep(router: Arc<Inner>) {
                 tracing::warn!("pruning this replica's expired s2s correlations failed");
             }
         }
+    }
+}
+
+/// Until shutdown: deliver the traffic of remote rooms to their local
+/// occupants, one stanza at a time in the order it arrived, so an occupant
+/// sees a room's presence and messages in the room's order.
+async fn deliver_room_traffic(router: Arc<Inner>, mut receiver: mpsc::Receiver<RoomDelivery>) {
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = router.shutdown.cancelled() => return,
+            next = receiver.recv() => next,
+        };
+        let Some((to, stanza, origin)) = next else {
+            return;
+        };
+        router.deliver_local(&to, stanza, origin).await;
     }
 }
 
@@ -1201,7 +1438,10 @@ impl PairWorker {
                     }
                 }
             }
-            Purpose::Response { .. } | Purpose::Reply => false,
+            Purpose::Response { .. }
+            | Purpose::Reply
+            | Purpose::Room { .. }
+            | Purpose::Departure => false,
         };
         let mut element = stanza_element(&queued.stanza);
         let mut offered_again = false;

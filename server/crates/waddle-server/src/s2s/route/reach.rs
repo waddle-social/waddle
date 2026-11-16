@@ -9,6 +9,13 @@
 //! correlated response, and refuses everything else. No namespace handler
 //! written for client sessions sees a stanza from an S2S stream.
 //!
+//! One decision depends on state and so is taken by the router before this
+//! one: a message or presence from a remote room to the full JID of a
+//! local resource that occupies, is joining or has just left that room is
+//! delivered to that resource (D7's room exception; the router's `rooms`
+//! module). Every other stanza to a local account, including one from a
+//! room the resource never joined, is decided here.
+//!
 //! The inventory with each entry's status is recorded in
 //! `server/docs/planning/s2s-routing-2047.md`; enabling a further service
 //! or operation for remote senders is its own reviewed change to this
@@ -73,7 +80,9 @@ pub enum InboundReach {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// Traffic to a local account, refused as if the account did not
-    /// exist until account traffic is reviewed (D7, gate G18).
+    /// exist until account traffic is reviewed (D7, gate G18). Traffic
+    /// from a remote room the account's resource occupies never reaches
+    /// this decision.
     AccountTraffic,
     /// A request, message or presence for the server domain other than
     /// service discovery and ping (D10).

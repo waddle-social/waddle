@@ -7,8 +7,9 @@
 //! `remote-server-not-found` while S2S is disabled or the domain cannot
 //! name a peer, and the router's own reason otherwise, which for a local
 //! account's messages and presence is `service-unavailable` until account
-//! traffic across S2S is reviewed (ADR-0020 D7). An error stanza is never
-//! answered.
+//! traffic across S2S is reviewed (ADR-0020 D7), except a resource's
+//! presence and messages for a remote room it joins, occupies or leaves.
+//! An error stanza is never answered.
 
 use jid::{FullJid, Jid};
 use tracing::debug;

@@ -298,11 +298,13 @@ pub enum UnroutableReason {
     /// Peer admission (ADR-0020 D1) does not admit the remote domain.
     PeerNotAdmitted,
     /// The stanza is refused by the routing policy: a local account's
-    /// account traffic to remote JIDs (ADR-0020 D7), or a sender that may
-    /// not address remote entities.
+    /// account traffic to remote JIDs (ADR-0020 D7), meaning any message or
+    /// presence that is not for a remote room the sending resource joins,
+    /// occupies or leaves, or a sender that may not address remote
+    /// entities.
     RefusedByPolicy,
-    /// The egress queue for the remote domain, or the router's bound on
-    /// pending requests, is full.
+    /// The egress queue for the remote domain, the router's bound on
+    /// pending requests, or its bound on joined remote rooms, is full.
     EgressBusy,
     /// The request cannot be correlated: its id is empty, too long, or
     /// already pending for the same sender and recipient.
@@ -575,6 +577,13 @@ pub const REMOTE_ROUTE_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
 pub trait RemoteRoute: Send + Sync {
     /// Offer one stanza for remote delivery.
     async fn route(&self, outbound: RemoteOutbound) -> RemoteRouteOutcome;
+
+    /// The local resource `resource` ended for good: no session holds its
+    /// full JID and none will resume it. A route that let it join remote
+    /// rooms leaves them for it (XEP-0045 §7.14). Like [`Self::route`] it
+    /// only queues and must not wait for a peer. By default nothing
+    /// happens.
+    async fn resource_ended(&self, _resource: &FullJid) {}
 }
 
 /// The remote route used while server-to-server transport is not enabled:
