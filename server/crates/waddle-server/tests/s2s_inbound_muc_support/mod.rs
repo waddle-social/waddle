@@ -259,6 +259,29 @@ impl Hosted {
         .await
     }
 
+    /// How many stanzas `home-b.test` has received: a mark for
+    /// [`Self::at_peer_after`].
+    pub fn received(&self) -> usize {
+        self.captured.stanzas().len()
+    }
+
+    /// The first stanza `home-b.test` received after the first `mark` that
+    /// `found` accepts, within [`ARRIVES`].
+    pub async fn at_peer_after(
+        &self,
+        mark: usize,
+        found: impl Fn(&Element) -> bool,
+    ) -> Option<Element> {
+        wait_for(ARRIVES, || {
+            self.captured
+                .stanzas()
+                .into_iter()
+                .skip(mark)
+                .find(|stanza| found(stanza))
+        })
+        .await
+    }
+
     /// The stanza with `id` that `home-b.test` received.
     pub async fn answered(&self, id: &str) -> Element {
         wait_for(ARRIVES, || self.captured.with_id(id).into_iter().next())

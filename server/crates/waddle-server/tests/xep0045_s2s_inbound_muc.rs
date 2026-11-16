@@ -579,11 +579,20 @@ async fn a_trusted_homes_account_made_admin_enters_with_that_standing_over_pkix(
         .from_peer(remote_leave(BOB, ROOM, "bob", "leave-1"))
         .await;
     assert!(hosted.unseated(ROOM, BOB).await);
+    let before = hosted.received();
     hosted
         .from_peer(remote_join(BOB, ROOM, "bob", "join-2"))
         .await;
-    let own = hosted.answered("join-2").await;
-    assert_eq!(error_condition(&own), None, "{own:?}");
+    // The room's own presence carries no id: it is the first one for the
+    // occupant, after the join was sent, that is available and its own.
+    let own = hosted
+        .at_peer_after(before, |stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && stanza.attr("type").is_none()
+                && statuses(stanza).contains(&"110".to_owned())
+        })
+        .await
+        .expect("the room's own presence for the occupant that entered again");
     assert_eq!(
         item(&own),
         Some(("moderator".to_owned(), "admin".to_owned()))

@@ -270,6 +270,24 @@ fn reduced_presence(presence: &Presence) -> Presence {
     reduced
 }
 
+/// Give the error presences among `replies` the id of the presence they
+/// answer (RFC 6120 §8.1.3). The room's handlers build a refusal without
+/// one: a session matches it by its addresses, while a server relaying it
+/// to a client has only the id to go by.
+fn with_request_id(mut replies: Vec<Stanza>, id: Option<&str>) -> Vec<Stanza> {
+    let Some(id) = id else {
+        return replies;
+    };
+    for reply in &mut replies {
+        if let Stanza::Presence(presence) = reply {
+            if presence.type_ == PresenceType::Error && presence.id.is_none() {
+                presence.id = Some(id.to_owned());
+            }
+        }
+    }
+    replies
+}
+
 /// A remote occupant's message as the room sees it: its text, its thread
 /// and the identifier its client gave it (XEP-0359 `origin-id`). Every
 /// other payload is dropped before the room plans the message. The room's
@@ -546,6 +564,12 @@ impl Asked<'_> {
     // --- presence -------------------------------------------------------------
 
     async fn presence(&self, presence: &Presence) -> RoomReplies {
+        let mut replies = self.decide_presence(presence).await;
+        replies.stanzas = with_request_id(replies.stanzas, presence.id.as_deref());
+        replies
+    }
+
+    async fn decide_presence(&self, presence: &Presence) -> RoomReplies {
         let (Some(room), Some(seat), Some(occupant)) = (
             self.room(),
             self.request.seat.as_ref(),
