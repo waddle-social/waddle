@@ -61,7 +61,8 @@ import Testing
             f.port.callSends == [
                 .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .terminate(callPeer, "c-old", .expired),
             ])
-        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callVideo, isAccepting: true)))
+        // The re-proposal asks for video; the migrated call keeps the audio the user agreed to.
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callAudio, isAccepting: true)))
         f.store.clear()
     }
 
@@ -163,10 +164,10 @@ import Testing
         f.port.heldCallVerbs = []
         f.port.releaseCallSends()
         await eventually { f.port.callSends.count == 4 }
-        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c-new", media: callVideo, join: callJoin, initiator: callPeer)))
+        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c-new", media: callAudio, join: callJoin, initiator: callPeer)))
         #expect(
             Set(f.port.callSends) == [
-                .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .accept(callPeer, callOwn, "c-new", callVideo),
+                .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .accept(callPeer, callOwn, "c-new", callAudio),
                 .terminate(callPeer, "c-old", .expired),
             ])
         f.store.clear()

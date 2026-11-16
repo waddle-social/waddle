@@ -50,14 +50,14 @@ import Testing
         await eventually { media.calls.count == 1 }
         store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .propose(callVideo)))
         await eventually { media.calls.count == 2 }
-        #expect(store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callVideo, isAccepting: true)))
+        // The peer asks for video, but the user only ever agreed to audio.
+        #expect(store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callAudio, isAccepting: true)))
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
-        let migratedJoin = CallJoin(
-            url: "wss://livekit.waddle.test", room: "migrated-room", identity: "alice@waddle.test/waddle-apple-1", token: "new-jwt")
+        let migratedJoin = CallJoin(url: callJoin.url, room: "migrated-room", identity: callJoin.identity, token: "new-jwt")
         store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .sessionInitiate(join: migratedJoin, media: callVideo)))
         await eventually { media.calls.count == 3 }
-        #expect(media.calls == [.connect(callJoin, callAudio), .disconnect, .connect(migratedJoin, callVideo)])
-        #expect(store.state == .active(ActiveCall(peer: callPeer, sid: "c-new", media: callVideo, join: migratedJoin, initiator: callPeer)))
+        #expect(media.calls == [.connect(callJoin, callAudio), .disconnect, .connect(migratedJoin, callAudio)])
+        #expect(store.state == .active(ActiveCall(peer: callPeer, sid: "c-new", media: callAudio, join: migratedJoin, initiator: callPeer)))
         store.clear()
     }
 

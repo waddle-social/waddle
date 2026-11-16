@@ -105,6 +105,21 @@ import Testing
         f.store.clear()
     }
 
+    @Test func peerTerminatingTheSessionIsAnsweredWithOurFinish() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        f.port.callSends = []
+        f.store.handle(f.event(.sessionTerminate(reason: .success)))
+        // The peer's own finish follows; it must not draw a second one.
+        f.store.handle(f.event(.finish(reason: .success, migratedTo: nil)))
+        await eventually { f.port.completedCallSends.count == 2 }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(f.port.callSends == [.finish(callPeer, "c1", .success)])
+        #expect(f.store.state == .ended(sid: "c1", reason: .finished(.success)))
+        f.store.clear()
+    }
+
     @Test func declinedInvitationIsNotRungAfterwards() async {
         let f = CallFixture()
         let dave = JID(parsing: "dave@waddle.test/tab")!
@@ -120,12 +135,12 @@ import Testing
         #expect(await f.store.declineIncoming())
         f.port.heldCallVerbs = []
         f.port.releaseCallSends()
-        await eventually { f.port.completedCallSends.count == 4 }
+        await eventually { f.port.completedCallSends.count == 5 }
         try? await Task.sleep(for: .milliseconds(50))
         #expect(
             f.port.callSends == [
                 .ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
-                .reject(dave, "c3", false),
+                .reject(dave, "c3", false), .finish(callPeer, "c1", .success),
             ])
         #expect(f.store.state == .idle)
         f.store.clear()

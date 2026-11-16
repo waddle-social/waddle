@@ -16,6 +16,9 @@ extension CallStore {
             failCall(sid: previous.sid, message: "call migration failed", epoch: epoch)
             return
         }
+        // Migration is accepted without asking the user again, so it carries
+        // only the tracks they agreed to for the session it replaces.
+        let media = media.bounded(by: previous.media)
         // The new sid owns the slot before the proceed can suspend: the
         // caller's session-initiate may arrive while that send is in flight.
         var oldSessionIsOpen = true

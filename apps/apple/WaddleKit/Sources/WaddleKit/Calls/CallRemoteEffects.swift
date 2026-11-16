@@ -42,6 +42,14 @@ extension CallStore {
                 to: event.from, responder: own, sid: event.sid, media: media.bounded(by: call.media))
             guard generation == epoch else { return }
             if !sent { failCall(sid: event.sid, message: "call session accept failed", epoch: epoch) }
+        case .finish, .sessionTerminate:
+            // XEP-0353 has both parties send `<finish/>`. Ours answers the
+            // first end event for a session we were in, so our other devices
+            // and the archive learn it ended even if the peer drops offline.
+            guard case .active(let call) = before, call.sid == event.sid else { return }
+            _ = await send(epoch: epoch, error: "call finish failed") {
+                await port.sendCallFinish(to: call.peer, sid: call.sid, reason: .success)
+            }
         default: break
         }
     }
