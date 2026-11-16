@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "8f6088ba601528090ec1bc82294b1a12422f5519",
+  "baseline_commit": "31fd3f41591d0ff3072dc667e35207c522ae0dc6",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -25,11 +25,15 @@
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
-      "sha256": "94f757d9e9e820a2ffe7adea37689fcb5253636cf1503c2ae6a5201ca1adbac9"
+      "sha256": "b7c11406636c7f95f5f3d01688cfbf598e48fd4a6a2c9c23a1d8a692a5d20a00"
     },
     {
       "path": "server/crates/waddle-server/src/ingress/commit_room.rs",
-      "sha256": "7db5a380c5c289549f59e8375fe533623ef871721ccc4d7edc5c52fe0ec13c9e"
+      "sha256": "8d86584df2e1f2d5dacb99f1d6919443c05ee88458d98f1dfe4a9f025cb35a9d"
+    },
+    {
+      "path": "server/crates/waddle-server/src/ingress/principal.rs",
+      "sha256": "20d5f922c54e73edf7e7c1843fd35a5503c4b30dc8a419c40901144e2ebb6787"
     },
     {
       "path": "server/crates/waddle-server/src/ingress/room_manifest_replay.rs",
@@ -57,7 +61,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/admission.rs",
-      "sha256": "12ee9d226cfff220e55bc61651ccf31f87b399fcce619e44d669404dffe69faa"
+      "sha256": "1c31d13704af0278aef14200b415c7f6cd0086b65fe94b53351528eedc6568df"
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/enrolled.rs",
@@ -65,15 +69,19 @@
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/fence.rs",
-      "sha256": "005219f54795f03bc3704cd472512308cba1e5d4ee2e73c51c09c147cc24ce4b"
+      "sha256": "442fb79e94990ccb2a138e8db2cf39b7a209e1b7a4e6c92156e199114fa6fddd"
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
-      "sha256": "78bd1eae509c05804ba3faf0dacbe8bfdad42f40b499e8e8c50bf1d16177ac10"
+      "sha256": "08ea9430bbf2624ffd354b8d735ef69a625a8a419f6775d68da734720a6e59ab"
+    },
+    {
+      "path": "server/crates/waddle-server/src/permissions/host_grant/principal.rs",
+      "sha256": "0ce0cd43fa1d656e8cc29d06a155e8cc62bc6ade8866f3db080362b4410862ae"
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/standing.rs",
-      "sha256": "e6f4ddcb2c74d799abb9751e02f1ffcb75990b6ea1a99e03acfb38d5a1e48a85"
+      "sha256": "28609964ed948cf3f6704cb4035c0bf7219a759eaf4585d3ce3868b97b9ea78d"
     },
     {
       "path": "server/crates/waddle-server/src/permissions/schema.rs",
@@ -104,6 +112,10 @@
       "sha256": "735ffecc5ac3ac31445b2e7e6bb4795a5de55adcbe7fd27fca725fdc29beeff1"
     },
     {
+      "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
+      "sha256": "2793b0c3a0e18b67152cbe8fc67e19f4da76b00853797f341a7848543226a971"
+    },
+    {
       "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
       "sha256": "bd8d01e5fff419e51e025de9f0921fb34ef5fa02caf26f35eef0c9b7bdfdb959"
     },
@@ -129,11 +141,11 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/host_grant_revocation.rs",
-      "sha256": "0130c942685b3f0afdd4cbb7bcdbaf11e3345314a20fac668012c77e41e5f360"
+      "sha256": "a61833210f810e53de5e32810aad9f024bb3034309b306122490f4312f3a46a6"
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "4ce0d21f5c6a1d89db5703e46d1dec36800c772c844d858286256392b2422f38"
+      "sha256": "74eda88fef438358520e4f822964f64c470a4608f7dad00fc50c0e59c530c7d5"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -173,11 +185,11 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs",
-      "sha256": "9db72a15e5c48aff193cc0eda6a80c079e90fce75ed0c0fd8cae58397b555c7e"
+      "sha256": "b1fc522a70043cb6d726f27e2b2d79327bb07241a28ba19c49cfc5604b1b14a1"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs",
-      "sha256": "9103520810d8015a6990c75215ada6f77a574977b2bebd38c33e3726baec8caf"
+      "sha256": "30aa36e84da4b11265c212422c8d51ba846308258f124625f948d40e372a4606"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_config.rs",
@@ -229,15 +241,19 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "sha256": "4f916e268e5c75aa5cf95bc37e6b601dd948fc51428c423d853f9faad69470ea"
+      "sha256": "1d432dd4229e2ab8120442fcde2d348d09b6bb5896e53aa4dff10b7e70c9be67"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs",
-      "sha256": "9c68493144b49b68044572a9abce84f13b82098c0d928577298be41eab42b415"
+      "sha256": "89b62f6abe9cabd39ea2c1e0e8c597a5a522bc1589796ce28250dd5e6f43bed2"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/pubsub_fanout/implementation.rs",
       "sha256": "97796677d93ca64e60179a70db1da229f63ed82c56afb64ba34c493e285e8dbb"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
+      "sha256": "dcc4102a8477ca31754b70e4f9ad875b009ee4368a9f1ebf2d3b64a0456137a5"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/tests/iq.rs",
@@ -284,8 +300,12 @@
       "sha256": "f05599b6ec8101f77bbb4eb9098f43661ec95c0db608d96afd65a958b3b36245"
     },
     {
+      "path": "server/crates/waddle-xmpp/src/registry/connection_registry.rs",
+      "sha256": "f05e0105b71c650c94989bb311be3e2577eb3ec6b78d7e9e5f5ffc1d2a5bbdfd"
+    },
+    {
       "path": "server/crates/waddle-xmpp/src/registry/connection_registry/sending.rs",
-      "sha256": "be5f733c76d670e97d2799667037e06724f5851e85749203c71bbfe3d565d1dd"
+      "sha256": "15caef0dc274fde18b446c781678363dd6bcbfc9434f0229b23f0f60b158716b"
     },
     {
       "path": "server/crates/waddle-xmpp/src/stream_management/session_registry/resources.rs",
@@ -365,7 +385,7 @@
     },
     "startup-call": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1550,
+      "line": 1561,
       "text": "crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn("
     },
     "bootstrap": {
@@ -395,7 +415,7 @@
     },
     "admin-rollback": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs",
-      "line": 204,
+      "line": 248,
       "text": "async fn rollback_admin_affiliations("
     },
     "space-admin": {
@@ -475,22 +495,22 @@
     },
     "join-resolver": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "line": 25,
-      "text": "async fn resolve_managed_channel_affiliation("
+      "line": 96,
+      "text": "async fn resolve_managed_channel_admission("
     },
     "join-repair": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "line": 428,
+      "line": 554,
       "text": "async fn restore_space_parent_tuples_for_room("
     },
     "join-repair-link": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "line": 562,
+      "line": 688,
       "text": "async fn linked_space_node("
     },
     "join": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs",
-      "line": 865,
+      "line": 885,
       "text": "pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handle_muc_join_unlocked("
     },
     "join-accept": {
@@ -535,7 +555,7 @@
     },
     "archive-gate": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "line": 225,
+      "line": 276,
       "text": "pub async fn resolve_muc_room_archive_access("
     },
     "archive-query": {
@@ -550,7 +570,7 @@
     },
     "queue": {
       "path": "server/crates/waddle-xmpp/src/registry/connection_registry/sending.rs",
-      "line": 519,
+      "line": 524,
       "text": "pub fn try_send_to("
     },
     "sm": {
@@ -570,7 +590,7 @@
     },
     "claim": {
       "path": "server/crates/waddle-server/src/ingress/commit_room.rs",
-      "line": 465,
+      "line": 463,
       "text": "pub(super) async fn assert_room<'a>("
     },
     "accepted": {
@@ -635,7 +655,7 @@
     },
     "e-rollback": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs",
-      "line": 3599,
+      "line": 3645,
       "text": "async fn rollback_keeps_affiliation_committed_by_a_later_owner("
     },
     "e-accepted": {
@@ -655,17 +675,17 @@
     },
     "hg-gate": {
       "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
-      "line": 86,
+      "line": 89,
       "text": "pub struct HostGrantGate"
     },
     "hg-room-read": {
       "path": "server/crates/waddle-server/src/permissions/host_grant/standing.rs",
-      "line": 161,
+      "line": 169,
       "text": "pub async fn room_grants("
     },
     "hg-admission": {
       "path": "server/crates/waddle-server/src/permissions/host_grant/admission.rs",
-      "line": 165,
+      "line": 173,
       "text": "pub(crate) async fn admit_room_acceptance("
     },
     "hg-writer-fence": {
@@ -680,12 +700,12 @@
     },
     "hg-join": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "line": 102,
+      "line": 154,
       "text": "pub(crate) async fn host_grant_affiliation("
     },
     "hg-read-recheck": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
-      "line": 360,
+      "line": 474,
       "text": "pub async fn host_grant_read_still_admitted("
     },
     "hg-room-admin": {
@@ -760,7 +780,7 @@
     },
     "hg-recovery": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1005,
+      "line": 1016,
       "text": "fn spawn_host_grant_recovery("
     },
     "placement": {
@@ -840,7 +860,7 @@
     },
     "hg-claim-move": {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
-      "line": 636,
+      "line": 676,
       "text": "async fn host_grant_reseating("
     },
     "hg-invite-rollback": {
@@ -865,12 +885,12 @@
     },
     "hg-fence-ticket": {
       "path": "server/crates/waddle-server/src/permissions/host_grant/fence.rs",
-      "line": 1019,
+      "line": 1008,
       "text": "pub fn is_current(&self) -> bool {"
     },
     "hg-revocation-sweep": {
       "path": "server/crates/waddle-server/src/server/host_grant_revocation.rs",
-      "line": 194,
+      "line": 196,
       "text": "async fn room(&self, room: &BareJid) -> bool {"
     },
     "hg-fanout-recheck": {
@@ -887,6 +907,46 @@
       "path": "server/crates/waddle-server/src/auth/native.rs",
       "line": 110,
       "text": "WHERE {JID_NOT_RETIRED_SQL} RETURNING id"
+    },
+    "s2s-room-host": {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
+      "line": 833,
+      "text": "impl LocalRooms for WebSocketLocalRooms {"
+    },
+    "s2s-room-archive": {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
+      "line": 486,
+      "text": "async fn archive(&self, iq: &Iq) -> RoomReplies {"
+    },
+    "s2s-room-message": {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
+      "line": 714,
+      "text": "async fn message(&self, message: &Message) -> RoomReplies {"
+    },
+    "s2s-seat-egress": {
+      "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
+      "line": 597,
+      "text": "pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {"
+    },
+    "foreign-delivery": {
+      "path": "server/crates/waddle-xmpp/src/registry/connection_registry.rs",
+      "line": 63,
+      "text": "pub trait ForeignDelivery"
+    },
+    "remote-acceptance-principal": {
+      "path": "server/crates/waddle-server/src/ingress/principal.rs",
+      "line": 25,
+      "text": "pub struct RemoteOccupantPrincipal"
+    },
+    "hg-seat-evidence": {
+      "path": "server/crates/waddle-server/src/permissions/host_grant/principal.rs",
+      "line": 294,
+      "text": "pub trait SeatEvidence"
+    },
+    "hg-stored-grants": {
+      "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
+      "line": 201,
+      "text": "pub struct StoredRoomGrants"
     }
   },
   "lexical_tokens": [
@@ -937,12 +997,14 @@
     "system_message_audience",
     "MirrorRepair",
     "host_grant_reseating",
-    "with_members_only_binding"
+    "with_members_only_binding",
+    "offer_foreign",
+    "RemoteOccupantPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "15f62da83e0b9904a2707a9ba572266ad1a4720c28fb0fd6d83bbd7d41c62b76",
+    "sha256": "0087e4cdd97cbaef172230914802e8690769ecc8ed2b5321a48b2cf62c7e4a98",
     "occurrences": {
-      "WriteTuple": 65,
+      "WriteTuple": 67,
       "DeleteTuple": 20,
       "ReplaceExclusiveRelation": 15,
       "SwapExclusiveRelation": 13,
@@ -968,7 +1030,7 @@
       "UpdateConfig": 99,
       "HydrateDurableRecipients": 14,
       "SyncResolverAffiliation": 34,
-      "query_messages": 101,
+      "query_messages": 102,
       "try_send_to": 37,
       "record_stanza_for_detached_bound_resource": 14,
       "assert_room_claim": 23,
@@ -989,7 +1051,9 @@
       "system_message_audience": 3,
       "MirrorRepair": 4,
       "host_grant_reseating": 2,
-      "with_members_only_binding": 3
+      "with_members_only_binding": 3,
+      "offer_foreign": 5,
+      "RemoteOccupantPrincipal": 5
     }
   }
 }
