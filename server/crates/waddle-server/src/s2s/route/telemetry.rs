@@ -126,3 +126,14 @@ pub(super) fn seat_ended_stream_lost() {
         1,
     );
 }
+
+/// A remote occupant's seat ended because its room stopped being open to
+/// accounts at other servers.
+pub(super) fn seat_ended_room_closed() {
+    counter_add!(
+        "waddle.s2s.route.seats.ended_room_closed",
+        "{seat}",
+        "Seats of remote occupants ended because their room's federated setting was turned off.",
+        1,
+    );
+}

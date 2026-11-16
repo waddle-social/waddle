@@ -23,8 +23,8 @@ mod s2s_inbound_muc_support;
 
 use minidom::Element;
 use s2s_inbound_muc_support::{
-    error_condition, local_join, remote_get, remote_leave, room_with_remote_occupant, Hosted, BOB,
-    HOME_B, MUC, ROOM,
+    error_condition, error_of, local_join, not_federating, remote_get, remote_leave,
+    room_with_remote_occupant, Hosted, BOB, HOME_B, MUC, ROOM,
 };
 use waddle_server::s2s::route::RouterLimits;
 
@@ -36,6 +36,10 @@ fn no_change(_: &mut s2s_inbound_muc_support::Spec) {}
 
 fn info() -> Element {
     Element::builder("query", DISCO_INFO).build()
+}
+
+fn items() -> Element {
+    Element::builder("query", DISCO_ITEMS).build()
 }
 
 fn ping() -> Element {
@@ -131,6 +135,41 @@ async fn a_room_answers_as_a_conference_and_a_missing_one_with_item_not_found() 
     hosted.from_peer(remote_get(BOB, ROOM, "r3", node)).await;
     let refused = hosted.answered("r3").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("item-not-found"));
+}
+
+#[tokio::test]
+async fn a_room_that_is_not_federated_is_described_as_one_that_does_not_exist() {
+    let hosted = Hosted::start(RouterLimits::default(), not_federating).await;
+    let mut alice = hosted.room_creator("alice", "desk").await;
+    local_join(&mut alice, ROOM, "alice").await;
+    let missing = "nowhere@muc.example.com";
+    // The room exists and its `federated` setting is off: its description
+    // is refused with the condition, type and text of a missing room's.
+    hosted.from_peer(remote_get(BOB, ROOM, "c1", info())).await;
+    let closed = hosted.answered("c1").await;
+    hosted
+        .from_peer(remote_get(BOB, missing, "c2", info()))
+        .await;
+    let absent = hosted.answered("c2").await;
+    assert_eq!(closed.attr("type"), Some("error"), "{closed:?}");
+    assert_eq!(error_condition(&closed).as_deref(), Some("item-not-found"));
+    assert_eq!(error_of(&closed), error_of(&absent));
+    // Neither a ping nor a `disco#items` request tells them apart.
+    for (payload, first, second) in [(ping(), "c3", "c4"), (items(), "c5", "c6")] {
+        hosted
+            .from_peer(remote_get(BOB, ROOM, first, payload.clone()))
+            .await;
+        let of_closed = hosted.answered(first).await;
+        hosted
+            .from_peer(remote_get(BOB, missing, second, payload))
+            .await;
+        let of_absent = hosted.answered(second).await;
+        assert_eq!(of_closed.attr("type"), of_absent.attr("type"));
+        assert_eq!(
+            of_closed.children().collect::<Vec<_>>(),
+            of_absent.children().collect::<Vec<_>>()
+        );
+    }
 }
 
 #[tokio::test]

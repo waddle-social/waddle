@@ -87,6 +87,9 @@ pub enum SeatEnd {
     /// other than the seat's stream did: the seat no longer stands for the
     /// evidence it was admitted under.
     EvidenceChanged,
+    /// The room stopped being open to accounts at other servers: its
+    /// `federated` setting was turned off.
+    RoomClosed,
 }
 
 /// The rooms of this deployment, as the S2S router reaches them.

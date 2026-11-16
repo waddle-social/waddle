@@ -672,6 +672,11 @@ pub(super) async fn apply_muc_owner_config(
                     config.pin_permission = pin_permission;
                 }
             }
+            // Whether accounts at other servers may reach the room.
+            if let Some(federated) = data_form_bool(form, waddle_xmpp::muc::owner::FIELD_FEDERATED)
+            {
+                config.federated = federated;
+            }
             // #1265 item 7: honor muc#roomconfig_maxusers on submit.
             // The registrar value "none" and 0 both mean unlimited.
             if let Some(value) = data_form_value(form, "muc#roomconfig_maxusers") {
@@ -907,6 +912,12 @@ pub(super) async fn apply_muc_owner_config(
         }
     };
     cancelled_commit_recovery.disarm();
+    // A room that stops being open to accounts at other servers keeps none
+    // of them: each remote occupant is removed and told (XEP-0045 §11.1,
+    // status 333), once the change is committed.
+    if previous_config.federated && !config.federated {
+        state.deps.remote_route.close_room_seats(room_jid).await;
+    }
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
     let mut config_reservation = CommittedConfigReservationGuard::new(state, config_reservation);
@@ -988,8 +999,8 @@ pub(super) async fn apply_muc_owner_config(
     if let Err(error) = actor
         .ask(DbExecute {
             sql: r#"
-                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, members_only, public_room, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, members_only, public_room, federated, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
@@ -997,6 +1008,7 @@ pub(super) async fn apply_muc_owner_config(
                     pin_permission = excluded.pin_permission,
                     members_only = excluded.members_only,
                     public_room = excluded.public_room,
+                    federated = excluded.federated,
                     updated_at = excluded.updated_at
             "#
             .to_string(),
@@ -1008,6 +1020,7 @@ pub(super) async fn apply_muc_owner_config(
                 config.pin_permission.as_form_value().into(),
                 config.members_only.into(),
                 config.public_room.into(),
+                config.federated.into(),
                 now.clone().into(),
                 now.into(),
             ],

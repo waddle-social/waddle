@@ -69,8 +69,8 @@ use crate::permissions::{
 };
 use crate::server::routes::websocket::WebSocketState;
 use crate::server::xmpp_state::{
-    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
-    XmppChannelRecord, XmppChannelUpsert,
+    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, set_xmpp_channel_federated,
+    upsert_xmpp_channel, XmppChannelRecord, XmppChannelUpsert,
 };
 use crate::server::AppState;
 use crate::space_identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
@@ -1937,7 +1937,12 @@ async fn upsert_channel_catalog(
         members_only: config.members_only,
         public_room: config.public_room,
     };
-    upsert_xmpp_channel(db_actor, &record)
+    upsert_xmpp_channel(db_actor.clone(), &record)
+        .await
+        .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))?;
+    // The catalog upsert leaves the federated setting as stored; the row
+    // follows the room's configuration here.
+    set_xmpp_channel_federated(db_actor, channel_id, config.federated)
         .await
         .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))
 }
@@ -1976,7 +1981,11 @@ pub(super) async fn restore_channel_catalog_record(state: &AppState, record: &Xm
         members_only: record.members_only,
         public_room: record.public_room,
     };
-    if let Err(error) = upsert_xmpp_channel(db_actor, &upsert).await {
+    let restored = match upsert_xmpp_channel(db_actor.clone(), &upsert).await {
+        Ok(()) => set_xmpp_channel_federated(db_actor, &record.id, record.federated).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = restored {
         tracing::warn!(
             channel = %record.id,
             error = %error,
@@ -2097,6 +2106,10 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     apply_channel_type(&mut config, args.channel_type);
     config.max_occupants = 0;
     config.enable_logging = true;
+    // A new channel starts with the deployment's federated setting; its
+    // owner changes it in the room's configuration.
+    config.federated = state.federates_new_rooms();
+    let config = config.normalized();
 
     state
         .room_registry
@@ -6036,6 +6049,7 @@ mod tests {
             pin_permission: PinPermission::Anyone,
             members_only: false,
             public_room: true,
+            federated: false,
             created_at: "2026-06-21T00:00:00Z".to_string(),
             updated_at: None,
         };

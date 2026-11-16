@@ -714,6 +714,10 @@ impl RemoteRoute for S2sRouter {
         self.inner.adopt_seat(room, occupant).await
     }
 
+    async fn close_room_seats(&self, room: &BareJid) {
+        self.inner.close_room_seats(room);
+    }
+
     async fn resource_resumed(&self, resource: &FullJid) {
         if self
             .inner

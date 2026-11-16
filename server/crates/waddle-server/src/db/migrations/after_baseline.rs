@@ -39,6 +39,10 @@ pub const RETIRED_ACCOUNT_JIDS_VERSION: i64 = 2006;
 /// occupants hold in local rooms.
 pub const S2S_LOCAL_ROOM_SEATS_VERSION: i64 = 2007;
 
+/// Version of the migration that adds the federated setting to the channel
+/// catalog.
+pub const CHANNEL_FEDERATED_VERSION: i64 = 2008;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -108,6 +112,14 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2007_s2s_local_room_seats.postgres.sql"
             ),
         },
+        Migration {
+            version: CHANNEL_FEDERATED_VERSION,
+            description: "channel federated setting".to_string(),
+            sql_sqlite: include_str!("../../../sql/migrations/2008_channel_federated.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2008_channel_federated.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -115,9 +127,10 @@ pub fn all() -> Vec<Migration> {
 mod tests {
     use super::super::BASELINE_VERSION;
     use super::{
-        all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
-        HOST_GRANT_REVOCATION_FENCE_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+        all, CHANNEL_FEDERATED_VERSION, HOST_GRANT_AUTHORITY_VERSION,
+        HOST_GRANT_RESTORE_INCARNATION_VERSION, HOST_GRANT_REVOCATION_FENCE_VERSION,
+        RETIRED_ACCOUNT_JIDS_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        S2S_REMOTE_ROOMS_VERSION,
     };
 
     #[test]
@@ -134,7 +147,8 @@ mod tests {
                 S2S_REMOTE_ROOMS_VERSION,
                 HOST_GRANT_REVOCATION_FENCE_VERSION,
                 RETIRED_ACCOUNT_JIDS_VERSION,
-                S2S_LOCAL_ROOM_SEATS_VERSION
+                S2S_LOCAL_ROOM_SEATS_VERSION,
+                CHANNEL_FEDERATED_VERSION
             ]
         );
     }

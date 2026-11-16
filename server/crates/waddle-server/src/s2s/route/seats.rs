@@ -744,6 +744,14 @@ impl SeatIndex {
             .collect()
     }
 
+    /// Every seat held here in `room`.
+    pub fn of_room(&self, room: &BareJid) -> Vec<Seat> {
+        self.rooms()
+            .get(room)
+            .map(|seats| seats.values().map(|held| held.seat.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Every seat held here whose join is answered.
     pub fn settled(&self) -> Vec<Seat> {
         self.rooms()

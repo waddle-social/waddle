@@ -1254,7 +1254,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ItemNotFound,
                     ErrorType::Cancel,
                     waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomCreationNotPermitted,
-                    "The room does not exist.",
+                    "Requested item not found.",
                 )),
                 // A channel-backed room whose actor is not live yet is
                 // decided once it has seated the joiner, below.
@@ -1333,6 +1333,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string()),
                         members_only: false,
+                        // A room its first occupant creates starts with the
+                        // deployment's federated setting; one built from
+                        // the catalog keeps the setting stored for it.
+                        federated: state.deps.app_state.federates_new_rooms(),
                         ..Default::default()
                     });
                 // The room binding of an enrolled scope is members-only

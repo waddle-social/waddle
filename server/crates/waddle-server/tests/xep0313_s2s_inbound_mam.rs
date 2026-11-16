@@ -34,8 +34,8 @@ mod s2s_inbound_muc_support;
 use managed::{Managed, GUEST_PHONE, STRANGER_PHONE};
 use minidom::Element;
 use s2s_inbound_muc_support::{
-    error_condition, jid, local_groupchat, local_receives, room_with_remote_occupant, Hosted,
-    ARRIVES, BOB, ROOM,
+    error_condition, error_of, jid, local_groupchat, local_receives, not_federating,
+    room_with_remote_occupant, Hosted, ARRIVES, BOB, ROOM,
 };
 use waddle_server::s2s::route::RouterLimits;
 use xmpp_parsers::iq::Iq;
@@ -151,6 +151,35 @@ async fn a_query_for_a_room_that_does_not_exist_or_an_occupant_jid_is_refused() 
         .stanzas()
         .iter()
         .any(|stanza| is_result_of(stanza, "page-3") || is_result_of(stanza, "page-4")));
+}
+
+#[tokio::test]
+async fn the_archive_of_a_room_that_is_not_federated_is_not_found() {
+    let hosted = Hosted::start(RouterLimits::default(), not_federating).await;
+    let mut alice = hosted.room_creator("alice", "desk").await;
+    s2s_inbound_muc_support::local_join(&mut alice, ROOM, "alice").await;
+    local_groupchat(&mut alice, ROOM, "m1", "not for other servers").await;
+    local_receives(&mut alice, ARRIVES, |stanza| {
+        stanza.name() == "message" && stanza.attr("id") == Some("m1")
+    })
+    .await
+    .expect("the sender's reflection");
+    // The room is open to any local account; its archive is refused to an
+    // asker at another server as that of a room that does not exist.
+    hosted.from_peer(query(BOB, ROOM, "q5", "page-5")).await;
+    let closed = hosted.answered("q5").await;
+    hosted
+        .from_peer(query(BOB, "nowhere@muc.example.com", "q6", "page-6"))
+        .await;
+    let absent = hosted.answered("q6").await;
+    assert_eq!(closed.attr("type"), Some("error"), "{closed:?}");
+    assert_eq!(error_condition(&closed).as_deref(), Some("item-not-found"));
+    assert_eq!(error_of(&closed), error_of(&absent));
+    assert!(!hosted
+        .captured
+        .stanzas()
+        .iter()
+        .any(|stanza| is_result_of(stanza, "page-5")));
 }
 
 #[tokio::test]

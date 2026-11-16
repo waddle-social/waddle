@@ -611,6 +611,12 @@ pub trait RemoteRoute: Send + Sync {
         false
     }
 
+    /// The local room `room` stopped being open to accounts at other
+    /// servers: every remote occupant this replica seats in it is removed
+    /// and told so. Like [`Self::route`] it only queues and must not wait
+    /// for a peer. A route that seats no remote occupant does nothing.
+    async fn close_room_seats(&self, _room: &jid::BareJid) {}
+
     /// The local resource `resource` resumed its session on this replica,
     /// which may not be the one that held it before. A route that keeps
     /// state for it, such as the remote rooms it joined, records that this

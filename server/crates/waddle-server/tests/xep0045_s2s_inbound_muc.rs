@@ -48,9 +48,10 @@ use host_grant_support::OWNER;
 use managed::{Managed, GUEST, GUEST_PHONE, STRANGER_PHONE};
 use minidom::Element;
 use s2s_inbound_muc_support::{
-    body, error_condition, full, item, jid, local_groupchat, local_join, local_receives,
-    presence_between, remote_get, remote_groupchat, remote_join, remote_leave,
-    room_with_remote_occupant, statuses, Hosted, Wiring, ARRIVES, BOB, HOME_B, MUC, QUIET, ROOM,
+    body, error_condition, error_of, federated_form, full, item, jid, local_groupchat, local_join,
+    local_receives, local_set, not_federating, presence_between, remote_get, remote_groupchat,
+    remote_join, remote_leave, room_with_remote_occupant, statuses, Hosted, Wiring, ARRIVES, BOB,
+    HOME_B, MUC, QUIET, ROOM,
 };
 use waddle_server::db::{Database, MigrationRunner};
 use waddle_server::permissions::host_grant::{RoomAffiliation, SeatEvidence, StreamEvidence};
@@ -289,6 +290,80 @@ async fn a_remote_principal_creates_no_room() {
 }
 
 #[tokio::test]
+async fn a_room_that_is_not_federated_refuses_a_remote_join_as_a_room_that_does_not_exist() {
+    let hosted = Hosted::start(RouterLimits::default(), not_federating).await;
+    let mut alice = hosted.room_creator("alice", "desk").await;
+    local_join(&mut alice, ROOM, "alice").await;
+    hosted
+        .from_peer(remote_join(BOB, ROOM, "bob", "closed-1"))
+        .await;
+    let closed = hosted.answered("closed-1").await;
+    hosted
+        .from_peer(remote_join(
+            BOB,
+            "nowhere@muc.example.com",
+            "bob",
+            "missing-1",
+        ))
+        .await;
+    let missing = hosted.answered("missing-1").await;
+    assert_eq!(error_condition(&closed).as_deref(), Some("item-not-found"));
+    // Condition, type and text are those of a room that does not exist.
+    assert_eq!(error_of(&closed), error_of(&missing));
+    assert!(hosted.unseated(ROOM, BOB).await);
+    // Nobody in the room is told of the attempt.
+    let seen = local_receives(&mut alice, QUIET, |stanza| {
+        stanza.name() == "presence" && stanza.attr("from") == Some(BOB_OCCUPANT)
+    })
+    .await;
+    assert!(seen.is_none(), "{seen:?}");
+}
+
+#[tokio::test]
+async fn an_owner_opens_a_room_to_other_servers_and_closing_it_removes_its_remote_occupants() {
+    let hosted = Hosted::start(RouterLimits::default(), not_federating).await;
+    let mut alice = hosted.room_creator("alice", "desk").await;
+    local_join(&mut alice, ROOM, "alice").await;
+    let opened = local_set(&mut alice, ROOM, "open-1", federated_form(true)).await;
+    assert_eq!(opened.attr("type"), Some("result"), "{opened:?}");
+    hosted
+        .from_peer(remote_join(BOB, ROOM, "bob", "join-1"))
+        .await;
+    let own = hosted
+        .at_peer(|stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && statuses(stanza).contains(&"110".to_owned())
+        })
+        .await
+        .expect("the room's own presence for the remote occupant");
+    assert_eq!(own.attr("type"), None, "{own:?}");
+
+    let closed = local_set(&mut alice, ROOM, "close-1", federated_form(false)).await;
+    assert_eq!(closed.attr("type"), Some("result"), "{closed:?}");
+    // The occupant is told that the service removed it (§11.1).
+    let told = hosted
+        .at_peer(|stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && stanza.attr("type") == Some("unavailable")
+        })
+        .await
+        .expect("the removed occupant's own presence");
+    let codes = statuses(&told);
+    assert!(
+        codes.contains(&"110".to_owned()) && codes.contains(&"333".to_owned()),
+        "{codes:?}"
+    );
+    removed_with_333(&mut alice).await;
+    assert!(hosted.unseated(ROOM, BOB).await);
+    // The room is not found again.
+    hosted
+        .from_peer(remote_join(BOB, ROOM, "bob", "join-2"))
+        .await;
+    let refused = hosted.answered("join-2").await;
+    assert_eq!(error_condition(&refused).as_deref(), Some("item-not-found"));
+}
+
+#[tokio::test]
 async fn an_owner_or_admin_standing_is_not_issued_to_a_home_that_is_not_trusted() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
@@ -505,27 +580,6 @@ async fn a_domain_this_replica_no_longer_admits_is_refused_where_the_room_decide
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
 }
 
-/// An IQ `set` from a local client to `to`, and its answer.
-async fn local_set(
-    client: &mut waddle_ws_test_support::WsXmppClient,
-    to: &str,
-    id: &str,
-    payload: Element,
-) -> Element {
-    let request = Element::builder("iq", "jabber:client")
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
-        .append(payload)
-        .build();
-    client.send(&String::from(&request)).await.expect("send");
-    local_receives(client, ARRIVES, |stanza| {
-        stanza.name() == "iq" && stanza.attr("id") == Some(id)
-    })
-    .await
-    .expect("the answer to the request")
-}
-
 fn role_item(role: &str, nick: &str) -> Element {
     Element::builder("query", NS_MUC_ADMIN)
         .append(
@@ -705,6 +759,43 @@ async fn a_remote_member_enters_a_managed_room_on_its_grant_and_a_stranger_does_
         .await;
     let refused = managed.hosted.answered("stranger-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("not-acceptable"));
+    managed.deployment.close().await;
+}
+
+#[tokio::test]
+async fn a_managed_room_that_is_not_federated_is_not_found_for_its_remote_member() {
+    let Some(managed) = Managed::start("s2s_in_closed", no_change).await else {
+        return;
+    };
+    let room = managed.room();
+    // The setting is read when the room's actor is built from the catalog,
+    // which the owner's join does.
+    managed.deployment.replicas[0]
+        .federate(&managed.deployment.grants.scope.channel_id, false)
+        .await;
+    let mut owner = managed.deployment.replicas[0].client("owner", "desk").await;
+    let joined = local_join(&mut owner, room.as_str(), "owner").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    // The member's grant admits it to read; the room is not open to its
+    // server, which is decided first.
+    managed
+        .hosted
+        .from_peer(remote_join(GUEST_PHONE, room.as_str(), "guest", "closed-1"))
+        .await;
+    let closed = managed.hosted.answered("closed-1").await;
+    managed
+        .hosted
+        .from_peer(remote_join(
+            GUEST_PHONE,
+            "nowhere@muc.example.com",
+            "guest",
+            "missing-1",
+        ))
+        .await;
+    let missing = managed.hosted.answered("missing-1").await;
+    assert_eq!(error_condition(&closed).as_deref(), Some("item-not-found"));
+    assert_eq!(error_of(&closed), error_of(&missing));
+    assert!(managed.hosted.unseated(room.as_str(), GUEST_PHONE).await);
     managed.deployment.close().await;
 }
 

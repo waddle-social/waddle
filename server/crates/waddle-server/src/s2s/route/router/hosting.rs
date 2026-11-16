@@ -543,7 +543,10 @@ impl Inner {
         // by a failed stream, the occupant is told that the service removed
         // it (XEP-0045 §11.1), ahead of anything a later join is answered
         // with. It is not waited for: nothing depends on its arrival.
-        if matches!(end, SeatEnd::Undeliverable | SeatEnd::EvidenceChanged) {
+        if matches!(
+            end,
+            SeatEnd::Undeliverable | SeatEnd::EvidenceChanged | SeatEnd::RoomClosed
+        ) {
             self.tell_removed(&seat);
         }
         if hosting.store.remove(&seat).await.is_err() {
@@ -781,6 +784,22 @@ impl Inner {
                 tracing::warn!("marking the seats behind a lost stream failed");
             }
         });
+    }
+
+    /// The room stopped being open to accounts at other servers: every
+    /// seat held here in it ends, behind what the room already decides.
+    pub(super) fn close_room_seats(&self, room: &BareJid) {
+        if self.hosting.get().is_none() {
+            return;
+        }
+        for seat in self.seats.of_room(room) {
+            self.seats.release(&seat.room, &seat.occupant, seat.session);
+            telemetry::seat_ended_room_closed();
+            self.local_rooms.push_exempt(
+                seat.room.clone(),
+                RoomWork::Unseat(Box::new((seat, SeatEnd::RoomClosed))),
+            );
+        }
     }
 
     /// End the seats of this replica whose stream another replica lost.

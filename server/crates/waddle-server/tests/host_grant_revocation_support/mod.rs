@@ -192,6 +192,22 @@ impl Replica {
             .expect("channel catalog row");
     }
 
+    /// Record in the channel catalog whether the room of channel `id` is
+    /// open to accounts at other servers, as the room's configuration does.
+    pub async fn federate(&self, id: &str, federated: bool) {
+        self.state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "UPDATE channels SET federated = ? WHERE id = ?".to_owned(),
+                params: vec![federated.into(), id.into()],
+            })
+            .await
+            .expect("the channel's federated setting");
+    }
+
     /// An authenticated client of `localpart` on this replica, with
     /// `resource` bound.
     pub async fn client(&self, localpart: &str, resource: &str) -> WsXmppClient {

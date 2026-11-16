@@ -60,6 +60,7 @@ pub struct FederationSnapshot {
     generation: Uuid,
     admission: Arc<AdmissionPolicy>,
     require_pkix: bool,
+    federate_new_rooms: bool,
 }
 
 impl FederationSnapshot {
@@ -69,7 +70,13 @@ impl FederationSnapshot {
             generation: config.generation(),
             admission: Arc::clone(config.admission()),
             require_pkix: config.grants_require_pkix(),
+            federate_new_rooms: config.federates_new_rooms(),
         }
+    }
+
+    /// Whether a room created now starts with its `federated` setting on.
+    pub fn federates_new_rooms(&self) -> bool {
+        self.federate_new_rooms
     }
 
     /// The identifier of the snapshot.

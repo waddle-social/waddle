@@ -41,7 +41,7 @@ use waddle_xmpp::mam::{
 };
 use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::muc::room_actor::{
-    GetOccupantSessionGeneration, LeaveSessionSelector, PingSelfCheck,
+    GetConfig, GetOccupantSessionGeneration, LeaveSessionSelector, PingSelfCheck,
 };
 use waddle_xmpp::muc::MucRemovalCause;
 use waddle_xmpp::Stanza;
@@ -51,7 +51,9 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::cleanup::{get_room_actor, is_muc_room_jid, sweep_abandoned_room_occupancy};
+use super::cleanup::{
+    get_room_actor, get_room_actor_result, is_muc_room_jid, sweep_abandoned_room_occupancy,
+};
 use super::handlers::iq::muc_disco_info_for_remote;
 use super::handlers::presence::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
@@ -169,6 +171,18 @@ fn unavailable() -> StanzaError {
         ErrorType::Cancel,
         DefinedCondition::ServiceUnavailable,
         "The request is not available to occupants from other servers.",
+    )
+}
+
+/// The answer for a room a remote asker may not learn about: one that does
+/// not exist, a group conversation of this deployment's accounts, and one
+/// whose `federated` setting is off. They are answered alike, in
+/// condition, type and text, so the answer says nothing about which.
+fn no_such_room() -> StanzaError {
+    error(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "Requested item not found.",
     )
 }
 
@@ -354,6 +368,68 @@ impl Asked<'_> {
         self.to.node().map(|_| self.to.to_bare())
     }
 
+    /// Whether accounts at other servers may reach `room` at all: it
+    /// exists, it is not a group conversation of this deployment's
+    /// accounts, and its `federated` setting is on. A room an enrolled
+    /// scope manages needs the setting like any other; its grants decide
+    /// who enters once it is on. `None` when that cannot be told now.
+    ///
+    /// The setting is read from the room's actor when this replica holds
+    /// one, and otherwise from the channel catalog, which a room's
+    /// configuration keeps in step. A room with neither is not found: no
+    /// room is created for a remote principal.
+    async fn open_to_other_servers(&self, room: &BareJid) -> Option<bool> {
+        if !is_muc_room_jid(self.state, room).await {
+            return Some(false);
+        }
+        match get_room_actor_result(self.state, room).await {
+            Ok(Some(actor)) => {
+                let config = actor
+                    .ask(GetConfig)
+                    .reply_timeout(ROOM_ASK_TIMEOUT)
+                    .await
+                    .ok()?;
+                Some(config.federated && !config.group_dm)
+            }
+            Ok(None) => {
+                let channel = get_managed_channel_for_room(self.state, room).await.ok()?;
+                Some(channel.is_some_and(|channel| {
+                    channel.federated
+                        && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+                }))
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// The refusal of a request for a room accounts at other servers may
+    /// not reach, or `None` for a room they may. It is decided before
+    /// anything else about the room, the sender's grants and standing
+    /// included, so no later answer tells such a room from one that does
+    /// not exist. An occupant the room still seats is removed: its seat
+    /// was opened while the room was open.
+    async fn closed_room(&self, room: &BareJid) -> Option<RoomReplies> {
+        let refused = match self.open_to_other_servers(room).await {
+            Some(true) => return None,
+            Some(false) => no_such_room(),
+            None => internal(),
+        };
+        if let (Some(seat), false) = (&self.request.seat, self.request.joining) {
+            sweep_abandoned_room_occupancy(
+                self.state,
+                &seat.room,
+                &seat.occupant,
+                LeaveSessionSelector::Generation(seat.session),
+                MucRemovalCause::TechnicalProblem,
+            )
+            .await;
+        }
+        Some(RoomReplies {
+            stanzas: refuse(&self.request.stanza, refused),
+            seat: SeatChange::Refused,
+        })
+    }
+
     // --- service discovery and ping ------------------------------------------
 
     async fn disco_info(&self, iq: &Iq) -> RoomReplies {
@@ -363,11 +439,7 @@ impl Asked<'_> {
         // No node of the service or of a room is described to remote
         // askers.
         if payload.attr("node").is_some() {
-            return self.refuse(error(
-                ErrorType::Cancel,
-                DefinedCondition::ItemNotFound,
-                "No such node.",
-            ));
+            return self.refuse(no_such_room());
         }
         let requester = self.request.principal.full();
         let answered =
@@ -400,11 +472,7 @@ impl Asked<'_> {
             return self.refuse(unavailable());
         };
         if payload.attr("node").is_some() || self.to.resource().is_some() {
-            return self.refuse(error(
-                ErrorType::Cancel,
-                DefinedCondition::ItemNotFound,
-                "Requested item not found.",
-            ));
+            return self.refuse(no_such_room());
         }
         let listed = DiscoItemsResult {
             node: None,
@@ -487,26 +555,10 @@ impl Asked<'_> {
         let Some(room) = self.room().filter(|_| self.to.resource().is_none()) else {
             return self.refuse(unavailable());
         };
-        let not_found = || {
-            self.refuse(error(
-                ErrorType::Cancel,
-                DefinedCondition::ItemNotFound,
-                "Requested item not found.",
-            ))
-        };
-        if !is_muc_room_jid(self.state, &room).await {
-            return not_found();
-        }
+        let not_found = || self.refuse(no_such_room());
         let Ok(channel) = get_managed_channel_for_room(self.state, &room).await else {
             return self.refuse(internal());
         };
-        // A group conversation of accounts of this deployment has no remote
-        // member.
-        if channel.as_ref().is_some_and(|channel| {
-            channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
-        }) {
-            return self.refuse(forbidden("Operation not permitted."));
-        }
         match resolve_muc_room_archive_access_as(
             self.state,
             &room,
@@ -629,28 +681,6 @@ impl Asked<'_> {
             }
             // The room does not seat the occupant any more: the presence
             // is a join again.
-        }
-        match get_managed_channel_for_room(self.state, room).await {
-            // A group conversation of accounts of this deployment admits
-            // no remote occupant.
-            Ok(Some(channel))
-                if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM =>
-            {
-                return RoomReplies {
-                    stanzas: refuse(
-                        &self.request.stanza,
-                        forbidden("This room does not admit occupants from other servers."),
-                    ),
-                    seat: SeatChange::Refused,
-                };
-            }
-            Ok(_) => {}
-            Err(_) => {
-                return RoomReplies {
-                    stanzas: refuse(&self.request.stanza, internal()),
-                    seat: SeatChange::Refused,
-                };
-            }
         }
         // The join handler reads the joiner's address from a session. This
         // one names the remote account and nothing else: it is no
@@ -863,6 +893,26 @@ impl LocalRooms for WebSocketLocalRooms {
                 ),
                 seat: SeatChange::Refused,
             };
+        }
+        // A room that is not open to other servers answers every request
+        // that could tell it from a room that does not exist the same way.
+        // A ping of a room's bare JID and a `disco#items` request are
+        // answered alike for every address, presence from a sender without
+        // a seat that asks for none is ignored, and a message from such a
+        // sender is refused before its room is looked at, so those say
+        // nothing about the room either.
+        let names_room = match request.operation {
+            RoomOperation::DiscoInfo => true,
+            // A query addressed to an occupant JID is refused the same way
+            // whatever its room is.
+            RoomOperation::Archive => to.resource().is_none(),
+            RoomOperation::Presence | RoomOperation::Message => request.seat.is_some(),
+            RoomOperation::DiscoItems | RoomOperation::Ping => false,
+        };
+        if let Some(room) = asked.room().filter(|_| names_room) {
+            if let Some(refused) = asked.closed_room(&room).await {
+                return refused;
+            }
         }
         match (request.operation, &request.stanza) {
             (RoomOperation::DiscoInfo, Stanza::Iq(iq)) => asked.disco_info(iq).await,

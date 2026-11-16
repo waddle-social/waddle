@@ -45,6 +45,11 @@ impl Managed {
             .grants
             .activate_current(&deployment.grants.scope)
             .await;
+        // A managed room needs its `federated` setting like any other; the
+        // fixture's catalog row is written without it.
+        deployment.replicas[0]
+            .federate(&deployment.grants.scope.channel_id, true)
+            .await;
         let state = Arc::clone(&deployment.replicas[0].state);
         let hosted = Hosted::serve(wiring, state, RouterLimits::default()).await;
         Some(Self { deployment, hosted })

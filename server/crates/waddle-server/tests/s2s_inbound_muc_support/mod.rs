@@ -74,6 +74,7 @@ impl Wiring {
         let mut spec = Spec::new(DOMAIN, HOME_B);
         spec.local.push(MUC);
         spec.endpoints = vec![(HOME_B, peer_address)];
+        spec.tables.extend(federating_new_rooms());
         adjust(&mut spec);
         let mut peer = Spec::new(HOME_B, DOMAIN);
         peer.allow = spec.local.clone();
@@ -95,8 +96,20 @@ impl Wiring {
     pub async fn without_peer(&self) -> S2sConfig {
         let mut spec = Spec::new(DOMAIN, "elsewhere.test");
         spec.local.push(MUC);
+        spec.tables.extend(federating_new_rooms());
         spec.load(&self.pki).await.expect("a valid configuration")
     }
+}
+
+/// The host-policy table of a deployment that creates its rooms open to
+/// accounts at other servers. The suites' rooms are created by their first
+/// occupant, so they are federated unless a case clears
+/// [`Spec::tables`] to run the default, which is off.
+pub fn federating_new_rooms() -> [String; 2] {
+    [
+        "[host_policy]".to_owned(),
+        "federate_new_rooms = true".to_owned(),
+    ]
 }
 
 /// `example.com` hosting its rooms for `home-b.test`.
@@ -379,6 +392,73 @@ pub fn item(presence: &Element) -> Option<(String, String)> {
         item.attr("role")?.to_owned(),
         item.attr("affiliation")?.to_owned(),
     ))
+}
+
+/// The `<error/>` of a refusal: its type, condition and text, without the
+/// addresses and id of the stanza that carries it.
+pub fn error_of(stanza: &Element) -> Option<Element> {
+    stanza
+        .children()
+        .find(|child| child.name() == "error")
+        .cloned()
+}
+
+/// The deployment default for new rooms: not open to accounts at other
+/// servers. It undoes what [`Wiring::new`] sets.
+pub fn not_federating(spec: &mut Spec) {
+    spec.tables.clear();
+}
+
+/// An owner's configuration submission (XEP-0045 §10.2) that sets the
+/// room's `urn:waddle:roomconfig:federated` field.
+pub fn federated_form(federated: bool) -> Element {
+    let field = |var: &str, type_: Option<&str>, value: &str| {
+        let mut field = Element::builder("field", "jabber:x:data")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
+        if let Some(type_) = type_ {
+            field = field.attr(minidom::rxml::xml_ncname!("type").to_owned(), type_);
+        }
+        field
+            .append(
+                Element::builder("value", "jabber:x:data")
+                    .append(value)
+                    .build(),
+            )
+            .build()
+    };
+    Element::builder("query", "http://jabber.org/protocol/muc#owner")
+        .append(
+            Element::builder("x", "jabber:x:data")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(field(
+                    "FORM_TYPE",
+                    Some("hidden"),
+                    "http://jabber.org/protocol/muc#roomconfig",
+                ))
+                .append(field(
+                    "urn:waddle:roomconfig:federated",
+                    None,
+                    if federated { "1" } else { "0" },
+                ))
+                .build(),
+        )
+        .build()
+}
+
+/// An IQ `set` from a local client to `to`, and its answer.
+pub async fn local_set(client: &mut WsXmppClient, to: &str, id: &str, payload: Element) -> Element {
+    let request = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .append(payload)
+        .build();
+    client.send(&String::from(&request)).await.expect("send");
+    local_receives(client, ARRIVES, |stanza| {
+        stanza.name() == "iq" && stanza.attr("id") == Some(id)
+    })
+    .await
+    .expect("the answer to the request")
 }
 
 /// Whether `stanza` is a presence from `from` to `to`.
