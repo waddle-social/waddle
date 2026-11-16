@@ -653,22 +653,31 @@ Each worker serves its rooms in turn, one stanza each, and a room's
 stanzas in the order they arrived, so an occupant sees a room's presence
 and messages in the room's order, and the room's own presence moves the
 occupancy on before its next stanza is decided. A room may have at most
-64 stanzas waiting, a worker 256, and one remote domain 128 of a worker's
-256, so that one peer cannot fill a worker's queue for the rooms of other
-peers. A stanza beyond any of these is not dropped: the stream that
+64 stanzas waiting, a worker 256, and one remote domain 64 of a worker's
+256, a quarter, so that one peer cannot fill a worker's queue for the rooms
+of other peers. A stanza beyond any of these is not dropped: the stream that
 carried it stops reading from its peer until the stanza fits (counted as
 `waddle.s2s.route.room_traffic.waits`), so its later stanzas wait in the
 transport and the peer's writes slow down. A room's burst, such as the
 presence of every occupant a join receives before the joining occupant's
 own presence with status 110 (§7.2.3), arrives in full and in order,
-however many occupants the room has. A stream whose stanza has not fit
-within 30 seconds, or that this server shuts down, evicts or replaces
-meanwhile, loses that stanza and ends: with `resource-constraint` after
-the wait (counted as `waddle.s2s.route.room_traffic.overloaded`) and as
-*lost* (see below), so the occupants of rooms behind it are told and join
-again rather than miss a stanza unaware. A delivery that takes more than
-five seconds is abandoned and counted
-(`waddle.s2s.route.room_traffic.delivery_timeouts`).
+however many occupants the room has. The 30-second bound applies to each
+stanza's wait, not to the stream: a stream whose next stanza also finds the
+queues full waits again, so a stream carrying a long burst may wait longer
+than 30 seconds in all. A stream whose stanza has not fit within 30
+seconds, or that this server shuts down, evicts or replaces meanwhile,
+loses that stanza and ends as *lost* (see below): with
+`resource-constraint` after the wait (counted as
+`waddle.s2s.route.room_traffic.overloaded`), and with `system-shutdown`
+when the router stops during the wait. The occupants of rooms behind it are
+then told and join again rather than miss a stanza unaware. A stanza that
+fits after waiting counts as the stream's traffic, so the wait itself never
+makes the stream idle or a candidate for eviction. A delivery that takes
+more than five seconds is abandoned and counted
+(`waddle.s2s.route.room_traffic.delivery_timeouts`). A stanza whose
+occupancy cannot be read because the shared store failed is dropped
+unanswered, since whether it is room traffic is unknown, and counted
+(`waddle.s2s.route.room_traffic.store_failures`).
 
 **Carbons, archive and inbox.** A private message that a local resource
 receives from a remote room occupant takes the recipient's peer-stanza
@@ -733,7 +742,11 @@ when an established stream ends, and how:
   first-level element; a write that did not complete within the write
   deadline; a first-level element the peer left unfinished past the
   incomplete-element deadline; a stanza the router could not queue within
-  its deadline (see Inbound); a stream error this server sent
+  its deadline or before it stopped (see Inbound); the idle timeout, the
+  maximum age, eviction or replacement after the stream waited for the
+  router and before it read from the peer again, since what the peer wrote
+  meanwhile is still unread and is dropped with the connection; a stream
+  error this server sent
   (`protocol`) or the peer sent other than `conflict` and
   `connection-timeout` (`peer-error`, which includes the peer's
   `system-shutdown`); a domain peer admission no longer admits
@@ -746,6 +759,17 @@ when an established stream ends, and how:
   down. Peers close idle streams with `connection-timeout` or by dropping
   the connection, and a stream idle long enough to be closed carries
   nothing in flight.
+
+End of file between elements is *closed* whether or not the peer sent a
+TLS `close_notify` first. So a peer that crashed, or whose connection was
+cut, between two stanzas looks the same as a peer dropping an idle
+connection: its occupants are not told that the stream ended, and learn
+that the room no longer seats them only through a XEP-0410 self-ping or
+the room's answer to their next stanza. One end that may lose a stanza the peer did write is
+reported as *lost* even when the peer wrote nothing: a stream that waited
+for the router and then reaches its idle timeout without reading again
+cannot tell a silent peer from unread stanzas, and is reported as lost
+then.
 
 When an inbound stream from a remote domain to a local domain is lost,
 every occupancy of a resource of that local domain in a room at that
@@ -811,8 +835,8 @@ the durable authority has adopted its rows and is not affected.
 | How long a "not a service" or "not a room" verdict is cached | 5 min |
 | Room traffic waiting for decision on one replica (four workers of 256) | 1,024 |
 | Room traffic waiting from one room | 64 |
-| Room traffic waiting from one remote domain, of one worker's 256 | 128 |
-| How long a stream waits for its room traffic to fit | 30 s |
+| Room traffic waiting from one remote domain, of one worker's 256 | 64 |
+| How long a stream waits for one stanza of room traffic to fit | 30 s |
 | One delivery of room traffic | 5 s |
 
 A join beyond the occupancy bounds is refused with `resource-constraint`.
@@ -905,9 +929,10 @@ runbook (G24):
 - **A waiting stream holds back its other rooms.** A stream that waits
   for its stanza to fit on the room delivery queues reads nothing else
   meanwhile, so the peer's traffic for other rooms and other occupants on
-  that stream waits too, and IQ responses on it arrive late. The wait ends
-  within 30 seconds; a peer whose rooms keep the queues full has its
-  stream closed then and its occupants told to join again.
+  that stream waits too, and IQ responses on it arrive late. Each stanza's
+  wait ends within 30 seconds, but a stream may wait again for each later
+  stanza that finds the queues full; a stanza that does not fit in time
+  closes the stream, and its occupants are told to join again.
 - **A cancelled offer.** The WebSocket path waits at most two seconds for
   the route. A join or leave whose occupancy was written but whose route
   call was cancelled before its stanza was queued leaves the occupancy

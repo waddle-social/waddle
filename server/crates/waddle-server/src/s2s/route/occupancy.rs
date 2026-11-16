@@ -289,8 +289,12 @@ const COLUMNS: &str = "occupant_jid, room_jid, nick, phase, affiliation, attempt
 const KEY_CLAUSE: &str = "occupant_jid = ? AND room_jid = ?";
 
 /// The seed of the PostgreSQL advisory lock key a join takes on its
-/// account (`hashtextextended(account, seed)`), which keeps those keys
-/// apart from the other advisory locks of the schema.
+/// account (`hashtextextended(account, seed)`). Every advisory lock of the
+/// database shares one 64-bit key space, and a seed of its own makes it
+/// unlikely, not impossible, that an account's key equals another lock's
+/// key or another account's. Such a collision only makes the two lock
+/// holders wait for each other: each join still counts and inserts under
+/// its own account's lock, so the bounds hold either way.
 const ACCOUNT_LOCK_SEED: i64 = 0x7332_735f_726f_6f6d;
 
 impl SqlRemoteRoomStore {
