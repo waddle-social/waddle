@@ -1369,7 +1369,7 @@ request (its queues are full, it no longer holds the room) is not taken
 for silent: that one request is answered. No stream is closed and no
 seat ends for a holder that does not answer. What
 waits to be placed is bounded like the queues behind the stage (1,024 on a
-replica, 64 for one room, 64 from one remote domain), and as there a
+replica, 32 for one room, 64 from one remote domain), and as there a
 stanza beyond the replica's or its domain's bound holds its stream until
 it fits, while one beyond its room's is answered as its kind is and holds
 none, so a room whose holder is silent fills only its own lane. Stanzas
@@ -1534,7 +1534,7 @@ reached.
 | Rooms being placed at once on one replica, and for the requests of one remote domain | 64, 8 |
 | How long a request may wait for a place among the rooms being placed, how long asking the holder may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s (4.5 s for the relay's own ask), 5 s |
 | Requests waiting for the room host on one replica (four workers of 256) | 1,024 |
-| Requests waiting for one room (a stanza beyond it is answered as its kind is, and holds no stream; a leave and a delivery error are not counted) | 64 |
+| Requests waiting for one room, never above half of a domain's share (a stanza beyond it is answered as its kind is, and holds no stream; a leave and a delivery error are not counted) | 32 |
 | Requests waiting from one remote domain, of one worker's 256 | 64 |
 | How long a stream waits for its domain's rate or a place | 30 s |
 | How long one item of a worker that hands requests to the room host may take: deciding a request, its seat's changes and queueing its answer; and each step of a seat's end | 5 s |
@@ -1626,10 +1626,13 @@ room again for presence that enters again, and waiting for a place for
 the answer share one deadline, and a seat's end is handed to the workers
 that end seats. A room actor that is slow costs its shard at most that
 for each of its requests, a sixth of the time a stream waits, and the
-requests that wait for it fill only the room's share: no stream is held
-for one room, and so none is closed and no pair's seats are lost for it.
-Only a worker's queue, or a domain's share of it, filled by many slow
-rooms holds a stream.
+requests that wait for it fill only the room's share, which is at most
+half of its domain's share of a worker or of the placement stage: no
+stream is held for one room, and so none is closed and no pair's seats
+are lost for it. Only a worker's queue, or a domain's share of it, filled
+by more than one slow room holds a stream. The room host's own asks of a
+room actor wait at most 2 s, so a room that does not answer in time is
+answered for as one that cannot say, within that budget.
 
 **Not enabled for remote principals.**
 
@@ -1907,6 +1910,36 @@ runbook (G24):
   contract). The executed evidence that a retried copy is not sent twice,
   and that the recovery of unfinished deliveries leaves a remote
   occupant's child alone, is verification's; neither has been run.
+- **A slow room loses its joins.** Deciding one request, changing its
+  seat and queueing its answer share 5 s. A join the room has not decided
+  by then ends the seat opened for it, and the occupant is told with
+  statuses 110 and 333 rather than answered with error presence; any other
+  request is left unanswered. A room whose actor is slower than that under
+  load turns its remote occupants' joins away until it recovers.
+- **Joins where a replica carries requests.** A replica that carries
+  requests to the room's holder cannot tell whether the sender of presence
+  holds a seat there, so presence that does not carry the `muc` element is
+  taken for a change of presence and counts against both of its account's
+  shares; once those are spent it is dropped, where a join with the
+  element would be answered or held. A client that enters a room without
+  the element can see its join go unanswered on such a deployment.
+- **The presence share is narrow.** One available presence a second on
+  average, 64 at once, for each account across every room: a client that
+  enters every room it may at once fits, a client that changes its
+  availability often across many rooms loses some of those changes, and
+  its occupants then show an earlier availability.
+- **A stale seat row refuses an affiliation.** The admin command that sets
+  a room affiliation reads the account's seats from the shared table. A row
+  whose seat ended but whose removal failed refuses an owner or admin
+  affiliation for its account until its replica's next pass removes it
+  (rows younger than 30 s are kept) or, for a replica that stopped, until
+  its rows are removed as a stopped replica's.
+- **A taken-over occupant the room did not seat again is not told.** A
+  seat taken over from a replica that stopped is told that it ended only
+  once the room removed the occupancy recorded for it. Where the room
+  seated nothing (its grants could not be read) or seated the occupant
+  under another generation, the occupant is not told, and learns that it
+  is not joined at its next request or self-ping.
 - **A seat ends rather than lag.** An occupant whose domain's queue is
   full, or whose stream cannot be established within the dial's budget, is
   removed with status 333 and joins again. A peer that is slow for longer
