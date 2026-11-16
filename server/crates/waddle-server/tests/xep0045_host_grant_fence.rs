@@ -38,12 +38,17 @@ mod ws_loopback_support;
 mod sinks;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use host_grant_support::{bare, issuance_policy, served, GrantFixture, OWNER, PEER, SENDER};
 use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
 use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
-use waddle_server::permissions::host_grant::{HostGrantAttachment, HostGrantGate, RoomAffiliation};
+use waddle_server::ingress::IngressAuthority;
+use waddle_server::permissions::host_grant::{
+    GateState, HostGrantAttachment, HostGrantGate, RestoreEpoch, RoomAffiliation, RoomBinding,
+    RoomGate,
+};
 use waddle_server::permissions::{
     CheckPermission, ListRelations, ListSubjects, Object, ObjectType, Permission, PermissionActor,
     Relation, Subject, Tuple, WriteTuple,
@@ -88,6 +93,9 @@ const MUC_MEMBERSONLY: &str = "muc_membersonly";
 struct ManagedRoom {
     grants: GrantFixture,
     server: Loopback,
+    /// The replica's ingress authority, whose attachment gate the state's
+    /// host-grant gate is bound to.
+    authority: Arc<IngressAuthority>,
     /// A permission actor without the host-grant fence, standing in for a
     /// stale mirror or an older binary: it writes and reads the legacy
     /// relationships the fenced actor refuses.
@@ -117,13 +125,15 @@ impl ManagedRoom {
             .expect("shared database pool"),
         );
         let authority = Arc::new(grants.ingress.authority().await);
-        let state = websocket_state_with_host_grant_fence(pool, authority).await;
+        let state = websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await;
         if attach {
-            let host_grants = &state.deps.app_state.host_grants;
+            // The replica's attachment gate attaches, as its verification
+            // would; the surfaces read it through the state's gate.
             let attachment = HostGrantAttachment::unfenced_for_test(&grants.store, served())
                 .await
                 .expect("attachment");
-            assert!(host_grants.attach(attachment));
+            assert!(authority.attach_host_grants(attachment));
+            assert!(state.deps.app_state.host_grants.attachment().is_some());
         }
         let legacy = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
             grants.ingress.db.clone(),
@@ -138,6 +148,7 @@ impl ManagedRoom {
         Some(Self {
             grants,
             server,
+            authority,
             legacy,
         })
     }
@@ -393,6 +404,130 @@ async fn joins_archive_reads_and_disco_follow_the_canonical_grants() {
         is_error(&reply, DefinedCondition::Forbidden),
         "a banned member read the archive: {reply:?}"
     );
+    fixture.close().await;
+}
+
+/// Wait until the replica's attachment gate is in `state`.
+async fn gate_reaches(fixture: &ManagedRoom, state: GateState, within: Duration) {
+    let gate = fixture.authority.host_grant_gate();
+    let deadline = tokio::time::Instant::now() + within;
+    while gate.state() != state {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the attachment gate did not reach {state:?}; it is {:?}",
+            gate.state()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The surfaces decide a managed room with the replica's attachment only
+/// while its attachment gate is attached. When the gate verifies a changed
+/// authority again and the restore fence refuses it (here the database is
+/// adopted under the running replica), the gate keeps the earlier
+/// attachment for acceptance to compare with, and joins, archive reads and
+/// the gate's own decisions are refused until a verification passes again.
+#[tokio::test]
+async fn a_refused_reverification_closes_the_surfaces_until_the_fence_passes_again() {
+    let Some(fixture) = ManagedRoom::start("hg_fence_reverify").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    let host_grants = fixture.server.state.deps.app_state.host_grants.clone();
+    let gate = fixture.authority.host_grant_gate();
+    // The incarnation binds the database's lineage, so an adoption is
+    // refused by the fence. The verifier runs the fence without the
+    // privilege check, since the fixture's login owns the schema.
+    fixture
+        .grants
+        .store
+        .prepare_restore_incarnation(RestoreEpoch::INITIAL)
+        .await
+        .expect("lineage binding");
+    gate.install_verifier_for_test(
+        fixture.grants.store.clone(),
+        fixture.legacy.clone(),
+        served(),
+        RestoreEpoch::INITIAL,
+    );
+    assert_eq!(gate.state(), GateState::Attached);
+
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "a member's join: {joined:?}"
+    );
+    let reply = round_trip(&mut romeo, set("mam", room.as_str(), mam_query("q-before"))).await;
+    assert!(is_result(&reply), "a member's archive read: {reply:?}");
+
+    // The database is adopted under the running replica, and the gate is
+    // told the authority changed, as an acceptance that read another
+    // binding tells it. The fence refuses the adopted lineage.
+    let pool = sqlx::PgPool::connect(fixture.grants.ingress.db.database_url())
+        .await
+        .expect("owner connection");
+    let lineage: String = sqlx::query_scalar("SELECT lineage_uuid FROM _lineage WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .expect("lineage");
+    sqlx::query("UPDATE _lineage SET lineage_uuid = $1 WHERE id = 1")
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&pool)
+        .await
+        .expect("adoption");
+    gate.authority_changed();
+    gate_reaches(&fixture, GateState::ReverifyFailed, Duration::from_secs(10)).await;
+    // The earlier attachment is still held, for acceptance to compare with;
+    // the surfaces do not read it.
+    assert!(gate.current().is_some());
+    assert!(gate.verified_attachment().is_none());
+    assert!(host_grants.attachment().is_none());
+    assert!(matches!(
+        host_grants.room(RoomBinding::Room(&room)).await,
+        RoomGate::Unavailable
+    ));
+
+    let mut owner = fixture.server.client("owner", "phone").await;
+    let refused = join(&mut owner, &room, "owner").await;
+    assert!(
+        error_condition(&refused).is_some(),
+        "an owner joined while the authority was refused: {refused:?}"
+    );
+    let reply = round_trip(
+        &mut romeo,
+        set("mam", room.as_str(), mam_query("q-refused")),
+    )
+    .await;
+    assert!(
+        !is_result(&reply),
+        "the archive was read while the authority was refused: {reply:?}"
+    );
+
+    // The lineage is put back: the gate's retry passes the fence and the
+    // surfaces decide the room again.
+    sqlx::query("UPDATE _lineage SET lineage_uuid = $1 WHERE id = 1")
+        .bind(&lineage)
+        .execute(&pool)
+        .await
+        .expect("lineage restored");
+    pool.close().await;
+    gate_reaches(&fixture, GateState::Attached, Duration::from_secs(30)).await;
+    assert!(host_grants.attachment().is_some());
+    assert!(matches!(
+        host_grants.room(RoomBinding::Room(&room)).await,
+        RoomGate::Managed(_)
+    ));
+    let mut owner = fixture.server.client("owner", "laptop").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(
+        error_condition(&joined),
+        None,
+        "an owner's join after the fence passed: {joined:?}"
+    );
+    let reply = round_trip(&mut romeo, set("mam", room.as_str(), mam_query("q-after"))).await;
+    assert!(is_result(&reply), "a member's archive read: {reply:?}");
     fixture.close().await;
 }
 

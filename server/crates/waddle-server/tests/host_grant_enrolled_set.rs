@@ -283,7 +283,8 @@ async fn a_failed_refresh_keeps_the_set_and_unmanaged_rooms_need_no_read() {
 
 /// The gate decides managed rooms with the attachment the replica's
 /// attachment gate holds at each decision, the one room-manifest acceptance
-/// uses: none before that gate attaches, and the one it holds once it does.
+/// uses: none before that gate attaches, the one it holds once it does, and
+/// none once a different attachment gate was offered.
 #[tokio::test]
 async fn the_gate_reads_the_attachment_its_attachment_gate_holds() {
     let Some(fixture) = GrantFixture::active("hg_set_bound").await else {
@@ -311,6 +312,16 @@ async fn the_gate_reads_the_attachment_its_attachment_gate_holds() {
     assert!(matches!(
         gate.room(RoomBinding::Room(&scope.room)).await,
         RoomGate::Managed(_)
+    ));
+
+    // Another attachment gate offered once one is bound leaves the gate
+    // unable to tell which speaks for the replica: it refuses every managed
+    // room from then on.
+    assert!(!gate.bind_attachment(Arc::default()));
+    assert!(gate.attachment().is_none());
+    assert!(matches!(
+        gate.room(RoomBinding::Room(&scope.room)).await,
+        RoomGate::Unavailable
     ));
     assert!(replica.drain_and_join(Duration::from_secs(5)).await);
     fixture.close().await;
