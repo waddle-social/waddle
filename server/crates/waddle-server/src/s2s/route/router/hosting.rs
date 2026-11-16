@@ -27,7 +27,8 @@ use waddle_xmpp::muc::presence::NS_MUC_USER;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::message::MessageType;
-use xmpp_parsers::presence::Type as PresenceType;
+use xmpp_parsers::muc::user::{Affiliation, Item, MucUser, Role, Status};
+use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::{
@@ -323,7 +324,7 @@ impl Inner {
             // enters again on the evidence of the stream that carries it
             // now.
             if held.evidence != StreamEvidence::of(&principal) {
-                self.unseat(held.clone(), SeatEnd::StreamLost).await;
+                self.unseat(held.clone(), SeatEnd::EvidenceChanged).await;
                 seat = None;
             }
         }
@@ -533,11 +534,18 @@ impl Inner {
     /// End `seat` without the room deciding it: the seat is given up and
     /// the room removes the occupant, telling those who stay (XEP-0045
     /// §11.1).
-    async fn unseat(&self, seat: Seat, end: SeatEnd) {
+    async fn unseat(self: &Arc<Self>, seat: Seat, end: SeatEnd) {
         let Some(hosting) = self.hosting.get() else {
             return;
         };
         self.seats.release(&seat.room, &seat.occupant, seat.session);
+        // Where the occupant's server may still be reached and was not told
+        // by a failed stream, the occupant is told that the service removed
+        // it (XEP-0045 §11.1), ahead of anything a later join is answered
+        // with. It is not waited for: nothing depends on its arrival.
+        if matches!(end, SeatEnd::Undeliverable | SeatEnd::EvidenceChanged) {
+            self.tell_removed(&seat);
+        }
         if hosting.store.remove(&seat).await.is_err() {
             tracing::warn!("removing an ended remote occupant's seat failed");
         }
@@ -550,11 +558,49 @@ impl Inner {
         }
     }
 
+    /// Queue the occupant's own unavailable presence with statuses 110 and
+    /// 333 for a seat the service ended, if a place is free for it.
+    fn tell_removed(self: &Arc<Self>, seat: &Seat) {
+        let (Ok(from), Ok(local), Ok(remote)) = (
+            seat.room.with_resource_str(&seat.nick),
+            CanonicalDomain::from_domain(seat.room.domain()),
+            CanonicalDomain::from_domain(seat.occupant.domain()),
+        ) else {
+            return;
+        };
+        let mut presence = Presence::new(PresenceType::Unavailable);
+        presence.from = Some(Jid::from(from));
+        presence.to = Some(Jid::from(seat.occupant.clone()));
+        let user = MucUser::new()
+            .with_items(vec![Item::new(Affiliation::None, Role::None)])
+            .with_statuses(vec![Status::SelfPresence, Status::ServiceErrorKick]);
+        presence.payloads.push(Element::from(user));
+        let queued = Queued {
+            stanza: Stanza::Presence(presence),
+            purpose: Purpose::RoomReply,
+        };
+        let placed = self.reserve_on(Pair { local, remote }, self.limits.reply_queues, |queue| {
+            &queue.seats
+        });
+        if let Some(permit) = placed {
+            permit.send(queued);
+        }
+    }
+
     // --- egress -----------------------------------------------------------
 
-    /// The seat `occupant` holds here in the room `stanza` comes from.
+    /// The seat `occupant` holds here in the room `stanza` comes from, for
+    /// a stanza a room sends its occupants: presence and groupchat
+    /// messages. Private messages, invitations and IQs relayed between
+    /// occupants are not a room's traffic to a seat: their answers would be
+    /// account traffic, which remote senders do not reach (ADR-0020 D7).
     pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {
         self.hosting.get()?;
+        match stanza {
+            Stanza::Presence(_) => {}
+            Stanza::Message(message) if message.type_ == MessageType::Groupchat => {}
+            Stanza::Message(_) | Stanza::Iq(_) => return None,
+        }
         let room = stanza_from(stanza)?.to_bare();
         self.seats.get(&room, occupant)
     }

@@ -50,7 +50,7 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::cleanup::{get_room_actor, is_muc_room_jid, sweep_abandoned_muc_occupancy};
+use super::cleanup::{get_room_actor, is_muc_room_jid, sweep_abandoned_room_occupancy};
 use super::handlers::iq::muc_disco_info_for_remote;
 use super::handlers::presence::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
@@ -227,11 +227,12 @@ fn result(iq: &Iq, payload: Option<Element>) -> Stanza {
 
 /// The frames a room handler written for WebSocket sessions returns are
 /// that transport's wire form; they are read back into typed stanzas once,
-/// here, before anything else sees them.
-fn stanzas_of(frames: Vec<String>) -> Vec<Stanza> {
+/// here, before anything else sees them. `None` when one of them is not a
+/// stanza: an answer read only in part must not be taken for the whole.
+fn stanzas_of(frames: Vec<String>) -> Option<Vec<Stanza>> {
     frames
         .into_iter()
-        .filter_map(|frame| {
+        .map(|frame| {
             let element = frame.parse::<Element>().ok()?;
             match element.name() {
                 "message" => Message::try_from(element).ok().map(Stanza::Message),
@@ -335,12 +336,10 @@ impl Asked<'_> {
             Some(Err(error)) => return self.refuse(error),
             Some(Ok(_)) | None => None,
         };
+        // An answer this server could not build is no statement about the
+        // address: a peer caches what a service or a room says it is.
         let Some(mut described) = described else {
-            return self.refuse(error(
-                ErrorType::Cancel,
-                DefinedCondition::ItemNotFound,
-                "Requested item not found.",
-            ));
+            return self.refuse(internal());
         };
         described
             .features
@@ -538,7 +537,15 @@ impl Asked<'_> {
                 let frames =
                     handle_muc_leave(self.state, &room, &occupant, &seat.nick, seat.session, None)
                         .await;
-                RoomReplies::of(stanzas_of(frames))
+                // The room no longer seats the occupant, whatever of its
+                // answer could be read: the seat is given up.
+                match stanzas_of(frames) {
+                    Some(stanzas) => RoomReplies::of(stanzas),
+                    None => RoomReplies {
+                        stanzas: Vec::new(),
+                        seat: SeatChange::Refused,
+                    },
+                }
             }
             _ => RoomReplies::none(),
         }
@@ -568,7 +575,7 @@ impl Asked<'_> {
             )
             .await;
             if let Some(frames) = updated {
-                return RoomReplies::of(stanzas_of(frames));
+                return RoomReplies::of(stanzas_of(frames).unwrap_or_default());
             }
             // The room does not seat the occupant any more: the presence
             // is a join again.
@@ -626,7 +633,24 @@ impl Asked<'_> {
             },
         )
         .await;
-        let stanzas = stanzas_of(frames);
+        let Some(stanzas) = stanzas_of(frames) else {
+            // The room may have seated the occupant, and its answer cannot
+            // be given: the occupant is removed again rather than left
+            // seated without having been told.
+            tracing::warn!("a room's answer to a remote occupant's join could not be read");
+            sweep_abandoned_room_occupancy(
+                self.state,
+                room,
+                occupant,
+                LeaveSessionSelector::Generation(seat.session),
+                MucRemovalCause::TechnicalProblem,
+            )
+            .await;
+            return RoomReplies {
+                stanzas: refuse(&self.request.stanza, internal()),
+                seat: SeatChange::Refused,
+            };
+        };
         let seat = if seated(&stanzas) {
             SeatChange::Seated
         } else {
@@ -799,8 +823,9 @@ impl LocalRooms for WebSocketLocalRooms {
         // later join of the same full JID keeps its seat. Those who stay
         // are told with status 333 (XEP-0045 §11.1); the removed occupant's
         // own copy finds no seat and is not sent.
-        sweep_abandoned_muc_occupancy(
+        sweep_abandoned_room_occupancy(
             &state,
+            &seat.room,
             &seat.occupant,
             LeaveSessionSelector::Generation(seat.session),
             MucRemovalCause::TechnicalProblem,

@@ -83,6 +83,10 @@ pub enum SeatEnd {
     /// The occupant's server answered the room's traffic with a
     /// delivery-related error (XEP-0045 §17.1.2, "ghost users").
     OccupantError,
+    /// A stanza of the occupant arrived on a stream that proved something
+    /// other than the seat's stream did: the seat no longer stands for the
+    /// evidence it was admitted under.
+    EvidenceChanged,
 }
 
 /// The rooms of this deployment, as the S2S router reaches them.

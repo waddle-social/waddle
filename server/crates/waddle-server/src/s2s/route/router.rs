@@ -681,19 +681,22 @@ impl S2sRouter {
     /// `budget`. Stanzas still queued are answered as if their stream could
     /// not be established. `true` when every task ended.
     pub async fn shutdown(&self, budget: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        self.inner.shutdown.cancel();
+        self.inner.tasks.close();
+        let ended = tokio::time::timeout_at(deadline, self.inner.tasks.wait())
+            .await
+            .is_ok();
         // The rooms this replica hosts end with it, so their remote
-        // occupants hold no seat any more.
+        // occupants hold no seat any more. Rows that stay behind are
+        // removed as a stopped replica's.
         if let Some(hosting) = self.inner.hosting.get() {
             let removal = hosting.store.remove_owned(self.inner.owner.as_str());
-            if !matches!(tokio::time::timeout(budget, removal).await, Ok(Ok(_))) {
+            if !matches!(tokio::time::timeout_at(deadline, removal).await, Ok(Ok(_))) {
                 tracing::warn!("removing this replica's remote occupants' seats failed");
             }
         }
-        self.inner.shutdown.cancel();
-        self.inner.tasks.close();
-        tokio::time::timeout(budget, self.inner.tasks.wait())
-            .await
-            .is_ok()
+        ended
     }
 }
 
