@@ -367,11 +367,19 @@ implemented unless the text says so.
 
 ### Host-grant authority design (`host-grant-authority-2047.md`)
 
-- Revocation fence (W5d): occupant ejection and presence after a revoke, and
-  whether acquisition of the coarse fence needs a fair primitive. PostgreSQL
-  does not queue share lockers behind a waiting exclusive locker, so
-  overlapping acceptance transactions in one scope can delay a revoke
-  repeatedly; it never acknowledges a revoke that did not commit.
+- Revocation fence (W5d), decided in the design's "Revocation fence
+  decisions": occupants a revoke leaves seated are removed by the sweep,
+  and the queue lock in front of the scope's guard keeps overlapping
+  acceptances from holding a revoke back. Open there: surfaces that decide
+  before an await and act after it without deciding again (XEP-0425
+  moderation, channel-wide mentions, Muji call start and media tokens, the
+  owner configuration form, the extension bot list, the room and Space
+  listings); an `UpdateConfig` that asks the decision's ticket in the room
+  actor's turn; the admin commands' unbounded wait for a room's
+  configuration lock; seats a lapsed replica keeps until it registers again;
+  the relayed record of a remote membership; and the clock assumptions the
+  fence's acknowledgement rests on (Linux replicas, PostgreSQL hosts kept in
+  sync), which rollout checks and nothing enforces.
 - A PubSub admission identity for serving an enrolled Space (needed before
   a scope's Space is served; W7a depends on it). Until then its node is
   described and listed to nobody.

@@ -15,6 +15,16 @@ own domain; there the JID should also be retired
 ([account retirement](account-retirement.md)), which a Waddle home enforces
 durably.
 
+The acknowledgement this procedure waits for holds only under the fence's
+clock assumptions: the servers run on Linux, and the PostgreSQL hosts, a
+standby that a failover would promote included, are kept in sync by NTP
+with an offset well under 1 s. A database clock that runs ahead ends the
+servers' leases early, and a revoke can then be acknowledged while a server
+still acts on a decision it read before. Before relying on an
+acknowledgement, check that no server reports
+`waddle.host_grant.fence.clock_skew` above 500 ms and that its log shows no
+`clock_skew` warning ([metrics](server-metrics.md)).
+
 ## What the report changes
 
 - **A home that is not on the trusted-home list.** The previous holder's
@@ -69,7 +79,12 @@ restore witnesses at once
 
    The command records a revoke in every managed room where the JID holds a
    grant, and for each one waits until the revocation fence has acknowledged
-   it. Each revoke is effective at its commit: from then on no new use of the
+   it. It prints one JSON line for every room the JID holds a row in. A room
+   where the JID already holds what is asked for (an earlier run revoked it,
+   or it was revoked another way) records nothing and is reported with
+   `"unchanged": true` and the fence's answer at its scope's current
+   generation, which covers that earlier revoke: a repeated run confirms
+   every room, not only those it changed. Each revoke is effective at its commit: from then on no new use of the
    room is admitted under the grant. The acknowledgement says more: every
    server that may still decide for the scope has installed the revoke, so
    none acts on a decision it read before. Each server then removes the
@@ -84,9 +99,10 @@ restore witnesses at once
 
    | Exit | Meaning | Do |
    | --- | --- | --- |
-   | `0` | Every revoke is recorded and acknowledged. | Go on. |
-   | `1` with `"acknowledged": false` on a line | That revoke is recorded and effective; a server that holds a lease has not installed it yet. A server that stopped is waited for until its lease has run out (about 6 s). | Run the same command again with the same operation ID. It replays the recorded revokes and waits again. If a server stays behind, look at that server: `host-grant fence --scope <lifecycle>` shows the scope's standing. |
-   | `1` otherwise | The database returned an error or an outcome is unknown. | Run the same command again with the same operation ID. |
+   | `0` | Every room's revoke is recorded and acknowledged. | Go on. |
+   | `1` with `"error"` on a line | That room's revoke, or the reading of its acknowledgement, failed; the other rooms are reported on their own lines. | Run the same command again with the same operation ID. |
+   | `1` with `"acknowledged": false` on a line | That revoke is recorded and effective; a server that holds a lease has not installed it yet. A server that stopped is waited for until its lease has run out (about 6 s). | Run the same command again with the same operation ID. It replays the recorded revokes, reports the rooms revoked before, and waits again. If a server stays behind, look at that server: `host-grant fence --scope <lifecycle>` shows the scope's standing. |
+   | `1` otherwise | The database returned an error before any room was reported. | Run the same command again with the same operation ID. |
    | `4` with `"refusal": "last_owner"` on a line | The JID is that room's only owner of a domain this deployment serves; the other rooms are revoked. | This cannot be a remote JID. For a local account, have another owner granted through the room's administration, then repeat the command. |
    | `4` otherwise | The store refused the act. | Read the diagnostic. |
 

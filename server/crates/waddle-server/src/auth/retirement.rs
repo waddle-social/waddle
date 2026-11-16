@@ -34,11 +34,13 @@
 //! waits for the commit and runs against the ledger that holds the JID.
 //! SQLite runs one writing transaction at a time.
 //!
-//! The lock holds up every writer of the account tables for as long as the
-//! retirement waits and runs: provisioning, and also session creation at
-//! every login and changes of native credentials. The retirement waits at
-//! most 2 s for the lock and then fails without having changed anything; it
-//! can be run again.
+//! Every writer of the account tables (provisioning, and also session
+//! creation at every login and changes of native credentials) that arrives
+//! while the retirement waits for the lock or holds it is held up until the
+//! retirement ends. The retirement waits at most 2 s for the lock and then
+//! fails without having changed anything; it can be run again. Holding the
+//! lock it runs a few statements, each bounded at 5 s; the transaction has
+//! no deadline of its own beyond those.
 
 use chrono::Utc;
 use jid::BareJid;
