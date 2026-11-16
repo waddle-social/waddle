@@ -1619,8 +1619,13 @@ domain's rate is not spent on it and its stream is not held, so one
 account cannot spend what the other accounts of its domain may send, nor
 hold the stream they share. Every allowance of the account is decided
 before the domain's rate, and a stanza beyond one is answered or dropped
-at once; only the domain's rate, which all its accounts spend together,
-makes a stream wait. An account has three allowances. Requests,
+at once; of the allowances, only the domain's rate, which all its
+accounts spend together, makes a stream wait. The queues behind them
+still do while they, or the domain's share of them, are full, and one
+account's stanzas within its allowances, spread over several rooms whose
+actors are slow, can fill the domain's share of a worker's queue: the
+stream then waits for that account as it waits for the domain (below,
+under risks). An account has three allowances. Requests,
 messages, chat states, markers and changes of availability or nickname
 count against its share. Available presence to an occupant JID counts
 against its share of presence: joins, which count against nothing else,
@@ -1973,6 +1978,13 @@ runbook (G24):
   at most 21 of its domain's 50 stanzas a second and 144 of its 200 at
   once. A configuration whose per-account rates add up to more than the
   domain's lets one account spend its domain's rate, and the domain's
+- **One account can fill its domain's share of the queues.** An
+  account's allowances bound how fast it sends, not how long what it sent
+  waits. Its stanzas for two or more rooms whose actors are slow wait in
+  its domain's share of a worker's queue, or of the placement stage (one
+  room fills at most half of it); the next stanza of any account of the
+  domain then holds the stream until a place frees, and the stream is
+  closed with `resource-constraint` if none frees in time.
   stream then waits for it as it waits for all its accounts together.
 - **`service-unavailable` does not end a seat.** Only the conditions
   XEP-0045 lists for ghost users (§17.1.2) do. A server answers with

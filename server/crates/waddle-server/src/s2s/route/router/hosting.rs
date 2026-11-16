@@ -472,8 +472,11 @@ enum Spend {
     /// A stanza of the domain's rate and of the account's allowances was
     /// taken.
     Taken,
-    /// The domain's rate is spent for this long. Only the domain's rate,
-    /// which every account of the domain spends, makes a stream wait.
+    /// The domain's rate is spent for this long. Of the allowances, only
+    /// the domain's rate, which every account of the domain spends, makes
+    /// a stream wait; the queues behind them make it wait too while they,
+    /// or the domain's share of them, are full, and those an account's
+    /// stanzas for several rooms can fill.
     Wait(Duration),
     /// The account has spent a share the stanza counts against: the
     /// stanza is not taken, and is answered with an error only when
