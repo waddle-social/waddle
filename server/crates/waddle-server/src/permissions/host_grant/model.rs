@@ -363,6 +363,18 @@ pub enum OperationKind {
     /// The scope had no working generation left for the command and was
     /// closed instead.
     Exhaust,
+    /// A restore transition bound the scope to a new authority incarnation
+    /// and closed it until a verified reconstruction.
+    Restore,
+    /// A reconstruction lowered grants to what the projection of an earlier
+    /// incarnation shows, and recorded the subjects only the projection
+    /// held, before the projection is rebuilt from the canonical rows.
+    Reconstruct,
+    /// The projection or a witness recorded an operation the journal does
+    /// not: the scope was closed until a restore is declared.
+    Fence,
+    /// An operator reopened a scope whose reconstruction was verified.
+    Reopen,
 }
 
 impl OperationKind {
@@ -372,6 +384,10 @@ impl OperationKind {
             Self::SetAffiliation => "set_affiliation",
             Self::Retire => "retire",
             Self::Exhaust => "exhaust",
+            Self::Restore => "restore",
+            Self::Reconstruct => "reconstruct",
+            Self::Fence => "fence",
+            Self::Reopen => "reopen",
         }
     }
 
@@ -381,6 +397,10 @@ impl OperationKind {
             Self::SetAffiliation,
             Self::Retire,
             Self::Exhaust,
+            Self::Restore,
+            Self::Reconstruct,
+            Self::Fence,
+            Self::Reopen,
         ]
         .into_iter()
         .find(|kind| kind.as_storage() == value)
@@ -439,21 +459,51 @@ pub enum ClosedReason {
     Enrolled,
     Retired,
     Exhausted,
+    /// A restore transition bound it to a new authority incarnation. It
+    /// admits nothing until its projection has been rebuilt from the
+    /// canonical rows, verified and activated under that incarnation, and an
+    /// operator has reopened it.
+    Restored,
+    /// Its reconstruction after a declared restore was verified and
+    /// activated. It admits nothing until an operator reopens it.
+    Reconstructed,
+    /// Its projection or a witness recorded an operation the journal does
+    /// not: the database lost operations and no restore was declared. It
+    /// admits nothing, and is not projected again, until a restore is
+    /// declared.
+    Fenced,
 }
 
 impl ClosedReason {
+    /// Whether the scope is closed while a restore is handled: declared and
+    /// not yet reopened, or detected and not yet declared. No initiator's
+    /// standing is honoured in such a scope, whatever its grant rows hold.
+    pub fn awaits_restore_handling(self) -> bool {
+        matches!(self, Self::Restored | Self::Reconstructed | Self::Fenced)
+    }
+
     pub(crate) fn as_storage(self) -> &'static str {
         match self {
             Self::Enrolled => "enrolled",
             Self::Retired => "retired",
             Self::Exhausted => "exhausted",
+            Self::Restored => "restored",
+            Self::Reconstructed => "reconstructed",
+            Self::Fenced => "fenced",
         }
     }
 
     pub(crate) fn from_storage(value: &str) -> Option<Self> {
-        [Self::Enrolled, Self::Retired, Self::Exhausted]
-            .into_iter()
-            .find(|reason| reason.as_storage() == value)
+        [
+            Self::Enrolled,
+            Self::Retired,
+            Self::Exhausted,
+            Self::Restored,
+            Self::Reconstructed,
+            Self::Fenced,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_storage() == value)
     }
 }
 
@@ -470,6 +520,11 @@ pub struct ScopeState {
     pub projected_generation: Option<GrantGeneration>,
     pub admission: AdmissionState,
     pub closed_reason: Option<ClosedReason>,
+    /// Whether a restore lost operations of the scope, as a fence pass, a
+    /// reconciliation or a reconstruction found from SpiceDB. Such a scope
+    /// is reopened only by name, with the operator's confirmation that what
+    /// was lost has been applied again.
+    pub lost_operations: bool,
 }
 
 impl ScopeState {

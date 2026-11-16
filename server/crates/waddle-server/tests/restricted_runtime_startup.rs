@@ -510,6 +510,56 @@ async fn owner_phase_prepares_the_stores_the_runtime_role_attaches() {
     prepared.cleanup().await;
 }
 
+/// The physical attestor requires that the restricted runtime role cannot
+/// call `pg_control_system()`. On its attested pool the host-grant store
+/// still reads the PostgreSQL position its restore fence compares with the
+/// position witness: the system identifier is the attested identity's,
+/// checked in the same transaction, and the timeline and WAL position come
+/// from functions the provisioned profile leaves to every role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_runtime_role_reads_the_host_grant_position_on_its_attested_pool() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    let mut runtime = runtime_connection(&prepared).await;
+    let error = sqlx::query("SELECT system_identifier FROM pg_catalog.pg_control_system()")
+        .execute(&mut runtime)
+        .await
+        .expect_err("the runtime role must not read the control file");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"), "{error}");
+    runtime.close().await.expect("close runtime probe");
+
+    let pool = attach_serving_pool(&prepared).await;
+    let store = waddle_server::permissions::host_grant::HostGrantStore::open(pool.global().clone())
+        .expect("host-grant store");
+    store
+        .verify_runtime_privileges()
+        .await
+        .expect("the runtime role holds exactly the host-grant store's privileges");
+    let position = store
+        .postgres_position()
+        .await
+        .expect("the runtime role reads the PostgreSQL position");
+    let identity = prepared
+        .lineage
+        .postgres_identity
+        .as_ref()
+        .expect("the attested physical identity");
+    assert_eq!(position.system_identifier, identity.system_identifier.0);
+    assert!(position.timeline >= 1);
+    assert!(position.lsn > 0);
+    let later = store.postgres_position().await.expect("a second read");
+    assert_eq!(
+        (later.system_identifier, later.timeline),
+        (position.system_identifier, position.timeline)
+    );
+    assert!(later.lsn >= position.lsn);
+    drop(store);
+    drop(pool);
+    prepared.cleanup().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restricted_runtime_refuses_instead_of_creating_a_missing_relation() {
     let Some(url) = require_test_postgres_url() else {

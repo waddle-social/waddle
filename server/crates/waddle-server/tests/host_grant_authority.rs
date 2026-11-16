@@ -26,12 +26,14 @@ mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use host_grant_support::{
     bare, issuance_policy, served, subject, GrantFixture, OWNER, PEER, SENDER,
 };
 use jid::Jid;
+use kameo::actor::Spawn;
 use uuid::Uuid;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::permissions::host_grant::{
@@ -40,11 +42,11 @@ use waddle_server::permissions::host_grant::{
     GrantOperationId, GrantSubject, GrantSubjectError, HostGrantAction, HostGrantAttachment,
     HostGrantCommitFault, HostGrantError, HostGrantStore, IssuanceBasis, IssuancePolicy,
     IssuanceRefusal, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome, ProjectedGrant,
-    ProjectionIntent, ProjectionMarker, ProjectionRefusal, RetireScope, RoomAffiliation, ScopeKey,
-    ScopeLifecycleId, ServedAccountDomains, SubjectHome, HOST_GRANT_POLICY_VERSION,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    ProjectionIntent, ProjectionMarker, ProjectionRefusal, RestoreEpoch, RetireScope,
+    RoomAffiliation, ScopeKey, ScopeLifecycleId, ServedAccountDomains, SubjectHome,
+    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
-use waddle_server::permissions::{Object, ObjectType, PermissionError};
+use waddle_server::permissions::{Object, ObjectType, PermissionActor, PermissionError};
 use waddle_server::test_support::activate_host_grant_marker;
 use waddle_xmpp::identity::CanonicalDomain;
 
@@ -1390,7 +1392,7 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         format!("GRANT USAGE ON SCHEMA public TO {role}"),
         format!(
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
-             host_grant_rooms TO {role}"
+             host_grant_rooms, _lineage TO {role}"
         ),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
@@ -1435,12 +1437,27 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             component: "runtime role"
         })
     ));
-    let attachment = HostGrantAttachment::verify(&runtime, served())
-        .await
-        .expect("attachment of the restricted runtime role");
+    // The local permission backend holds no projection: the restore fence
+    // compares the epoch and the lineage.
+    let permissions =
+        PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(runtime_db.clone())));
+    let attachment =
+        HostGrantAttachment::verify(&runtime, &permissions, served(), RestoreEpoch::INITIAL)
+            .await
+            .expect("attachment of the restricted runtime role");
     assert_eq!(attachment.served(), &served());
+    assert_eq!(
+        attachment.binding(),
+        &fixture.store.authority_binding().await.expect("binding")
+    );
     assert!(matches!(
-        HostGrantAttachment::verify(&fixture.store, served()).await,
+        HostGrantAttachment::verify(
+            &fixture.store,
+            &permissions,
+            served(),
+            RestoreEpoch::INITIAL
+        )
+        .await,
         Err(HostGrantError::UnsafeRuntimePrivileges {
             component: "runtime role"
         })

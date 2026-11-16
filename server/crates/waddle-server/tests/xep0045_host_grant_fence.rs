@@ -119,11 +119,11 @@ impl ManagedRoom {
         let authority = Arc::new(grants.ingress.authority().await);
         let state = websocket_state_with_host_grant_fence(pool, authority).await;
         if attach {
-            assert!(state
-                .deps
-                .app_state
-                .host_grants
-                .attach(HostGrantAttachment::unverified_for_test(served())));
+            let host_grants = &state.deps.app_state.host_grants;
+            let attachment = HostGrantAttachment::unfenced_for_test(&grants.store, served())
+                .await
+                .expect("attachment");
+            assert!(host_grants.attach(attachment));
         }
         let legacy = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
             grants.ingress.db.clone(),
@@ -728,7 +728,11 @@ async fn durable_membership_of_an_enrolled_room_is_its_admitted_grants() {
             .is_err(),
         "an unattached replica named a managed room's members"
     );
-    assert!(gate.attach(HostGrantAttachment::unverified_for_test(served())));
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(gate.store().expect("store"), served())
+            .await
+            .expect("attachment")
+    ));
     let source = PermissionDurableMembershipSource::new(actor).with_host_grants(gate);
     let members = source
         .list_durable_member_jids("space", &fixture.scope.channel_id)

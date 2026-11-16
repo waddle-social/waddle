@@ -256,6 +256,12 @@ fn spawn_reconcile(authority: HostGrantAuthority, command: SetAffiliation) {
                     tracing::debug!("Reconciled a room affiliation change's projection");
                     return;
                 }
+                // A scope a declared restore closed was rebuilt and stays
+                // closed until an operator reopens it.
+                Ok(Reconciliation::Reconstructed(_)) => {
+                    tracing::debug!("Reconstructed a restored scope's projection");
+                    return;
+                }
                 Ok(Reconciliation::Contradiction(_)) => {
                     warn!(
                         kind = "contradiction",

@@ -49,7 +49,8 @@ use waddle_server::ingress::effects::ExternalEffect;
 use waddle_server::ingress::{IngressDecision, IngressDecisionClass, RoomExecutionPath};
 use waddle_server::permissions::host_grant::{
     Activation, GrantOperationId, HostGrantAction, HostGrantAttachment, HostGrantAuthority,
-    HostGrantError, HostGrantStore, MutationReceipt, Reconciliation, RetireScope, RoomAffiliation,
+    HostGrantError, HostGrantStore, MutationReceipt, Reconciliation, RestoreEpoch, RetireScope,
+    RoomAffiliation,
 };
 use waddle_server::permissions::{
     DeleteTuple, Object, ObjectType, PermissionActor, PermissionError, Relation,
@@ -117,6 +118,23 @@ async fn wait_for_blocked_backend(observer: &sqlx::PgPool) {
             "no backend waited for the scope guard"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Wait until `acceptance` reached the host-grant admission gate. One that
+/// finished first never reached it, and its outcome is the failure.
+async fn wait_for_gate<T: std::fmt::Debug>(
+    entered: &Notify,
+    acceptance: &mut tokio::task::JoinHandle<T>,
+) {
+    tokio::select! {
+        () = entered.notified() => {}
+        outcome = acceptance => {
+            panic!("the acceptance finished before the admission gate: {outcome:?}")
+        }
+        () = tokio::time::sleep(Duration::from_secs(10)) => {
+            panic!("the acceptance did not reach the admission gate within 10 s")
+        }
     }
 }
 
@@ -317,7 +335,7 @@ async fn acceptance_first_makes_the_revoke_wait_and_keeps_the_accepted_children(
     let submission = fixture.room_submission("accepted-first", "accepted before the revoke");
 
     // The acceptance is admitted and holds the scope's guard.
-    let acceptance = tokio::spawn({
+    let mut acceptance = tokio::spawn({
         let uow = fixture.ingress.uow.clone();
         let submission = submission.clone();
         let (entered, proceed) = (Arc::clone(&entered), Arc::clone(&proceed));
@@ -328,7 +346,7 @@ async fn acceptance_first_makes_the_revoke_wait_and_keeps_the_accepted_children(
             .await
         }
     });
-    entered.notified().await;
+    wait_for_gate(&entered, &mut acceptance).await;
 
     // The revoke cannot commit while the acceptance is unresolved.
     let command = fixture.command(OWNER, SENDER, RoomAffiliation::None).await;
@@ -347,7 +365,11 @@ async fn acceptance_first_makes_the_revoke_wait_and_keeps_the_accepted_children(
         .await
         .expect("acceptance task")
         .expect("acceptance commits");
-    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    assert_eq!(
+        decision.class,
+        IngressDecisionClass::Accepted,
+        "{decision:?}"
+    );
     let receipt = revoke.await.expect("revoke task").expect("revoke commits");
     assert!(matches!(receipt, MutationReceipt::Recorded(_)));
     assert_eq!(
@@ -391,7 +413,7 @@ async fn a_backend_that_dies_before_commit_accepts_nothing() {
     let entered = Arc::new(Notify::new());
     let proceed = Arc::new(Notify::new());
     let submission = fixture.room_submission("backend-death", "never acknowledged");
-    let acceptance = tokio::spawn({
+    let mut acceptance = tokio::spawn({
         let uow = fixture.ingress.uow.clone();
         let submission = submission.clone();
         let (entered, proceed) = (Arc::clone(&entered), Arc::clone(&proceed));
@@ -402,7 +424,7 @@ async fn a_backend_that_dies_before_commit_accepts_nothing() {
             .await
         }
     });
-    entered.notified().await;
+    wait_for_gate(&entered, &mut acceptance).await;
 
     // The acceptance transaction has read the policy state and holds the
     // guard. Its backend is terminated before it records or commits.
@@ -444,7 +466,11 @@ async fn a_backend_that_dies_before_commit_accepts_nothing() {
     let decision = commit_submission(&fixture.ingress.uow, &submission, 1)
         .await
         .expect("retransmission");
-    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    assert_eq!(
+        decision.class,
+        IngressDecisionClass::Accepted,
+        "{decision:?}"
+    );
     assert!(fixture
         .manifest(decision.message_key.expect("key"))
         .await
@@ -1036,15 +1062,29 @@ async fn a_replica_admits_a_managed_room_only_after_it_verified_its_privileges()
 
     // The schema owner's login is not the restricted runtime role, so the
     // check a server runs when it starts yields no attachment for it.
+    let permissions = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
+        fixture.ingress.db.clone(),
+    )));
     assert!(matches!(
-        HostGrantAttachment::verify(&fixture.store, served()).await,
+        HostGrantAttachment::verify(
+            &fixture.store,
+            &permissions,
+            served(),
+            RestoreEpoch::INITIAL
+        )
+        .await,
         Err(HostGrantError::UnsafeRuntimePrivileges { .. })
     ));
 
     // Once the replica holds an attachment, a new stanza is admitted. The
     // attachment is set once.
-    assert!(replica.attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
-    assert!(!replica.attach_host_grants(HostGrantAttachment::unverified_for_test(served())));
+    let attachment = || async {
+        HostGrantAttachment::unfenced_for_test(&fixture.store, served())
+            .await
+            .expect("attachment")
+    };
+    assert!(replica.attach_host_grants(attachment().await));
+    assert!(!replica.attach_host_grants(attachment().await));
     let admitted = fixture.room_submission("verified-replica", "admitted now");
     assert_eq!(
         replica.commit(&admitted).await.class,

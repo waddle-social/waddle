@@ -273,6 +273,10 @@ pub async fn start_with_config_and_owner_outbox(
         .map_err(|error| {
             anyhow::anyhow!("Failed to record the permission schema version: {error}")
         })?;
+    // The host-grant restore fence runs when the ingress authority attaches
+    // to the grant store (`http::attach_host_grant_store`), so the binding
+    // the attachment keeps is the one the fence verified. A refusal leaves
+    // managed rooms unavailable on this replica and does not stop it.
     // Membership reconciliation (reads every user row and provisions
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must

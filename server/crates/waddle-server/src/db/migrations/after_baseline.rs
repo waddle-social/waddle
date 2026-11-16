@@ -16,6 +16,10 @@ use super::Migration;
 /// Version of the migration that creates the host-grant authority tables.
 pub const HOST_GRANT_AUTHORITY_VERSION: i64 = 2001;
 
+/// Version of the migration that binds the host-grant authority incarnation
+/// to the declared restore epoch and the database lineage.
+pub const HOST_GRANT_RESTORE_INCARNATION_VERSION: i64 = 2002;
+
 /// Version of the migration that creates the S2S IQ correlation table.
 pub const S2S_IQ_CORRELATIONS_VERSION: i64 = 2003;
 
@@ -33,6 +37,16 @@ pub fn all() -> Vec<Migration> {
             ),
         },
         Migration {
+            version: HOST_GRANT_RESTORE_INCARNATION_VERSION,
+            description: "host-grant restore incarnation".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2002_host_grant_restore_incarnation.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2002_host_grant_restore_incarnation.postgres.sql"
+            ),
+        },
+        Migration {
             version: S2S_IQ_CORRELATIONS_VERSION,
             description: "s2s iq correlations".to_string(),
             sql_sqlite: include_str!("../../../sql/migrations/2003_s2s_iq_correlations.sqlite.sql"),
@@ -46,7 +60,10 @@ pub fn all() -> Vec<Migration> {
 #[cfg(test)]
 mod tests {
     use super::super::BASELINE_VERSION;
-    use super::{all, HOST_GRANT_AUTHORITY_VERSION, S2S_IQ_CORRELATIONS_VERSION};
+    use super::{
+        all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
+        S2S_IQ_CORRELATIONS_VERSION,
+    };
 
     #[test]
     fn later_migrations_follow_the_baseline_in_order() {
@@ -55,7 +72,11 @@ mod tests {
         assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             versions,
-            vec![HOST_GRANT_AUTHORITY_VERSION, S2S_IQ_CORRELATIONS_VERSION]
+            vec![
+                HOST_GRANT_AUTHORITY_VERSION,
+                HOST_GRANT_RESTORE_INCARNATION_VERSION,
+                S2S_IQ_CORRELATIONS_VERSION
+            ]
         );
     }
 }

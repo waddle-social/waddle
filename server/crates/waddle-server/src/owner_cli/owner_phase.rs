@@ -4,7 +4,9 @@ use uuid::Uuid;
 
 #[cfg(feature = "clustering")]
 use crate::clustering::lease::{configured_peer_order, KeypoolOwnerError};
-use crate::config::{session_key_from_env, ClusteringConfig, LineageConfig};
+use crate::config::{
+    host_grant_restore_epoch_from_env, session_key_from_env, ClusteringConfig, LineageConfig,
+};
 use crate::db::runtime_startup::database_identity_json;
 use crate::db::{Database, DatabaseError};
 use crate::server::runtime_owner::{
@@ -31,6 +33,8 @@ pub(super) async fn run(args: OwnerPhaseArgs) -> Result<(), OwnerCliError> {
         ));
     }
     let session_key = session_key_from_env().map_err(OwnerCliError::Configuration)?;
+    let host_grant_restore_epoch =
+        host_grant_restore_epoch_from_env().map_err(OwnerCliError::Configuration)?;
     let clustering = ClusteringConfig::from_env().map_err(OwnerCliError::Configuration)?;
     // Generated per run: with it a clustered phase tells its own sessions
     // from every other client's, including another session of this login.
@@ -42,6 +46,7 @@ pub(super) async fn run(args: OwnerPhaseArgs) -> Result<(), OwnerCliError> {
         runtime: args.roles.runtime_login.clone(),
         attestation_definer: args.roles.attestor_definer_role.clone(),
         vapid_root_key: session_key.into_bytes(),
+        host_grant_restore_epoch,
         #[cfg(feature = "clustering")]
         clustering: clustering_plan(&clustering, &args.clustering, &application_name)?,
     };

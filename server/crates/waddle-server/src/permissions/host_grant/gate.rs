@@ -2,7 +2,10 @@
 //! consults for a room an enrolled scope manages.
 //!
 //! [`HostGrantGate`] pairs the canonical store with the replica's enrolled
-//! set ([`EnrolledScopes`]) and its [`HostGrantAttachment`]. Whether a room
+//! set ([`EnrolledScopes`]) and the [`HostGrantAttachment`] its
+//! [`HostGrantAttachmentGate`] holds: the attachment the restore fence
+//! verified, which the attachment gate replaces when it verifies a changed
+//! authority again and drops while the fence refuses. Whether a room
 //! is managed is answered from the enrolled set, in memory: a room outside
 //! it answers [`RoomGate::Unmanaged`] without touching PostgreSQL, and the
 //! surface keeps its existing checks. A managed room is answered from its
@@ -12,9 +15,9 @@
 //! membership and the room actor's occupancy admit nothing. It answers
 //! [`RoomGate::Unavailable`] when the enrolled set has not loaded, when the
 //! address reaches a managed room in a form that is not canonical, when the
-//! grants cannot be read within the bounds, and on a replica that has not
-//! verified its runtime role's privileges on the store: a surface fails
-//! closed on it.
+//! grants cannot be read within the bounds, and on a replica whose
+//! attachment gate holds no attachment (its runtime role's privileges or
+//! the restore fence not verified): a surface fails closed on it.
 //!
 //! SQLite holds no canonical store, so every room is unmanaged there.
 
@@ -28,7 +31,7 @@ use super::enrolled::{EnrolledScopes, Enrollment};
 use super::issuance::ServedAccountDomains;
 use super::policy::HostGrantAction;
 use super::rate_limited::RateLimitedWarning;
-use super::runtime_attach::HostGrantAttachment;
+use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
 use crate::db::Database;
@@ -48,13 +51,13 @@ static UNDECIDED: RateLimitedWarning = RateLimitedWarning::new();
 /// (500 ms for a lock, 1 s for a statement); this bounds the whole read.
 const ROOM_READ_DEADLINE: Duration = Duration::from_millis(1_500);
 
-/// The canonical store of a replica, its enrolled set and its verified
-/// attachment to the store.
+/// The canonical store of a replica, its enrolled set and the gate that
+/// holds its verified attachment to the store.
 #[derive(Clone, Default)]
 pub struct HostGrantGate {
     store: Option<HostGrantStore>,
     enrolled: EnrolledScopes,
-    attachment: Arc<OnceLock<HostGrantAttachment>>,
+    attachment: Arc<OnceLock<Arc<HostGrantAttachmentGate>>>,
 }
 
 /// Whether a room or Space is managed by an enrolled scope cannot be told:
@@ -119,9 +122,18 @@ impl HostGrantGate {
         }
     }
 
-    /// Record the replica's verified attachment. Only the first one is kept.
+    /// Decide managed rooms with the attachment `gate` holds: the replica's
+    /// attachment gate, shared with room-manifest acceptance. Only the first
+    /// gate bound is kept; the answer is whether this call bound it.
+    pub fn bind_attachment(&self, gate: Arc<HostGrantAttachmentGate>) -> bool {
+        self.attachment.set(gate).is_ok()
+    }
+
+    /// Hold `attachment` in the bound attachment gate, binding a gate of
+    /// this gate's own when none is bound. The first attachment stays; the
+    /// answer is whether this call set it.
     pub fn attach(&self, attachment: HostGrantAttachment) -> bool {
-        self.attachment.set(attachment).is_ok()
+        self.attachment.get_or_init(Arc::default).attach(attachment)
     }
 
     /// The canonical store, on PostgreSQL.
@@ -134,9 +146,9 @@ impl HostGrantGate {
         &self.enrolled
     }
 
-    /// The replica's verified attachment, once its check passed.
-    pub fn attachment(&self) -> Option<&HostGrantAttachment> {
-        self.attachment.get()
+    /// The verified attachment the bound attachment gate holds now, if any.
+    pub fn attachment(&self) -> Option<HostGrantAttachment> {
+        self.attachment.get().and_then(|gate| gate.current())
     }
 
     /// Whether an enrolled scope manages the room `binding` names, from the
@@ -169,12 +181,12 @@ impl HostGrantGate {
             Enrollment::Undecided => return RoomGate::Unavailable,
             Enrollment::Enrolled => {}
         }
-        let Some(attachment) = self.attachment.get() else {
+        let Some(attachment) = self.attachment() else {
             if UNATTACHED.due() {
                 tracing::warn!(
                     kind = "authority_unavailable",
-                    "A managed room was refused: this replica has not verified its runtime \
-                     role's privileges on the host-grant store"
+                    "A managed room was refused: this replica holds no verified host-grant \
+                     attachment (runtime role privileges or restore fence)"
                 );
             }
             return RoomGate::Unavailable;

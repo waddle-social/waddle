@@ -36,27 +36,85 @@
 //! canonical state again. While SpiceDB does not answer, the pass reports
 //! [`Reconciliation::ProjectionUnknown`] and the grant stays recorded and
 //! not effective; admission, which reads PostgreSQL only, is unaffected.
+//!
+//! A marker that the canonical journal contradicts (`AheadOfCanonical`,
+//! `UnknownMarker`, or a `ForeignIncarnation` the journal never held) is
+//! evidence that the database lost operations: besides reporting the
+//! contradiction, the pass closes the scope as `fenced`
+//! (`HostGrantStore::fence_scope`), as the restore fence does.
+//!
+//! A scope a restore transition closed is reconstructed by the same pass.
+//! When it was never projected, the pass writes its first projection with
+//! the journal witness moved to the current operation in the same request.
+//! When its marker was written under another authority incarnation, the
+//! pass records what the projection and the journal witness prove the
+//! restored database lost (`restore::reconstruction_targets`: only
+//! lowerings, and the subjects only the projection holds, at `none` or
+//! `outcast`); then it takes the projection over: it writes the current
+//! intent conditioned on exactly that marker, and moves the journal witness
+//! from exactly what it read to the current operation, in one request, reads
+//! the projection back and activates it. The scope is then `reconstructed`,
+//! and admits again once an operator reopens it.
+//!
+//! Either way, a scope the projection or the journal witness shows to have
+//! lost operations is marked so in the commit of a `reconstruct` operation
+//! at its next generation, before the projection is written, and the
+//! projection then names that operation. The mark is never a change of its
+//! own: a database restored to before it cannot hold the operation the
+//! marker names, so a pass over that database finds the marker ahead of its
+//! journal and marks the scope again (or fences it), and a reopen of every
+//! scope never reopens it. A journal witness that cannot be read is treated
+//! the same way and also stops the takeover: the scope stays closed until
+//! an operator removes the witness. A marker that is missing after an
+//! activation or malformed, a family that holds what the projection never
+//! writes, and changes beyond the scope's row bound leave the scope closed.
+//!
+//! No first projection of a lifecycle is written while a scope admits or
+//! was ever projected and SpiceDB holds nothing of this authority
+//! (`restore::projection_absent`): while scopes admit, the state in which
+//! the restore fence refuses the authority; after a declared restore closed
+//! every scope, a SpiceDB that holds none of the journal witnesses that
+//! show what the restore lost.
+//!
+//! Every committed mutation brings the scope's journal witness and the
+//! position witness up to date on a task of its own
+//! (`witness::sync_witnesses_after_commit`), after the commit and without
+//! the caller waiting for SpiceDB.
+
+use std::collections::BTreeSet;
 
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 
 use super::error::HostGrantError;
-use super::issuance::IssuancePolicy;
+use super::issuance::{IssuanceBasis, IssuancePolicy};
 use super::marker::ProjectionMarker;
 use super::model::{
-    EnrollScope, GrantGeneration, MutationReceipt, ScopeLifecycleId, SetAffiliation,
+    EnrollScope, GrantGeneration, GrantOperationId, GrantSubject, MutationReceipt, RetireScope,
+    RoomAffiliation, ScopeLifecycleId, SetAffiliation,
 };
 use super::projection::{
-    MarkerObservation, ProjectionObservation, ProjectionPlan, ProjectionWrite,
+    MarkerObservation, ProjectedRelationship, ProjectionObservation, ProjectionPlan,
+    ProjectionWrite, RestoredPlan,
+};
+use super::restore::{
+    projection_absent, reconstruction_targets, FenceEvidence, ReconstructScope,
+    ReconstructionChange, RestoreFenceRefusal,
 };
 use super::store::{Activation, HostGrantStore};
+use super::witness::{
+    head_witness_resource, sync_journal_witness, sync_position_witness,
+    sync_witnesses_after_commit, PositionWriter, WitnessChange, WitnessSync,
+};
 use crate::permissions::{
-    ObserveHostGrantProjection, PermissionActor, PermissionError, WriteHostGrantProjection,
+    ObserveHostGrantProjection, PermissionActor, PermissionError, ReadHostGrantWitness,
+    TakeOverHostGrantProjection, WriteHostGrantProjection,
 };
 
-/// Projection state that no reconciliation pass may write over. The scope
-/// keeps admitting from its effective grants; the recorded increase stays
-/// not effective until an operator resolves the contradiction.
+/// Projection state that no reconciliation pass may write over. Nothing is
+/// written; a recorded increase stays not effective until an operator
+/// resolves the contradiction. A contradiction that shows the database lost
+/// operations also closes the scope as `fenced`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionContradiction {
     /// More than one marker, or one that is not a canonical stamp.
@@ -77,6 +135,18 @@ pub enum ProjectionContradiction {
     /// holds relationships: the namespace a first projection requires to be
     /// empty is not.
     NamespaceNotFresh,
+    /// The projection a reconstruction would replace holds a relationship
+    /// the projection never writes, so what it records cannot be read.
+    MalformedFamily,
+    /// Recording every subject the projection a reconstruction would replace
+    /// holds would exceed the scope's grant-row bound.
+    ReconstructionTooLarge,
+    /// The journal witness of a scope a restore transition closed holds
+    /// more than one relationship, or a stamp that is not a canonical one:
+    /// what the restored database lost cannot be read from it. The scope
+    /// is marked as one that lost operations and stays closed until an
+    /// operator removes the witness.
+    MalformedJournalWitness,
 }
 
 /// The result of one reconciliation pass.
@@ -84,6 +154,10 @@ pub enum ProjectionContradiction {
 pub enum Reconciliation {
     /// The current operation's projection was verified and activated.
     Activated(GrantGeneration),
+    /// The current operation of a scope a restore transition closed was
+    /// verified and activated; the scope stays closed until an operator
+    /// reopens it.
+    Reconstructed(GrantGeneration),
     /// Nothing was pending.
     AlreadyActive(GrantGeneration),
     /// Another operation or another writer got ahead of this pass. Nothing
@@ -164,17 +238,58 @@ impl HostGrantAuthority {
         &self,
         command: &EnrollScope,
     ) -> Result<MutationReceipt, HostGrantError> {
-        self.store.enroll_scope(command, &self.issuance).await
+        let receipt = self.store.enroll_scope(command, &self.issuance).await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
     }
 
     /// Record an affiliation change under this authority's issuance policy.
     /// A receipt means the change is recorded, not that an increase is
-    /// effective: [`Self::reconcile`] makes it so.
+    /// effective: [`Self::reconcile`] makes it so. The witnesses follow the
+    /// commit on a task of their own; the receipt does not wait for them.
     pub async fn set_affiliation(
         &self,
         command: &SetAffiliation,
     ) -> Result<MutationReceipt, HostGrantError> {
-        self.store.set_affiliation(command, &self.issuance).await
+        let receipt = self.store.set_affiliation(command, &self.issuance).await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
+    }
+
+    /// Close a scope for good, as [`HostGrantStore::retire_scope`] does,
+    /// and witness the retirement after the commit. Owner phase only.
+    pub async fn retire_scope(
+        &self,
+        command: &RetireScope,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let receipt = self.store.retire_scope(command).await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
+    }
+
+    /// Bring a scope's journal witness and an existing position witness up
+    /// to date now, and answer what the journal witness writer did. A
+    /// committed mutation does this on a task of its own; this is for a
+    /// caller that wants to wait for it. The first position witness is
+    /// written only after a fence pass that passed
+    /// (`witness::sync_witnesses_after_fence`).
+    pub async fn sync_witnesses(
+        &self,
+        lifecycle: ScopeLifecycleId,
+    ) -> Result<WitnessSync, HostGrantError> {
+        let journal = sync_journal_witness(&self.store, &self.permissions, lifecycle).await?;
+        sync_position_witness(&self.store, &self.permissions, PositionWriter::Commit, None).await?;
+        Ok(journal)
+    }
+
+    /// Spawn the witness writers for a scope after a commit, so that SpiceDB
+    /// is never on the commit's path.
+    fn after_commit(&self, lifecycle: ScopeLifecycleId) {
+        tokio::spawn(sync_witnesses_after_commit(
+            self.store.clone(),
+            self.permissions.clone(),
+            lifecycle,
+        ));
     }
 
     /// Read the projection of the scope `plan` describes.
@@ -192,13 +307,19 @@ impl HostGrantAuthority {
     }
 
     /// Write `plan`'s intent, conditioned on exactly `previous`. An error
-    /// other than a refusal leaves the outcome unknown.
+    /// other than a refusal leaves the outcome unknown. A first projection
+    /// (no `previous`) is refused with
+    /// [`RestoreFenceRefusal::ProjectionAbsent`] while a scope admits or
+    /// was ever projected and SpiceDB holds nothing of this authority.
     pub async fn write(
         &self,
         plan: &ProjectionPlan,
         previous: Option<&ProjectionMarker>,
     ) -> Result<ProjectionWrite, HostGrantError> {
         plan.intent.check_replaces(previous)?;
+        if previous.is_none() {
+            self.refuse_absent_projection().await?;
+        }
         self.permissions
             .ask(WriteHostGrantProjection {
                 previous: previous.cloned(),
@@ -206,6 +327,43 @@ impl HostGrantAuthority {
             })
             .await
             .map_err(projection_store_error)
+    }
+
+    /// Write the projection of a scope a restore transition closed:
+    /// `plan`'s intent conditioned on exactly `previous`, a marker of
+    /// another authority incarnation, or on a fresh namespace for a scope
+    /// that was never projected; `head` moves its journal witness in the
+    /// same request. Only the store produces a [`RestoredPlan`]. An error
+    /// other than a refusal leaves the outcome unknown. A first projection
+    /// is refused as [`Self::write`] refuses one.
+    pub async fn take_over(
+        &self,
+        plan: &RestoredPlan,
+        previous: Option<&ProjectionMarker>,
+        head: Option<WitnessChange>,
+    ) -> Result<ProjectionWrite, HostGrantError> {
+        match previous {
+            Some(previous) => plan.plan().intent.check_takes_over(previous)?,
+            None => self.refuse_absent_projection().await?,
+        }
+        self.permissions
+            .ask(TakeOverHostGrantProjection {
+                previous: previous.cloned(),
+                plan: plan.clone(),
+                head,
+            })
+            .await
+            .map_err(projection_store_error)
+    }
+
+    /// Refuse a first projection while a scope admits or was ever projected
+    /// and SpiceDB holds nothing of this authority
+    /// (`restore::projection_absent`).
+    async fn refuse_absent_projection(&self) -> Result<(), HostGrantError> {
+        if projection_absent(&self.store, &self.permissions).await? {
+            return Err(RestoreFenceRefusal::ProjectionAbsent.into());
+        }
+        Ok(())
     }
 
     /// Whether `observation` shows exactly `plan`'s intent.
@@ -237,12 +395,37 @@ impl HostGrantAuthority {
                     ProjectionContradiction::MarkerMissing,
                 ))
             }
-            MarkerObservation::Absent => None,
+            MarkerObservation::Absent => {
+                if let Some(restored) = plan.clone().into_restored() {
+                    return self.project_restored(restored).await;
+                }
+                None
+            }
             MarkerObservation::Present(ref marker) if marker == plan.marker() => {
                 return self.verify_and_activate(&plan, Some(observation)).await;
             }
             MarkerObservation::Present(marker) => {
                 if marker.incarnation != plan.marker().incarnation {
+                    if let Some(restored) = plan.into_restored() {
+                        return self
+                            .reconstruct(
+                                restored,
+                                &observation.relationships,
+                                observation.malformed_family,
+                                marker,
+                            )
+                            .await;
+                    }
+                    // A marker of an incarnation this journal never held
+                    // was written by an authority the database lost.
+                    if !self
+                        .store
+                        .journal_holds_incarnation(lifecycle, marker.incarnation)
+                        .await?
+                    {
+                        self.fence(lifecycle, FenceEvidence::UnknownIncarnation(marker))
+                            .await?;
+                    }
                     return Ok(Reconciliation::Contradiction(
                         ProjectionContradiction::ForeignIncarnation,
                     ));
@@ -252,17 +435,22 @@ impl HostGrantAuthority {
                     // state has moved on since, the marker may be the newer
                     // operation's and this pass's plan is the stale one.
                     let current = self.store.projection_plan(lifecycle).await?;
-                    return Ok(if current.marker() == plan.marker() {
-                        Reconciliation::Contradiction(ProjectionContradiction::AheadOfCanonical)
-                    } else {
-                        Reconciliation::Superseded
-                    });
+                    if current.marker() != plan.marker() {
+                        return Ok(Reconciliation::Superseded);
+                    }
+                    self.fence(lifecycle, FenceEvidence::ProjectionAhead(marker))
+                        .await?;
+                    return Ok(Reconciliation::Contradiction(
+                        ProjectionContradiction::AheadOfCanonical,
+                    ));
                 }
                 let recorded = self
                     .store
                     .recorded_marker(lifecycle, marker.generation)
                     .await?;
                 if recorded.as_ref() != Some(&marker) {
+                    self.fence(lifecycle, FenceEvidence::ProjectionAhead(marker))
+                        .await?;
                     return Ok(Reconciliation::Contradiction(
                         ProjectionContradiction::UnknownMarker,
                     ));
@@ -291,6 +479,7 @@ impl HostGrantAuthority {
             // older grant after a newer revoke.
             Ok(ProjectionWrite::PreconditionFailed) => Ok(Reconciliation::Superseded),
             Err(HostGrantError::Projection(refusal)) => Err(refusal.into()),
+            Err(error @ HostGrantError::RestoreFence(_)) => Err(error),
             Err(_) => Ok(Reconciliation::ProjectionUnknown),
         }
     }
@@ -320,6 +509,271 @@ impl HostGrantAuthority {
             after = Some(last);
         }
         Ok(outcomes)
+    }
+
+    /// Reconstruct a scope a restore transition closed whose projection
+    /// holds `previous`, a marker of another authority incarnation.
+    ///
+    /// The restored database lost operations when the journal does not
+    /// record `previous`, or does not record the scope's journal witness:
+    /// the canonical grants are then first lowered to what the projection
+    /// holds; a subject only the projection holds is recorded at `none` or
+    /// `outcast` either way. Those changes, and the mark of a scope that
+    /// lost operations, are one `reconstruct` operation, after which the
+    /// pass reads the plan again, takes the projection over, reads it back
+    /// and activates it, which leaves the scope `reconstructed`. A change
+    /// issuance refuses at its affiliation is recorded lower, at `none` or
+    /// `outcast`; one it refuses even there (a service identity) is left
+    /// out, and verification then reports the relationship it leaves as a
+    /// contradiction.
+    async fn reconstruct(
+        &self,
+        plan: RestoredPlan,
+        observed: &BTreeSet<ProjectedRelationship>,
+        malformed_family: bool,
+        previous: ProjectionMarker,
+    ) -> Result<Reconciliation, HostGrantError> {
+        if malformed_family {
+            return Ok(Reconciliation::Contradiction(
+                ProjectionContradiction::MalformedFamily,
+            ));
+        }
+        let lifecycle = plan.plan().marker().lifecycle;
+        let projection_lost = self
+            .store
+            .recorded_marker(lifecycle, previous.generation)
+            .await?
+            .as_ref()
+            != Some(&previous);
+        let Ok(head) = self.journal_witness(lifecycle).await else {
+            return Ok(Reconciliation::ProjectionUnknown);
+        };
+        let lost = projection_lost || head.shows_lost();
+        // A journal witness that is not a canonical stamp shows nothing of
+        // what the database lost: the scope is marked as one that lost
+        // operations, nothing else is recorded and the takeover below does
+        // not run. Its changes are recorded by the first pass after an
+        // operator removed the witness. (A witness SpiceDB did not return
+        // stopped the pass above, with nothing recorded.)
+        let changes: Vec<ReconstructionChange> = if head.malformed() {
+            Vec::new()
+        } else {
+            reconstruction_targets(&plan.plan().intent, observed, lost)
+                .into_iter()
+                .filter_map(|target| {
+                    let subject = GrantSubject::from_storage(&target.subject)?;
+                    let (affiliation, basis) = self.issuable(&subject, target.affiliation)?;
+                    Some(ReconstructionChange {
+                        channel_id: target.channel_id,
+                        subject,
+                        affiliation,
+                        basis,
+                    })
+                })
+                .collect()
+        };
+        let command = ReconstructScope {
+            operation: GrantOperationId::generate(),
+            lifecycle,
+            expected_generation: plan.plan().marker().generation,
+            replaced: Some(previous.clone()),
+            witnessed_head: head.stamp(),
+            lost_operations: lost || head.malformed(),
+            changes,
+        };
+        let plan = match self.record_reconstruction(&command, plan).await? {
+            Ok(plan) => plan,
+            Err(stopped) => return Ok(stopped),
+        };
+        if head.malformed() {
+            return Ok(Reconciliation::Contradiction(
+                ProjectionContradiction::MalformedJournalWitness,
+            ));
+        }
+        let head = head.change_to(&plan);
+        match self.take_over(&plan, Some(&previous), head).await {
+            Ok(ProjectionWrite::Applied) => self.verify_and_activate(plan.plan(), None).await,
+            // The marker changed since it was read: another pass took the
+            // projection over, or a writer replaced it. This pass stops.
+            Ok(ProjectionWrite::PreconditionFailed) => Ok(Reconciliation::Superseded),
+            Err(HostGrantError::Projection(refusal)) => Err(refusal.into()),
+            Err(_) => Ok(Reconciliation::ProjectionUnknown),
+        }
+    }
+
+    /// Write the first projection of a scope a restore transition closed
+    /// and that was never projected. Nothing was projected to lower the
+    /// canonical grants to, but the journal witness can still show that the
+    /// restored database lost operations (a revoke, a retirement): the scope
+    /// is then marked as one that lost operations under a `reconstruct`
+    /// operation, before the write, so that only a reopen by name with the
+    /// operator's confirmation reopens it. The journal witness moves to the
+    /// plan's operation in the same request as the projection, from exactly
+    /// what was read.
+    async fn project_restored(&self, plan: RestoredPlan) -> Result<Reconciliation, HostGrantError> {
+        let lifecycle = plan.plan().marker().lifecycle;
+        let Ok(head) = self.journal_witness(lifecycle).await else {
+            return Ok(Reconciliation::ProjectionUnknown);
+        };
+        let plan = if head.shows_lost() || head.malformed() {
+            let command = ReconstructScope {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: plan.plan().marker().generation,
+                replaced: None,
+                witnessed_head: head.stamp(),
+                lost_operations: true,
+                changes: Vec::new(),
+            };
+            match self.record_reconstruction(&command, plan).await? {
+                Ok(plan) => plan,
+                Err(stopped) => return Ok(stopped),
+            }
+        } else {
+            plan
+        };
+        if head.malformed() {
+            return Ok(Reconciliation::Contradiction(
+                ProjectionContradiction::MalformedJournalWitness,
+            ));
+        }
+        let change = head.change_to(&plan);
+        match self.take_over(&plan, None, change).await {
+            Ok(ProjectionWrite::Applied) => self.verify_and_activate(plan.plan(), None).await,
+            // Either the namespace is not fresh, or another writer moved
+            // the marker or the journal witness since they were read: an
+            // empty namespace without a marker is the latter.
+            Ok(ProjectionWrite::PreconditionFailed) => Ok(match self.observe(plan.plan()).await {
+                Ok(ProjectionObservation {
+                    marker: MarkerObservation::Absent,
+                    relationships,
+                    malformed_family,
+                }) if !relationships.is_empty() || malformed_family => {
+                    Reconciliation::Contradiction(ProjectionContradiction::NamespaceNotFresh)
+                }
+                Ok(_) => Reconciliation::Superseded,
+                Err(_) => Reconciliation::ProjectionUnknown,
+            }),
+            Err(HostGrantError::Projection(refusal)) => Err(refusal.into()),
+            Err(error @ HostGrantError::RestoreFence(_)) => Err(error),
+            Err(_) => Ok(Reconciliation::ProjectionUnknown),
+        }
+    }
+
+    /// Record `command` for the scope `plan` describes, when it changes a
+    /// grant or marks the scope, and read the plan again: the takeover then
+    /// names the operation it recorded. No witness writer is started for
+    /// that operation: the takeover moves the journal witness to it,
+    /// conditioned on what was read, and a writer racing it would make that
+    /// condition fail. `Err` holds the outcome of a pass that stops here.
+    async fn record_reconstruction(
+        &self,
+        command: &ReconstructScope,
+        plan: RestoredPlan,
+    ) -> Result<Result<RestoredPlan, Reconciliation>, HostGrantError> {
+        if command.changes.is_empty() && !command.lost_operations {
+            return Ok(Ok(plan));
+        }
+        match self
+            .store
+            .record_reconstruction(command, self.issuance.served_account_domains())
+            .await
+        {
+            Ok(_) => {}
+            Err(HostGrantError::StaleGeneration { .. } | HostGrantError::ScopeNotRestored) => {
+                return Ok(Err(Reconciliation::Superseded))
+            }
+            Err(HostGrantError::GrantLimit) => {
+                return Ok(Err(Reconciliation::Contradiction(
+                    ProjectionContradiction::ReconstructionTooLarge,
+                )))
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(
+            match self
+                .store
+                .projection_plan(command.lifecycle)
+                .await?
+                .into_restored()
+            {
+                Some(plan) => Ok(plan),
+                None => Err(Reconciliation::Superseded),
+            },
+        )
+    }
+
+    /// The scope's journal witness as SpiceDB holds it, and whether it
+    /// names an operation the journal does not record: the restored
+    /// database lost it, whether or not its projection was written. A
+    /// witness that holds more than one relationship, or a stamp that is
+    /// not a canonical one, cannot be read and is reported as such.
+    async fn journal_witness(
+        &self,
+        lifecycle: ScopeLifecycleId,
+    ) -> Result<ObservedHead, HostGrantError> {
+        let listed = self
+            .permissions
+            .ask(ReadHostGrantWitness {
+                resource: head_witness_resource(lifecycle),
+            })
+            .await
+            .map_err(projection_store_error)?;
+        let Some(listed) = listed else {
+            return Ok(ObservedHead::Unlisted);
+        };
+        let stamp = match listed.single_stamp() {
+            Ok(None) => return Ok(ObservedHead::Absent),
+            Ok(Some(stamp)) => stamp,
+            Err(_) => return Ok(ObservedHead::Malformed),
+        };
+        let Some(head) = ProjectionMarker::parse(lifecycle, stamp) else {
+            return Ok(ObservedHead::Malformed);
+        };
+        let lost = self
+            .store
+            .recorded_marker(lifecycle, head.generation)
+            .await?
+            .as_ref()
+            != Some(&head);
+        Ok(ObservedHead::Present {
+            stamp: stamp.to_owned(),
+            lost,
+        })
+    }
+
+    /// Close a scope on evidence a pass found, as the restore fence does.
+    async fn fence(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        evidence: FenceEvidence,
+    ) -> Result<(), HostGrantError> {
+        if self.store.fence_scope(lifecycle, &evidence).await? {
+            tracing::error!(
+                evidence = evidence.kind(),
+                "A host-grant scope was closed: its projection records what its canonical store \
+                 does not (docs/operations/authz-host-grant-restore.md)"
+            );
+            self.after_commit(lifecycle);
+        }
+        Ok(())
+    }
+
+    /// The affiliation and basis a reconstruction records for a subject: the
+    /// target when issuance accepts it, else no higher than `none`.
+    fn issuable(
+        &self,
+        subject: &GrantSubject,
+        target: RoomAffiliation,
+    ) -> Option<(RoomAffiliation, IssuanceBasis)> {
+        if let Ok(basis) = self.issuance.check(subject, target) {
+            return Some((target, basis));
+        }
+        let lowered = target.min(RoomAffiliation::None);
+        self.issuance
+            .check(subject, lowered)
+            .ok()
+            .map(|basis| (lowered, basis))
     }
 
     /// Compare the projection with the plan and activate the exact
@@ -353,14 +807,67 @@ impl HostGrantAuthority {
         };
         Ok(match self.store.activate(&verified).await? {
             Activation::Activated => Reconciliation::Activated(plan.marker().generation),
+            Activation::Reconstructed => Reconciliation::Reconstructed(plan.marker().generation),
             Activation::AlreadyActive => Reconciliation::AlreadyActive(plan.marker().generation),
             Activation::Superseded => Reconciliation::Superseded,
         })
     }
 }
 
+/// A scope's journal witness as a reconstruction read it.
+enum ObservedHead {
+    /// The backend holds no projection.
+    Unlisted,
+    /// The scope has no journal witness.
+    Absent,
+    /// The witness holds `stamp`; `lost` when the journal does not record
+    /// the operation it names.
+    Present { stamp: String, lost: bool },
+    /// The witness holds more than one relationship, or a stamp that is not
+    /// a canonical one. It is left as it is.
+    Malformed,
+}
+
+impl ObservedHead {
+    /// The witness names an operation the journal does not record.
+    fn shows_lost(&self) -> bool {
+        matches!(self, Self::Present { lost: true, .. })
+    }
+
+    fn malformed(&self) -> bool {
+        matches!(self, Self::Malformed)
+    }
+
+    /// The stamp the witness holds, if it holds a readable one.
+    fn stamp(&self) -> Option<String> {
+        match self {
+            Self::Present { stamp, .. } => Some(stamp.clone()),
+            Self::Unlisted | Self::Absent | Self::Malformed => None,
+        }
+    }
+
+    /// The journal witness moves with the restored plan's projection, from
+    /// exactly what was read: what it showed lost is recorded by then, and
+    /// a head of an incarnation this journal never held is not left to
+    /// fence the scope after it is reopened. Nothing moves a witness that
+    /// cannot be read, or one of a backend that holds no projection.
+    fn change_to(&self, plan: &RestoredPlan) -> Option<WitnessChange> {
+        let marker = plan.plan().marker();
+        let previous = match self {
+            Self::Absent => None,
+            Self::Present { stamp, .. } => Some(stamp.clone()),
+            Self::Unlisted | Self::Malformed => return None,
+        };
+        Some(WitnessChange {
+            resource: head_witness_resource(marker.lifecycle),
+            previous,
+            next: Some(marker.stamp()),
+        })
+    }
+}
+
 /// A failed ask of the permission actor: the projection's answer is unknown.
-fn projection_store_error<M>(error: SendError<M, PermissionError>) -> HostGrantError {
+pub(super) fn projection_store_error<M>(error: SendError<M, PermissionError>) -> HostGrantError {
     match error {
         SendError::HandlerError(PermissionError::HostGrantProjection(refusal)) => {
             HostGrantError::Projection(refusal)

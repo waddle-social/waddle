@@ -15,9 +15,13 @@ use clap::{Args, Parser, Subcommand};
 use thiserror::Error;
 use uuid::Uuid;
 
+use jid::BareJid;
+use waddle_xmpp::identity::CanonicalDomain;
+
 use crate::db::lineage::PgSchemaName;
 use crate::db::physical_attestation::{validate_identifier, PgRoleName, PhysicalAttestationError};
 use crate::db::runtime_startup::valid_git_sha;
+use crate::permissions::host_grant::{GrantSubject, PositionWitness, ScopeLifecycleId};
 
 const ABOUT: &str = "Waddle XMPP server";
 
@@ -39,6 +43,9 @@ Order for one database:
   1. owner-phase       as the migrator login
   2. install-attestor  as the attestor installer login
   3. emit-handoff      as the migrator login
+
+host-grant runs as the migrator login when an operator acts on the host-grant
+authority after a restore (docs/operations/authz-host-grant-restore.md).
 
 Exit codes:
   0  completed
@@ -62,6 +69,13 @@ Environment (no flag; secret values are never printed):
                                   deployment; unset otherwise.
   WADDLE_SESSION_KEY              The server's session key. The VAPID signing
                                   key is sealed under it.
+  WADDLE_HOST_GRANT_RESTORE_EPOCH The declared host-grant restore epoch
+                                  (default 0). Above the epoch the database
+                                  records, the phase declares a restore of
+                                  the host-grant authority; below it, the
+                                  phase is refused. The servers must be
+                                  started with the same value. See
+                                  docs/operations/authz-host-grant-restore.md.
   WADDLE_DB_BASELINE_ACTION       Unset or `stamp`: an empty database is built
                                   from the schema baseline, and a database
                                   that holds the complete retired migration
@@ -83,6 +97,23 @@ to standard output as JSON; install-attestor takes it as --identity.
 Without clustering the phase does not check that it has the database to
 itself: stop every server before it runs. --identity-output replaces an
 existing file atomically and refuses a symbolic link.";
+
+const HOST_GRANT_ENVIRONMENT: &str = "\
+Environment (no flag; secret values are never printed):
+  WADDLE_DATABASE_URL           PostgreSQL URL of the migrator login, as for
+                                owner-phase.
+  WADDLE_SPICEDB_ENDPOINT       Optional: the servers' SpiceDB, with
+  WADDLE_SPICEDB_PRESHARED_KEY  its key (and WADDLE_SPICEDB_INSECURE as the
+                                servers set it). With it, the action's
+                                witnesses are written at once instead of by
+                                the next fence pass of a server, and
+                                acknowledge-position reads the position
+                                witness itself.
+
+Each action is one or more short transactions on the host-grant store and can
+run while the servers run. The actions print what they recorded as JSON;
+repeat `revoke` with the same --operation-id after an unknown outcome. See
+docs/operations/authz-host-grant-restore.md.";
 
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -130,6 +161,10 @@ pub(super) enum Command {
     /// Compose or verify the handoff document the restricted server starts with
     #[command(after_help = EMIT_HANDOFF_ENVIRONMENT)]
     EmitHandoff(EmitHandoffArgs),
+    /// Reopen restored host-grant scopes, acknowledge the PostgreSQL position
+    /// or revoke a grant the restored database lost
+    #[command(after_help = HOST_GRANT_ENVIRONMENT)]
+    HostGrant(HostGrantArgs),
 }
 
 /// The owner connection: the migrator login acting as the schema owner.
@@ -287,6 +322,69 @@ pub(super) enum ExclusiveDatabaseArg {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct HostGrantArgs {
+    #[command(flatten)]
+    pub(super) connection: OwnerConnectionArgs,
+    #[command(subcommand)]
+    pub(super) action: HostGrantActionArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum HostGrantActionArgs {
+    /// Reopen scopes whose reconstruction after a declared restore was
+    /// verified; the operator's acknowledgement of the restore
+    Reopen {
+        /// Lifecycle of the one scope to reopen (32 lowercase hex characters);
+        /// every reconstructed scope the restore lost no operations in when
+        /// absent
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: Option<ScopeLifecycleId>,
+        /// Confirm that the revokes and bans the restore lost in this scope
+        /// have been applied again (with `revoke`); a scope the restore lost
+        /// operations in reopens only with it
+        #[arg(long, requires = "scope")]
+        lost_operations_reapplied: bool,
+    },
+    /// Acknowledge the position witness for the PostgreSQL system and
+    /// timeline the server now writes on: after a promotion the witness
+    /// cannot verify, or a regression on the witnessed timeline the operator
+    /// accepts
+    AcknowledgePosition {
+        /// The position witness this acknowledgement supersedes, as SpiceDB
+        /// holds it (`<epoch>_<system>_<timeline>_<lsn>`); read from SpiceDB
+        /// when WADDLE_SPICEDB_ENDPOINT is set and the flag is absent
+        #[arg(long, value_name = "STAMP", value_parser = parse_position_witness)]
+        witnessed: Option<PositionWitness>,
+    },
+    /// Revoke or ban one account in one managed room, in a closed scope too
+    Revoke {
+        /// Lifecycle of the scope (32 lowercase hex characters)
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+        /// The managed room's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_bare_jid)]
+        room: BareJid,
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+        /// Record a ban (outcast) instead of a revoke (none)
+        #[arg(long)]
+        ban: bool,
+        /// Operation ID of this revoke; generate one UUID and keep it
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// The account domain the servers serve, as their WADDLE_XMPP_DOMAIN
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+    },
+}
+
+#[derive(Debug, Args)]
 pub(super) struct InstallAttestorArgs {
     /// Database identity JSON that owner-phase printed
     #[arg(long, value_name = "FILE")]
@@ -360,9 +458,40 @@ fn parse_schema(value: &str) -> Result<PgSchemaName, PhysicalAttestationError> {
 pub(super) enum ArgumentError {
     #[error("expected 40 lowercase hexadecimal characters")]
     GitSha,
+    #[error("expected 32 lowercase hexadecimal characters")]
+    Lifecycle,
+    #[error("expected a bare JID")]
+    BareJid,
+    #[error("expected the bare JID of an account in canonical form")]
+    Subject,
+    #[error("expected a canonical domain (lowercase, no trailing dot, A-labels)")]
+    Domain,
+    #[error("expected a position witness: <epoch>_<system>_<timeline>_<lsn> in decimal")]
+    PositionWitness,
     #[cfg(feature = "clustering")]
     #[error("expected a whole number followed by ms, s, m or h, such as 30s")]
     Duration,
+}
+
+fn parse_lifecycle(value: &str) -> Result<ScopeLifecycleId, ArgumentError> {
+    ScopeLifecycleId::from_storage(value).ok_or(ArgumentError::Lifecycle)
+}
+
+fn parse_position_witness(value: &str) -> Result<PositionWitness, ArgumentError> {
+    PositionWitness::parse(value).ok_or(ArgumentError::PositionWitness)
+}
+
+fn parse_bare_jid(value: &str) -> Result<BareJid, ArgumentError> {
+    value.parse().map_err(|_| ArgumentError::BareJid)
+}
+
+fn parse_subject(value: &str) -> Result<GrantSubject, ArgumentError> {
+    let jid = parse_bare_jid(value).map_err(|_| ArgumentError::Subject)?;
+    GrantSubject::new(jid).map_err(|_| ArgumentError::Subject)
+}
+
+fn parse_account_domain(value: &str) -> Result<CanonicalDomain, ArgumentError> {
+    CanonicalDomain::parse_exact(value).map_err(|_| ArgumentError::Domain)
 }
 
 fn parse_git_sha(value: &str) -> Result<String, ArgumentError> {

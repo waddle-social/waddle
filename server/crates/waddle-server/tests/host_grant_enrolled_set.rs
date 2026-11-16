@@ -248,7 +248,11 @@ async fn a_failed_refresh_keeps_the_set_and_unmanaged_rooms_need_no_read() {
     // The grants cannot be read: a managed room fails closed, a room the
     // set does not name is decided without them.
     let gate = HostGrantGate::with_enrolled_scopes(fixture.store.clone(), scopes.clone());
-    assert!(gate.attach(HostGrantAttachment::unverified_for_test(served())));
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(gate.store().expect("store"), served())
+            .await
+            .expect("attachment")
+    ));
     fixture
         .ingress
         .execute("ALTER TABLE host_grants RENAME TO host_grants_hidden", ())
@@ -305,7 +309,11 @@ async fn the_gate_reads_grants_only_for_enrolled_rooms_on_an_attached_replica() 
     assert_eq!(gate.channel_enrolled("unmanaged").await, Ok(false));
     assert_eq!(gate.space_enrolled(&scope.space_node).await, Ok(true));
 
-    assert!(gate.attach(HostGrantAttachment::unverified_for_test(served())));
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(gate.store().expect("store"), served())
+            .await
+            .expect("attachment")
+    ));
     assert!(matches!(
         gate.room(RoomBinding::Channel(&scope.channel_id)).await,
         RoomGate::Managed(_)
@@ -546,7 +554,11 @@ async fn legacy_reads_answer_nothing_for_enrolled_objects_and_fail_until_the_set
     }
     assert!(legacy_check(&guarded, &deployment).await.is_ok());
     let gate = HostGrantGate::with_enrolled_scopes(fixture.store.clone(), pending.clone());
-    assert!(gate.attach(HostGrantAttachment::unverified_for_test(served())));
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(gate.store().expect("store"), served())
+            .await
+            .expect("attachment")
+    ));
     assert!(matches!(
         gate.room(RoomBinding::Room(&bare("unmanaged@muc.example.com")))
             .await,

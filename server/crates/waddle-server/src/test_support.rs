@@ -249,6 +249,17 @@ pub async fn activate_host_grant_marker(
         .await
 }
 
+/// What `/readyz` answers for a replica whose database is healthy and whose
+/// lineage is attested, given its host-grant gate: the status code and the
+/// body, as the readiness handler builds them.
+#[cfg(feature = "test-support")]
+pub fn host_grant_readiness_response(
+    gate: &crate::permissions::host_grant::HostGrantAttachmentGate,
+) -> (u16, serde_json::Value) {
+    let (status, body) = crate::server::attested_readiness_response(Some(gate));
+    (status.as_u16(), body.0)
+}
+
 /// The production source a room actor hydrates its durable audience from:
 /// the channel and parent Space membership the permission store holds.
 pub use crate::server::durable_membership::PermissionDurableMembershipSource;

@@ -5,6 +5,7 @@ use thiserror::Error;
 use super::issuance::IssuanceRefusal;
 use super::model::{GrantGeneration, GrantSubjectError};
 use super::projection::ProjectionRefusal;
+use super::restore::RestoreFenceRefusal;
 use crate::db::DatabaseError;
 use crate::ingress_substrate::{GuardedStoreWriterError, IngressSubstrateError};
 use crate::permissions::PermissionError;
@@ -40,11 +41,12 @@ pub enum HostGrantError {
     )]
     CommitOutcomeUnknown,
     /// PostgreSQL refused a statement for the role that ran it. Enrollment
-    /// and retirement write the lifecycle ledger, which the runtime role
-    /// only reads, so this is what either returns on a runtime handle.
+    /// and retirement write the lifecycle ledger, and a restore transition
+    /// and a position acknowledgement the authority row, which the runtime
+    /// role only reads, so this is what each returns on a runtime handle.
     #[error(
-        "PostgreSQL refused a statement of the operation for this role; enrollment and \
-         retirement run in the owner phase"
+        "PostgreSQL refused a statement of the operation for this role; enrollment, \
+         retirement, restore transitions and position acknowledgements run in the owner phase"
     )]
     OwnerPhaseRequired,
     #[error("a stored host-grant row has an invalid {field}")]
@@ -94,6 +96,30 @@ pub enum HostGrantError {
     GrantLimit,
     #[error("the scope is bound to another authority incarnation than the current one")]
     IncarnationChanged,
+    /// A reconstruction was asked for a scope that no restore transition
+    /// closed, or whose reconstruction was already activated.
+    #[error("the scope is not closed by a restore transition")]
+    ScopeNotRestored,
+    /// The projection or a witness recorded an operation the journal does
+    /// not; the scope is neither changed nor projected until a restore is
+    /// declared.
+    #[error("the scope is closed on evidence that the database lost operations")]
+    ScopeFenced,
+    /// The authority is not served: a restore was not declared, or the
+    /// configuration does not match the declared one.
+    #[error(transparent)]
+    RestoreFence(#[from] RestoreFenceRefusal),
+    /// An operator's position acknowledgement names a witness of another
+    /// PostgreSQL system, of a later timeline than the server writes on, or
+    /// of an earlier timeline at a position the server's timeline is below:
+    /// it could never apply, and only a declared restore replaces such a
+    /// witness.
+    #[error(
+        "the position acknowledgement names another PostgreSQL system, a later timeline than \
+         the server writes on, or a position the server's later timeline is below; declare a \
+         restore instead"
+    )]
+    AcknowledgementRefused,
     #[error("the scope was enrolled under an admission policy this build does not evaluate")]
     PolicyVersionUnsupported,
     #[error(transparent)]
@@ -167,6 +193,10 @@ impl HostGrantError {
             Self::ScopeExhausted => "scope_exhausted",
             Self::GrantLimit => "grant_limit",
             Self::IncarnationChanged => "incarnation_changed",
+            Self::ScopeNotRestored => "scope_not_restored",
+            Self::ScopeFenced => "scope_fenced",
+            Self::RestoreFence(_) => "restore_fence",
+            Self::AcknowledgementRefused => "acknowledgement_refused",
             Self::PolicyVersionUnsupported => "policy_version_unsupported",
             Self::Subject(_) => "subject",
             Self::Issuance(_) => "issuance",

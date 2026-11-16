@@ -23,14 +23,23 @@
 //!   The acceptance reduces its plan to the admitted audience before it
 //!   records anything (`ingress::host_grant_plan`).
 //! - A replica admits a managed room only after it verified its runtime
-//!   role's privileges on the store when it started
-//!   ([`HostGrantAttachment`]).
+//!   role's privileges on the store and the restore fence
+//!   ([`HostGrantAttachment`], held by the replica's
+//!   [`HostGrantAttachmentGate`], which verifies it again when the
+//!   authority changes and drops it when the fence refuses).
+//! - A restore of PostgreSQL cannot reopen authority a later revoke closed:
+//!   the authority incarnation is bound to the declared restore epoch, the
+//!   database lineage and what SpiceDB witnesses (`witness`); a declared
+//!   restore closes every scope under a new incarnation, and a closed scope
+//!   reopens only through a verified reconstruction and an operator's
+//!   reopen (`restore`).
 //! - Every other surface that admits a principal to a managed room (joins,
 //!   archive and discovery reads, PubSub, room administration, the
 //!   planner's audience sources) decides through [`HostGrantGate`], from the
-//!   same canonical grants and the same policy. Legacy reads of a managed
-//!   room's authorization objects through the permission actor answer
-//!   nothing.
+//!   same canonical grants and the same policy, and only while the
+//!   replica's attachment gate holds an attachment. Legacy reads of a
+//!   managed room's authorization objects through the permission actor
+//!   answer nothing.
 //! - Whether an object is enrolled at all is answered from the replica's
 //!   in-memory enrolled set ([`EnrolledScopes`]), refreshed in the
 //!   background, so rooms no scope manages never wait on PostgreSQL.
@@ -52,9 +61,11 @@ mod model;
 mod policy;
 mod projection;
 mod rate_limited;
+mod restore;
 mod runtime_attach;
 mod standing;
 mod store;
+mod witness;
 
 pub(crate) use admission::{
     admit_room_acceptance, managing_scope, AdmissionRelations, ManagingScope, RoomManagement,
@@ -86,12 +97,33 @@ pub use model::{
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use projection::{
     MarkerObservation, ProjectedGrant, ProjectedRelationship, ProjectionIntent,
-    ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite,
+    ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite, RestoredPlan,
     HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_PROJECTION_RPC_TIMEOUT,
 };
 pub(crate) use rate_limited::RateLimitedWarning;
-pub use runtime_attach::HostGrantAttachment;
+pub use restore::{
+    reconstruction_targets, verify_restore_fence, verify_restore_fence_with, AuthorityBinding,
+    FenceEvidence, FenceMemory, OperatorRevoke, ReconstructionTarget, ReopenReport,
+    ReopenSelection, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal, RestoreFenceReport,
+    HOST_GRANT_RESTORE_FENCE_DEADLINE, HOST_GRANT_RESTORE_FENCE_SCOPE_ALLOWANCE,
+    HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+};
+pub use runtime_attach::{
+    verification_retried, GateReadiness, GateState, HostGrantAttachment, HostGrantAttachmentGate,
+    ReplicaFailure, INCOMPLETE_READINESS_GRACE, MAX_INCOMPLETE_PASSES, REVERIFY_INTERVAL,
+};
 pub use standing::{RoomBinding, RoomGrants, RoomLookup};
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
-pub use store::{Activation, HostGrantStore};
+pub use store::{Activation, HostGrantStore, RESTORE_TRANSITION_BATCH};
+pub(crate) use witness::position_resource_authority;
+#[cfg(feature = "test-support")]
+pub use witness::with_host_grant_witness_write_fault;
+pub use witness::{
+    epoch_witness_resource, head_witness_resource, latch_witness_resource, position_standing,
+    position_witness_resource, read_position_witness, regression, room_witness_digest,
+    room_witness_resource, sync_journal_witness, sync_journal_witnesses, sync_position_witness,
+    sync_witnesses_after_fence, LatchKind, ListedWitness, MalformedWitness,
+    PositionAcknowledgement, PositionLatch, PositionStanding, PositionWitness, PositionWriter,
+    PostgresPosition, WitnessChange, WitnessPass, WitnessSync,
+};

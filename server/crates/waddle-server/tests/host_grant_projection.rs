@@ -27,6 +27,8 @@
 mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
+#[path = "host_grant_support/live_spicedb.rs"]
+mod live_spicedb;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,11 +57,9 @@ use waddle_server::permissions::host_grant::{
     HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
 use waddle_server::permissions::{
-    guarded_resource_definitions, CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation,
-    EnsureSchema, Object, ObjectType, Permission, PermissionActor, PermissionError,
-    RecordAuthzSchemaVersion, Relation, ReplaceExclusiveRelation, Subject, Tuple,
-    WriteHostGrantProjection, WriteTuple, AUTHZ_CODEC_MARKER_DEFINITION,
-    AUTHZ_SCHEMA_MARKER_DEFINITION,
+    CheckPermission, DeleteTuple, EnsureAuthzCodecIncarnation, EnsureSchema, Object, ObjectType,
+    Permission, PermissionActor, PermissionError, RecordAuthzSchemaVersion, Relation,
+    ReplaceExclusiveRelation, Subject, Tuple, WriteHostGrantProjection, WriteTuple,
 };
 use waddle_server::test_support::activate_host_grant_marker;
 use waddle_server::ServerConfig;
@@ -103,7 +103,7 @@ struct Live {
 
 impl Live {
     async fn start(label: &str) -> Self {
-        let (endpoint, preshared_key) = disposable_spicedb_env();
+        let (endpoint, preshared_key) = live_spicedb::disposable_spicedb_env();
         let fixture = GrantFixture::enrolled(label).await.expect(
             "the host-grant projection cases need the PostgreSQL test cluster as well as \
              SpiceDB; set the WADDLE_TEST_POSTGRES_URL variable",
@@ -114,27 +114,26 @@ impl Live {
             .await
             .expect("raw SpiceDB client");
         // Empty the store, markers included, so that this build's schema is
-        // installed whatever an earlier test left. A definition the stored
-        // schema lacks makes its delete fail; that is the state wanted.
-        for definition in guarded_resource_definitions().chain([
-            AUTHZ_CODEC_MARKER_DEFINITION,
-            AUTHZ_SCHEMA_MARKER_DEFINITION,
-        ]) {
-            let _ = raw
-                .delete_relationships(RelationshipFilter::new(definition))
-                .await;
-        }
+        // installed whatever an earlier test left; a store holding markers
+        // or witnesses no test suite marked is refused instead. Each replica
+        // marks the store as a test store once it has started.
+        live_spicedb::empty_disposable_store(&raw).await;
         let mut config = ServerConfig::test_homeserver();
         config.spicedb = Some(SpiceDbConfig {
             endpoint,
             preshared_key,
             insecure: true,
         });
-        Self {
+        let live = Self {
             fixture,
             config,
             raw,
-        }
+        };
+        // The store's codec is marked by a replica's startup steps; then it
+        // is marked as a test store, before the case writes anything.
+        live.actor(&live.fixture.store).await;
+        live_spicedb::mark_test_store(&live.raw).await;
+        live
     }
 
     /// A replica's permission actor: the production backend, started with
@@ -210,12 +209,13 @@ impl Live {
     }
 
     fn marker_relationship(&self, stamp: &str) -> Relationship {
+        Self::marker_relationship_of(self.fixture.scope.lifecycle, stamp)
+    }
+
+    fn marker_relationship_of(lifecycle: ScopeLifecycleId, stamp: &str) -> Relationship {
         Relationship::new(
-            ObjectReference::new(
-                HOST_GRANT_PROJECTION_DEFINITION,
-                self.fixture.scope.lifecycle.to_storage(),
-            )
-            .expect("marker resource"),
+            ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, lifecycle.to_storage())
+                .expect("marker resource"),
             HOST_GRANT_PROJECTION_MARKER_RELATION,
             SubjectReference::new(
                 ObjectReference::new(HOST_GRANT_PROJECTION_DEFINITION, stamp)
@@ -848,7 +848,6 @@ async fn live_spicedb_contradicting_projection_state_is_never_written_over() {
         .set(OWNER, CAROL, RoomAffiliation::Member)
         .await
         .expect("grant");
-    let pending = live.current_marker().await;
     let expect = |contradiction| Reconciliation::Contradiction(contradiction);
     let unchanged = |live: &Live| {
         let lifecycle = live.fixture.scope.lifecycle;
@@ -884,42 +883,6 @@ async fn live_spicedb_contradicting_projection_state_is_never_written_over() {
         authority.reconcile(lifecycle).await.expect("pass"),
         expect(ProjectionContradiction::MarkerMissing)
     );
-
-    // A marker of another authority incarnation.
-    let mut foreign = projected.clone();
-    foreign.incarnation = waddle_server::permissions::host_grant::AuthorityIncarnation::generate();
-    live.set_stamps(&[foreign.stamp()]).await;
-    assert_eq!(
-        authority.reconcile(lifecycle).await.expect("pass"),
-        expect(ProjectionContradiction::ForeignIncarnation)
-    );
-
-    // A marker ahead of the canonical generation, and one at the canonical
-    // generation that names another operation.
-    let mut ahead = pending.clone();
-    ahead.generation = GrantGeneration::new(pending.generation.value() + 5).expect("generation");
-    live.set_stamps(&[ahead.stamp()]).await;
-    assert_eq!(
-        authority.reconcile(lifecycle).await.expect("pass"),
-        expect(ProjectionContradiction::AheadOfCanonical)
-    );
-    let mut other_operation = pending.clone();
-    other_operation.operation = GrantOperationId::generate();
-    live.set_stamps(&[other_operation.stamp()]).await;
-    assert_eq!(
-        authority.reconcile(lifecycle).await.expect("pass"),
-        expect(ProjectionContradiction::AheadOfCanonical)
-    );
-
-    // A marker of an older generation that the journal does not record.
-    let mut unrecorded = projected.clone();
-    unrecorded.operation = GrantOperationId::generate();
-    live.set_stamps(&[unrecorded.stamp()]).await;
-    assert_eq!(
-        authority.reconcile(lifecycle).await.expect("pass"),
-        expect(ProjectionContradiction::UnknownMarker)
-    );
-    unchanged(&live).await;
 
     // Throughout, the pending grant stayed ineffective, grants that were
     // effective kept admitting, and a revoke still took effect at once.
@@ -1002,6 +965,116 @@ async fn live_spicedb_contradicting_projection_state_is_never_written_over() {
         Reconciliation::Activated(plan.marker().generation)
     );
     assert!(sql_admits(&live.fixture, "dave@example.com", HostGrantAction::Read).await);
+
+    // A marker the journal contradicts shows that the database lost
+    // operations: besides being reported, it closes the scope as `fenced`
+    // (the restore slice's decision), so each such case runs on a scope of
+    // its own, with a projected first operation and a pending grant.
+    type Contradicting = fn(&ProjectionMarker, &ProjectionMarker) -> ProjectionMarker;
+    let cases: [(Contradicting, ProjectionContradiction); 4] = [
+        // A marker of an incarnation the journal never held.
+        (
+            |projected, _| ProjectionMarker {
+                incarnation: waddle_server::permissions::host_grant::AuthorityIncarnation::generate(
+                ),
+                ..projected.clone()
+            },
+            ProjectionContradiction::ForeignIncarnation,
+        ),
+        // A marker ahead of the canonical generation.
+        (
+            |_, pending| ProjectionMarker {
+                generation: GrantGeneration::new(pending.generation.value() + 5)
+                    .expect("generation"),
+                ..pending.clone()
+            },
+            ProjectionContradiction::AheadOfCanonical,
+        ),
+        // One at the canonical generation that names another operation.
+        (
+            |_, pending| ProjectionMarker {
+                operation: GrantOperationId::generate(),
+                ..pending.clone()
+            },
+            ProjectionContradiction::AheadOfCanonical,
+        ),
+        // A marker of an older generation that the journal does not record.
+        (
+            |projected, _| ProjectionMarker {
+                operation: GrantOperationId::generate(),
+                ..projected.clone()
+            },
+            ProjectionContradiction::UnknownMarker,
+        ),
+    ];
+    for (contradicting, contradiction) in cases {
+        let scope = live.fixture.enroll_another().await;
+        assert_eq!(
+            authority
+                .reconcile(scope.lifecycle)
+                .await
+                .expect("first pass"),
+            Reconciliation::Activated(GrantGeneration::FIRST)
+        );
+        let projected = authority
+            .store()
+            .projection_plan(scope.lifecycle)
+            .await
+            .expect("plan")
+            .marker()
+            .clone();
+        live.fixture
+            .store
+            .set_affiliation(
+                &SetAffiliation {
+                    operation: GrantOperationId::generate(),
+                    lifecycle: scope.lifecycle,
+                    expected_generation: live.fixture.state(&scope).await.generation,
+                    initiator: subject(OWNER),
+                    room: scope.room.clone(),
+                    subject: subject(CAROL),
+                    affiliation: RoomAffiliation::Member,
+                },
+                &live.fixture.policy,
+            )
+            .await
+            .expect("pending grant");
+        let pending = authority
+            .store()
+            .projection_plan(scope.lifecycle)
+            .await
+            .expect("plan")
+            .marker()
+            .clone();
+        let marker = contradicting(&projected, &pending);
+        live.raw
+            .write_relationships(vec![
+                RelationshipUpdate::delete(Live::marker_relationship_of(
+                    scope.lifecycle,
+                    &projected.stamp(),
+                )),
+                RelationshipUpdate::touch(Live::marker_relationship_of(
+                    scope.lifecycle,
+                    &marker.stamp(),
+                )),
+            ])
+            .await
+            .expect("raw marker write");
+        assert_eq!(
+            authority.reconcile(scope.lifecycle).await.expect("pass"),
+            expect(contradiction)
+        );
+        let state = live.fixture.state(&scope).await;
+        assert_eq!(state.admission, AdmissionState::Closed);
+        assert_eq!(
+            state.closed_reason,
+            Some(waddle_server::permissions::host_grant::ClosedReason::Fenced)
+        );
+        assert!(matches!(
+            authority.reconcile(scope.lifecycle).await,
+            Err(HostGrantError::ScopeFenced)
+        ));
+    }
     live.close().await;
 }
 
@@ -1205,7 +1278,7 @@ async fn live_spicedb_a_projection_read_that_does_not_answer_does_not_hold_the_p
         .expect("first pass");
 
     // A replica whose permission actor reaches SpiceDB through the relay.
-    let (endpoint, preshared_key) = disposable_spicedb_env();
+    let (endpoint, preshared_key) = live_spicedb::disposable_spicedb_env();
     let relay = StallableRelay::start(&endpoint).await;
     let mut config = ServerConfig::test_homeserver();
     config.spicedb = Some(SpiceDbConfig {
@@ -1341,7 +1414,7 @@ async fn live_spicedb_replica_process_entry() {
         return;
     };
     let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is set"));
-    let (endpoint, preshared_key) = disposable_spicedb_env();
+    let (endpoint, preshared_key) = live_spicedb::disposable_spicedb_env();
     let mut config = ServerConfig::test_homeserver();
     config.spicedb = Some(SpiceDbConfig {
         endpoint,
@@ -1435,22 +1508,4 @@ async fn live_spicedb_replica_process_entry() {
         }
         other => panic!("unknown replica role {other}"),
     }
-}
-
-/// The endpoint and key of the disposable SpiceDB, refusing to proceed unless
-/// the operator has declared the store disposable: these tests delete every
-/// relationship of the guarded definitions and both markers.
-fn disposable_spicedb_env() -> (String, String) {
-    assert_eq!(
-        std::env::var("WADDLE_TEST_SPICEDB_DISPOSABLE").as_deref(),
-        Ok("1"),
-        "WADDLE_TEST_SPICEDB_DISPOSABLE=1 is required: the live SpiceDB tests delete every \
-         relationship of the guarded definitions and both markers, so they only run against a \
-         store that is safe to wipe"
-    );
-    let endpoint =
-        std::env::var("WADDLE_TEST_SPICEDB_ENDPOINT").expect("WADDLE_TEST_SPICEDB_ENDPOINT");
-    let preshared_key = std::env::var("WADDLE_TEST_SPICEDB_PRESHARED_KEY")
-        .expect("WADDLE_TEST_SPICEDB_PRESHARED_KEY");
-    (endpoint, preshared_key)
 }

@@ -30,6 +30,16 @@ the runtime role when a PostgreSQL replica starts, and the refusal of a room
 address that is not in canonical form (see
 [Rollout part](#rollout-part-g24)).
 
+The restore slice (W5r in the plan, condition B7) is implemented as well
+(`permissions/host_grant/restore` and `witness`, migration 2002, the
+`waddle-server host-grant` operator subcommand). Its decisions are recorded
+under [Restore incarnation decisions](#restore-incarnation-decisions), and
+its operator procedure is the
+[restore runbook](../../../docs/operations/authz-host-grant-restore.md). Its
+suite has run against disposable stores (see
+[Running the restore slice's cases](#running-the-restore-slices-cases));
+verification step 4 has not.
+
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
 for its scope, records the decision here and has it independently reviewed
@@ -400,10 +410,12 @@ Restoring older PostgreSQL can restore an old generation and `active` flag.
 Restore/startup therefore needs an independently enforced authority-incarnation
 transition, invalidation of old credentials/work, and verified reconstruction
 before admission. An epoch stored only inside the restored database is
-insufficient. The mechanism surviving rollback and excluding the previous
-deployment is unresolved (B7); the restore-incarnation slice (W5r in the plan)
-owns it. Graph loss also requires closed admission before reconstruction;
-silent active corruption is not covered by an old marker.
+insufficient. The restore slice (W5r in the plan) decided the mechanism that
+survives rollback and excludes the previous deployment for the first slice's
+scope; see [Restore incarnation decisions](#restore-incarnation-decisions),
+including what it leaves open. Graph loss also requires closed admission
+before reconstruction; silent active corruption is not covered by an old
+marker.
 
 Home-account deletion does not automatically revoke remote grants. Waddle homes
 enforce durable non-reuse of retired account JIDs across their provisioning
@@ -521,7 +533,18 @@ S2S.
 | Exact retry and key reuse with changed input | Original outcome versus typed conflict; no new authorization. | W5b |
 | Generation and lifecycle-identity exhaustion in the enrolled scope | Stale identity fails; exhaustion fails closed; identities are never reused. | W5b |
 | Space, room or node deletion and recreation | Old witnesses, grants and markers do not apply to the new lifecycle. | W5c (step 4) |
-| Restored older PostgreSQL state | Restore cannot reopen old authority; old credentials and work are invalid; admission stays closed until verified reconstruction. | W5r (step 4) |
+| Restored older PostgreSQL state | Restore cannot reopen old authority; old credentials and work are invalid; admission stays closed until verified reconstruction. The rows below are its cases. | W5r (step 4) |
+| Undeclared restore that lost projected operations, or operations only the journal witness saw; projection of an incarnation the journal does not record; a scope that admits without a marker | The fence closes that scope as `fenced` (and reconciliation on the same evidence); the server starts and other scopes are unaffected. | W5r (step 4) |
+| Projection and room witnesses of a scope the store does not hold | Its rooms are refused, not served as unmanaged, whether or not the replica is attached (before any pass has read them, from the room's witness); other rooms are unaffected; the server starts. | W5r (step 4) |
+| Adopted lineage; configured restore epoch other than the recorded one; PostgreSQL position behind its witness, or on an unacknowledged system or timeline; scopes that admit beside a SpiceDB without this authority's markers and position witness | The fence refuses the authority and the replica holds no attachment; the owner phase refuses an adopted lineage and an older epoch; each names only the refusal's kind. A regression is latched and stays refused after the server writes past the witness. An acknowledgement is bound to the witness it supersedes and spent with it; it accepts a later timeline of the same system or a regression on the witnessed timeline, never a regression across timelines or another system. A SpiceDB without the projection closes nothing. A database without a scope beside a projection without one is not refused. The position is read under the restricted runtime profile. | W5r (step 4) |
+| Owner-phase act (retirement) the database lost | The next pass that passes witnesses it, retired as the scope is; the fence closes the restored scope. | W5r (step 4) |
+| Declared restore with an active, a never-activated and a retired scope; a transition whose run stopped after its first commit | New incarnation, epoch and lineage recorded; every scope not retired or exhausted closed as `restored` at its next generation in bounded batches, effective standing lowered to `none`; nothing admits and no initiator is honoured; a rerun finishes a stopped transition and otherwise changes nothing; an older epoch and the runtime role are refused. | W5r (step 4) |
+| Command, activation, projection pass and replica attachment from before a declared restore | Stale generation, superseded activation, no takeover from a plan that is not a `RestoredPlan`, and no acceptance on a replica whose attachment names another binding; a replica configured for the earlier epoch does not attach. | W5r (step 4) |
+| A replica whose binding no longer matches (server restart, declared restore); periodic passes | The acceptance is refused and the replica verifies the fence once in place: it admits again with the new binding when the fence passes. While it fails the replica stays ready, except one configured with an epoch below the recorded one. A periodic pass drops the attachment on a refusal, on a runtime role that no longer matches, and after three passes in a row that could not complete. | W5r (step 4) |
+| Reconstruction after a restore that lost a projected revoke, ban or grant; after one that lost nothing; beside relationships no canonical row names; of a remote privileged grant | Lost revokes and bans stay in force; lost grants are not recreated; recorded increases are kept; subjects only the projection held are recorded at `none` or `outcast` and dropped from it; nothing is raised in what admission honours; the scope is `reconstructed` once the rebuilt projection is read back and activated, and admits only after an operator reopens it. | W5r (step 4) |
+| Operator revoke and reopen | A revoke or ban applies in a closed scope at its commit, never raises, keeps an owner and replays; a reopen opens only a scope whose latest operation is verified, and one a restore lost operations in only by name with the operator's confirmation. | W5r (step 4) |
+| Restore to before an earlier declared restore, with and without the configuration rolled back | Refused by the configured epoch, by the position witness's epoch, and otherwise the scope is closed for the projection's unknown incarnation; a new declaration reconstructs over the projection of the lost incarnation. | W5r (step 4) |
+| Reconstruction that does not fit one projection write; a malformed family; a missing marker | The scope stays closed with a contradiction; nothing is recorded or written. | W5r (step 4) |
 | Initiator revoked while mutation prepared | Target mutation cannot use stale administrator authority. | W5b |
 | Negative override/private config/alternate grant | Action policy, especially outcast precedence, not merely positive-path success. | W5b |
 | #2052 accepted-child regressions | Frozen target/payload, occupancy and lifecycle remain unchanged. | W5b |
@@ -591,9 +614,9 @@ Migration 2001 creates seven relations.
 
 | Relation | Holds |
 | --- | --- |
-| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. The restore slice owns how it changes. |
+| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. Migration 2002 adds the restore epoch the incarnation was established under, the database lineage it is bound to, a fixed authority identity and an operator's position acknowledgement; only a declared restore changes the incarnation (see [Restore incarnation decisions](#restore-incarnation-decisions)). |
 | `host_grant_scope_lifecycles` | One row per enrollment: lifecycle identity and scope key, both unique. Never deleted, and updated once at most: retirement stamps `retired_at_ms`. Only the schema owner writes it. |
-| `host_grant_scopes` | The latest state of a scope: incarnation, policy version, generation, the operation that recorded it, the latest generation whose projection was verified and activated, and `closed` or `active` with the reason for `closed` (`enrolled`, `retired`, `exhausted`). Its row lock is the scope's authority guard. |
+| `host_grant_scopes` | The latest state of a scope: incarnation, policy version, generation, the operation that recorded it, the latest generation whose projection was verified and activated, and `closed` or `active` with the reason for `closed` (`enrolled`, `retired`, `exhausted`; migration 2002 adds `restored`, `reconstructed`, `fenced` and the `lost_operations` mark). Its row lock is the scope's authority guard. |
 | `host_grant_rooms` | The rooms a scope manages and each room's authorization object. A binding is immutable. |
 | `host_grants` | One row per room and subject: the recorded affiliation, the effective affiliation, the generation and operation that last changed it, and why issuance accepted it. A revoke is a row whose affiliation is `none`. |
 | `host_grant_operations` | The immutable outcome of each operation: identity, fingerprint of its input, kind, initiator, incarnation, generation and the digest of the intended projection. One operation per generation of a lifecycle. |
@@ -916,15 +939,19 @@ scopes page by page, in lifecycle order, to the end. A scope that cannot
 progress (a contradiction, a projection that does not answer) is visited
 once per pass and never keeps a scope behind it from being reconciled.
 
-A contradiction or an unknown outcome never closes the scope and never
-changes canonical state: the recorded increase stays ineffective, effective
-grants keep admitting, and a revoke still takes effect at its commit. Nothing
-in the projection can make a revoked grant effective, because admission does
-not read it.
+A contradiction or an unknown outcome never changes the grants: the
+recorded increase stays ineffective, effective grants keep admitting, and a
+revoke still takes effect at its commit. Nothing in the projection can make a
+revoked grant effective, because admission does not read it. The restore
+slice closes the scope on the three contradictions that show the database
+lost operations (`AheadOfCanonical`, `UnknownMarker`, and a
+`ForeignIncarnation` the journal never held); see
+[The fence a replica passes](#the-fence-a-replica-passes).
 
-Not decided here: repair of a contradiction and reconstruction of a
-projection (the restore slice), projections larger than one request, and any
-admission that reads the projection. A retired or exhausted scope has no
+Not decided here: repair of a contradiction, projections larger than one
+request, and any admission that reads the projection. Reconstruction of a
+projection after a restore is decided by the restore slice (see
+[Verified reconstruction](#verified-reconstruction-g15-part)). A retired or exhausted scope has no
 projection plan; its relationships and marker stay as they were.
 
 ### B2: policy for the action this slice protects (G14, part)
@@ -1173,6 +1200,24 @@ outside room-manifest acceptance. For a room it answers:
   replica holds no verified attachment (B1). Every surface fails closed on
   it. A room address that is not canonical and reaches no enrolled room is
   unmanaged.
+
+The attachment is the one room-manifest acceptance uses: `HostGrantGate`
+reads it, at each decision, from the replica's `HostGrantAttachmentGate`
+(`permissions/host_grant/runtime_attach.rs`), which holds it only while the
+runtime role's privileges and the restore fence are verified (see
+[Restore incarnation decisions](#restore-incarnation-decisions)). When that
+gate drops the attachment (a refusal of the whole authority, a role that
+no longer matches the profile, passes that cannot complete) every surface
+answers *unavailable* for managed rooms until it attaches again. The
+projection recovery pass a replica runs at startup waits for the first
+attachment, so nothing is projected while the fence refuses the authority.
+A closed scope (restored, reconstructed, fenced) admits nothing on these
+surfaces either (`RoomGrants::scope_admits`). Unlike acceptance, they do not
+compare the attachment's binding with the authority they read, and they
+serve a room no enrolled scope manages without asking the attachment gate
+whether it belongs to an enrollment only SpiceDB holds
+(`HostGrantAttachmentGate::refuses_unmanaged`); both are left to a later
+slice.
 
 Enrolled set. Whether a channel, a room address or a Space node belongs to
 an enrolled scope is answered from the replica's in-memory copy of the
@@ -1695,6 +1740,677 @@ yet uses two replicas; that is verification step 4.
 - A deployment-wide policy guard; the first slice's community generation
   still does not fence a changed deployment override.
 
+## Restore incarnation decisions
+
+These are the decisions the restore slice (W5r in the plan) made for B7
+(ADR-0020 gate G13) and for bounded reconstruction, its part of B3 (G15),
+over the first slice's scope. They are decisions; the W5r rows of the
+[acceptance matrix](#required-native-acceptance-matrix) are their evidence,
+and the run recorded under
+[Running the restore slice's cases](#running-the-restore-slices-cases) is
+the only part of it that has run. They change the first slice's decisions
+only where stated. The operator procedure is the
+[restore runbook](../../../docs/operations/authz-host-grant-restore.md).
+
+### Where the incarnation lives (G13)
+
+A restore brings the incarnation back together with the grants it governs,
+so the incarnation stored in PostgreSQL cannot by itself tell a restored
+database from the live one. It is bound to what a restore of the database
+does not bring back:
+
+1. **The declared restore epoch.** `WADDLE_HOST_GRANT_RESTORE_EPOCH`, an
+   unsigned integer in the deployment configuration (`0` when unset), read
+   by the owner phase and by every replica. The operator raises it once for
+   each restore; it is never lowered. `host_grant_authority.restore_epoch`
+   records the epoch the current incarnation was established under.
+2. **The database lineage.** `host_grant_authority.lineage_uuid` binds the
+   incarnation to `_lineage`. A logical restore into another database is
+   adopted, which rotates the lineage; the authority then no longer matches
+   it. A physical copy (a base backup, a volume snapshot, a promoted
+   replica) keeps the lineage row, the system identifier and the OIDs
+   ([lineage runbook](../operations/db-lineage.md), "Physical-clone
+   limitation"), so the lineage does not detect a physical restore, in
+   place or into a new cluster.
+3. **SpiceDB witnesses.** SpiceDB is not restored with PostgreSQL, so what it
+   holds about the canonical store survives a restore of the database. Six
+   kinds of record, all in the projection's definition and relation
+   (`waddle_grant_projection#marker`), each under a resource ID no
+   lifecycle identity can take (`permissions/host_grant/witness`):
+   - the **projection marker** of each scope (`<lifecycle>`): the operation
+     whose projection was last written;
+   - the **journal head** of each scope (`head_<lifecycle>`): the scope's
+     latest recorded operation, in the marker's spelling. It advances while
+     the projection is stuck;
+   - the **room bindings** of each projected scope
+     (`room_<SHA-256 of the room's channel object>`, naming the lifecycle),
+     written in the projection's own request;
+   - the **PostgreSQL position** of the authority
+     (`position_<authority_id>`): the declared epoch, the system identifier,
+     the timeline (from `pg_walfile_name(pg_current_wal_flush_lsn())`) and
+     the flushed WAL position (`pg_current_wal_flush_lsn()`). On the
+     physically attested pool the system identifier is the attested
+     physical identity's, which the attestor compares with the live one in
+     the same transaction; the restricted runtime role may not call
+     `pg_control_system()` (the attestor requires it not to). On any other
+     handle it is read from `pg_control_system()`. `authority_id` is a fixed
+     identity migration 2002 mints and nothing changes, so a restored copy
+     finds the witness of the database it was copied from;
+   - the **regression latch** of the authority (`latch_<authority_id>`):
+     the position witness a regression was seen against, and whether it
+     was on the witnessed timeline (`timeline`) or below the witness on
+     another one (`branch`);
+   - the **witnessed epoch** of the authority (`epoch_<authority_id>`): the
+     declared epoch the position witness was last written under, written in
+     the same request as every position witness. A position witness or
+     latch that cannot be read carries no epoch of its own; this one tells
+     whether a restore was declared since it was written.
+
+No schema change is needed for the witnesses: they reuse the marker
+definition and relation, so the built-in schema stays at version 2 and a
+SpiceDB store that already holds it serves them. A synchronous witness
+written with every revoke (in the revoke's commit path) was rejected: it
+would put another store on revocation's path, which D5 keeps in PostgreSQL
+alone. Every witness is written after the commit it describes, never inside
+it; the commit never waits for SpiceDB.
+
+#### What each event is caught by
+
+"Pass" is a pass of the restore fence: when a replica attaches, when an
+acceptance finds the binding changed, and about every five minutes
+(300 s plus up to 30 s of jitter) while it is attached. "Witnessed" means
+written to SpiceDB before the restore point. The tests named are in
+`tests/host_grant_restore.rs` unless stated.
+
+| Event | Caught by | Not caught when | Evidence |
+| --- | --- | --- | --- |
+| Declared restore (epoch raised) | The owner phase's transition: new incarnation, every scope that is not retired or exhausted closed as `restored` at its next generation, effective standing lowered to `none`, any position acknowledgement cleared. | — | `a_declared_restore_closes_every_scope_under_a_new_incarnation`, `a_transition_that_stopped_is_finished_by_the_next_owner_phase` |
+| Replica configured with another epoch than the recorded one | `epoch_mismatch` at every pass. Configured below the recorded epoch, the replica is not ready while an unretired scope is enrolled (`configuration_predates_restore`); configured above it, it stays ready, refuses managed rooms and names `configuration_ahead_of_restore`. Verifications that cannot complete do not replace `configuration_predates_restore`. | — | `a_replica_verifies_a_changed_authority_in_place`, `live_spicedb_a_restore_to_before_a_transition_is_refused`, `incomplete_verifications_keep_a_configuration_that_predates_the_restore` |
+| Logical restore into another database (adopted lineage) | `lineage_changed` at every pass and in the owner phase, while the database holds a scope or SpiceDB names one. The binding's database OID differs, so a running replica's next managed acceptance starts a pass. | The database holds no scope and SpiceDB names none: there is nothing to protect, and the owner phase binds the new lineage. | `an_adopted_database_is_not_served_until_its_restore_is_declared`, `a_database_without_a_scope_is_not_refused`, `a_refused_authority_keeps_the_replica_ready_and_refuses_managed_rooms` |
+| Logical restore that recreates the relations in the same database, under running replicas | The binding's authority-relation OID differs: the next managed acceptance is refused and starts a pass, which closes the scopes the rows below catch. | As for those rows. Until a managed acceptance or a periodic pass, nothing is compared. | `a_replica_verifies_a_changed_authority_in_place` |
+| Rows rewritten in place under running replicas, no restart and no new relation | The next periodic pass, on the scope evidence below. | As for those rows; the window is up to 330 s. | `live_spicedb_a_restore_under_a_running_replica_is_found_without_a_restart` |
+| Undeclared restore that lost projected operations | A marker of the scope's incarnation the journal does not record: `projection_ahead`, the scope is `fenced` and marked as having lost operations. Reconciliation closes it on the same evidence (`AheadOfCanonical`, `UnknownMarker`). | SpiceDB went back to a point before that projection as well. | `live_spicedb_a_restore_cannot_reopen_a_projected_revoke`, `live_spicedb_reconciliation_closes_a_scope_whose_marker_is_ahead` |
+| Undeclared restore that lost operations never projected | A journal witness the journal does not record: `journal_ahead`, `fenced`, marked as having lost operations. | The lost operation was not witnessed: its journal witness is written by a task after the commit (a mutation through `HostGrantAuthority`), and no later operation's witness or position witness passed it either. | `live_spicedb_the_journal_witness_finds_a_lost_revoke_the_projection_never_saw` |
+| Declared restore of a scope that was never projected and whose journal witness the journal does not record | Its first projection (reconciliation) reads the journal witness, marks the scope as having lost operations under a `reconstruct` operation before the write, and moves the witness with the projection, which names that operation, in one request; a reopen of every scope leaves it closed. | As the row above. | `live_spicedb_a_restored_scope_never_projected_keeps_its_lost_operations` |
+| A second restore during restore handling, to after the declaration and before the lost-operations mark | The mark is recorded with a `reconstruct` operation at the next generation, and the projection and journal witness then name that operation, which the restored journal does not hold. Declared, the reconstruction finds the marker unrecorded and marks the scope again; acknowledged instead (no new incarnation), the marker is ahead of the restored journal and the pass fences the scope, marked. A reopen of every scope leaves it closed either way. | The mark's projection was never written (the takeover after it failed) and SpiceDB still holds the earlier marker and witness: the next reconstruction reads the same evidence and marks the scope again. | `live_spicedb_a_second_declared_restore_keeps_the_lost_operations_mark`, `live_spicedb_a_second_acknowledged_restore_keeps_the_scope_closed` |
+| Journal witness of a restored scope that cannot be read | Reconciliation marks the scope as having lost operations under a `reconstruct` operation and stops (`MalformedJournalWitness`), without moving the witness or taking the projection over; the scope stays `restored` until an operator removes the witness, and is then reconstructed with the mark. | — | `live_spicedb_an_unreadable_journal_witness_keeps_a_restored_scope_closed` |
+| Undeclared restore that lost an owner-phase act (a retirement, an enrollment, a reopen, an operator revoke) | Its journal witness (`journal_ahead`). `waddle-server host-grant` writes it at once when it is given the servers' SpiceDB; otherwise the next pass that passes writes every journal witness that differs from its journal head, retired and exhausted scopes included. | It was not witnessed: no SpiceDB was given to the act and no pass passed before the restore point (up to 330 s with a replica attached; unbounded while every replica's fence refuses). | `live_spicedb_a_lost_retirement_is_found_by_its_journal_witness` |
+| Undeclared restore that lost an enrollment | Its room witnesses name a lifecycle the store does not hold: the pass reads that set before it decides anything about the whole authority, and the replica refuses those rooms (`service-unavailable`) whether or not it is attached. Until a pass has read the set, the gate reads the room's witness from SpiceDB (500 ms bound; a witness is remembered, its absence for 60 s; after a failed read, no room is asked about for a minute). | The enrollment's projection was never written (no room witness); or SpiceDB does not answer while the set is unknown, and the room is served as unmanaged (accepted residual). A replica running when the database is restored keeps the set its last pass read until its next pass that reads SpiceDB: at most one periodic pass (330 s) for a restore made under it, sooner when an acceptance for a managed room finds the binding changed and starts a pass, or at the next retry while the authority is refused; a gate that stopped verifying (a runtime role that does not match the profile) reads the set once every interval as well; nothing reads it while SpiceDB does not answer. Meanwhile it serves the lost enrollment's rooms as unmanaged. | `live_spicedb_a_lost_enrollment_refuses_only_its_own_rooms` |
+| Physical restore in place, or into another cluster, to an earlier point on the same timeline | The position witness is ahead of the server: `position_regressed`, latched (`timeline`) in SpiceDB and in the replica's memory, so it stays refused after the server writes past the witness again. Cleared by a declared restore, or by an acknowledgement bound to that witness. Every write that moves the position witness is conditioned on the latch it read, or on there being none. | No position witness was written after the restore point (it moves after a committed mutation and after every pass that passes); the restored server's flushed position passed the witnessed one before any pass compared them, so the regression was never seen; SpiceDB went back as well. A latch SpiceDB did not take (each way the write fails is counted) is the replica's alone, and every later pass of it writes it again; until one does, it is lost when the replica restarts, and stops counting once a writer that does not hold it (another replica's pass, a committed mutation, an operator's act) moves the witness, which it does as soon as the server has written past the witnessed position. | `live_spicedb_the_position_witness_refuses_a_rolled_back_database` |
+| Recovery to a point in time, or promotion, onto a new timeline | Another timeline of the same system: `position_unverified` until an operator acknowledges that exact witness for the current, later, timeline; below the witnessed position, `position_regressed`, latched (`branch`), cleared only by a declared restore, and `acknowledge-position` refuses to record an acknowledgement for it. Another system: `position_unverified`, cleared only by a declared restore. | No position witness exists. An acknowledgement is the operator's assertion that the promotion lost nothing; operations whose witnesses were not written are not checked by it. | `live_spicedb_the_position_witness_refuses_a_rolled_back_database`, `the_position_witness_detects_regressions_and_unverified_timelines` |
+| Restore to before the latest declared restore | The configured epoch (`epoch_mismatch`); with the configuration rolled back too, a position witness of the later epoch (`position_regressed`); without one, a marker or journal witness of the later incarnation (`unknown_incarnation`, `journal_ahead`). | The configuration was rolled back and no position witness, marker or journal witness of a later incarnation was written. | `live_spicedb_a_restore_to_before_a_transition_is_refused` |
+| A journal witness of an incarnation the journal never held, on a reopened scope | `journal_ahead`: a reopen explains only a witness of an incarnation the journal held. | — | `live_spicedb_a_journal_witness_of_an_unknown_incarnation_closes_a_reopened_scope` |
+| SpiceDB empty or another deployment's, PostgreSQL intact | Scopes admit and SpiceDB holds no marker or room witness of a lifecycle the store holds, and no position witness, latch or witnessed epoch of this authority (it may hold another deployment's markers): `projection_absent`. Nothing is closed; the refusal clears when the replica reaches the right SpiceDB. While no scope admits the pass passes, and writes no position witness into such a SpiceDB. Reconciliation writes no first projection while a scope admits or was ever projected and SpiceDB holds no position witness, latch or witnessed epoch of this authority and no marker of the first 16 such scopes, those that admit first (`restore::projection_absent`, which errs towards refusing and gives up as busy after 20 s), so the refusal is not cleared by a marker written into the wrong SpiceDB, and after a declared restore closed every scope a restored scope is not projected into a SpiceDB that holds none of the journal witnesses showing what the restore lost. Journal witnesses do not count: a committed mutation writes them wherever its replica points. | — | `live_spicedb_a_spicedb_without_the_projection_refuses_without_closing`, `live_spicedb_another_deployments_spicedb_gets_no_position_witness`, `live_spicedb_no_first_projection_is_written_into_a_spicedb_without_the_authority`, `live_spicedb_no_restored_scope_is_projected_into_a_spicedb_without_the_authority` |
+| Position witness or latch that cannot be read, or witnessed epoch that cannot be read with neither of them readable beside it; latch without its position witness | `position_unverified`. Nothing removes them without a declared restore: the first pass under a declared epoch above the witnessed epoch (or above the epoch of the latch or witness that can be read) removes all three, each in a request conditioned on the resource that shows the earlier epoch, which goes last, and only when none that can be read shows the declared epoch or a later one; the pass that follows writes the first witness of the declared epoch. The removal request names one authority's position witness, latch and witnessed epoch only, and the permission backend refuses any other resource. A latch without its witness is cleared the same way once a restore was declared since its witness. Writers leave an unreadable witness or latch alone; an unreadable journal witness is counted and warned about like a failed write. An unreadable witnessed epoch beside a readable witness or latch, which carry their own epoch, is not refused, and the next move of the position witness replaces it (removing it first when it holds more than one relationship). | None of the three shows an epoch (the position witness unreadable, the witnessed epoch missing or unreadable, no readable latch): the refusal outlives the declared restore, and the operator removes the three resources by hand after declaring it (runbook). One that can be read shows the declared epoch: a further declared restore is needed. | `live_spicedb_a_latch_survives_a_failed_write_and_unreadable_witnesses_need_a_restore`, `live_spicedb_unreadable_witnesses_beside_one_of_the_declared_epoch_are_kept`, `live_spicedb_an_unreadable_epoch_beside_a_readable_witness_is_replaced` |
+| SpiceDB lost markers, PostgreSQL intact | Beside this authority's position witness or other markers, an admitting scope without a marker is `fenced` (`marker_missing`); it is not marked as having lost operations. | — | `live_spicedb_a_scope_that_admits_without_a_marker_is_closed`, `live_spicedb_a_spicedb_without_the_projection_refuses_without_closing` |
+| SpiceDB restored to an older point, PostgreSQL intact | Nothing to catch: a marker of an incarnation the journal holds, an older journal witness and an older position witness are SpiceDB being behind; the witnesses move forward. | — | `live_spicedb_a_projection_older_than_the_database_closes_nothing` |
+| PostgreSQL and SpiceDB restored together | The witnesses that survive, as in the rows above. | Both stores went back to points that agree: nothing detects it. The operator procedure (declare, reconstruct, review, reopen) is the control. | untested |
+
+The position read under the restricted runtime profile is
+`the_runtime_role_reads_the_host_grant_position_on_its_attested_pool` in
+`tests/restricted_runtime_startup.rs`.
+
+A database that holds no scope, beside a projection that names none, has no
+authority a restore could reopen. The fence and the owner phase do not
+refuse it for its lineage or epoch, and the owner phase binds its new
+lineage.
+
+### Declaring a restore
+
+The owner phase (`prepare_restricted_runtime_owner`, after the migrations and
+before the runtime grants) calls `HostGrantStore::prepare_restore_incarnation`
+with the configured epoch.
+
+- Configured epoch below the recorded one: refused (`epoch_mismatch`),
+  nothing changed.
+- Equal: the lineage is bound if it is not yet (the first owner phase after
+  migration 2002). A database that holds a scope and whose lineage differs
+  from the bound one is refused (`lineage_changed`). A transition an earlier
+  run did not finish is finished (`Resumed`).
+- Above: a restore transition. One transaction takes the authority row
+  `FOR UPDATE`, mints a new incarnation and records it with the epoch and
+  the live lineage, and clears any position acknowledgement. From that
+  commit no scope bound to the earlier incarnation admits, mutates or
+  activates. Then transactions of at most `RESTORE_TRANSITION_BATCH` (256)
+  scopes each take the scope state rows `FOR UPDATE` in lifecycle order and
+  bind every scope that is not retired or exhausted, whatever else it was
+  (`fenced` and `reconstructed` included), to the new incarnation at its
+  next generation under a `restore` operation, closed as `restored`; one
+  with no generation left is closed as exhausted. Retired and exhausted
+  scopes keep their incarnation.
+
+The transition keeps the recorded affiliations and lowers every effective
+standing above `none` to `none`: no standing the restored rows hold
+authorizes an initiator, a revoke included, until the scope is reopened.
+Activation of the reconstructed projection makes the recorded grants
+effective again. A transition is resumable rather than one transaction, so
+its cost per transaction is bounded; while it is unfinished, the scopes it
+has not reached are bound to an incarnation that is no longer current, which
+admission, mutation and activation already refuse.
+
+Locking the authority row needs `UPDATE` on it, which the runtime role does
+not hold (B1's grant matrix is unchanged), so a runtime handle is refused
+with `OwnerPhaseRequired` at the first statement.
+
+### The fence a replica passes
+
+`HostGrantAttachment::verify` checks the runtime role's privileges and then
+runs `verify_restore_fence`; a replica's acceptances admit a managed room
+only through the attachment it produces. The fence is bound to the
+attachment: a pass reads the authority binding in its first snapshot, then
+every marker and witness (one streamed, fully consistent read with its own
+60 s deadline), then every scope the store holds (one statement), then the
+PostgreSQL position and the evidence of each scope SpiceDB names, and
+finally the binding again. The attachment is built only from a pass whose
+two bindings are equal; otherwise the pass is repeated (three times, then
+`authority_moved`). The binding is the incarnation, the epoch, the
+PostgreSQL server's start (`pg_postmaster_start_time()`), the OID and name
+of the current database, and the OID of the authority relation, which a
+logical restore that recreates the relations changes without a restart. The
+PostgreSQL reads and fence closures of a pass draw on one budget of 60 s
+plus 100 ms for each scope it compares, which the SpiceDB read does not
+draw on; a step that overruns it is `busy` and the pass is retried.
+
+From the listing and the store's scopes the pass first takes the
+lifecycles SpiceDB names that the store does not hold (lost enrollments)
+and the rooms their room witnesses name, and publishes that set to the
+replica's gate before it decides anything about the whole authority. An
+acceptance for such a room, which the store reports as unmanaged, is
+refused with `service-unavailable` whether or not the replica is attached.
+Other rooms are unaffected. Until a replica's first pass has read the set,
+its gate reads the witness of each unmanaged room an acceptance names
+(500 ms; a witness is remembered, its absence for 60 s); after a read that
+fails it serves such rooms as unmanaged without asking for a minute. Once a
+pass has read the set, the replica refuses exactly that set until its next
+pass that reads SpiceDB: a lost enrollment under a running replica is
+refused from that pass on (see the table above).
+
+What the fence refuses is the whole authority, and only when the evidence
+concerns the whole authority: `lineage_changed`, `epoch_mismatch`,
+`projection_absent`, `position_regressed`, `position_unverified`,
+`position_unreadable` and `authority_moved`.
+
+- `projection_absent`: scopes admit, so their markers were written, and
+  SpiceDB holds no marker or room witness of a lifecycle the store holds
+  and no position witness, latch or witnessed epoch of this authority (it
+  may hold another deployment's markers). The replica is connected to a
+  SpiceDB that is empty or another deployment's; nothing is closed, no
+  position witness is written into it, and the refusal clears when it
+  reaches the right one. A journal witness does not count: a committed
+  mutation writes it into whatever SpiceDB its replica reaches.
+- The position: see [Where the incarnation lives](#where-the-incarnation-lives-g13)
+  and [Witness writers](#witness-writers). A regression the pass sees is
+  latched in memory at once and written to SpiceDB beside the exact
+  witness it names, in one conditioned request; the in-memory latch counts
+  like a stored one naming the same witness, and every later pass writes
+  it again until SpiceDB takes it; each way the write fails (an error, a
+  failed condition, no projection backend) is counted. A latch without its
+  position witness is `position_unverified`, kept, until a restore is
+  declared since the witness it names. A position witness, latch or
+  witnessed epoch that cannot be read is `position_unverified` until a
+  restore is declared since; the first pass that finds the declared epoch
+  above the witnessed one removes them (see the table above).
+
+Evidence about one scope closes that scope and nothing else:
+
+- a marker of the scope's own incarnation the journal does not record
+  (`projection_ahead`), a marker of an incarnation the scope's journal never
+  held (`unknown_incarnation`), or a journal witness the journal does not
+  record (`journal_ahead`) closes it as `fenced` and marks it as one a
+  restore lost operations in. A journal witness of another incarnation is
+  explained while a restore is handled, and once a declared restore that
+  superseded an incarnation the journal held was reopened under the
+  current one;
+- a scope that admitted when the pass began and has no marker
+  (`marker_missing`), when SpiceDB holds a marker or room witness of a
+  lifecycle the store holds or this authority's position witness, latch or
+  witnessed epoch, is closed as `fenced`: a marker is written before an
+  activation and only ever replaced.
+
+A marker of an earlier incarnation the journal holds is SpiceDB being older
+than PostgreSQL; it closes nothing, and reconciliation reports it. A scope
+closed for a restore (`restored`, `reconstructed`) accepts a marker or
+witness of another incarnation, which reconstruction and the reopen
+replace. Malformed markers and witnesses are not evidence; reconciliation
+reports a malformed marker, and a malformed position witness, latch or
+witnessed epoch refuses the authority as `position_unverified` until a
+declared restore removes it. The canonical state is
+always read after what SpiceDB holds, so an operation another replica
+recorded and projected meanwhile is found in the journal, and a scope is
+closed only after the evidence is compared again under its guard.
+
+A `fenced` closure is recorded like any mutation: the runtime role locks
+the scope's state row, records a `fence` operation at the next generation,
+closes the scope and lowers its effective standing to `none` at most. A
+fenced scope is not projected again and takes no mutation but an
+operator's revoke, so the evidence in SpiceDB stays as it was; it reopens
+only through a declared restore. Reconciliation closes a scope on the same
+evidence when it finds it: `AheadOfCanonical`, `UnknownMarker`, and a
+`ForeignIncarnation` the journal never held. This changes the first
+slice's rule that a contradiction never closes a scope, for these three.
+
+The server starts whatever the fence finds. A failing scope stays closed
+and its rooms refuse; a replica whose fence refuses the authority, or fails
+on something a later attempt may pass (a statement, a bound, SpiceDB not
+answering), holds no attachment, refuses every managed room, and keeps
+trying in the background with a capped backoff (1 s to 60 s). Only a
+runtime role that does not match the profile stops the attempts.
+
+#### Re-verifying in place
+
+Every acceptance for a managed room compares the binding it reads, under the
+scope's guard, with its attachment's. On any difference it is refused
+(`AdmissionDenial::AuthorityChanged`: `service-unavailable`, type `cancel`,
+a committed denial) and the replica's `HostGrantAttachmentGate` starts one
+verification (single-flight): it runs the fence, which reads the binding
+before and after, and swaps the attachment for the one the fence produced.
+Until then every managed room is refused, and while it fails the gate keeps
+retrying with the same backoff. A PostgreSQL restart or failover therefore
+costs a refused acceptance per replica and one fence pass, not a replica
+restart.
+
+A restore that rewrites the rows in place, with neither a restart nor a new
+relation, changes nothing a binding holds. An attached gate therefore also
+runs the fence about every five minutes (`REVERIFY_INTERVAL`, plus up to a
+tenth of it at random so that replicas do not pass together): scope
+evidence closes the scope in PostgreSQL, where every replica's acceptances
+read it; a refusal of the whole authority, or a runtime role that no longer
+matches the profile, drops the attachment; a pass that cannot complete
+keeps it, up to three in a row (`MAX_INCOMPLETE_PASSES`), after which it is
+dropped and the gate keeps verifying. The window of such a restore is the
+interval. A gate that holds no attachment and runs no verification (one
+that stopped on a runtime role that does not match the profile, which no
+backoff retries) verifies again at the same interval, so grants the owner
+phase corrects attach the replica without a restart.
+
+Readiness (`HostGrantAttachmentGate::readiness`, rendered by the readiness handler)
+is never coupled to SpiceDB or to a failure every replica shares: failing
+it for such a failure would take every replica out of the endpoint set, and
+the rooms no scope manages with them, while managed rooms are refused
+either way. It returns HTTP 503 for one cause only, while an unretired
+scope is enrolled (or that cannot be read): this replica's configured epoch
+is below the recorded one (`configuration_predates_restore`), a
+configuration of this replica alone that predates a declared restore and
+that only a restart with the declared epoch corrects.
+
+Every other failure keeps the replica ready, refuses managed rooms, logs an
+error by kind at most once a minute and sets the
+`waddle.host_grant.authority.unverified` gauge (1 while an unretired scope
+is enrolled and the replica holds no verified attachment); the readiness
+body names it in `host_grants`:
+
+- a refusal of the whole authority (a failover the position witness cannot
+  verify, a latched regression, an adopted lineage, `projection_absent`, an
+  unreadable position witness): `unverified`;
+- a configured epoch above the recorded one, which the owner phase that
+  declares the restore clears, and which every replica of a rollout ahead
+  of the owner phase shares (`configuration_ahead_of_restore`);
+- a runtime role that does not match the profile, or a store that cannot be
+  read as the profile requires (`runtime_profile_mismatch`): usually the
+  owner phase's grant matrix, shared by every replica; the periodic pass
+  verifies again;
+- three verifications in a row (`MAX_INCOMPLETE_PASSES`) that could not
+  complete, the first at least 30 s earlier (`INCOMPLETE_READINESS_GRACE`):
+  `spicedb_unreachable` when the last one failed on SpiceDB, otherwise
+  `fence_incomplete`. Each verification that does not complete is counted
+  once; attached, the third periodic pass drops the attachment. A replica
+  whose configuration predates the declared restore stays not ready through
+  them: only a verification that reaches the epoch shows it corrected.
+
+A failure that is one replica's alone (its runtime role, or its own
+network path to SpiceDB or PostgreSQL) keeps that replica ready as well:
+it stays in the endpoint set and refuses every managed room while its
+peers serve them. The gauge, which is 1 on that replica only, and its error
+log are the signal.
+
+A restarted replica refuses managed rooms the same way until the cause is
+resolved. A verification that completes, passed or refused for the whole
+authority, clears the cause. A replica without a verified attachment in a
+deployment with no unretired scope reports `"host_grants": "unmanaged"`; a
+verified one reports no `host_grants` field. The alert is the gauge and the
+error log, not readiness.
+
+Re-verification in place is a precondition for enrolling the first scope.
+
+### Witness writers
+
+Each writer reads the witnesses first and the canonical state second,
+writes conditioned on the exact witnesses it read, and on a failed
+precondition reads both again (three attempts). They only move a witness
+forward:
+
+- the journal witness moves to the journal's latest operation when the
+  journal records the witness at an older generation; a witness the journal
+  does not record is kept, except that once a declared restore superseded
+  its incarnation, which the journal held, and an operator reopened the
+  scope under the new one, it is replaced. Reconstruction moves it with the
+  takeover (below);
+- the position witness moves when the position advanced on the witnessed
+  system and timeline, when a declared restore raised the epoch since, or
+  when an acknowledgement applies; such a move removes the latch it read
+  in the same request, or, when it read none, is conditioned on there
+  being none, and records the witnessed epoch. Every writer reads the
+  latch: a stored latch that names the witness, or a latch without a
+  witness, stops every move but the replacement a declared restore makes
+  and an acknowledgement bound to an on-timeline latch, so `host-grant`
+  never moves the witness past a latched or regressed position (it says
+  so). A regression is latched, conditioned on the exact witness it names;
+  otherwise a regressed or unverified position is kept as it is. Only a
+  pass that passed and found a marker or room witness of a lifecycle the
+  store holds, or a position witness, latch or witnessed epoch of this
+  authority, writes the first position witness: a mutation's writer never
+  does, so a SpiceDB that holds nothing of this deployment's is not given
+  one (`projection_absent` stays decidable). A writer leaves a witness it
+  cannot read alone; an unreadable journal or position witness is counted
+  and warned about like a failed write.
+
+`HostGrantAuthority` spawns both writers after every mutation it commits
+(enrollment, affiliation change, retirement, reconstruction, fence
+closure). After every pass that passes, the gate brings the position
+witness up to date and every journal witness that differs from its
+scope's journal head, retired and exhausted scopes included, one pass at a
+time; a deployment whose witnesses are current costs one statement. The
+owner phase holds no SpiceDB credential: its acts (a transition, an
+enrollment, a retirement, a reopen, an operator revoke, an acknowledgement)
+are witnessed by the next pass that passes, or at once by
+`waddle-server host-grant` when the servers' SpiceDB is in its environment.
+Writes that fail are counted (`waddle.host_grant.witness.write_failures`)
+and logged by kind at most once a minute.
+
+An acknowledgement (`host_grant_authority.position_acknowledgement`,
+`<witness stamp>/<system>_<timeline>`) names the exact witness it
+supersedes and the system and timeline the server wrote on when it was
+recorded. It applies only while that witness is the current one and the
+server writes on that system and timeline, and only for a later timeline of
+the witnessed system whose position is not below the witness, or for a
+regression on the witnessed timeline. It never applies to a regression
+across timelines or to another system. That binding is what consumes it:
+once applied the witness has moved, and the acknowledgement names one that
+no longer exists, also when a restore of the database brings it back.
+`host-grant` removes it once it applied it, and a declared restore clears
+it. The one exception: an acknowledgement still in the row is honoured
+again if SpiceDB once more holds exactly the witness it names (SpiceDB
+restored to before it was applied, or rewritten by a holder of its key),
+and then only for the same system and timeline.
+
+The runtime role reads the position with `pg_current_wal_flush_lsn()` and
+`pg_walfile_name()`, which PostgreSQL grants to every role and the
+provisioning leaves in place, and on the attested pool takes the system
+identifier from the attested identity. A deployment that revoked the two
+WAL functions is refused `position_unreadable` and grants `EXECUTE` on them
+(never on `pg_control_system()`, which the attestor requires the runtime
+role not to hold). The timeline history, which would tell where a new
+timeline branched, needs `pg_read_server_files` and is not read; a timeline
+change is therefore unverified rather than decided. The flushed position is
+read rather than the written one, so a crash that loses WAL never flushed
+is not a regression; a failover to a standby that had not received WAL the
+primary had flushed is a regression across timelines, which only a
+declared restore clears.
+
+### Invalidating old credentials and work
+
+- **Commands.** The transition advances every restored scope's generation,
+  so a command decided before it is refused as stale. The exact retry of an
+  operation the restore lost carries its old expected generation and is
+  refused too; it is not re-applied.
+- **Initiators.** While a scope is `restored`, `reconstructed` or `fenced`,
+  no initiator's standing is honoured, whatever the grant rows hold; the
+  transition and the fence also lower the effective standings to `none`.
+  Only an operator's revoke changes such a scope.
+- **Activations and witnesses.** Activation compares the incarnation and
+  the generation under the guard, so an activation prepared before the
+  transition is superseded. An admission witness is valid only inside its
+  transaction.
+- **Projection passes.** A pass that read its plan before the transition
+  writes only conditioned on the exact marker it saw, and its activation is
+  superseded. Only a `RestoredPlan`, which the store alone produces and only
+  for a `restored` scope, may take a projection over from another
+  incarnation; the type is what the takeover message carries.
+- **Replicas.** A replica attached before the transition, or to another
+  server start or database, admits nothing until it has verified the fence
+  again. A replica configured with an earlier epoch does not attach. A
+  binary built before migration 2002 refuses the ledger.
+- **Accepted children.** The ingress acceptance contract is unchanged:
+  children accepted before the restore point are in the restored database
+  and replay as accepted; those accepted after it are gone with it.
+- **Credentials.** Not enforced by the server. A physical restore brings
+  back the roles with their old passwords; the runbook stops every server
+  before the restore, rotates the runtime login's password before any server
+  starts, and rotates the SpiceDB key where a holder may survive.
+
+### Verified reconstruction (G15, part)
+
+A restored scope is reconstructed only by reconciliation
+(`HostGrantAuthority::reconcile`, and `recover_pending`, which pages through
+`restored` and `reconstructed` scopes like other pending ones). No
+production caller runs either yet, as for every activation in the first
+slice; a restored scope therefore stays closed until the slice that
+integrates the authority runs them.
+
+When the scope's marker was written under another incarnation, the pass:
+
+1. refuses a projection family that holds a relationship the projection
+   never writes, or more rows than a scope holds (`MalformedFamily`);
+2. decides whether the restored database lost operations: it did when the
+   journal does not record the marker exactly, or does not record the
+   scope's journal witness;
+3. records, as one operation of kind `reconstruct` at the next generation
+   (`restore::reconstruction_targets`): every subject the projection holds
+   that no canonical row names, at `outcast` if the projection bans it and
+   at `none` otherwise; and, only when operations were lost, every canonical
+   grant lowered to what the projection holds for its subject, `none` where
+   it holds nothing. Nothing is raised, in the affiliation or in what
+   admission honours: lowering an owner or admin grant of an account this
+   deployment does not serve (honoured as none) to the projection's
+   `member` is recorded at `none`. An affiliation issuance refuses for its
+   subject is recorded no higher than `none`;
+4. if operations were lost, the operation of step 3 also marks the scope as
+   one a restore lost operations in (`host_grant_scopes.lost_operations`),
+   and is recorded even when no grant changes, unless the scope holds the
+   mark already (every mark is set by the operation that recorded it, at or
+   before the current generation, so a database that holds the current
+   operation holds the mark). The projection written next names that
+   operation, which a database restored to before the mark cannot hold: a
+   later pass over such a database finds the marker unrecorded or ahead of
+   its journal and marks or fences the scope again. A journal witness that
+   cannot be read (more than one relationship, or a stamp that is not a
+   canonical one) is treated as showing a loss: the mark is recorded and
+   the pass stops (`MalformedJournalWitness`), leaving the witness and the
+   projection as they are, until an operator removes the witness. Then the
+   pass takes the projection over: one `WriteRelationships` request that states
+   the whole affiliation family of every canonical row, the room witnesses,
+   deletes the old marker and touches the new one, conditioned on the exact
+   old marker, and moves the journal witness from exactly what step 2 read
+   to the current operation.
+   What the witness showed lost is recorded by then; a witness of an
+   incarnation the journal never held is not left to close the scope after
+   it is reopened. A failed precondition stops the pass;
+5. reads the projection back, compares it exactly with the canonical rows
+   and activates the exact operation: the grants become effective and the
+   scope is `reconstructed`, still closed.
+
+A reconstructed scope admits again only after an operator reopens it
+(`waddle-server host-grant reopen`): the operator's acknowledgement of the
+restore, made after reviewing what the witnesses show it lost. A reopen
+requires the scope's latest operation to be verified and activated; it
+records a `reopen` operation at the next generation and opens the scope,
+whose projection follows with the next pass. A scope marked as one the
+restore lost operations in is reopened only by name, with the operator's
+confirmation that what was lost has been applied again
+(`--lost-operations-reapplied`); the reopen clears the mark. Mutations
+recorded while it is `reconstructed` (an operator's revoke) are projected
+and activated without opening it.
+
+A marker missing after an activation (`MarkerMissing`) or malformed leaves
+the scope closed: without a projection there is no witness, and
+missing-marker initialization is allowed only in a fresh namespace. A
+restored scope that was never projected is projected into its fresh
+namespace as at enrollment, with what a takeover adds: the pass reads the
+journal witness first, marks the scope as one the restore lost operations
+in when the journal does not record it (nothing was projected to lower the
+grants to, so the operator re-applies what was lost before the reopen by
+name) under a `reconstruct` operation that the projection then names, as in
+step 4, and moves the witness to the current operation in the same request
+as the projection. A failed condition there is a contradiction
+(`NamespaceNotFresh`) when the scope's rooms hold relationships, and
+`Superseded` otherwise. No first projection, of a restored scope or of a
+newly enrolled one, is written while a scope admits or was ever projected
+and SpiceDB holds nothing of this authority (`projection_absent`).
+
+Bounds. A scope holds at most 8 rooms and 200 grant rows. An observation is
+at most 33 reads within 20 s; the `reconstruct` operation records at most
+200 rows in one store transaction; the takeover is one request of at most
+812 updates (802, 8 room witnesses and the journal witness's two). A
+reconstruction whose rows would exceed 200 is refused before anything is
+recorded (`ReconstructionTooLarge`) and the scope stays closed. Each scope
+is reconstructed independently, and a scope that cannot progress is visited
+once per recovery pass without holding back another. A fence pass reads
+every marker and witness in one bounded stream (at most one marker, one
+journal witness and eight room witnesses per enrolled scope, and one
+position witness and one latch), every scope in one statement, and up to
+four PostgreSQL snapshots per scope SpiceDB names; its budget grows with
+the number of scopes it compares.
+
+Declaring a restore is also how an operator has a scope whose projection
+contradicts it with a well-formed marker rebuilt: the scope closes and is
+reconstructed. Other repair of a contradiction is not decided.
+
+### Operator acts
+
+`waddle-server host-grant`, as the migrator login with the owner phase's
+environment, records an operator's act in one or more short transactions
+and can run while the servers run. With the servers' SpiceDB in its
+environment (`WADDLE_SPICEDB_ENDPOINT`, `WADDLE_SPICEDB_PRESHARED_KEY`) it
+writes the act's witnesses at once; without it, the next pass that passes
+does.
+
+- `reopen [--scope <lifecycle> [--lost-operations-reapplied]]` reopens
+  reconstructed scopes whose latest operation is verified, and reports how
+  many it left closed: not reconstructed, or (without the confirmation)
+  marked as having lost operations;
+- `acknowledge-position [--witnessed <stamp>]` records an acknowledgement
+  of that position witness for the system and timeline the server writes
+  on; without `--witnessed` it reads the witness from SpiceDB. One that
+  could never apply (another system, a witness of a later timeline, or of
+  an earlier timeline whose position the server's timeline is below) is
+  refused. With SpiceDB it applies it at once and removes it, and says why
+  when it did not;
+- `revoke --scope --room --subject [--ban] --operation-id --account-domain`
+  records an operator's revoke or ban, with no initiator, in any scope that
+  is not retired or exhausted, closed ones included. It never raises (a
+  banned account stays banned), keeps a recorded owner of a served account
+  in the room (`LastOwner`), takes effect at its commit, and is replayed
+  under its operation identity. It is how a revoke the restore lost, which
+  no witness records the content of, is applied again.
+
+### What stays open
+
+- What a lost operation changed is not recorded outside PostgreSQL: the
+  witnesses show that operations were lost, and reconstruction lowers what
+  the projection shows; a lost revoke that was never projected is applied
+  again by the operator (`revoke`) from what the operator knows, before the
+  reopen. The audit trail of the lost operation is in the lost database.
+- A witness write that had not completed at the restore point records
+  nothing: the residual window is the lag of the asynchronous writers
+  (after a mutation through `HostGrantAuthority`, a task; for an owner-phase
+  act without SpiceDB, until the next pass that passes, up to 330 s with a
+  replica attached and unbounded while every replica's fence refuses), plus
+  the projection lag for what reconstruction can lower.
+- A same-timeline regression is latched only once a pass sees it. A
+  restored server whose flushed position passes the witnessed one before
+  any pass compares them (a crash-consistent snapshot of a busy cluster,
+  say) is not seen as a regression; the scope evidence still applies. A
+  latch the replica holds only in memory, because SpiceDB did not take it,
+  is lost when the replica restarts, and stops counting once a writer that
+  does not hold it moves the witness after the server wrote past it.
+- A lost enrollment whose projection was never written is not detected,
+  and no tool retires a scope the database no longer knows; its rooms are
+  refused while SpiceDB names them. While SpiceDB does not answer and no
+  pass has read the refused rooms, they are served as unmanaged.
+- The refused-room set a replica keeps is the one its last pass that read
+  SpiceDB and the scope table produced; once it exists, single rooms are no
+  longer read from SpiceDB. It is stale both ways until the next such pass
+  (up to 330 s, unbounded while passes fail before that read): a lost
+  enrollment that appears after it was read is served as unmanaged, and a
+  room it lists stays refused after its scope is enrolled again or its
+  witness removed.
+- `projection_absent` is reversible; if the right SpiceDB never comes back
+  the deployment declares a restore, and a scope whose activated projection
+  has no marker stays closed (`MarkerMissing`) with no tool to reopen it.
+  Nor is a first projection written into the replacement SpiceDB, of a
+  restored scope or of a newly enrolled one, while the store holds a scope
+  that was projected: no tool yet seeds a replacement SpiceDB with this
+  authority's witnesses.
+  PostgreSQL and SpiceDB restored together to agreeing points leave no
+  witness; the operator procedure is the control.
+- A promotion is never verified automatically; it needs an operator's
+  acknowledgement or a declared restore. An acknowledgement is the
+  operator's assertion that the promotion lost nothing.
+- Witness writes after a commit are spawned per commit and not coalesced.
+- Credential rotation is operational, not enforced.
+- The attested runtime's pinned catalog profile does not cover the
+  host-grant relations, as in the first slice.
+
+### Restore rollout part (G24)
+
+- Migration 2002 adds to `host_grant_authority` the restore epoch (default
+  `0`), the lineage binding, the fixed `authority_id` and the position
+  acknowledgement; to `host_grant_scopes` the `lost_operations` mark; the
+  `restored`, `reconstructed` and `fenced` closed reasons; the `restore`,
+  `reconstruct`, `fence` and `reopen` operation kinds; and an index on the
+  journal by lifecycle and incarnation. It creates no relation, so B1's
+  grant matrix is unchanged. The owner phase applies it; a server of the
+  previous release refuses the ledger, so the owner phase runs before any
+  server of the release starts. On SQLite it creates nothing.
+- The first owner phase after the migration binds the authority to the
+  database lineage and changes nothing else.
+- `WADDLE_HOST_GRANT_RESTORE_EPOCH` is new and defaults to `0`, the value
+  the migration records. The owner phase and every server must read the
+  same value; with the chart, `config.extraEnv` renders it into the
+  ConfigMap both the owner job and the Deployment read, so no template
+  changes.
+- `waddle-server host-grant` is a new operator subcommand. It reads
+  `WADDLE_SPICEDB_*` when set.
+- A server starts whatever the restore fence finds: the fence runs when the
+  ingress authority attaches, and a refusal leaves managed rooms unavailable
+  on that replica. Readiness fails, while an unretired scope is enrolled,
+  only for a configured epoch below the recorded one; every other
+  host-grant failure keeps the replica ready and raises the error log and
+  the `waddle.host_grant.authority.unverified` gauge.
+- The built-in SpiceDB schema is unchanged; witnesses live in the marker
+  definition.
+- Behavior with no scope enrolled: the fence reads the authority row, lists
+  the projection definition (empty) and reads the scope table (empty); no
+  witness is written; acceptance is unchanged except that, until the first
+  pass has read the refused rooms, an acceptance for an unmanaged room may
+  ask SpiceDB about its room witness. After a lineage adoption of a
+  database without a scope, the owner phase binds the new lineage.
+
+### Running the restore slice's cases
+
+`tests/host_grant_restore.rs`, from `server/`, with the environment of the
+[first slice's focused set](#running-the-first-slices-focused-set),
+`WADDLE_TEST_REQUIRE_POSTGRES=1` included so that a case fails rather than
+skips without PostgreSQL, and a SpiceDB endpoint of the run's own:
+
+```sh
+cargo nextest run -p waddle-server --features test-support --locked \
+    --run-ignored all -E 'binary(host_grant_restore)'
+```
+
+The cases without a `live_spicedb_` prefix need PostgreSQL only; the
+`live_spicedb_` cases need both stores, run in the `spicedb-live` group and
+empty SpiceDB before each case, refusing a store that holds a position
+witness no test suite marked (`tests/host_grant_support/live_spicedb.rs`).
+A restore is simulated by copying the host-grant relations into a schema of
+their own and rewriting them from it in one transaction. PostgreSQL is not
+restarted and its WAL position does not go back: a changed server start is
+stood in for by an attachment bound to another one, a regressed position
+by a witness written ahead of the server, and a server that has written
+past a latched regression by a witness below the server with its latch.
+The position read under the provisioned restricted profile is in
+`tests/restricted_runtime_startup.rs`.
+
 ## Blocking review ledger
 
 Slice names refer to [the federation plan](../../../docs/planning/federation-2047.md),
@@ -1705,11 +2421,11 @@ evidence.
 | --- | --- | --- | --- |
 | B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation: [recorded](#b1-store-capabilities-and-credential-separation-g11)) and W5c (writer inventory and exclusion: [recorded](#b1-writer-and-reader-exclusion-g11)); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
 | B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part), and W5c's [as well](#b2-policy-for-the-surfaces-this-slice-protects-g14-part). |
-| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences ([recorded](#b3-projection-of-the-writers-this-slice-fences-g15-part)), W5o decides the fenced schema transition and W5r bounded reconstruction. Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
+| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences ([recorded](#b3-projection-of-the-writers-this-slice-fences-g15-part)), W5o decides the fenced schema transition and W5r bounded reconstruction ([recorded](#verified-reconstruction-g15-part)). Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences ([recorded](#b4-lock-order-of-the-surfaces-g12)). |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c ([recorded](#b5-sink-contracts-g16)); W5d's #2056 control is its evidence. |
 | B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |
-| B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r. |
+| B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r ([recorded](#restore-incarnation-decisions), with the limits it leaves open); its evidence runs in verification step 4. |
 
 The coarse fence's availability cost is a non-blocking tradeoff once bounded
 resources and independent progress are proved. Fine-grained fences can follow

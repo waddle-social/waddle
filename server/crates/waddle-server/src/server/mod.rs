@@ -82,6 +82,8 @@ pub(crate) use config::resolve_xmpp_database_url_values;
 #[cfg(feature = "test-support")]
 pub use fixed_account::{seed_fixed_test_account, FixedTestAccountConfig};
 #[cfg(feature = "test-support")]
+pub(crate) use health::attested_readiness_response;
+#[cfg(feature = "test-support")]
 pub(crate) use http::select_mam_storage_for_test;
 #[cfg(feature = "test-support")]
 pub(crate) use http::{

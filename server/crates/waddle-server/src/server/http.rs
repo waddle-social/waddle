@@ -903,101 +903,90 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     Ok(router)
 }
 
-/// The first delay before the host-grant privilege check is repeated after
-/// a failure that may pass on a later attempt; each further failure doubles
-/// it up to [`HOST_GRANT_ATTACH_RETRY_MAX`].
-const HOST_GRANT_ATTACH_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(1);
-const HOST_GRANT_ATTACH_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Let the ingress authority admit rooms that enrolled host-grant scopes
 /// manage, if this replica's runtime role holds exactly the grant store's
-/// privileges.
+/// privileges and the store passes the restore fence for the replica's
+/// configured restore epoch. The attachment binds the authority the fence
+/// verified; an acceptance that reads another one is refused, and makes the
+/// replica's gate verify the fence again in place.
 ///
 /// The first check runs before the WebSocket state exists, so when it
-/// passes no acceptance precedes it. A failure that may pass on a later
-/// attempt (a statement that failed, a lock or statement bound that
-/// expired, bounds that could not be installed) is retried in the
+/// passes no acceptance precedes it. A failure that a later attempt may pass
+/// (a statement that failed, a bound that expired, SpiceDB that did not
+/// answer, a fence refusal an operator can clear) is retried in the
 /// background with a capped exponential backoff until the check passes,
-/// finds that the role does not match the profile, or the replica stops.
-/// A role that does not match the profile leaves the authority unattached.
-/// While it is unattached every acceptance for a managed room is refused
-/// with a committed stanza error, and rooms that no scope manages are
-/// unaffected. SQLite holds no canonical grant store and no enrolled scope,
-/// so there is nothing to attach.
+/// finds that the role does not match the profile, or the replica stops. A
+/// role that does not match the profile is checked again about every
+/// [`REVERIFY_INTERVAL`](crate::permissions::host_grant::REVERIFY_INTERVAL),
+/// so the owner phase's corrected grants attach the replica without a
+/// restart. While the authority is unattached every acceptance for a
+/// managed room is refused with a committed stanza error, and rooms that no
+/// scope manages are unaffected, except the rooms of an enrollment only
+/// SpiceDB holds. Once attached, the gate runs the fence again at the same
+/// interval.
+/// SQLite holds no canonical grant store and no enrolled scope, so there is
+/// nothing to attach.
 async fn attach_host_grant_store(
     ingress: &Arc<IngressAuthority>,
     state: &AppState,
     account_domain: waddle_xmpp::identity::CanonicalDomain,
+    restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     stop: tokio_util::sync::CancellationToken,
 ) {
-    use crate::permissions::host_grant::{HostGrantStore, ServedAccountDomains};
+    use crate::permissions::host_grant::ServedAccountDomains;
+    use crate::permissions::host_grant::{verification_retried, HostGrantStore};
     let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
         return;
     };
-    let served = ServedAccountDomains::new([account_domain]);
-    let gate = state.host_grants.clone();
+    let gate = ingress.host_grant_gate();
+    let _ = state.host_grant_gate.set(Arc::clone(&gate));
+    // Every surface outside manifest acceptance decides managed rooms with
+    // the attachment this gate holds, as the fence verifies, replaces and
+    // drops it.
+    state.host_grants.bind_attachment(Arc::clone(&gate));
     let permissions = state.permission_actor.clone();
-    if !try_attach_host_grant_store(ingress, &gate, &permissions, &store, &served).await {
-        return;
-    }
-    let ingress = Arc::clone(ingress);
-    tokio::spawn(async move {
-        let mut delay = HOST_GRANT_ATTACH_RETRY_INITIAL;
-        loop {
-            tokio::select! {
-                () = stop.cancelled() => return,
-                () = tokio::time::sleep(delay) => {}
-            }
-            if !try_attach_host_grant_store(&ingress, &gate, &permissions, &store, &served).await {
-                return;
-            }
-            delay = delay.saturating_mul(2).min(HOST_GRANT_ATTACH_RETRY_MAX);
+    gate.install_verifier(
+        store.clone(),
+        permissions.clone(),
+        ServedAccountDomains::new([account_domain]),
+        restore_epoch,
+        stop.clone(),
+    );
+    // A failure is logged and counted by the gate.
+    if let Err(error) = gate.verify_once().await {
+        if verification_retried(&error) {
+            gate.verify_in_background();
         }
-    });
+    }
+    gate.watch(crate::permissions::host_grant::REVERIFY_INTERVAL);
+    spawn_host_grant_recovery(gate, store, permissions, stop);
 }
 
-/// One host-grant privilege check. The answer is whether to check again:
-/// only a failure that a later attempt may pass is retried.
-async fn try_attach_host_grant_store(
-    ingress: &IngressAuthority,
-    gate: &crate::permissions::host_grant::HostGrantGate,
-    permissions: &kameo::actor::ActorRef<crate::permissions::PermissionActor>,
-    store: &crate::permissions::host_grant::HostGrantStore,
-    served: &crate::permissions::host_grant::ServedAccountDomains,
-) -> bool {
-    use crate::permissions::host_grant::{HostGrantAttachment, HostGrantError};
-    match HostGrantAttachment::verify(store, served.clone()).await {
-        Ok(attachment) => {
-            // The surfaces outside manifest acceptance decide managed rooms
-            // through the gate; both hold the same verified attachment.
-            gate.attach(attachment.clone());
-            ingress.attach_host_grants(attachment);
-            spawn_host_grant_recovery(store.clone(), permissions.clone());
-            false
-        }
-        Err(error) => {
-            let retrying = matches!(
-                error,
-                HostGrantError::Database(_) | HostGrantError::Busy | HostGrantError::BoundsUnproven
-            );
-            log_unverified_host_grant_store(store, &error, retrying).await;
-            retrying
-        }
-    }
-}
+/// How often recovery looks whether the replica's gate has attached.
+const HOST_GRANT_RECOVERY_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Project and activate every recorded host-grant change whose projection
-/// was not verified before, once this replica is attached to the store: a
-/// change recorded by an administration request whose reconciliation did
-/// not finish (a stopped replica, an unreachable projection) becomes
-/// effective here, or stays recorded and not effective. Outcomes are logged
-/// by kind, without a scope identifier.
+/// was not verified before, once this replica's gate first holds an
+/// attachment (the restore fence passed): a change recorded by an
+/// administration request whose reconciliation did not finish (a stopped
+/// replica, an unreachable projection) becomes effective here, or stays
+/// recorded and not effective, and a scope a declared restore closed is
+/// reconstructed. Nothing is projected while the fence refuses the
+/// authority. Outcomes are logged by kind, without a scope identifier.
 fn spawn_host_grant_recovery(
+    gate: Arc<crate::permissions::host_grant::HostGrantAttachmentGate>,
     store: crate::permissions::host_grant::HostGrantStore,
     permissions: kameo::actor::ActorRef<crate::permissions::PermissionActor>,
+    stop: tokio_util::sync::CancellationToken,
 ) {
     use crate::permissions::host_grant::{HostGrantAuthority, IssuancePolicy, Reconciliation};
     tokio::spawn(async move {
+        while !gate.verified() {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(HOST_GRANT_RECOVERY_POLL) => {}
+            }
+        }
         // Recovery projects recorded intent only; it issues nothing, so it
         // needs no issuance policy.
         let authority = HostGrantAuthority::new(store, permissions, IssuancePolicy::default());
@@ -1025,34 +1014,6 @@ fn spawn_host_grant_recovery(
             }
         }
     });
-}
-
-/// Log a failed host-grant privilege check by its kind only. The failure
-/// is an error when an unretired scope is enrolled, which this replica
-/// cannot serve, or when that cannot be read; otherwise the replica loses
-/// nothing by it and it is logged as information.
-async fn log_unverified_host_grant_store(
-    store: &crate::permissions::host_grant::HostGrantStore,
-    error: &crate::permissions::host_grant::HostGrantError,
-    retrying: bool,
-) {
-    const UNVERIFIED: &str = "The runtime role's privileges on the host-grant store are not \
-                              verified; rooms of enrolled scopes are unavailable on this replica";
-    match store.holds_unretired_scope().await {
-        Ok(false) => info!(kind = error.kind(), retrying, "{UNVERIFIED}"),
-        Ok(true) => tracing::error!(
-            kind = error.kind(),
-            retrying,
-            unretired_scope = true,
-            "{UNVERIFIED}"
-        ),
-        Err(probe) => tracing::error!(
-            kind = error.kind(),
-            retrying,
-            probe_kind = probe.kind(),
-            "{UNVERIFIED}"
-        ),
-    }
 }
 
 async fn open_ingress_authority(
@@ -1803,6 +1764,7 @@ async fn create_websocket_state(
         &ingress,
         &state,
         account_domain.clone(),
+        server_config.host_grant_restore_epoch,
         shutdown_handle.stop_token(),
     )
     .await;

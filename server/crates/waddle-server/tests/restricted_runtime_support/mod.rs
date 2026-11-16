@@ -504,6 +504,7 @@ impl Provisioned {
             runtime: role(&roles.runtime),
             attestation_definer: role(&roles.definer),
             vapid_root_key: SESSION_KEY.as_bytes().to_vec(),
+            host_grant_restore_epoch: waddle_server::permissions::host_grant::RestoreEpoch::INITIAL,
             #[cfg(feature = "clustering")]
             clustering: None,
         };

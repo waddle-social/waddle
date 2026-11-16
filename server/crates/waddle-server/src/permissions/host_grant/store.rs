@@ -17,10 +17,18 @@
 //! Enrollment and retirement are owner-phase operations. Both write the
 //! lifecycle ledger, which the runtime role may only read, so PostgreSQL
 //! refuses either on a runtime handle and the store reports
-//! [`HostGrantError::OwnerPhaseRequired`].
+//! [`HostGrantError::OwnerPhaseRequired`]. So is a restore transition, which
+//! changes the authority incarnation: the owner phase's first transaction
+//! takes the authority row `FOR UPDATE` and replaces the incarnation, and
+//! each later one takes a batch of scope state rows `FOR UPDATE` in
+//! lifecycle order and closes them (see `restore`). An operator's reopen,
+//! position acknowledgement and revoke are owner-phase acts too; the
+//! runtime role may close a scope on fence evidence, which takes the
+//! scope's state row like any mutation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -39,8 +47,15 @@ use super::model::{
 };
 use super::policy::{grant_allows, honoured_affiliation, initiator_may_change, HostGrantAction};
 use super::projection::{projection_digest, ProjectedGrant, ProjectionIntent, ProjectionPlan};
+use super::restore::{
+    fence_fingerprint, reopen_fingerprint, restore_fingerprint, AuthorityBinding, FenceEvidence,
+    OperatorRevoke, ReconstructScope, ReopenReport, ReopenSelection, RestoreDeclaration,
+    RestoreEpoch, RestoreFenceRefusal,
+};
+use super::witness::{PositionAcknowledgement, PositionWitness, PostgresPosition};
+use crate::db::lineage::PgSystemIdentifier;
 use crate::db::read_only_timeout::{bound_postgres_waits, ReadOnlyTimeoutError};
-use crate::db::{Database, DatabaseDriver, Row, Transaction};
+use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use crate::ingress_substrate::{
     begin_guarded_store_writer, set_local_transaction_timeouts, EnteredTransaction,
 };
@@ -52,6 +67,8 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most scopes one page of a recovery pass lists.
 const PENDING_SCOPE_PAGE: i64 = 256;
+/// Most scopes one transaction of a restore transition closes.
+pub const RESTORE_TRANSITION_BATCH: usize = 256;
 /// Longest the lookup behind a legacy permission write waits for a lock, and
 /// longest it runs. The lookup reads one indexed row and takes no row lock;
 /// the bounds keep a stalled database from holding the permission actor. A
@@ -61,7 +78,7 @@ const ENROLLED_LOOKUP_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const ENROLLED_LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const SCOPE_COLUMNS: &str = "lifecycle_id, authority_incarnation, policy_version, generation, \
-     operation_id, projected_generation, admission_state, closed_reason";
+     operation_id, projected_generation, admission_state, closed_reason, lost_operations";
 const GRANT_COLUMNS: &str = "room_jid, subject_jid, affiliation, effective_affiliation, \
      changed_generation, operation_id, issuance_basis";
 const OPERATION_COLUMNS: &str =
@@ -120,6 +137,52 @@ pub enum Activation {
     AlreadyActive,
     /// Another operation has been recorded since. Nothing was activated.
     Superseded,
+    /// The exact operation of a scope a restore transition closed was still
+    /// current: its grants are now effective, and the scope stays closed as
+    /// `reconstructed` until an operator reopens it.
+    Reconstructed,
+}
+
+/// What one pass of the restore fence reads from the canonical store before
+/// it reads SpiceDB, in one snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FenceSnapshot {
+    pub(crate) binding: AuthorityBinding,
+    /// The fixed identity the position witness is filed under.
+    pub(crate) authority_id: String,
+    /// The database lineage the incarnation is bound to, once the owner
+    /// phase has bound it.
+    pub(crate) bound_lineage: Option<String>,
+    /// The database's own lineage, if it records one.
+    pub(crate) live_lineage: Option<String>,
+    /// Whether any scope is enrolled, retired or not.
+    pub(crate) holds_scope: bool,
+    /// The scopes that admit, in lifecycle order.
+    pub(crate) admitting: Vec<ScopeLifecycleId>,
+    /// Scopes closed as `restored`.
+    pub(crate) restored: usize,
+    /// Scopes closed as `reconstructed`.
+    pub(crate) reconstructed: usize,
+    /// The position witness an operator acknowledged, and for which
+    /// system and timeline.
+    pub(crate) position_acknowledgement: Option<PositionAcknowledgement>,
+}
+
+/// What a position witness is filed and compared under.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PositionAuthority {
+    pub(crate) authority_id: String,
+    pub(crate) restore_epoch: RestoreEpoch,
+    pub(crate) position_acknowledgement: Option<PositionAcknowledgement>,
+}
+
+/// A scope's latest recorded operation, as a journal witness states it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JournalHead {
+    pub(crate) marker: ProjectionMarker,
+    /// Whether an operator reopened the scope under the operation's
+    /// incarnation.
+    pub(crate) reopened: bool,
 }
 
 /// The canonical grant store of enrolled scopes.
@@ -239,6 +302,489 @@ impl HostGrantStore {
         Ok(incarnation)
     }
 
+    /// The current incarnation, the restore epoch it was established under,
+    /// the start of the PostgreSQL server that answered and the database it
+    /// answered for, read in one snapshot. A replica's attachment keeps it,
+    /// and every acceptance the replica makes compares it with what it
+    /// reads.
+    pub async fn authority_binding(&self) -> Result<AuthorityBinding, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let binding = load_binding(&mut tx, "host_grant_authority").await?;
+        tx.rollback().await?;
+        Ok(binding)
+    }
+
+    /// What one pass of the restore fence reads before SpiceDB, in one
+    /// snapshot. A database without the host-grant relations has no
+    /// authority to fence.
+    pub(crate) async fn fence_snapshot(&self) -> Result<Option<FenceSnapshot>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        if !query_flag(
+            &mut tx,
+            "SELECT pg_catalog.to_regclass('host_grant_authority') IS NOT NULL",
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let binding = load_binding(&mut tx, "host_grant_authority").await?;
+        let mut rows = tx
+            .query(
+                "SELECT lineage_uuid, authority_id, position_acknowledgement \
+                 FROM host_grant_authority WHERE singleton",
+                (),
+            )
+            .await?;
+        let row = rows.next().await?.ok_or(corrupt("authority incarnation"))?;
+        let bound_lineage = row.get::<Option<String>>(0)?;
+        let authority_id = row.get::<String>(1)?;
+        let position_acknowledgement = decode_acknowledgement(row.get::<Option<String>>(2)?)?;
+        drop(rows);
+        let live_lineage = load_live_lineage(&mut tx).await?;
+        let mut rows = tx
+            .query(
+                "SELECT count(*), \
+                 count(*) FILTER (WHERE closed_reason = 'restored'), \
+                 count(*) FILTER (WHERE closed_reason = 'reconstructed') \
+                 FROM host_grant_scopes",
+                (),
+            )
+            .await?;
+        let row = rows.next().await?.ok_or(corrupt("scope count"))?;
+        let count = |index| {
+            row.get::<i64>(index)
+                .ok()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or(corrupt("scope count"))
+        };
+        let (scopes, restored, reconstructed) = (count(0)?, count(1)?, count(2)?);
+        drop(rows);
+        let mut rows = tx
+            .query(
+                "SELECT lifecycle_id FROM host_grant_scopes WHERE admission_state = 'active' \
+                 ORDER BY lifecycle_id",
+                (),
+            )
+            .await?;
+        let mut admitting = Vec::new();
+        while let Some(row) = rows.next().await? {
+            admitting.push(
+                ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                    .ok_or(corrupt("lifecycle_id"))?,
+            );
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some(FenceSnapshot {
+            binding,
+            authority_id,
+            bound_lineage,
+            live_lineage,
+            holds_scope: scopes > 0,
+            admitting,
+            restored,
+            reconstructed,
+            position_acknowledgement,
+        }))
+    }
+
+    /// The authority identity and up to `limit` scopes whose projection was
+    /// written, read in one snapshot: those that admit first, then those
+    /// that no longer admit (closed by a restore transition, fenced,
+    /// retired), each in lifecycle order. A scope that admits was always
+    /// projected first. This is what a first projection checks SpiceDB
+    /// against before it writes (`restore::projection_absent`). `None`
+    /// without the host-grant relations.
+    pub(crate) async fn projected_scopes(
+        &self,
+        limit: i64,
+    ) -> Result<Option<(String, Vec<ScopeLifecycleId>)>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        if !query_flag(
+            &mut tx,
+            "SELECT pg_catalog.to_regclass('host_grant_authority') IS NOT NULL",
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT authority_id FROM host_grant_authority WHERE singleton",
+                (),
+            )
+            .await?;
+        let authority_id = rows
+            .next()
+            .await?
+            .ok_or(corrupt("authority incarnation"))?
+            .get::<String>(0)?;
+        drop(rows);
+        let mut rows = tx
+            .query(
+                "SELECT lifecycle_id FROM host_grant_scopes \
+                 WHERE admission_state = 'active' OR projected_generation > 0 \
+                 ORDER BY admission_state = 'active' DESC, lifecycle_id LIMIT ?",
+                crate::db_params![limit],
+            )
+            .await?;
+        let mut projected = Vec::new();
+        while let Some(row) = rows.next().await? {
+            projected.push(
+                ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                    .ok_or(corrupt("lifecycle_id"))?,
+            );
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some((authority_id, projected)))
+    }
+
+    /// Where the PostgreSQL server stands: its system identifier, the
+    /// timeline it writes on and its flushed WAL position.
+    ///
+    /// On the physically attested pool the restricted runtime role serves
+    /// from, the role may not call `pg_control_system()` (the attestor's
+    /// precondition): the transaction is attested first, and the system
+    /// identifier is the one the attested physical identity names, which
+    /// the attestor has just compared with the live one. On any other
+    /// handle (the owner phase, an unattested deployment) it is read from
+    /// `pg_control_system()`. The timeline and the position come from
+    /// `pg_current_wal_flush_lsn()` and `pg_walfile_name()`, which PostgreSQL
+    /// grants to every role and the provisioning leaves in place. A role
+    /// that may not run what it needs is refused with
+    /// [`RestoreFenceRefusal::PositionUnreadable`].
+    pub async fn postgres_position(&self) -> Result<PostgresPosition, HostGrantError> {
+        let capability = self.db.attested_pg_writer_capability();
+        let mut tx = self.begin_read().await?;
+        let unreadable = |error: DatabaseError| match HostGrantError::from_database(error) {
+            HostGrantError::OwnerPhaseRequired => RestoreFenceRefusal::PositionUnreadable.into(),
+            other => other,
+        };
+        let system_identifier = match &capability {
+            Some(capability) => {
+                self.db
+                    .verify_attested_pg_writer_capability(capability)
+                    .map_err(DatabaseError::from)?;
+                capability.attest_transaction(&mut tx).await?;
+                capability.identity().system_identifier.0
+            }
+            None => {
+                let mut rows = tx
+                    .query(
+                        "SELECT system_identifier::text FROM pg_catalog.pg_control_system()",
+                        (),
+                    )
+                    .await
+                    .map_err(unreadable)?;
+                let row = rows.next().await?.ok_or(corrupt("postgres position"))?;
+                let text = row.get::<String>(0)?;
+                drop(rows);
+                PgSystemIdentifier::from_str(&text)
+                    .map_err(|_| corrupt("postgres system identifier"))?
+                    .0
+            }
+        };
+        let mut rows = tx
+            .query(
+                "SELECT pg_catalog.pg_walfile_name(pg_catalog.pg_current_wal_flush_lsn()), \
+                 (pg_catalog.pg_current_wal_flush_lsn() - '0/0'::pg_lsn)::text",
+                (),
+            )
+            .await
+            .map_err(unreadable)?;
+        let row = rows.next().await?.ok_or(corrupt("postgres position"))?;
+        let walfile = row.get::<String>(0)?;
+        let lsn = row.get::<String>(1)?;
+        drop(rows);
+        tx.rollback().await?;
+        let timeline = walfile
+            .get(..8)
+            .and_then(|timeline| u32::from_str_radix(timeline, 16).ok())
+            .ok_or(corrupt("postgres timeline"))?;
+        let lsn = lsn
+            .parse::<u64>()
+            .map_err(|_| corrupt("postgres position"))?;
+        Ok(PostgresPosition {
+            system_identifier,
+            timeline,
+            lsn,
+        })
+    }
+
+    /// The authority identity, its restore epoch and the acknowledged
+    /// position, which the position witness is filed and compared under.
+    /// `None` without the host-grant relations, and while no scope is
+    /// enrolled: without a scope there is no authority a position could
+    /// protect.
+    pub(crate) async fn position_authority(
+        &self,
+    ) -> Result<Option<PositionAuthority>, HostGrantError> {
+        Ok(self
+            .position_authority_row()
+            .await?
+            .and_then(|(authority, holds_scope)| holds_scope.then_some(authority)))
+    }
+
+    async fn position_authority_row(
+        &self,
+    ) -> Result<Option<(PositionAuthority, bool)>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        if !query_flag(
+            &mut tx,
+            "SELECT pg_catalog.to_regclass('host_grant_authority') IS NOT NULL",
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT authority_id, restore_epoch, position_acknowledgement, \
+                 EXISTS (SELECT 1 FROM host_grant_scopes) \
+                 FROM host_grant_authority WHERE singleton",
+                (),
+            )
+            .await?;
+        let row = rows.next().await?.ok_or(corrupt("authority incarnation"))?;
+        let authority = PositionAuthority {
+            authority_id: row.get::<String>(0)?,
+            restore_epoch: RestoreEpoch::from_storage(row.get::<i64>(1)?)
+                .ok_or(corrupt("restore_epoch"))?,
+            position_acknowledgement: decode_acknowledgement(row.get::<Option<String>>(2)?)?,
+        };
+        let holds_scope = row.get::<bool>(3)?;
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some((authority, holds_scope)))
+    }
+
+    /// Whether a scope's journal records an operation under `incarnation`:
+    /// the scope was bound to it at some generation.
+    pub(crate) async fn journal_holds_incarnation(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        incarnation: AuthorityIncarnation,
+    ) -> Result<bool, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let held = holds_incarnation(&mut tx, lifecycle, incarnation).await?;
+        tx.rollback().await?;
+        Ok(held)
+    }
+
+    /// Whether an operator reopened the scope under `incarnation`: its
+    /// journal records a `reopen` operation of that incarnation.
+    pub(crate) async fn journal_holds_reopen(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        incarnation: AuthorityIncarnation,
+    ) -> Result<bool, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let held = holds_reopen(&mut tx, lifecycle, incarnation).await?;
+        tx.rollback().await?;
+        Ok(held)
+    }
+
+    /// The scope's latest recorded operation as a marker, and whether an
+    /// operator reopened the scope under that operation's incarnation, read
+    /// in one snapshot. `None` for a scope the store does not hold.
+    pub(crate) async fn journal_head(
+        &self,
+        lifecycle: ScopeLifecycleId,
+    ) -> Result<Option<JournalHead>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let Some(scope) = load_scope(&mut tx, lifecycle, false).await? else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let recorded = load_operation(&mut tx, scope.operation)
+            .await?
+            .ok_or(corrupt("current operation"))?
+            .record;
+        let reopened = holds_reopen(&mut tx, lifecycle, recorded.authority_incarnation).await?;
+        tx.rollback().await?;
+        Ok(Some(JournalHead {
+            marker: ProjectionMarker {
+                lifecycle,
+                incarnation: recorded.authority_incarnation,
+                generation: recorded.generation,
+                operation: recorded.operation,
+                digest: recorded.projection_digest,
+            },
+            reopened,
+        }))
+    }
+
+    /// Close a scope on `evidence` that the database lost operations, until
+    /// a restore is declared: its next generation is recorded under a
+    /// `fence` operation, it admits nothing, its effective standing is
+    /// lowered to `none` at most, and it is not projected again.
+    ///
+    /// The evidence is compared again under the scope's guard: a marker or
+    /// witness the journal now records, or a scope that no longer admits
+    /// when the evidence is a missing marker, closes nothing. A scope that is
+    /// retired, exhausted or fenced already is left as it is. The answer is
+    /// whether this call closed the scope. The runtime role may run it.
+    pub(crate) async fn fence_scope(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        evidence: &FenceEvidence,
+    ) -> Result<bool, HostGrantError> {
+        let store = self.clone();
+        let evidence = evidence.clone();
+        let mode = commit_mode();
+        own(async move { store.fence_owned(lifecycle, &evidence, mode).await }).await
+    }
+
+    /// Bind the authority to the declared restore epoch and the database
+    /// lineage, declaring a restore when `configured` exceeds the stored
+    /// epoch.
+    ///
+    /// - `configured` below the stored epoch: refused. The configuration
+    ///   predates the latest restore transition.
+    /// - `configured` equal to it: the lineage is bound if it is not yet.
+    ///   A database that holds a scope and whose lineage differs from the
+    ///   bound one was adopted after a restore or a clone, and is refused
+    ///   until the restore is declared; one that holds no scope is bound to
+    ///   its new lineage. A transition an earlier run recorded and did not
+    ///   finish is finished.
+    /// - `configured` above it: a restore transition. One transaction mints
+    ///   a new incarnation and records it with the epoch and the live
+    ///   lineage; from its commit no scope bound to an earlier incarnation
+    ///   admits. Then, in transactions of at most
+    ///   [`RESTORE_TRANSITION_BATCH`] scopes, every scope that is not
+    ///   retired or exhausted is bound to it at its next generation, closed
+    ///   as `restored` with a `restore` operation in its journal, and its
+    ///   effective standing lowered to `none` at most. A scope with no
+    ///   generation left is closed as exhausted instead.
+    ///
+    /// Owner phase only: the runtime role reads the authority row and cannot
+    /// update it, so PostgreSQL refuses the transaction on a runtime handle
+    /// ([`HostGrantError::OwnerPhaseRequired`]) and nothing changes. A rerun
+    /// with the same epoch after a run that stopped finds the epoch recorded
+    /// and finishes what is left.
+    pub async fn prepare_restore_incarnation(
+        &self,
+        configured: RestoreEpoch,
+    ) -> Result<RestoreDeclaration, HostGrantError> {
+        let store = self.clone();
+        let mode = commit_mode();
+        own(async move { store.prepare_restore_owned(configured, mode).await }).await
+    }
+
+    /// Reopen the scopes whose reconstruction after a declared restore was
+    /// verified and activated (see [`ReopenSelection`]). Each is reopened in
+    /// a transaction of its own, under a `reopen` operation at its next
+    /// generation, and admits from that commit; its projection follows with
+    /// the next reconciliation pass. A scope that is not `reconstructed`, or
+    /// whose latest operation is not yet verified, is left closed and
+    /// counted. So is a scope the restore lost operations in, unless it is
+    /// named and the operator confirms that what was lost has been applied
+    /// again; reopening it clears the mark.
+    ///
+    /// Owner phase only by convention: it is the operator's
+    /// acknowledgement of the restore, run as the migrator login.
+    pub async fn reopen_scopes(
+        &self,
+        selection: ReopenSelection,
+    ) -> Result<ReopenReport, HostGrantError> {
+        let store = self.clone();
+        let mode = commit_mode();
+        own(async move { store.reopen_owned(selection, mode).await }).await
+    }
+
+    /// Record an operator's acknowledgement of `witnessed`, the position
+    /// witness SpiceDB holds, for the PostgreSQL system and timeline the
+    /// server now writes on (see [`PositionAcknowledgement`]). It replaces
+    /// any earlier acknowledgement. The next fence pass, or witness writer,
+    /// moves the witness to the current position when the acknowledgement
+    /// applies: after a promotion to a later timeline whose position is not
+    /// below the witness, or after a regression on the witnessed timeline.
+    /// An acknowledgement that could never apply (another system, an earlier
+    /// timeline, or a later timeline whose position is below the witness, a
+    /// provable regression across timelines) is refused with
+    /// [`HostGrantError::AcknowledgementRefused`] and nothing is recorded.
+    ///
+    /// Owner phase only: the runtime role cannot update the authority row.
+    pub async fn acknowledge_position(
+        &self,
+        witnessed: PositionWitness,
+    ) -> Result<PositionAcknowledgement, HostGrantError> {
+        let position = self.postgres_position().await?;
+        let acknowledgement = PositionAcknowledgement {
+            supersedes: witnessed,
+            system_identifier: position.system_identifier,
+            timeline: position.timeline,
+        };
+        if !acknowledgement.admissible(position.lsn) {
+            return Err(HostGrantError::AcknowledgementRefused);
+        }
+        let store = self.clone();
+        let mode = commit_mode();
+        own(async move {
+            store
+                .acknowledge_position_owned(acknowledgement, mode)
+                .await
+        })
+        .await
+    }
+
+    /// Remove `acknowledgement` once an operator's tool has seen it applied
+    /// (the witness it superseded was replaced), so that it is spent in the
+    /// database as well. Another acknowledgement recorded since is kept; the
+    /// answer is whether this one was removed. Owner phase only.
+    pub async fn consume_position_acknowledgement(
+        &self,
+        acknowledgement: &PositionAcknowledgement,
+    ) -> Result<bool, HostGrantError> {
+        let store = self.clone();
+        let spelling = acknowledgement.spelling();
+        own(async move {
+            let mut tx = store.begin_write().await?;
+            let removed = tx
+                .execute(
+                    "UPDATE host_grant_authority SET position_acknowledgement = NULL \
+                     WHERE singleton AND position_acknowledgement = ?",
+                    crate::db_params![spelling],
+                )
+                .await
+                .map_err(HostGrantError::from_database)?;
+            commit(tx, CommitMode::Acknowledged).await?;
+            Ok(removed == 1)
+        })
+        .await
+    }
+
+    /// The fixed identity the authority's position witness is filed under,
+    /// for an operator who reads the witness from SpiceDB. `None` without
+    /// the host-grant relations.
+    pub async fn authority_id(&self) -> Result<Option<String>, HostGrantError> {
+        Ok(self
+            .position_authority_row()
+            .await?
+            .map(|(authority, _)| authority.authority_id))
+    }
+
+    /// Record an operator's revoke or ban (see [`OperatorRevoke`]). The
+    /// subject's recorded and effective affiliation are lowered at the
+    /// commit, whatever the scope's state, unless the scope is retired or
+    /// exhausted or the subject is the room's last owner of a served
+    /// account domain. `served` decides the issuance basis recorded with a
+    /// row and which owners count.
+    pub async fn operator_revoke(
+        &self,
+        command: &OperatorRevoke,
+        served: &ServedAccountDomains,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let store = self.clone();
+        let command = command.clone();
+        let served = served.clone();
+        let mode = commit_mode();
+        own(async move { store.operator_revoke_owned(&command, &served, mode).await }).await
+    }
     /// Enroll a fresh scope: its lifecycle, its rooms and its bootstrap
     /// grants, closed until the first projection is verified and activated.
     ///
@@ -344,7 +890,9 @@ impl HostGrantStore {
     /// not yet verified and activated, in lifecycle order, starting after
     /// `after`. A caller that follows the pages to an empty one has seen
     /// every pending scope, so a scope that stays pending (a contradiction,
-    /// an unreachable projection) never hides another.
+    /// an unreachable projection) never hides another. A scope a restore
+    /// transition closed is pending until its reconstruction is activated;
+    /// a fenced scope is not projected again and is not listed.
     pub async fn pending_scopes(
         &self,
         after: Option<ScopeLifecycleId>,
@@ -355,7 +903,8 @@ impl HostGrantStore {
             .query(
                 "SELECT lifecycle_id FROM host_grant_scopes \
                  WHERE projected_generation < generation \
-                   AND (closed_reason IS NULL OR closed_reason = 'enrolled') \
+                   AND (closed_reason IS NULL \
+                        OR closed_reason IN ('enrolled', 'restored', 'reconstructed')) \
                    AND lifecycle_id > ? \
                  ORDER BY lifecycle_id LIMIT ?",
                 crate::db_params![after, PENDING_SCOPE_PAGE],
@@ -371,6 +920,63 @@ impl HostGrantStore {
         drop(rows);
         tx.rollback().await?;
         Ok(scopes)
+    }
+
+    /// Every scope the store holds, retired and exhausted ones included, by
+    /// lifecycle, read in one snapshot. The restore fence reads it after
+    /// SpiceDB, in one statement however many scopes are enrolled.
+    pub(crate) async fn scopes(
+        &self,
+    ) -> Result<BTreeMap<ScopeLifecycleId, ScopeState>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let mut rows = tx
+            .query(
+                &format!("SELECT {SCOPE_COLUMNS} FROM host_grant_scopes ORDER BY lifecycle_id"),
+                (),
+            )
+            .await?;
+        let mut scopes = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            let scope = decode_scope(&row)?;
+            scopes.insert(scope.lifecycle, scope);
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(scopes)
+    }
+
+    /// The stamp of every scope's latest recorded operation, in the
+    /// marker's spelling, retired and exhausted scopes included, read in one
+    /// statement. A journal witness that holds it is current.
+    pub(crate) async fn journal_heads(
+        &self,
+    ) -> Result<BTreeMap<ScopeLifecycleId, String>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let mut rows = tx
+            .query(
+                "SELECT o.operation_id, o.lifecycle_id, o.generation, o.fingerprint, o.kind, \
+                 o.authority_incarnation, o.projection_digest \
+                 FROM host_grant_scopes s \
+                 JOIN host_grant_operations o ON o.operation_id = s.operation_id \
+                 ORDER BY s.lifecycle_id",
+                (),
+            )
+            .await?;
+        let mut heads = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            let record = decode_operation(&row)?.record;
+            let marker = ProjectionMarker {
+                lifecycle: record.lifecycle,
+                incarnation: record.authority_incarnation,
+                generation: record.generation,
+                operation: record.operation,
+                digest: record.projection_digest,
+            };
+            heads.insert(record.lifecycle, marker.stamp());
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(heads)
     }
 
     /// Read the policy state for one subject and action outside any
@@ -522,6 +1128,7 @@ impl HostGrantStore {
                 grants: projected,
             },
             projected_generation: scope.projected_generation,
+            restored: scope.closed_reason == Some(ClosedReason::Restored),
         })
     }
 
@@ -534,28 +1141,9 @@ impl HostGrantStore {
         generation: GrantGeneration,
     ) -> Result<Option<ProjectionMarker>, HostGrantError> {
         let mut tx = self.begin_read().await?;
-        let mut rows = tx
-            .query(
-                &format!(
-                    "SELECT {OPERATION_COLUMNS} FROM host_grant_operations \
-                     WHERE lifecycle_id = ? AND generation = ?"
-                ),
-                crate::db_params![lifecycle.to_storage(), generation.value()],
-            )
-            .await?;
-        let recorded = match rows.next().await? {
-            Some(row) => Some(decode_operation(&row)?),
-            None => None,
-        };
-        drop(rows);
+        let recorded = load_recorded_marker(&mut tx, lifecycle, generation).await?;
         tx.rollback().await?;
-        Ok(recorded.map(|recorded| ProjectionMarker {
-            lifecycle,
-            incarnation: recorded.record.authority_incarnation,
-            generation: recorded.record.generation,
-            operation: recorded.record.operation,
-            digest: recorded.record.projection_digest,
-        }))
+        Ok(recorded)
     }
 
     /// Make the grants of a verified projection effective, if the operation
@@ -575,6 +1163,40 @@ impl HostGrantStore {
         let store = self.clone();
         let marker = verified.marker().clone();
         own(async move { store.activate_owned(&marker).await }).await
+    }
+
+    /// Record the changes a reconstruction found before it rebuilds the
+    /// projection of a scope a restore transition closed, and mark the
+    /// scope as one the restored database lost operations in when
+    /// `lost_operations` says so, in one `reconstruct` operation at the
+    /// next generation.
+    ///
+    /// The scope must still be closed as `restored` and at
+    /// `expected_generation`. A change that would not lower the subject's
+    /// recorded affiliation is left out, a lowering that would raise what
+    /// admission honours for an account `served` does not hold (a remote
+    /// privileged grant, honoured as none, lowered to `member`) is recorded
+    /// at `none` instead, and a change to a subject without a row records
+    /// one at `none` or `outcast`, within the scope's row bound
+    /// ([`HostGrantError::GrantLimit`] otherwise). The scope stays closed.
+    ///
+    /// The mark is only ever set in the commit of an operation that
+    /// advances the generation, never alone: the projection written after
+    /// it names that operation (see [`ReconstructScope`]). `None` when no
+    /// grant is left to change and the scope needs no mark, or holds one
+    /// already: a scope is marked by the operation that recorded the mark,
+    /// at or before its current generation, so every database that holds
+    /// the current operation holds the mark too.
+    pub(crate) async fn record_reconstruction(
+        &self,
+        command: &ReconstructScope,
+        served: &ServedAccountDomains,
+    ) -> Result<Option<OperationRecord>, HostGrantError> {
+        let store = self.clone();
+        let command = command.clone();
+        let served = served.clone();
+        let mode = commit_mode();
+        own(async move { store.reconstruct_owned(&command, &served, mode).await }).await
     }
 
     /// Enroll, and answer a conflict with what the journal holds by then.
@@ -809,9 +1431,15 @@ impl HostGrantStore {
             // now, under the guard: a grant that was revoked, demoted or
             // never activated authorizes nothing, whatever the initiator saw
             // earlier, and neither does a privileged grant of an account
-            // this deployment does not serve.
+            // this deployment does not serve. While a restore is handled no
+            // standing is honoured: the grant rows are those of the restored
+            // database until an operator reopens the scope.
+            let restore_handling = scope
+                .closed_reason
+                .is_some_and(ClosedReason::awaits_restore_handling);
             let initiator = in_room(&command.initiator)
                 .filter(|grant| grant.affiliation != RoomAffiliation::Outcast)
+                .filter(|_| !restore_handling)
                 .map_or(RoomAffiliation::None, |grant| {
                     honoured_affiliation(
                         grant.effective_affiliation,
@@ -957,11 +1585,17 @@ impl HostGrantStore {
         let refusal = match scope.closed_reason {
             Some(ClosedReason::Retired) => Some(HostGrantError::ScopeRetired),
             Some(ClosedReason::Exhausted) => Some(HostGrantError::ScopeExhausted),
-            Some(ClosedReason::Enrolled) | None => (scope.generation
-                != command.expected_generation)
-                .then_some(HostGrantError::StaleGeneration {
+            Some(
+                ClosedReason::Enrolled
+                | ClosedReason::Restored
+                | ClosedReason::Reconstructed
+                | ClosedReason::Fenced,
+            )
+            | None => (scope.generation != command.expected_generation).then_some(
+                HostGrantError::StaleGeneration {
                     current: scope.generation,
-                }),
+                },
+            ),
         };
         if let Some(refusal) = refusal {
             tx.rollback().await?;
@@ -1101,12 +1735,25 @@ impl HostGrantStore {
         )
         .await
         .map_err(HostGrantError::from_database)?;
+        // A scope a restore transition closed stays closed once its
+        // reconstruction is verified: an operator reopens it.
+        let reconstructed = matches!(
+            scope.closed_reason,
+            Some(ClosedReason::Restored | ClosedReason::Reconstructed)
+        );
+        let (state, reason) = if reconstructed {
+            ("closed", Some(ClosedReason::Reconstructed.as_storage()))
+        } else {
+            ("active", None)
+        };
         let updated = tx
             .execute(
                 "UPDATE host_grant_scopes SET projected_generation = generation, \
-                 admission_state = 'active', closed_reason = NULL, updated_at_ms = ? \
+                 admission_state = ?, closed_reason = ?, updated_at_ms = ? \
                  WHERE lifecycle_id = ? AND generation = ? AND operation_id = ?",
                 crate::db_params![
+                    state,
+                    reason,
                     now,
                     scope.lifecycle.to_storage(),
                     scope.generation.value(),
@@ -1119,8 +1766,817 @@ impl HostGrantStore {
             return Err(corrupt("scope generation"));
         }
         commit(tx, CommitMode::Acknowledged).await?;
-        Ok(Activation::Activated)
+        Ok(if reconstructed {
+            Activation::Reconstructed
+        } else {
+            Activation::Activated
+        })
     }
+
+    async fn prepare_restore_owned(
+        &self,
+        configured: RestoreEpoch,
+        mode: CommitMode,
+    ) -> Result<RestoreDeclaration, HostGrantError> {
+        let mut tx = self.begin_write().await?;
+        // Locking the authority row needs UPDATE on it, which the runtime
+        // role does not hold: on a runtime handle PostgreSQL refuses this
+        // first statement and nothing changes.
+        let mut rows = tx
+            .query(
+                "SELECT incarnation, restore_epoch, lineage_uuid FROM host_grant_authority \
+                 WHERE singleton FOR UPDATE",
+                (),
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+        let row = rows.next().await?.ok_or(corrupt("authority incarnation"))?;
+        let previous = AuthorityIncarnation::from_storage(&row.get::<String>(0)?)
+            .ok_or(corrupt("authority incarnation"))?;
+        let stored =
+            RestoreEpoch::from_storage(row.get::<i64>(1)?).ok_or(corrupt("restore_epoch"))?;
+        let bound = row.get::<Option<String>>(2)?;
+        drop(rows);
+        let live = load_live_lineage(&mut tx)
+            .await
+            .map_err(statement_failure)?;
+        if configured < stored {
+            tx.rollback().await?;
+            return Err(RestoreFenceRefusal::EpochMismatch { configured, stored }.into());
+        }
+        if configured == stored {
+            if bound.is_some() && bound != live {
+                // A database that holds no scope has no authority a restore
+                // could reopen, and its new lineage is simply bound.
+                let holds_scope =
+                    query_flag(&mut tx, "SELECT EXISTS (SELECT 1 FROM host_grant_scopes)")
+                        .await
+                        .map_err(statement_failure)?;
+                if holds_scope {
+                    tx.rollback().await?;
+                    return Err(RestoreFenceRefusal::LineageChanged.into());
+                }
+            }
+            let declaration = match live.filter(|live| bound.as_ref() != Some(live)) {
+                Some(live) => {
+                    tx.execute(
+                        "UPDATE host_grant_authority SET lineage_uuid = ? WHERE singleton",
+                        crate::db_params![live],
+                    )
+                    .await
+                    .map_err(HostGrantError::from_database)?;
+                    commit(tx, mode).await?;
+                    RestoreDeclaration::LineageBound
+                }
+                None => {
+                    tx.rollback().await?;
+                    RestoreDeclaration::Unchanged
+                }
+            };
+            // A transition whose first commit landed and whose scopes were
+            // not all closed is finished now.
+            let resumed = self.close_for_restore(previous, configured).await?;
+            return Ok(if resumed.closed > 0 {
+                RestoreDeclaration::Resumed {
+                    restored_scopes: resumed.restored,
+                }
+            } else {
+                declaration
+            });
+        }
+        let incarnation = AuthorityIncarnation::generate();
+        // A declared restore replaces the position witness whatever it
+        // names, so no acknowledgement recorded before it applies after it.
+        tx.execute(
+            "UPDATE host_grant_authority SET incarnation = ?, restore_epoch = ?, \
+             lineage_uuid = ?, position_acknowledgement = NULL WHERE singleton",
+            crate::db_params![incarnation.to_storage(), configured.to_storage(), live],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
+        // From this commit no scope bound to the earlier incarnation admits,
+        // mutates or activates; the batches below close each one.
+        commit(tx, mode).await?;
+        let closed = self.close_for_restore(incarnation, configured).await?;
+        Ok(RestoreDeclaration::Transitioned {
+            previous,
+            incarnation,
+            epoch: configured,
+            restored_scopes: closed.restored,
+        })
+    }
+
+    /// Close every scope that is not retired or exhausted and is bound to
+    /// another incarnation than `incarnation`, the current one, in
+    /// transactions of at most [`RESTORE_TRANSITION_BATCH`] scopes.
+    async fn close_for_restore(
+        &self,
+        incarnation: AuthorityIncarnation,
+        epoch: RestoreEpoch,
+    ) -> Result<TransitionCount, HostGrantError> {
+        let mut count = TransitionCount::default();
+        loop {
+            let now = Utc::now().timestamp_millis();
+            let mut tx = self.begin_write().await?;
+            if load_incarnation(&mut tx).await.map_err(statement_failure)? != incarnation {
+                tx.rollback().await?;
+                return Err(HostGrantError::IncarnationChanged);
+            }
+            let batch = i64::try_from(RESTORE_TRANSITION_BATCH).unwrap_or(i64::MAX);
+            let mut rows = tx
+                .query(
+                    &format!(
+                        "SELECT {SCOPE_COLUMNS} FROM host_grant_scopes \
+                         WHERE authority_incarnation <> ? \
+                           AND (closed_reason IS NULL \
+                                OR closed_reason NOT IN ('retired', 'exhausted')) \
+                         ORDER BY lifecycle_id LIMIT ? FOR UPDATE"
+                    ),
+                    crate::db_params![incarnation.to_storage(), batch],
+                )
+                .await
+                .map_err(HostGrantError::from_database)?;
+            let mut scopes = Vec::new();
+            while let Some(row) = rows.next().await? {
+                scopes.push(decode_scope(&row)?);
+            }
+            drop(rows);
+            if scopes.is_empty() {
+                tx.rollback().await?;
+                return Ok(count);
+            }
+            for scope in &scopes {
+                if close_one_for_restore(&mut tx, scope, incarnation, epoch, now).await? {
+                    count.restored += 1;
+                }
+                count.closed += 1;
+            }
+            commit(tx, CommitMode::Acknowledged).await?;
+        }
+    }
+
+    async fn fence_owned(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        evidence: &FenceEvidence,
+        mode: CommitMode,
+    ) -> Result<bool, HostGrantError> {
+        let now = Utc::now().timestamp_millis();
+        let mut tx = self.begin_write().await?;
+        let Some(scope) = load_scope(&mut tx, lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+        else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let evidence_holds = async {
+            if matches!(
+                scope.closed_reason,
+                Some(ClosedReason::Retired | ClosedReason::Exhausted | ClosedReason::Fenced)
+            ) {
+                return Ok(false);
+            }
+            Ok::<_, HostGrantError>(match evidence {
+                FenceEvidence::ProjectionAhead(marker) => {
+                    load_recorded_marker(&mut tx, lifecycle, marker.generation)
+                        .await?
+                        .as_ref()
+                        != Some(marker)
+                }
+                FenceEvidence::UnknownIncarnation(marker) => {
+                    !holds_incarnation(&mut tx, lifecycle, marker.incarnation).await?
+                }
+                FenceEvidence::JournalAhead(head) => {
+                    let recorded = load_recorded_marker(&mut tx, lifecycle, head.generation)
+                        .await?
+                        .as_ref()
+                        == Some(head);
+                    let restore_handling = scope
+                        .closed_reason
+                        .is_some_and(ClosedReason::awaits_restore_handling);
+                    // A head of another incarnation is explained while a
+                    // restore is handled, or once a declared restore that
+                    // superseded an incarnation this journal held was
+                    // reopened under the current one.
+                    let superseded = head.incarnation != scope.authority_incarnation
+                        && (restore_handling
+                            || (holds_reopen(&mut tx, lifecycle, scope.authority_incarnation)
+                                .await?
+                                && holds_incarnation(&mut tx, lifecycle, head.incarnation)
+                                    .await?));
+                    !recorded && !superseded
+                }
+                FenceEvidence::MarkerMissing => scope.admission == AdmissionState::Active,
+            })
+        }
+        .await
+        .map_err(statement_failure);
+        match evidence_holds {
+            Ok(true) => {}
+            Ok(false) => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
+        let operation = GrantOperationId::generate();
+        let fingerprint = fence_fingerprint(lifecycle, scope.generation, evidence);
+        let Some(generation) = scope.generation.next() else {
+            return match self
+                .exhaust(tx, &scope, operation, &fingerprint, mode)
+                .await
+            {
+                Err(HostGrantError::ScopeExhausted) => Ok(true),
+                Err(error) => Err(error),
+                Ok(_) => Ok(true),
+            };
+        };
+        let digest = current_digest(&mut tx, &scope).await?;
+        close_scope(
+            &mut tx,
+            &scope,
+            scope.authority_incarnation,
+            generation,
+            operation,
+            ClosedReason::Fenced,
+            now,
+        )
+        .await?;
+        lower_effective_standing(&mut tx, lifecycle).await?;
+        if evidence.shows_lost_operations() {
+            mark_lost_operations(&mut tx, lifecycle).await?;
+        }
+        let record = OperationRecord {
+            operation,
+            lifecycle,
+            generation,
+            kind: OperationKind::Fence,
+            authority_incarnation: scope.authority_incarnation,
+            projection_digest: digest,
+        };
+        insert_operation(&mut tx, &record, &fingerprint, None, now).await?;
+        commit(tx, mode).await?;
+        Ok(true)
+    }
+
+    async fn reopen_owned(
+        &self,
+        selection: ReopenSelection,
+        mode: CommitMode,
+    ) -> Result<ReopenReport, HostGrantError> {
+        let (candidates, reapplied) = match selection {
+            ReopenSelection::Scope {
+                lifecycle,
+                lost_operations_reapplied,
+            } => (vec![lifecycle], lost_operations_reapplied),
+            ReopenSelection::All => {
+                let mut tx = self.begin_read().await?;
+                let mut rows = tx
+                    .query(
+                        "SELECT lifecycle_id FROM host_grant_scopes \
+                         WHERE closed_reason IN ('restored', 'reconstructed') \
+                         ORDER BY lifecycle_id",
+                        (),
+                    )
+                    .await?;
+                let mut candidates = Vec::new();
+                while let Some(row) = rows.next().await? {
+                    candidates.push(
+                        ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                            .ok_or(corrupt("lifecycle_id"))?,
+                    );
+                }
+                drop(rows);
+                tx.rollback().await?;
+                (candidates, false)
+            }
+        };
+        let mut report = ReopenReport::default();
+        for lifecycle in candidates {
+            let now = Utc::now().timestamp_millis();
+            let mut tx = self.begin_write().await?;
+            let Some(scope) = load_scope(&mut tx, lifecycle, true)
+                .await
+                .map_err(statement_failure)?
+            else {
+                tx.rollback().await?;
+                return Err(HostGrantError::UnknownScope);
+            };
+            let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+            let verified = scope.closed_reason == Some(ClosedReason::Reconstructed)
+                && scope.projected_generation == Some(scope.generation)
+                && scope.authority_incarnation == current
+                && scope.policy_version == HOST_GRANT_POLICY_VERSION;
+            let Some(generation) = scope.generation.next().filter(|_| verified) else {
+                tx.rollback().await?;
+                report.not_reconstructed += 1;
+                continue;
+            };
+            if scope.lost_operations && !reapplied {
+                tx.rollback().await?;
+                report.lost_operations += 1;
+                continue;
+            }
+            let operation = GrantOperationId::generate();
+            let digest = current_digest(&mut tx, &scope).await?;
+            let updated = tx
+                .execute(
+                    "UPDATE host_grant_scopes SET generation = ?, operation_id = ?, \
+                     admission_state = 'active', closed_reason = NULL, lost_operations = FALSE, \
+                     updated_at_ms = ? WHERE lifecycle_id = ? AND generation = ?",
+                    crate::db_params![
+                        generation.value(),
+                        operation.to_storage(),
+                        now,
+                        lifecycle.to_storage(),
+                        scope.generation.value()
+                    ],
+                )
+                .await
+                .map_err(HostGrantError::from_database)?;
+            if updated != 1 {
+                return Err(corrupt("scope generation"));
+            }
+            let record = OperationRecord {
+                operation,
+                lifecycle,
+                generation,
+                kind: OperationKind::Reopen,
+                authority_incarnation: scope.authority_incarnation,
+                projection_digest: digest,
+            };
+            insert_operation(
+                &mut tx,
+                &record,
+                &reopen_fingerprint(lifecycle, scope.generation),
+                None,
+                now,
+            )
+            .await?;
+            commit(tx, mode).await?;
+            report.reopened += 1;
+        }
+        Ok(report)
+    }
+
+    async fn acknowledge_position_owned(
+        &self,
+        acknowledgement: PositionAcknowledgement,
+        mode: CommitMode,
+    ) -> Result<PositionAcknowledgement, HostGrantError> {
+        let mut tx = self.begin_write().await?;
+        tx.execute(
+            "UPDATE host_grant_authority SET position_acknowledgement = ? WHERE singleton",
+            crate::db_params![acknowledgement.spelling()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
+        commit(tx, mode).await?;
+        Ok(acknowledgement)
+    }
+
+    async fn operator_revoke_owned(
+        &self,
+        command: &OperatorRevoke,
+        served: &ServedAccountDomains,
+        mode: CommitMode,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let fingerprint = command.fingerprint();
+        let lifecycle = command.lifecycle.to_storage();
+        let operation = command.operation.to_storage();
+        let now = Utc::now().timestamp_millis();
+        let mut tx = self.begin_write().await?;
+        let Some(scope) = load_scope(&mut tx, command.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+        else {
+            tx.rollback().await?;
+            return Err(HostGrantError::UnknownScope);
+        };
+        if let Some(recorded) = load_operation(&mut tx, command.operation)
+            .await
+            .map_err(statement_failure)?
+        {
+            tx.rollback().await?;
+            return recorded.replay(&fingerprint);
+        }
+        let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        let decision = async {
+            match scope.closed_reason {
+                Some(ClosedReason::Retired) => return Err(HostGrantError::ScopeRetired),
+                Some(ClosedReason::Exhausted) => return Err(HostGrantError::ScopeExhausted),
+                _ => {}
+            }
+            if scope.authority_incarnation != current {
+                return Err(HostGrantError::IncarnationChanged);
+            }
+            let rooms = load_rooms(&mut tx, command.lifecycle).await?;
+            if !rooms.iter().any(|room| room.room() == &command.room) {
+                return Err(HostGrantError::UnknownRoom);
+            }
+            let grants = load_grants(&mut tx, command.lifecycle).await?;
+            let held = grants
+                .iter()
+                .find(|grant| grant.room == command.room && grant.subject == command.subject);
+            // A revoke never raises: a banned subject stays banned.
+            let target = held.map_or(command.affiliation(), |grant| {
+                grant.affiliation.min(command.affiliation())
+            });
+            let recorded = held.map_or(RoomAffiliation::None, |grant| grant.affiliation);
+            let effective = held.map_or(RoomAffiliation::None, |grant| grant.effective_affiliation);
+            // The room keeps a recorded owner of a served account, so that it
+            // can be administered once it is reopened.
+            if recorded == RoomAffiliation::Owner && target != RoomAffiliation::Owner {
+                let other_owner = grants.iter().any(|grant| {
+                    grant.room == command.room
+                        && grant.subject != command.subject
+                        && grant.affiliation == RoomAffiliation::Owner
+                        && served.home_of(grant.subject.jid()) == SubjectHome::Served
+                });
+                if !other_owner {
+                    return Err(HostGrantError::LastOwner);
+                }
+            }
+            if held.is_none() && grants.len() >= HOST_GRANT_SCOPE_MAX_GRANT_ROWS {
+                return Err(HostGrantError::GrantLimit);
+            }
+            Ok((target, recorded, effective))
+        }
+        .await;
+        let (target, recorded, effective) = match decision {
+            Ok(decision) => decision,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(statement_failure(error));
+            }
+        };
+        let Some(generation) = scope.generation.next() else {
+            return self
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
+                .await;
+        };
+        let basis = match served.home_of(command.subject.jid()) {
+            SubjectHome::Served => IssuanceBasis::Local,
+            SubjectHome::Remote => IssuanceBasis::Unprivileged,
+        };
+        tx.execute(
+            "INSERT INTO host_grants (lifecycle_id, room_jid, subject_jid, affiliation, \
+             effective_affiliation, changed_generation, operation_id, issuance_basis) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (lifecycle_id, room_jid, subject_jid) DO UPDATE SET \
+             affiliation = EXCLUDED.affiliation, \
+             effective_affiliation = EXCLUDED.effective_affiliation, \
+             changed_generation = EXCLUDED.changed_generation, \
+             operation_id = EXCLUDED.operation_id, \
+             issuance_basis = EXCLUDED.issuance_basis",
+            crate::db_params![
+                lifecycle.as_str(),
+                command.room.as_str(),
+                command.subject.as_str(),
+                target.as_storage(),
+                effective.min(target).as_storage(),
+                generation.value(),
+                operation.as_str(),
+                basis.as_storage()
+            ],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
+        advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        insert_change(
+            &mut tx,
+            RecordedChange {
+                operation: &operation,
+                ordinal: 0,
+                room: &command.room,
+                subject: &command.subject,
+                affiliation: target,
+                previous: recorded,
+                basis,
+            },
+        )
+        .await?;
+        let digest = current_digest(&mut tx, &scope).await?;
+        let record = OperationRecord {
+            operation: command.operation,
+            lifecycle: command.lifecycle,
+            generation,
+            kind: OperationKind::SetAffiliation,
+            authority_incarnation: scope.authority_incarnation,
+            projection_digest: digest,
+        };
+        insert_operation(&mut tx, &record, &fingerprint, None, now).await?;
+        commit(tx, mode).await?;
+        Ok(MutationReceipt::Recorded(record))
+    }
+
+    async fn reconstruct_owned(
+        &self,
+        command: &ReconstructScope,
+        served: &ServedAccountDomains,
+        mode: CommitMode,
+    ) -> Result<Option<OperationRecord>, HostGrantError> {
+        let fingerprint = command.fingerprint();
+        let lifecycle = command.lifecycle.to_storage();
+        let operation = command.operation.to_storage();
+        let now = Utc::now().timestamp_millis();
+        let mut tx = self.begin_write().await?;
+        let Some(scope) = load_scope(&mut tx, command.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+        else {
+            tx.rollback().await?;
+            return Err(HostGrantError::UnknownScope);
+        };
+        if let Some(recorded) = load_operation(&mut tx, command.operation)
+            .await
+            .map_err(statement_failure)?
+        {
+            tx.rollback().await?;
+            return recorded
+                .replay(&fingerprint)
+                .map(|receipt| Some(receipt.record().clone()));
+        }
+        let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        let decision = async {
+            refuse_unusable_scope(&scope, current)?;
+            if scope.closed_reason != Some(ClosedReason::Restored) {
+                return Err(HostGrantError::ScopeNotRestored);
+            }
+            if scope.generation != command.expected_generation {
+                return Err(HostGrantError::StaleGeneration {
+                    current: scope.generation,
+                });
+            }
+            let rooms = load_rooms(&mut tx, command.lifecycle).await?;
+            let grants = load_grants(&mut tx, command.lifecycle).await?;
+            let mut writes = Vec::new();
+            let mut new_rows = 0usize;
+            for change in &command.changes {
+                let room = rooms
+                    .iter()
+                    .find(|room| room.channel_id() == change.channel_id)
+                    .ok_or(HostGrantError::UnknownRoom)?;
+                let held = grants
+                    .iter()
+                    .find(|grant| &grant.room == room.room() && grant.subject == change.subject);
+                let home = served.home_of(change.subject.jid());
+                let write = match held {
+                    // Only a lowering is recorded for a subject that holds a
+                    // row, and only one that lowers what admission honours:
+                    // a privileged grant of an account this deployment does
+                    // not serve is honoured as none, so it is lowered to
+                    // `none` or `outcast`, never to `member`.
+                    Some(grant) if change.affiliation < grant.affiliation => {
+                        let honoured = |affiliation| honoured_affiliation(affiliation, home);
+                        let target = if honoured(change.affiliation) > honoured(grant.affiliation) {
+                            change.affiliation.min(RoomAffiliation::None)
+                        } else {
+                            change.affiliation
+                        };
+                        ReconstructionWrite {
+                            room: room.room().clone(),
+                            subject: change.subject.clone(),
+                            target,
+                            basis: change.basis,
+                            recorded: grant.affiliation,
+                            effective: grant.effective_affiliation,
+                        }
+                    }
+                    Some(_) => continue,
+                    // A subject only the projection held is recorded at
+                    // `none` or `outcast`, never above.
+                    None if change.affiliation <= RoomAffiliation::None => {
+                        new_rows += 1;
+                        ReconstructionWrite {
+                            room: room.room().clone(),
+                            subject: change.subject.clone(),
+                            target: change.affiliation,
+                            basis: change.basis,
+                            recorded: RoomAffiliation::None,
+                            effective: RoomAffiliation::None,
+                        }
+                    }
+                    None => continue,
+                };
+                writes.push(write);
+            }
+            if grants.len() + new_rows > HOST_GRANT_SCOPE_MAX_GRANT_ROWS {
+                return Err(HostGrantError::GrantLimit);
+            }
+            Ok(writes)
+        }
+        .await;
+        let mark = command.lost_operations && !scope.lost_operations;
+        let writes = match decision {
+            Ok(writes) if writes.is_empty() && !mark => {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+            Ok(writes) => writes,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(statement_failure(error));
+            }
+        };
+        let Some(generation) = scope.generation.next() else {
+            return self
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
+                .await
+                .map(|_| None);
+        };
+        for (ordinal, write) in writes.iter().enumerate() {
+            // A lowering takes effect with this commit, like any reduction.
+            let effective_after = write.effective.min(write.target);
+            tx.execute(
+                "INSERT INTO host_grants (lifecycle_id, room_jid, subject_jid, affiliation, \
+                 effective_affiliation, changed_generation, operation_id, issuance_basis) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (lifecycle_id, room_jid, subject_jid) DO UPDATE SET \
+                 affiliation = EXCLUDED.affiliation, \
+                 effective_affiliation = EXCLUDED.effective_affiliation, \
+                 changed_generation = EXCLUDED.changed_generation, \
+                 operation_id = EXCLUDED.operation_id, \
+                 issuance_basis = EXCLUDED.issuance_basis",
+                crate::db_params![
+                    lifecycle.as_str(),
+                    write.room.as_str(),
+                    write.subject.as_str(),
+                    write.target.as_storage(),
+                    effective_after.as_storage(),
+                    generation.value(),
+                    operation.as_str(),
+                    write.basis.as_storage()
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+            insert_change(
+                &mut tx,
+                RecordedChange {
+                    operation: &operation,
+                    ordinal,
+                    room: &write.room,
+                    subject: &write.subject,
+                    affiliation: write.target,
+                    previous: write.recorded,
+                    basis: write.basis,
+                },
+            )
+            .await?;
+        }
+        advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        if mark {
+            mark_lost_operations(&mut tx, command.lifecycle).await?;
+        }
+        let digest = current_digest(&mut tx, &scope).await?;
+        let record = OperationRecord {
+            operation: command.operation,
+            lifecycle: command.lifecycle,
+            generation,
+            kind: OperationKind::Reconstruct,
+            authority_incarnation: scope.authority_incarnation,
+            projection_digest: digest,
+        };
+        insert_operation(&mut tx, &record, &fingerprint, None, now).await?;
+        commit(tx, mode).await?;
+        Ok(Some(record))
+    }
+}
+
+/// One grant row a reconstruction writes.
+struct ReconstructionWrite {
+    room: BareJid,
+    subject: GrantSubject,
+    target: RoomAffiliation,
+    basis: IssuanceBasis,
+    recorded: RoomAffiliation,
+    effective: RoomAffiliation,
+}
+
+/// Scopes a restore transition closed.
+#[derive(Clone, Copy, Debug, Default)]
+struct TransitionCount {
+    /// Every scope bound to the new incarnation.
+    closed: usize,
+    /// Of those, the scopes closed as `restored`; the rest had no
+    /// generation left and were closed as exhausted.
+    restored: usize,
+}
+
+/// Bind one scope to `incarnation` at its next generation and close it as
+/// `restored` under a `restore` operation, or as exhausted when no
+/// generation is left. Its effective standing is lowered to `none` at most,
+/// so nothing it held before the restore authorizes an initiator while it
+/// is closed. Answers whether it was closed as `restored`.
+async fn close_one_for_restore(
+    tx: &mut Transaction<'_>,
+    scope: &ScopeState,
+    incarnation: AuthorityIncarnation,
+    epoch: RestoreEpoch,
+    now: i64,
+) -> Result<bool, HostGrantError> {
+    let operation = GrantOperationId::generate();
+    let digest = current_digest(tx, scope).await?;
+    let (generation, kind, reason) = match scope.generation.next() {
+        Some(generation) => (generation, OperationKind::Restore, ClosedReason::Restored),
+        None => (
+            GrantGeneration::TERMINAL,
+            OperationKind::Exhaust,
+            ClosedReason::Exhausted,
+        ),
+    };
+    close_scope(tx, scope, incarnation, generation, operation, reason, now).await?;
+    lower_effective_standing(tx, scope.lifecycle).await?;
+    let record = OperationRecord {
+        operation,
+        lifecycle: scope.lifecycle,
+        generation,
+        kind,
+        authority_incarnation: incarnation,
+        projection_digest: digest,
+    };
+    insert_operation(
+        tx,
+        &record,
+        &restore_fingerprint(scope.lifecycle, epoch, incarnation),
+        None,
+        now,
+    )
+    .await?;
+    Ok(kind == OperationKind::Restore)
+}
+
+/// Move a scope to `generation` under `operation`, bound to `incarnation`
+/// and closed for `reason`, under the guard its caller holds.
+async fn close_scope(
+    tx: &mut Transaction<'_>,
+    scope: &ScopeState,
+    incarnation: AuthorityIncarnation,
+    generation: GrantGeneration,
+    operation: GrantOperationId,
+    reason: ClosedReason,
+    now: i64,
+) -> Result<(), HostGrantError> {
+    let updated = tx
+        .execute(
+            "UPDATE host_grant_scopes SET authority_incarnation = ?, generation = ?, \
+             operation_id = ?, admission_state = 'closed', closed_reason = ?, \
+             updated_at_ms = ? WHERE lifecycle_id = ? AND generation = ?",
+            crate::db_params![
+                incarnation.to_storage(),
+                generation.value(),
+                operation.to_storage(),
+                reason.as_storage(),
+                now,
+                scope.lifecycle.to_storage(),
+                scope.generation.value()
+            ],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(corrupt("scope generation"))
+    }
+}
+
+/// Lower every effective standing of a scope above `none` to `none`. The
+/// recorded affiliations are kept, and activation of a verified projection
+/// makes them effective again.
+async fn lower_effective_standing(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+) -> Result<(), HostGrantError> {
+    tx.execute(
+        "UPDATE host_grants SET effective_affiliation = 'none' \
+         WHERE lifecycle_id = ? AND effective_affiliation IN ('owner', 'admin', 'member')",
+        crate::db_params![lifecycle.to_storage()],
+    )
+    .await
+    .map_err(HostGrantError::from_database)?;
+    Ok(())
+}
+
+/// Mark a scope as one the restored database lost operations in, under the
+/// guard its caller holds, in the commit of the operation that advances its
+/// generation.
+async fn mark_lost_operations(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+) -> Result<(), HostGrantError> {
+    tx.execute(
+        "UPDATE host_grant_scopes SET lost_operations = TRUE WHERE lifecycle_id = ?",
+        crate::db_params![lifecycle.to_storage()],
+    )
+    .await
+    .map_err(HostGrantError::from_database)?;
+    Ok(())
 }
 
 /// Run a transaction on a task of its own, so that a caller that stops
@@ -1228,6 +2684,12 @@ pub(super) fn scope_admits(scope: &ScopeState, current: AuthorityIncarnation) ->
 }
 
 /// Refuse a scope no operation may change and no projection may serve.
+///
+/// A scope a restore transition closed stays usable: its projection is
+/// rebuilt and activated by reconciliation, and a mutation is recorded,
+/// though no initiator's standing is honoured until it is reopened. A
+/// fenced scope is neither changed nor projected until a restore is
+/// declared; only an operator's revoke is recorded in it.
 fn refuse_unusable_scope(
     scope: &ScopeState,
     current: AuthorityIncarnation,
@@ -1235,7 +2697,9 @@ fn refuse_unusable_scope(
     match scope.closed_reason {
         Some(ClosedReason::Retired) => return Err(HostGrantError::ScopeRetired),
         Some(ClosedReason::Exhausted) => return Err(HostGrantError::ScopeExhausted),
-        Some(ClosedReason::Enrolled) | None => {}
+        Some(ClosedReason::Fenced) => return Err(HostGrantError::ScopeFenced),
+        Some(ClosedReason::Enrolled | ClosedReason::Restored | ClosedReason::Reconstructed)
+        | None => {}
     }
     if scope.authority_incarnation != current {
         return Err(HostGrantError::IncarnationChanged);
@@ -1265,6 +2729,155 @@ async fn channel_is_group_direct_message(
         waddle_xmpp::ChannelType::parse(&row.get::<String>(0)?),
         Some(waddle_xmpp::ChannelType::GroupDm)
     ))
+}
+
+/// One boolean a statement answers.
+async fn query_flag(tx: &mut Transaction<'_>, sql: &str) -> Result<bool, HostGrantError> {
+    let mut rows = tx.query(sql, ()).await?;
+    let flag = match rows.next().await? {
+        Some(row) => row.get::<bool>(0)?,
+        None => false,
+    };
+    drop(rows);
+    Ok(flag)
+}
+
+/// The database's own lineage UUID, as `_lineage` spells it, if the
+/// database records one.
+async fn load_live_lineage(tx: &mut Transaction<'_>) -> Result<Option<String>, HostGrantError> {
+    if !query_flag(tx, "SELECT pg_catalog.to_regclass('_lineage') IS NOT NULL").await? {
+        return Ok(None);
+    }
+    let mut rows = tx
+        .query("SELECT lineage_uuid FROM _lineage WHERE id = 1", ())
+        .await?;
+    let lineage = match rows.next().await? {
+        Some(row) => Some(row.get::<String>(0)?),
+        None => None,
+    };
+    drop(rows);
+    Ok(lineage)
+}
+
+/// The statement that reads an [`AuthorityBinding`] from the authority row
+/// `authority` names, in the column order [`decode_binding`] reads.
+pub(crate) fn binding_query(authority: &str) -> String {
+    format!(
+        "SELECT incarnation, restore_epoch, \
+         (extract(epoch FROM pg_catalog.pg_postmaster_start_time()) * 1000000)::bigint, \
+         (SELECT d.oid::bigint FROM pg_catalog.pg_database d \
+          WHERE d.datname = pg_catalog.current_database()), \
+         pg_catalog.current_database()::text, tableoid::bigint \
+         FROM {authority} WHERE singleton"
+    )
+}
+
+/// The binding a row of [`binding_query`] holds; `None` when a stored value
+/// is not valid.
+pub(crate) fn decode_binding(row: &Row) -> Result<Option<AuthorityBinding>, DatabaseError> {
+    let incarnation = AuthorityIncarnation::from_storage(&row.get::<String>(0)?);
+    let restore_epoch = RestoreEpoch::from_storage(row.get::<i64>(1)?);
+    let (Some(incarnation), Some(restore_epoch)) = (incarnation, restore_epoch) else {
+        return Ok(None);
+    };
+    Ok(Some(AuthorityBinding {
+        incarnation,
+        restore_epoch,
+        server_started_at_us: row.get::<i64>(2)?,
+        database_oid: row.get::<i64>(3)?,
+        database_name: row.get::<String>(4)?,
+        authority_relation_oid: row.get::<i64>(5)?,
+    }))
+}
+
+async fn load_binding(
+    tx: &mut Transaction<'_>,
+    authority: &str,
+) -> Result<AuthorityBinding, HostGrantError> {
+    let mut rows = tx.query(&binding_query(authority), ()).await?;
+    let row = rows.next().await?.ok_or(corrupt("authority incarnation"))?;
+    let binding = decode_binding(&row)?.ok_or(corrupt("authority incarnation"))?;
+    drop(rows);
+    Ok(binding)
+}
+
+/// The acknowledgement `position_acknowledgement` holds, if any.
+fn decode_acknowledgement(
+    text: Option<String>,
+) -> Result<Option<PositionAcknowledgement>, HostGrantError> {
+    text.map(|text| {
+        PositionAcknowledgement::parse(&text).ok_or(corrupt("position_acknowledgement"))
+    })
+    .transpose()
+}
+
+/// The marker the journal records for one generation of a lifecycle.
+async fn load_recorded_marker(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+    generation: GrantGeneration,
+) -> Result<Option<ProjectionMarker>, HostGrantError> {
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT {OPERATION_COLUMNS} FROM host_grant_operations \
+                 WHERE lifecycle_id = ? AND generation = ?"
+            ),
+            crate::db_params![lifecycle.to_storage(), generation.value()],
+        )
+        .await?;
+    let recorded = match rows.next().await? {
+        Some(row) => Some(decode_operation(&row)?),
+        None => None,
+    };
+    drop(rows);
+    Ok(recorded.map(|recorded| ProjectionMarker {
+        lifecycle,
+        incarnation: recorded.record.authority_incarnation,
+        generation: recorded.record.generation,
+        operation: recorded.record.operation,
+        digest: recorded.record.projection_digest,
+    }))
+}
+
+async fn holds_incarnation(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+    incarnation: AuthorityIncarnation,
+) -> Result<bool, HostGrantError> {
+    let mut rows = tx
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM host_grant_operations \
+             WHERE lifecycle_id = ? AND authority_incarnation = ?)",
+            crate::db_params![lifecycle.to_storage(), incarnation.to_storage()],
+        )
+        .await?;
+    let held = match rows.next().await? {
+        Some(row) => row.get::<bool>(0)?,
+        None => false,
+    };
+    drop(rows);
+    Ok(held)
+}
+
+async fn holds_reopen(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+    incarnation: AuthorityIncarnation,
+) -> Result<bool, HostGrantError> {
+    let mut rows = tx
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM host_grant_operations \
+             WHERE lifecycle_id = ? AND authority_incarnation = ? AND kind = 'reopen')",
+            crate::db_params![lifecycle.to_storage(), incarnation.to_storage()],
+        )
+        .await?;
+    let held = match rows.next().await? {
+        Some(row) => row.get::<bool>(0)?,
+        None => false,
+    };
+    drop(rows);
+    Ok(held)
 }
 
 pub(super) async fn load_incarnation(
@@ -1329,6 +2942,7 @@ fn decode_scope(row: &Row) -> Result<ScopeState, HostGrantError> {
         projected_generation,
         admission,
         closed_reason,
+        lost_operations: row.get::<bool>(8)?,
     })
 }
 
@@ -1449,9 +3063,13 @@ impl RecordedOperation {
         }
         match self.record.kind {
             OperationKind::Exhaust => Err(HostGrantError::ScopeExhausted),
-            OperationKind::Enroll | OperationKind::SetAffiliation | OperationKind::Retire => {
-                Ok(MutationReceipt::Replayed(self.record))
-            }
+            OperationKind::Enroll
+            | OperationKind::SetAffiliation
+            | OperationKind::Retire
+            | OperationKind::Restore
+            | OperationKind::Reconstruct
+            | OperationKind::Fence
+            | OperationKind::Reopen => Ok(MutationReceipt::Replayed(self.record)),
         }
     }
 }
