@@ -121,8 +121,8 @@ pub use model::{
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use principal::{
-    FederationSnapshot, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, RemoteRefusal,
-    RemoteWitness, StreamEvidence,
+    named_evidence, FederationSnapshot, NoSeats, PrincipalEvidence, PrincipalPolicy,
+    PrincipalWitness, RemoteRefusal, RemoteWitness, SeatEvidence, StreamEvidence,
 };
 pub use projection::{
     MarkerObservation, ProjectedGrant, ProjectedRelationship, ProjectionIntent,

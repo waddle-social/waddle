@@ -51,7 +51,10 @@ use jid::BareJid;
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
 use super::policy::HostGrantAction;
-use super::principal::{PrincipalEvidence, PrincipalPolicy, PrincipalWitness};
+use super::principal::{
+    named_evidence, NoSeats, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, SeatEvidence,
+    StreamEvidence,
+};
 use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
@@ -333,6 +336,35 @@ impl HostGrantGate {
         self.attachment
             .get()
             .and_then(|gate| gate.verified_attachment())
+    }
+
+    /// The evidence a decision that names `account` in `room` without its
+    /// request decides it on: that of each seat this replica holds for it
+    /// there, or no stream when it holds none
+    /// ([`super::principal::named_evidence`]).
+    pub fn named_evidence(&self, room: &BareJid, account: &BareJid) -> Vec<PrincipalEvidence> {
+        match self.attachment.get() {
+            Some(gate) => named_evidence(gate.seat_evidence(), room, account),
+            None => named_evidence(&NoSeats, room, account),
+        }
+    }
+
+    /// The stream evidence of every seat this replica holds for `account`
+    /// in `room`; empty when it seated none over an S2S stream.
+    pub fn seat_evidence(&self, room: &BareJid, account: &BareJid) -> Vec<StreamEvidence> {
+        self.attachment
+            .get()
+            .map(|gate| gate.seat_evidence().of_account(room, account))
+            .unwrap_or_default()
+    }
+
+    /// Hold the stream evidence of the remote occupants this replica seats
+    /// in the bound attachment gate. `false` when no gate is bound or one
+    /// source is already held.
+    pub fn attach_seat_evidence(&self, seats: Arc<dyn SeatEvidence>) -> bool {
+        self.attachment
+            .get()
+            .is_some_and(|gate| gate.attach_seat_evidence(seats))
     }
 
     /// Whether an enrolled scope manages the room `binding` names, from the
