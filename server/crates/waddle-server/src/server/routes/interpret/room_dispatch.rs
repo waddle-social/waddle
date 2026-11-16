@@ -696,16 +696,24 @@ pub(super) async fn dispatch_to_room(
     if let Some(sender_room_nick_jid) = sender_room_nick_jid.as_ref() {
         prototype.from = Some(sender_room_nick_jid.clone());
     }
-    let _extension_outcome = state
-        .deps
-        .protocol
-        .extension_manager
-        .process_message_enrichments_for_waddle_with_requester(
-            &mut prototype,
-            waddle_id,
-            Some(sender_full.to_bare()),
-        )
-        .await;
+    // The enrichment hooks of this deployment's extensions run for the
+    // messages of its own accounts. A message of an occupant at another
+    // server reaches the room reduced to the standard payloads a room
+    // carries, and no extension is handed it as its requester: an
+    // extension decides for the accounts it knows, and its hooks have not
+    // been reviewed to act for a principal that holds none here.
+    if state.serves(&sender_full.to_bare()) {
+        let _extension_outcome = state
+            .deps
+            .protocol
+            .extension_manager
+            .process_message_enrichments_for_waddle_with_requester(
+                &mut prototype,
+                waddle_id,
+                Some(sender_full.to_bare()),
+            )
+            .await;
+    }
     // 6. Rich-target validation against the room archive. Runs only
     //    after the gate has admitted the sender, so non-occupants /
     //    managed-room-forbidden senders never see archive-derived

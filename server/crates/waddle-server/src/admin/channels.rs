@@ -5186,6 +5186,26 @@ async fn run_set_affiliation(
                 .to_string(),
         )))));
     }
+    // The room makes every occupant of an owner or admin a moderator. A
+    // remote occupant holds that role only on a seat whose stream carries
+    // it, so the standing is not written while one of the account's seats
+    // in this room does not, as the `muc#admin` writer refuses it.
+    if matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin)
+        && websocket_state.is_some_and(|websocket_state| {
+            !crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::seats_honour_privilege(
+                websocket_state,
+                &args.channel_jid,
+                &args.member_jid,
+            )
+        })
+    {
+        return Err(Box::new(CommandResult::Error(XmppError::not_allowed(Some(
+            "this account is in the room over a stream that does not carry owner or admin \
+             standing; grant it once that occupant has left or has entered over a \
+             certificate-authenticated stream of a trusted server"
+                .to_string(),
+        )))));
+    }
     if next_affiliation != Affiliation::Owner && previous_affiliation == Affiliation::Owner {
         let owners = actor
             .ask(ListAffiliations {

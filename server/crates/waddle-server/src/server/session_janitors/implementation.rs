@@ -449,17 +449,19 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         }),
                                     )
                                     .await;
-                                    broadcast_muc_muji_clear_to_remaining_resumable(
-                                        state,
-                                        &room,
-                                        &jid,
-                                        &outcome,
-                                        Some(LeaveFanOutProgress {
-                                            skip: &notified,
-                                            record: None,
-                                        }),
-                                    )
-                                    .await;
+                                    if removal.is_announced() {
+                                        broadcast_muc_muji_clear_to_remaining_resumable(
+                                            state,
+                                            &room,
+                                            &jid,
+                                            &outcome,
+                                            Some(LeaveFanOutProgress {
+                                                skip: &notified,
+                                                record: None,
+                                            }),
+                                        )
+                                        .await;
+                                    }
                                     let _ = maybe_evict_empty_room(state, &room, &outcome).await;
                                 }
                                 OccupancyLeaveCause::Administrative => {
@@ -507,17 +509,19 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         }),
                                     )
                                     .await;
-                                    broadcast_muc_muji_clear_to_remaining_resumable(
-                                        state,
-                                        &room,
-                                        &jid,
-                                        &outcome,
-                                        Some(LeaveFanOutProgress {
-                                            skip: &notified,
-                                            record: None,
-                                        }),
-                                    )
-                                    .await;
+                                    if removal.is_announced() {
+                                        broadcast_muc_muji_clear_to_remaining_resumable(
+                                            state,
+                                            &room,
+                                            &jid,
+                                            &outcome,
+                                            Some(LeaveFanOutProgress {
+                                                skip: &notified,
+                                                record: None,
+                                            }),
+                                        )
+                                        .await;
+                                    }
                                     match (outcome.provenance, selector) {
                                         // A replayed receipt answers an owed earlier
                                         // departure; the same connection may have

@@ -619,6 +619,43 @@ pub(super) fn privilege_honoured_for_named(
         })
 }
 
+/// Whether every seat `account` holds in `room_jid` on this replica would
+/// honour an owner or admin standing (ADR-0020 D8): `true` for an account
+/// of a served domain, and for one that holds no seat here.
+///
+/// A room gives every occupant of an account the role its affiliation
+/// derives (XEP-0045 §5.1.3), the moderator role for an owner or admin,
+/// and decides that role for the account, not for each of its seats. A
+/// remote occupant holds the moderator role only on a seat whose stream's
+/// evidence honours privilege, so an owner or admin standing is not
+/// issued while one of the account's seats does not: it is issued once
+/// that occupant has left, or has entered over a stream that does. A seat
+/// taken later on a stream that does not honour the standing is refused
+/// where it is taken.
+pub(crate) fn seats_honour_privilege(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    account: &BareJid,
+) -> bool {
+    if state.serves(account) {
+        return true;
+    }
+    state
+        .deps
+        .app_state
+        .host_grants
+        .seat_evidence(room_jid, account)
+        .into_iter()
+        .all(|evidence| {
+            crate::server::routes::websocket::handlers::presence::principal_witness(
+                state,
+                account,
+                &crate::permissions::host_grant::PrincipalEvidence::Stream(evidence),
+            )
+            .is_some_and(|witness| witness.privilege_honoured())
+        })
+}
+
 /// Whether an owner or admin standing may be written for `account` in a
 /// room no enrolled scope manages (ADR-0020 D8 at issuance): an account of
 /// a served domain, or of a home on the trusted-home list of the S2S

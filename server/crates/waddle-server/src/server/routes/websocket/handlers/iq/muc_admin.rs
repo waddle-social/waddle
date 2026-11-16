@@ -130,9 +130,11 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
 /// What a room an enrolled host-grant scope manages accepts of an
 /// administration set, before anything is recorded: one affiliation change
 /// per request, so that what is recorded is what the room actor applies,
-/// and the moderator role only for occupants whose witness honours room
-/// moderation (accounts of a served domain, and remote occupants seated on
-/// a trusted home's `pkix` stream).
+/// an owner or admin standing only for an account none of whose seats in
+/// the room would hold the moderator role it derives on a stream that does
+/// not carry it, and the moderator role only for occupants whose witness
+/// honours room moderation (accounts of a served domain, and remote
+/// occupants seated on a trusted home's `pkix` stream).
 async fn check_host_grant_admin_items(
     state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -145,14 +147,37 @@ async fn check_host_grant_admin_items(
             "This room takes one affiliation change per request.",
         )));
     }
+    check_privileged_seats(state, room_jid, affiliation_updates)?;
     check_moderator_role_items(state, room_actor, room_jid, items).await
+}
+
+/// Refuse a set that gives an owner or admin standing to an account one of
+/// whose seats in the room would not honour it (ADR-0020 D8): the room
+/// would make that occupant a moderator with the standing.
+fn check_privileged_seats(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
+    let unhonoured = affiliation_updates.iter().any(|(jid, affiliation)| {
+        matches!(affiliation, Affiliation::Owner | Affiliation::Admin)
+            && !super::muc_admin_host_grant::seats_honour_privilege(state, room_jid, jid)
+    });
+    if unhonoured {
+        return Err(Box::new(not_allowed_iq_error(
+            "This account is in the room over a stream that does not carry owner or admin              standing. Grant it once that occupant has left, or has entered over a              certificate-authenticated stream of a trusted server.",
+        )));
+    }
+    Ok(())
 }
 
 /// What a room no enrolled scope manages accepts of an administration set
 /// under ADR-0020 D8, before its own checks: an owner or admin standing
-/// only for an account of this deployment or of a trusted home, and the
-/// moderator role only for occupants whose witness honours room
-/// moderation. The room's legacy stores are written without asking either.
+/// only for an account of this deployment or of a trusted home none of
+/// whose seats in the room would hold the moderator role it derives on a
+/// stream that does not carry it, and the moderator role only for
+/// occupants whose witness honours room moderation. The room's legacy
+/// stores are written without asking any of this.
 async fn check_legacy_admin_items(
     state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -170,6 +195,7 @@ async fn check_legacy_admin_items(
              trusted servers only.",
         )));
     }
+    check_privileged_seats(state, room_jid, affiliation_updates)?;
     check_moderator_role_items(state, room_actor, room_jid, items).await
 }
 

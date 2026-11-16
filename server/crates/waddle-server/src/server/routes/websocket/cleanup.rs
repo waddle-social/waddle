@@ -244,6 +244,10 @@ pub(crate) async fn echo_muc_self_unavailable(
     affiliation: waddle_xmpp_core::Affiliation,
     removal: MucRemovalCause,
 ) {
+    // An occupancy nobody was told of is not told of as ended either.
+    if !removal.is_announced() {
+        return;
+    }
     let from_jid = leaving_room_jid.clone();
     let sender_bare = sender_jid.to_bare();
     let identity = OccupantIdentity {
@@ -305,7 +309,8 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     removal: MucRemovalCause,
     progress: Option<LeaveFanOutProgress<'_>>,
 ) {
-    if !outcome.removed_last_session {
+    // Those who stay never saw an unannounced occupancy begin.
+    if !outcome.removed_last_session || !removal.is_announced() {
         return;
     }
     let from_jid = outcome.leaving_room_jid.clone();
@@ -3340,20 +3345,22 @@ async fn cleanup_muc_presence_in(
                     }),
                 )
                 .await;
-                broadcast_muc_muji_clear_to_remaining_resumable(
-                    state,
-                    &room_jid,
-                    jid,
-                    &outcome,
-                    Some(LeaveFanOutProgress {
-                        skip: &NO_SKIP,
-                        record: Some((
-                            &state.deps.protocol.pending_local_muc_departures,
-                            &in_flight,
-                        )),
-                    }),
-                )
-                .await;
+                if removal.is_announced() {
+                    broadcast_muc_muji_clear_to_remaining_resumable(
+                        state,
+                        &room_jid,
+                        jid,
+                        &outcome,
+                        Some(LeaveFanOutProgress {
+                            skip: &NO_SKIP,
+                            record: Some((
+                                &state.deps.protocol.pending_local_muc_departures,
+                                &in_flight,
+                            )),
+                        }),
+                    )
+                    .await;
+                }
                 if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
                     completed = false;
                 }

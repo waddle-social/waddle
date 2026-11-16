@@ -1896,7 +1896,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         // remote principal, it holds an owner or admin affiliation or the
         // moderator role only when its home is a trusted home and a `pkix`
         // stream carried the join. A seat the room gave on a standing that
-        // is not honoured is given up before anyone is told of it.
+        // is not honoured is given up before anyone is told of it, and so
+        // without telling anyone that it ended: the occupants were not
+        // sent the joiner's presence yet, and the joiner is answered with
+        // the refusal.
         if remote {
             let privileged = matches!(
                 join_outcome.new_occupant_affiliation,
@@ -1913,7 +1916,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
                         occupancy_session,
                     ),
-                    waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                    waddle_xmpp::muc::MucRemovalCause::Unannounced,
                 )
                 .await;
                 return deny_join_admission(
