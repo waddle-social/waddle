@@ -5,10 +5,15 @@
 //! no state of its own, so any replica can run it at any time for any scope,
 //! after a crash, a cancelled caller or a lost reply. One pass:
 //!
-//! 1. reads the scope's current canonical intent in one PostgreSQL snapshot
+//! 1. drops, as an operation of its own, every recorded increase not yet
+//!    effective whose remote initiator this replica's S2S snapshot no longer
+//!    admits or lists as a trusted home
+//!    (`HostGrantStore::drop_unhonoured_increases`), so that such an
+//!    increase is never projected;
+//! 2. reads the scope's current canonical intent in one PostgreSQL snapshot
 //!    (only the current operation has an intent; a superseded one has none);
-//! 2. reads the scope's projection marker;
-//! 3. decides from the marker:
+//! 3. reads the scope's projection marker;
+//! 4. decides from the marker:
 //!    - it is the current operation's marker: the write was applied, whether
 //!      or not its reply arrived;
 //!    - it is the marker the journal records for an older generation: the
@@ -18,10 +23,10 @@
 //!      fresh, and the scope is otherwise left as it is;
 //!    - anything else (a malformed marker, another incarnation, a generation
 //!      the journal does not hold or that is not older): nothing is written;
-//! 4. reads the projection back at the marker's revision and compares the
+//! 5. reads the projection back at the marker's revision and compares the
 //!    affiliation family with the canonical rows exactly, which yields the
 //!    [`VerifiedProjection`] witness;
-//! 5. activates the exact operation in PostgreSQL, which accepts nothing
+//! 6. activates the exact operation in PostgreSQL, which accepts nothing
 //!    but that witness.
 //!
 //! The pass reads PostgreSQL before SpiceDB, so another replica can record
@@ -298,6 +303,39 @@ impl HostGrantAuthority {
         Ok(journal)
     }
 
+    /// Drop the recorded increases of `lifecycle` whose remote initiator
+    /// this authority's S2S snapshot no longer admits or trusts, before any
+    /// of them is projected. The S2S snapshot is fixed for the life of the
+    /// process, so a pass that finds nothing to drop cannot be overtaken by
+    /// a change of this replica's own policy; a replica that still runs an
+    /// earlier snapshot decides by that one until it restarts.
+    async fn drop_unhonoured_increases(
+        &self,
+        lifecycle: ScopeLifecycleId,
+    ) -> Result<(), HostGrantError> {
+        let dropped = self
+            .store
+            .drop_unhonoured_increases(lifecycle, &self.issuance)
+            .await?;
+        if dropped > 0 {
+            waddle_xmpp::counter_add!(
+                "waddle.host_grant.increases_dropped",
+                "{increase}",
+                "Recorded host-grant increases dropped before activation because their remote \
+                 initiator's home is no longer admitted or no longer a trusted home",
+                u64::try_from(dropped).unwrap_or(u64::MAX),
+            );
+            tracing::warn!(
+                kind = "increase_dropped",
+                dropped,
+                "Recorded host-grant increases were dropped before activation: their remote \
+                 initiator's home is no longer admitted or no longer a trusted home"
+            );
+            self.after_commit(lifecycle);
+        }
+        Ok(())
+    }
+
     /// Spawn the witness writers for a scope after a commit, so that SpiceDB
     /// is never on the commit's path.
     fn after_commit(&self, lifecycle: ScopeLifecycleId) {
@@ -392,6 +430,7 @@ impl HostGrantAuthority {
         &self,
         lifecycle: ScopeLifecycleId,
     ) -> Result<Reconciliation, HostGrantError> {
+        self.drop_unhonoured_increases(lifecycle).await?;
         let plan = self.store.projection_plan(lifecycle).await?;
         let generation = plan.marker().generation;
         if !plan.pending() {

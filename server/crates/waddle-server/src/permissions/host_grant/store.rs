@@ -791,6 +791,40 @@ impl HostGrantStore {
         let mode = commit_mode();
         own(async move { store.operator_revoke_owned(&command, &served, mode).await }).await
     }
+
+    /// Drop every increase recorded in `lifecycle` and not yet effective
+    /// whose initiator would no longer be allowed to make it: a principal of
+    /// a domain this deployment does not serve, whose home the S2S snapshot
+    /// in `policy`'s [`PrincipalPolicy`] no longer admits (S2S off included)
+    /// or no longer lists as a trusted home. An increase needs an initiator
+    /// with owner or admin standing, which a remote principal holds only for
+    /// a trusted home (ADR-0020 D8); the parts of its witness that depended
+    /// on the stream that carried the request (its strength, its trust
+    /// profile) cannot be read again and are not. An increase recorded
+    /// without an initiator (an owner act) or by an account of a served
+    /// domain is kept.
+    ///
+    /// The drop is one operation at the next generation, recorded without
+    /// an initiator, that lowers each such row's recorded affiliation to its
+    /// effective one: the increase is journalled as dropped and is never
+    /// projected or activated. A scope that admits no mutation now (retired,
+    /// exhausted, fenced, bound to another incarnation, or closed for a
+    /// restore) is left as it is. The answer is how many increases were
+    /// dropped; zero records nothing.
+    pub(crate) async fn drop_unhonoured_increases(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        policy: &IssuancePolicy,
+    ) -> Result<usize, HostGrantError> {
+        let store = self.clone();
+        let policy = policy.clone();
+        own(async move {
+            store
+                .drop_unhonoured_increases_owned(lifecycle, &policy)
+                .await
+        })
+        .await
+    }
     /// Enroll a fresh scope: its lifecycle, its rooms and its bootstrap
     /// grants, closed until the first projection is verified and activated.
     ///
@@ -2399,6 +2433,128 @@ impl HostGrantStore {
         Ok(MutationReceipt::Recorded(record))
     }
 
+    async fn drop_unhonoured_increases_owned(
+        &self,
+        lifecycle: ScopeLifecycleId,
+        policy: &IssuancePolicy,
+    ) -> Result<usize, HostGrantError> {
+        let now = Utc::now().timestamp_millis();
+        let mut tx = self.begin_write().await?;
+        let Some(scope) = load_scope(&mut tx, lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+        else {
+            tx.rollback().await?;
+            return Err(HostGrantError::UnknownScope);
+        };
+        let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        let restore_handling = scope
+            .closed_reason
+            .is_some_and(ClosedReason::awaits_restore_handling);
+        if refuse_unusable_scope(&scope, current).is_err() || restore_handling {
+            tx.rollback().await?;
+            return Ok(0);
+        }
+        let decision = async {
+            let grants = load_grants(&mut tx, lifecycle).await?;
+            let mut initiators = BTreeMap::new();
+            let mut dropped = Vec::new();
+            for grant in grants {
+                if grant.affiliation <= grant.effective_affiliation {
+                    continue;
+                }
+                let initiator = match initiators.get(&grant.operation) {
+                    Some(initiator) => Option::clone(initiator),
+                    None => {
+                        let initiator = load_initiator(&mut tx, grant.operation).await?;
+                        initiators.insert(grant.operation, initiator.clone());
+                        initiator
+                    }
+                };
+                if initiator
+                    .as_ref()
+                    .is_some_and(|initiator| !initiator_still_honoured(initiator, policy))
+                {
+                    dropped.push(grant);
+                }
+            }
+            Ok(dropped)
+        }
+        .await;
+        let dropped = match decision {
+            Ok(dropped) if dropped.is_empty() => {
+                tx.rollback().await?;
+                return Ok(0);
+            }
+            Ok(dropped) => dropped,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(statement_failure(error));
+            }
+        };
+        let Some(generation) = scope.generation.next() else {
+            tx.rollback().await?;
+            return Err(HostGrantError::ScopeExhausted);
+        };
+        let command = GrantOperationId::generate();
+        let operation = command.to_storage();
+        let mut fingerprint = super::model::Fingerprint::new("waddle:host-grant:drop-increase:v1");
+        fingerprint.text(&lifecycle.to_storage());
+        fingerprint.number(scope.generation.value());
+        fingerprint.number(i64::try_from(dropped.len()).unwrap_or(i64::MAX));
+        for (ordinal, grant) in dropped.iter().enumerate() {
+            fingerprint.text(grant.room.as_str());
+            fingerprint.text(grant.subject.as_str());
+            fingerprint.text(grant.affiliation.as_storage());
+            // The row keeps the basis it was issued under unless issuance
+            // decides its effective affiliation differently now.
+            let basis = policy
+                .check(&grant.subject, grant.effective_affiliation)
+                .unwrap_or(grant.issuance_basis);
+            tx.execute(
+                "UPDATE host_grants SET affiliation = effective_affiliation, \
+                 changed_generation = ?, operation_id = ?, issuance_basis = ? \
+                 WHERE lifecycle_id = ? AND room_jid = ? AND subject_jid = ?",
+                crate::db_params![
+                    generation.value(),
+                    operation.as_str(),
+                    basis.as_storage(),
+                    lifecycle.to_storage(),
+                    grant.room.as_str(),
+                    grant.subject.as_str()
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+            insert_change(
+                &mut tx,
+                RecordedChange {
+                    operation: &operation,
+                    ordinal,
+                    room: &grant.room,
+                    subject: &grant.subject,
+                    affiliation: grant.effective_affiliation,
+                    previous: grant.affiliation,
+                    basis,
+                },
+            )
+            .await?;
+        }
+        advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        let digest = current_digest(&mut tx, &scope).await?;
+        let record = OperationRecord {
+            operation: command,
+            lifecycle,
+            generation,
+            kind: OperationKind::SetAffiliation,
+            authority_incarnation: scope.authority_incarnation,
+            projection_digest: digest,
+        };
+        insert_operation(&mut tx, &record, &fingerprint.finish(), None, now).await?;
+        commit(tx, CommitMode::Acknowledged).await?;
+        Ok(dropped.len())
+    }
+
     async fn reconstruct_owned(
         &self,
         command: &ReconstructScope,
@@ -3274,6 +3430,45 @@ async fn insert_operation(
     .await
     .map_err(HostGrantError::from_database)?;
     Ok(())
+}
+
+/// The initiator an operation records, if it records one: an owner act and
+/// a drop of increases record none.
+async fn load_initiator(
+    tx: &mut Transaction<'_>,
+    operation: GrantOperationId,
+) -> Result<Option<BareJid>, HostGrantError> {
+    let mut rows = tx
+        .query(
+            "SELECT initiator_jid FROM host_grant_operations WHERE operation_id = ?",
+            crate::db_params![operation.to_storage()],
+        )
+        .await?;
+    let row = rows.next().await?.ok_or(corrupt("grant operation"))?;
+    row.get::<Option<String>>(0)?
+        .map(|initiator| {
+            initiator
+                .parse::<BareJid>()
+                .map_err(|_| corrupt("initiator_jid"))
+        })
+        .transpose()
+}
+
+/// Whether an increase `initiator` recorded may still become effective
+/// under `policy`: always for an account of a served domain; for a remote
+/// principal, while the S2S snapshot admits its home and lists it as a
+/// trusted home, the parts of its owner or admin standing that do not
+/// depend on the stream that carried its request.
+fn initiator_still_honoured(initiator: &BareJid, policy: &IssuancePolicy) -> bool {
+    match policy
+        .principals()
+        .witness(initiator, &PrincipalEvidence::NoStream)
+    {
+        PrincipalWitness::Served => true,
+        PrincipalWitness::Remote(witness) => {
+            witness.admission().is_ok() && witness.trusted_home_listed()
+        }
+    }
 }
 
 /// One grant change of an operation, as the journal records it.

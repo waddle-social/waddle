@@ -21,7 +21,11 @@
 //! fixed clock for the private-CA profile's certificate and CRL.
 //!
 //! The cases with a database need PostgreSQL only; the fixture activates
-//! each scope in place of a verified projection.
+//! each scope in place of a verified projection. The `live_spicedb_` case
+//! reconciles through the projection and is `#[ignore]`d like the other
+//! live suites: it needs `WADDLE_TEST_SPICEDB_ENDPOINT`,
+//! `WADDLE_TEST_SPICEDB_PRESHARED_KEY` and `WADDLE_TEST_SPICEDB_DISPOSABLE=1`
+//! as well.
 #![cfg(feature = "test-support")]
 
 // The shared host-grant and ingress fixtures serve several suites; this one
@@ -30,6 +34,8 @@
 mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
+#[path = "host_grant_support/live_spicedb.rs"]
+mod live_spicedb;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +45,7 @@ use host_grant_support::{
     bare, issuance_policy, room_submission, sealed_manifest, served, subject, GrantFixture, OWNER,
     PEER, PEER_RESOURCE, SENDER,
 };
+use kameo::actor::Spawn;
 use rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, CertificateRevocationListParams,
     DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyIdMethod, KeyPair,
@@ -49,18 +56,23 @@ use rustls::pki_types::UnixTime;
 use rustls::time_provider::TimeProvider;
 use tempfile::TempDir;
 use uuid::Uuid;
+use waddle_server::config::SpiceDbConfig;
 use waddle_server::ingress::commit::commit_submission;
 use waddle_server::ingress::IngressDecisionClass;
 use waddle_server::permissions::host_grant::{
     affiliation_allows, Activation, AdmissionDenial, EnrolledScopes, FederationSnapshot,
-    HostGrantAction, HostGrantAttachment, HostGrantError, HostGrantGate, HostGrantStore,
-    IssuanceBasis, IssuancePolicy, IssuanceRefusal, MutationReceipt, PrincipalEvidence,
-    PrincipalPolicy, PrincipalWitness, RemoteRefusal, RoomAcceptance, RoomAdmission,
-    RoomAffiliation, RoomBinding, RoomGate, StreamEvidence,
+    HostGrantAction, HostGrantAttachment, HostGrantAuthority, HostGrantError, HostGrantGate,
+    HostGrantStore, IssuanceBasis, IssuancePolicy, IssuanceRefusal, MutationReceipt,
+    PrincipalEvidence, PrincipalPolicy, PrincipalWitness, Reconciliation, RemoteRefusal,
+    RoomAcceptance, RoomAdmission, RoomAffiliation, RoomBinding, RoomGate, StreamEvidence,
+};
+use waddle_server::permissions::{
+    EnsureAuthzCodecIncarnation, EnsureSchema, PermissionActor, RecordAuthzSchemaVersion,
 };
 use waddle_server::s2s::config::{AdmissionRefusal, S2sConfig};
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::s2s::verify::{TlsSettings, TrustProfileKind};
+use waddle_server::ServerConfig;
 use waddle_xmpp::identity::CanonicalDomain;
 
 /// A trusted home in every snapshot that lists one.
@@ -1206,4 +1218,194 @@ async fn subdomains_and_served_accounts_on_streams_are_not_trusted_homes() {
             RoomAffiliation::Outcast
         );
     }
+}
+
+/// A permission actor on the disposable SpiceDB, emptied and started as a
+/// server starts it, guarding `store`'s scopes.
+async fn live_permission_actor(store: &HostGrantStore) -> kameo::actor::ActorRef<PermissionActor> {
+    let (endpoint, preshared_key) = live_spicedb::disposable_spicedb_env();
+    let raw = prescience::Client::builder(&endpoint, &preshared_key)
+        .insecure(true)
+        .build()
+        .await
+        .expect("raw SpiceDB client");
+    live_spicedb::empty_disposable_store(&raw).await;
+    let mut config = ServerConfig::test_homeserver();
+    config.spicedb = Some(SpiceDbConfig {
+        endpoint,
+        preshared_key,
+        insecure: true,
+    });
+    let backend = PermissionActor::from_server_config(&config)
+        .await
+        .expect("production SpiceDB backend");
+    assert_eq!(backend.backend_name(), "spicedb");
+    let actor = PermissionActor::spawn(backend.with_host_grant_store(store.clone()));
+    actor.ask(EnsureSchema).await.expect("built-in schema");
+    actor
+        .ask(EnsureAuthzCodecIncarnation)
+        .await
+        .expect("codec incarnation");
+    actor
+        .ask(RecordAuthzSchemaVersion)
+        .await
+        .expect("schema version");
+    live_spicedb::mark_test_store(&raw).await;
+    actor
+}
+
+/// The journal's record of `account`'s change in the fixture's room from
+/// `previous` to `affiliation` by an operation without an initiator, if it
+/// holds one.
+async fn change_without_initiator(
+    fixture: &GrantFixture,
+    account: &str,
+    previous: RoomAffiliation,
+    affiliation: RoomAffiliation,
+) -> i64 {
+    let conn = fixture.ingress.db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM host_grant_operation_changes c \
+             JOIN host_grant_operations o ON o.operation_id = c.operation_id \
+             WHERE c.room_jid = ? AND c.subject_jid = ? AND c.previous_affiliation = ? \
+             AND c.affiliation = ? AND o.kind = 'set_affiliation' AND o.initiator_jid IS NULL",
+            waddle_server::db_params![
+                fixture.scope.room.as_str(),
+                account,
+                previous.as_storage(),
+                affiliation.as_storage()
+            ],
+        )
+        .await
+        .expect("journal query");
+    rows.next()
+        .await
+        .expect("journal row")
+        .expect("count row")
+        .get(0)
+        .expect("count")
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_an_increase_whose_initiator_is_no_longer_trusted_is_dropped() {
+    let fixture = GrantFixture::enrolled("hg_w5e_drop_increase").await.expect(
+        "the live remote-principal case needs the PostgreSQL test cluster as well as SpiceDB; \
+         set the WADDLE_TEST_POSTGRES_URL variable",
+    );
+    let lifecycle = fixture.scope.lifecycle;
+    let actor = live_permission_actor(&fixture.store).await;
+    let services = [domain("muc.example.com"), domain("spaces.example.com")];
+    let authority_under = |principals: &PrincipalPolicy| {
+        HostGrantAuthority::new(
+            fixture.store.clone(),
+            actor.clone(),
+            IssuancePolicy::for_principals(principals, services.clone()).expect("issuance policy"),
+        )
+    };
+    let trusting = authority_under(&Snapshot::trusting().principals().await);
+    let delisted = authority_under(&Snapshot::without_trusted_home().principals().await);
+    trusting.reconcile(lifecycle).await.expect("first pass");
+
+    // The trusted home's admin, effective under the trusting snapshot.
+    let command = fixture
+        .command(OWNER, TRUSTED_ADMIN, RoomAffiliation::Admin)
+        .await;
+    trusting
+        .set_affiliation(&command)
+        .await
+        .expect("admin grant");
+    assert!(matches!(
+        trusting.reconcile(lifecycle).await.expect("admin pass"),
+        Reconciliation::Activated(_)
+    ));
+    assert_eq!(
+        fixture.affiliations(TRUSTED_ADMIN).await,
+        Some((RoomAffiliation::Admin, RoomAffiliation::Admin))
+    );
+
+    // On its home's `pkix` stream it records a membership, and the owner
+    // records one; neither is effective yet.
+    let command = fixture
+        .command(TRUSTED_ADMIN, REMOTE_MEMBER, RoomAffiliation::Member)
+        .await;
+    trusting
+        .set_affiliation_as(&command, &public_pkix())
+        .await
+        .expect("membership recorded by the remote admin");
+    let command = fixture
+        .command(OWNER, SERVED_CAROL, RoomAffiliation::Member)
+        .await;
+    trusting
+        .set_affiliation(&command)
+        .await
+        .expect("membership recorded by the owner");
+    assert_eq!(
+        fixture.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::None))
+    );
+    let recorded = fixture.generation().await;
+
+    // A replica whose snapshot no longer lists the home reconciles: the
+    // remote admin's increase is dropped by an operation of its own, never
+    // projected or activated, and the owner's increase becomes effective.
+    let reconciled = delisted
+        .reconcile(lifecycle)
+        .await
+        .expect("pass after delisting");
+    let dropped_at = recorded.next().expect("a generation after the increases");
+    assert_eq!(reconciled, Reconciliation::Activated(dropped_at));
+    assert_eq!(fixture.generation().await, dropped_at);
+    assert_eq!(
+        fixture.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::None, RoomAffiliation::None))
+    );
+    assert_eq!(
+        fixture.affiliations(SERVED_CAROL).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::Member))
+    );
+    assert_eq!(
+        change_without_initiator(
+            &fixture,
+            REMOTE_MEMBER,
+            RoomAffiliation::Member,
+            RoomAffiliation::None
+        )
+        .await,
+        1
+    );
+    // The admin's own grant stays recorded; the delisted snapshot no longer
+    // honours it, and the dropped member reads nothing under either.
+    assert_eq!(
+        fixture.affiliations(TRUSTED_ADMIN).await,
+        Some((RoomAffiliation::Admin, RoomAffiliation::Admin))
+    );
+    for principals in [
+        Snapshot::trusting().principals().await,
+        Snapshot::without_trusted_home().principals().await,
+    ] {
+        assert!(
+            !admitted(
+                &fixture,
+                &principals,
+                REMOTE_MEMBER,
+                public_pkix(),
+                HostGrantAction::Read
+            )
+            .await
+        );
+    }
+
+    // The scope has converged: a further pass on either replica finds
+    // nothing to drop and nothing to activate.
+    assert_eq!(
+        trusting.reconcile(lifecycle).await.expect("later pass"),
+        Reconciliation::AlreadyActive(dropped_at)
+    );
+    assert_eq!(
+        delisted.reconcile(lifecycle).await.expect("later pass"),
+        Reconciliation::AlreadyActive(dropped_at)
+    );
+    fixture.close().await;
 }
