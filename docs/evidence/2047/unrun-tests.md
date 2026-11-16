@@ -53,6 +53,7 @@ the integration branch itself.
 | `integration-run4-c.log` | nextest of the writer fence's set at `def22148d` (the commit is the log's first line): 66 of 66 passed across 6 binaries, including the `#[ignore]` SpiceDB cases. |
 | `integration-run4-r.log` | nextest of the restore incarnation's set at `def22148d`: 114 of 114 passed across 6 binaries (`host_grant_authority`, `host_grant_projection`, `host_grant_restore`, `restricted_runtime_startup`, `xep0045_host_grant_admission`, `xep0045_host_grant_audience`), including the `#[ignore]` SpiceDB cases. |
 | `integration-run6-hostgrant.log` | nextest at `c415ea213` (after the W5d and W5e merges and the fixes that followed them) of 21 binaries: the revocation fence's focused set, the effect boundary's suite and every host-grant, authorization schema and codec binary, with `--run-ignored all`, `WADDLE_TEST_REQUIRE_POSTGRES=1`, PostgreSQL 17.11 and SpiceDB 1.56.1 on the **PostgreSQL datastore** (a database of its own on the shared cluster, dropped afterwards): 277 of 278 passed. The failure, `xep0045_host_grant_revocation` `the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it`, was the new case waiting for an arrival presence that a member seated through its room actor never sends; fixed in the case at `f05fed7ac`. |
+| `integration-run6-hostgrant-final.log` | the same 21 binaries as `integration-run6-hostgrant.log` at `ff1dbf666`, the integration tree's last code and test change included, with the same environment and a fresh PostgreSQL-backed SpiceDB: 278 of 278 passed; no skips reported. |
 | `integration-run6-hostgrant-rerun.log` | `xep0045_host_grant_revocation` at `f05fed7ac`, PostgreSQL required: 12 of 12 passed, its two-process case included. |
 | `integration-run6-sweep-control.log` | the new sweep case at `f05fed7ac` with the sweep's rule for remote occupants (`6f330e5e2`) reverted in the working tree: it fails where the remote member is removed without stream evidence. |
 | `integration-run6-drop-control.log` | `live_spicedb_an_increase_whose_initiator_is_no_longer_trusted_is_dropped` at `f05fed7ac` with reconciliation's drop disabled in the working tree, against a memory SpiceDB: it fails where the remote initiator's increase is activated. |
@@ -125,27 +126,27 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `host_grant_authority` (21) | W5b, W5c, W5d, W5e | PostgreSQL 17 (superuser login; one case creates a role) | Run 21/21, run6 host-grant and run6 W5b logs |
-| `xep0045_host_grant_admission` (15) | W5b, W5c, W5e | PostgreSQL 17 | Run 15/15, run6 host-grant and run6 W5b logs |
-| `xep0045_host_grant_audience` (4) | W5b, W5c | PostgreSQL 17 | Run 4/4, run6 host-grant and run6 W5b logs |
-| `host_grant_projection` (11) | W5b, W5c, W5d | PostgreSQL 17 and SpiceDB; `live_spicedb_` cases are `#[ignore]`; one case runs replicas as separate processes | Run 11/11, run6 host-grant log (PostgreSQL datastore) and run6 W5b log (memory) |
-| `authz_schema_version` (24; 11 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 24/24, run6 host-grant and run6 W5b logs |
-| `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run6 host-grant and run6 W5b logs |
-| `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run6 host-grant and run6 W5b logs |
-| `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run6 host-grant and run6 W5b logs |
-| `xep0045_host_grant_fence` (29 in 2 modules) | W5c, integration, W5d | PostgreSQL 17; loopback | Run 29/29, run6 host-grant log |
-| `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run6 host-grant log |
-| `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run6 host-grant log |
-| `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run6 host-grant log |
-| `xep0060_extension_route_room_access` (3) | W5c | none (in-memory state, loopback) | Run 3/3, run6 host-grant log |
-| `host_grant_restore` (46; 28 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run6 host-grant log |
-| `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18 without `clustering`, run6 host-grant log |
-| `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run6 host-grant log |
-| `xep0045_host_grant_revocation` (12) | W5d, integration | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 12/12, run6 host-grant rerun log (11/12 in the run6 host-grant log; see above) |
-| `account_jid_retirement` (10) | W5d | PostgreSQL 17 | Run 10/10, run6 host-grant log |
-| `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run6 host-grant log |
-| `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run6 host-grant log |
-| `host_grant_remote_principals` (14; 1 `#[ignore]`) | W5e, integration | PostgreSQL 17; SpiceDB for the ignored case | Run 14/14, run6 host-grant log |
+| `host_grant_authority` (21) | W5b, W5c, W5d, W5e | PostgreSQL 17 (superuser login; one case creates a role) | Run 21/21, run6 host-grant final and run6 W5b logs |
+| `xep0045_host_grant_admission` (15) | W5b, W5c, W5e | PostgreSQL 17 | Run 15/15, run6 host-grant final and run6 W5b logs |
+| `xep0045_host_grant_audience` (4) | W5b, W5c | PostgreSQL 17 | Run 4/4, run6 host-grant final and run6 W5b logs |
+| `host_grant_projection` (11) | W5b, W5c, W5d | PostgreSQL 17 and SpiceDB; `live_spicedb_` cases are `#[ignore]`; one case runs replicas as separate processes | Run 11/11, run6 host-grant final log (PostgreSQL datastore) and run6 W5b log (memory) |
+| `authz_schema_version` (24; 11 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 24/24, run6 host-grant final and run6 W5b logs |
+| `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run6 host-grant final and run6 W5b logs |
+| `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run6 host-grant final and run6 W5b logs |
+| `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run6 host-grant final and run6 W5b logs |
+| `xep0045_host_grant_fence` (29 in 2 modules) | W5c, integration, W5d | PostgreSQL 17; loopback | Run 29/29, run6 host-grant final log |
+| `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run6 host-grant final log |
+| `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run6 host-grant final log |
+| `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run6 host-grant final log |
+| `xep0060_extension_route_room_access` (3) | W5c | none (in-memory state, loopback) | Run 3/3, run6 host-grant final log |
+| `host_grant_restore` (46; 28 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run6 host-grant final log |
+| `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18 without `clustering`, run6 host-grant final log |
+| `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run6 host-grant final log |
+| `xep0045_host_grant_revocation` (12) | W5d, integration | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 12/12, run6 host-grant final log (11/12 in the first run6 host-grant final log; see above) |
+| `account_jid_retirement` (10) | W5d | PostgreSQL 17 | Run 10/10, run6 host-grant final log |
+| `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run6 host-grant final log |
+| `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run6 host-grant final log |
+| `host_grant_remote_principals` (14; 1 `#[ignore]`) | W5e, integration | PostgreSQL 17; SpiceDB for the ignored case | Run 14/14, run6 host-grant final log |
 | `spicedb_architecture_guard` (edited, 4) | W5o | none (reads source; names SpiceDB variables only in messages) | Not run |
 | `ingress_relation_guard_lab` (edited, 8) | W5b | PostgreSQL (17 for the definer API pilot); skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `migration_owner_lab` (edited, 5) | W5b | PostgreSQL; skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
@@ -228,9 +229,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | Not run | 41 targets (16 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
-427 `waddle-server` cases in 15); the run6 host-grant log covers 21 targets
-(278 cases), `xep0045_host_grant_revocation` passing in full in its rerun
-log; the run6 W5b log repeats 8 of those 21 on the memory datastore.
+427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
+(278 cases) and passed in full in its final run; the run6 W5b log repeats 8
+of those 21 on the memory datastore.
 
 A target is counted as run only when the whole binary's cases appear in a
 log. Skipped prerequisites are not recorded as passed: nothing here was run

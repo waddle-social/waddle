@@ -3106,8 +3106,9 @@ occupant, which waited for an arrival presence a member seated through its
 room actor is never sent; the case was corrected at `f05fed7ac` and its
 binary then passed 12 of 12. That case fails with the sweep's rule for
 remote occupants reverted, and the case for a dropped increase fails with
-reconciliation's drop disabled. The runs are recorded in
-`docs/evidence/2047/unrun-tests.md`.
+reconciliation's drop disabled. The 21 binaries ran again at `ff1dbf666`,
+with a fresh PostgreSQL-backed SpiceDB: 278 of 278 cases passed. The runs
+are recorded in `docs/evidence/2047/unrun-tests.md`.
 
 ## Remote principals at the effect boundary (G17)
 
