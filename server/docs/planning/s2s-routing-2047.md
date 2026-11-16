@@ -1194,9 +1194,11 @@ read state are its own server's.
 
 What a remote account can have archived is bounded for the account as well
 as for its domain: five messages a second on average and thirty at once,
-counted on the replica that writes the archive and only for a message the
-room would archive (text, a subject, a correction, a retraction, a
-reaction). A message beyond that is refused with `resource-constraint`
+counted on the replica that writes the archive, for a message of a kind
+the room archives (text, a subject, a correction, a retraction, a
+reaction) when it is put to the room, whether or not the room then accepts
+it. A chat state or a marker is not counted. A message beyond that is
+refused with `resource-constraint`
 (type `wait`) and counted (`waddle.s2s.rooms.archive_writes.limited`).
 The allowances are kept for 65,536 accounts; an account that finds the
 table full of accounts still spending theirs is refused the same way.

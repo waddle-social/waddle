@@ -1125,7 +1125,9 @@ impl Asked<'_> {
             ));
         }
         // What an admitted domain can make this deployment store is
-        // bounded for each of its accounts as well as for the domain.
+        // bounded for each of its accounts as well as for the domain. A
+        // message of a kind the room archives is counted when it is put to
+        // the room, whether or not the room then accepts it.
         if is_archivable(&message) && !self.archive_writes.take(&self.account) {
             archive_write_limited();
             return self.refuse(error(
