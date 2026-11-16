@@ -5170,7 +5170,8 @@ async fn run_set_affiliation(
     // of the S2S snapshot the replica runs, as the `muc#admin` writer
     // does. A standing written for any other home would not be honoured
     // at the effect either. A fixture that runs the command without a
-    // WebSocket state has no snapshot to ask and writes as before.
+    // WebSocket state has no snapshot to ask, and the rule is not applied
+    // to it.
     if matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin)
         && websocket_state.is_some_and(|websocket_state| {
             !crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::privileged_standing_may_be_issued(

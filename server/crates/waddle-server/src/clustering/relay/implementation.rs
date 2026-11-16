@@ -1367,8 +1367,8 @@ pub enum RelayTrustProfile {
 /// message id, and neither [`RemoteStanzaEnvelope`] nor any ordered reply
 /// type changes. A peer that predates it answers `UnknownMessage` before any
 /// handler runs, and the origin answers the stanza's sender with a
-/// retryable error, as it did for every room another node holds before
-/// this message existed.
+/// retryable error; nothing was queued, so both orders of a rolling update
+/// are safe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRemoteRoomRequest {
     pub room: jid::BareJid,

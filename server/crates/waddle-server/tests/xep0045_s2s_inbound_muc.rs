@@ -287,7 +287,7 @@ async fn a_remote_occupant_leaves_no_inbox_or_activity_rows() {
             .await,
         0
     );
-    // A local sender's own row is written as before.
+    // A local sender's own row is written.
     local_groupchat(&mut alice, ROOM, "row-4", "mine to keep").await;
     local_receives(&mut alice, ARRIVES, |stanza| {
         stanza.name() == "message" && stanza.attr("id") == Some("row-4")
