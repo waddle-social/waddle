@@ -46,3 +46,15 @@ pub(super) fn room_delivery_timed_out() {
         1,
     );
 }
+
+/// A stanza that may be a remote room's traffic for a local resource was
+/// dropped unanswered because reading its occupancy from the shared store
+/// failed, so whether it is room traffic could not be decided.
+pub(super) fn room_traffic_store_failed() {
+    counter_add!(
+        "waddle.s2s.route.room_traffic.store_failures",
+        "{stanza}",
+        "Stanzas from S2S streams to local full JIDs dropped unanswered because the remote room occupancy store failed while deciding whether they are room traffic.",
+        1,
+    );
+}

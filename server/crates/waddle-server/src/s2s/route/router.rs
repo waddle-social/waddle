@@ -129,7 +129,9 @@ pub struct RouterLimits {
     /// Of those, the stanzas from one room.
     pub room_deliveries_per_room: usize,
     /// Of one worker's share, the stanzas from one remote domain, so that
-    /// one peer cannot fill a worker's queue for the rooms of others.
+    /// one peer cannot fill a worker's queue for the rooms of others. The
+    /// default is a quarter of a worker's share; a value above the
+    /// worker's share counts as the whole share.
     pub room_deliveries_per_peer: usize,
     /// How long a stream waits for one stanza to fit before the stanza is
     /// given up and the stream closed with `resource-constraint`. The bound
@@ -170,7 +172,7 @@ impl Default for RouterLimits {
             not_room_verdict_ttl: Duration::from_secs(300),
             room_deliveries: 1024,
             room_deliveries_per_room: 64,
-            room_deliveries_per_peer: 128,
+            room_deliveries_per_peer: 64,
             room_delivery_wait: Duration::from_secs(30),
             room_delivery_workers: 4,
             room_delivery_timeout: Duration::from_secs(5),
@@ -1624,6 +1626,7 @@ impl Inner {
                 Ok(current) => current,
                 // Unknown: dropped unanswered rather than refused.
                 Err(_) => {
+                    telemetry::room_traffic_store_failed();
                     tracing::warn!("dropping a remote room's stanza: the occupancy store failed");
                     return;
                 }

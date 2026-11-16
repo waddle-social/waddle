@@ -110,6 +110,7 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `waddle.s2s.route.room_traffic.waits` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_waits_total` | Stanzas from S2S streams to local full JIDs that found the room delivery queues full (the room's, a worker's, or the remote domain's share of a worker's), so that their stream stopped reading until they fit. |
 | `waddle.s2s.route.room_traffic.overloaded` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_overloaded_total` | Stanzas from S2S streams to local full JIDs that found no place on the room delivery queues within the wait's deadline; the stanza is lost and its stream closed with `resource-constraint`. |
 | `waddle.s2s.route.room_traffic.delivery_timeouts` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_delivery_timeouts_total` | Deliveries of remote room traffic to a local occupant abandoned after the delivery timeout. |
+| `waddle.s2s.route.room_traffic.store_failures` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_store_failures_total` | Stanzas from S2S streams to local full JIDs dropped unanswered because the remote room occupancy store failed while deciding whether they are room traffic. |
 
 ## All other metrics
 
