@@ -38,6 +38,13 @@ not run until verification (D9):
 - `crates/waddle-server/tests/xep0060_s2s_account_events_ws.rs`: event
   notifications from remote PubSub services and personal eventing
   services;
+- `crates/waddle-server/tests/xep0199_s2s_account_ping_ws.rs`,
+  `xep0115_s2s_account_caps_ws.rs` and `xep0313_s2s_account_archive_ws.rs`:
+  pings between clients, capabilities in probe answers and their queries,
+  and the recipient's archive;
+- `crates/waddle-server/tests/xep0410_s2s_self_ping.rs` (edited): a
+  remote room's self-ping reflection reaching the occupant once an account
+  side is attached;
 - `crates/waddle-server/tests/s2s_reachability.rs` (edited): the account
   rows of the reachability matrix.
 
@@ -382,8 +389,10 @@ Remote contacts are kept in the roster only while S2S is enabled:
   so one sender's stanzas are decided in order, with the same bounds per
   sender (64), per worker (256) and per remote domain (64 of a worker's
   256), and the same back-pressure on the stream that carried a stanza
-  that does not fit. One stanza's account work may take 10 s before the
-  worker moves on.
+  that does not fit. A worker waits 10 s for one stanza's account work and
+  then moves on; the work itself runs to its end in a task of its own, so
+  a roster write is never separated from the answer that goes with it,
+  and answers that come after the deadline are dropped.
 - **Correlated requests.** 256 inbound requests pending from one remote
   domain and 1,024 on one replica, each for at most 60 s; a request
   beyond either is answered `resource-constraint`.
@@ -436,10 +445,12 @@ store. This is the slice's rollout part (G24).
 - **Outbound messages are not archived** in the sender's archive or
   projected into the sender's inbox; the sender's other devices see them
   only as carbons while online.
-- **One stream per pair under load.** A roster with more than 64 remote
-  contacts on one domain overflows that pair's queue when presence is
-  broadcast; the excess is dropped silently, and those contacts see the
-  change at the next broadcast or probe.
+- **One stream per pair under load.** A pair's queue holds 64 stanzas. A
+  session's first presence sends a contact with `both` a probe and a
+  broadcast, so a roster with more than about 32 such contacts on one
+  domain, or 64 with `from` only, overflows that pair's queue at login;
+  the excess is dropped silently, and those contacts see the change at
+  the next broadcast or probe.
 - **Presence from non-contacts is dropped**, which narrows RFC 6121
   §8.5.2.1.2; directed presence to a full JID is still delivered.
 - **Probes from unauthorised senders are not answered with
@@ -453,7 +464,8 @@ store. This is the slice's rollout part (G24).
   nor admitted to send IQ requests to its resources.
 - **The account side runs on the four room-traffic workers.** A slow
   roster or account read slows every remote sender sharing a worker, up
-  to the 10 s bound per stanza.
+  to the 10 s bound per stanza; work abandoned at that bound keeps
+  running in its own task, so a store that hangs accumulates such tasks.
 - **Disabling S2S removes remote contacts** at the next start.
 
 ## Follow-ups

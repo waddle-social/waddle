@@ -107,19 +107,22 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 final and run6 logs |
 | `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run5 final and run6 logs |
 | `s2s_reachability` (6) | W5a, W6b, W6c | none | Not run since W6c changed its account rows (6/6 ran before, run5 final and run6 logs) |
-| `s2s_d7_refusal` (4) | W5a | none | Run 4/4, run5 final and run6 logs |
+| `s2s_d7_refusal` (4) | W5a, W6c (header only) | none | Run 4/4, run5 final and run6 logs |
 | `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run5 final and run6 logs |
 | `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 final and run6 logs |
 | `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run5 final and run6 logs |
 | `xep0045_s2s_outbound_muc` (41) | W6b, integration | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 41/41, run5 final, stress and run6 logs |
-| `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 final, stress and run6 logs |
+| `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Not run since W6c added a case (its 4 earlier cases ran: run5 final, stress and run6 logs) |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
 | `s2s_account_router` (10) | W6c | loopback; in-memory SQLite | Not run |
-| `s2s_account_traffic_ws` (37), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
+| `s2s_account_traffic_ws` (36), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
 | `xep0280_s2s_account_carbons_ws` (4) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0191_s2s_account_blocking_ws` (4) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0060_s2s_account_events_ws` (4) | W6c | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Not run |
+| `xep0115_s2s_account_caps_ws` (1) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0313_s2s_account_archive_ws` (1) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -232,9 +235,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 87 (68 integration targets, 17 library test modules, 2 chat test files) |
-| Run, with a cited log | 39 targets, 832 cases, all passed in their latest cited run |
-| Not run | 48 targets (17 of them library modules) |
+| Test targets listed | 90 (71 integration targets, 17 library test modules, 2 chat test files) |
+| Run, with a cited log | 38 targets, 828 cases, all passed in their latest cited run |
+| Not run | 52 targets (17 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
@@ -408,8 +411,9 @@ implemented unless the text says so.
   activity at an account's bare JID, each with its own review; PEP
   notifications from local accounts to remote contacts.
 - Directed presence tracking for remote entities.
-- Presence broadcast to more than 64 remote contacts of one domain
-  overflows that pair's queue and drops the excess.
+- Presence at login to more than about 32 remote contacts with `both`
+  (64 with `from`) on one domain overflows that pair's queue and drops the
+  excess.
 - Owner questions: whether disabling S2S should keep users' remote
   contacts instead of pruning them at the next start, and whether a
   stranger's message to an offline account should be answered instead of
