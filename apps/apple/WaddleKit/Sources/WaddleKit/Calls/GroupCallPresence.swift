@@ -28,6 +28,10 @@ struct GroupCallPreparationKey: Hashable {
     @ObservationIgnored private var preparing: [BareJID: Set<GroupCallParticipantKey>] = [:]
     @ObservationIgnored private var echoes: [GroupCallPreparationKey: GroupCallPreparingWaiter] = [:]
     @ObservationIgnored private var peers: [GroupCallPreparationKey: GroupCallWaiter<Bool>] = [:]
+    /// Who was already preparing when the room echoed a participant's own
+    /// preparation. XEP-0272 §Joining has a joiner wait for those, not for
+    /// whoever starts preparing afterwards: they in turn wait for the joiner.
+    @ObservationIgnored private var awaited: [GroupCallPreparationKey: Set<GroupCallParticipantKey>] = [:]
 
     public init() {}
 
@@ -44,12 +48,18 @@ struct GroupCallPreparationKey: Hashable {
         let identity = GroupCallParticipantKey(nick: nick, realJID: presence.occupant?.realJID)
         let marker = presence.kind == .available ? presence.groupCall : nil
         if marker?.isPreparing == true {
-            preparing[room, default: []].insert(identity)
             let key = GroupCallPreparationKey(room: room, participant: identity)
-            echoes.removeValue(forKey: key)?.result.resolve(true)
+            if let waiter = echoes.removeValue(forKey: key) {
+                awaited[key] = preparing[room, default: []].subtracting([identity])
+                waiter.result.resolve(true)
+            }
+            preparing[room, default: []].insert(identity)
         } else {
             preparing[room] = preparing[room]?.filter { !matches($0, identity, includeAggregate: identity.realJID == nil) }
             if preparing[room]?.isEmpty == true { preparing[room] = nil }
+            // Whoever finished is no longer waited for, even if they prepare again.
+            let stillPreparing = preparing[room] ?? []
+            for key in awaited.keys where key.room == room { awaited[key]?.formIntersection(stillPreparing) }
         }
         for key in peers.keys.filter({ $0.room == room && !hasOtherPreparing($0) }) {
             peers.removeValue(forKey: key)?.resolve(true)
@@ -62,7 +72,6 @@ struct GroupCallPreparationKey: Hashable {
             } else {
                 active[room, default: []].append(participant)
             }
-            setFlags(in: room, nick: nick, raised: marker.isHandRaised, muted: marker.isMuted)
             publish(room)
         } else if marker?.isPreparing != true {
             removeActive(in: room, identity: identity, includeAggregate: identity.realJID == nil)
@@ -79,6 +88,7 @@ struct GroupCallPreparationKey: Hashable {
         let key = GroupCallPreparationKey(room: room, participant: .init(nick: nick, realJID: realJID))
         let waiter = GroupCallPreparingWaiter(key: key)
         echoes.updateValue(waiter, forKey: key)?.result.cancel()
+        awaited[key] = nil
         return waiter
     }
 
@@ -88,14 +98,21 @@ struct GroupCallPreparationKey: Hashable {
         return completed
     }
 
-    /// Same-nick sibling resources still count as other preparing participants.
+    /// Waits for the participants who were preparing when the room echoed
+    /// ours. Same-nick sibling resources count as other participants.
     public func awaitNoOtherPreparing(in room: BareJID, nick: String, realJID: JID?, timeout: Duration) async -> Bool {
         let key = GroupCallPreparationKey(room: room, participant: .init(nick: nick, realJID: realJID))
-        guard hasOtherPreparing(key) else { return !Task.isCancelled }
+        guard hasOtherPreparing(key) else {
+            awaited[key] = nil
+            return !Task.isCancelled
+        }
         let waiter = GroupCallWaiter<Bool>()
         peers.updateValue(waiter, forKey: key)?.cancel()
         let completed = await waiter.wait(timeout: timeout) == true
-        if peers[key] === waiter { peers[key] = nil }
+        if peers[key] === waiter {
+            peers[key] = nil
+            awaited[key] = nil
+        }
         return completed
     }
 
@@ -106,6 +123,7 @@ struct GroupCallPreparationKey: Hashable {
         for key in peers.keys.filter({ $0.room == room && $0.participant.nick == nick }) {
             peers.removeValue(forKey: key)?.cancel()
         }
+        for key in awaited.keys where key.room == room && key.participant.nick == nick { awaited[key] = nil }
     }
 
     /// Stream loss forgets room advertisements and completes every pending waiter.
@@ -114,6 +132,7 @@ struct GroupCallPreparationKey: Hashable {
         for waiter in peers.values { waiter.cancel() }
         echoes.removeAll()
         peers.removeAll()
+        awaited.removeAll()
         preparing.removeAll()
         active.removeAll()
         participants.removeAll()
@@ -121,7 +140,10 @@ struct GroupCallPreparationKey: Hashable {
     }
 
     private func hasOtherPreparing(_ key: GroupCallPreparationKey) -> Bool {
-        preparing[key.room, default: []].contains { $0 != key.participant }
+        let current = preparing[key.room, default: []]
+        if let earlier = awaited[key] { return !earlier.isDisjoint(with: current) }
+        // No echo was seen for this participant: everyone else preparing counts.
+        return current.contains { $0 != key.participant }
     }
 
     private func matches(_ key: GroupCallParticipantKey, _ target: GroupCallParticipantKey, includeAggregate: Bool) -> Bool {
@@ -130,17 +152,7 @@ struct GroupCallPreparationKey: Hashable {
 
     private func removeActive(in room: BareJID, identity: GroupCallParticipantKey, includeAggregate: Bool) {
         active[room]?.removeAll { matches(.init(nick: $0.nick, realJID: $0.realJID), identity, includeAggregate: includeAggregate) }
-        setFlags(in: room, nick: identity.nick, raised: false, muted: false)
         publish(room)
-    }
-
-    private func setFlags(in room: BareJID, nick: String, raised: Bool, muted: Bool) {
-        guard let entries = active[room] else { return }
-        active[room] = entries.map {
-            guard $0.nick == nick else { return $0 }
-            return GroupCallParticipant(nick: $0.nick, realJID: $0.realJID, media: $0.media,
-                isHandRaised: raised, isMuted: muted)
-        }
     }
 
     private func publish(_ room: BareJID) {
@@ -154,9 +166,11 @@ struct GroupCallPreparationKey: Hashable {
         for entry in entries {
             if let index = projected.firstIndex(where: { $0.nick == entry.nick }) {
                 let previous = projected[index]
+                // One row per nick: each device keeps its own flags, and the
+                // row has a hand up if any does and is muted only if all are.
                 projected[index] = GroupCallParticipant(nick: entry.nick, realJID: entry.realJID,
                     media: CallMedia(audio: previous.media.audio || entry.media.audio, video: previous.media.video || entry.media.video),
-                    isHandRaised: entry.isHandRaised, isMuted: entry.isMuted)
+                    isHandRaised: previous.isHandRaised || entry.isHandRaised, isMuted: previous.isMuted && entry.isMuted)
             } else {
                 projected.append(entry)
             }

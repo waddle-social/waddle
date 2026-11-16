@@ -33,7 +33,7 @@ extension CallStore {
 
     /// `onFailure` runs before the queue moves on to the next presence.
     private func restampGroupPresence(
-        _ target: GroupCall, epoch: Int, onFailure: @escaping @MainActor () -> Void = {}
+        _ target: GroupCall, epoch: Int, onFailure: (@MainActor () -> Void)? = nil
     ) async -> Bool? {
         await groupControl.serializePresence { [self] in
             guard generation == epoch, case .inGroup(let current) = state,
@@ -47,7 +47,7 @@ extension CallStore {
             // after the slot moved on must not touch the next call's.
             guard generation == epoch, case .inGroup(let now) = state,
                 now.sid == target.sid, now.room == target.room else { return sent }
-            if sent { groupControl.advertisedHand = hand } else { onFailure() }
+            if sent { groupControl.advertisedHand = hand } else { onFailure?() }
             return sent
         }
     }

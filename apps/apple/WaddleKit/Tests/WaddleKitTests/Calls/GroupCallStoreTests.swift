@@ -6,7 +6,7 @@ import Testing
 let groupRoom = BareJID(parsing: "room@muc.waddle.test")!
 let groupMixer = JID(parsing: "calls.waddle.test/mixer")!
 let groupJoin = CallJoin(
-    url: "wss://livekit.waddle.test", room: "room@muc.waddle.test", identity: "alice@waddle.test/waddle-apple-1",
+    url: callJoin.url, room: "room@muc.waddle.test", identity: "alice@waddle.test/waddle-apple-1",
     token: callToken(#"{"sub":"alice@waddle.test/waddle-apple-1","video":{"roomJoin":true,"room":"room@muc.waddle.test"}}"#))
 
 @MainActor @Suite("Group call store") struct GroupCallStoreTests {

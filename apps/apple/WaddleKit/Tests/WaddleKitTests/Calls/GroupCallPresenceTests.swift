@@ -279,6 +279,59 @@ import WaddleKit
             media: CallMedia(audio: true, video: false))]])
     }
 
+    @Test func someoneWhoStartsPreparingAfterOurEchoIsNotWaitedFor() async {
+        let presence = GroupCallPresence()
+        let bob = JID(parsing: "bob@waddle.test/phone")!
+        let waiter = presence.registerPreparingEcho(in: room, nick: "alice", realJID: own)
+        presence.apply(preparing("alice", realJID: own))
+        // XEP-0272 §Joining: wait for those who "had" a preparing element when
+        // the room echoed ours. Bob, arriving later, waits for us instead.
+        presence.apply(preparing("bob", realJID: bob))
+        #expect(await presence.awaitPreparingEcho(waiter, timeout: .milliseconds(50)))
+        #expect(await presence.awaitNoOtherPreparing(in: room, nick: "alice", realJID: own, timeout: .milliseconds(50)))
+    }
+
+    @Test func someoneAlreadyPreparingWhenOurEchoArrivesIsWaitedFor() async {
+        let presence = GroupCallPresence()
+        let bob = JID(parsing: "bob@waddle.test/phone")!
+        let carol = JID(parsing: "carol@waddle.test/phone")!
+        let waiter = presence.registerPreparingEcho(in: room, nick: "alice", realJID: own)
+        presence.apply(preparing("bob", realJID: bob))
+        presence.apply(preparing("alice", realJID: own))
+        presence.apply(preparing("carol", realJID: carol))
+        #expect(await presence.awaitPreparingEcho(waiter, timeout: .milliseconds(50)))
+        var finished = false
+        let waiting = Task {
+            let result = await presence.awaitNoOtherPreparing(in: room, nick: "alice", realJID: own, timeout: .seconds(5))
+            finished = true
+            return result
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(!finished)
+        // Bob declares his contents; Carol, who came after our echo, is still preparing.
+        presence.apply(active("bob", realJID: bob))
+        #expect(await waiting.value)
+    }
+
+    @Test func flagsBelongToEachDeviceSharingANick() {
+        let presence = GroupCallPresence()
+        presence.apply(active("alice", realJID: own, raised: true, muted: true))
+        presence.apply(active("alice", realJID: peer))
+        // The second device leaves the call; the first is still muted with its hand up.
+        presence.apply(WirePresence(from: room.with(resource: "alice")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: peer, statusCodes: [])))
+        #expect(presence.participants == [room: [GroupCallParticipant(nick: "alice", realJID: own,
+            media: CallMedia(audio: true, video: false), isHandRaised: true, isMuted: true)]])
+    }
+
+    @Test func aNickSharedByTwoDevicesIsMutedOnlyWhenBothAre() {
+        let presence = GroupCallPresence()
+        presence.apply(active("alice", realJID: own, raised: true, muted: true))
+        presence.apply(active("alice", realJID: peer))
+        #expect(presence.participants[room]?.map(\.isMuted) == [false])
+        #expect(presence.participants[room]?.map(\.isHandRaised) == [true])
+    }
+
     private func preparing(_ nick: String, realJID: JID? = nil) -> WirePresence {
         WirePresence(from: room.with(resource: nick)!, kind: .available,
             occupant: .init(affiliation: nil, role: nil, realJID: realJID, statusCodes: []),
