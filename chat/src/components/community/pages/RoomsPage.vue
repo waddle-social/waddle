@@ -65,7 +65,6 @@ const {
   openThreads,
   openUnread,
   openCreateChannelDialog,
-  handleNewGroupDm,
   handleAddPeopleToDm,
 } = props.controller;
 
@@ -415,7 +414,6 @@ const embed = css({
               @reconnect-dm="reconnectDmFromPage"
               @end-dm="endDmFromPage"
               @new-dm="ui.showNewDm.value = true"
-              @new-group-dm="handleNewGroupDm"
               @add-people-to-dm="handleAddPeopleToDm"
             />
           </div>

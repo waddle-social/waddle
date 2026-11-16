@@ -57,7 +57,6 @@ const emit = defineEmits<{
   reconnectDm: [peerJid: string, media: CallMedia];
   endDm: [peerJid: string, sid?: string];
   newDm: [];
-  newGroupDm: [];
   addPeopleToDm: [peerJid: string];
 }>();
 
@@ -523,20 +522,10 @@ const cls = {
     <div :class="cls.head">
       <MessageCircle :class="cls.headIcon" aria-hidden="true" />
       <h2 :class="cls.title">Direct messages</h2>
-      <AppTooltip label="New group message">
-        <button
-          :class="iconbtn()"
-          aria-label="New group message"
-          type="button"
-          @click="emit('newGroupDm')"
-        >
-          <MessagesSquare aria-hidden="true" />
-        </button>
-      </AppTooltip>
       <AppTooltip label="New message">
         <button
           :class="iconbtn()"
-          aria-label="New direct message"
+          aria-label="New message"
           type="button"
           @click="emit('newDm')"
         >

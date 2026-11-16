@@ -18,7 +18,7 @@ const PEOPLE: [string, string, "available" | "away" | "dnd" | "offline"][] = [
  * Preview fixtures for members-*, rooms-* and dialog-* screens:
  *   members | members-room | members-empty | members-manage | members-manage-member
  *   rooms | rooms-empty | rooms-empty-member | rooms-loading
- *   dialog-create | dialog-edit | dialog-waddle | dialog-newdm | dialog-newgroup | notify
+ *   dialog-create | dialog-edit | dialog-waddle | dialog-newdm | dialog-addpeople | notify
  */
 export function seedPeople(c: ChatAppController, screen: string) {
   if (!/^(members|rooms|dialog-|notify)/.test(screen)) return;
@@ -68,5 +68,8 @@ export function seedPeople(c: ChatAppController, screen: string) {
   if (screen === "dialog-create") { c.openRooms(); c.ui.showCreateChannel.value = true; }
   if (screen === "dialog-waddle") { c.openRooms(); c.ui.showWaddleSettings.value = true; }
   if (screen === "dialog-newdm") c.ui.showNewDm.value = true;
-  if (screen === "dialog-newgroup") c.ui.showNewGroupDm.value = true;
+  if (screen === "dialog-addpeople") {
+    c.ui.groupDmSeedPeerJid.value = jid("jo");
+    c.ui.showNewDm.value = true;
+  }
 }

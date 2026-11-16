@@ -54,8 +54,11 @@ export function useDmSync(deps: DmSyncDeps) {
     selectGroupDm,
   } = deps;
 
-  watch(() => ui.showNewGroupDm.value, (open) => {
-    if (!open) ui.groupDmSeedPeerJid.value = null;
+  // Closing the compose dialog forgets its seed and every recipient it vetted.
+  watch(() => ui.showNewDm.value, (open) => {
+    if (open) return;
+    ui.groupDmSeedPeerJid.value = null;
+    recipientSearch = null;
   });
 
   async function handleOpenDm(peerJid: string, options: { intent?: ChannelLoadIntent; scope?: DmConversationScope } = {}) {
@@ -92,6 +95,8 @@ export function useDmSync(deps: DmSyncDeps) {
   }
 
   let searchRequestId = 0;
+  // Every account a successful, current search returned while the compose
+  // dialog is open, so people picked from an earlier query stay pickable.
   let recipientSearch: {
     client: BrowserXmppClient;
     ownerJid: string;
@@ -100,7 +105,6 @@ export function useDmSync(deps: DmSyncDeps) {
 
   async function searchDmRecipients(input: string): Promise<UserSearchResult[]> {
     const requestId = ++searchRequestId;
-    recipientSearch = null;
     const query = input.trim().replace(/^@/, "");
     if (!query) return [];
     const client = xmppClient.value;
@@ -124,15 +128,23 @@ export function useDmSync(deps: DmSyncDeps) {
         && (!address || jid === address)
         && !client.isKnownMucRoom?.(user.jid);
     });
-    recipientSearch = { client, ownerJid, results };
+    const kept = recipientSearch?.client === client && recipientSearch.ownerJid === ownerJid
+      ? recipientSearch.results
+      : [];
+    recipientSearch = { client, ownerJid, results: [...kept, ...results] };
     return results;
   }
 
+  /** A directory result from this session or a contact; never typed text. */
+  function vettedRecipientJid(peerJid: string): string | null {
+    const current = recipientSearch?.client === xmppClient.value && recipientSearch?.ownerJid === session.value?.jid;
+    const searched = current ? recipientSearch?.results.find((user) => user.jid === peerJid) : undefined;
+    return searched?.jid ?? rosterContacts.contacts.value.find((contact) => contact.jid === peerJid)?.jid ?? null;
+  }
+
   async function handleNewDm(peerJid: string) {
-    if (recipientSearch?.client !== xmppClient.value || recipientSearch?.ownerJid !== session.value?.jid) return;
-    const recipient = recipientSearch.results.find((user) => user.jid === peerJid);
-    if (!recipient) return;
-    await handleOpenDm(recipient.jid);
+    const jid = vettedRecipientJid(peerJid);
+    if (jid) await handleOpenDm(jid);
   }
 
   function handleAddPeopleToDm(peerJid: string) {
@@ -141,12 +153,7 @@ export function useDmSync(deps: DmSyncDeps) {
       return;
     }
     ui.groupDmSeedPeerJid.value = barePeerJid(peerJid);
-    ui.showNewGroupDm.value = true;
-  }
-
-  function handleNewGroupDm() {
-    ui.groupDmSeedPeerJid.value = null;
-    ui.showNewGroupDm.value = true;
+    ui.showNewDm.value = true;
   }
 
   async function handleCreateGroupDm(payload: { name: string; memberJids: string[] }) {
@@ -172,6 +179,10 @@ export function useDmSync(deps: DmSyncDeps) {
       ui.actionError.value = BOT_DM_ERROR;
       return;
     }
+    if (payload.memberJids.some((jid) => !vettedRecipientJid(jid))) {
+      ui.actionError.value = "Pick people from the directory or your contacts.";
+      return;
+    }
     if (createPayload.memberJids.length < 2) {
       ui.actionError.value = seedPeerJid ? "Choose at least one more contact." : "Choose at least two contacts.";
       return;
@@ -181,8 +192,7 @@ export function useDmSync(deps: DmSyncDeps) {
     try {
       const created = await client.createGroupDm(createPayload.name, createPayload.memberJids);
       await waddles.loadStructure(null, { noChannelSelect: true });
-      ui.showNewGroupDm.value = false;
-      ui.groupDmSeedPeerJid.value = null;
+      ui.showNewDm.value = false;
       await selectGroupDm(created.roomJid);
     } catch (error) {
       ui.actionError.value = ui.normalizeError(error);
@@ -203,7 +213,6 @@ export function useDmSync(deps: DmSyncDeps) {
     searchDmRecipients,
     handleNewDm,
     handleAddPeopleToDm,
-    handleNewGroupDm,
     handleCreateGroupDm,
   };
 }

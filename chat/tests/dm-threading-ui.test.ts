@@ -82,18 +82,19 @@ describe("DM threading UI contract", () => {
     expect(selectIndex).toBeGreaterThan(createIndex);
   });
 
-  test("seeded Add people dialog requires one picked contact while generic group creation requires two", () => {
-    const modals = readFileSync(new URL("../src/components/chat/ChatAppModals.vue", import.meta.url), "utf8");
-    const dialog = readFileSync(new URL("../src/components/modals/NewGroupDmDialog.vue", import.meta.url), "utf8");
+  test("Add people in a DM header opens the one compose dialog seeded with that person", () => {
+    const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+    const header = read("../src/components/chat/ChatHeader.vue");
+    const content = read("../src/components/chat/ContentArea.vue");
+    const shell = read("../src/components/chat/ChatReadyShell.vue");
+    const modals = read("../src/components/chat/ChatAppModals.vue");
 
-    expect(modals).toContain(':minimum-selected-contacts="ui.groupDmSeedPeerJid.value ? 1 : 2"');
-    expect(modals).toContain(':excluded-jids="ui.groupDmSeedPeerJid.value ? [ui.groupDmSeedPeerJid.value] : []"');
-    expect(dialog).toContain("selected.value.size >= (props.minimumSelectedContacts ?? 2)");
-    expect(dialog).toContain("!excluded.has(bare)");
-    expect(dialog).toContain('labelled-by="new-group-dm-title"');
-    expect(dialog).toContain('id="new-group-dm-title"');
-    expect(dialog).toContain('name: name.value.trim()');
-    expect(dialog).toContain('(props.minimumSelectedContacts ?? 2) < 2 ? "Add people" : "Create group"');
+    expect(header).toContain("emit('addPeople')");
+    expect(content).toContain("@add-people=\"dmPeer?.peerJid && emit('addPeopleToDm', dmPeer.peerJid)\"");
+    expect(shell).toContain('@add-people-to-dm="handleAddPeopleToDm"');
+    expect(modals).toContain(':seed="groupDmSeed"');
+    expect(modals).toContain('@create-group="handleCreateGroupDm"');
+    expect(existsSync(new URL("../src/components/modals/NewGroupDmDialog.vue", import.meta.url))).toBe(false);
   });
 
   test("restores DM route threads only after the async route request is still current", () => {

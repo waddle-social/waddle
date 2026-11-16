@@ -170,7 +170,6 @@ const {
   selectExtensionRoute,
   handleOpenDm,
   selectDm,
-  handleNewGroupDm,
   handleAddPeopleToDm,
   openCreateChannelDialog,
   openChannelEdit,
@@ -1013,6 +1012,7 @@ async function recoverSupersededFromShell() {
               @open-nav="openNav"
               @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
+              @add-people-to-dm="handleAddPeopleToDm"
               @open-thread="openThread"
               @join-channel-call="joinChannelCallFromActivity"
               @leave-channel-call="leaveRetainedChannelCall"

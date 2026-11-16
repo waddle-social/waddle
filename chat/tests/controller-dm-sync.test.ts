@@ -76,8 +76,9 @@ function makeHarness() {
     clearMessages,
     loadMessages,
   } as unknown as ReturnType<typeof useDirectMessages>;
+  const contacts = ref<{ jid: string; name?: string }[]>([]);
   const rosterContacts = {
-    contacts: ref([]),
+    contacts,
   } as unknown as ReturnType<typeof useXmppRosterContacts>;
 
   const scope = effectScope();
@@ -105,6 +106,7 @@ function makeHarness() {
     searchUsers,
     createGroupDm,
     currentClient,
+    contacts,
     dmSync,
     conversations,
     channels,
@@ -145,7 +147,7 @@ describe("useDmSync refuses server-hosted bots", () => {
   test("a bot is not a recipient, a group-DM seed, or a group-DM member", async () => {
     const h = makeHarness();
     h.dmSync.handleAddPeopleToDm(BOT);
-    expect(h.ui.showNewGroupDm.value).toBe(false);
+    expect(h.ui.showNewDm.value).toBe(false);
     expect(h.ui.groupDmSeedPeerJid.value).toBeNull();
 
     await h.dmSync.handleCreateGroupDm({ name: "", memberJids: ["bob@example.com", BOT] });
@@ -157,6 +159,7 @@ describe("useDmSync refuses server-hosted bots", () => {
     expect(h.createGroupDm).not.toHaveBeenCalled();
 
     h.ui.groupDmSeedPeerJid.value = null;
+    h.contacts.value = [{ jid: "bob@example.com" }, { jid: "carol@example.com" }];
     await h.dmSync.handleCreateGroupDm({ name: "", memberJids: ["bob@example.com", "carol@example.com"] });
     expect(h.createGroupDm).toHaveBeenCalledTimes(1);
     h.scope.stop();
@@ -217,15 +220,30 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
     h.scope.stop();
   });
 
-  test("failed search clears previous recipients and retains the error", async () => {
+  test("people picked from earlier searches stay valid until the compose dialog closes", async () => {
     const h = makeHarness();
-    const user = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null };
-    h.searchUsers.mockResolvedValue([user]);
+    const chat = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null };
+    const bob = { id: "bob@example.com", jid: "bob@example.com", username: "bob", display_name: null };
+    h.ui.showNewDm.value = true;
+    await nextTick();
+    h.searchUsers.mockResolvedValueOnce([chat]).mockResolvedValueOnce([bob]);
     await h.dmSync.searchDmRecipients("chat");
+    await h.dmSync.searchDmRecipients("bob");
     h.searchUsers.mockRejectedValue(new Error("Directory unavailable"));
-    await expect(h.dmSync.searchDmRecipients("chat")).rejects.toThrow("Directory unavailable");
-    await h.dmSync.handleNewDm(user.jid);
-    expect(h.openDm).not.toHaveBeenCalled();
+    await expect(h.dmSync.searchDmRecipients("carol")).rejects.toThrow("Directory unavailable");
+    await h.dmSync.handleCreateGroupDm({ name: "", memberJids: ["chat@example.com", "bob@example.com", "carol@example.com"] });
+    expect(h.createGroupDm).not.toHaveBeenCalled();
+    expect(h.ui.actionError.value).toBe("Pick people from the directory or your contacts.");
+    await h.dmSync.handleNewDm(chat.jid);
+    expect(h.openDm).toHaveBeenCalledTimes(1);
+
+    h.ui.showNewDm.value = false;
+    await nextTick();
+    await h.dmSync.handleNewDm(bob.jid);
+    expect(h.openDm).toHaveBeenCalledTimes(1);
+    h.contacts.value = [{ jid: "bob@example.com" }];
+    await h.dmSync.handleNewDm(bob.jid);
+    expect(h.openDm).toHaveBeenLastCalledWith("bob@example.com", undefined);
     h.scope.stop();
   });
 
