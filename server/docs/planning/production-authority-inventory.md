@@ -17,7 +17,7 @@ replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
 placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
-the issuance check across replicas, through `abdf0c12a9cf182630dfea6257840eb13d570545` (see the last refresh below); the original
+the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -986,7 +986,7 @@ evidence was added.
   gained lines.
 
 The selected evidence was refreshed a twentieth time, through
-`abdf0c12a9cf182630dfea6257840eb13d570545`, after reviewing the delta of the reviewed
+`99f30be6766e510672dbaa8c421a873ab758b9cd`, after reviewing the delta of the reviewed
 files since the nineteenth refresh. This refresh covers fixes to inbound
 S2S rooms: the bounds on the work that hands requests to the room host,
 how a seat ends, how a restored room's seats are taken over, and the
@@ -1026,7 +1026,7 @@ producer of stream evidence was added.
   removal of an occupant whose seat ended now says whether it removed that
   generation, and it removes, pinned to its generation, an occupant of
   another server the router holds no seat for (`s2s-unseated-removal`, new
-  anchor).
+  anchor). Its own asks of a room actor wait 2 s instead of 5 s.
 - The router (`s2s-seat-egress` and `s2s-carried-request` moved) answers
   that a JID at a served domain, or in a room without a seat, holds no
   seat without reading the seat index; refuses a request for a room whose
