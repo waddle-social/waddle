@@ -195,93 +195,15 @@ async fn groupchat_to_an_account_is_refused_with_service_unavailable_without_the
 }
 
 #[tokio::test]
-async fn a_message_to_an_account_with_no_resource_is_stored_unanswered_from_contact_and_stranger() {
-    let pki = Pki::new();
-    let federated = federated(&pki).await;
-    federated.account("alice").await;
-    contact(&federated, ALICE, BOB, "from").await;
-    let mark = federated.peer_mark();
-
-    // Bob may see Alice's presence and Mallory may not; neither is told
-    // anything (RFC 6121 §8.5.2.2.1: stored for later delivery).
-    federated
-        .from_peer(message(
-            BOB_PHONE,
-            ALICE,
-            MessageType::Chat,
-            "o1",
-            "are you there",
-        ))
-        .await;
-    federated
-        .from_peer(message(
-            MALLORY,
-            ALICE,
-            MessageType::Normal,
-            "o2",
-            "are you there",
-        ))
-        .await;
-    let mut barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
-    barrier.extend(federated.peer_barrier(MALLORY, ALICE).await);
-    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
-    assert_eq!(support::offline_count(&federated, ALICE).await, 2);
-
-    // Alice's next session receives both.
-    let mut phone = federated.online("alice", "phone", 5).await;
-    let frames = receive_until(&mut phone, |frame| {
-        frame.name() == "message" && frame.attr("id") == Some("o2")
-    })
-    .await;
-    assert!(holds(&frames, "message", "o1"), "{frames:?}");
-}
-
-#[tokio::test]
-async fn a_strangers_messages_beyond_its_offline_bound_are_dropped_unanswered() {
-    let pki = Pki::new();
-    let federated = federated(&pki).await;
-    federated.account("alice").await;
-    let mark = federated.peer_mark();
-    let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
-
-    for index in 0..=bound {
-        let id = ["flood-", &index.to_string()].concat();
-        federated
-            .from_peer(message(MALLORY, ALICE, MessageType::Chat, &id, "hello"))
-            .await;
-    }
-    let barrier = federated.peer_barrier(MALLORY, ALICE).await;
-    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
-    assert_eq!(
-        support::offline_count(&federated, ALICE).await,
-        u32::try_from(bound).expect("a small bound")
-    );
-
-    // A contact is not held to a stranger's bound.
-    contact(&federated, ALICE, BOB, "from").await;
-    federated
-        .from_peer(message(
-            BOB_PHONE,
-            ALICE,
-            MessageType::Chat,
-            "contact",
-            "hi",
-        ))
-        .await;
-    federated.peer_barrier(BOB_PHONE, ALICE).await;
-    assert_eq!(
-        support::offline_count(&federated, ALICE).await,
-        u32::try_from(bound + 1).expect("a small bound")
-    );
-}
-
-#[tokio::test]
 async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
     contact(&federated, ALICE, BOB, "from").await;
     let mut away = federated.online("alice", "away", -1).await;
+    federated
+        .peer_receives_login("alice@example.com/away", BOB, true, false)
+        .await;
     let mark = federated.peer_mark();
 
     federated
@@ -647,6 +569,9 @@ async fn a_contacts_message_gets_nothing_back_whether_the_account_is_online_or_o
     federated.account("awake").await;
     contact(&federated, "awake@example.com", BOB, "both").await;
     let mut phone = federated.online("awake", "phone", 5).await;
+    federated
+        .peer_receives_login("awake@example.com/phone", BOB, true, true)
+        .await;
 
     let mut answers = Vec::new();
     for to in ["asleep@example.com", "awake@example.com"] {
@@ -717,10 +642,13 @@ async fn a_probe_from_a_contact_with_from_is_answered_with_each_available_resour
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
-    let _phone = federated.online("alice", "phone", 5).await;
-    let _laptop = federated.online("alice", "laptop", 1).await;
-    // Bob becomes a contact after the initial presence, so the only
-    // presence he receives answers his probe.
+    let mut phone = federated.online("alice", "phone", 5).await;
+    let mut laptop = federated.online("alice", "laptop", 1).await;
+    // Bob becomes a contact once both sessions' initial presence was
+    // handled, so the only available presence he receives answers his
+    // probe.
+    client_settle(&mut phone).await;
+    client_settle(&mut laptop).await;
     contact(&federated, ALICE, BOB, "both").await;
 
     federated
@@ -771,9 +699,14 @@ async fn a_probe_from_a_sender_without_from_is_not_answered() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
-    let _phone = federated.online("alice", "phone", 5).await;
-    // Added after the initial presence, so no login probe reaches Bob.
+    // Alice is subscribed to Bob, who may not see her presence: her
+    // session's login probe reaches him, and is waited for before anything
+    // is counted.
     contact(&federated, ALICE, BOB, "to").await;
+    let _phone = federated.online("alice", "phone", 5).await;
+    federated
+        .peer_receives_login(ALICE_PHONE, BOB, false, true)
+        .await;
     let mark = federated.peer_mark();
 
     federated
@@ -1295,10 +1228,14 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
     )
     .await;
     federated.account("alice").await;
-    let mut phone = federated.online("alice", "phone", 5).await;
-    // Added after the initial presence, so no login probe or broadcast
-    // reaches Bob.
     contact(&federated, ALICE, BOB, "both").await;
+    let mut phone = federated.online("alice", "phone", 5).await;
+    // The login broadcast and probe leave on the router's own snapshot,
+    // which still admits the peer; they are waited for before anything is
+    // counted.
+    federated
+        .peer_receives_login(ALICE_PHONE, BOB, true, true)
+        .await;
     let mark = federated.peer_mark();
 
     federated
@@ -1348,6 +1285,9 @@ async fn a_retired_accounts_open_stream_sends_nothing_to_remote_jids() {
     let account = federated.account("alice").await;
     contact(&federated, ALICE, BOB, "both").await;
     let mut phone = federated.online("alice", "phone", 5).await;
+    federated
+        .peer_receives_login(ALICE_PHONE, BOB, true, true)
+        .await;
     waddle_server::auth::retirement::retire_account(
         federated.loopback.state.deps.app_state.db_pool.global(),
         &account,

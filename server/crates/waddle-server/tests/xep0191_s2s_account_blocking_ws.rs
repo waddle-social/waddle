@@ -205,18 +205,42 @@ async fn recorded_request(federated: &support::Federated) {
     assert!(pending_request(federated, ALICE, BOB).await);
 }
 
+/// Carol, never blocked, asks Alice for a subscription after Bob did. A new
+/// session receives the recorded requests oldest first, so Carol's arrives
+/// after Bob's would.
+async fn later_request(federated: &support::Federated, id: &str) {
+    federated
+        .from_peer(presence(CAROL, ALICE, PresenceType::Subscribe, id))
+        .await;
+    federated.peer_barrier(CAROL, ALICE).await;
+    assert!(pending_request(federated, ALICE, CAROL).await);
+}
+
+/// Every stanza a new session receives up to Carol's request `id`.
+async fn presented_until(
+    client: &mut waddle_ws_test_support::WsXmppClient,
+    id: &str,
+) -> Vec<Element> {
+    receive_until(client, |frame| {
+        frame.name() == "presence" && frame.attr("id") == Some(id)
+    })
+    .await
+}
+
 #[tokio::test]
 async fn a_recorded_request_from_a_sender_the_account_then_blocks_is_not_presented_again() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
     recorded_request(&federated).await;
+    later_request(&federated, "carol-ask").await;
     // Blocked by a write of the list alone, as another replica's block
     // would look here.
     block(&federated, ALICE, BOB).await;
 
     let mut phone = federated.online("alice", "phone", 5).await;
-    assert!(!holds(&client_settle(&mut phone).await, "presence", "ask"));
+    let presented = presented_until(&mut phone, "carol-ask").await;
+    assert!(!holds(&presented, "presence", "ask"), "{presented:?}");
 }
 
 #[tokio::test]
@@ -253,8 +277,10 @@ async fn blocking_a_sender_forgets_its_recorded_request() {
     )
     .await;
     assert!(matches!(reply, Iq::Result { .. }), "{reply:?}");
+    later_request(&federated, "carol-ask").await;
     let mut laptop = federated.online("alice", "laptop", 5).await;
-    assert!(!holds(&client_settle(&mut laptop).await, "presence", "ask"));
+    let presented = presented_until(&mut laptop, "carol-ask").await;
+    assert!(!holds(&presented, "presence", "ask"), "{presented:?}");
 }
 
 #[tokio::test]

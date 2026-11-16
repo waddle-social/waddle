@@ -116,8 +116,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
 | `s2s_account_router` (13) | W6c | loopback; in-memory SQLite | Not run |
-| `s2s_account_traffic_ws` (41), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
-| `s2s_account_sm_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
+| `s2s_account_traffic_ws` (39), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
+| `xep0160_s2s_account_offline_ws` (2) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0198_s2s_account_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
 | `xep0280_s2s_account_carbons_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0191_s2s_account_blocking_ws` (8) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0060_s2s_account_events_ws` (6) | W6c | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Not run |
@@ -236,9 +237,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 91 (72 integration targets, 17 library test modules, 2 chat test files) |
+| Test targets listed | 92 (73 integration targets, 17 library test modules, 2 chat test files) |
 | Run, with a cited log | 38 targets, 828 cases, all passed in their latest cited run |
-| Not run | 53 targets (17 of them library modules) |
+| Not run | 54 targets (17 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets

@@ -207,6 +207,49 @@ impl Federated {
             .unwrap_or_else(|| panic!("the peer receives `{id}`"))
     }
 
+    /// The first stanza the peer receives that `matches`, waiting for it.
+    pub async fn peer_receives_matching(&self, matches: impl Fn(&Element) -> bool) -> Element {
+        wait_for(ARRIVES, || {
+            self.captured
+                .stanzas()
+                .into_iter()
+                .find(|stanza| matches(stanza))
+        })
+        .await
+        .unwrap_or_else(|| panic!("the peer receives a matching stanza"))
+    }
+
+    /// Wait until the peer has received what a session of `account` sends
+    /// `contact` at login: the broadcast of `resource`'s presence when
+    /// `broadcast`, and the probe from the account's bare JID when `probe`
+    /// (RFC 6121 §4.2.2). A case that then counts what the peer receives
+    /// starts after them.
+    pub async fn peer_receives_login(
+        &self,
+        resource: &str,
+        contact: &str,
+        broadcast: bool,
+        probe: bool,
+    ) {
+        let account = jid(resource).to_bare().to_string();
+        if broadcast {
+            self.peer_receives_matching(|stanza| {
+                is_presence(stanza, None)
+                    && stanza.attr("from") == Some(resource)
+                    && stanza.attr("to") == Some(contact)
+            })
+            .await;
+        }
+        if probe {
+            self.peer_receives_matching(|stanza| {
+                is_presence(stanza, Some("probe"))
+                    && stanza.attr("from") == Some(account.as_str())
+                    && stanza.attr("to") == Some(contact)
+            })
+            .await;
+        }
+    }
+
     /// How many stanzas the peer has received so far: a mark for
     /// [`Federated::peer_received_since`].
     pub fn peer_mark(&self) -> usize {
