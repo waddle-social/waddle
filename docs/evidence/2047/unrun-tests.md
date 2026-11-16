@@ -220,6 +220,23 @@ implemented unless the text says so.
   Muji presence path (only the local path is driven), the mirror repair loop
   and its generation check, and the transient publish the Spaces backfill no
   longer makes.
+- **Writer-fence preconditions before the first enrollment (W5c, W5r;
+  `host-grant-authority-2047.md`, "One decision for every surface").** The
+  surfaces outside room-manifest acceptance read the replica's attachment
+  only while its attachment gate is attached, so a re-verification in
+  progress or failed closes them. Two differences from acceptance remain,
+  and both must be closed before the first scope is enrolled: each surface
+  decision compares the attachment's binding with the authority it reads
+  and refuses on a difference, and each surface asks
+  `HostGrantAttachmentGate::refuses_unmanaged` before serving a room no
+  enrolled scope manages.
+- **Reconciliation after a re-attachment (W5c, W5r).** The background
+  reconciliation of a recorded affiliation change runs no pass while the
+  attachment gate is not attached, and gives up after its last retry
+  delay. The projection recovery pass runs only at a replica's first
+  attachment, so such a change stays recorded and not effective until the
+  scope's next reconciliation or the replica's next start; a recovery pass
+  on every re-attachment would close that gap.
 - **Client carry-overs from W3, for the client slice (W8).** Local-id caches
   that assume one client and must hold several; link generation with
   qualified slugs; `selectedSpaceId` keyed by `(service, node)`; and the
