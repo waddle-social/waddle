@@ -151,6 +151,27 @@ import Testing
         f.store.clear()
     }
 
+    @Test func sessionInitiateArrivingWhileMigrationProceedIsInFlightActivates() async {
+        let f = CallFixture(sid: { "c-old" })
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio), sid: "c-old"))
+        f.port.callSends = []
+        f.port.heldCallVerbs = ["proceed"]
+        f.store.handle(f.event(.propose(callVideo), sid: "c-new"))
+        await eventually { f.port.callSends.count == 2 }
+        f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callVideo), sid: "c-new"))
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        await eventually { f.port.callSends.count == 4 }
+        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c-new", media: callVideo, join: callJoin, initiator: callPeer)))
+        #expect(
+            Set(f.port.callSends) == [
+                .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .accept(callPeer, callOwn, "c-new", callVideo),
+                .terminate(callPeer, "c-old", .expired),
+            ])
+        f.store.clear()
+    }
+
     @Test func retractedMigrationEndsAndTerminatesOldSession() async {
         let f = CallFixture(sid: { "c-old" })
         #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
@@ -162,7 +183,7 @@ import Testing
         f.store.handle(f.event(.retract(reason: nil, tieBreak: false), sid: "c-new"))
         f.port.releaseCallSends()
         await eventually { f.port.callSends.count == 3 }
-        #expect(f.store.state == .ended(sid: "c-old", reason: .expired))
+        #expect(f.store.state == .ended(sid: "c-new", reason: .retracted))
         #expect(
             f.port.callSends == [
                 .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .terminate(callPeer, "c-old", .expired),
@@ -185,10 +206,13 @@ import Testing
             return false
         }
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callAudio, isAccepting: true)))
-        await eventually { f.port.callSends.count == 3 }
+        await eventually { f.port.callSends.count == 4 }
         #expect(f.store.state == .ended(sid: "c-new", reason: .timeout))
         #expect(
-            f.port.callSends == [.migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .finish(callPeer, "c-new", .timeout)])
+            f.port.callSends == [
+                .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .terminate(callPeer, "c-old", .expired),
+                .finish(callPeer, "c-new", .timeout),
+            ])
         f.store.clear()
     }
 
@@ -227,12 +251,12 @@ import Testing
         await eventually { f.port.callSends.count == 2 }
         await f.store.hangUp()
         f.port.releaseCallSends()
-        await eventually { f.port.callSends.count == 5 }
+        await eventually { f.port.callSends.count == 4 }
         #expect(f.store.state == .idle)
         #expect(
             f.port.callSends == [
-                .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .terminate(callPeer, "c-old", .success),
-                .finish(callPeer, "c-old", nil), .finish(callPeer, "c-new", .cancel),
+                .migrated(callPeer, "c-old", "c-new"), .proceed(callPeer, "c-new"), .finish(callPeer, "c-new", .cancel),
+                .terminate(callPeer, "c-old", .expired),
             ])
         f.store.clear()
     }

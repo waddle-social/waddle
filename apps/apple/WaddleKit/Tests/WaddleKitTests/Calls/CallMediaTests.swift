@@ -182,7 +182,7 @@ import Testing
     }
 }
 
-@MainActor private final class RecordingCallMedia: CallMediaController {
+@MainActor final class RecordingCallMedia: CallMediaController {
     enum Call: Equatable {
         case connect(CallJoin, CallMedia)
         case disconnect

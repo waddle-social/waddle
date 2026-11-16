@@ -10,16 +10,22 @@ func reduceCallState(_ current: CallState, _ event: CallEvent) -> CallState {
         }
     case .proceed:
         if current.isIncoming, current.sid == event.sid { return .idle }
+        // The first of the peer's devices to answer is the one we call.
+        if case .outgoing(var call) = current, call.sid == event.sid, call.responder == nil, call.to == event.from.bare {
+            call.responder = event.from
+            return .outgoing(call)
+        }
     case .reject(let reason, let tieBreak):
         if current.sid == event.sid { return .ended(sid: event.sid, reason: tieBreak && reason == .expired ? .expired : .rejected) }
     case .retract(let reason, let tieBreak):
         if current.sid == event.sid { return .ended(sid: event.sid, reason: tieBreak && reason == .expired ? .expired : .retracted) }
     case .sessionInitiate(let join, let media):
-        if current.isIncoming, current.sid == event.sid {
+        // Media starts only for an invitation this device accepted.
+        if case .incoming(let call) = current, call.sid == event.sid, call.isAccepting {
             return .active(ActiveCall(peer: event.from, sid: event.sid, media: media, join: join, initiator: event.from))
         }
     case .sessionAccept(let join, let media):
-        if case .outgoing(let call) = current, call.sid == event.sid {
+        if case .outgoing(let call) = current, call.sid == event.sid, call.responder == nil || call.responder == event.from {
             return .active(ActiveCall(peer: event.from, sid: event.sid, media: media, join: join, initiator: call.initiator))
         }
     case .finish(let reason, _), .sessionTerminate(let reason):

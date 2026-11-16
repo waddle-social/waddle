@@ -185,14 +185,15 @@ import Observation
     }
 
     func scheduleRingTimeout(sid: String) {
-        guard case .outgoing(let current) = state, current.sid == sid else { return }
+        // An answered ring is bounded by the session timeout instead.
+        guard case .outgoing(let current) = state, current.sid == sid, current.responder == nil else { return }
         ringTimer?.cancel()
         let epoch = generation
         ringTimer = Task { [weak self, ringTimeout] in
             do { try await Task.sleep(for: ringTimeout) } catch { return }
             // A sleep whose deadline already passed returns normally even when cancelled.
             guard !Task.isCancelled, let self, self.generation == epoch,
-                case .outgoing(let current) = self.state, current.sid == sid
+                case .outgoing(let current) = self.state, current.sid == sid, current.responder == nil
             else { return }
             self.state = .ended(sid: sid, reason: .timeout)
             let sent = await self.port.sendCallRetract(to: current.to, sid: sid)

@@ -16,7 +16,57 @@ import Testing
         await eventually { f.port.callSends.count == 2 }
         try? await Task.sleep(for: .milliseconds(50))
         #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .initiate(callPeer, callOwn, "c1", callAudio)])
-        #expect(f.store.state == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn)))
+        #expect(
+            f.store.state
+                == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn, responder: callPeer)))
+        f.store.clear()
+    }
+
+    @Test func sessionInitiateBeforeLocalAcceptIsIgnored() async {
+        let media = RecordingCallMedia()
+        let port = FakePort()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media)
+        store.handle(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio)))
+        await eventually { port.completedCallSends.count == 1 }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        #expect(port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(media.calls.isEmpty)
+        store.clear()
+    }
+
+    @Test func proposeCompletingAfterProceedDoesNotRearmTheRingTimer() async {
+        let f = CallFixture(ringTimeout: .milliseconds(50))
+        f.port.heldCallVerbs = ["propose"]
+        let starting = Task { await f.store.startCall(to: callPeer.bare, media: callAudio) }
+        await eventually { f.port.callSends.count == 1 }
+        f.store.handle(f.event(.proceed))
+        await eventually { f.port.callSends.count == 2 }
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        #expect(await starting.value)
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .initiate(callPeer, callOwn, "c1", callAudio)])
+        #expect(
+            f.store.state
+                == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn, responder: callPeer)))
+        f.store.clear()
+    }
+
+    @Test func onlyTheFirstAnsweringDeviceGetsTheSession() async {
+        let f = CallFixture()
+        let tablet = JID(parsing: "bob@waddle.test/tablet")!
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.proceed))
+        f.store.handle(f.event(.proceed, from: tablet))
+        await eventually { f.port.completedCallSends.count == 2 }
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio), from: tablet))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .initiate(callPeer, callOwn, "c1", callAudio)])
+        #expect(
+            f.store.state
+                == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn, responder: callPeer)))
         f.store.clear()
     }
 
@@ -364,11 +414,13 @@ import Testing
         await eventually { f.port.callSends.count == 1 }
         await f.store.hangUpActive(ifSid: "c1", reason: .gone)
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        #expect(await f.store.acceptIncoming())
         f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio)))
-        await eventually { f.port.callSends.count == 2 }
+        await eventually { f.port.callSends.count == 3 }
         await f.store.hangUpActive(ifSid: "other-sid", reason: .gone)
         #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+        #expect(
+            f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
         f.store.clear()
     }
 

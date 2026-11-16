@@ -43,11 +43,7 @@
             guard revision == expectedRevision, !Task.isCancelled else { return }
             connectedSid = call.sid
             media.onFailure = { [weak self] in
-                guard let self, self.revision == expectedRevision else { return }
-                Task {
-                    guard self.revision == expectedRevision else { return }
-                    await self.hangUp(call.sid, .connectivityError)
-                }
+                self?.endCall(call.sid, reason: .connectivityError, revision: expectedRevision)
             }
             do {
                 try await media.connect(join: call.join, media: call.media)
@@ -62,13 +58,18 @@
                 connectedSid = nil
                 media.onFailure = nil
                 await media.disconnect()
-                // Teardown changes the slot; it must not cancel its own
-                // terminate/finish sends through the media state task.
-                Task {
-                    guard revision == expectedRevision else { return }
-                    await hangUp(call.sid, .gone)
-                }
+                endCall(call.sid, reason: .gone, revision: expectedRevision)
             }
+        }
+    }
+
+    /// Runs in its own task: the hang-up changes the slot, and must not
+    /// cancel its own terminate and finish sends through the media task.
+    private func endCall(_ sid: String, reason: JingleReason, revision expectedRevision: Int) {
+        guard revision == expectedRevision else { return }
+        Task {
+            guard revision == expectedRevision else { return }
+            await hangUp(sid, reason)
         }
     }
 }

@@ -10,6 +10,8 @@ struct SessionCallTests {
         let (coordinator, port) = session()
         coordinator.start()
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
+        await eventually { coordinator.calls.state != .idle }
+        #expect(await coordinator.calls.acceptIncoming())
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         await eventually { port.callSends.contains(.accept(callPeer, callOwn, "c1", callAudio)) }
         port.callSends = []
@@ -42,6 +44,8 @@ struct SessionCallTests {
         let (coordinator, port) = session()
         coordinator.start()
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
+        await eventually { coordinator.calls.state != .idle }
+        #expect(await coordinator.calls.acceptIncoming())
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         await eventually { port.callSends.contains(.accept(callPeer, callOwn, "c1", callAudio)) }
         port.callSends = []
@@ -92,6 +96,8 @@ struct SessionCallTests {
         let (coordinator, port) = session()
         coordinator.start()
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
+        await eventually { coordinator.calls.state != .idle }
+        #expect(await coordinator.calls.acceptIncoming())
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         await eventually { port.callSends.contains(.accept(callPeer, callOwn, "c1", callAudio)) }
         port.callSends = []
@@ -142,15 +148,19 @@ struct SessionCallTests {
         coordinator.start()
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
         await eventually { port.callSends.count == 1 }
+        #expect(await coordinator.calls.acceptIncoming())
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         if resource == "waddle-apple-1" {
-            await eventually { port.callSends.count == 2 }
-            #expect(port.callSends == [.ringing(callPeer.bare, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+            await eventually { port.callSends.count == 3 }
+            #expect(
+                port.callSends == [
+                    .ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
+                ])
         } else {
             await eventually { coordinator.calls.lastError != nil }
             #expect(coordinator.calls.state == .ended(sid: "c1", reason: .error))
             #expect(coordinator.calls.lastError == "call session accept failed: no bound resource")
-            #expect(port.callSends == [.ringing(callPeer.bare, "c1")])
+            #expect(port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1")])
         }
         await coordinator.stop()
     }

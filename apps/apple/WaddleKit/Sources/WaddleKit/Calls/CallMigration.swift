@@ -9,41 +9,49 @@ extension CallStore {
         }
         let finished = await port.sendCallFinishMigrated(to: event.from, oldSid: previous.sid, newSid: event.sid)
         guard generation == epoch else { return }
-        var proceeded = false
-        if finished { proceeded = await port.sendCallProceed(to: event.from, sid: event.sid) }
-        guard generation == epoch else { return }
-        guard proceeded else {
+        guard finished else {
             _ = await send(epoch: epoch, error: "call reject failed") {
                 await port.sendCallReject(to: event.from, sid: event.sid, tieBreak: false)
             }
             failCall(sid: previous.sid, message: "call migration failed", epoch: epoch)
             return
         }
-        guard installIncoming(event, media: media, expected: .active(previous), accepting: true, epoch: epoch) else {
-            await abandonRefusedMigration(event, media: media, previous: previous, epoch: epoch)
-            return
-        }
-        scheduleIncomingTimeout(peer: event.from, sid: event.sid)
-        retireOldSession(previous, epoch: epoch)
-    }
-
-    /// A retracted re-proposal cannot strand the retired old session as active.
-    func abandonRefusedMigration(_ event: CallEvent, media: CallMedia, previous: ActiveCall, epoch: Int) async {
-        guard generation == epoch else { return }
-        if recentlyAbortedSids.contains(event.sid), slotStillMatches(.active(previous)) {
-            cancelTimers()
-            transition(.ended(sid: previous.sid, reason: .expired))
-            retireOldSession(previous, epoch: epoch)
-        } else if !recentlyAbortedSids.contains(event.sid), case .ended(sid: previous.sid, reason: _) = state {
+        // The new sid owns the slot before the proceed can suspend: the
+        // caller's session-initiate may arrive while that send is in flight.
+        var oldSessionIsOpen = true
+        if !installIncoming(event, media: media, expected: .active(previous), accepting: true, epoch: epoch) {
+            guard generation == epoch else { return }
+            let proposalDied = recentlyAbortedSids.contains(event.sid)
+            if proposalDied, slotStillMatches(.active(previous)) {
+                // The old sid is already retired on the wire; it cannot stay active.
+                cancelTimers()
+                transition(.ended(sid: previous.sid, reason: .expired))
+                retireOldSession(previous, epoch: epoch)
+                return
+            }
+            guard !proposalDied, case .ended(sid: previous.sid, reason: _) = state else {
+                // A local hang-up walked away before we answered: decline.
+                _ = await send(epoch: epoch, error: "call reject failed") {
+                    await port.sendCallReject(to: event.from, sid: event.sid, tieBreak: false)
+                }
+                return
+            }
+            // The old session ended remotely meanwhile; the re-proposal is still live.
             cancelTimers()
             transition(.incoming(IncomingCall(from: event.from, sid: event.sid, media: media, isAccepting: true)))
-            scheduleIncomingTimeout(peer: event.from, sid: event.sid)
-        } else {
-            // Our proceed is already on the wire; walking away requires its finish bookend.
-            _ = await send(epoch: epoch, error: "call finish failed") {
-                await port.sendCallFinish(to: event.from, sid: event.sid, reason: .cancel)
-            }
+            oldSessionIsOpen = false
         }
+        let proceeded = await port.sendCallProceed(to: event.from, sid: event.sid)
+        guard generation == epoch else { return }
+        if proceeded {
+            scheduleIncomingTimeout(peer: event.from, sid: event.sid)
+        } else if state.isIncoming, state.sid == event.sid {
+            _ = await send(epoch: epoch, error: "call reject failed") {
+                await port.sendCallReject(to: event.from, sid: event.sid, tieBreak: false)
+            }
+            failCall(sid: event.sid, message: "call migration failed", epoch: epoch)
+        }
+        if oldSessionIsOpen { retireOldSession(previous, epoch: epoch) }
     }
 
     /// An orphaned old IQ must not stall the serial invitation effects queue.

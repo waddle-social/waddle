@@ -28,12 +28,18 @@ public struct OutgoingCall: Hashable, Sendable {
     public let media: CallMedia
     public let initiator: JID?
     public var isRinging: Bool
-    public init(to: BareJID, sid: String, media: CallMedia, initiator: JID? = nil, isRinging: Bool = false) {
+    /// The peer device whose `<proceed/>` arrived first. Once set, the
+    /// Jingle session is negotiated with it alone and the ring is answered.
+    public var responder: JID?
+    public init(
+        to: BareJID, sid: String, media: CallMedia, initiator: JID? = nil, isRinging: Bool = false, responder: JID? = nil
+    ) {
         self.to = to
         self.sid = sid
         self.media = media
         self.initiator = initiator
         self.isRinging = isRinging
+        self.responder = responder
     }
 }
 

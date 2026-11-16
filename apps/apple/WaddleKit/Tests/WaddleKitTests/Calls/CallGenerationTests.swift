@@ -66,6 +66,7 @@ import Testing
         } else if verb == "accept" || verb == "reject" {
             f.store.handle(f.event(.propose(callAudio)))
             await eventually { f.port.callSends.count == 1 }
+            if verb == "accept" { #expect(await f.store.acceptIncoming()) }
         }
         f.port.callSends = []
         f.port.heldCallVerbs = [verb]

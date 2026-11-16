@@ -16,7 +16,10 @@ extension CallStore {
             }
 
         case .proceed:
-            guard case .outgoing(let call) = before, call.sid == event.sid, callStillLive(event.sid) else { return }
+            // A second device's proceed must not open a second session.
+            guard case .outgoing(let call) = before, call.sid == event.sid, call.responder == nil,
+                call.to == event.from.bare, callStillLive(event.sid)
+            else { return }
             guard let own = ownJID() else {
                 failCall(sid: event.sid, message: "call session initiate failed: no bound resource", epoch: epoch)
                 return
@@ -29,7 +32,8 @@ extension CallStore {
                 failCall(sid: event.sid, message: "call session initiate failed", epoch: epoch)
             }
         case .sessionInitiate(_, let media):
-            guard before.isIncoming, before.sid == event.sid, callStillLive(event.sid) else { return }
+            guard case .incoming(let call) = before, call.sid == event.sid, call.isAccepting, callStillLive(event.sid)
+            else { return }
             guard let own = ownJID() else {
                 failCall(sid: event.sid, message: "call session accept failed: no bound resource", epoch: epoch)
                 return
