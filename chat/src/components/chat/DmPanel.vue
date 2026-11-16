@@ -4,7 +4,7 @@ import { useStore } from "@nanostores/vue";
 import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, UserPlus, Video } from "lucide-vue-next";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { css, cx } from "styled-system/css";
-import { badge, iconbtn, room } from "styled-system/recipes";
+import { avatar, badge, iconbtn, room } from "styled-system/recipes";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -455,7 +455,7 @@ const cls = {
   name: css({ flex: 1, minWidth: 0, truncate: true, color: "fg" }),
   sub: css({ flex: 1, minWidth: 0, truncate: true, textStyle: "caption", fontWeight: 400, color: "fg.muted" }),
   time: css({ textStyle: "timestamp", color: "fg.muted", fontVariantNumeric: "tabular-nums", flex: "none" }),
-  groupIcon: css({ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "28px", height: "28px", flex: "none", borderRadius: "sm", bg: "surface.2", color: "fg", "& svg": { width: "16px", height: "16px", color: "inherit" } }),
+  groupIcon: cx(avatar({ size: "sm" }), css({ "& svg": { width: "16px", height: "16px", color: "inherit" } })),
   badges: css({ display: "flex", alignItems: "center", gap: "1", flex: "none" }),
   livePill: css({
     display: "inline-flex",

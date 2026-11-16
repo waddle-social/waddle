@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
 import { ChevronLeft, Hash, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, UserPlus, Users } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
-import { header, iconbtn, tag } from "styled-system/recipes";
+import { avatar, header, iconbtn, tag } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
@@ -233,6 +233,8 @@ const emptyClass = css({ md: { display: "none" } });
 const titleGroupClass = css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0, flex: 1 });
 const sigilClass = css({ display: "none", flex: "none", color: "fg.soft", "& svg": { width: "20px", height: "20px" }, md: { display: "inline-flex" } });
 const avatarSlotClass = css({ display: "none", flex: "none", md: { display: "inline-flex" } });
+// Same 36px tile as the 1:1 DM header avatar.
+const groupAvatarClass = cx(avatar(), css({ "& svg": { width: "20px", height: "20px" } }));
 const titleStackClass = css({ display: "flex", flexDirection: "column", minWidth: 0, lineHeight: 1.3, md: { flexDirection: "row", alignItems: "baseline", gap: "3" } });
 const dmTitleStackClass = css({ display: "flex", flexDirection: "column", minWidth: 0, lineHeight: 1.3 });
 const titleRowClass = css({ display: "flex", alignItems: "center", gap: "2", minWidth: 0 });
@@ -334,6 +336,9 @@ const memberButtonCopy = computed(() => {
           :presence="dmPeerPresence"
           size="md"
         />
+      </span>
+      <span v-else-if="channel?.isGroupDm" :class="avatarSlotClass" aria-hidden="true">
+        <span :class="groupAvatarClass"><Users :stroke-width="1.75" /></span>
       </span>
       <span v-else :class="sigilClass" aria-hidden="true">
         <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" :stroke-width="1.75" />
