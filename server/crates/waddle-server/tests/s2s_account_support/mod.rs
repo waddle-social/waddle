@@ -49,6 +49,10 @@ pub const LOCAL: &str = ws::DOMAIN;
 /// The peer deployment's domain.
 pub const PEER: &str = "home-b.test";
 /// A remote account at the peer.
+/// The state of a durable stream-management session that is detached
+/// and waits for a resumption.
+const DURABLE_DETACHED: i64 = 2;
+
 pub const BOB: &str = "bob@home-b.test";
 /// A resource of [`BOB`].
 pub const BOB_PHONE: &str = "bob@home-b.test/phone";
@@ -440,7 +444,10 @@ impl Federated {
     }
 
     /// The stanzas the detached session of `resource` holds for it that
-    /// `from` sent, as the session will replay them.
+    /// `from` sent, as the session will replay them. A session the
+    /// registry keeps in memory is read there; the test state's registry
+    /// also keeps detached sessions in the durable stream-management
+    /// tables, whose retained frames are read in their order.
     pub async fn held_from(&self, resource: &FullJid, from: &str) -> Vec<Element> {
         let registry = &self.loopback.state.deps.protocol.sm_session_registry;
         let streams = registry
@@ -464,7 +471,35 @@ impl Federated {
                 .filter(|held| held.attr("from") == Some(from))
                 .collect();
         }
-        panic!("{resource} is still detached");
+        let actor = self.loopback.state.deps.app_state.db_pool.global_actor();
+        let sessions = actor
+            .ask(waddle_server::db::actor::DbQuery {
+                sql: "SELECT session_id FROM sm_durable_sessions WHERE full_jid = ? AND state = ?"
+                    .to_owned(),
+                params: vec![resource.to_string().into(), DURABLE_DETACHED.into()],
+            })
+            .await
+            .expect("the durable sessions are readable");
+        let Some(waddle_server::db::Value::Text(session)) =
+            sessions.first().and_then(|row| row.first()).cloned()
+        else {
+            panic!("{resource} has no detached session");
+        };
+        actor
+            .ask(waddle_server::db::actor::DbQuery {
+                sql: "SELECT stanza_xml FROM sm_unacked WHERE stream_id = ? ORDER BY sequence"
+                    .to_owned(),
+                params: vec![session.into()],
+            })
+            .await
+            .expect("the retained frames are readable")
+            .into_iter()
+            .filter_map(|row| match row.first() {
+                Some(waddle_server::db::Value::Text(xml)) => xml.parse::<Element>().ok(),
+                _ => None,
+            })
+            .filter(|held| held.attr("from") == Some(from))
+            .collect()
     }
 
     /// Spend `sender`'s whole share of `account`'s offline admissions for
