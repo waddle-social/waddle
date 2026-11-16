@@ -201,12 +201,19 @@ impl PrincipalPolicy {
     }
 }
 
+/// A policy with S2S off, for suites that decide without a snapshot. A
+/// replica builds its policy from the snapshot it runs
+/// (`AppState::grant_principals`), so production code names
+/// [`PrincipalPolicy::local`] where it means S2S off.
+#[cfg(feature = "test-support")]
 impl From<ServedAccountDomains> for PrincipalPolicy {
     fn from(served: ServedAccountDomains) -> Self {
         Self::local(served)
     }
 }
 
+/// See the conversion from an owned [`ServedAccountDomains`].
+#[cfg(feature = "test-support")]
 impl From<&ServedAccountDomains> for PrincipalPolicy {
     fn from(served: &ServedAccountDomains) -> Self {
         Self::local(served.clone())
