@@ -1177,6 +1177,27 @@ was added by the merge, and no decision of standing moved.
   `handlers/presence/subscription/delivery.rs`, `server/runtime_owner.rs`
   and `test_support.rs`.
 
+The selected evidence was refreshed a twenty-fourth time, through
+`4fceb7ea55331c5b46b5fd60e636f91348e4b211`, after reviewing the delta of the reviewed files since the
+twenty-third refresh. Only `server/routes/websocket/s2s_rooms.rs`
+changed. No grant writer, storage plane or producer of stream evidence
+was added, and no decision of standing moved.
+
+- Hosting rooms for remote occupants (`s2s-room-host`, `s2s-room-archive`,
+  `s2s-room-message`, `s2s-room-federated`, `s2s-room-admin`,
+  `s2s-room-owner`, `s2s-room-placement` and `s2s-unseated-removal`
+  moved) also binds the app state's host-grant gate to the ingress
+  authority's attachment gate, which startup binds only where a canonical
+  grant store exists. The surfaces that decide a seated remote occupant's
+  moderator role and an owner or admin standing for its account then read
+  the seats' evidence on every deployment; before, on one without a store,
+  they found no seat, refused the role to a trusted home's occupant and
+  issued a standing to an account seated on a dialback stream. Binding
+  the gate already bound changes nothing, and the gate's store still
+  decides which rooms are managed.
+- The raw scan holds 1633 records, unchanged in content. 4 records in
+  that file moved because it gained lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
