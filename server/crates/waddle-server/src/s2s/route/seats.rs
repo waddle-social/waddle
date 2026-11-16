@@ -222,12 +222,11 @@ impl SqlSeatStore {
     }
 
     fn counted(&self) -> MutexGuard<'_, Option<(usize, Instant)>> {
-        // The cell holds one value written whole, so a poisoned lock still
-        // holds a usable one.
-        match self.total.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // The cell holds one value written whole and nothing fails while
+        // it is held; a poisoned lock is not read past.
+        self.total
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// The deployment's seats, counted now when the last count is older
@@ -784,12 +783,14 @@ impl HeldSeats {
 
 impl SeatIndex {
     fn held(&self) -> MutexGuard<'_, HeldSeats> {
-        // Every update leaves the maps and counts consistent, so a poisoned
-        // lock still holds usable state.
-        match self.held.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // The index is what bounds a room's traffic to the remote JIDs it
+        // admitted and what records the evidence each was admitted under.
+        // Nothing fails while it is held; were it poisoned all the same,
+        // its seats could not be trusted, and the process stops rather
+        // than decide on them.
+        self.held
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Hold `seat`, replacing any seat of the same room and occupant.

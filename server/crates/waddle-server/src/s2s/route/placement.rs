@@ -99,12 +99,12 @@ pub(super) struct Placements {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Every update leaves the maps and counts consistent, so a poisoned
-    // lock still holds usable state.
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+    // Nothing here can fail while it holds a lock. A poisoned lock means
+    // the counts may no longer match the lanes, and a stage that miscounts
+    // would hold back or admit without bound: the process stops instead.
+    mutex
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 impl Placements {
