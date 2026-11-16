@@ -45,7 +45,7 @@ use crate::server::routes::websocket::handlers::roster_fanout::send_roster_push_
 use crate::server::routes::websocket::handlers::unserved_route::unserved_destination;
 use crate::server::routes::websocket::s2s_accounts::{
     account_exists, admits_domain, blocklist, blocks, database, deliver, lock_account,
-    reaches_full_jid, s2s_enabled, telemetry,
+    reaches_full_jid, s2s_enabled, telemetry, AccountLock,
 };
 use crate::server::routes::websocket::transport_xml::stanza_to_xml;
 use crate::server::routes::websocket::WebSocketState;
@@ -755,13 +755,15 @@ fn lookup_failed(presence: &Presence, sender: &FullJid) -> Vec<String> {
 /// roster. A request the contact sent is forgotten. The contact is sent
 /// `unsubscribe` if the account was subscribed to it or asked to be, and
 /// `unsubscribed` if it was subscribed to the account; nothing is sent to a
-/// contact the account blocks (XEP-0191 §3.3), or while S2S is off.
+/// contact the account blocks (XEP-0191 §3.3), or while S2S is off. The
+/// caller holds the account's lock (`_lock`) from before it read the item
+/// it removed.
 pub(crate) async fn remove_remote_contact(
     state: &WebSocketState,
     account: &BareJid,
     item: &RosterItem,
+    _lock: &AccountLock,
 ) {
-    let _lock = lock_account(account).await;
     forget_request(state, account, &item.jid).await;
     // With S2S off nothing could leave; with it on, nothing leaves for a
     // contact the account blocks.

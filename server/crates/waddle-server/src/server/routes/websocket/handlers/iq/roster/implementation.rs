@@ -215,6 +215,22 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         }
     }
 
+    // The account side reads, decides and writes the account's items for
+    // remote contacts under the account's lock (gate G18); the roster set
+    // takes it too, before its own read, so that an inbound subscription
+    // stanza's read-modify-write never interleaves with it and cannot
+    // restore an item the client just changed or removed. It is taken
+    // before the per-user mutation lock below, in the order the account
+    // side takes both, and held until the removal's side effects have
+    // been sent.
+    let remote_lock = if crate::server::routes::websocket::handlers::presence::is_remote_contact(
+        state,
+        &requested.jid,
+    ) {
+        Some(crate::server::routes::websocket::s2s_accounts::lock_account(user_jid).await)
+    } else {
+        None
+    };
     let mut removed_item = None;
     // Hold the per-user mutation lock from the start of the storage write
     // through the end of push fanout below (XEP-0237 §2.6 — pushes for
@@ -350,8 +366,16 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
     // already preserved.
     drop(_user_lock);
     if let Some(item) = removed_item.as_ref() {
-        send_roster_remove_subscription_side_effects(state, storage, user_jid, item).await;
+        send_roster_remove_subscription_side_effects(
+            state,
+            storage,
+            user_jid,
+            item,
+            remote_lock.as_ref(),
+        )
+        .await;
     }
+    drop(remote_lock);
     frames.push(iq_to_xml(build_roster_result_empty(iq)));
     frames
 }

@@ -13,22 +13,23 @@ use super::{
 // can recover state. They log at warn without marking the dispatch
 // span — `status=error` stays reserved for operations whose outcome actually
 // failed (#1428), matching `send_blocking_pushes`.
+/// `remote_lock` is the account's lock for its remote contacts, which the
+/// caller holds when `removed_item` is a remote contact.
 pub(super) async fn send_roster_remove_subscription_side_effects(
     state: &WebSocketState,
     storage: &DatabaseRosterStorage,
     user_jid: &BareJid,
     removed_item: &RosterItem,
+    remote_lock: Option<&crate::server::routes::websocket::s2s_accounts::AccountLock>,
 ) {
     // A remote contact's roster is on its own server: it is told through
     // the remote route (RFC 6121 §2.5.2; gate G18).
-    if crate::server::routes::websocket::handlers::presence::is_remote_contact(
-        state,
-        &removed_item.jid,
-    ) {
+    if let Some(lock) = remote_lock {
         crate::server::routes::websocket::handlers::presence::remove_remote_contact(
             state,
             user_jid,
             removed_item,
+            lock,
         )
         .await;
         return;
