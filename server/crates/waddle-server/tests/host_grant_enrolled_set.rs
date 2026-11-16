@@ -281,6 +281,41 @@ async fn a_failed_refresh_keeps_the_set_and_unmanaged_rooms_need_no_read() {
     fixture.close().await;
 }
 
+/// The gate decides managed rooms with the attachment the replica's
+/// attachment gate holds at each decision, the one room-manifest acceptance
+/// uses: none before that gate attaches, and the one it holds once it does.
+#[tokio::test]
+async fn the_gate_reads_the_attachment_its_attachment_gate_holds() {
+    let Some(fixture) = GrantFixture::active("hg_set_bound").await else {
+        return;
+    };
+    let scope = &fixture.scope;
+    let gate =
+        HostGrantGate::with_enrolled_scopes(fixture.store.clone(), loaded(&fixture.store).await);
+    let replica = fixture.ingress.authority().await;
+    assert!(gate.bind_attachment(replica.host_grant_gate()));
+    assert!(!gate.bind_attachment(replica.host_grant_gate()));
+    assert!(gate.attachment().is_none());
+    assert!(matches!(
+        gate.room(RoomBinding::Room(&scope.room)).await,
+        RoomGate::Unavailable
+    ));
+
+    // The replica's attachment gate attaches, as its verification would.
+    assert!(replica.attach_host_grants(
+        HostGrantAttachment::unfenced_for_test(&fixture.store, served())
+            .await
+            .expect("attachment")
+    ));
+    assert!(gate.attachment().is_some());
+    assert!(matches!(
+        gate.room(RoomBinding::Room(&scope.room)).await,
+        RoomGate::Managed(_)
+    ));
+    assert!(replica.drain_and_join(Duration::from_secs(5)).await);
+    fixture.close().await;
+}
+
 #[tokio::test]
 async fn the_gate_reads_grants_only_for_enrolled_rooms_on_an_attached_replica() {
     let Some(fixture) = GrantFixture::active("hg_set_gate").await else {
