@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "0ac974978f2ba9a664b1964788f37e8fb2a6de18",
+  "baseline_commit": "9766d9c8175f09d56fff6f4e6f8c65b93b0984eb",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -121,7 +121,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
-      "sha256": "018a7b2b31792d6cacad7b476efc8e5cb7f08e116e620e71062f10e6e5822360"
+      "sha256": "e03308c47ac808d0f12acc326233727febbc069c892d77606db88f81339efa40"
     },
     {
       "path": "server/crates/waddle-server/src/server/managed_channel_policy.rs",
@@ -894,7 +894,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "d4cebd8a7f86dc10f6d33608d0ceac12c49e65c74d22be01bf99b82dc83842f0",
+    "sha256": "12d8afe31774a826980225d0527e6db89d533434f31a7a2a1426fe4a7eaec53b",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,

@@ -5,7 +5,8 @@ Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
 S2S routing and the host-grant restore incarnation through
-`0ac974978f2ba9a664b1964788f37e8fb2a6de18` (see the last refresh below); the original
+`0ac974978f2ba9a664b1964788f37e8fb2a6de18`, and outbound S2S rooms through
+`9766d9c8175f09d56fff6f4e6f8c65b93b0984eb` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -476,6 +477,22 @@ the reviewed files since the sixth refresh:
   lines moved, in the files above and in the fenced WebSocket test state,
   which now binds its gate to the ingress authority's attachment gate. No
   production grant writer, grant store or acceptance authority was added.
+
+The selected evidence was refreshed an eighth time, through
+`9766d9c8175f09d56fff6f4e6f8c65b93b0984eb`, after reviewing the delta of the reviewed files since the
+seventh refresh:
+
+- S2S startup (`server/lifecycle.rs`) gives the S2S router a second store
+  in the global database, the remote room occupancies local resources hold
+  in rooms on other domains. The store records S2S routing state only; it
+  writes no grant, affiliation or acceptance row, and the `startup` and
+  `startup-schema` anchors did not move.
+- The raw scan holds 1595 records, unchanged in count and content; 13 moved
+  lines in `routes/websocket/cleanup.rs`, `routes/interpret/carbons.rs`,
+  `runtime_owner.rs` and `test_support.rs`, which gained remote room
+  cleanup, carbon rules for remote rooms, table grants for the two new S2S
+  tables and a test re-export. No production grant writer, grant store or
+  acceptance authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
