@@ -444,6 +444,69 @@ async fn a_remote_occupant_leaves_and_its_seat_ends() {
 }
 
 #[tokio::test]
+async fn a_seated_occupant_that_sends_its_join_again_is_answered_as_a_join() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    let first = hosted.seat(ROOM, BOB).expect("the remote occupant's seat");
+    local_receives(&mut alice, ARRIVES, |stanza| {
+        stanza.name() == "presence" && stanza.attr("from") == Some(BOB_OCCUPANT)
+    })
+    .await
+    .expect("the remote occupant's arrival for the local occupant");
+    // XEP-0045 §7.2: a client that lost track of a room it is in sends
+    // its join again, with the `muc` element.
+    let before = hosted.received();
+    hosted
+        .from_peer(remote_join(BOB, ROOM, "bob", "join-2"))
+        .await;
+    let is_own = |stanza: &Element| {
+        presence_between(stanza, BOB_OCCUPANT, BOB)
+            && stanza.attr("type").is_none()
+            && statuses(stanza).contains(&"110".to_owned())
+    };
+    hosted
+        .at_peer_after(before, is_own)
+        .await
+        .expect("the room's own presence for the occupant that entered again");
+    // §7.2.3: the occupants are presented again, before the occupant's
+    // own presence.
+    let after: Vec<Element> = hosted.captured.stanzas().into_iter().skip(before).collect();
+    let roster = after
+        .iter()
+        .position(|stanza| presence_between(stanza, ALICE_OCCUPANT, BOB));
+    let own = after.iter().position(is_own);
+    assert!(roster.is_some() && roster < own, "{roster:?} {own:?}");
+    // The join was decided on a seat of its own, which replaced the one
+    // the occupant held: one seat, one row, a new occupancy generation.
+    let second = hosted
+        .seat(ROOM, BOB)
+        .expect("the seat after the second join");
+    assert_ne!(second.session, first.session);
+    assert_eq!(
+        hosted
+            .rows_naming("s2s_local_room_seats", "occupant_jid", BOB)
+            .await,
+        1
+    );
+    // Nobody saw the occupant leave: it never did.
+    let left = local_receives(&mut alice, QUIET, |stanza| {
+        stanza.name() == "presence"
+            && stanza.attr("from") == Some(BOB_OCCUPANT)
+            && stanza.attr("type") == Some("unavailable")
+    })
+    .await;
+    assert!(left.is_none(), "{left:?}");
+    assert_eq!(
+        hosted.count_at_peer(|stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && stanza.attr("type") == Some("unavailable")
+        }),
+        0,
+        "the occupant was told that it left"
+    );
+}
+
+#[tokio::test]
 async fn a_remote_principal_creates_no_room() {
     let hosted = Hosted::start(RouterLimits::default(), no_change).await;
     let missing = "nowhere@muc.example.com";

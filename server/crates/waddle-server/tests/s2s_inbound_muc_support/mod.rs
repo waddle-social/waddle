@@ -745,6 +745,21 @@ pub async fn local_groupchat(client: &mut WsXmppClient, room: &str, id: &str, te
         .expect("send groupchat");
 }
 
+/// A local client's groupchat message to `room` that carries `payload` and
+/// no text.
+pub async fn local_payload(client: &mut WsXmppClient, room: &str, id: &str, payload: Element) {
+    let message = Element::builder("message", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .append(payload)
+        .build();
+    client
+        .send(&String::from(&message))
+        .await
+        .expect("send groupchat");
+}
+
 /// The next stanza `client` receives within `budget` that `found` accepts.
 pub async fn local_receives(
     client: &mut WsXmppClient,

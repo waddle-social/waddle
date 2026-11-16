@@ -9,7 +9,7 @@
 //! pair is lost, when the room no longer seats its occupant, when the host
 //! refuses the occupant, when this replica takes it over from one that
 //! stopped (status 333, §11.1) and when this replica stops (status 332,
-//! §10.9); presence for an earlier occupancy neither ends nor reaches a
+//! §11.2); presence for an earlier occupancy neither ends nor reaches a
 //! later seat; an occupant that enters again is answered before the room's
 //! traffic reaches it (§7.1); the sender's own copy of its message reaches
 //! it once (§7.4); one account cannot spend its domain's request rate; and
@@ -443,7 +443,7 @@ async fn a_stopping_replica_tells_its_remote_occupants_with_status_332() {
     let hosted = Scripted::start("inbound-router-shutdown", RouterLimits::default()).await;
     with_bob(&hosted).await;
     hosted.router.shutdown(Duration::from_secs(5)).await;
-    // XEP-0045 §10.9: the occupant's own unavailable presence says that
+    // XEP-0045 §11.2: the occupant's own unavailable presence says that
     // the service is shutting down.
     let told = hosted
         .home_b

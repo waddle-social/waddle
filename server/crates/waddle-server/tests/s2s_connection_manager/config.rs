@@ -244,12 +244,17 @@ fn the_default_caps_leave_room_for_negotiation() {
     assert!(limits.max_peers <= limits.max_streams);
     // One source address cannot hold every inbound handshake.
     assert!(limits.max_unauthenticated_per_address < limits.max_inbound_handshakes);
-    // Two caps default below ceilings an operator may raise them to.
+    // Three caps default below ceilings an operator may raise them to.
     let ceiling = ResourceLimits::CEILING;
     assert_eq!(limits.max_unauthenticated_per_address, 2);
     assert_eq!(ceiling.max_unauthenticated_per_address, 4);
     assert_eq!(limits.max_negotiating_per_peer, 3);
     assert_eq!(ceiling.max_negotiating_per_peer, 4);
+    // The router's pair queues: more of them than peers can hold streams,
+    // since a pair is directional and a queue outlives its stream.
+    assert_eq!(limits.max_pair_queues, 64);
+    assert_eq!(ceiling.max_pair_queues, 256);
+    assert!(limits.max_pair_queues >= limits.max_peers);
 }
 
 #[test]
@@ -270,6 +275,7 @@ async fn limits_load_within_their_ranges() {
     spec.limits = vec![
         "max_unauthenticated_per_address = 4".to_owned(),
         "max_negotiating_per_peer = 4".to_owned(),
+        "max_pair_queues = 128".to_owned(),
         "input_per_socket_per_second = 32768".to_owned(),
         "input_per_socket_burst = 16384".to_owned(),
         "input_per_second = 65536".to_owned(),
@@ -279,6 +285,7 @@ async fn limits_load_within_their_ranges() {
     let limits = config.limits();
     assert_eq!(limits.max_unauthenticated_per_address, 4);
     assert_eq!(limits.max_negotiating_per_peer, 4);
+    assert_eq!(limits.max_pair_queues, 128);
     assert_eq!(
         limits.input_rate_per_socket,
         RateLimit {
@@ -584,6 +591,17 @@ async fn contradictory_or_incomplete_configurations_fail_to_load() {
         "a per-peer budget above its ceiling",
     )
     .await;
+
+    for beyond in ["max_pair_queues = 257", "max_pair_queues = 0"] {
+        let mut spec = Spec::new(HOME_A, HOME_B);
+        spec.limits = vec![beyond.to_owned()];
+        check(
+            spec,
+            |error| matches!(error, ConfigError::LimitOutOfRange("max_pair_queues")),
+            "the router's pair queues outside their range",
+        )
+        .await;
+    }
 
     let mut spec = Spec::new(HOME_A, HOME_B);
     spec.limits = vec!["input_per_socket_per_second = 1024".to_owned()];
