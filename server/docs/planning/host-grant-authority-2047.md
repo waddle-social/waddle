@@ -3047,6 +3047,14 @@ SpiceDB, unlike the earlier runs recorded above. The second replica of the
 two-process case is a process of the test binary, not a `waddle-server`
 process.
 
+After the attached-only gate was merged in and the late renewal, the
+repeated `revoke-account`, the surfaces decided again after an await and
+the batched Space fan-out read were fixed, the same 19 binaries ran once
+more on 2026-11-16 at commit `658db7c4e`, with the same versions, the same
+PostgreSQL-backed SpiceDB and nextest's default parallelism: 245 of 245
+cases passed, 32 of them in the five binaries above. No run recorded here
+shows that a new case fails without its fix.
+
 ## Blocking review ledger
 
 Slice names refer to [the federation plan](../../../docs/planning/federation-2047.md),
