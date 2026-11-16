@@ -33,12 +33,21 @@
 //! is then removed with the account, and every insert that arrives later
 //! waits for the commit and runs against the ledger that holds the JID.
 //! SQLite runs one writing transaction at a time.
+//!
+//! The lock holds up every writer of the account tables for as long as the
+//! retirement waits and runs: provisioning, and also session creation at
+//! every login and changes of native credentials. The retirement waits at
+//! most 2 s for the lock and then fails without having changed anything; it
+//! can be run again.
 
 use chrono::Utc;
 use jid::BareJid;
 
+use std::time::Duration;
+
 use super::directory::canonical_account_jid;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::ingress_substrate::set_local_transaction_timeouts;
 
 /// The condition a provisioning statement carries: the ledger does not hold
 /// the JID. Its one parameter is the JID's canonical form
@@ -62,11 +71,20 @@ pub(crate) fn retirement_key_of(jid: &BareJid) -> Option<String> {
     retirement_key(jid.node()?.as_str(), jid.domain().as_str())
 }
 
+/// Longest a retirement waits for the lock on the account tables. Writers
+/// of those tables that arrive meanwhile wait behind it, so this is also the
+/// longest a retirement can hold up a login before it gives up.
+const RETIREMENT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest any one statement of a retirement runs.
+const RETIREMENT_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Why an account could not be retired.
 #[derive(Debug, thiserror::Error)]
 pub enum RetireAccountError {
     #[error("the JID names no account: it needs a localpart and a canonical form")]
     NotAnAccountJid,
+    #[error("the retirement's lock and statement bounds could not be installed")]
+    BoundsUnproven,
     #[error("a statement of the retirement failed")]
     Database(#[from] DatabaseError),
 }
@@ -113,6 +131,19 @@ pub async fn retire_account(
     let mut tx = match db.driver() {
         DatabaseDriver::Postgres => {
             let mut tx = db.begin().await?;
+            // While this transaction waits for the table lock, PostgreSQL
+            // queues every later writer of the account tables behind it,
+            // logins included. The wait is bounded, and so is every
+            // statement that follows.
+            if !set_local_transaction_timeouts(
+                &mut tx,
+                RETIREMENT_LOCK_TIMEOUT,
+                RETIREMENT_STATEMENT_TIMEOUT,
+            )
+            .await?
+            {
+                return Err(RetireAccountError::BoundsUnproven);
+            }
             // Provisioning inserts into these tables; the lock makes each
             // one finish before this transaction writes, or wait for it.
             tx.execute(

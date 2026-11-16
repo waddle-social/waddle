@@ -107,9 +107,10 @@ impl OwnerCliError {
             Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {
                 ExitStatus::Usage
             }
-            Self::Retirement(crate::auth::retirement::RetireAccountError::Database(_)) => {
-                ExitStatus::Failed
-            }
+            Self::Retirement(
+                crate::auth::retirement::RetireAccountError::Database(_)
+                | crate::auth::retirement::RetireAccountError::BoundsUnproven,
+            ) => ExitStatus::Failed,
             Self::KeypoolActivationPending { .. } => ExitStatus::Pending,
             // The throwaway preflight pool did not close in time: the
             // preflight itself reached no verdict.
