@@ -374,6 +374,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // rows deleted.
     ("s2s_remote_room_occupancies", READ_WRITE),
     ("s2s_remote_room_verdicts", READ_WRITE),
+    // Remote occupants' seats in local rooms: a join inserts its row, the
+    // owning replica updates the nickname and another replica marks the
+    // seat lost or adopts it, and the end of the seat deletes it.
+    ("s2s_local_room_seats", READ_WRITE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

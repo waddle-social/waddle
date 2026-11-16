@@ -35,6 +35,10 @@ pub const HOST_GRANT_REVOCATION_FENCE_VERSION: i64 = 2005;
 /// JIDs.
 pub const RETIRED_ACCOUNT_JIDS_VERSION: i64 = 2006;
 
+/// Version of the migration that creates the table of the seats remote
+/// occupants hold in local rooms.
+pub const S2S_LOCAL_ROOM_SEATS_VERSION: i64 = 2007;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -94,6 +98,16 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2006_retired_account_jids.postgres.sql"
             ),
         },
+        Migration {
+            version: S2S_LOCAL_ROOM_SEATS_VERSION,
+            description: "s2s local room seats".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2007_s2s_local_room_seats.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2007_s2s_local_room_seats.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -103,7 +117,7 @@ mod tests {
     use super::{
         all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
         HOST_GRANT_REVOCATION_FENCE_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_ROOMS_VERSION,
     };
 
     #[test]
@@ -119,7 +133,8 @@ mod tests {
                 S2S_IQ_CORRELATIONS_VERSION,
                 S2S_REMOTE_ROOMS_VERSION,
                 HOST_GRANT_REVOCATION_FENCE_VERSION,
-                RETIRED_ACCOUNT_JIDS_VERSION
+                RETIRED_ACCOUNT_JIDS_VERSION,
+                S2S_LOCAL_ROOM_SEATS_VERSION
             ]
         );
     }

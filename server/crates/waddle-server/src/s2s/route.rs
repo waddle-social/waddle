@@ -32,6 +32,7 @@ mod replies;
 mod room_delivery;
 mod rooms;
 mod router;
+mod seats;
 mod telemetry;
 
 pub use correlation::{
@@ -47,3 +48,7 @@ pub use occupancy::{
 pub use principal::{PrincipalError, RemotePrincipal};
 pub use reach::{reach, InboundReach, LocalTarget, Refusal};
 pub use router::{RouterLimits, RouterOptions, S2sRouter};
+pub use seats::{
+    Seat, SeatIndex, SeatInsert, SeatLimits, SeatStore, SeatStoreError, SqlSeatStore,
+    MAX_SEAT_ADDRESS_BYTES,
+};
