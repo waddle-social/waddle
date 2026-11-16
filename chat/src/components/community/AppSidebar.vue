@@ -13,7 +13,7 @@ import {
   Users,
 } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
-import { badge, iconbtn, room } from "styled-system/recipes";
+import { avatar, badge, iconbtn, room } from "styled-system/recipes";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
@@ -200,6 +200,8 @@ const jumpClass = css({
 const scrollClass = css({ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 8px 8px", display: "flex", flexDirection: "column", gap: "0.5" });
 const rowClass = cx(room(), css({ cursor: "pointer", border: 0, bg: "transparent", width: "100%", textAlign: "left", "& .wd-badge": { flex: "none" } }));
 const viewRowClass = cx(rowClass, css({ color: "fg" }));
+// Group DMs sit among avatar rows: same 28px tile as a `sm` avatar.
+const groupAvatarClass = cx(avatar({ size: "sm" }), css({ "& svg": { width: "16px", height: "16px", color: "inherit" } }));
 const sectionClass = css({
   display: "flex",
   alignItems: "center",
@@ -298,7 +300,7 @@ const dockClass = css({ flex: "none", padding: "6px 10px 0", display: "flex", fl
         :data-unread="entry.group.unreadCount > 0 ? '' : undefined"
         @click="go(() => selectGroupDm(entry.group.roomJid))"
       >
-        <Users aria-hidden="true" />
+        <span :class="groupAvatarClass"><Users aria-hidden="true" /></span>
         <span class="wd-room__name">{{ entry.group.name }}</span>
         <span v-if="entry.group.unreadCount > 0" :class="badge()" :aria-label="`${entry.group.unreadCount} unread`">{{ entry.group.unreadCount }}</span>
       </button>
