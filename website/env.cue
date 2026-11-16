@@ -48,6 +48,8 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			// Light pull-request lane: free GitHub-hosted runner (public repository).
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				contents:   "read"
 				"id-token": "write"
@@ -62,8 +64,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "generate-types"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]},
 				"package.json",
 				"wrangler.jsonc",
 			]
@@ -75,8 +76,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "db:generate"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]},
 				"package.json",
 				"drizzle.config.ts",
 				"src/db/schema.ts",
@@ -90,8 +90,7 @@ schema.#Project & {
 			args: ["run", "build"]
 			dependsOn: [tasks.generateTypes]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]},
 				"package.json",
 				"astro.config.ts",
 				"panda.config.ts",
@@ -100,9 +99,7 @@ schema.#Project & {
 				"wrangler.jsonc",
 				"src/**",
 				"public/**",
-				"../design/package.json",
-				"../design/src/**",
-				"../design/assets/**",
+				schema.#ModuleFiles & {paths: ["design/package.json", "design/src/**", "design/assets/**"]},
 			]
 			outputs: [
 				"dist/**",

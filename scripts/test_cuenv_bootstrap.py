@@ -14,9 +14,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 DIGESTS = {
-    "cuenv-darwin-arm64": "8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba",
-    "cuenv-linux-arm64": "0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519",
-    "cuenv-linux-x64": "5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa",
+    "cuenv-darwin-arm64": "e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160",
+    "cuenv-linux-arm64": "653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4",
+    "cuenv-linux-x64": "3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102",
 }
 
 
@@ -54,13 +54,13 @@ class BootstrapContracts(unittest.TestCase):
                 self.assertEqual(step["name"], "Setup cuenv (release)")
                 self.assertEqual(step["run"], self.script)
         self.assertEqual(dict(re.findall(r'cuenv_asset="([^"]+)"\s+cuenv_sha256="([0-9a-f]+)"', self.script)), DIGESTS)
-        self.assertIn('cuenv_version="0.63.2"', self.script)
+        self.assertIn('cuenv_version="0.76.1"', self.script)
         self.assertNotIn("latest", self.script)
         self.assertNotIn("/usr/local", self.script)
         plan = subprocess.run(["bun", "-e", "console.log(Bun.YAML.parse(await Bun.file('.github/workflows/waddle-integration.yml').text()).jobs.plan.steps.map(step=>step.run??'').join('\\n'))"], cwd=ROOT, check=True, capture_output=True, text=True)
         self.assertIn("python3 scripts/test_cuenv_bootstrap.py", plan.stdout)
 
-    def exercise(self, *, system="Linux", arch="x86_64", altered=False, version="0.63.2", missing=False, bootstrap_version=None, sync_exit=0):
+    def exercise(self, *, system="Linux", arch="x86_64", altered=False, version="0.76.1", missing=False, bootstrap_version=None, sync_exit=0):
         # Replace pinned digests only in this isolated executable fixture. The
         # separate full-graph assertion above verifies every real release pin.
         with tempfile.TemporaryDirectory(prefix="waddle-cuenv-bootstrap-") as temporary:
@@ -84,7 +84,7 @@ class BootstrapContracts(unittest.TestCase):
             for pinned in DIGESTS.values():
                 script = script.replace(pinned, "" if missing else digest)
             if bootstrap_version is not None:
-                script = script.replace('cuenv_version="0.63.2"', 'cuenv_version="' + bootstrap_version + '"')
+                script = script.replace('cuenv_version="0.76.1"', 'cuenv_version="' + bootstrap_version + '"')
             (tools / "uname").write_text("#!/bin/sh\ncase \"$1\" in -s) echo \"$TEST_SYSTEM\" ;; -m) echo \"$TEST_ARCH\" ;; *) exit 9 ;; esac\n")
             (tools / "curl").write_text("#!" + shutil.which("python3") + "\nimport os, pathlib, shutil, sys\nargs=sys.argv[1:]\nassert args[:5]==['--proto','=https','--proto-redir','=https','-fsSL']\nassert args[5]=='-o' and len(args)==8\npathlib.Path(os.environ['TEST_DOWNLOAD_URL']).write_text(args[7])\nshutil.copyfile(os.environ['TEST_DOWNLOAD_PAYLOAD'],args[6])\n")
             # Simulate Darwin's shasum CLI while using the real host SHA-256
@@ -103,7 +103,7 @@ class BootstrapContracts(unittest.TestCase):
                 self.assertEqual(executions, [], "unverified bytes must never execute")
                 self.assertEqual(installed, [])
                 self.assertEqual(list(runner.iterdir()), [])
-            elif version != "0.63.2":
+            elif version != "0.76.1":
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("version differs", result.stderr)
                 self.assertEqual(executions, ["--version"])
@@ -119,7 +119,7 @@ class BootstrapContracts(unittest.TestCase):
                 self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
             if url_trace.exists():
                 expected_asset = "cuenv-darwin-arm64" if system == "Darwin" else ("cuenv-linux-x64" if arch in ("x86_64", "amd64") else "cuenv-linux-arm64")
-                self.assertEqual(url_trace.read_text(), "https://github.com/cuenv/cuenv/releases/download/0.63.2/" + expected_asset)
+                self.assertEqual(url_trace.read_text(), "https://github.com/cuenv/cuenv/releases/download/0.76.1/" + expected_asset)
 
     def test_valid_digest_version_and_platform_mapping(self):
         for system, arch in (("Linux", "x86_64"), ("Linux", "amd64"), ("Linux", "arm64"), ("Linux", "aarch64"), ("Darwin", "arm64"), ("Darwin", "aarch64")):

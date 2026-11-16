@@ -163,8 +163,9 @@ The Rust workflow is generated directly from `ci/rust-tests/workflow.cue`, which
 imports the task commands from `server/env.cue` and the shared Nix/cache setup.
 cuenv 0.55.0's matrix generation neither preserves ordinary dependencies nor
 exposes artifact compression, and its task wrapper loads the complete development
-shell. The focused generator runs the same Nix tasks directly, uploads the shard NARs without an additional ZIP layer, and retains
-every previous path trigger. The metadata travels separately; workers verify the
+shell. The focused generator runs the same Nix tasks directly, uploads the shard NARs without an additional ZIP layer, and was
+given the pull-request path triggers until 2026-11, when it became dispatch-only
+(see "Pull request scope (2026-11)"). The metadata travels separately; workers verify the
 NAR checksum and expected output before importing it.
 Run `bash scripts/sync-rust-tests.sh` after changing those inputs; `checkCiDrift`
 checks this generator alongside cuenv. The final `nixTest` gate always reports and
@@ -563,7 +564,7 @@ Pull requests no longer start these lanes:
 | --- | --- | --- | --- |
 | `waddle-integration` (a copy of every PR lane) | all of them | merge groups, dispatch | the original workflows |
 | `namespaceRustChecks` `clippy`, `doctest` | Namespace profile | `main` (`mainClippy`, `mainDoctest`) | `nixClippy`, `nixDoctest`: same workspace, features and lints |
-| `xmppServerCompliance` | Namespace profile | `main`, dispatch | `rustTests` runs the server tests with Postgres and all features |
+| `xmppServerCompliance` | Namespace profile | `main`, dispatch | none on pull requests; the Postgres, all-features shards run post-merge as `nixTestLocal` (2026-11) |
 | `roomChildContract`, `spaceFanoutContract` | Namespace profile | `main`, dispatch | none; they gate nothing |
 | `parentMoveNativePullRequest` | GitHub | `main`, dispatch (`parentMoveNative`) | its build closure repeats `nixClippy`, `nixFmt` and `nixBuildImageStream` |
 | Android `deviceTests` | Namespace profile | `main`, dispatch | Android `pullRequest` |
@@ -577,3 +578,38 @@ runners from the publishing pipeline that the same push starts.
 These are design expectations, not measurements. The account's Namespace
 concurrency limit is unverified (see the 64 vCPU observation above); if it is
 64 vCPU, `fmt` and `nixTestLocal` together fill it for the first minute.
+
+## Pull request scope (2026-11)
+
+Pull requests run light, important checks only. The `waddle-server-rustTests`
+workflow (Postgres, all-features, four isolated shards on the 32-core Namespace
+builder) no longer has a `pull_request` trigger, and `waddle-integration` no
+longer contains it.
+
+- **On pull requests:** the per-project `pullRequest` pipelines (server Nix
+  lanes, `namespaceRustChecks` `test`, chat, apps, website, design, colony,
+  infrastructure) and `checkCiDrift`.
+- **After merge:** the same shards run as `nixTestLocal` in the server `default`
+  pipeline. It gates image publishing, including every test in
+  `.config/required-cluster-tests.txt`.
+- **On demand:** run the shards on a branch with
+  `gh workflow run waddle-server-rusttests.yml --ref <branch>`.
+- **Runners:** the `website`, `design`, `colony` and `infrastructure/waddle.cloud`
+  pull-request lanes use free `ubuntu-24.04` GitHub-hosted runners (the repository
+  is public), as `chat` and the server Nix lanes already did. Deploy and `default`
+  pipelines are unchanged.
+
+Earlier sections that describe the pull-request shard lane are historical
+measurements and were not rewritten.
+
+## Measuring CI spend
+
+```sh
+GITHUB_TOKEN=... bun scripts/ci-cost-report.ts --repo waddle-social/waddle --days 7 [--json] [--rate <class>=<usd-per-minute>]
+```
+
+Add `--stdin` to aggregate saved jobs JSON from standard input offline. The unit is
+vCPU-minutes for Namespace Linux shapes (`nscloud-*-NxM` uses N;
+`namespace-profile-linux-x86` uses `--profile-vcpu`, default 8) and plain
+minutes for macOS. GitHub-hosted minutes are listed but weighted 0. Cancelled
+and failed jobs count. Shares are of weighted units, not dollars.

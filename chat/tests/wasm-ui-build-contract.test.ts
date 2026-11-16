@@ -131,17 +131,15 @@ describe("UI WASM build contract", () => {
 
   test("cuenv invalidates UI roots for every WASM build input", () => {
     expect(cueList("_WasmSourceInputs")).toEqual([
-      "../.cargo/**",
-      "../flake.lock",
-      "../flake.nix",
-      "../server/.cargo/**",
-      "../server/Cargo.lock",
-      "../server/Cargo.toml",
-      "../server/vendor/**",
-      "../server/crates/waddle-xmpp-client-wasm/**",
-      "../server/crates/waddle-xmpp-client/**",
-      "../server/crates/waddle-xmpp-core/**",
-      "../server/rust-toolchain.toml",
+      "flake.lock",
+      "flake.nix",
+      "server/Cargo.lock",
+      "server/Cargo.toml",
+      "server/vendor/**",
+      "server/crates/waddle-xmpp-client-wasm/**",
+      "server/crates/waddle-xmpp-client/**",
+      "server/crates/waddle-xmpp-core/**",
+      "server/rust-toolchain.toml",
     ]);
     expect(envSource).toContain(
       "let _WasmBuildInputs = list.Concat([_WasmSourceInputs",

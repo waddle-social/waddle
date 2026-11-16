@@ -70,30 +70,30 @@ let _AndroidTestReports = schema.#Contributor & {
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
-	"../../.cargo/**",
-	"../../server/.cargo/**",
-	"../../server/Cargo.toml",
-	"../../server/Cargo.lock",
-	"../../server/vendor/**",
-	"../../server/rust-toolchain.toml",
-	"../../server/crates/**",
-	"../../server/crates/**/.cargo/**",
-	"../../scripts/build-android-rust.sh",
-	"../../scripts/check-android-ffi-bindings.sh",
+	schema.#ModuleFiles & {paths: [
+		"server/Cargo.toml",
+		"server/Cargo.lock",
+		"server/vendor/**",
+		"server/rust-toolchain.toml",
+		// The FFI crate and its local path-dependency closure; guarded by
+		// server/scripts/test_ci_trigger_inputs.py.
+		"server/crates/waddle-xmpp-client-ffi/**",
+		"server/crates/waddle-xmpp-client/**",
+		"server/crates/waddle-xmpp-core/**",
+		"scripts/build-android-rust.sh",
+		"scripts/check-android-ffi-bindings.sh",
+	]},
 ]
 
 let _gradleInputs = [
 	"env.cue",
-	"../../scripts/android-ci-gradle.sh",
-	"**/build.gradle.kts",
+	schema.#ModuleFiles & {paths: ["scripts/android-ci-gradle.sh"]},
 	"settings.gradle.kts",
 	"build.gradle.kts",
 	"gradle/libs.versions.toml",
 	"gradle.properties",
 	"gradle/**",
 	"gradlew",
-	"**/src",
-	"**/src/**",
 	"app/**",
 	"core/client/build.gradle.kts",
 	"core/client/consumer-rules.pro",
@@ -176,7 +176,7 @@ schema.#Project & {
 		setupSdk: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/setup-android-sdk.sh"]
-			inputs: ["../../scripts/setup-android-sdk.sh"]
+			inputs: [schema.#ModuleFiles & {paths: ["scripts/setup-android-sdk.sh"]}]
 		}
 
 		// Cross-compiles libwaddle_xmpp_client_ffi.so for arm64-v8a and
@@ -213,7 +213,11 @@ schema.#Project & {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
-			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml"]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: [
+				".github/workflows/waddle-android-default.yml",
+				".github/workflows/waddle-android-devicetests.yml",
+				".github/workflows/waddle-android-pullrequest.yml",
+			]}]
 		}
 
 		telemetryContract: schema.#Task & {
@@ -221,9 +225,11 @@ schema.#Project & {
 			args: ["../../scripts/check-native-remote-telemetry.sh", "--android"]
 			inputs: list.Concat([_gradleInputs, _ffiInputs, [
 				"env.cue",
-				"../../flake.nix",
-				"../../scripts/check-native-remote-telemetry.sh",
-				"../../scripts/native-telemetry-cargo-closure.py",
+				schema.#ModuleFiles & {paths: [
+					"flake.nix",
+					"scripts/check-native-remote-telemetry.sh",
+					"scripts/native-telemetry-cargo-closure.py",
+				]},
 			]])
 		}
 
@@ -272,7 +278,7 @@ schema.#Project & {
 		ciGradleContract: schema.#Task & {
 			command: "python3"
 			args: ["../../scripts/test_android_ci_gradle.py"]
-			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py", "../../.github/workflows/waddle-android-*.yml"]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: ["scripts/android-ci-gradle.sh", "scripts/test_android_ci_gradle.py", ".github/workflows/waddle-android-default.yml", ".github/workflows/waddle-android-devicetests.yml", ".github/workflows/waddle-android-pullrequest.yml"]}]
 		}
 
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).

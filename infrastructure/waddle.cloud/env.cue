@@ -76,6 +76,8 @@ schema.#Project & {
 		pullRequest: {
 			derivePaths: true
 			when: pullRequest: true
+			// Light pull-request lane: free GitHub-hosted runner (public repository).
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -87,22 +89,6 @@ schema.#Project & {
 	}
 
 	tasks: {
-		namespaceServerRustInputs: schema.#Task & {
-			command: "bash"
-			args: ["-euo", "pipefail", "-c", #"""
-					mkdir -p target/cuenv/server-rust-inputs/gitops/waddle-server
-					mkdir -p target/cuenv/server-rust-inputs/rules/mimir
-					cp gitops/waddle-server/postgresql-monitoring-ingress.yaml target/cuenv/server-rust-inputs/gitops/waddle-server/
-					cp rules/mimir/*.yaml target/cuenv/server-rust-inputs/rules/mimir/
-				"""#]
-			inputs: [
-				"gitops/waddle-server/postgresql-monitoring-ingress.yaml",
-				"rules/mimir/*.yaml",
-			]
-			outputs: ["target/cuenv/server-rust-inputs/**"]
-			hermetic: sandbox: "dir"
-		}
-
 		helmPush: schema.#Task & {
 			ci: github: permissions: packages: "write"
 			command: "bash"

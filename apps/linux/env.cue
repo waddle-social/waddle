@@ -14,14 +14,16 @@ let _rustInputs = [
 	"rust-toolchain.toml",
 	"src/**",
 	"data/**",
-	"../../flake.nix",
-	"../../flake.lock",
-	// The shared core and the protocol facade, by path.
-	"../../server/Cargo.toml",
-	"../../server/crates/waddle-client-session/**",
-	"../../server/crates/waddle-xmpp-client-ffi/**",
-	"../../server/crates/waddle-xmpp-client/**",
-	"../../server/crates/waddle-xmpp-core/**",
+	schema.#ModuleFiles & {paths: [
+		"flake.nix",
+		"flake.lock",
+		// The shared core and the protocol facade, by path.
+		"server/Cargo.toml",
+		"server/crates/waddle-client-session/**",
+		"server/crates/waddle-xmpp-client-ffi/**",
+		"server/crates/waddle-xmpp-client/**",
+		"server/crates/waddle-xmpp-core/**",
+	]},
 ]
 
 schema.#Project & {
@@ -72,7 +74,7 @@ schema.#Project & {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
-			inputs: ["env.cue", "../../.github/workflows/waddle-linux-*.yml"]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: [".github/workflows/waddle-linux-default.yml", ".github/workflows/waddle-linux-pullrequest.yml"]}]
 		}
 
 		fmt: schema.#Task & {
