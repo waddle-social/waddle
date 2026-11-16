@@ -1138,23 +1138,22 @@ impl Inner {
             }
             break answer;
         };
-        // A stopping replica gave up the seat opened for this join while
-        // the room decided it, and told nobody: the occupant is not told
-        // that it entered a room that ends with the replica.
-        if let Some(opened) = seat.as_ref().filter(|_| joining) {
-            if self.stopping.load(Ordering::Acquire)
-                && !self
-                    .seats
-                    .holds_under(&opened.room, &opened.occupant, opened.session)
-            {
-                if let Some(reply) = replies::error_reply(
-                    &stanza,
-                    self.busy("This server is shutting down; try again later."),
-                ) {
-                    self.offer_room_reply(&pair, reply);
-                }
-                return;
+        // A replica that began to stop while the room decided this join
+        // gives up the seat opened for it without a notice, as it gave up
+        // the other seats whose join was being answered: the occupant is
+        // not told that it entered a room that ends with the replica.
+        if joining && self.stopping.load(Ordering::Acquire) {
+            if let Some(opened) = seat.take() {
+                self.seats
+                    .release(&opened.room, &opened.occupant, opened.session);
             }
+            if let Some(reply) = replies::error_reply(
+                &stanza,
+                self.busy("This server is shutting down; try again later."),
+            ) {
+                self.offer_room_reply(&pair, reply);
+            }
+            return;
         }
         // A seat stays only if the room seats the occupant. One opened for
         // a join the room did not accept is dropped. One the occupant held
