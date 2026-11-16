@@ -935,7 +935,7 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
 
 /// The S2S router for an enabled S2S configuration: the destinations this
 /// deployment serves, exactly as the WebSocket classifier sees them, and the
-/// shared correlation table in the global database.
+/// shared correlation and remote room tables in the global database.
 fn start_s2s_router(
     config: Arc<crate::s2s::config::S2sConfig>,
     xmpp_config: &XmppConfig,
@@ -953,7 +953,8 @@ fn start_s2s_router(
         crate::s2s::route::RouterOptions {
             config,
             served,
-            correlations: Arc::new(crate::s2s::route::SqlIqCorrelations::new(global)),
+            correlations: Arc::new(crate::s2s::route::SqlIqCorrelations::new(global.clone())),
+            rooms: Arc::new(crate::s2s::route::SqlRemoteRoomStore::new(global)),
             limits: crate::s2s::route::RouterLimits::default(),
             stop: Some(stop),
         },

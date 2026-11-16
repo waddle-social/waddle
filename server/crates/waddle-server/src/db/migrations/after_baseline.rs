@@ -23,6 +23,10 @@ pub const HOST_GRANT_RESTORE_INCARNATION_VERSION: i64 = 2002;
 /// Version of the migration that creates the S2S IQ correlation table.
 pub const S2S_IQ_CORRELATIONS_VERSION: i64 = 2003;
 
+/// Version of the migration that creates the S2S remote room occupancy
+/// table and its room verdict cache.
+pub const S2S_REMOTE_ROOMS_VERSION: i64 = 2004;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -54,6 +58,14 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2003_s2s_iq_correlations.postgres.sql"
             ),
         },
+        Migration {
+            version: S2S_REMOTE_ROOMS_VERSION,
+            description: "s2s remote rooms".to_string(),
+            sql_sqlite: include_str!("../../../sql/migrations/2004_s2s_remote_rooms.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2004_s2s_remote_rooms.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -62,7 +74,7 @@ mod tests {
     use super::super::BASELINE_VERSION;
     use super::{
         all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION,
+        S2S_IQ_CORRELATIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
     };
 
     #[test]
@@ -75,7 +87,8 @@ mod tests {
             vec![
                 HOST_GRANT_AUTHORITY_VERSION,
                 HOST_GRANT_RESTORE_INCARNATION_VERSION,
-                S2S_IQ_CORRELATIONS_VERSION
+                S2S_IQ_CORRELATIONS_VERSION,
+                S2S_REMOTE_ROOMS_VERSION
             ]
         );
     }

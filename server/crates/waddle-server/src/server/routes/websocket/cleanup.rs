@@ -1438,6 +1438,9 @@ async fn cleanup_connection_shutdown_inner(
                         .is_some();
                     if !replacement_bound_during_recovery {
                         state.deps.protocol.caps_resolver.drop_resource(&jid);
+                        // The session was not stored for resumption, so it
+                        // ended for good and leaves its remote rooms.
+                        leave_remote_rooms_if_no_replacement(state, &jid).await;
                     }
                     if !detach_fail_removed {
                         cleanup_muc_presence(
@@ -1903,6 +1906,10 @@ async fn promote_terminal_recovery_inner(
     let detached_snapshot = terminal_recovery_snapshot(jid, conn);
     let Some(mut detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
         cleanup_terminal_muc_presence(state, jid, conn).await;
+        // Nothing can resume this session, so it leaves its remote rooms,
+        // unless a replacement holds its full JID by now. Its own binding
+        // may still be published here; that one is not a replacement.
+        leave_remote_rooms_unless_replaced(state, jid, conn.registry_owner.as_ref()).await;
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     };
@@ -2873,6 +2880,37 @@ async fn cleanup_without_resumable_snapshot(
     Box::pin(cleanup_connection_shutdown(state, outbound_rx, conn, false)).await
 }
 
+/// XEP-0045 §7.14 for remote rooms: a resource whose session ended for
+/// good leaves every remote room it joined through the S2S route. Every
+/// caller of [`broadcast_unavailable_if_no_replacement`] has already removed
+/// its own registry entry, so an entry for the full JID now is a
+/// replacement's. A replacement holds the same full JID, which is all a
+/// remote room knows of its occupant, so its rooms are left to it: leaving
+/// them here could reach the room after the replacement's own join and
+/// remove it.
+async fn leave_remote_rooms_if_no_replacement(state: &WebSocketState, jid: &FullJid) {
+    leave_remote_rooms_unless_replaced(state, jid, None).await;
+}
+
+/// [`leave_remote_rooms_if_no_replacement`] for a caller whose own binding
+/// `own` may still be published: an entry under that binding is the ended
+/// session's, not a replacement's.
+async fn leave_remote_rooms_unless_replaced(
+    state: &WebSocketState,
+    jid: &FullJid,
+    own: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
+) {
+    let replaced = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(jid)
+        .is_some_and(|entry| own.is_none_or(|own| entry.binding_id() != *own));
+    if !replaced {
+        state.deps.remote_route.resource_ended(jid).await;
+    }
+}
+
 /// RFC 6121 §4.5.2: an ungraceful session end (connection drop with no
 /// self-sent unavailable) requires the SERVER to broadcast `<presence
 /// type='unavailable'/>` from this full JID to the user's presence
@@ -2896,6 +2934,7 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
     jid: &FullJid,
     was_presence_available: bool,
 ) -> handlers::presence::TerminatedPresenceBroadcastOutcome {
+    leave_remote_rooms_if_no_replacement(state, jid).await;
     if !was_presence_available {
         return handlers::presence::TerminatedPresenceBroadcastOutcome::Completed;
     }

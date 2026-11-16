@@ -46,6 +46,39 @@ pub(crate) struct CarbonFanoutIncomplete {
     pub(crate) completed: CarbonRegistryFanoutOutcome,
 }
 
+/// Whether `message` is a private message from a room occupant that this
+/// server received for a local user, which XEP-0280 §6.1 says SHOULD NOT be
+/// carbon-copied: the room already replicates it to every client instance
+/// joined under the occupant's nickname.
+///
+/// Only a `received` copy is affected; a `sent` copy of a private message
+/// to an occupant stays eligible. The message is recognised as §6.1
+/// allows, by its `<x xmlns='http://jabber.org/protocol/muc#user'/>`
+/// marker, together with a `from` that is a full JID on a domain other
+/// than the account domain, since an occupant JID is always on a room
+/// service domain. A marker that carries a mediated `<invite/>` keeps the
+/// message eligible. A room on this deployment hands its private messages
+/// to the occupant's sessions directly, without the recipient pass that
+/// emits a `received` copy, so in practice this matches private messages
+/// from rooms on remote domains.
+fn is_received_room_private_message(deps: &Deps<'_>, message: &Message, kind: CarbonKind) -> bool {
+    use waddle_xmpp::muc::presence::NS_MUC_USER;
+
+    if !matches!(kind, CarbonKind::Received) {
+        return false;
+    }
+    let Some(from) = message.from.as_ref() else {
+        return false;
+    };
+    if from.resource().is_none() || from.domain().as_str() == deps.local_domain {
+        return false;
+    }
+    message
+        .payloads
+        .iter()
+        .any(|payload| payload.is("x", NS_MUC_USER) && !payload.has_child("invite", NS_MUC_USER))
+}
+
 pub(super) async fn send_carbons(
     registry: &ConnectionRegistry,
     deps: &Deps<'_>,
@@ -54,6 +87,10 @@ pub(super) async fn send_carbons(
     kind: CarbonKind,
     exclude: Vec<FullJid>,
 ) {
+    if is_received_room_private_message(deps, &message, kind) {
+        debug!(%owner, "room private message is not carbon-copied (XEP-0280 §6.1)");
+        return;
+    }
     if deps.effects.is_planning() {
         let inventory = match super::recipient_selection::recipient_inventory(deps, &owner).await {
             Ok(inventory) => inventory,
@@ -111,6 +148,10 @@ pub(super) fn plan_carbon_resources(
     exclude: Vec<FullJid>,
     carbon_recipients: Vec<FullJid>,
 ) {
+    if is_received_room_private_message(deps, &message, kind) {
+        debug!(%owner, "room private message is not carbon-copied (XEP-0280 §6.1)");
+        return;
+    }
     // Each resource is an independently receiptable obligation. An empty
     // confirmed inventory creates neither an intent nor an external effect.
     for recipient in carbon_recipients {
@@ -263,8 +304,10 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
     //
     // Suppression rules (groupchat, <private/>, no-copy,
     // body-less) are enforced by `CarbonsMessageHandler`
-    // before emitting this event; the interpreter does
-    // not re-check them — but it DOES per-target filter
+    // before emitting this event, and the §6.1 rule for a
+    // received room private message by `send_carbons` and
+    // `plan_carbon_resources`; this function does not
+    // re-check them — but it DOES per-target filter
     // through `other_carbon_resources_for_user` so a
     // resource that disabled carbons after the message
     // entered the pipeline still gets skipped.

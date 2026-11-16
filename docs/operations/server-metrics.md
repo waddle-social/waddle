@@ -90,7 +90,8 @@ Which of these are recorded today:
 ## Server-to-server connection metrics
 
 Emitted by the S2S connection manager
-(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`) and S2S discovery
+(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`), the S2S router
+(`server/crates/waddle-server/src/s2s/route/telemetry.rs`) and S2S discovery
 (`server/crates/waddle-server/src/s2s/discovery.rs`) only when S2S is
 enabled, which it is not by default. Attributes are the closed enums in
 `server/crates/waddle-xmpp/src/telemetry/attributes/s2s.rs`; no metric
@@ -105,6 +106,11 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `waddle.s2s.streams` | gauge | `{stream}` | `direction` | `waddle_s2s_streams` | Established streams. |
 | `waddle.s2s.dialback` | counter | `{exchange}` | `role`, `result` | `waddle_s2s_dialback_total` | Server Dialback exchanges, by this server's role (`initiating`, `receiving`, `authoritative`) and result (`valid`, `invalid`, `error`). |
 | `waddle.s2s.discovery` | counter | `{lookup}` | `source` | `waddle_s2s_discovery_total` | Endpoint resolutions, by where the endpoints came from (`configured`, `srv`, `fallback`) or why there were none (`no_service`, `lookup_failed`, `blocked`). |
+| `waddle.s2s.route.unusable_presence` | counter | `{stanza}` | none | `waddle_s2s_route_unusable_presence_total` | Presence from S2S streams dropped unanswered because an address it carries is outside the identity profile or it is not valid presence. |
+| `waddle.s2s.route.room_traffic.waits` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_waits_total` | Stanzas from S2S streams to local full JIDs that found the room delivery queues full (the room's, a worker's, or the remote domain's share of a worker's), so that their stream stopped reading until they fit. |
+| `waddle.s2s.route.room_traffic.overloaded` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_overloaded_total` | Stanzas from S2S streams to local full JIDs that found no place on the room delivery queues within the wait's deadline; the stanza is lost and its stream closed with `resource-constraint`. |
+| `waddle.s2s.route.room_traffic.delivery_timeouts` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_delivery_timeouts_total` | Deliveries of remote room traffic to a local occupant abandoned after the delivery timeout. |
+| `waddle.s2s.route.room_traffic.store_failures` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_store_failures_total` | Stanzas from S2S streams to local full JIDs dropped unanswered because the remote room occupancy store failed while deciding whether they are room traffic. |
 
 ## All other metrics
 

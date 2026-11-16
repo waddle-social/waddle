@@ -51,7 +51,7 @@ pub use endpoints::{
 pub use outbox::TransmitError;
 pub use peer_stream::{AuthenticationStrength, StreamDirection, TlsParameters, VerifiedPeerStream};
 pub use service::{ConnectError, S2sHandle, S2sService, ServiceOptions, ShutdownReport};
-pub use sink::{RefuseAllStanzas, SinkVerdict, StanzaSink};
+pub use sink::{RefuseAllStanzas, SinkVerdict, SinkWait, StanzaSink, StreamEnd, Waited};
 pub use startup::{
     check_inherited_listener, check_inherited_listener_in, load_config, load_enabled_config,
     load_enabled_config_from, StartupError, S2S_LISTENER_NAME,

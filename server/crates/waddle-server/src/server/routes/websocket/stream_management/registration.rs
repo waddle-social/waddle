@@ -90,6 +90,9 @@ async fn complete_durable_resume(
             if let Some(success) = conn.sasl2_success.as_mut() {
                 success.resumed(inline_results);
             }
+            // The session may have lived on another replica; the remote
+            // rooms it joined are this replica's to route from now on.
+            state.deps.remote_route.resource_resumed(jid).await;
             SmFinalizationReport {
                 finalization: SmRegistrationFinalization::ReplaceWithResumed {
                     resumed,

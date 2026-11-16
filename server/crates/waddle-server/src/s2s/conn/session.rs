@@ -51,7 +51,7 @@ use super::registry::{
     Activity, DialSlot, NegotiationSlot, RegisterRefusal, Registration, StreamSlot, StreamTokens,
 };
 use super::service::Shared;
-use super::sink::SinkVerdict;
+use super::sink::{SinkVerdict, SinkWait, StreamEnd, Waited};
 use super::telemetry;
 use super::transport::{Transport, TransportError};
 use super::verification;
@@ -109,7 +109,11 @@ pub(super) struct SessionStart {
 /// Which deadline fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineKind {
+    /// The idle timeout, or a negotiation stage's deadline.
     Timeout,
+    /// An established stream's first-level element stayed unfinished for
+    /// longer than the incomplete-element deadline allows.
+    Incomplete,
     Expired,
 }
 
@@ -185,6 +189,23 @@ pub(super) struct Session {
     replaced: bool,
     admission_refused: bool,
     capacity_refusal: Option<S2sResource>,
+    /// The stream ended without an orderly close and may have lost stanzas
+    /// in flight: the transport reached end of file, the idle timeout or
+    /// the maximum age while the peer had a first-level element unfinished,
+    /// a write did not complete within its deadline, the peer left a
+    /// first-level element unfinished past its deadline, the stanza sink
+    /// could not take a stanza within its deadline, or the stream ended for
+    /// a deadline, eviction or replacement before reading again after a
+    /// wait for the sink.
+    lost: bool,
+    /// The connection waited for the stanza sink and has not read from the
+    /// peer since. The peer may have written stanzas meanwhile that are
+    /// still unread in the transport, so ending the stream now for a
+    /// deadline, eviction or replacement may lose them.
+    waited_since_read: bool,
+    /// The peer ended the stream with `connection-timeout`: it closed an
+    /// idle stream, as this server does, and nothing is known to be lost.
+    peer_idle_close: bool,
 }
 
 impl Session {
@@ -226,6 +247,9 @@ impl Session {
             replaced: false,
             admission_refused: false,
             capacity_refusal: None,
+            lost: false,
+            waited_since_read: false,
+            peer_idle_close: false,
         }
     }
 
@@ -295,11 +319,13 @@ impl Session {
                     self.stream.signal(Signal::Shutdown)
                 }
                 Event::Evicted => {
+                    self.lose_unread();
                     self.evicted = true;
                     self.stream.signal(Signal::ResourceExhausted)
                 }
                 // A newer stream for the same pair took over.
                 Event::Replaced => {
+                    self.lose_unread();
                     self.replaced = true;
                     self.stream.signal(Signal::Conflict)
                 }
@@ -307,10 +333,38 @@ impl Session {
                 // deadline was computed moved the incomplete-element
                 // deadline later; one that is no longer due is not acted on.
                 Event::Deadline(_) if self.deadline().0 > Instant::now() => continue,
-                Event::Deadline(DeadlineKind::Timeout) => self.stream.signal(Signal::Timeout),
-                Event::Deadline(DeadlineKind::Expired) => self.stream.signal(Signal::Expired),
-                Event::Read(Ok(0)) => return S2sOutcome::PeerClosed,
+                // The idle timeout and the maximum age end the stream in an
+                // orderly way unless the peer was in the middle of an
+                // element, which is then lost, or the connection has not
+                // read since it waited for the sink, so that what the peer
+                // wrote meanwhile is lost unread.
+                Event::Deadline(DeadlineKind::Timeout) => {
+                    self.lose_unread();
+                    self.lose_unfinished();
+                    self.stream.signal(Signal::Timeout)
+                }
+                Event::Deadline(DeadlineKind::Incomplete) => {
+                    self.lost = true;
+                    self.stream.signal(Signal::Timeout)
+                }
+                Event::Deadline(DeadlineKind::Expired) => {
+                    self.lose_unread();
+                    self.lose_unfinished();
+                    self.stream.signal(Signal::Expired)
+                }
+                // Either side's closing tag ends the connection as soon as
+                // the codec reports it, so end of file here arrived before
+                // any close: the peer dropped the connection. Peers drop
+                // idle connections this way, so it loses something only
+                // when the peer was in the middle of an element. Nothing
+                // the peer wrote is left unread behind an end of file,
+                // whether or not the connection waited for the sink before.
+                Event::Read(Ok(0)) => {
+                    self.lose_unfinished();
+                    return S2sOutcome::PeerClosed;
+                }
                 Event::Read(Ok(read)) => {
+                    self.waited_since_read = false;
                     let outputs = self.stream.receive(&buffer[..read]);
                     self.after_receive(!outputs.is_empty());
                     outputs
@@ -401,6 +455,25 @@ impl Session {
         }
     }
 
+    /// Record that the stream lost a stanza if it ends now while the peer
+    /// has a first-level element unfinished.
+    fn lose_unfinished(&mut self) {
+        if self.incomplete.is_some() {
+            self.lost = true;
+        }
+    }
+
+    /// Record that the stream may have lost stanzas if it ends now without
+    /// having read since it waited for the sink: the peer may have written
+    /// more while the connection read nothing, and those stanzas would be
+    /// dropped unread. A peer that wrote nothing more is reported the same
+    /// way, since nothing tells the two apart without reading.
+    fn lose_unread(&mut self) {
+        if self.waited_since_read {
+            self.lost = true;
+        }
+    }
+
     /// Execute one codec output; `Err` ends the connection.
     async fn execute(&mut self, output: Output) -> Result<Vec<Output>, S2sOutcome> {
         match output {
@@ -413,7 +486,12 @@ impl Session {
                     }
                     Ok(Err(TransportError::Tls(_))) => Err(S2sOutcome::Tls),
                     Ok(Err(_)) => Err(S2sOutcome::Io),
-                    Err(_) => Err(S2sOutcome::Timeout),
+                    // The peer did not read in time: what was being written
+                    // may be partly sent.
+                    Err(_) => {
+                        self.lost = true;
+                        Err(S2sOutcome::Timeout)
+                    }
                 }
             }
             Output::StartTls(handoff) => {
@@ -496,22 +574,19 @@ impl Session {
                     Some(stream) => self.shared.sink.offer(stream, stanza),
                     None => SinkVerdict::Refuse,
                 };
-                match verdict {
-                    SinkVerdict::Accepted => Ok(Vec::new()),
-                    SinkVerdict::Refuse => Ok(self.stream.signal(Signal::PolicyViolation)),
-                }
+                self.sink_verdict(verdict, Signal::PolicyViolation).await
             }
             Output::MalformedAddress(stanza) => {
                 let verdict = match &self.peer_stream {
                     Some(stream) => self.shared.sink.offer_malformed(stream, stanza),
                     None => SinkVerdict::Refuse,
                 };
-                match verdict {
-                    SinkVerdict::Accepted => Ok(Vec::new()),
-                    SinkVerdict::Refuse => Ok(self.stream.signal(Signal::ImproperAddressing)),
-                }
+                self.sink_verdict(verdict, Signal::ImproperAddressing).await
             }
             Output::Close(reason) => {
+                if reason == CloseReason::PeerStreamError(StreamErrorCondition::ConnectionTimeout) {
+                    self.peer_idle_close = true;
+                }
                 if self.direction == StreamDirection::Outbound {
                     // The receiving server's answer, also when it arrived
                     // with the features in one read; otherwise a stream that
@@ -528,6 +603,82 @@ impl Session {
                     self.awaiting_dialback_result = false;
                 }
                 Err(self.close_outcome(reason))
+            }
+        }
+    }
+
+    /// Act on what the sink did with a stanza: a refusal closes the stream
+    /// with `refusal`, and a wait holds the connection, reading nothing
+    /// more from the peer, until the sink takes the stanza.
+    async fn sink_verdict(
+        &mut self,
+        verdict: SinkVerdict,
+        refusal: Signal,
+    ) -> Result<Vec<Output>, S2sOutcome> {
+        match verdict {
+            SinkVerdict::Accepted => Ok(Vec::new()),
+            SinkVerdict::Refuse => Ok(self.stream.signal(refusal)),
+            SinkVerdict::Wait(wait) => Ok(self.wait_for_sink(wait).await),
+        }
+    }
+
+    /// Wait for the sink to take a stanza. The stream's own ends still
+    /// apply meanwhile: shutdown, eviction and replacement end the wait and
+    /// the stream, and the stanza is lost. A wait the sink gives up on ends
+    /// the stream with `resource-constraint`, and one the sink ends because
+    /// it is stopping with `system-shutdown`; either loses the stanza. Time
+    /// spent waiting is not counted against the element the peer may have
+    /// left unfinished behind the stanza, since nothing was read. A stanza
+    /// the sink takes counts as traffic, so a stream that waited is neither
+    /// idle nor a candidate for eviction because of the wait.
+    async fn wait_for_sink(&mut self, wait: SinkWait) -> Vec<Output> {
+        /// What ended a wait before the sink did.
+        enum Interrupted {
+            Shutdown,
+            Evicted,
+            Replaced,
+        }
+        self.waited_since_read = true;
+        let started = Instant::now();
+        let shutdown = self.shared.shutdown.clone();
+        let evict = self.tokens.evict.clone();
+        let replace = self.tokens.replace.clone();
+        let interrupted = tokio::select! {
+            biased;
+            () = shutdown.cancelled(), if !self.shutdown_sent => Some(Interrupted::Shutdown),
+            () = evict.cancelled(), if !self.evicted => Some(Interrupted::Evicted),
+            () = replace.cancelled(), if !self.replaced => Some(Interrupted::Replaced),
+            waited = wait => match waited {
+                Waited::Taken => {
+                    self.activity.traffic();
+                    None
+                }
+                Waited::Overloaded => {
+                    self.lost = true;
+                    return self.stream.signal(Signal::ResourceExhausted);
+                }
+                Waited::Stopping => Some(Interrupted::Shutdown),
+            },
+        };
+        if let Some(unfinished) = &mut self.incomplete {
+            unfinished.since += started.elapsed();
+        }
+        let Some(interrupted) = interrupted else {
+            return Vec::new();
+        };
+        self.lost = true;
+        match interrupted {
+            Interrupted::Shutdown => {
+                self.shutdown_sent = true;
+                self.stream.signal(Signal::Shutdown)
+            }
+            Interrupted::Evicted => {
+                self.evicted = true;
+                self.stream.signal(Signal::ResourceExhausted)
+            }
+            Interrupted::Replaced => {
+                self.replaced = true;
+                self.stream.signal(Signal::Conflict)
             }
         }
     }
@@ -894,10 +1045,13 @@ impl Session {
                     self.transport.next_wait(now),
                 )
             });
-            let timeout = incomplete.map_or(idle, |incomplete| incomplete.min(idle));
+            let (timeout, kind) = match incomplete {
+                Some(incomplete) if incomplete < idle => (incomplete, DeadlineKind::Incomplete),
+                _ => (idle, DeadlineKind::Timeout),
+            };
             return match self.expiry {
                 Some(expiry) if expiry <= timeout => (expiry, DeadlineKind::Expired),
-                _ => (timeout, DeadlineKind::Timeout),
+                _ => (timeout, kind),
             };
         }
         let stage = if is_sasl(self.phase) {
@@ -995,6 +1149,52 @@ impl Session {
         // Unregister before reporting the new stream count.
         self.registered = None;
         telemetry::stream_counts(&self.shared.registry);
+        if let Some(stream) = self.peer_stream.take() {
+            self.shared.sink.stream_ended(
+                &stream,
+                stream_end(outcome, self.lost, self.peer_idle_close),
+            );
+        }
+    }
+}
+
+/// How an established stream that ended with `outcome` ended, for the
+/// sink. `lost` is whether it ended without an orderly close (end of file,
+/// the idle timeout or the maximum age with an element unfinished, a write
+/// past its deadline, an element left unfinished past its deadline, a
+/// stanza the sink could not take in time or took while stopping, or the
+/// idle timeout, the maximum age, eviction or replacement before the
+/// connection read again after waiting for the sink), which may have lost
+/// stanzas in flight whatever the outcome. `peer_idle_close` is whether the peer
+/// closed the stream with `connection-timeout`, which is orderly. Otherwise
+/// the idle timeout, the maximum age, end of file and either side's close
+/// are orderly, and a stream error, a transport failure or a withdrawn
+/// admission may have lost stanzas.
+fn stream_end(outcome: S2sOutcome, lost: bool, peer_idle_close: bool) -> StreamEnd {
+    if lost {
+        return StreamEnd::Lost;
+    }
+    if peer_idle_close {
+        return StreamEnd::Closed;
+    }
+    match outcome {
+        S2sOutcome::Io
+        | S2sOutcome::Tls
+        | S2sOutcome::Protocol
+        | S2sOutcome::PeerError
+        | S2sOutcome::Admission
+        | S2sOutcome::Certificate
+        | S2sOutcome::Dialback => StreamEnd::Lost,
+        S2sOutcome::Established
+        | S2sOutcome::Capacity
+        | S2sOutcome::Redirected
+        | S2sOutcome::PeerClosed
+        | S2sOutcome::Timeout
+        | S2sOutcome::Expired
+        | S2sOutcome::Evicted
+        | S2sOutcome::Conflict
+        | S2sOutcome::Shutdown
+        | S2sOutcome::Verified => StreamEnd::Closed,
     }
 }
 

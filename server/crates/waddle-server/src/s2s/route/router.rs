@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use jid::{DomainRef, FullJid, Jid};
+use jid::{BareJid, DomainRef, FullJid, Jid};
 use minidom::Element;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -26,17 +27,24 @@ use super::correlation::{
     PendingRequest, RequestKind,
 };
 use super::local::{LocalDelivery, LocalOrigin};
+use super::occupancy::{
+    InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomVerdict,
+    MAX_JOIN_ID_BYTES,
+};
 use super::principal::RemotePrincipal;
-use super::reach::{reach, InboundReach, LocalTarget};
+use super::reach::{reach, InboundReach, LocalTarget, Refusal};
 use super::replies;
+use super::room_delivery::{InboundTraffic, Placed, RoomQueues, RoomWork};
+use super::rooms::{self, Asked, Change, RoomEgress, VerificationAnswer};
+use super::telemetry;
 use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
     RemoteRouteOutcome, ServedDomains, UnroutableReason,
 };
 use crate::s2s::config::S2sConfig;
 use crate::s2s::conn::{
-    ConnectError, S2sHandle, SinkVerdict, StanzaSink, StreamDirection, TransmitError,
-    VerifiedPeerStream,
+    ConnectError, S2sHandle, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd,
+    TransmitError, VerifiedPeerStream, Waited,
 };
 
 /// Bounds on the router's queues and pending requests.
@@ -80,6 +88,62 @@ pub struct RouterLimits {
     /// How long after expiry a request is pruned once its replica has
     /// stopped recording that it is alive for as long.
     pub prune_after: Duration,
+    /// Remote rooms one local resource may occupy, be joining or have
+    /// just left at once; a further join is refused with
+    /// `resource-constraint`.
+    pub rooms_per_resource: usize,
+    /// Remote rooms every resource of one local account may occupy, be
+    /// joining or have just left at once.
+    pub rooms_per_account: usize,
+    /// Remote room occupancies of every local resource of the deployment,
+    /// on every replica.
+    pub rooms: usize,
+    /// How long a remote room a resource left keeps admitting the room's
+    /// answer to the leave.
+    pub leave_grace: Duration,
+    /// How long a join that left waits for the room's own presence before
+    /// it is forgotten and its sender answered with
+    /// `remote-server-timeout`.
+    pub join_timeout: Duration,
+    /// How long this server waits for a remote domain's answer to whether
+    /// it is a multi-user chat service, and then for a room's answer to
+    /// whether it is a room, before the join held for it is answered with
+    /// `remote-server-timeout`.
+    pub verification_timeout: Duration,
+    /// Remote services and rooms this replica is asking at once what they
+    /// are; a join that would ask another is refused with
+    /// `resource-constraint`. A join to a room not asked before uses one
+    /// for its service, unless that is known, and then one for the room.
+    pub verifications: usize,
+    /// How long an answer that a remote domain is a multi-user chat
+    /// service, or that a JID at one is a room, is trusted.
+    pub room_verdict_ttl: Duration,
+    /// How long an answer that a remote domain or JID is not one is
+    /// trusted.
+    pub not_room_verdict_ttl: Duration,
+    /// Stanzas from remote JIDs to local full JIDs waiting to be decided as
+    /// room traffic and delivered, on this replica, shared equally by the
+    /// workers. A stream whose stanza finds no place beyond this, or beyond
+    /// one of the shares below, stops reading until it fits.
+    pub room_deliveries: usize,
+    /// Of those, the stanzas from one room.
+    pub room_deliveries_per_room: usize,
+    /// Of one worker's share, the stanzas from one remote domain, so that
+    /// one peer cannot fill a worker's queue for the rooms of others. The
+    /// default is a quarter of a worker's share; a value above the
+    /// worker's share counts as the whole share.
+    pub room_deliveries_per_peer: usize,
+    /// How long a stream waits for one stanza to fit before the stanza is
+    /// given up and the stream closed with `resource-constraint`. The bound
+    /// is per stanza: a stream whose next stanza also finds the queues full
+    /// waits again, so a stream may spend longer than this waiting in all.
+    pub room_delivery_wait: Duration,
+    /// Workers deciding and delivering room traffic; each serves its own
+    /// share of rooms in order.
+    pub room_delivery_workers: usize,
+    /// How long delivering one stanza of room traffic to its occupant may
+    /// take before the worker moves on.
+    pub room_delivery_timeout: Duration,
 }
 
 impl Default for RouterLimits {
@@ -97,6 +161,21 @@ impl Default for RouterLimits {
             queue_idle: Duration::from_secs(60),
             sweep_interval: Duration::from_secs(5),
             prune_after: Duration::from_secs(600),
+            rooms_per_resource: 128,
+            rooms_per_account: 512,
+            rooms: 65_536,
+            leave_grace: Duration::from_secs(30),
+            join_timeout: Duration::from_secs(60),
+            verification_timeout: Duration::from_secs(30),
+            verifications: 256,
+            room_verdict_ttl: Duration::from_secs(3600),
+            not_room_verdict_ttl: Duration::from_secs(300),
+            room_deliveries: 1024,
+            room_deliveries_per_room: 64,
+            room_deliveries_per_peer: 64,
+            room_delivery_wait: Duration::from_secs(30),
+            room_delivery_workers: 4,
+            room_delivery_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -109,6 +188,8 @@ pub struct RouterOptions {
     pub served: ServedDomains,
     /// The correlation table every replica shares.
     pub correlations: Arc<dyn IqCorrelations>,
+    /// The remote room occupancies every replica shares.
+    pub rooms: Arc<dyn RemoteRoomStore>,
     pub limits: RouterLimits,
     /// Cancelled when the process starts to shut down.
     pub stop: Option<CancellationToken>,
@@ -147,7 +228,72 @@ enum Purpose {
     },
     /// A response or error the router generated for a stanza it received.
     Reply,
+    /// A local resource's message or presence for a remote room it
+    /// occupies or is joining (ADR-0020 D7's room exception). If it cannot
+    /// be sent, its sender is answered with an error, and a join that never
+    /// left is forgotten.
+    Room {
+        sender: FullJid,
+        /// The join this stanza is, when it put the occupancy in the
+        /// joining phase.
+        join: Option<JoinAttempt>,
+    },
+    /// The presence leaving a remote room for a local resource that ended:
+    /// nothing is left to answer if it cannot be sent.
+    Departure,
+    /// This server's `disco#info` to the domain of a remote room that a
+    /// local resource joins, or then to the room, registered for
+    /// correlation before it is written. If it cannot be sent, the joins it
+    /// holds are answered with the error.
+    Verify {
+        target: BareJid,
+        pending: PendingRequest,
+    },
 }
+
+/// The join a queued join presence is.
+#[derive(Debug, Clone)]
+struct JoinAttempt {
+    room: BareJid,
+    attempt: String,
+}
+
+/// A join held on this replica until its room's service, and then the
+/// room, is verified.
+#[derive(Debug)]
+struct HeldJoin {
+    occupant: FullJid,
+    room: BareJid,
+    attempt: String,
+    pair: Pair,
+    stanza: Stanza,
+}
+
+/// This replica's question to one remote domain, is it a multi-user chat
+/// service, or to one bare JID at such a service, is it a room?
+#[derive(Debug)]
+struct Verification {
+    key: CorrelationKey,
+    expires_at_ms: i64,
+    /// Whether its row is in the correlation table.
+    registered: bool,
+    held: Vec<HeldJoin>,
+}
+
+/// How a verification ended, for the joins it held.
+#[derive(Debug, Clone)]
+enum Conclusion {
+    Verdict(RoomVerdict),
+    /// No verdict; each held join is answered with this error.
+    Failed(Box<StanzaError>),
+}
+
+/// How many times a compare-and-set on an occupancy is tried against
+/// concurrent writers before the change gives up.
+const EDIT_ATTEMPTS: usize = 4;
+
+/// Occupancies the sweep ends at once.
+const SWEEP_BATCH: usize = 256;
 
 /// Why a queued request was not sent, as the error its sender receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +412,15 @@ struct Inner {
     local: OnceLock<Arc<dyn LocalDelivery>>,
     queues: Mutex<HashMap<Pair, mpsc::Sender<Queued>>>,
     pending: Mutex<PendingRequests>,
+    /// The remote room occupancies every replica shares.
+    rooms: Arc<dyn RemoteRoomStore>,
+    /// The verifications this replica is waiting on, by the service's
+    /// domain JID or the room's bare JID asked. Taken before `queues` when
+    /// both are held.
+    verifications: Mutex<HashMap<BareJid, Verification>>,
+    /// Stanzas that may be room traffic, decided and delivered in order
+    /// per room.
+    room_queues: RoomQueues,
     completions: Arc<Semaphore>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
@@ -303,6 +458,12 @@ impl S2sRouter {
         let shutdown = options
             .stop
             .map_or_else(CancellationToken::new, |stop| stop.child_token());
+        let room_queues = RoomQueues::new(
+            options.limits.room_delivery_workers,
+            options.limits.room_deliveries,
+            options.limits.room_deliveries_per_room,
+            options.limits.room_deliveries_per_peer,
+        );
         let inner = Arc::new(Inner {
             config: options.config,
             served: options.served,
@@ -314,11 +475,19 @@ impl S2sRouter {
             local: OnceLock::new(),
             queues: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingRequests::default()),
+            rooms: options.rooms,
+            verifications: Mutex::new(HashMap::new()),
+            room_queues,
             completions: Arc::new(Semaphore::new(options.limits.completions)),
             tasks: TaskTracker::new(),
             shutdown,
         });
         inner.tasks.spawn(sweep(Arc::clone(&inner)));
+        for shard in 0..inner.room_queues.shards() {
+            inner
+                .tasks
+                .spawn(deliver_room_traffic(Arc::clone(&inner), shard));
+        }
         Self { inner }
     }
 
@@ -339,6 +508,12 @@ impl S2sRouter {
         self.inner.pending().requests.len()
     }
 
+    /// Remote room occupancies of every local resource of the deployment,
+    /// in every phase; `0` when the store cannot be read.
+    pub async fn remote_rooms(&self) -> usize {
+        self.inner.rooms.count().await.unwrap_or(0)
+    }
+
     /// Stop taking stanzas, end every worker and wait for them, at most
     /// `budget`. Stanzas still queued are answered as if their stream could
     /// not be established. `true` when every task ended.
@@ -354,7 +529,25 @@ impl S2sRouter {
 #[async_trait]
 impl RemoteRoute for S2sRouter {
     async fn route(&self, outbound: RemoteOutbound) -> RemoteRouteOutcome {
-        self.inner.route(outbound)
+        self.inner.route(outbound).await
+    }
+
+    async fn resource_ended(&self, resource: &FullJid) {
+        self.inner.leave_rooms(resource).await;
+    }
+
+    async fn resource_resumed(&self, resource: &FullJid) {
+        if self
+            .inner
+            .rooms
+            .adopt_resource(resource, self.inner.owner.as_str(), now_ms())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "recording the replica routing a resumed resource's remote rooms failed"
+            );
+        }
     }
 }
 
@@ -365,6 +558,12 @@ impl StanzaSink for S2sRouter {
 
     fn offer_malformed(&self, stream: &VerifiedPeerStream, stanza: Element) -> SinkVerdict {
         self.inner.inbound(stream, stanza, true)
+    }
+
+    fn stream_ended(&self, stream: &VerifiedPeerStream, end: StreamEnd) {
+        if end == StreamEnd::Lost {
+            self.inner.lose_rooms(stream);
+        }
     }
 }
 
@@ -402,13 +601,25 @@ impl Inner {
         lock(&self.pending)
     }
 
+    fn verifications(&self) -> MutexGuard<'_, HashMap<BareJid, Verification>> {
+        lock(&self.verifications)
+    }
+
+    fn room_limits(&self) -> RoomLimits {
+        RoomLimits {
+            per_resource: self.limits.rooms_per_resource,
+            per_account: self.limits.rooms_per_account,
+            total: self.limits.rooms,
+        }
+    }
+
     fn home(&self) -> &DomainRef {
         self.served.local()
     }
 
     // --- remote route ---------------------------------------------------
 
-    fn route(self: &Arc<Self>, outbound: RemoteOutbound) -> RemoteRouteOutcome {
+    async fn route(self: &Arc<Self>, outbound: RemoteOutbound) -> RemoteRouteOutcome {
         let refuse = |reason, outbound| RemoteRouteOutcome::Unroutable {
             reason,
             outbound: Box::new(outbound),
@@ -421,13 +632,26 @@ impl Inner {
             Stanza::Iq(iq) => Stanza::Iq(Box::new(without_server_minted_credentials(*iq))),
             other => other,
         };
+        if let Purpose::Room { sender, .. } = purpose {
+            return match self
+                .route_room(pair, &sender, outbound.destination().address(), stanza)
+                .await
+            {
+                Ok(()) => RemoteRouteOutcome::Accepted,
+                Err(reason) => refuse(reason, outbound),
+            };
+        }
         let reserved = match &purpose {
             Purpose::Request {
                 pending,
                 generation,
                 ..
             } => Some((pending.key.clone(), *generation)),
-            Purpose::Response { .. } | Purpose::Reply => None,
+            Purpose::Response { .. }
+            | Purpose::Reply
+            | Purpose::Room { .. }
+            | Purpose::Departure
+            | Purpose::Verify { .. } => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
             return RemoteRouteOutcome::Accepted;
@@ -436,6 +660,1074 @@ impl Inner {
             self.release_if(&key, Some(generation));
         }
         refuse(UnroutableReason::EgressBusy, outbound)
+    }
+
+    // --- outbound room traffic -------------------------------------------
+
+    /// Route a local resource's message or presence for the remote JID
+    /// `to`: room traffic for a room the resource joins or occupies is
+    /// queued and its effect on the occupancy recorded; anything else is
+    /// account traffic, which D7 refuses.
+    async fn route_room(
+        self: &Arc<Self>,
+        pair: Pair,
+        sender: &FullJid,
+        to: &Jid,
+        stanza: Stanza,
+    ) -> Result<(), UnroutableReason> {
+        let Some((room, egress)) = rooms::egress(to, &stanza) else {
+            return Err(UnroutableReason::RefusedByPolicy);
+        };
+        match egress {
+            RoomEgress::Join { nick, id } => self.join(pair, sender, room, nick, id, stanza).await,
+            RoomEgress::Leave => self.leave(pair, sender, room, stanza).await,
+            other => {
+                let current = self
+                    .rooms
+                    .get(sender, &room)
+                    .await
+                    .map_err(|_| UnroutableReason::EgressBusy)?;
+                // ADR-0020 D7: messages and presence for a remote JID the
+                // resource does not occupy as a room are account traffic.
+                let Some(current) = current else {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                };
+                if !other.permitted_in(current.phase) {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                }
+                let queued = Queued {
+                    stanza,
+                    purpose: Purpose::Room {
+                        sender: sender.clone(),
+                        join: None,
+                    },
+                };
+                if !self.enqueue(pair, queued) {
+                    return Err(UnroutableReason::EgressBusy);
+                }
+                self.adopt(&current).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Record that this replica now routes the occupant's stanzas for the
+    /// room, such as after its session resumed here.
+    async fn adopt(&self, occupancy: &Occupancy) {
+        if occupancy.owner != self.owner.as_str()
+            && self
+                .rooms
+                .adopt(
+                    &occupancy.occupant,
+                    &occupancy.room,
+                    self.owner.as_str(),
+                    now_ms(),
+                )
+                .await
+                .is_err()
+        {
+            tracing::debug!("recording the replica routing a remote room occupancy failed");
+        }
+    }
+
+    /// A join presence (XEP-0045 §7.2) from `sender` for `room` as `nick`.
+    ///
+    /// - A join for a room the resource has joined is sent and changes
+    ///   nothing: a client resynchronising after it reconnected under the
+    ///   same full JID keeps the room's traffic while the answer is on its
+    ///   way.
+    /// - A join while joining or leaving is sent and waits for the room's
+    ///   answer anew; after a leave, the leave's answer still to come is
+    ///   absorbed rather than taken for the end of the new join.
+    /// - Otherwise the JID's domain must be known to be a multi-user chat
+    ///   service and the JID to be one of its rooms: cached verdicts decide
+    ///   at once, and without them the join is held while this server asks
+    ///   the domain's `disco#info` and then the room's, and nothing reaches
+    ///   the JID.
+    async fn join(
+        self: &Arc<Self>,
+        pair: Pair,
+        sender: &FullJid,
+        room: BareJid,
+        nick: String,
+        id: Option<String>,
+        stanza: Stanza,
+    ) -> Result<(), UnroutableReason> {
+        let busy = |_| UnroutableReason::EgressBusy;
+        let join_id = id.filter(|id| id.len() <= MAX_JOIN_ID_BYTES);
+        let attempt = uuid::Uuid::new_v4().to_string();
+        for _ in 0..EDIT_ATTEMPTS {
+            let now = now_ms();
+            let current = self.rooms.get(sender, &room).await.map_err(busy)?;
+            let Some(current) = current else {
+                let service = self
+                    .rooms
+                    .verdict(&service_of(&room), now)
+                    .await
+                    .map_err(busy)?;
+                let named = self.rooms.verdict(&room, now).await.map_err(busy)?;
+                let verdict = match (service, named) {
+                    (Some(RoomVerdict::NotRoom), _) | (_, Some(RoomVerdict::NotRoom)) => {
+                        Some(RoomVerdict::NotRoom)
+                    }
+                    (Some(RoomVerdict::Room), Some(RoomVerdict::Room)) => Some(RoomVerdict::Room),
+                    _ => None,
+                };
+                // What is asked first: the service, unless it is known to
+                // be one.
+                let target = if service == Some(RoomVerdict::Room) {
+                    room.clone()
+                } else {
+                    service_of(&room)
+                };
+                let mut occupancy = Occupancy {
+                    occupant: sender.clone(),
+                    room: room.clone(),
+                    nick: nick.clone(),
+                    phase: OccupancyPhase::Verifying,
+                    affiliation: xmpp_parsers::muc::user::Affiliation::None,
+                    attempt: attempt.clone(),
+                    join_id: join_id.clone(),
+                    leaves_pending: 0,
+                    leave_until_ms: None,
+                    owner: self.owner.as_str().to_owned(),
+                    deadline_ms: None,
+                    updated_at_ms: now,
+                    revision: 0,
+                };
+                match verdict {
+                    Some(RoomVerdict::NotRoom) => return Err(UnroutableReason::NotARoom),
+                    Some(RoomVerdict::Room) => {
+                        let Some(permit) = self.reserve(pair.clone(), false) else {
+                            return Err(UnroutableReason::EgressBusy);
+                        };
+                        occupancy.phase = OccupancyPhase::Joining;
+                        occupancy.deadline_ms = Some(now + duration_ms(self.limits.join_timeout));
+                        match self
+                            .rooms
+                            .insert(&occupancy, &self.room_limits())
+                            .await
+                            .map_err(busy)?
+                        {
+                            InsertOutcome::Inserted => {
+                                permit.send(self.join_queued(sender, &room, &attempt, stanza));
+                                return Ok(());
+                            }
+                            InsertOutcome::Exists => continue,
+                            InsertOutcome::Bounds => return Err(UnroutableReason::EgressBusy),
+                        }
+                    }
+                    None => {
+                        // The row is written, within the bounds, before the
+                        // join is held and anything asked. A verification
+                        // that ended before the join was held is either
+                        // cached, which settles the join at once, or not,
+                        // and then the join starts a new one.
+                        occupancy.deadline_ms =
+                            Some(now + 2 * duration_ms(self.limits.verification_timeout));
+                        match self
+                            .rooms
+                            .insert(&occupancy, &self.room_limits())
+                            .await
+                            .map_err(busy)?
+                        {
+                            InsertOutcome::Inserted => {}
+                            InsertOutcome::Exists => continue,
+                            InsertOutcome::Bounds => return Err(UnroutableReason::EgressBusy),
+                        }
+                        if let Err(reason) =
+                            self.hold(&pair, sender, &room, &attempt, stanza.clone(), &target)
+                        {
+                            self.discard(&occupancy).await;
+                            return Err(reason);
+                        }
+                        self.settle_if_verified(&room, &attempt, &target).await;
+                        return Ok(());
+                    }
+                }
+            };
+            match current.phase {
+                OccupancyPhase::Joined => {
+                    let queued = Queued {
+                        stanza,
+                        purpose: Purpose::Room {
+                            sender: sender.clone(),
+                            join: None,
+                        },
+                    };
+                    if !self.enqueue(pair, queued) {
+                        return Err(UnroutableReason::EgressBusy);
+                    }
+                    self.adopt(&current).await;
+                    return Ok(());
+                }
+                OccupancyPhase::Verifying => {
+                    // A newer join replaces the one held, with a deadline
+                    // of its own.
+                    let mut next = current.clone();
+                    next.nick = nick.clone();
+                    next.attempt = attempt.clone();
+                    next.join_id = join_id.clone();
+                    next.owner = self.owner.as_str().to_owned();
+                    next.deadline_ms =
+                        Some(now + 2 * duration_ms(self.limits.verification_timeout));
+                    next.updated_at_ms = now;
+                    if !self.rooms.replace(&next).await.map_err(busy)? {
+                        continue;
+                    }
+                    next.revision = next.revision.saturating_add(1);
+                    let target = match self.rooms.verdict(&service_of(&room), now).await {
+                        Ok(Some(RoomVerdict::Room)) => room.clone(),
+                        Ok(_) | Err(_) => service_of(&room),
+                    };
+                    // The row now waits on this join; one that cannot be
+                    // held is forgotten and refused, as a new join is.
+                    if let Err(reason) =
+                        self.hold(&pair, sender, &room, &attempt, stanza.clone(), &target)
+                    {
+                        self.discard(&next).await;
+                        return Err(reason);
+                    }
+                    self.settle_if_verified(&room, &attempt, &target).await;
+                    return Ok(());
+                }
+                OccupancyPhase::Joining | OccupancyPhase::Leaving => {
+                    let Some(permit) = self.reserve(pair.clone(), false) else {
+                        return Err(UnroutableReason::EgressBusy);
+                    };
+                    let mut next = current.clone();
+                    if current.phase == OccupancyPhase::Leaving {
+                        // The leave's answer still comes first; it is
+                        // absorbed while the leave's grace lasts.
+                        next.leaves_pending = current.leaves_pending.saturating_add(1);
+                        next.leave_until_ms = current.deadline_ms.max(current.leave_until_ms);
+                    }
+                    next.phase = OccupancyPhase::Joining;
+                    next.nick = nick.clone();
+                    next.attempt = attempt.clone();
+                    next.join_id = join_id.clone();
+                    next.owner = self.owner.as_str().to_owned();
+                    next.deadline_ms = Some(now + duration_ms(self.limits.join_timeout));
+                    next.updated_at_ms = now;
+                    if self.rooms.replace(&next).await.map_err(busy)? {
+                        permit.send(self.join_queued(sender, &room, &attempt, stanza));
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err(UnroutableReason::EgressBusy)
+    }
+
+    fn join_queued(
+        &self,
+        sender: &FullJid,
+        room: &BareJid,
+        attempt: &str,
+        stanza: Stanza,
+    ) -> Queued {
+        Queued {
+            stanza,
+            purpose: Purpose::Room {
+                sender: sender.clone(),
+                join: Some(JoinAttempt {
+                    room: room.clone(),
+                    attempt: attempt.to_owned(),
+                }),
+            },
+        }
+    }
+
+    /// Unavailable presence from `sender` to an occupant JID of `room`
+    /// (XEP-0045 §7.14). A join still held for verification is dropped
+    /// with nothing sent; otherwise the leave is sent and the room's answer
+    /// admitted for the leave's grace.
+    async fn leave(
+        self: &Arc<Self>,
+        pair: Pair,
+        sender: &FullJid,
+        room: BareJid,
+        stanza: Stanza,
+    ) -> Result<(), UnroutableReason> {
+        let busy = |_| UnroutableReason::EgressBusy;
+        for _ in 0..EDIT_ATTEMPTS {
+            let now = now_ms();
+            let Some(current) = self.rooms.get(sender, &room).await.map_err(busy)? else {
+                return Err(UnroutableReason::RefusedByPolicy);
+            };
+            if current.phase == OccupancyPhase::Verifying {
+                if self.rooms.remove(&current).await.map_err(busy)? {
+                    self.unhold(&room, &current.attempt);
+                    return Ok(());
+                }
+                continue;
+            }
+            let Some(permit) = self.reserve(pair.clone(), false) else {
+                return Err(UnroutableReason::EgressBusy);
+            };
+            let mut next = current.clone();
+            next.phase = OccupancyPhase::Leaving;
+            next.owner = self.owner.as_str().to_owned();
+            next.deadline_ms = Some(now + duration_ms(self.limits.leave_grace));
+            next.updated_at_ms = now;
+            if self.rooms.replace(&next).await.map_err(busy)? {
+                permit.send(Queued {
+                    stanza,
+                    purpose: Purpose::Room {
+                        sender: sender.clone(),
+                        join: None,
+                    },
+                });
+                return Ok(());
+            }
+        }
+        Err(UnroutableReason::EgressBusy)
+    }
+
+    // --- room verification -------------------------------------------------
+
+    /// Hold `stanza`, a join from `occupant` named `attempt`, until
+    /// `target` (the room's service, then the room) is verified, asking
+    /// its `disco#info` if this replica is not asking already. A join the
+    /// same occupant held for the same room before is replaced, whichever
+    /// stage it was held at.
+    fn hold(
+        self: &Arc<Self>,
+        pair: &Pair,
+        occupant: &FullJid,
+        room: &BareJid,
+        attempt: &str,
+        stanza: Stanza,
+        target: &BareJid,
+    ) -> Result<(), UnroutableReason> {
+        let mut verifications = self.verifications();
+        if !verifications.contains_key(target) {
+            if verifications.len() >= self.limits.verifications {
+                return Err(UnroutableReason::EgressBusy);
+            }
+            let local = Jid::from(BareJid::from_parts(None, pair.local.as_domain_ref()));
+            let key = CorrelationKey {
+                direction: CorrelationDirection::Outbound,
+                local: local.clone(),
+                remote: Jid::from(target.clone()),
+                id: ["room-", &uuid::Uuid::new_v4().simple().to_string()].concat(),
+            };
+            if !key.fits() {
+                return Err(UnroutableReason::InvalidRequest);
+            }
+            let expires_at_ms =
+                now_ms().saturating_add(duration_ms(self.limits.verification_timeout));
+            let queued = Queued {
+                stanza: rooms::disco_request(local, target, key.id.clone()),
+                purpose: Purpose::Verify {
+                    target: target.clone(),
+                    pending: PendingRequest {
+                        key: key.clone(),
+                        kind: RequestKind::Get,
+                        payload_namespace: DISCO_INFO_NS.to_owned(),
+                        owner: self.owner.clone(),
+                        expires_at_ms,
+                    },
+                },
+            };
+            if !self.enqueue(pair.clone(), queued) {
+                return Err(UnroutableReason::EgressBusy);
+            }
+            verifications.insert(
+                target.clone(),
+                Verification {
+                    key,
+                    expires_at_ms,
+                    registered: false,
+                    held: Vec::new(),
+                },
+            );
+        }
+        for stage in [service_of(room), room.clone()] {
+            if let Some(verification) = verifications.get_mut(&stage) {
+                verification
+                    .held
+                    .retain(|held| held.occupant != *occupant || held.room != *room);
+            }
+        }
+        if let Some(verification) = verifications.get_mut(target) {
+            verification.held.push(HeldJoin {
+                occupant: occupant.clone(),
+                room: room.clone(),
+                attempt: attempt.to_owned(),
+                pair: pair.clone(),
+                stanza,
+            });
+        }
+        Ok(())
+    }
+
+    /// Take the join named `attempt` for `room` off this replica's held
+    /// joins, at either stage.
+    fn unhold(&self, room: &BareJid, attempt: &str) -> Option<HeldJoin> {
+        let mut verifications = self.verifications();
+        for stage in [service_of(room), room.clone()] {
+            let Some(verification) = verifications.get_mut(&stage) else {
+                continue;
+            };
+            if let Some(index) = verification
+                .held
+                .iter()
+                .position(|held| held.attempt == attempt)
+            {
+                return Some(verification.held.swap_remove(index));
+            }
+        }
+        None
+    }
+
+    /// Whether this replica holds the join named `attempt` for `room`, at
+    /// either stage.
+    fn holds(&self, room: &BareJid, attempt: &str) -> bool {
+        let verifications = self.verifications();
+        [service_of(room), room.clone()].iter().any(|stage| {
+            verifications.get(stage).is_some_and(|verification| {
+                verification.held.iter().any(|held| held.attempt == attempt)
+            })
+        })
+    }
+
+    /// Settle the held join `attempt` for `room` at once if `target`, the
+    /// stage it is held at, already has a verdict, such as one cached while
+    /// this join was being recorded.
+    async fn settle_if_verified(self: &Arc<Self>, room: &BareJid, attempt: &str, target: &BareJid) {
+        let verdict = match self.rooms.verdict(target, now_ms()).await {
+            Ok(Some(verdict)) => verdict,
+            Ok(None) => return,
+            Err(_) => {
+                // The verification's own answer or expiry settles it.
+                tracing::warn!("reading a remote room verdict failed");
+                return;
+            }
+        };
+        let Some(held) = self.unhold(room, attempt) else {
+            return;
+        };
+        self.settle(held, &Conclusion::Verdict(verdict), target)
+            .await;
+    }
+
+    /// End this replica's verification of `target` named by `key`, and
+    /// settle every join it held.
+    async fn conclude(
+        self: &Arc<Self>,
+        target: &BareJid,
+        key: &CorrelationKey,
+        conclusion: Conclusion,
+    ) {
+        let held = {
+            let mut verifications = self.verifications();
+            match verifications.get(target) {
+                Some(verification) if verification.key == *key => verifications
+                    .remove(target)
+                    .map(|verification| verification.held)
+                    .unwrap_or_default(),
+                _ => return,
+            }
+        };
+        for join in held {
+            self.settle(join, &conclusion, target).await;
+        }
+    }
+
+    /// Act on a held join once the verification of `asked`, its service or
+    /// its room, ended, if the occupancy still waits on that join:
+    ///
+    /// - a service that is a multi-user chat service moves the join on to
+    ///   its room: a cached verdict on the room decides at once, otherwise
+    ///   the join is held while the room is asked;
+    /// - a room is sent the join;
+    /// - a JID whose service or room is not one, or that did not answer,
+    ///   is sent nothing, and the join is answered with `item-not-found`
+    ///   or the failure.
+    async fn settle(self: &Arc<Self>, held: HeldJoin, conclusion: &Conclusion, asked: &BareJid) {
+        let mut conclusion = conclusion.clone();
+        if Asked::of(asked) == Asked::Service
+            && matches!(conclusion, Conclusion::Verdict(RoomVerdict::Room))
+        {
+            match self.rooms.verdict(&held.room, now_ms()).await {
+                Ok(Some(verdict)) => conclusion = Conclusion::Verdict(verdict),
+                Ok(None) | Err(_) => return self.ask_room(held).await,
+            }
+        }
+        self.finish(held, &conclusion).await;
+    }
+
+    /// Send a held join to its room, or refuse it, as `conclusion` says,
+    /// if the occupancy still waits on that join.
+    async fn finish(self: &Arc<Self>, held: HeldJoin, conclusion: &Conclusion) {
+        let home = self.home().to_owned();
+        let room = &held.room;
+        for _ in 0..EDIT_ATTEMPTS {
+            let current = match self.rooms.get(&held.occupant, room).await {
+                Ok(Some(current)) => current,
+                Ok(None) => return,
+                Err(_) => {
+                    // The row's deadline ends the join.
+                    tracing::warn!("reading a held remote room join failed");
+                    return;
+                }
+            };
+            if current.phase != OccupancyPhase::Verifying || current.attempt != held.attempt {
+                // Left, ended, or replaced by a later join.
+                return;
+            }
+            let error = match conclusion {
+                Conclusion::Verdict(RoomVerdict::Room) => {
+                    let Some(permit) = self.reserve(held.pair.clone(), false) else {
+                        if self.discard(&current).await {
+                            self.answer_join(&current, Failure::Timeout.error(&home))
+                                .await;
+                        }
+                        return;
+                    };
+                    let mut next = current.clone();
+                    let now = now_ms();
+                    next.phase = OccupancyPhase::Joining;
+                    next.deadline_ms = Some(now + duration_ms(self.limits.join_timeout));
+                    next.updated_at_ms = now;
+                    match self.rooms.replace(&next).await {
+                        Ok(true) => {
+                            let queued = self.join_queued(
+                                &held.occupant,
+                                room,
+                                &held.attempt,
+                                held.stanza.clone(),
+                            );
+                            permit.send(queued);
+                            return;
+                        }
+                        Ok(false) => continue,
+                        Err(_) => {
+                            tracing::warn!("sending a held remote room join failed");
+                            return;
+                        }
+                    }
+                }
+                Conclusion::Verdict(RoomVerdict::NotRoom) => rooms::not_a_room(&home),
+                Conclusion::Failed(error) => (**error).clone(),
+            };
+            match self.rooms.remove(&current).await {
+                Ok(true) => {
+                    self.answer_join(&current, error).await;
+                    return;
+                }
+                Ok(false) => continue,
+                Err(_) => {
+                    tracing::warn!("ending a refused remote room join failed");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Hold a join whose service is a multi-user chat service until its
+    /// room has answered whether it is one, if the occupancy still waits on
+    /// that join. The row's deadline starts again for the second question;
+    /// a join that cannot be held is forgotten and answered with
+    /// `resource-constraint`.
+    async fn ask_room(self: &Arc<Self>, held: HeldJoin) {
+        for _ in 0..EDIT_ATTEMPTS {
+            let current = match self.rooms.get(&held.occupant, &held.room).await {
+                Ok(Some(current)) => current,
+                Ok(None) => return,
+                Err(_) => {
+                    tracing::warn!("reading a held remote room join failed");
+                    return;
+                }
+            };
+            if current.phase != OccupancyPhase::Verifying || current.attempt != held.attempt {
+                return;
+            }
+            let mut next = current.clone();
+            let now = now_ms();
+            next.deadline_ms = Some(now + 2 * duration_ms(self.limits.verification_timeout));
+            next.updated_at_ms = now;
+            match self.rooms.replace(&next).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) => {
+                    tracing::warn!("recording a remote room join's second question failed");
+                    return;
+                }
+            }
+            next.revision = next.revision.saturating_add(1);
+            let room = held.room.clone();
+            let attempt = held.attempt.clone();
+            if self
+                .hold(
+                    &held.pair,
+                    &held.occupant,
+                    &room,
+                    &attempt,
+                    held.stanza,
+                    &room,
+                )
+                .is_err()
+            {
+                if self.discard(&next).await {
+                    self.answer_join(&next, rooms::busy(self.home())).await;
+                }
+                return;
+            }
+            // A verdict on the room cached while the join was being moved
+            // on decides at once.
+            if let Ok(Some(verdict)) = self.rooms.verdict(&room, now_ms()).await {
+                if let Some(held) = self.unhold(&room, &attempt) {
+                    self.finish(held, &Conclusion::Verdict(verdict)).await;
+                }
+            }
+            return;
+        }
+        tracing::warn!("holding a remote room join for its room lost to concurrent changes");
+    }
+
+    /// Answer the join `occupancy` waited on with `error`, waiting at most
+    /// the delivery timeout.
+    async fn answer_join(&self, occupancy: &Occupancy, error: StanzaError) {
+        if let Some(reply) = rooms::join_error(occupancy, error) {
+            self.deliver_within(&occupancy.occupant, reply, LocalOrigin::Server)
+                .await;
+        }
+    }
+
+    /// Remove the row of a join that is refused or cannot go on, at the
+    /// revision and attempt read: `true` when this call removed it. A
+    /// failure is logged and the row's deadline ends it.
+    async fn discard(&self, occupancy: &Occupancy) -> bool {
+        match self.rooms.remove(occupancy).await {
+            Ok(removed) => removed,
+            Err(_) => {
+                tracing::warn!("forgetting a remote room join failed");
+                false
+            }
+        }
+    }
+
+    /// Complete this server's room verification with a response from a
+    /// remote entity to the server domain, on whichever replica it
+    /// arrived: the verdict is cached for every replica, and the joins this
+    /// replica holds for it are settled. A replica holding joins for a
+    /// verification another replica completed reads the cached verdict at
+    /// its next sweep. `usable` is `false` for the error standing in for a
+    /// response this server refuses to process.
+    fn complete_verification(
+        self: &Arc<Self>,
+        principal: &RemotePrincipal,
+        stanza: Stanza,
+        payload_namespace: Option<String>,
+        usable: bool,
+    ) {
+        let Stanza::Iq(iq) = &stanza else {
+            return;
+        };
+        let Some(local) = iq.to().cloned() else {
+            return;
+        };
+        // The service's domain JID or the room's bare JID, which the
+        // request was sent to.
+        let target = principal.address().to_bare();
+        let key = CorrelationKey {
+            direction: CorrelationDirection::Outbound,
+            local,
+            remote: principal.address().clone(),
+            id: iq.id().to_owned(),
+        };
+        let Ok(permit) = Arc::clone(&self.completions).try_acquire_owned() else {
+            tracing::debug!("dropping an s2s response: too many being correlated");
+            return;
+        };
+        let router = Arc::clone(self);
+        self.tasks.spawn(async move {
+            let _permit = permit;
+            let now = now_ms();
+            match router
+                .correlations
+                .complete(&key, payload_namespace.as_deref(), now)
+                .await
+            {
+                Ok(true) => {
+                    let asked = Asked::of(&target);
+                    let conclusion = match rooms::verification_answer(&stanza, usable, asked) {
+                        VerificationAnswer::Verdict(verdict) => {
+                            let ttl = match verdict {
+                                RoomVerdict::Room => router.limits.room_verdict_ttl,
+                                RoomVerdict::NotRoom => router.limits.not_room_verdict_ttl,
+                            };
+                            if router
+                                .rooms
+                                .record_verdict(&target, verdict, now + duration_ms(ttl))
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!("recording a remote room verdict failed");
+                            }
+                            Conclusion::Verdict(verdict)
+                        }
+                        VerificationAnswer::Unavailable => {
+                            Conclusion::Failed(Box::new(rooms::unanswered(router.home())))
+                        }
+                    };
+                    router.conclude(&target, &key, conclusion).await;
+                }
+                Ok(false) => tracing::debug!("dropping an uncorrelated s2s response"),
+                Err(_) => tracing::warn!("dropping an s2s response: correlation failed"),
+            }
+        });
+    }
+
+    /// Conclude this replica's verifications that expired or that another
+    /// replica completed: a verdict cached by then decides. A verification
+    /// another replica completed without a verdict cached yet waits for one
+    /// until it expires; at expiry without a verdict, the held joins are
+    /// answered with `remote-server-timeout`.
+    async fn sweep_verifications(self: &Arc<Self>) {
+        let now = now_ms();
+        let pending: Vec<(BareJid, CorrelationKey, i64, bool)> = self
+            .verifications()
+            .iter()
+            .map(|(room, verification)| {
+                (
+                    room.clone(),
+                    verification.key.clone(),
+                    verification.expires_at_ms,
+                    verification.registered,
+                )
+            })
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let outstanding: Option<HashSet<CorrelationKey>> =
+            if pending.iter().any(|(_, _, _, registered)| *registered) {
+                self.correlations
+                    .outstanding(&self.owner)
+                    .await
+                    .ok()
+                    .map(|keys| keys.into_iter().collect())
+            } else {
+                None
+            };
+        for (room, key, expires_at_ms, registered) in pending {
+            let ended = if expires_at_ms <= now {
+                match self.correlations.expire(&key, now).await {
+                    // Never answered.
+                    Ok(true) => {
+                        self.conclude(
+                            &room,
+                            &key,
+                            Conclusion::Failed(Box::new(rooms::unanswered(self.home()))),
+                        )
+                        .await;
+                        continue;
+                    }
+                    // Answered elsewhere, or never registered.
+                    Ok(false) => true,
+                    // Tried again at the next sweep.
+                    Err(_) => false,
+                }
+            } else {
+                registered
+                    && outstanding
+                        .as_ref()
+                        .is_some_and(|outstanding| !outstanding.contains(&key))
+            };
+            if !ended {
+                continue;
+            }
+            let conclusion = match self.rooms.verdict(&room, now).await {
+                Ok(Some(verdict)) => Conclusion::Verdict(verdict),
+                // The replica that completed it may not have recorded its
+                // verdict yet: wait for it until the verification expires.
+                Ok(None) | Err(_) if expires_at_ms > now => continue,
+                Ok(None) | Err(_) => Conclusion::Failed(Box::new(rooms::unanswered(self.home()))),
+            };
+            self.conclude(&room, &key, conclusion).await;
+        }
+    }
+
+    /// Note that this replica's verification of `target` now has its row.
+    fn mark_verification_registered(&self, target: &BareJid, key: &CorrelationKey) {
+        if let Some(verification) = self.verifications().get_mut(target) {
+            if verification.key == *key {
+                verification.registered = true;
+            }
+        }
+    }
+
+    // --- ending occupancies ------------------------------------------------
+
+    /// Leave every remote room `resource` occupies or is joining, for a
+    /// resource that ended (XEP-0045 §7.14), and forget its occupancies,
+    /// whichever replica routed them. A join still held for verification
+    /// is dropped; nothing reached the room.
+    async fn leave_rooms(self: &Arc<Self>, resource: &FullJid) {
+        let Ok(occupancies) = self.rooms.of_resource(resource).await else {
+            tracing::warn!("reading the remote rooms of an ended resource failed");
+            return;
+        };
+        for occupancy in occupancies {
+            // Whatever the room's traffic changed since the read, the
+            // occupancy ends, unless a later join replaced it or a session
+            // that resumed elsewhere adopted it since: those belong to a
+            // session that lives on.
+            let Some(occupancy) = self
+                .remove_current(&occupancy, |current| {
+                    current.attempt == occupancy.attempt && current.owner == occupancy.owner
+                })
+                .await
+            else {
+                continue;
+            };
+            match occupancy.phase {
+                OccupancyPhase::Joining | OccupancyPhase::Joined => self.depart(&occupancy),
+                OccupancyPhase::Verifying => {
+                    self.unhold(&occupancy.room, &occupancy.attempt);
+                }
+                OccupancyPhase::Leaving => {}
+            }
+        }
+    }
+
+    /// Queue the unavailable presence that leaves `occupancy`'s room for
+    /// its resource.
+    fn depart(self: &Arc<Self>, occupancy: &Occupancy) {
+        let (Some(stanza), Ok(local), Ok(remote)) = (
+            rooms::leave_presence(&occupancy.occupant, &occupancy.room, &occupancy.nick),
+            CanonicalDomain::from_domain(occupancy.occupant.domain()),
+            CanonicalDomain::from_domain(occupancy.room.domain()),
+        ) else {
+            return;
+        };
+        let queued = Queued {
+            stanza,
+            purpose: Purpose::Departure,
+        };
+        if !self.enqueue(Pair { local, remote }, queued) {
+            tracing::debug!("dropping the leave of a remote room: the queue is full");
+        }
+    }
+
+    /// The stream between a local domain and a remote one failed: every
+    /// occupancy of a resource of that local domain in a room at that
+    /// remote domain ends, and the occupant receives its own unavailable
+    /// presence from the room with status 333 (XEP-0045 §11.1). An inbound
+    /// stream carried the rooms' traffic for every occupant, so all of
+    /// them end; an outbound one carried the stanzas of the occupants this
+    /// replica routes. Each end is queued behind the room's traffic already
+    /// queued, exempt from the queue's bounds.
+    fn lose_rooms(self: &Arc<Self>, stream: &VerifiedPeerStream) {
+        let router = Arc::clone(self);
+        // The table holds the domains as the JIDs spell them.
+        let local = stream.local().as_domain_ref().as_str().to_owned();
+        let remote = stream.remote().as_domain_ref().as_str().to_owned();
+        let only_ours = stream.direction() == StreamDirection::Outbound;
+        self.tasks.spawn(async move {
+            let owner = only_ours.then(|| router.owner.as_str().to_owned());
+            let Ok(occupancies) = router
+                .rooms
+                .of_pair(&local, &remote, owner.as_deref())
+                .await
+            else {
+                tracing::warn!("reading the remote rooms behind a lost stream failed");
+                return;
+            };
+            for occupancy in occupancies {
+                if occupancy.phase.occupies() {
+                    router
+                        .room_queues
+                        .push_exempt(occupancy.room.clone(), RoomWork::Ended(Box::new(occupancy)));
+                }
+            }
+        });
+    }
+
+    /// End joins the room never answered and leaves whose grace passed,
+    /// on whichever replica routed them: a join is forgotten and answered
+    /// with `remote-server-timeout`. A join this replica still holds for
+    /// verification is left to its verification.
+    async fn sweep_due_rooms(self: &Arc<Self>) {
+        let now = now_ms();
+        let Ok(due) = self.rooms.due(now, SWEEP_BATCH).await else {
+            tracing::warn!("reading the remote room occupancies past their deadline failed");
+            return;
+        };
+        for occupancy in due {
+            if occupancy.phase == OccupancyPhase::Verifying
+                && self.holds(&occupancy.room, &occupancy.attempt)
+            {
+                continue;
+            }
+            if !self.discard(&occupancy).await {
+                continue;
+            }
+            match occupancy.phase {
+                OccupancyPhase::Verifying | OccupancyPhase::Joining => {
+                    self.answer_join(&occupancy, rooms::unanswered(self.home()))
+                        .await;
+                }
+                OccupancyPhase::Joined | OccupancyPhase::Leaving => {}
+            }
+        }
+    }
+
+    /// End occupancies a stopped replica left: their resource leaves the
+    /// room and is told it was removed (status 333), in case its session
+    /// lives on elsewhere.
+    async fn sweep_orphaned_rooms(self: &Arc<Self>, before_ms: i64) {
+        let Ok(orphaned) = self.rooms.orphaned(before_ms, SWEEP_BATCH).await else {
+            tracing::warn!("reading the remote room occupancies stopped replicas left failed");
+            return;
+        };
+        for occupancy in orphaned {
+            if !self.discard(&occupancy).await {
+                continue;
+            }
+            match occupancy.phase {
+                OccupancyPhase::Joining | OccupancyPhase::Joined => {
+                    self.depart(&occupancy);
+                    if let Some(presence) = rooms::removed_by_error(&occupancy) {
+                        self.deliver_within(&occupancy.occupant, presence, LocalOrigin::Server)
+                            .await;
+                    }
+                }
+                OccupancyPhase::Verifying => {
+                    self.answer_join(&occupancy, rooms::unanswered(self.home()))
+                        .await;
+                }
+                OccupancyPhase::Leaving => {}
+            }
+        }
+    }
+
+    // --- inbound room traffic ------------------------------------------------
+
+    /// Decide one stanza that may be a room's traffic for `occupant`,
+    /// apply what it does to the occupancy, and deliver it if it is
+    /// admitted; refuse it as account traffic otherwise (D7: a message
+    /// receives `service-unavailable`, presence is dropped).
+    async fn room_traffic(
+        self: &Arc<Self>,
+        stream: &VerifiedPeerStream,
+        from: &Jid,
+        occupant: &FullJid,
+        stanza: Stanza,
+    ) {
+        let room = from.to_bare();
+        let mut admitted = None;
+        for _ in 0..EDIT_ATTEMPTS {
+            let now = now_ms();
+            let current = match self.rooms.get(occupant, &room).await {
+                Ok(current) => current,
+                // Unknown: dropped unanswered rather than refused.
+                Err(_) => {
+                    telemetry::room_traffic_store_failed();
+                    tracing::warn!("dropping a remote room's stanza: the occupancy store failed");
+                    return;
+                }
+            };
+            let Some(current) = current else {
+                admitted = Some(false);
+                break;
+            };
+            let (admits, change) = rooms::inbound(&current, from, &stanza, now);
+            admitted = Some(admits);
+            let applied = match change {
+                None => Ok(true),
+                Some(Change::Remove) => self.rooms.remove(&current).await,
+                Some(Change::Update(next)) => self.rooms.replace(&next).await,
+            };
+            match applied {
+                Ok(false) => continue,
+                Ok(true) => break,
+                Err(_) => {
+                    tracing::warn!("recording what a remote room's stanza changed failed");
+                    break;
+                }
+            }
+        }
+        if admitted == Some(true) {
+            self.deliver_room(occupant, stanza, LocalOrigin::Remote)
+                .await;
+            return;
+        }
+        tracing::debug!(refusal = ?Refusal::AccountTraffic, "refusing a stanza from an s2s stream");
+        // RFC 6121 §8.5.1 and ADR-0020 D10: refused presence is ignored,
+        // never answered.
+        if matches!(stanza, Stanza::Message(_)) {
+            let home = stream.local().as_domain_ref().to_owned();
+            if let Some(reply) = replies::error_reply(&stanza, replies::service_unavailable(&home))
+            {
+                self.reply(stream, reply);
+            }
+        }
+    }
+
+    /// End `occupancy` after its stream failed, if it is still as read,
+    /// and tell the occupant (XEP-0045 §11.1).
+    async fn end_lost(&self, occupancy: Occupancy) {
+        // The room's traffic queued before this may have moved the
+        // occupancy on; it still ends unless a later join replaced the one
+        // the stream carried, or the occupancy no longer occupies the room.
+        let ended = self
+            .remove_current(&occupancy, |current| {
+                current.attempt == occupancy.attempt && current.phase.occupies()
+            })
+            .await;
+        if let Some(ended) = ended {
+            if let Some(presence) = rooms::removed_by_error(&ended) {
+                self.deliver_room(&ended.occupant, presence, LocalOrigin::Server)
+                    .await;
+            }
+        }
+    }
+
+    /// Remove `occupancy`'s row at whatever revision it now has, while
+    /// `still` holds for it, and return the row removed.
+    async fn remove_current(
+        &self,
+        occupancy: &Occupancy,
+        still: impl Fn(&Occupancy) -> bool,
+    ) -> Option<Occupancy> {
+        for _ in 0..EDIT_ATTEMPTS {
+            let current = match self.rooms.get(&occupancy.occupant, &occupancy.room).await {
+                Ok(Some(current)) => current,
+                Ok(None) => return None,
+                Err(_) => continue,
+            };
+            if !still(&current) {
+                return None;
+            }
+            if let Ok(true) = self.rooms.remove(&current).await {
+                return Some(current);
+            }
+        }
+        tracing::warn!("ending a remote room occupancy lost to concurrent changes");
+        None
+    }
+
+    /// Deliver room traffic to its occupant, waiting at most the delivery
+    /// timeout so that one slow delivery does not hold back the rooms
+    /// behind it.
+    async fn deliver_room(&self, to: &FullJid, stanza: Stanza, origin: LocalOrigin) {
+        if !self.deliver_within(to, stanza, origin).await {
+            telemetry::room_delivery_timed_out();
+        }
+    }
+
+    /// Deliver `stanza` to a local resource, waiting at most the delivery
+    /// timeout, so that a slow delivery holds back neither a room's worker
+    /// nor the sweep: `false` when it was abandoned.
+    async fn deliver_within(&self, to: &FullJid, stanza: Stanza, origin: LocalOrigin) -> bool {
+        let delivery = self.deliver_local(to, stanza, origin);
+        tokio::time::timeout(self.limits.room_delivery_timeout, delivery)
+            .await
+            .is_ok()
     }
 
     /// Decide whether a local entity's stanza may go to its remote
@@ -479,10 +1771,18 @@ impl Inner {
             },
             // ADR-0020 D7: until account traffic is reviewed (gate G18), a
             // local account's messages and presence for remote JIDs are
-            // refused, and nothing on its roster changes. Messages and
-            // presence for a remote room are enabled with outbound MUC.
+            // refused, and nothing on its roster changes, unless they are
+            // for a remote room the account's resource occupies or is
+            // joining ([`Self::route_room`]). Only a bound resource of a
+            // local account joins rooms.
             Stanza::Message(_) | Stanza::Presence(_) => {
-                return Err(UnroutableReason::RefusedByPolicy)
+                let Ok(sender) = outbound.sender().clone().try_into_full() else {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                };
+                if *sender.domain() != *self.served.local() {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                }
+                Purpose::Room { sender, join: None }
             }
         };
         Ok((Pair { local, remote }, purpose))
@@ -589,34 +1889,46 @@ impl Inner {
     /// pair's worker if it has none: `false` when a full queue, too many
     /// pairs or shutdown refused it, and it was dropped.
     fn enqueue(self: &Arc<Self>, pair: Pair, queued: Queued) -> bool {
-        let opens = if matches!(queued.purpose, Purpose::Reply) {
+        let reply = matches!(queued.purpose, Purpose::Reply);
+        match self.reserve(pair, reply) {
+            Some(permit) => {
+                permit.send(queued);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Reserve a place on `pair`'s queue without waiting, starting the
+    /// pair's worker if it has none: `None` when the queue is full, too
+    /// many pairs have one, or the router is shutting down. A `reply`
+    /// opens a queue only within the reply bound. A reservation keeps the
+    /// queue from being retired until it is used or dropped.
+    fn reserve(self: &Arc<Self>, pair: Pair, reply: bool) -> Option<OwnedPermit<Queued>> {
+        let opens = if reply {
             self.limits.reply_queues
         } else {
             self.limits.peer_queues
         };
         let mut queues = lock(&self.queues);
-        let queued = match queues.get(&pair) {
-            Some(sender) => match sender.try_send(queued) {
-                Ok(()) => return true,
-                Err(TrySendError::Full(_)) => return false,
+        if let Some(sender) = queues.get(&pair) {
+            match sender.clone().try_reserve_owned() {
+                Ok(permit) => return Some(permit),
+                Err(TrySendError::Full(_)) => return None,
                 // The worker ended; start another.
-                Err(TrySendError::Closed(queued)) => {
+                Err(TrySendError::Closed(_)) => {
                     queues.remove(&pair);
-                    queued
                 }
-            },
-            None => queued,
-        };
+            }
+        }
         if queues.len() >= opens.min(self.limits.peer_queues)
             || self.tasks.is_closed()
             || self.shutdown.is_cancelled()
         {
-            return false;
+            return None;
         }
         let (sender, receiver) = mpsc::channel(self.limits.queue_per_peer.max(1));
-        if sender.try_send(queued).is_err() {
-            return false;
-        }
+        let permit = sender.clone().try_reserve_owned().ok()?;
         let worker = PairWorker {
             router: Arc::clone(self),
             pair: pair.clone(),
@@ -625,14 +1937,17 @@ impl Inner {
         };
         self.tasks.spawn(worker.run());
         queues.insert(pair, sender);
-        true
+        Some(permit)
     }
 
-    /// End an idle pair's queue: `true` when it held nothing and no other
-    /// stanza can reach it.
+    /// End an idle pair's queue: `true` when it holds nothing, no place on
+    /// it is reserved, and no other stanza can reach it.
     fn retire(&self, pair: &Pair, receiver: &mut mpsc::Receiver<Queued>) -> bool {
         let mut queues = lock(&self.queues);
-        if !receiver.is_empty() {
+        let reserved = queues
+            .get(pair)
+            .is_some_and(|sender| sender.capacity() < sender.max_capacity());
+        if !receiver.is_empty() || reserved {
             return false;
         }
         queues.remove(pair);
@@ -644,14 +1959,43 @@ impl Inner {
     /// is answered only if this call withdraws it, so a request is never
     /// both answered and completed. Responses and replies are dropped:
     /// nothing answers them (RFC 6120 §8.3.1).
-    async fn answer(&self, queued: Queued, failure: Failure, registered: bool) {
-        let Purpose::Request {
-            sender,
-            pending,
-            generation,
-        } = queued.purpose
-        else {
-            return;
+    async fn answer(self: &Arc<Self>, queued: Queued, failure: Failure, registered: bool) {
+        let (sender, pending, generation) = match queued.purpose {
+            Purpose::Request {
+                sender,
+                pending,
+                generation,
+            } => (sender, pending, generation),
+            // A message or presence for a remote room that did not leave:
+            // its sender learns why (RFC 6120 §10.4.3), and a join the room
+            // never saw is forgotten.
+            Purpose::Room { sender, join } => {
+                if let Some(join) = &join {
+                    self.forget_join(&sender, join).await;
+                }
+                if let Some(reply) =
+                    replies::error_reply(&queued.stanza, failure.error(self.home()))
+                {
+                    self.deliver_local(&sender, reply, LocalOrigin::Server)
+                        .await;
+                }
+                return;
+            }
+            // The joins the verification held are answered with the
+            // failure; nothing reached the JID.
+            Purpose::Verify { target, pending } => {
+                if registered && !matches!(self.correlations.withdraw(&pending.key).await, Ok(true))
+                {
+                    // Completed elsewhere, or unknown: the sweep concludes
+                    // it from the cached verdict or at expiry.
+                    return;
+                }
+                let error = failure.error(self.home());
+                self.conclude(&target, &pending.key, Conclusion::Failed(Box::new(error)))
+                    .await;
+                return;
+            }
+            Purpose::Response { .. } | Purpose::Reply | Purpose::Departure => return,
         };
         if registered {
             match self.correlations.withdraw(&pending.key).await {
@@ -668,6 +2012,26 @@ impl Inner {
         if let Some(reply) = replies::error_reply(&queued.stanza, failure.error(self.home())) {
             self.deliver_local(&sender, reply, LocalOrigin::Server)
                 .await;
+        }
+    }
+
+    /// Forget a join that never left, if the occupancy still waits on it.
+    async fn forget_join(&self, sender: &FullJid, join: &JoinAttempt) {
+        for _ in 0..EDIT_ATTEMPTS {
+            let Ok(Some(current)) = self.rooms.get(sender, &join.room).await else {
+                return;
+            };
+            if current.phase != OccupancyPhase::Joining || current.attempt != join.attempt {
+                return;
+            }
+            match self.rooms.remove(&current).await {
+                Ok(false) => continue,
+                Ok(true) => return,
+                Err(_) => {
+                    tracing::warn!("forgetting a remote room join that never left failed");
+                    return;
+                }
+            }
         }
     }
 
@@ -693,20 +2057,12 @@ impl Inner {
         // Gate G10: every address the stanza carries, not only its own,
         // must be in the identity profile before anything reads it.
         if malformed || enforce_stanza_addresses(&mut element).is_err() {
-            if let Some(reply) =
-                replies::error_reply_to_element(&element, replies::jid_malformed(&home))
-            {
-                self.reply(stream, reply);
-            }
+            self.refuse_unusable(stream, &element, replies::jid_malformed(&home));
             self.fail_unusable_response(stream, &element, &home);
             return SinkVerdict::Accepted;
         }
         let Some(stanza) = replies::parse_stanza(element.clone()) else {
-            if let Some(reply) =
-                replies::error_reply_to_element(&element, replies::bad_request(&home))
-            {
-                self.reply(stream, reply);
-            }
+            self.refuse_unusable(stream, &element, replies::bad_request(&home));
             return SinkVerdict::Accepted;
         };
         let (Some(from), Some(to)) = replies::addresses(&stanza) else {
@@ -719,6 +2075,46 @@ impl Inner {
         let Some(target) = LocalTarget::of(&destination) else {
             return SinkVerdict::Refuse;
         };
+        // ADR-0020 D7's second exception: traffic from a remote room to the
+        // full JID of a local resource that occupies, is joining or has just
+        // left it, delivered to that resource only. Whether it is room
+        // traffic is decided against the shared occupancy table, off the
+        // stream's task and in the room's order. A stanza that finds the
+        // queues full holds its stream until it fits: a room's presence
+        // burst is never cut short.
+        if target == LocalTarget::AccountResource && !matches!(stanza, Stanza::Iq(_)) {
+            if let Ok(occupant) = to.clone().try_into_full() {
+                let from = principal.address().clone();
+                let room = from.to_bare();
+                let peer = stream.remote().as_domain_ref().as_str().to_owned();
+                let work = RoomWork::Traffic(Box::new(InboundTraffic {
+                    stream: stream.clone(),
+                    from,
+                    occupant,
+                    stanza,
+                }));
+                let Err(work) = self.room_queues.try_push(room.clone(), work, &peer) else {
+                    return SinkVerdict::Accepted;
+                };
+                telemetry::room_traffic_waited();
+                let router = Arc::clone(self);
+                let deadline = tokio::time::Instant::now() + self.limits.room_delivery_wait;
+                return SinkVerdict::Wait(SinkWait::new(async move {
+                    let placed = router
+                        .room_queues
+                        .push_or_wait(room, work, &peer, deadline, &router.shutdown)
+                        .await;
+                    match placed {
+                        Placed::Queued => Waited::Taken,
+                        Placed::TimedOut => {
+                            telemetry::room_traffic_overloaded();
+                            Waited::Overloaded
+                        }
+                        Placed::Stopped => Waited::Stopping,
+                    }
+                }));
+            }
+        }
         match reach(target, &stanza) {
             InboundReach::ServerDiscoInfo => self.answer_disco_info(stream, &stanza, &home),
             InboundReach::ServerDiscoItems => self.answer_disco_items(stream, &stanza, &home),
@@ -727,17 +2123,12 @@ impl Inner {
                     self.reply(stream, result);
                 }
             }
+            InboundReach::ServerResponse => {
+                let payload_namespace = response_namespace(&stanza);
+                self.complete_verification(&principal, stanza, payload_namespace, true);
+            }
             InboundReach::CorrelatedResponse => {
-                let payload_namespace = match &stanza {
-                    Stanza::Iq(iq) => match iq.as_ref() {
-                        Iq::Result {
-                            payload: Some(payload),
-                            ..
-                        } => Some(payload.ns()),
-                        _ => None,
-                    },
-                    Stanza::Message(_) | Stanza::Presence(_) => None,
-                };
+                let payload_namespace = response_namespace(&stanza);
                 self.complete_response(&principal, stanza, payload_namespace, LocalOrigin::Remote);
             }
             InboundReach::Refused(refusal) => {
@@ -754,6 +2145,25 @@ impl Inner {
             }
         }
         SinkVerdict::Accepted
+    }
+
+    /// Answer an element from `stream` that this server cannot use, with
+    /// `error`. Presence is dropped instead and counted: an error presence
+    /// that reaches a room as an occupant's answer tells the room the
+    /// occupant is gone, and rooms remove such occupants.
+    fn refuse_unusable(
+        self: &Arc<Self>,
+        stream: &VerifiedPeerStream,
+        element: &Element,
+        error: StanzaError,
+    ) {
+        if element.name() == "presence" {
+            telemetry::unusable_presence_dropped();
+            return;
+        }
+        if let Some(reply) = replies::error_reply_to_element(element, error) {
+            self.reply(stream, reply);
+        }
     }
 
     /// Queue a reply to a stanza that arrived on the inbound `stream`; it
@@ -879,8 +2289,14 @@ impl Inner {
         let Some(target) = LocalTarget::of(&self.served.classify(Some(&to))) else {
             return;
         };
-        if reach(target, &error) == InboundReach::CorrelatedResponse {
-            self.complete_response(&principal, error, payload_namespace, LocalOrigin::Server);
+        match reach(target, &error) {
+            InboundReach::CorrelatedResponse => {
+                self.complete_response(&principal, error, payload_namespace, LocalOrigin::Server);
+            }
+            InboundReach::ServerResponse => {
+                self.complete_verification(&principal, error, payload_namespace, false);
+            }
+            _ => {}
         }
     }
 
@@ -965,7 +2381,7 @@ impl Inner {
                         payload: None,
                         error: Failure::Expired.error(self.home()),
                     };
-                    self.deliver_local(&sender, Stanza::Iq(Box::new(reply)), LocalOrigin::Server)
+                    self.deliver_within(&sender, Stanza::Iq(Box::new(reply)), LocalOrigin::Server)
                         .await;
                 }
                 // Completed, withdrawn or never registered.
@@ -1002,6 +2418,26 @@ impl Inner {
                 self.release_if(&key, Some(generation));
             }
         }
+    }
+}
+
+/// The multi-user chat service that hosts `room`: its domain, which this
+/// server asks whether it is one (XEP-0045 §6.2).
+fn service_of(room: &BareJid) -> BareJid {
+    BareJid::from_parts(None, room.domain())
+}
+
+/// The namespace of an IQ result's payload, if it carries one.
+fn response_namespace(stanza: &Stanza) -> Option<String> {
+    match stanza {
+        Stanza::Iq(iq) => match iq.as_ref() {
+            Iq::Result {
+                payload: Some(payload),
+                ..
+            } => Some(payload.ns()),
+            _ => None,
+        },
+        Stanza::Message(_) | Stanza::Presence(_) => None,
     }
 }
 
@@ -1055,8 +2491,9 @@ async fn sweep(router: Arc<Inner>) {
             () = router.shutdown.cancelled() => return,
             _ = interval.tick() => {}
         }
-        router.sweep_expired().await;
-        router.sweep_completed_elsewhere().await;
+        // Liveness first: the sweeps below deliver to local resources and
+        // may take a while, and another replica takes this one's room
+        // occupancies for a stopped replica's once it stops recording it.
         if router
             .correlations
             .heartbeat(&router.owner, now_ms())
@@ -1065,6 +2502,10 @@ async fn sweep(router: Arc<Inner>) {
         {
             tracing::warn!("recording the s2s router's liveness failed");
         }
+        router.sweep_expired().await;
+        router.sweep_completed_elsewhere().await;
+        router.sweep_verifications().await;
+        router.sweep_due_rooms().await;
         if last_prune.elapsed() >= router.limits.prune_after {
             last_prune = Instant::now();
             let before = now_ms().saturating_sub(duration_ms(router.limits.prune_after));
@@ -1079,6 +2520,35 @@ async fn sweep(router: Arc<Inner>) {
             {
                 tracing::warn!("pruning this replica's expired s2s correlations failed");
             }
+            router.sweep_orphaned_rooms(before).await;
+            if router.rooms.prune_verdicts(now_ms()).await.is_err() {
+                tracing::warn!("pruning expired remote room verdicts failed");
+            }
+        }
+    }
+}
+
+/// Until shutdown: decide and deliver the work of one shard of rooms, one
+/// item at a time, so an occupant sees a room's presence and messages in
+/// the room's order.
+async fn deliver_room_traffic(router: Arc<Inner>, shard: usize) {
+    loop {
+        let work = tokio::select! {
+            biased;
+            () = router.shutdown.cancelled() => return,
+            work = router.room_queues.next(shard) => work,
+        };
+        match work {
+            RoomWork::Traffic(traffic) => {
+                let InboundTraffic {
+                    stream,
+                    from,
+                    occupant,
+                    stanza,
+                } = *traffic;
+                router.room_traffic(&stream, &from, &occupant, stanza).await
+            }
+            RoomWork::Ended(occupancy) => router.end_lost(*occupancy).await,
         }
     }
 }
@@ -1201,7 +2671,31 @@ impl PairWorker {
                     }
                 }
             }
-            Purpose::Response { .. } | Purpose::Reply => false,
+            Purpose::Verify { target, pending } => {
+                if pending.expires_at_ms <= now {
+                    return self.router.answer(queued, Failure::Expired, false).await;
+                }
+                match self.router.correlations.register(pending, now).await {
+                    Ok(()) => {
+                        self.router
+                            .mark_verification_registered(target, &pending.key);
+                        true
+                    }
+                    Err(CorrelationError::Duplicate) => {
+                        return self.router.answer(queued, Failure::Duplicate, false).await
+                    }
+                    Err(CorrelationError::KeyTooLong) => {
+                        return self.router.answer(queued, Failure::TooLong, false).await
+                    }
+                    Err(CorrelationError::Storage(_)) => {
+                        return self.router.answer(queued, Failure::Internal, false).await
+                    }
+                }
+            }
+            Purpose::Response { .. }
+            | Purpose::Reply
+            | Purpose::Room { .. }
+            | Purpose::Departure => false,
         };
         let mut element = stanza_element(&queued.stanza);
         let mut offered_again = false;

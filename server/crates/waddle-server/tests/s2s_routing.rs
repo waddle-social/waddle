@@ -404,12 +404,16 @@ async fn a_router_without_a_transport_refuses_every_stanza() {
     let spec = Spec::new(HOME_A, HOME_B);
     let config = std::sync::Arc::new(spec.load(&pki).await.expect("a valid configuration"));
     let served = support::served(HOME_A);
+    let database = support::correlation_database("s2s-routing-detached").await;
     let router =
         waddle_server::s2s::route::S2sRouter::new(waddle_server::s2s::route::RouterOptions {
             config,
             served: served.clone(),
             correlations: std::sync::Arc::new(waddle_server::s2s::route::SqlIqCorrelations::new(
-                support::correlation_database("s2s-routing-detached").await,
+                database.clone(),
+            )),
+            rooms: std::sync::Arc::new(waddle_server::s2s::route::SqlRemoteRoomStore::new(
+                database,
             )),
             limits: RouterLimits::default(),
             stop: None,

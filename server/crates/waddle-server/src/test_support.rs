@@ -266,6 +266,7 @@ pub use crate::server::durable_membership::PermissionDurableMembershipSource;
 /// The production `/ws` RFC 7395 router, so suites can serve a test state
 /// over a real loopback WebSocket and drive the live connection loop.
 pub use crate::server::routes::websocket::router;
+pub use crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery;
 pub use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
 pub use crate::server::routes::websocket::test_state::{
     create_test_session, register_test_connection, seed_local_account,
