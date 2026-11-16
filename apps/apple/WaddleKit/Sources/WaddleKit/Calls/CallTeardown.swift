@@ -18,8 +18,20 @@ extension CallStore {
         let epoch = generation
         if case .incoming(let call) = claimed { _ = await answerDeclined(call) }
         if case .outgoing(let call) = claimed {
-            let sent = await port.sendCallRetract(to: call.to, sid: call.sid)
-            if !sent { reportError("call retract failed", epoch: epoch) }
+            guard let responder = call.responder else {
+                let sent = await port.sendCallRetract(to: call.to, sid: call.sid)
+                if !sent { reportError("call retract failed", epoch: epoch) }
+                return
+            }
+            // A device has answered and may already be in the session, where
+            // a retract means nothing: end the Jingle session, then send the
+            // finish. The finish goes out even when the server does not know
+            // the session yet, since it is all a still-accepting device sees.
+            let outcome = await port.sendCallSessionTerminate(to: responder, sid: call.sid, reason: reason)
+            guard generation == epoch else { return }
+            if outcome == .error { reportError("call session terminate failed", epoch: epoch) }
+            let sent = await port.sendCallFinish(to: responder, sid: call.sid, reason: nil)
+            if !sent { reportError("call finish failed", epoch: epoch) }
         }
         if case .active(let call) = claimed {
             let outcome = await port.sendCallSessionTerminate(to: call.peer, sid: call.sid, reason: reason)

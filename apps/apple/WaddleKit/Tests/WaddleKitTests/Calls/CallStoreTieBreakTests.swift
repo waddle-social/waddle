@@ -301,11 +301,13 @@ import Testing
         // Busy response is ordered after the stale proceed effect.
         let carol = JID(parsing: "carol@waddle.test/tab")!
         f.store.handle(f.event(.propose(callAudio), sid: "c-third", from: carol))
-        await eventually { f.port.callSends.count == 4 }
+        await eventually { f.port.callSends.count == 5 }
+        // The first call was answered, so hanging up ends its session rather than retracting.
         #expect(
             f.port.callSends == [
-                .propose(callPeer.bare, "c-first", callAudio), .retract(callPeer.bare, "c-first"),
-                .propose(callPeer.bare, "c-second", callAudio), .reject(carol, "c-third", false),
+                .propose(callPeer.bare, "c-first", callAudio), .terminate(callPeer, "c-first", .success),
+                .finish(callPeer, "c-first", nil), .propose(callPeer.bare, "c-second", callAudio),
+                .reject(carol, "c-third", false),
             ])
         #expect(f.store.state == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c-second", media: callAudio, initiator: callOwn)))
         f.store.clear()

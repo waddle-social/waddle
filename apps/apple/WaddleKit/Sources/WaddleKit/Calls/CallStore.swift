@@ -55,7 +55,9 @@ import Observation
         }
         let isSelfOriginated = event.from.bare == ownBareJID
         transition(reduceCallState(before, event, isOwn: isSelfOriginated))
-        if before.isOutgoing, event.kind == .proceed, before.sid == event.sid {
+        // The ring is answered only when the reducer took this proceed's
+        // sender as the responder; an ignored proceed leaves the timeout running.
+        if case .outgoing(let was) = before, was.responder == nil, case .outgoing(let now) = state, now.responder != nil {
             ringTimer?.cancel()
             ringTimer = nil
         }

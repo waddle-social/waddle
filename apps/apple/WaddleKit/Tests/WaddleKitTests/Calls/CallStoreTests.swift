@@ -185,6 +185,34 @@ import Testing
         f.store.clear()
     }
 
+    @Test func hangingUpAnAnsweredCallBeforeItConnectsTerminatesAndFinishes() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.proceed))
+        await eventually { f.port.completedCallSends.count == 2 }
+        // The server may not know the session yet; the finish goes out regardless.
+        f.port.callTerminateOutcome = .error
+        await f.store.hangUp()
+        #expect(
+            f.port.callSends == [
+                .propose(callPeer.bare, "c1", callAudio), .initiate(callPeer, callOwn, "c1", callAudio),
+                .terminate(callPeer, "c1", .success), .finish(callPeer, "c1", nil),
+            ])
+        #expect(f.store.state == .idle)
+        f.store.clear()
+    }
+
+    @Test func proceedFromSomeoneWeDidNotCallLeavesTheRingTimeoutRunning() async {
+        let f = CallFixture(ringTimeout: .milliseconds(50))
+        let carol = JID(parsing: "carol@waddle.test/tab")!
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.proceed, from: carol))
+        await eventually { f.port.callSends.count == 2 }
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .retract(callPeer.bare, "c1")])
+        #expect(f.store.state == .ended(sid: "c1", reason: .timeout))
+        f.store.clear()
+    }
+
     @Test func declinedInvitationIsNotRungAfterwards() async {
         let f = CallFixture()
         let dave = JID(parsing: "dave@waddle.test/tab")!
