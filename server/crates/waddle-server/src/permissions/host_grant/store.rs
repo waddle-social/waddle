@@ -364,11 +364,14 @@ impl HostGrantStore {
         }))
     }
 
-    /// The authority identity and up to `limit` scopes that admit, in
-    /// lifecycle order, read in one snapshot: what a first projection checks
-    /// SpiceDB against before it writes (`restore::projection_absent`).
-    /// `None` without the host-grant relations.
-    pub(crate) async fn admitting_scopes(
+    /// The authority identity and up to `limit` scopes whose projection was
+    /// written, read in one snapshot: those that admit first, then those
+    /// that no longer admit (closed by a restore transition, fenced,
+    /// retired), each in lifecycle order. A scope that admits was always
+    /// projected first. This is what a first projection checks SpiceDB
+    /// against before it writes (`restore::projection_absent`). `None`
+    /// without the host-grant relations.
+    pub(crate) async fn projected_scopes(
         &self,
         limit: i64,
     ) -> Result<Option<(String, Vec<ScopeLifecycleId>)>, HostGrantError> {
@@ -396,21 +399,22 @@ impl HostGrantStore {
         drop(rows);
         let mut rows = tx
             .query(
-                "SELECT lifecycle_id FROM host_grant_scopes WHERE admission_state = 'active' \
-                 ORDER BY lifecycle_id LIMIT ?",
+                "SELECT lifecycle_id FROM host_grant_scopes \
+                 WHERE admission_state = 'active' OR projected_generation > 0 \
+                 ORDER BY admission_state = 'active' DESC, lifecycle_id LIMIT ?",
                 crate::db_params![limit],
             )
             .await?;
-        let mut admitting = Vec::new();
+        let mut projected = Vec::new();
         while let Some(row) = rows.next().await? {
-            admitting.push(
+            projected.push(
                 ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
                     .ok_or(corrupt("lifecycle_id"))?,
             );
         }
         drop(rows);
         tx.rollback().await?;
-        Ok(Some((authority_id, admitting)))
+        Ok(Some((authority_id, projected)))
     }
 
     /// Where the PostgreSQL server stands: its system identifier, the

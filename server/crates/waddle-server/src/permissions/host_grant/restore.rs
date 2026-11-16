@@ -491,35 +491,60 @@ pub(crate) async fn refresh_refused_rooms(
     Ok(())
 }
 
-/// Most scopes that admit whose markers [`projection_absent`] reads.
+/// Most scopes whose markers [`projection_absent`] reads.
 const ABSENT_PROBE_SCOPES: i64 = 16;
 
-/// Whether SpiceDB holds nothing of this authority while scopes admit: the
-/// state in which the fence refuses the whole authority as
-/// [`RestoreFenceRefusal::ProjectionAbsent`]. A first projection of a
-/// lifecycle is not written then. Written into a SpiceDB that is empty or
-/// another deployment's, it would make that SpiceDB hold a marker of this
-/// authority: the refusal would clear, and the next fence pass would close
-/// every scope that admits as having lost its marker, where the refusal is
-/// meant to clear only once the replica reaches the SpiceDB it belongs
-/// beside.
+/// Longest [`projection_absent`] may take, its PostgreSQL read and every
+/// SpiceDB read together. A first projection whose check does not finish
+/// in time is not written; the pass reports the projection unknown and a
+/// later pass checks again.
+const ABSENT_PROBE_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Whether SpiceDB holds nothing of this authority while a scope admits or
+/// was ever projected: then no first projection of a lifecycle is written.
+///
+/// While a scope admits, the fence refuses that state for the whole
+/// authority as [`RestoreFenceRefusal::ProjectionAbsent`]. A first
+/// projection written into a SpiceDB that is empty or another
+/// deployment's would make it hold a marker of this authority: the refusal
+/// would clear, and the next fence pass would close every scope that
+/// admits as having lost its marker, where the refusal is meant to clear
+/// only once the replica reaches the SpiceDB it belongs beside. While no
+/// scope admits (a declared restore closed every one of them), the fence
+/// has nothing to refuse, but a SpiceDB that holds none of the markers this
+/// deployment wrote is still not its SpiceDB: it holds none of the journal
+/// witnesses that show what the restore lost, so a restored scope
+/// projected there would not be marked as having lost operations, and the
+/// marker written would pass that SpiceDB off as this deployment's.
 ///
 /// The check reads the authority's position witness, latch and witnessed
-/// epoch, and then the markers of up to [`ABSENT_PROBE_SCOPES`] scopes that
-/// admit, until one of them is present. It errs towards refusing: the fence
-/// also counts room witnesses and every scope's marker, so a SpiceDB that
-/// holds only those of scopes past the probe is refused here and passed by
-/// the fence, which then closes the scopes whose markers are missing; once
-/// none of them admits, the first projection is written. A backend that
-/// holds no projection writes none, and is not refused.
+/// epoch, and then the markers of up to [`ABSENT_PROBE_SCOPES`] projected
+/// scopes, those that admit first, until one of them is present. It errs
+/// towards refusing: the fence also counts room witnesses and every scope's
+/// marker, so a SpiceDB that holds only those of scopes past the probe is
+/// refused here and passed by the fence, whose witness pass then writes
+/// the position witness this check finds (closing first, while scopes
+/// admit, those whose markers are missing). A backend that holds no
+/// projection writes none, and is not refused. A check that does not
+/// finish within [`ABSENT_PROBE_DEADLINE`] fails as
+/// [`HostGrantError::Busy`], and nothing is written.
 pub(crate) async fn projection_absent(
     store: &HostGrantStore,
     permissions: &ActorRef<PermissionActor>,
 ) -> Result<bool, HostGrantError> {
-    let Some((authority_id, admitting)) = store.admitting_scopes(ABSENT_PROBE_SCOPES).await? else {
+    tokio::time::timeout(ABSENT_PROBE_DEADLINE, probe_projection(store, permissions))
+        .await
+        .unwrap_or(Err(HostGrantError::Busy))
+}
+
+async fn probe_projection(
+    store: &HostGrantStore,
+    permissions: &ActorRef<PermissionActor>,
+) -> Result<bool, HostGrantError> {
+    let Some((authority_id, projected)) = store.projected_scopes(ABSENT_PROBE_SCOPES).await? else {
         return Ok(false);
     };
-    if admitting.is_empty() {
+    if projected.is_empty() {
         return Ok(false);
     }
     let resources = [
@@ -528,7 +553,7 @@ pub(crate) async fn projection_absent(
         epoch_witness_resource(&authority_id),
     ]
     .into_iter()
-    .chain(admitting.iter().map(|lifecycle| lifecycle.to_storage()));
+    .chain(projected.iter().map(|lifecycle| lifecycle.to_storage()));
     for resource in resources {
         match read_witness(permissions, &resource).await? {
             None => return Ok(false),

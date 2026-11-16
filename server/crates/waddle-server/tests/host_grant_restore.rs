@@ -4312,6 +4312,65 @@ async fn live_spicedb_no_first_projection_is_written_into_a_spicedb_without_the_
     live.close().await;
 }
 
+/// Nor is a restored scope projected into such a SpiceDB once a declared
+/// restore closed every scope: nothing admits, so the fence has nothing to
+/// refuse, but a scope was projected before and SpiceDB holds none of its
+/// markers or witnesses. A first projection written there would find no
+/// journal witness of what the restore lost, and its marker would pass
+/// that SpiceDB off as this deployment's.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_no_restored_scope_is_projected_into_a_spicedb_without_the_authority() {
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_restore_absent_restored").await;
+    let store = &live.fixture.store;
+    let (authority, actor) = live.replica().await;
+    // One scope is projected; another is enrolled and never projected.
+    assert!(matches!(
+        authority
+            .reconcile(live.fixture.scope.lifecycle)
+            .await
+            .expect("first pass"),
+        Reconciliation::Activated(_)
+    ));
+    let unprojected = live.fixture.enroll_another().await;
+
+    // A restore is declared, and the replica reaches a SpiceDB that holds
+    // nothing of this authority. No scope admits, so the fence passes.
+    declare(&live.fixture, 1).await;
+    assert_eq!(
+        live.fixture.state(&unprojected).await.closed_reason,
+        Some(ClosedReason::Restored)
+    );
+    live.raw
+        .delete_relationships(RelationshipFilter::new(HOST_GRANT_PROJECTION_DEFINITION))
+        .await
+        .expect("empty the projection");
+    mark_test_store(&live.raw).await;
+    verify_restore_fence(store, &actor, RestoreEpoch::new(1))
+        .await
+        .expect("no scope admits");
+
+    // The restored scope that was never projected gets no first projection,
+    // and is left as the restore closed it.
+    match authority.reconcile(unprojected.lifecycle).await {
+        Err(HostGrantError::RestoreFence(RestoreFenceRefusal::ProjectionAbsent)) => {}
+        other => panic!("expected the first projection to be refused, got {other:?}"),
+    }
+    assert!(live
+        .stamps_of(&unprojected.lifecycle.to_storage())
+        .await
+        .is_empty());
+    assert!(live
+        .stamps_of(&room_witness_resource(&unprojected.channel_id))
+        .await
+        .is_empty());
+    let state = live.fixture.state(&unprojected).await;
+    assert_eq!(state.closed_reason, Some(ClosedReason::Restored));
+    assert!(!state.lost_operations);
+    live.close().await;
+}
+
 /// A journal witness whose stamp is not a canonical one cannot show what a
 /// restored database lost: the reconstruction marks the scope, under an
 /// operation of its own, and stops without moving the witness or taking

@@ -69,9 +69,12 @@
 //! activation or malformed, a family that holds what the projection never
 //! writes, and changes beyond the scope's row bound leave the scope closed.
 //!
-//! No first projection of a lifecycle is written while scopes admit and
-//! SpiceDB holds nothing of this authority (`restore::projection_absent`),
-//! the state in which the restore fence refuses the authority.
+//! No first projection of a lifecycle is written while a scope admits or
+//! was ever projected and SpiceDB holds nothing of this authority
+//! (`restore::projection_absent`): while scopes admit, the state in which
+//! the restore fence refuses the authority; after a declared restore closed
+//! every scope, a SpiceDB that holds none of the journal witnesses that
+//! show what the restore lost.
 //!
 //! Every committed mutation brings the scope's journal witness and the
 //! position witness up to date on a task of its own
@@ -306,8 +309,8 @@ impl HostGrantAuthority {
     /// Write `plan`'s intent, conditioned on exactly `previous`. An error
     /// other than a refusal leaves the outcome unknown. A first projection
     /// (no `previous`) is refused with
-    /// [`RestoreFenceRefusal::ProjectionAbsent`] while scopes admit and
-    /// SpiceDB holds nothing of this authority.
+    /// [`RestoreFenceRefusal::ProjectionAbsent`] while a scope admits or
+    /// was ever projected and SpiceDB holds nothing of this authority.
     pub async fn write(
         &self,
         plan: &ProjectionPlan,
@@ -353,8 +356,9 @@ impl HostGrantAuthority {
             .map_err(projection_store_error)
     }
 
-    /// Refuse a first projection while scopes admit and SpiceDB holds
-    /// nothing of this authority (`restore::projection_absent`).
+    /// Refuse a first projection while a scope admits or was ever projected
+    /// and SpiceDB holds nothing of this authority
+    /// (`restore::projection_absent`).
     async fn refuse_absent_projection(&self) -> Result<(), HostGrantError> {
         if projection_absent(&self.store, &self.permissions).await? {
             return Err(RestoreFenceRefusal::ProjectionAbsent.into());
