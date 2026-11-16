@@ -13,7 +13,9 @@ with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
 `8f6088ba601528090ec1bc82294b1a12422f5519`, and inbound S2S rooms through
 `31fd3f41591d0ff3072dc667e35207c522ae0dc6` and, with remote room
 administration, the federated setting and requests carried between
-replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb` (see the last refresh below); the original
+replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
+placement of requests, the ends of a seat and the decisions that name a
+seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -900,6 +902,86 @@ request carried to the replica that holds its room.
   request's type in `s2s/route/local_rooms.rs`, the trait method of the
   remote route in `destination.rs` and the re-exports in `s2s/route.rs`
   and `handlers/iq/mod.rs`. The scan holds 1632 records in all.
+
+The selected evidence was refreshed a nineteenth time, through
+`ab055f27480da80b43e15087f17e699199cce190`, after reviewing the delta of the reviewed
+files since the eighteenth refresh. This refresh covers the changes to
+inbound S2S rooms that followed their review: where a request is placed,
+how a seat ends, and how decisions that name a seated remote occupant
+read its seats. No grant writer, storage plane or producer of stream
+evidence was added.
+
+- Issuance gained a refusal. `seats_honour_privilege` (`hg-seats-honour`,
+  new anchor, in `muc_admin_host_grant.rs`) reads the evidence of every
+  seat an account holds in a room on the replica; the `muc#admin` writer,
+  for a room an enrolled scope manages and for any other
+  (`check_privileged_seats`; `admin-rollback`, `e-rollback` and
+  `admin-context-honoured` moved), and the admin command that sets a room
+  affiliation (`admin-set-affiliation`, not moved) refuse an owner or
+  admin affiliation while one of those seats would not honour it, before
+  anything is persisted. An account without a seat there is decided as
+  before.
+- A room's own message decides each occupant of a managed room on the
+  evidence of its seats (`hg-system-message`, moved; `occupant_reads`),
+  where it passed no stream evidence: a remote occupant receives its copy
+  only if every one of its seats admits it to read. It reads grants and
+  writes nothing.
+- Claim-move re-seating (`hg-claim-move`, moved) still seats a recorded
+  occupant at another server only on a seat the replica took over, and
+  now has the router end each such seat once the room has seated its
+  occupants (`s2s-adopted-seats`, new anchor, in `router/hosting.rs`): the
+  room removes the occupant with status 333.
+- The join handler undoes a seat it gave on a standing that is not
+  honoured without announcing a departure (`MucRemovalCause::Unannounced`,
+  in `waddle-xmpp`'s presence module, outside the reviewed set; the
+  departure helpers in `cleanup.rs`, `local_departures.rs` and the session
+  janitors skip their broadcasts for it). The decision that undoes the
+  seat is unchanged.
+- `room_dispatch.rs` runs the extensions' enrichment hooks only for a
+  sender at a domain this deployment serves.
+- The room host (`s2s-room-host`, `s2s-room-archive`, `s2s-room-message`,
+  `s2s-room-admin` and `s2s-room-owner` moved) answers two further
+  questions of the router, both read-only: every occupant a room seats
+  with its generation, and whether it keeps rooms on other replicas. It
+  answers "cannot be told" where a room's actor cannot be reached. Where
+  a seated occupant's presence enters the room again it says so without
+  deciding, and the router asks again with a seat opened for the join.
+  `s2s-room-federated` moved: where the room's actor cannot be reached, an
+  address that cannot be open to other servers is not found, and only a
+  room that may be open is answered with a retryable error.
+- `s2s-room-placement` moved and is asked from a different place: the
+  router's placement stage, off the workers that hand requests to the
+  host, one request of a room at a time, within a bound in time. It is
+  still asked before any seat is opened for the request, and a host that
+  keeps every room itself is not asked. The cluster's carrier carries
+  only a room that may be open to other servers (`s2s-room-catalogued`,
+  new anchor, in `s2s_room_relay.rs`; `s2s-relayed-request` moved): one
+  whose catalog row says so, or one without a row while the deployment
+  opens its new rooms.
+- The router (`s2s-seat-egress` and `s2s-carried-request` moved) takes a
+  carried request only for a room at the MUC service's domain; opens a
+  seat only where a queue for the occupant's domain has a place; sends a
+  room's own presence that ends an occupancy, when it did not come as the
+  answer to the occupant's request, only once the room confirms that it
+  no longer seats that generation; and removes the occupant from its room
+  when the host refuses a seated occupant's request in a way that ends
+  its occupancy. Each narrows what leaves for a remote JID or what a room
+  keeps seated.
+- The delivery hook has one more caller. Executing the frame that is a
+  sender's own copy of its room message offers it to the hook
+  (`s2s-reflection-seat`, in `interpret/effects/immediate.rs`, new in the
+  reviewed set), which takes it only for a seat it holds in the room the
+  message comes from; the frame is still returned and settled as before,
+  and the router does not send the same archived message to a seat twice.
+- `server/lifecycle.rs` has the S2S connection manager drain once the
+  router has told the remote occupants of its rooms that it is stopping,
+  and reads the router's pair queues from the snapshot; `startup` and
+  `startup-schema` did not move. `actor-affiliation` and `actor-config`
+  moved for a read-only room actor message that lists the generations of
+  the seated sessions.
+- The raw scan holds 1633 records, one more: the `offer_foreign` of the
+  sender's own copy. 87 unchanged records moved because the files above
+  gained lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
