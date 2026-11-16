@@ -153,7 +153,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Run 3/3, run7 S2S final log |
 | `xep0313_s2s_account_archive_ws` (2) | W6c | as `s2s_account_traffic_ws` | Run 2/2, run7 S2S final log |
 | `xep0503_s2s_inbound_spaces` (9) | W7a | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Not run |
-| `xep0060_s2s_inbound_spaces_pubsub` (11) | W7a | as `xep0503_s2s_inbound_spaces` | Not run |
+| `xep0060_s2s_inbound_spaces_pubsub` (12) | W7a | as `xep0503_s2s_inbound_spaces` | Not run |
 | `xep0503_s2s_inbound_spaces_host_grant` (2) | W7a | PostgreSQL; loopback; both cases return early without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0503_s2s_outbound_spaces_ws` (3) | W7a | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Not run |
 | `spaces_privileged_issuance` (9) | W7a | none (in-memory SQLite, the local permission backend) | Not run |
@@ -299,7 +299,7 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | Run, with a cited log | 65 targets, 1,033 cases, all passed in their latest cited run |
 | Not run | 53 targets (20 of them library modules) |
 
-W7a added six targets (37 cases), listed `admin_spaces_ws` for the case it
+W7a added six targets (38 cases), listed `admin_spaces_ws` for the case it
 added there, and edited `s2s_reachability`, which moved from run to not run
 with its eight cases and gained a ninth.
 

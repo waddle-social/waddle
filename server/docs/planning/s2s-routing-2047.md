@@ -1888,8 +1888,8 @@ as the effect boundary honours any standing (`honoured` in the host):
 | `disco#items` of a node | An empty list for an open Space: a Space's content is read as PubSub items |
 | Ping of the service | An empty result |
 | `<items/>` | The XEP-0402 bookmarks of the rooms the asker may be told of (below), at most 256, without the publisher's address. `forbidden` for an account that may not read the Space. The store is read and nothing is written: a session's read also publishes bookmarks a Space lacks and repairs a room's parent, and a remote principal's read does neither |
-| `<subscribe/>` | For the sender's own bare or full JID: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one |
-| `<unsubscribe/>` | For the sender's own address: both records removed; `unexpected-request` when the address holds no subscription. Leaving is allowed whatever the sender's standing has become |
+| `<subscribe/>` | For the sender's own account, named by its bare JID or one of its full JIDs: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one. The service keeps one subscription for an account, under its bare JID, as it does for sessions; the answer names that bare JID and notifications are addressed to it |
+| `<unsubscribe/>` | For the sender's own account: both records removed; `unexpected-request` when the account holds no subscription. Leaving only reduces what an account receives, so the records are removed even for a node that is no longer a Space open to the account; the answer is then `item-not-found`, as for every other request about such a node |
 | `<publish/>`, `<retract/>` and every `pubsub#owner` request | `forbidden` unless the principal's privilege is honoured (a trusted home on a `pkix` stream); then decided by the checks a session's request meets, for the remote account as their subject (below) |
 | `<create/>` | `forbidden`: no Space is created for a remote principal, since creating one makes its creator the owner |
 | Anything else in the two namespaces | `feature-not-implemented` where the parser names the feature, otherwise `service-unavailable` |
@@ -1970,8 +1970,10 @@ this holds when it is handed over:
 - the room the event names is one the subscriber may be told of.
 
 The notification is the event local subscribers get, addressed to the
-subscribed JID, from the service's bare JID and naming the one node, without
-the publisher's address. The pair's worker checks once more before it
+subscribed account's bare JID, from the service's bare JID and naming the
+one node, without the publisher's address. Whether the room is open to
+other servers is read once for a publication; what is decided for each
+subscriber is its standing and, for a managed room, its grants. The pair's worker checks once more before it
 writes: peer admission must admit the remote domain then.
 
 A subscription outlives the stream that made it, so its row records what
@@ -1989,7 +1991,7 @@ status are not stored: they are evaluated at each notification.
 | How long the host may take to decide one request | 5 s |
 | Spaces listed, and items returned, in one answer | 256, 256 |
 | Subscriptions accounts at other servers hold to one Space | 256 |
-| Subscriptions of one remote account, under every address | 64 |
+| Subscriptions of one remote account | 64 |
 | Subscriptions of one remote domain | 4,096 |
 | Subscriptions accounts at other servers hold in the deployment | 65,536 |
 | Publications of one Space whose notifications leave for other servers, on average and at once, for each replica | 4 a second, 16 |
@@ -2012,11 +2014,13 @@ answered.
 The subscription bounds are counted and the row written in one
 transaction; on PostgreSQL the transaction takes an advisory lock keyed on
 the subscriber's domain, so the subscriptions of one domain are counted one
-at a time on every replica. A subscription the address already holds is
-recorded again whatever the bounds.
+at a time on every replica. Each bound is counted by the database, up to
+the bound, so checking one costs one row read whatever its size. A
+subscription the account already holds is recorded again whatever the
+bounds.
 
 **Amplification.** One publication sends at most one stanza to each
-subscribed address at another server, at most 256 for a Space, and only
+subscribed account at another server, at most 256 for a Space, and only
 within the Space's allowance of notified publications; a publication beyond
 it reaches the local subscribers alone. A notification opens its pair's
 queue only within the share of pair queues that what remote senders ask for
@@ -2064,9 +2068,10 @@ without stream evidence as before. Several of its changes apply whether or
 not S2S is on, and are listed below with the others.
 
 Spaces change nothing for remote senders while S2S is disabled: no router
-exists, so no Spaces host is attached, no notification leaves for an
-address at another server, and migrations 2012 and 2013 create two tables
-that stay empty unless an owner turns a Space's `federated` setting on. The
+exists, so no Spaces host is attached, the pass that notifies subscribers
+at other servers returns before it reads anything, and migrations 2012 and
+2013 create two tables that stay empty unless an owner turns a Space's
+`federated` setting on. The
 setting can be set while S2S is off and takes effect once it is on. Two of
 its changes apply whether or not S2S is on, and are listed below.
 
@@ -2495,6 +2500,14 @@ runbook (G24):
   notifications. Peer admission and the trusted-home list are evaluated at
   each notification, so removing a domain from either takes effect at once.
   Subscribing again records the evidence of the new request.
+- **Spaces: what one request can read.** The bounds limit how many
+  requests are taken, not what each reads. `disco#items` of the service
+  reads the node, the asker's affiliation and the title for each of up to
+  256 federated Spaces, so one request costs up to about 770 reads, and a
+  remote domain's allowance of 50 requests a second can ask for that many
+  listings. A notification reads one affiliation for each of up to 256
+  remote subscribers, inline in the publisher's request, so a Space with
+  many remote subscribers answers its publisher later. Neither is cached.
 - **Spaces: a notification dials.** A notification for a subscriber whose
   domain has no established stream makes this server dial it, within the
   connection manager's bounds and backoff. A remote account that subscribes
@@ -2545,7 +2558,11 @@ runbook (G24):
   ([survey](../../../docs/planning/xep0503-survey-2047.md)).
 - Spaces, ending a subscription on a delivery error from the subscriber's
   server (XEP-0060 §12.3), and expiring one whose domain stays unreachable
-  or unadmitted.
+  or unadmitted, or whose account lost its membership of a private Space
+  and never leaves.
+- Spaces, the cost of one request: page or cache the service's listing,
+  and decide a publication's remote subscribers off the publisher's
+  request.
 - Spaces, a federated setting for single peers: the setting opens a Space
   to every admitted domain.
 - Spaces, the web client: offer the `federated` field in a Space's
