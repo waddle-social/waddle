@@ -381,7 +381,7 @@ struct RevokeTally {
     failed: usize,
     /// Rooms whose revoke is recorded and not yet acknowledged.
     unacknowledged: usize,
-    /// Rooms of a retired or exhausted scope: closed for good, so nothing
+    /// Rooms of a retired or exhausted scope: closed for good, so no revoke
     /// is recorded there and nothing there is admitted. They do not change
     /// the exit code, but they are not reported as revoked.
     closed: usize,
@@ -457,8 +457,8 @@ impl RevokeTally {
         }
         format!(
             "every room of an open scope is revoked and acknowledged by the revocation fence; \
-             {} room(s) of a retired or exhausted scope were skipped: nothing is recorded or \
-             admitted there",
+             {} room(s) of a retired or exhausted scope were skipped: no revoke is recorded there \
+             and nothing there is admitted",
             self.closed
         )
     }

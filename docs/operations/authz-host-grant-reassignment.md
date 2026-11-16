@@ -107,7 +107,7 @@ restore witnesses at once
    | `4` otherwise | The store refused the act. | Read the diagnostic. |
 
    A line with `"refusal": "scope_retired"` or `"scope_exhausted"` names a
-   scope that is closed for good: nothing is admitted there, nothing is
+   scope that is closed for good: nothing is admitted there, no revoke is
    recorded, and the exit code is not affected. Such a room is not reported
    as revoked: the closing line on standard error says how many were
    skipped.
