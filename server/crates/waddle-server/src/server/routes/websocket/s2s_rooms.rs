@@ -1351,20 +1351,38 @@ impl LocalRooms for WebSocketLocalRooms {
         }
     }
 
-    async fn unseat(&self, seat: &Seat, end: SeatEnd) {
+    async fn unseat(&self, seat: &Seat, end: SeatEnd) -> bool {
+        tracing::debug!(?end, "removing a remote occupant whose seat ended");
+        // Whether the room seats this occupancy now: only then is it this
+        // call's to remove. A room that cannot say is asked to remove it
+        // all the same, without that being taken for a removal.
+        let seated = self.seats(seat).await;
+        if seated == Some(false) {
+            return false;
+        }
+        self.remove_unseated(&seat.room, &seat.occupant, seat.session)
+            .await;
+        seated == Some(true)
+    }
+
+    async fn remove_unseated(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: waddle_xmpp_core::OccupancySessionGeneration,
+    ) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        tracing::debug!(?end, "removing a remote occupant whose seat ended");
-        // The removal is pinned to the seat's occupancy generation, so a
-        // later join of the same full JID keeps its seat. Those who stay
-        // are told with status 333 (XEP-0045 §11.1); the removed occupant's
+        // The removal is pinned to the occupancy generation, so a later
+        // join of the same full JID keeps its seat. Those who stay are
+        // told with status 333 (XEP-0045 §11.1); the removed occupant's
         // own copy finds no seat and is not sent.
         sweep_abandoned_room_occupancy(
             &state,
-            &seat.room,
-            &seat.occupant,
-            LeaveSessionSelector::Generation(seat.session),
+            room,
+            occupant,
+            LeaveSessionSelector::Generation(session),
             MucRemovalCause::TechnicalProblem,
         )
         .await;

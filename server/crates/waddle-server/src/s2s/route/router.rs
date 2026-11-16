@@ -43,7 +43,7 @@ use super::seats::{SeatIndex, SeatStore};
 use super::telemetry;
 use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
-    RemoteRouteOutcome, ServedDomains, ServedService, UnroutableReason,
+    RemoteRouteOutcome, SeatAdoption, ServedDomains, ServedService, UnroutableReason,
 };
 use crate::s2s::config::S2sConfig;
 use crate::s2s::conn::{
@@ -179,8 +179,13 @@ pub struct RouterLimits {
     /// domain's request rate, before the stanza is given up and the stream
     /// closed with `resource-constraint`.
     pub room_request_wait: Duration,
-    /// How long the room host may take to decide one request before the
-    /// worker moves on.
+    /// How long one item of a worker that hands requests to the room host
+    /// may take: deciding one request, with every ask of the host and the
+    /// seat table and the wait for a place for its answer, before the
+    /// worker moves on. It is well under `room_request_wait`, so a slow
+    /// room holds back the rooms of its shard for at most this per item
+    /// and never long enough for a stream to be closed. The same bound
+    /// applies to each step of a seat's end, which other workers run.
     pub room_request_timeout: Duration,
     /// Stanzas one remote domain may address to the MUC service a second,
     /// on average; a stream beyond it stops reading until the rate allows
@@ -237,7 +242,8 @@ pub struct RouterLimits {
     /// the seat.
     pub seat_traffic_per_peer: usize,
     /// How long an answer to a remote request waits for a place among
-    /// them before it is given up.
+    /// them before it is given up, never past the item's budget
+    /// (`room_request_timeout`).
     pub room_reply_wait: Duration,
     /// Copies of chat states and markers one local room may have queued
     /// for remote seats a second, on average, and four seconds' worth at
@@ -296,7 +302,7 @@ impl Default for RouterLimits {
             room_requests_per_peer: 64,
             room_request_workers: 4,
             room_request_wait: Duration::from_secs(30),
-            room_request_timeout: Duration::from_secs(30),
+            room_request_timeout: Duration::from_secs(5),
             room_request_rate: 50,
             room_request_burst: 200,
             room_request_rate_per_account: 10,
@@ -403,6 +409,11 @@ enum Purpose {
     /// The answer of the MUC service, a room or an occupant JID to a
     /// remote entity's request. Nothing answers it if it cannot be sent.
     RoomReply,
+    /// A stopping replica's notice to a remote occupant that its seat ended
+    /// with the replica (XEP-0045 §11.2). Sent as an answer is; the replica
+    /// waits until it is written or given up: `_held` is released when the
+    /// pair's worker is done with the stanza.
+    Notice { _held: hosting::Notice },
 }
 
 /// The two queues of one directional domain pair, served by one worker.
@@ -478,6 +489,9 @@ const EDIT_ATTEMPTS: usize = 4;
 
 /// Occupancies the sweep ends at once.
 const SWEEP_BATCH: usize = 256;
+
+/// Workers that end remote occupants' seats off the room shards.
+const SEAT_END_WORKERS: usize = 4;
 
 /// Why a queued request was not sent, as the error its sender receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,6 +640,14 @@ struct Inner {
     reconcile_after: Mutex<Option<BareJid>>,
     /// The row the last check of this replica's rows stopped at.
     rows_after: Mutex<Option<(BareJid, FullJid)>>,
+    /// Seat ends and removals of occupants that hold no seat, for the
+    /// workers that end seats off the room shards.
+    seat_ends: hosting::SeatEnds,
+    /// Rooms whose removal of an occupant could not be confirmed: the next
+    /// pass over the seats asks them, whether or not a seat is held there.
+    recheck: Mutex<HashSet<BareJid>>,
+    /// The notices of a stopping replica not yet written or given up.
+    notices: Arc<hosting::Notices>,
     /// Set once this replica has begun to stop: no seat is opened any
     /// more.
     stopping: AtomicBool,
@@ -718,6 +740,9 @@ impl S2sRouter {
             reconciling: AtomicBool::new(false),
             reconcile_after: Mutex::new(None),
             rows_after: Mutex::new(None),
+            seat_ends: hosting::SeatEnds::default(),
+            recheck: Mutex::new(HashSet::new()),
+            notices: Arc::new(hosting::Notices::default()),
             stopping: AtomicBool::new(false),
             drained: CancellationToken::new(),
             rooms: options.rooms,
@@ -748,7 +773,20 @@ impl S2sRouter {
                 .tasks
                 .spawn(hosting::serve_local_rooms(Arc::clone(&inner), shard));
         }
+        for _ in 0..SEAT_END_WORKERS {
+            inner
+                .tasks
+                .spawn(hosting::serve_seat_ends(Arc::clone(&inner)));
+        }
         Self { inner }
+    }
+
+    /// The token the S2S connection manager drains on: with a router, the
+    /// router's own once it has told its remote occupants that it is
+    /// stopping ([`Self::drained`]), since those notices need the streams;
+    /// without one, the process stop itself.
+    pub fn service_stop(router: Option<&Self>, stop: &CancellationToken) -> CancellationToken {
+        router.map_or_else(|| stop.clone(), Self::drained)
     }
 
     /// Host rooms for remote occupants: `host` decides what remote
@@ -871,8 +909,13 @@ impl RemoteRoute for S2sRouter {
         self.inner.leave_rooms(resource).await;
     }
 
-    async fn adopt_seat(&self, room: &BareJid, occupant: &FullJid) -> bool {
-        self.inner.adopt_seat(room, occupant).await
+    async fn adopt_seat(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> SeatAdoption {
+        self.inner.adopt_seat(room, occupant, session).await
     }
 
     async fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {
@@ -1010,7 +1053,8 @@ impl Inner {
             | Purpose::Departure
             | Purpose::Verify { .. }
             | Purpose::Seat { .. }
-            | Purpose::RoomReply => None,
+            | Purpose::RoomReply
+            | Purpose::Notice { .. } => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
             return RemoteRouteOutcome::Accepted;
@@ -2397,9 +2441,11 @@ impl Inner {
                 }
                 return;
             }
-            Purpose::Response { .. } | Purpose::Reply | Purpose::Departure | Purpose::RoomReply => {
-                return
-            }
+            Purpose::Response { .. }
+            | Purpose::Reply
+            | Purpose::Departure
+            | Purpose::RoomReply
+            | Purpose::Notice { .. } => return,
         };
         if registered {
             match self.correlations.withdraw(&pending.key).await {
@@ -3109,7 +3155,7 @@ impl PairWorker {
                     return;
                 }
             }
-            Purpose::RoomReply => {
+            Purpose::RoomReply | Purpose::Notice { .. } => {
                 if !self.router.admits(&self.pair.remote) {
                     telemetry::seat_traffic_refused();
                     return;
@@ -3181,7 +3227,8 @@ impl PairWorker {
             | Purpose::Room { .. }
             | Purpose::Departure
             | Purpose::Seat { .. }
-            | Purpose::RoomReply => false,
+            | Purpose::RoomReply
+            | Purpose::Notice { .. } => false,
         };
         let mut element = stanza_element(&queued.stanza);
         let mut offered_again = false;

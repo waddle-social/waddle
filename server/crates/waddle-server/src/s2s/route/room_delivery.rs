@@ -332,8 +332,7 @@ impl RoomQueues {
         work: RoomWork,
         peer: &str,
     ) -> Result<(), RoomWork> {
-        self.offer(room, work, peer, true)
-            .map_err(|(work, _)| work)
+        self.offer(room, work, peer, true).map_err(|(work, _)| work)
     }
 
     /// Queue `work` for `room` against `peer`'s share and, when `in_room`,

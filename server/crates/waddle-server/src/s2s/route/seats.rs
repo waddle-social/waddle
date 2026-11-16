@@ -231,15 +231,29 @@ impl SqlSeatStore {
 
     /// The deployment's seats, counted now when the last count is older
     /// than [`TOTAL_COUNT_AGE`].
-    async fn approximate_total(&self) -> Result<usize, SeatStoreError> {
-        if let Some((total, at)) = *self.counted() {
+    ///
+    /// The total is approximate in any case, and the bounds a join is
+    /// counted against exactly (its room's, its domain's and its account's)
+    /// are counted in the join's own transaction. So a count that fails
+    /// does not fail the join: the last count stands, or none at all when
+    /// no count has been taken, and the next join counts again.
+    async fn approximate_total(&self) -> usize {
+        let last = *self.counted();
+        if let Some((total, at)) = last {
             if at.elapsed() < TOTAL_COUNT_AGE {
-                return Ok(total);
+                return total;
             }
         }
-        let total = self.count().await?;
-        *self.counted() = Some((total, Instant::now()));
-        Ok(total)
+        match self.count().await {
+            Ok(total) => {
+                *self.counted() = Some((total, Instant::now()));
+                total
+            }
+            Err(_) => {
+                tracing::warn!("counting the deployment's remote occupants' seats failed");
+                last.map_or(0, |(total, _)| total)
+            }
+        }
     }
 
     /// Apply a seat this store opened (`+1`) or ended (`-1`) to the last
@@ -257,6 +271,24 @@ impl SqlSeatStore {
     ) -> Result<u64, SeatStoreError> {
         let guard = self.db.guard().await.map_err(storage)?;
         guard.execute(sql, params).await.map_err(storage)
+    }
+
+    /// Every seat `account` holds in `room`, under every resource and on
+    /// every replica: what the shared table records, read on whichever
+    /// replica asks.
+    pub async fn of_account(
+        &self,
+        room: &BareJid,
+        account: &BareJid,
+    ) -> Result<Vec<Seat>, SeatStoreError> {
+        let sql = [
+            "SELECT ",
+            COLUMNS,
+            " FROM s2s_local_room_seats WHERE room_jid = ? AND account_jid = ?",
+        ]
+        .concat();
+        self.select(&sql, crate::db_params![room.as_str(), account.as_str()])
+            .await
     }
 
     async fn select(
@@ -354,7 +386,7 @@ impl SeatStore for SqlSeatStore {
         // The deployment's total is read from the last count, outside the
         // transaction: counting it for every join would read the whole
         // table under the join's lock.
-        let total = self.approximate_total().await?;
+        let total = self.approximate_total().await;
         // The existence check, the counts and the insert are one
         // transaction. On SQLite it holds the write lock throughout. On
         // PostgreSQL it first takes a transaction advisory lock on the
@@ -715,6 +747,11 @@ pub enum Deferred {
 #[derive(Debug, Default)]
 pub struct SeatIndex {
     held: Mutex<HeldSeats>,
+    /// The rooms with a seat held here, kept in step with `held` while its
+    /// lock is held. It answers whether a room has any seat without that
+    /// lock, which every room's delivery to a full JID without a local
+    /// connection would otherwise take.
+    occupied: dashmap::DashSet<BareJid>,
 }
 
 /// The seats held, with what is counted of them so that nothing reads
@@ -795,13 +832,24 @@ impl SeatIndex {
 
     /// Hold `seat`, replacing any seat of the same room and occupant.
     pub fn hold(&self, seat: Seat) {
-        self.held().insert(seat, None);
+        let mut held = self.held();
+        self.occupied.insert(seat.room.clone());
+        held.insert(seat, None);
     }
 
     /// Hold `seat` while the join that opened it is answered: the room's
     /// stanzas for it are kept until [`Self::settle`].
     pub fn hold_pending(&self, seat: Seat) {
-        self.held().insert(seat, Some(Vec::new()));
+        let mut held = self.held();
+        self.occupied.insert(seat.room.clone());
+        held.insert(seat, Some(Vec::new()));
+    }
+
+    /// Whether any seat is held here in `room`, without the index's lock:
+    /// `false` is exact for a room whose seats were released before the
+    /// call, and a seat held before it is seen.
+    pub fn seats_room(&self, room: &BareJid) -> bool {
+        self.occupied.contains(room)
     }
 
     /// Keep `stanza` for the seat `occupant` holds in `room` if its join is
@@ -883,7 +931,11 @@ impl SeatIndex {
         if held.get(room, occupant)?.seat.session != session {
             return None;
         }
-        held.remove(room, occupant)
+        let released = held.remove(room, occupant);
+        if !held.rooms.contains_key(room) {
+            self.occupied.remove(room);
+        }
+        released
     }
 
     /// Record the nickname the room now seats `occupant` under.
@@ -996,6 +1048,28 @@ impl SeatIndex {
     /// Every room with a seat held here.
     pub fn rooms(&self) -> Vec<BareJid> {
         self.held().rooms.keys().cloned().collect()
+    }
+
+    /// Stop holding every seat held here: those whose join is answered,
+    /// and then those whose join is still being answered.
+    pub fn release_all(&self) -> (Vec<Seat>, Vec<Seat>) {
+        let mut held = self.held();
+        let mut settled = Vec::new();
+        let mut pending = Vec::new();
+        for held in std::mem::take(&mut held.rooms)
+            .into_values()
+            .flat_map(HashMap::into_values)
+        {
+            if held.pending.is_some() {
+                pending.push(held.seat);
+            } else {
+                settled.push(held.seat);
+            }
+        }
+        held.pairs.clear();
+        held.seats = 0;
+        self.occupied.clear();
+        (settled, pending)
     }
 
     /// Every seat held here.

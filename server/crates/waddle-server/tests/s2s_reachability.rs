@@ -331,7 +331,9 @@ impl LocalRooms for RecordingRooms {
         }))])
     }
 
-    async fn unseat(&self, _seat: &Seat, _end: SeatEnd) {}
+    async fn unseat(&self, _seat: &Seat, _end: SeatEnd) -> bool {
+        false
+    }
 
     async fn seats(&self, _seat: &Seat) -> Option<bool> {
         Some(true)

@@ -77,6 +77,8 @@ pub struct ScriptedRooms {
     seated: Mutex<HashMap<BareJid, HashMap<FullJid, (String, OccupancySessionGeneration)>>>,
     handled: Mutex<Vec<Handled>>,
     unseated: Mutex<Vec<(FullJid, SeatEnd)>>,
+    /// Occupants removed because no seat was held for them.
+    ghosts: Mutex<Vec<FullJid>>,
     placed: AtomicUsize,
     room_asks: AtomicUsize,
     seat_asks: AtomicUsize,
@@ -187,6 +189,50 @@ impl ScriptedRooms {
     /// How many times the router asked whether one seat is seated.
     pub fn seat_asks(&self) -> usize {
         self.seat_asks.load(Ordering::Acquire)
+    }
+
+    /// Remove `occupant` from `room` if the room seats it under `session`:
+    /// `true` when it did.
+    fn remove(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> bool {
+        let mut seated = lock(&self.seated);
+        let Some(seats) = seated.get_mut(room) else {
+            return false;
+        };
+        if !seats
+            .get(occupant)
+            .is_some_and(|(_, seated)| *seated == session)
+        {
+            return false;
+        }
+        seats.remove(occupant);
+        true
+    }
+
+    /// The occupants the router had the host remove because no seat was
+    /// held for them.
+    pub fn ghosts(&self) -> Vec<FullJid> {
+        lock(&self.ghosts).clone()
+    }
+
+    /// Seat `occupant` in `room` under `session` without a seat, as a room
+    /// restored with an occupant whose seat no replica holds would.
+    pub fn seat_unseated(
+        &self,
+        room: &str,
+        occupant: &str,
+        nick: &str,
+    ) -> OccupancySessionGeneration {
+        let session = OccupancySessionGeneration::mint();
+        lock(&self.seated)
+            .entry(bare(room))
+            .or_default()
+            .insert(full(occupant), (nick.to_owned(), session));
+        session
     }
 
     fn own_presence(seat: &Seat, type_: PresenceType) -> Stanza {
@@ -399,15 +445,19 @@ impl LocalRooms for ScriptedRooms {
         RoomPlacement::Here
     }
 
-    async fn unseat(&self, seat: &Seat, end: SeatEnd) {
+    async fn unseat(&self, seat: &Seat, end: SeatEnd) -> bool {
         lock(&self.unseated).push((seat.occupant.clone(), end));
-        if let Some(seats) = lock(&self.seated).get_mut(&seat.room) {
-            if seats
-                .get(&seat.occupant)
-                .is_some_and(|(_, session)| *session == seat.session)
-            {
-                seats.remove(&seat.occupant);
-            }
+        self.remove(&seat.room, &seat.occupant, seat.session)
+    }
+
+    async fn remove_unseated(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) {
+        if self.remove(room, occupant, session) {
+            lock(&self.ghosts).push(occupant.clone());
         }
     }
 

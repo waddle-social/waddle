@@ -168,11 +168,15 @@ pub enum SeatEnd {
 
 /// The rooms of this deployment, as the S2S router reaches them.
 ///
-/// Calls are made off the stream's task. [`LocalRooms::handle`] and
-/// [`LocalRooms::unseat`] are called one at a time for each room, in the
-/// order the room's requests arrived; [`LocalRooms::place`] is called
-/// before them, one request of a room at a time, off the workers that call
-/// the others.
+/// Calls are made off the stream's task. [`LocalRooms::handle`] is called
+/// one request at a time for each room, in the order the room's requests
+/// arrived; [`LocalRooms::place`] is called before it, one request of a
+/// room at a time, off the workers that call the others.
+/// [`LocalRooms::unseat`] and [`LocalRooms::remove_unseated`] are called
+/// off those workers too, so that no room's requests wait for a removal,
+/// and may run beside a later request of the same room: that is safe
+/// because every removal names the occupancy generation it removes, and a
+/// later join seats the occupant under another.
 #[async_trait]
 pub trait LocalRooms: Send + Sync {
     /// Decide one request and answer it. A stanza that asks for nothing a
@@ -197,8 +201,22 @@ pub trait LocalRooms: Send + Sync {
     /// The seat ended without the room deciding it. The room removes the
     /// occupant, if it still seats it under the seat's generation, and
     /// tells those who stay with status 333 (XEP-0045 §11.1); nothing is
-    /// sent to the removed occupant.
-    async fn unseat(&self, seat: &Seat, end: SeatEnd);
+    /// sent to the removed occupant. `true` when the room seated the
+    /// occupant under that generation and this call removed it.
+    async fn unseat(&self, seat: &Seat, end: SeatEnd) -> bool;
+
+    /// The room seats `occupant`, an occupant of another server, under
+    /// `session`, and this replica holds no seat for that occupancy:
+    /// nothing reaches it. The room removes it, if it still seats it under
+    /// `session`, and tells those who stay with status 333 (XEP-0045
+    /// §11.1). By default nothing happens.
+    async fn remove_unseated(
+        &self,
+        _room: &BareJid,
+        _occupant: &FullJid,
+        _session: OccupancySessionGeneration,
+    ) {
+    }
 
     /// Whether the room on this replica seats the occupant under the
     /// seat's generation; `None` when that cannot be told now.

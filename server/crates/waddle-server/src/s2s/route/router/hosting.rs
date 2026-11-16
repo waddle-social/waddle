@@ -24,14 +24,15 @@
 //! replica takes it over from one that stopped, and when this replica
 //! stops, which tells the occupant so.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
+use tokio::sync::Notify;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::xep::xep0085::NS_CHATSTATES;
@@ -49,7 +50,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use super::{
     duration_ms, lock, now_ms, Allowance, Hosting, Inner, Pair, Purpose, Queued, SWEEP_BATCH,
 };
-use crate::destination::ServedService;
+use crate::destination::{SeatAdoption, ServedService};
 use crate::permissions::host_grant::StreamEvidence;
 use crate::s2s::conn::{SinkVerdict, SinkWait, VerifiedPeerStream, Waited};
 use crate::s2s::route::local_rooms::{
@@ -92,13 +93,17 @@ const REFUSALS_PER_REQUEST: f64 = 0.1;
 /// Rooms whose seats one pass checks against the room.
 const RECONCILE_ROOMS: usize = 256;
 
-/// How often the wait for a stopping replica's last stanzas looks at its
-/// queues.
-const NOTICE_POLL: Duration = Duration::from_millis(20);
-
 /// Until shutdown: hand the work of one shard of local rooms to the room
 /// host, one item at a time, so a room decides its requests in the order
 /// they arrived.
+///
+/// One item takes at most the per-item budget
+/// ([`super::RouterLimits::room_request_timeout`]): deciding a request,
+/// opening or changing its seat and queueing its answer all fit in it, and
+/// a seat's end is handed to the workers that end seats
+/// ([`serve_seat_ends`]) instead of being waited for here. So a slow room
+/// actor holds back its shard for at most that budget per item, well under
+/// the time a stream waits for a place.
 pub(super) async fn serve_local_rooms(router: Arc<Inner>, shard: usize) {
     loop {
         let work = tokio::select! {
@@ -110,7 +115,7 @@ pub(super) async fn serve_local_rooms(router: Arc<Inner>, shard: usize) {
             RoomWork::Request(request) => router.decide_room_request(*request).await,
             RoomWork::Unseat(ended) => {
                 let (seat, end) = *ended;
-                router.unseat(seat, end).await;
+                router.end_seat(seat, end);
             }
             RoomWork::Departure(left) => {
                 let (seat, stanza) = *left;
@@ -119,6 +124,20 @@ pub(super) async fn serve_local_rooms(router: Arc<Inner>, shard: usize) {
             // Work of the queues that serve remote rooms.
             RoomWork::Traffic(_) | RoomWork::Ended(_) => {}
         }
+    }
+}
+
+/// Until shutdown: end the seats handed to these workers, a few at a time,
+/// each within the per-item budget for the room and the seat table.
+pub(super) async fn serve_seat_ends(router: Arc<Inner>) {
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = router.shutdown.cancelled() => return,
+            next = router.seat_ends.next() => next,
+        };
+        router.finish_end(&next).await;
+        router.seat_ends.done(&next);
     }
 }
 
@@ -999,11 +1018,13 @@ impl Inner {
     }
 
     /// Have the room host decide one stanza and queue its answer for the
-    /// sender.
+    /// sender, within the per-item budget: opening a seat, every ask of
+    /// the host and queueing the answer share one deadline.
     async fn decide_room_request(self: &Arc<Self>, request: LocalRoomRequest) {
         let Some(hosting) = self.hosting.get() else {
             return;
         };
+        let deadline = tokio::time::Instant::now() + self.limits.room_request_timeout;
         let LocalRoomRequest {
             principal,
             operation,
@@ -1022,7 +1043,7 @@ impl Inner {
             .and_then(|occupant| self.seats.get(&room, occupant));
         if let Some(held) = &seat {
             if is_delivery_error(&stanza) {
-                self.unseat(held.clone(), SeatEnd::OccupantError).await;
+                self.end_seat(held.clone(), SeatEnd::OccupantError);
                 return;
             }
             // A seat stands for what the stream that carried its join
@@ -1032,7 +1053,7 @@ impl Inner {
             // enters again on the evidence of the stream that carries it
             // now.
             if held.evidence != StreamEvidence::of(&principal) {
-                self.unseat(held.clone(), SeatEnd::EvidenceChanged).await;
+                self.end_seat(held.clone(), SeatEnd::EvidenceChanged);
                 seat = None;
             }
         }
@@ -1050,9 +1071,19 @@ impl Inner {
         let answer = loop {
             if seat.is_none() {
                 if let (Some(occupant), Some(nick)) = (occupant.as_ref(), nick.clone()) {
-                    let opened = self
-                        .open_seat(hosting, &principal, &pair, &room, occupant, nick)
-                        .await;
+                    let opened = tokio::time::timeout_at(
+                        deadline,
+                        self.open_seat(hosting, &principal, &pair, &room, occupant, nick),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        // The seat table did not answer in time. A row it
+                        // may still have written names no seat held here
+                        // and is removed when this replica's rows are next
+                        // checked.
+                        tracing::warn!("opening a remote occupant's seat timed out");
+                        Err(Box::new(self.join_failed()))
+                    });
                     match opened {
                         Ok(opened) => {
                             seat = Some(opened);
@@ -1061,10 +1092,11 @@ impl Inner {
                         }
                         Err(error) => {
                             if let Some(reply) = replies::error_reply(&stanza, *error) {
-                                self.queue_room_reply(&pair, reply).await;
+                                self.queue_room_reply(&pair, reply, self.reply_deadline(deadline))
+                                    .await;
                             }
                             if let Some(left) = given_up {
-                                self.unseat(left, SeatEnd::Refused).await;
+                                self.end_seat(left, SeatEnd::Refused);
                             }
                             return;
                         }
@@ -1078,16 +1110,15 @@ impl Inner {
                 seat: seat.clone(),
                 joining,
             });
-            let Ok(answer) = tokio::time::timeout(self.limits.room_request_timeout, handled).await
-            else {
+            let Ok(answer) = tokio::time::timeout_at(deadline, handled).await else {
                 telemetry::room_request_timed_out();
                 // The room may have seated the occupant before the host was
                 // abandoned.
                 if let Some(opened) = seat.filter(|_| joining) {
-                    self.unseat(opened, SeatEnd::Undeliverable).await;
+                    self.end_seat(opened, SeatEnd::Undeliverable);
                 }
                 if let Some(left) = given_up {
-                    self.unseat(left, SeatEnd::Refused).await;
+                    self.end_seat(left, SeatEnd::Refused);
                 }
                 return;
             };
@@ -1107,6 +1138,24 @@ impl Inner {
             }
             break answer;
         };
+        // A stopping replica gave up the seat opened for this join while
+        // the room decided it, and told nobody: the occupant is not told
+        // that it entered a room that ends with the replica.
+        if let Some(opened) = seat.as_ref().filter(|_| joining) {
+            if self.stopping.load(Ordering::Acquire)
+                && !self
+                    .seats
+                    .holds_under(&opened.room, &opened.occupant, opened.session)
+            {
+                if let Some(reply) = replies::error_reply(
+                    &stanza,
+                    self.busy("This server is shutting down; try again later."),
+                ) {
+                    self.offer_room_reply(&pair, reply);
+                }
+                return;
+            }
+        }
         // A seat stays only if the room seats the occupant. One opened for
         // a join the room did not accept is dropped. One the occupant held
         // before, for which the host refused the occupant itself, ends, and
@@ -1117,7 +1166,7 @@ impl Inner {
             (SeatChange::Seated, _) => {}
             (_, true) => {
                 if let Some(opened) = seat.take() {
-                    self.close_seat(hosting, &opened).await;
+                    self.close_seat(&opened);
                 }
                 joining = false;
             }
@@ -1130,6 +1179,7 @@ impl Inner {
             refused = refused.or(given_up);
         }
         let mut answered = true;
+        let replied_by = self.reply_deadline(deadline);
         for mut reply in answer.stanzas {
             // Only what the MUC service sends the entity it answers leaves.
             let from_service = stanza_from(&reply).is_some_and(|from| {
@@ -1153,9 +1203,9 @@ impl Inner {
             set_to(&mut reply, sender.clone());
             let last = seat.is_some() && ends_seat(&reply);
             if let (Some(held), Some(nick)) = (&seat, new_nick(&reply)) {
-                self.rename_seat(hosting, held, &nick).await;
+                self.rename_seat(held, &nick);
             }
-            if !self.queue_room_reply(&pair, reply).await {
+            if !self.queue_room_reply(&pair, reply, replied_by).await {
                 // The sender missed part of its answer: a seated occupant
                 // cannot be kept in step and joins again.
                 answered = false;
@@ -1163,16 +1213,16 @@ impl Inner {
             }
             if last {
                 if let Some(held) = seat.take() {
-                    self.close_seat(hosting, &held).await;
+                    self.close_seat(&held);
                 }
             }
         }
         if let Some(left) = refused {
-            self.unseat(left, SeatEnd::Refused).await;
+            self.end_seat(left, SeatEnd::Refused);
         }
         if !answered {
             if let Some(held) = seat.take() {
-                self.unseat(held, SeatEnd::Undeliverable).await;
+                self.end_seat(held, SeatEnd::Undeliverable);
             }
             return;
         }
@@ -1189,6 +1239,23 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Until when the answer to a request decided by `deadline` may wait
+    /// for a place among the pair's stanzas: the reply wait, and never past
+    /// the item's budget.
+    fn reply_deadline(&self, deadline: tokio::time::Instant) -> tokio::time::Instant {
+        deadline.min(tokio::time::Instant::now() + self.limits.room_reply_wait)
+    }
+
+    /// The answer to a join whose seat could not be opened now.
+    fn join_failed(&self) -> StanzaError {
+        replies::error(
+            self.home(),
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "The room could not be joined now; try again later.",
+        )
     }
 
     /// Open the seat a join asks for, within the seat bounds, and hold it
@@ -1210,16 +1277,17 @@ impl Inner {
         // A seat is opened only where the room's stanzas for it can leave:
         // a place on a queue for the occupant's domain, which a join opens
         // within the bound on queues remote senders open. Without one the
-        // seat would end at the room's first stanza for it.
+        // seat would end at the room's first stanza for it. The place is
+        // held until the seat is, so that the queue is not retired as idle
+        // in between.
         let reachable =
             self.reserve_on(pair.clone(), self.limits.reply_queues, |queue| &queue.seats);
-        if reachable.is_none() {
+        let Some(_reachable) = reachable else {
             telemetry::seat_refused_unreachable();
             return Err(Box::new(self.busy(
                 "This server holds no place for more traffic to your server now; try again later.",
             )));
-        }
-        drop(reachable);
+        };
         let seat = Seat {
             room: room.clone(),
             occupant: occupant.clone(),
@@ -1285,62 +1353,138 @@ impl Inner {
             }
         }
         tracing::warn!("opening a remote occupant's seat failed");
-        Err(Box::new(replies::error(
-            self.home(),
-            ErrorType::Wait,
-            DefinedCondition::InternalServerError,
-            "The room could not be joined now; try again later.",
-        )))
+        Err(Box::new(self.join_failed()))
     }
 
-    /// Stop holding `seat` and remove its row: the room does not seat the
-    /// occupant, or has just told it that its occupancy ended. A row that
-    /// could not be removed is removed when this replica's rows are next
-    /// checked against the seats it holds.
-    async fn close_seat(&self, hosting: &Hosting, seat: &Seat) {
+    /// Stop holding `seat` and remove its row off the shard: the room does
+    /// not seat the occupant, or has just told it that its occupancy
+    /// ended. A row that could not be removed is removed when this
+    /// replica's rows are next checked against the seats it holds.
+    fn close_seat(self: &Arc<Self>, seat: &Seat) {
         self.seats.release(&seat.room, &seat.occupant, seat.session);
-        if hosting.store.remove(seat).await.is_err() {
-            tracing::warn!("removing a remote occupant's seat failed");
-        }
+        self.remove_row(seat);
     }
 
-    async fn rename_seat(&self, hosting: &Hosting, seat: &Seat, nick: &str) {
+    /// Remove `seat`'s row on a task of its own, within the per-item
+    /// budget.
+    fn remove_row(self: &Arc<Self>, seat: &Seat) {
+        let router = Arc::clone(self);
+        let seat = seat.clone();
+        self.tasks.spawn(async move {
+            let Some(hosting) = router.hosting.get() else {
+                return;
+            };
+            let removal = hosting.store.remove(&seat);
+            if !matches!(
+                tokio::time::timeout(router.limits.room_request_timeout, removal).await,
+                Ok(Ok(_))
+            ) {
+                tracing::warn!("removing a remote occupant's seat failed");
+            }
+        });
+    }
+
+    /// Record the nickname the room now seats `seat`'s occupant under: at
+    /// once in the index, and in the row on a task of its own.
+    fn rename_seat(self: &Arc<Self>, seat: &Seat, nick: &str) {
         self.seats.rename(&seat.room, &seat.occupant, nick);
-        if hosting.store.rename(seat, nick, now_ms()).await.is_err() {
-            tracing::debug!("recording a remote occupant's nickname failed");
-        }
+        let router = Arc::clone(self);
+        let seat = seat.clone();
+        let nick = nick.to_owned();
+        self.tasks.spawn(async move {
+            let Some(hosting) = router.hosting.get() else {
+                return;
+            };
+            let renamed = hosting.store.rename(&seat, &nick, now_ms());
+            if !matches!(
+                tokio::time::timeout(router.limits.room_request_timeout, renamed).await,
+                Ok(Ok(_))
+            ) {
+                tracing::debug!("recording a remote occupant's nickname failed");
+            }
+        });
     }
 
-    /// End `seat` without the room deciding it: the seat is given up and
-    /// the room removes the occupant, telling those who stay (XEP-0045
-    /// §11.1).
-    async fn unseat(self: &Arc<Self>, seat: Seat, end: SeatEnd) {
-        let Some(hosting) = self.hosting.get() else {
+    /// End `seat` without the room deciding it: the seat is given up now,
+    /// the occupant told where it may still be reached, and the room's
+    /// removal of the occupant and the row's removal are handed to the
+    /// workers that end seats, so no shard waits for them. Those who stay
+    /// are told by the room (XEP-0045 §11.1).
+    pub(super) fn end_seat(self: &Arc<Self>, seat: Seat, end: SeatEnd) {
+        if self.hosting.get().is_none() {
             return;
-        };
+        }
         self.seats.release(&seat.room, &seat.occupant, seat.session);
         // Where the occupant's server may still be reached and was not told
         // by a failed stream or by its own error, the occupant is told that
         // the service removed it (XEP-0045 §11.1), ahead of anything a
         // later join is answered with. It is not waited for: nothing
-        // depends on its arrival.
+        // depends on its arrival. A seat taken over from a replica that
+        // stopped is told only once the room has removed that occupancy.
         match end {
             SeatEnd::Undeliverable
             | SeatEnd::EvidenceChanged
             | SeatEnd::RoomClosed
-            | SeatEnd::Refused
-            | SeatEnd::HolderStopped => self.tell_removed(&seat, Status::ServiceErrorKick),
-            SeatEnd::StreamLost | SeatEnd::OccupantError => {}
+            | SeatEnd::Refused => self.tell_removed(&seat, Status::ServiceErrorKick),
+            SeatEnd::HolderStopped | SeatEnd::StreamLost | SeatEnd::OccupantError => {}
         }
-        if hosting.store.remove(&seat).await.is_err() {
-            tracing::warn!("removing an ended remote occupant's seat failed");
+        self.seat_ends.push(EndWork::Seat(seat, end));
+    }
+
+    /// Run one end handed to the seat-end workers: remove the row and have
+    /// the room remove the occupancy, each within the per-item budget. A
+    /// room that does not answer in time is checked again at the next pass
+    /// over the seats, which removes an occupant of another server that
+    /// holds no seat.
+    async fn finish_end(self: &Arc<Self>, work: &EndWork) {
+        let Some(hosting) = self.hosting.get() else {
+            return;
+        };
+        let budget = self.limits.room_request_timeout;
+        match work {
+            EndWork::Seat(seat, end) => {
+                if !matches!(
+                    tokio::time::timeout(budget, hosting.store.remove(seat)).await,
+                    Ok(Ok(_))
+                ) {
+                    tracing::warn!("removing an ended remote occupant's seat failed");
+                }
+                match tokio::time::timeout(budget, hosting.host.unseat(seat, *end)).await {
+                    // The occupant of a seat taken over from a replica that
+                    // stopped is told once the room removed the occupancy
+                    // recorded for it, unless it has entered again since.
+                    Ok(true) if *end == SeatEnd::HolderStopped => {
+                        if !self.seats.holds(&seat.room, &seat.occupant) {
+                            self.tell_removed(seat, Status::ServiceErrorKick);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        tracing::warn!("removing an ended remote occupant from its room timed out");
+                        self.recheck(&seat.room);
+                    }
+                }
+            }
+            EndWork::Ghost {
+                room,
+                occupant,
+                session,
+            } => {
+                let removal = hosting.host.remove_unseated(room, occupant, *session);
+                if tokio::time::timeout(budget, removal).await.is_err() {
+                    tracing::warn!("removing an occupant that holds no seat timed out");
+                    self.recheck(room);
+                }
+            }
         }
-        let removal = hosting.host.unseat(&seat, end);
-        if tokio::time::timeout(self.limits.room_request_timeout, removal)
-            .await
-            .is_err()
-        {
-            tracing::warn!("removing an ended remote occupant from its room timed out");
+    }
+
+    /// Have the next pass over the seats ask `room` for its occupants,
+    /// whether or not this replica still holds a seat in it.
+    fn recheck(&self, room: &BareJid) {
+        let mut recheck = lock(&self.recheck);
+        if recheck.len() < RECONCILE_ROOMS {
+            recheck.insert(room.clone());
         }
     }
 
@@ -1383,12 +1527,23 @@ impl Inner {
     /// account traffic, which remote senders do not reach (ADR-0020 D7).
     pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {
         self.hosting.get()?;
+        // A full JID at a domain this deployment serves never holds a seat:
+        // a local sender's own copy of its message, and any other frame
+        // for a resource of this deployment, is told so without the seat
+        // index.
+        if self.served.serves(occupant.domain()) {
+            return None;
+        }
         match stanza {
             Stanza::Presence(_) => {}
             Stanza::Message(message) if message.type_ == MessageType::Groupchat => {}
             Stanza::Message(_) | Stanza::Iq(_) => return None,
         }
         let room = stanza_from(stanza)?.to_bare();
+        // Nor does any JID in a room without a seat held here.
+        if !self.seats.seats_room(&room) {
+            return None;
+        }
         self.seats.get(&room, occupant)
     }
 
@@ -1523,13 +1678,7 @@ impl Inner {
             }
         }
         if let Some(nick) = renamed {
-            let router = Arc::clone(self);
-            let seat = seat.clone();
-            self.tasks.spawn(async move {
-                if let Some(hosting) = router.hosting.get() {
-                    router.rename_seat(hosting, &seat, &nick).await;
-                }
-            });
+            self.rename_seat(seat, &nick);
         }
     }
 
@@ -1553,7 +1702,11 @@ impl Inner {
             return;
         }
         let asked = hosting.host.seats(&seat);
-        match tokio::time::timeout(self.limits.room_delivery_timeout, asked).await {
+        let budget = self
+            .limits
+            .room_delivery_timeout
+            .min(self.limits.room_request_timeout);
+        match tokio::time::timeout(budget, asked).await {
             Ok(Some(false)) => {
                 if let Some(pair) = Self::seat_pair(&seat) {
                     let queued = Queued {
@@ -1571,13 +1724,13 @@ impl Inner {
                         permit.send(queued);
                     }
                 }
-                self.close_seat(hosting, &seat).await;
+                self.close_seat(&seat);
             }
             Ok(Some(true)) => telemetry::seat_departure_stale(),
             // Whether the room seats the occupant cannot be told: the seat
             // ends and the room removes the occupant if it still seats it,
             // so neither is left without the other.
-            Ok(None) | Err(_) => self.unseat(seat, SeatEnd::Undeliverable).await,
+            Ok(None) | Err(_) => self.end_seat(seat, SeatEnd::Undeliverable),
         }
     }
 
@@ -1595,10 +1748,14 @@ impl Inner {
     }
 
     /// Queue the MUC service's answer to a remote entity's request for the
-    /// entity's domain, waiting for a place at most the reply wait: `false`
-    /// when it found none and was dropped.
-    async fn queue_room_reply(self: &Arc<Self>, pair: &Pair, stanza: Stanza) -> bool {
-        let deadline = tokio::time::Instant::now() + self.limits.room_reply_wait;
+    /// entity's domain, waiting for a place until `deadline`: `false` when
+    /// it found none and was dropped.
+    async fn queue_room_reply(
+        self: &Arc<Self>,
+        pair: &Pair,
+        stanza: Stanza,
+        deadline: tokio::time::Instant,
+    ) -> bool {
         let mut queued = Queued {
             stanza,
             purpose: Purpose::RoomReply,
@@ -1784,13 +1941,24 @@ impl Inner {
     /// One pass: at most [`RECONCILE_ROOMS`] rooms, each asked once for
     /// every occupant it seats, and one page of this replica's rows, within
     /// the time between two passes. The next pass goes on where this one
-    /// stopped.
+    /// stopped. Rooms where a seat's end could not be confirmed are asked
+    /// first, whether or not a seat is still held in them.
     async fn reconcile_seats(self: &Arc<Self>) {
         let Some(hosting) = self.hosting.get() else {
             return;
         };
         let started = Instant::now();
         let budget = self.limits.seat_reconcile_interval;
+        let rechecked: Vec<BareJid> = std::mem::take(&mut *lock(&self.recheck))
+            .into_iter()
+            .collect();
+        for room in &rechecked {
+            if started.elapsed() >= budget {
+                self.recheck(room);
+                continue;
+            }
+            self.reconcile_room(hosting, room).await;
+        }
         let mut rooms = self.seats.rooms();
         rooms.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
         let after = lock(&self.reconcile_after).take();
@@ -1817,13 +1985,16 @@ impl Inner {
     /// its own presence did not pass through this router, or the room's
     /// actor ended. The occupant is told, as far as a place is free, so it
     /// is not left believing it is seated.
+    ///
+    /// The other way round, an occupant of another server that the room
+    /// seats under a generation for which no seat is held here, a pending
+    /// seat included, is one nothing can reach: its seat ended and the
+    /// room's removal did not complete, or the room was restored with it.
+    /// The room removes it, telling those who stay (XEP-0045 §11.1).
     async fn reconcile_room(self: &Arc<Self>, hosting: &Hosting, room: &BareJid) {
         // Read before the room is asked: a seat settled after the room
         // answered is not in its answer.
         let seats = self.seats.settled_of_room(room);
-        if seats.is_empty() {
-            return;
-        }
         let asked = hosting.host.occupancies(room);
         let Ok(Some(seated)) = tokio::time::timeout(self.limits.room_delivery_timeout, asked).await
         else {
@@ -1840,8 +2011,22 @@ impl Inner {
             {
                 telemetry::seat_ended_unseated();
                 self.tell_removed(&seat, Status::ServiceErrorKick);
-                self.close_seat(hosting, &seat).await;
+                self.close_seat(&seat);
             }
+        }
+        for (occupant, session) in seated {
+            if self.served.serves(occupant.domain())
+                || self.seats.holds_under(room, &occupant, session)
+                || self.seat_ends.ending(room, &occupant, session)
+            {
+                continue;
+            }
+            telemetry::seat_ghost_removed();
+            self.seat_ends.push(EndWork::Ghost {
+                room: room.clone(),
+                occupant,
+                session,
+            });
         }
     }
 
@@ -1886,32 +2071,56 @@ impl Inner {
         }
     }
 
-    /// Take over the seat a stopped replica left for `occupant` in `room`,
-    /// whose claim moved here, and hold it: the room can then seat the
-    /// occupant as recorded and remove it in its own order
-    /// ([`Self::end_adopted_seats`]).
-    pub(super) async fn adopt_seat(&self, room: &BareJid, occupant: &FullJid) -> bool {
-        if self.seats.holds(room, occupant) {
-            return true;
+    /// The seat a room restored on this replica may seat `occupant` on,
+    /// recorded under `session`: one this replica already holds under that
+    /// generation, which goes on ([`SeatAdoption::Held`]: the room's actor
+    /// was restored on the replica that seats the occupant), or the seat a
+    /// stopped replica left, taken over and held so that the room can seat
+    /// the occupant as recorded and remove it in its own order
+    /// ([`SeatAdoption::Adopted`], [`Self::end_adopted_seats`]). A seat of
+    /// another generation stands for another occupancy than the one the
+    /// room recorded: the occupant is not seated again, and a row taken
+    /// over for it is removed.
+    pub(super) async fn adopt_seat(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> SeatAdoption {
+        if let Some(held) = self.seats.get(room, occupant) {
+            return if held.session == session {
+                SeatAdoption::Held
+            } else {
+                SeatAdoption::NotHeld
+            };
         }
         let Some(hosting) = self.hosting.get() else {
-            return false;
+            return SeatAdoption::NotHeld;
         };
         let now = now_ms();
         let before = now.saturating_sub(duration_ms(self.limits.seat_owner_grace));
-        match hosting
+        let adopted = hosting
             .store
-            .adopt(room, occupant, self.owner.as_str(), before, now)
-            .await
-        {
-            Ok(Some(seat)) => {
+            .adopt(room, occupant, self.owner.as_str(), before, now);
+        match tokio::time::timeout(self.limits.room_request_timeout, adopted).await {
+            Ok(Ok(Some(seat))) if seat.session == session => {
                 self.seats.hold(seat);
-                true
+                SeatAdoption::Adopted
             }
-            Ok(None) => false,
-            Err(_) => {
+            Ok(Ok(Some(seat))) => {
+                let removal = hosting.store.remove(&seat);
+                if !matches!(
+                    tokio::time::timeout(self.limits.room_request_timeout, removal).await,
+                    Ok(Ok(_))
+                ) {
+                    tracing::warn!("removing a seat taken over for another occupancy failed");
+                }
+                SeatAdoption::NotHeld
+            }
+            Ok(Ok(None)) => SeatAdoption::NotHeld,
+            Ok(Err(_)) | Err(_) => {
                 tracing::warn!("taking over a remote occupant's seat failed");
-                false
+                SeatAdoption::NotHeld
             }
         }
     }
@@ -1949,35 +2158,176 @@ impl Inner {
     /// This replica is stopping, and its rooms with it: tell every remote
     /// occupant it seats that the service is shutting down (XEP-0045
     /// §11.2, status 332, with status 110) and give its seat up, then wait
-    /// for the pairs' workers to take those stanzas, at most the notice
-    /// wait. No seat is opened from here on. Nothing is promised: a
-    /// stanza that no stream takes in time is lost with the replica.
+    /// until the pairs' workers have handed those notices to their streams
+    /// or given them up, at most the notice wait. A seat whose join is
+    /// still being answered is given up without a notice: its occupant was
+    /// never told that it entered, and is not told so afterwards. No seat
+    /// is opened from here on. Nothing is promised: a notice that no
+    /// stream takes in time is lost with the replica.
     pub(super) async fn farewell(self: &Arc<Self>) {
         if self.stopping.swap(true, Ordering::AcqRel) || self.hosting.get().is_none() {
             return;
         }
-        let seats = self.seats.all();
-        if seats.is_empty() {
+        let (settled, _pending) = self.seats.release_all();
+        if settled.is_empty() {
             return;
         }
-        for seat in &seats {
-            if self
-                .seats
-                .release(&seat.room, &seat.occupant, seat.session)
-                .is_some()
-            {
-                self.tell_removed(seat, Status::ServiceShutdown);
+        for seat in &settled {
+            if let Some((pair, stanza)) = Self::own_unavailable(seat, Status::ServiceShutdown) {
+                self.offer_notice(&pair, stanza);
             }
         }
         let deadline = tokio::time::Instant::now() + self.limits.shutdown_notice_wait;
-        while tokio::time::Instant::now() < deadline {
-            let waiting = lock(&self.queues)
-                .values()
-                .any(|queue| queue.seats.capacity() < queue.seats.max_capacity());
-            if !waiting {
-                break;
+        self.notices.written_by(deadline).await;
+    }
+
+    /// Queue a stopping replica's notice for the occupant's domain without
+    /// waiting, if a place is free for it. It holds one of the notices
+    /// [`Self::farewell`] waits for until the pair's worker is done with
+    /// it.
+    fn offer_notice(self: &Arc<Self>, pair: &Pair, stanza: Stanza) {
+        let notice = self.notices.notice();
+        let placed = self.reserve_on(pair.clone(), self.limits.reply_queues, |queue| &queue.seats);
+        if let Some(permit) = placed {
+            permit.send(Queued {
+                stanza,
+                purpose: Purpose::Notice { _held: notice },
+            });
+        }
+    }
+}
+
+/// A seat's end, or the removal of an occupant that holds none, for the
+/// workers that end seats.
+#[derive(Debug, Clone)]
+pub(super) enum EndWork {
+    Seat(Seat, SeatEnd),
+    /// The room seats an occupant of another server under `session`, for
+    /// which this replica holds no seat: nothing reaches it.
+    Ghost {
+        room: BareJid,
+        occupant: FullJid,
+        session: OccupancySessionGeneration,
+    },
+}
+
+type EndKey = (BareJid, FullJid, OccupancySessionGeneration);
+
+impl EndWork {
+    fn key(&self) -> EndKey {
+        match self {
+            Self::Seat(seat, _) => (seat.room.clone(), seat.occupant.clone(), seat.session),
+            Self::Ghost {
+                room,
+                occupant,
+                session,
+            } => (room.clone(), occupant.clone(), *session),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct EndQueue {
+    items: VecDeque<EndWork>,
+    /// The occupancies whose end is queued or running.
+    keys: HashSet<EndKey>,
+}
+
+/// The ends waiting for the workers that end seats, in the order they were
+/// handed over. Each occupancy is ended once: an end of one whose end is
+/// queued or running is not queued again. There is at most one end for each
+/// seat and for each occupant a room seats, so what waits here is bounded
+/// by what this replica seats.
+#[derive(Debug, Default)]
+pub(super) struct SeatEnds {
+    queue: Mutex<EndQueue>,
+    work: Notify,
+}
+
+impl SeatEnds {
+    /// Hand `work` to the workers, unless an end of the same occupancy is
+    /// queued or running.
+    pub(super) fn push(&self, work: EndWork) {
+        let mut queue = lock(&self.queue);
+        if queue.keys.insert(work.key()) {
+            queue.items.push_back(work);
+            drop(queue);
+            self.work.notify_one();
+        }
+    }
+
+    /// The next end, waiting for one.
+    pub(super) async fn next(&self) -> EndWork {
+        loop {
+            let work = self.work.notified();
+            tokio::pin!(work);
+            work.as_mut().enable();
+            if let Some(next) = lock(&self.queue).items.pop_front() {
+                return next;
             }
-            tokio::time::sleep(NOTICE_POLL).await;
+            work.await;
+        }
+    }
+
+    /// `work` is done: an end of the same occupancy may be queued again.
+    pub(super) fn done(&self, work: &EndWork) {
+        lock(&self.queue).keys.remove(&work.key());
+    }
+
+    /// Whether an end of the occupancy of `occupant` under `session` in
+    /// `room` is queued or running.
+    pub(super) fn ending(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> bool {
+        lock(&self.queue)
+            .keys
+            .contains(&(room.clone(), occupant.clone(), session))
+    }
+}
+
+/// The notices a stopping replica waits for.
+#[derive(Debug, Default)]
+pub(super) struct Notices {
+    outstanding: AtomicUsize,
+    written: Notify,
+}
+
+impl Notices {
+    fn notice(self: &Arc<Self>) -> Notice {
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        Notice(Arc::clone(self))
+    }
+
+    /// Wait until every notice is done with, or until `deadline`.
+    async fn written_by(&self, deadline: tokio::time::Instant) {
+        loop {
+            let written = self.written.notified();
+            tokio::pin!(written);
+            written.as_mut().enable();
+            if self.outstanding.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => return,
+                () = &mut written => {}
+            }
+        }
+    }
+}
+
+/// One of a stopping replica's notices, held by its stanza while it is
+/// queued and written: dropped once the pair's worker has handed the
+/// stanza to its stream, or given it up.
+#[derive(Debug)]
+pub(super) struct Notice(Arc<Notices>);
+
+impl Drop for Notice {
+    fn drop(&mut self) {
+        if self.0.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.written.notify_waiters();
         }
     }
 }

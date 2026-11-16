@@ -264,6 +264,17 @@ pub(super) fn seat_ended_unseated() {
     );
 }
 
+/// A room seated an occupant of another server for which this replica
+/// held no seat, and was asked to remove it.
+pub(super) fn seat_ghost_removed() {
+    counter_add!(
+        "waddle.s2s.route.seats.ghosts_removed",
+        "{occupant}",
+        "Occupants of other servers removed from local rooms because the replica that holds the room held no seat for them.",
+        1,
+    );
+}
+
 /// A remote occupant's seat ended because this replica took it over from
 /// one that stopped.
 pub(super) fn seat_ended_holder_stopped() {

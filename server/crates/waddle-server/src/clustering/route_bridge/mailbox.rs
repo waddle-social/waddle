@@ -650,12 +650,15 @@ async fn seat_room_occupancy_in(
 /// them the occupants of other servers.
 ///
 /// An occupant at a domain this deployment does not serve was seated over
-/// S2S by the replica that held the room before. Its seat is restored only
-/// if this replica takes that seat over: the seat carries the stream
-/// evidence the occupant was admitted under, and a room's stanzas leave
-/// for a remote JID only while this replica holds its seat. A remote
-/// occupant without one, or whose seat a live replica still holds, is not
-/// restored, in any room.
+/// S2S. Its occupancy is restored only on a seat of the recorded
+/// generation that this replica holds: one it already held, when the
+/// room's actor was restored on the replica that seats the occupant, which
+/// goes on; or one it takes over from a replica that stopped. The seat
+/// carries the stream evidence the occupant was admitted under, and a
+/// room's stanzas leave for a remote JID only while this replica holds its
+/// seat. A remote occupant without one, whose seat a live replica still
+/// holds, or whose seat stands for another generation, is not restored, in
+/// any room.
 ///
 /// A seat taken over is restored so that the room can end it in its own
 /// order, not so that the occupancy continues: the caller ends those seats
@@ -678,14 +681,22 @@ async fn remote_reseating(
     for occupant in occupants {
         if served.serves(occupant.real_jid.domain()) {
             seated.push(occupant);
-        } else if state
+            continue;
+        }
+        let adoption = state
             .deps
             .remote_route
-            .adopt_seat(room, &occupant.real_jid)
-            .await
-        {
-            adopted.push(occupant.real_jid.clone());
-            seated.push(occupant);
+            .adopt_seat(room, &occupant.real_jid, occupant.session)
+            .await;
+        match adoption {
+            crate::destination::SeatAdoption::Adopted => {
+                adopted.push(occupant.real_jid.clone());
+                seated.push(occupant);
+            }
+            // The room's actor was restored on the replica that seats the
+            // occupant: its seat goes on, and the room seats it again.
+            crate::destination::SeatAdoption::Held => seated.push(occupant),
+            crate::destination::SeatAdoption::NotHeld => {}
         }
     }
     (seated, adopted)

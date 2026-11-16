@@ -601,9 +601,7 @@ pub async fn start_with_config_and_owner_outbox(
         // remote occupants of this replica's rooms that it is stopping,
         // which it does when the process stop token fires; the notices
         // need the streams. Without one they drain on that token itself.
-        let drain = s2s_router
-            .as_ref()
-            .map_or_else(|| stop_token.clone(), crate::s2s::route::S2sRouter::drained);
+        let drain = crate::s2s::route::S2sRouter::service_stop(s2s_router.as_ref(), &stop_token);
         let mut options = crate::s2s::conn::ServiceOptions {
             stop: Some(drain),
             resolver: s2s_resolver.map(|resolver| {
