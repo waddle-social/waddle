@@ -77,6 +77,9 @@ pub const FENCE_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_secs(10);
 const ACKNOWLEDGEMENT_POLL: Duration = Duration::from_millis(40);
 /// How long a decision waits for the replica's first lease.
 const FIRST_LEASE_WAIT: Duration = Duration::from_secs(2);
+/// How long a decision waits for a replica whose lease lapsed to register
+/// again: two ticks.
+const LAPSED_LEASE_WAIT: Duration = Duration::from_millis(500);
 /// Longest a fence statement waits for a lock, and longest it runs.
 const FENCE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const FENCE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -690,8 +693,17 @@ impl ReplicaFence {
         }
         self.start();
         self.wake();
+        // A replica that never held a lease is given time to register. One
+        // whose lease lapsed registers again within a tick when it can; a
+        // request does not wait longer than that for a database that does
+        // not answer.
+        let limit = if self.shared.read().registration == 0 {
+            FIRST_LEASE_WAIT
+        } else {
+            LAPSED_LEASE_WAIT
+        };
         let mut ticks = self.shared.ticks.subscribe();
-        let leased = tokio::time::timeout(FIRST_LEASE_WAIT, async {
+        let leased = tokio::time::timeout(limit, async {
             loop {
                 if let Some(registration) = self.registration() {
                     return Some(registration);

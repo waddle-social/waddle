@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
-use kameo::actor::ActorRef;
+use kameo::actor::WeakActorRef;
 use tokio::sync::mpsc;
 use waddle_xmpp::muc::room_actor::{
     AdminItemsApplied, ApplyAffiliationChange, ChangeAffiliation, GetSnapshot,
@@ -88,9 +88,10 @@ pub(crate) fn install(state: &WebSocketState) {
     }
     let sweep = Sweep {
         // Without the fence: the task must not keep the fence alive, and it
-        // admits nothing.
+        // admits nothing. The registry is held weakly for the same reason:
+        // its membership source holds the gate.
         grants: gate.detached(),
-        rooms: state.deps.protocol.room_registry.clone(),
+        rooms: state.deps.protocol.room_registry.downgrade(),
         connections: Arc::clone(&state.deps.protocol.connection_registry),
         sfu: state.deps.protocol.sfu.clone(),
         effects: state.deps.protocol.room_effect_arm_supervisor.clone(),
@@ -104,7 +105,7 @@ pub(crate) fn install(state: &WebSocketState) {
 pub(crate) async fn sweep_room_for_test(state: &WebSocketState, room: &BareJid) -> bool {
     Sweep {
         grants: state.deps.app_state.host_grants.detached(),
-        rooms: state.deps.protocol.room_registry.clone(),
+        rooms: state.deps.protocol.room_registry.downgrade(),
         connections: Arc::clone(&state.deps.protocol.connection_registry),
         sfu: state.deps.protocol.sfu.clone(),
         effects: state.deps.protocol.room_effect_arm_supervisor.clone(),
@@ -115,7 +116,7 @@ pub(crate) async fn sweep_room_for_test(state: &WebSocketState, room: &BareJid) 
 
 struct Sweep {
     grants: HostGrantGate,
-    rooms: ActorRef<RoomRegistryActor>,
+    rooms: WeakActorRef<RoomRegistryActor>,
     connections: Arc<ConnectionRegistry>,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
     effects: RoomEffectArmSupervisor,
@@ -182,9 +183,13 @@ impl Sweep {
     /// Sweep one room. `true` when it is in line with its grants, or this
     /// process holds no actor for it.
     async fn room(&self, room: &BareJid) -> bool {
+        // A registry that is gone holds no room.
+        let Some(rooms) = self.rooms.upgrade() else {
+            return true;
+        };
         let actor = match tokio::time::timeout(
             SWEEP_ASK_TIMEOUT,
-            self.rooms.ask(GetRoom {
+            rooms.ask(GetRoom {
                 room_jid: room.clone(),
             }),
         )

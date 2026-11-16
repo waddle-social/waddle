@@ -339,6 +339,19 @@ impl HostGrantGate {
         }
     }
 
+    /// Ask the replica's revocation sweep for the scope that manages
+    /// `room`, if one does: a caller that changed what a room actor holds
+    /// from a decision it made earlier (seats restored after a claim move)
+    /// has the result put in line with the grants as they stand now.
+    pub fn request_sweep_of(&self, room: &BareJid) {
+        let (Some(fence), Some(enrolled)) = (&self.fence, self.enrolled.snapshot()) else {
+            return;
+        };
+        if let Some(lifecycle) = enrolled.room(room.as_str()) {
+            fence.request_sweep(lifecycle);
+        }
+    }
+
     /// This gate without its part of the revocation fence: the same store,
     /// enrolled set and attachment. Its [`Self::room`] decides nothing; a
     /// task the fence itself drives holds it, so that the task does not keep
