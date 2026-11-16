@@ -1135,7 +1135,13 @@ was admitted under. The replica keeps the seats it holds in memory
 (`SeatIndex`), which is what egress and every decision that names a seated
 remote occupant read; the shared table `s2s_local_room_seats` (migration
 2007) carries the bounds across replicas and lets another replica find and
-end a seat.
+end a seat. Those decisions reach the index through the app state's
+host-grant gate, bound to the ingress authority's attachment gate when the
+replica starts hosting rooms, on a deployment without a canonical grant
+store (SQLite) as on one with it: unbound, the gate would report no seat,
+refuse the moderator role to every remote occupant and let an owner or
+admin standing be issued for an account seated on a stream that does not
+honour it.
 
 - *Opening.* A join from a sender without a seat opens one, within the
   bounds (below), before the host decides it: the row is inserted and the

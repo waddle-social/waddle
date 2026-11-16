@@ -219,13 +219,12 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 `scripted.rs` (W6a) are compiled into the targets above and add no cases. The inbound MUC support
 creates its rooms federated (its S2S snapshot sets
 `[host_policy] federate_new_rooms`, and the managed fixture sets the
-catalog's `federated` column); a case that needs the default clears it. W6a changed
+catalog's `federated` column); a case that needs the default clears it.
+Both the inbound MUC and the account-traffic supports serve `example.com`,
+outside `.test`, so their snapshots name the public peer scope. W6a changed
 `s2s_routing_support` and `host_grant_revocation_support` (a replica can
-run an S2S snapshot), so the targets that include them were compiled again
-and their recorded runs predate that change: `s2s_routing`,
-`s2s_iq_correlation`, `s2s_d7_refusal`, `xep0045_s2s_outbound_muc`,
-`xep0030_s2s_server_discovery`, `xep0199_s2s_ping`, `xep0410_s2s_self_ping`
-and `xep0410_host_grant_self_ping`. The submodules of `s2s_verifier`,
+run an S2S snapshot); every target that includes them ran in the run7
+final logs with those changes. The submodules of `s2s_verifier`,
 `s2s_connection_manager`, `xep0220_s2s_dialback`, `xep0368_s2s_discovery` and
 `host_grant_fence_cases/sinks.rs` are counted under their parent targets.
 
