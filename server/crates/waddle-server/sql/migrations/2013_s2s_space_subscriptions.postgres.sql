@@ -1,6 +1,8 @@
 -- The subscriptions accounts at other servers hold to local Spaces (ADR-0020
--- D10; XEP-0060 §6.1), one row per Space node and subscribed JID, beside
--- the PubSub service's own subscription record.
+-- D10; XEP-0060 §6.1), one row per Space node and account, beside the
+-- PubSub service's own subscription record. `subscriber_jid` is the
+-- subscribed JID, which is the account's bare JID: the service keeps one
+-- subscription for an account whichever of its addresses asked.
 --
 -- A row is written only when the remote account itself subscribed over an
 -- inbound S2S stream, and an event notification leaves for a JID at another

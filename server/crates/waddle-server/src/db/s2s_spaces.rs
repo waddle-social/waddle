@@ -5,10 +5,10 @@
 //!   for each Space whose `federated` setting is on, bound to the PubSub
 //!   node it was turned on for;
 //! - the subscriptions remote accounts made to those Spaces over inbound
-//!   streams ([`SpaceSubscriptions`]), each with what its stream proved,
-//!   beside the PubSub service's own subscription record. An event
-//!   notification leaves for a JID at another server only while such a row
-//!   exists.
+//!   streams ([`SpaceSubscriptions`]), one for an account and a Space as
+//!   the PubSub service keeps them, each with what its stream proved,
+//!   beside the service's own subscription record. An event notification
+//!   leaves for an account at another server only while such a row exists.
 //!
 //! Both bind a row to the creation time of its node, so a row left by a
 //! Space that was deleted counts for nothing once a Space of the same name
@@ -21,7 +21,7 @@
 //! every replica. The decisions are recorded in
 //! `server/docs/planning/s2s-routing-2047.md`.
 
-use jid::{BareJid, Jid};
+use jid::BareJid;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -33,8 +33,7 @@ use crate::s2s::verify::TrustProfileKind;
 /// Subscriptions accounts at other servers may hold to one local Space.
 pub const MAX_REMOTE_SUBSCRIBERS_PER_SPACE: usize = 256;
 
-/// Subscriptions one remote account may hold to local Spaces, under every
-/// address it subscribed.
+/// Subscriptions one remote account may hold to local Spaces.
 pub const MAX_SUBSCRIPTIONS_PER_REMOTE_ACCOUNT: usize = 64;
 
 /// Subscriptions the accounts of one remote domain may hold to local
@@ -205,9 +204,10 @@ impl FederatedSpaces {
 /// stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceSubscription {
-    /// The address that subscribed: the account's bare JID or one of its
-    /// full JIDs. Notifications are addressed to it.
-    pub subscriber: Jid,
+    /// The account that subscribed. The PubSub service keeps one
+    /// subscription for an account, under its bare JID, and notifications
+    /// are addressed to it.
+    pub account: BareJid,
     /// What the stream that carried the subscription request proved.
     pub evidence: StreamEvidence,
     /// The S2S snapshot that stream was admitted under.
@@ -217,9 +217,7 @@ pub struct SpaceSubscription {
 /// A subscription request as the store records it.
 #[derive(Debug, Clone, Copy)]
 pub struct SubscriptionRequest<'a> {
-    /// The address that subscribes: an address of `account`.
-    pub subscriber: &'a Jid,
-    /// The remote account the request is from.
+    /// The remote account the request is from, which is what subscribes.
     pub account: &'a BareJid,
     /// What the stream that carried the request proved.
     pub evidence: StreamEvidence,
@@ -266,24 +264,34 @@ async fn begin_for_domain<'a>(
     Ok(tx)
 }
 
-/// Count, up to the `LIMIT` it carries, the rows `sql` selects inside `tx`.
+/// How many rows of `s2s_space_subscriptions` match `filter`, counted by
+/// the database up to `most`, inside `tx`: one row is read whatever the
+/// bound, so a bound of thousands costs no more to check than one of tens.
 async fn count_in(
     tx: &mut Transaction<'_>,
-    sql: &str,
-    params: Vec<super::Value>,
+    filter: &str,
+    mut params: Vec<super::Value>,
+    most: usize,
 ) -> Result<usize, SpaceStoreError> {
-    let mut rows = tx.query(sql, params).await.map_err(storage)?;
-    let mut count = 0;
-    while rows.next().await.map_err(storage)?.is_some() {
-        count += 1;
-    }
-    Ok(count)
+    let sql = [
+        "SELECT COUNT(*) FROM (SELECT 1 FROM s2s_space_subscriptions ",
+        filter,
+        " LIMIT ?) AS bounded",
+    ]
+    .concat();
+    params.push(limit(most).into());
+    let mut rows = tx.query(&sql, params).await.map_err(storage)?;
+    let Some(row) = rows.next().await.map_err(storage)? else {
+        return Err(storage("a count returned no row"));
+    };
+    let count: i64 = row.get(0).map_err(storage)?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
 
 /// A row read back as the subscription it records. A row whose evidence
 /// cannot be read is an error, never evidence the row does not hold.
 fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
-    let subscriber: String = row.get(0).map_err(storage)?;
+    let account: String = row.get(0).map_err(storage)?;
     let strength: String = row.get(1).map_err(storage)?;
     let trust_profile: Option<String> = row.get(2).map_err(storage)?;
     let snapshot: String = row.get(3).map_err(storage)?;
@@ -299,7 +307,7 @@ fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
         Some(_) => return Err(storage("an unknown trust profile")),
     };
     Ok(SpaceSubscription {
-        subscriber: subscriber.parse().map_err(storage)?,
+        account: account.parse().map_err(storage)?,
         evidence: StreamEvidence::recorded(strength, trust_profile),
         snapshot: snapshot.parse().map_err(storage)?,
     })
@@ -310,9 +318,9 @@ impl SpaceSubscriptions {
         Self { db }
     }
 
-    /// Record that `request.subscriber` subscribed to the node `node` of
+    /// Record that `request.account` subscribed to the node `node` of
     /// `service` created at `node_created_at_ms`, within the bounds. A
-    /// subscription the address already holds to that node is recorded
+    /// subscription the account already holds to that node is recorded
     /// again with this request's evidence and counts against no bound;
     /// rows left for an earlier node of the name are removed first.
     pub async fn record(
@@ -323,7 +331,6 @@ impl SpaceSubscriptions {
         request: SubscriptionRequest<'_>,
     ) -> Result<SubscriptionRecord, SpaceStoreError> {
         let SubscriptionRequest {
-            subscriber,
             account,
             evidence,
             snapshot,
@@ -332,7 +339,7 @@ impl SpaceSubscriptions {
         if node.is_empty()
             || node.len() > MAX_NODE_BYTES
             || service.as_str().len() > MAX_SERVICE_BYTES
-            || subscriber.as_str().len() > MAX_ADDRESS_BYTES
+            || account.as_str().len() > MAX_ADDRESS_BYTES
         {
             return Ok(SubscriptionRecord::Bounds);
         }
@@ -347,45 +354,33 @@ impl SpaceSubscriptions {
         .map_err(storage)?;
         let held = count_in(
             &mut tx,
-            "SELECT 1 FROM s2s_space_subscriptions \
-             WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ? LIMIT 1",
-            crate::db_params![service.as_str(), node, subscriber.as_str()],
+            "WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ?",
+            crate::db_params![service.as_str(), node, account.as_str()],
+            1,
         )
         .await?
             > 0;
         if !held {
             let bounds: [(&str, Vec<super::Value>, usize); 4] = [
                 (
-                    "SELECT 1 FROM s2s_space_subscriptions \
-                     WHERE service_jid = ? AND node_name = ? LIMIT ?",
-                    crate::db_params![
-                        service.as_str(),
-                        node,
-                        limit(MAX_REMOTE_SUBSCRIBERS_PER_SPACE)
-                    ],
+                    "WHERE service_jid = ? AND node_name = ?",
+                    crate::db_params![service.as_str(), node],
                     MAX_REMOTE_SUBSCRIBERS_PER_SPACE,
                 ),
                 (
-                    "SELECT 1 FROM s2s_space_subscriptions WHERE account_jid = ? LIMIT ?",
-                    crate::db_params![
-                        account.as_str(),
-                        limit(MAX_SUBSCRIPTIONS_PER_REMOTE_ACCOUNT)
-                    ],
+                    "WHERE account_jid = ?",
+                    crate::db_params![account.as_str()],
                     MAX_SUBSCRIPTIONS_PER_REMOTE_ACCOUNT,
                 ),
                 (
-                    "SELECT 1 FROM s2s_space_subscriptions WHERE subscriber_domain = ? LIMIT ?",
-                    crate::db_params![domain, limit(MAX_SUBSCRIPTIONS_PER_REMOTE_DOMAIN)],
+                    "WHERE subscriber_domain = ?",
+                    crate::db_params![domain],
                     MAX_SUBSCRIPTIONS_PER_REMOTE_DOMAIN,
                 ),
-                (
-                    "SELECT 1 FROM s2s_space_subscriptions LIMIT ?",
-                    crate::db_params![limit(MAX_REMOTE_SUBSCRIPTIONS)],
-                    MAX_REMOTE_SUBSCRIPTIONS,
-                ),
+                ("", Vec::new(), MAX_REMOTE_SUBSCRIPTIONS),
             ];
-            for (sql, params, bound) in bounds {
-                if count_in(&mut tx, sql, params).await? >= bound {
+            for (filter, params, bound) in bounds {
+                if count_in(&mut tx, filter, params, bound).await? >= bound {
                     tx.rollback().await.map_err(storage)?;
                     return Ok(SubscriptionRecord::Bounds);
                 }
@@ -403,7 +398,7 @@ impl SpaceSubscriptions {
             crate::db_params![
                 service.as_str(),
                 node,
-                subscriber.as_str(),
+                account.as_str(),
                 account.as_str(),
                 domain,
                 node_created_at_ms,
@@ -419,19 +414,19 @@ impl SpaceSubscriptions {
         Ok(SubscriptionRecord::Recorded)
     }
 
-    /// Forget the subscription of `subscriber` to `node` of `service`.
+    /// Forget the subscription of `account` to `node` of `service`.
     pub async fn remove(
         &self,
         service: &BareJid,
         node: &str,
-        subscriber: &Jid,
+        account: &BareJid,
     ) -> Result<(), SpaceStoreError> {
         let guard = self.db.guard().await.map_err(storage)?;
         guard
             .execute(
                 "DELETE FROM s2s_space_subscriptions \
                  WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ?",
-                crate::db_params![service.as_str(), node, subscriber.as_str()],
+                crate::db_params![service.as_str(), node, account.as_str()],
             )
             .await
             .map_err(storage)?;
@@ -455,7 +450,7 @@ impl SpaceSubscriptions {
     /// The subscriptions remote accounts made to the node `node` of
     /// `service` created at `node_created_at_ms`, at most
     /// [`MAX_REMOTE_SUBSCRIBERS_PER_SPACE`] of them, in the order of their
-    /// addresses.
+    /// accounts.
     pub async fn of_node(
         &self,
         service: &BareJid,

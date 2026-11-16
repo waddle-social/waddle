@@ -537,27 +537,30 @@ fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) 
         .then_some(room)
 }
 
-/// Whether a remote principal `account`, deciding on `evidence`, may be
-/// told of `room` as a child of a Space: what the room's own host would
-/// tell it. The room's catalog row says it is open to other servers and is
-/// no group conversation; and a room an enrolled host-grant scope manages
-/// is told only to a principal its grants admit to view it on that
-/// evidence. A room that cannot be decided now is not told.
-async fn room_visible(
+/// Whether `room` is open to accounts at other servers at all: its catalog
+/// row says so and it is no group conversation. A room without a row, or
+/// one that cannot be read now, is not.
+async fn room_open(state: &WebSocketState, room: &BareJid) -> bool {
+    matches!(
+        get_managed_channel_for_room(state, room).await,
+        Ok(Some(channel))
+            if channel.federated
+                && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+    )
+}
+
+/// Whether the grants of `room` let the remote principal `account`,
+/// deciding on `evidence`, be told of it: always for a room no enrolled
+/// host-grant scope manages, which describes itself to any admitted asker,
+/// and for a managed room only where its canonical grants admit the
+/// principal to view it on that evidence. A room that cannot be decided now
+/// is not told.
+async fn room_admits(
     state: &WebSocketState,
     room: &BareJid,
     account: &BareJid,
     evidence: &PrincipalEvidence,
 ) -> bool {
-    let open = matches!(
-        get_managed_channel_for_room(state, room).await,
-        Ok(Some(channel))
-            if channel.federated
-                && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
-    );
-    if !open {
-        return false;
-    }
     match state
         .deps
         .app_state
@@ -574,6 +577,18 @@ async fn room_visible(
         RoomGate::Managed(allowed) => allowed,
         RoomGate::Unavailable => false,
     }
+}
+
+/// Whether a remote principal `account`, deciding on `evidence`, may be
+/// told of `room` as a child of a Space: what the room's own host would
+/// tell it ([`room_open`] and [`room_admits`]).
+async fn room_visible(
+    state: &WebSocketState,
+    room: &BareJid,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+) -> bool {
+    room_open(state, room).await && room_admits(state, room, account, evidence).await
 }
 
 impl Asked<'_> {
@@ -602,9 +617,19 @@ impl Asked<'_> {
             .enabled_for(&self.service, node)
             .await
             .map_err(|_| Undecided)?;
-        let Some(enabled_for) = enabled_for else {
-            return Ok(None);
-        };
+        match enabled_for {
+            Some(enabled_for) => self.space_enabled_for(node, enabled_for).await,
+            None => Ok(None),
+        }
+    }
+
+    /// [`Self::space`] for a node whose `federated` setting is on for the
+    /// node created at `enabled_for`.
+    async fn space_enabled_for(
+        &self,
+        node: &str,
+        enabled_for: i64,
+    ) -> Result<Option<OpenSpace>, Undecided> {
         // The Space of an enrolled host-grant scope is served to nobody:
         // no grant of the scope is a Space's, so nobody's standing in it
         // can be decided.
@@ -774,9 +799,9 @@ impl Asked<'_> {
             return self.refuse(internal());
         };
         let mut items = Vec::new();
-        for (node, _) in federated {
+        for (node, enabled_for) in federated {
             // A Space that cannot be decided now is left out of the list.
-            let Ok(Some(space)) = self.space(&node).await else {
+            let Ok(Some(space)) = self.space_enabled_for(&node, enabled_for).await else {
                 continue;
             };
             if space.affiliation.is_outcast() {
@@ -903,7 +928,10 @@ impl Asked<'_> {
     }
 
     /// XEP-0503, "Joining a space": a subscription to the Space's node, for
-    /// the sender's own address only. It is recorded with what the
+    /// the sender's own account only. The PubSub service keeps one
+    /// subscription for an account, under its bare JID, whichever of its
+    /// addresses asked; the answer names that bare JID, and notifications
+    /// are addressed to it. The subscription is recorded with what the
     /// sender's stream proved, within the bounds on remote subscriptions,
     /// and grants nothing in any room of the Space.
     async fn subscribe(&self, node: &str, jid: &Jid) -> Vec<Stanza> {
@@ -927,13 +955,13 @@ impl Asked<'_> {
             // A request without a stream is no remote principal's.
             return self.refuse(internal());
         };
+        let subscriber = Jid::from(self.account.clone());
         let recorded = subscriptions
             .record(
                 &self.service,
                 node,
                 space.created_at_ms(),
                 SubscriptionRequest {
-                    subscriber: jid,
                     account: &self.account,
                     evidence,
                     snapshot: self.snapshot,
@@ -949,24 +977,35 @@ impl Asked<'_> {
             }
             Err(_) => return self.refuse(internal()),
         }
-        match self.storage().subscribe(&self.service, node, jid).await {
+        match self
+            .storage()
+            .subscribe(&self.service, node, &subscriber)
+            .await
+        {
             Ok(subscription) => answer(build_pubsub_subscribe_result(
                 self.iq,
                 node,
-                jid,
+                &subscriber,
                 &subscription.subid,
             )),
             Err(_) => {
                 // Nothing is delivered for a record without the service's
                 // own subscription; it is removed all the same.
-                let _ = subscriptions.remove(&self.service, node, jid).await;
+                let _ = subscriptions
+                    .remove(&self.service, node, &self.account)
+                    .await;
                 self.refuse(internal())
             }
         }
     }
 
-    /// XEP-0060 §6.2: the sender's own subscription ends. Leaving is
-    /// allowed whatever the sender's standing in the Space has become.
+    /// XEP-0060 §6.2: the account's own subscription ends. Leaving only
+    /// reduces what the account receives, so whatever the account holds
+    /// for the node's name is removed even where the node is not a Space
+    /// open to it any more (its membership of a private Space was
+    /// withdrawn, the Space was closed to other servers); the answer is
+    /// then the one a node that does not exist gets, as for every other
+    /// request.
     async fn unsubscribe(&self, node: &str, jid: &Jid, subid: Option<&str>) -> Vec<Stanza> {
         if !matches!(self.iq, Iq::Set { .. }) {
             return self.refuse(bad_request());
@@ -975,26 +1014,23 @@ impl Asked<'_> {
         if jid.to_bare() != self.account {
             return self.refuse(forbidden("Only your own subscription can be removed."));
         }
-        if let Err(refused) = self.open(node).await {
-            return refused;
-        }
+        let open = self.open(node).await;
+        let subscriber = Jid::from(self.account.clone());
         let subid = subid.map(SubId::from_raw);
         let removed = self
             .storage()
-            .unsubscribe(&self.service, node, jid, subid.as_ref())
+            .unsubscribe(&self.service, node, &subscriber, subid.as_ref())
             .await;
-        match removed {
-            Ok(true) => {
-                let forgotten = SpaceSubscriptions::new(database(self.state).clone())
-                    .remove(&self.service, node, jid)
-                    .await;
-                if forgotten.is_err() {
-                    return self.refuse(internal());
-                }
-                answer(build_pubsub_success(self.iq))
-            }
-            Ok(false) => self.pubsub_error(PubSubError::NotSubscribed),
-            Err(_) => self.refuse(internal()),
+        let forgotten = SpaceSubscriptions::new(database(self.state).clone())
+            .remove(&self.service, node, &self.account)
+            .await;
+        if let Err(refused) = open {
+            return refused;
+        }
+        match (removed, forgotten) {
+            (Ok(true), Ok(())) => answer(build_pubsub_success(self.iq)),
+            (Ok(false), Ok(())) => self.pubsub_error(PubSubError::NotSubscribed),
+            _ => self.refuse(internal()),
         }
     }
 
@@ -1154,7 +1190,7 @@ fn for_remote_subscriber(event: &Message, to: &Jid) -> Message {
 /// - the room the event names is one the subscriber may be told of.
 ///
 /// One publication sends at most one stanza to each of at most 256 remote
-/// subscribers, within the Space's allowance of notified publications;
+/// accounts, within the Space's allowance of notified publications;
 /// what does not fit a domain pair's queue is dropped, as a headline may
 /// be. Nothing is sent to an address at a domain this deployment serves.
 pub(crate) async fn notify_remote_subscribers(
@@ -1163,6 +1199,11 @@ pub(crate) async fn notify_remote_subscribers(
     node: &PubSubNode,
     event: &Message,
 ) {
+    // Without an S2S snapshot nothing leaves for another server, and
+    // nothing is read to find that out.
+    if state.deps.app_state.s2s_federation.is_none() {
+        return;
+    }
     let db = database(state).clone();
     let created_at_ms = node.created_at.timestamp_millis();
     let federated = FederatedSpaces::new(db.clone())
@@ -1187,6 +1228,11 @@ pub(crate) async fn notify_remote_subscribers(
     let Some(room) = bookmarked_room(state, &item_id, item_payload.as_ref()) else {
         return;
     };
+    // Whether the room is open to other servers is the same for every
+    // subscriber: a room that is not is told to none of them.
+    if !room_open(state, &room).await {
+        return;
+    }
     if !take_event(service, &node.node_name) {
         telemetry::publication_limited();
         return;
@@ -1204,22 +1250,22 @@ pub(crate) async fn notify_remote_subscribers(
         tracing::warn!("event notifications withheld: the subscriptions could not be read");
         return;
     };
-    let deliverable: Vec<Jid> = deliverable
+    let deliverable: Vec<BareJid> = deliverable
         .into_iter()
-        .map(|subscription| subscription.subscriber)
+        .map(|subscription| subscription.subscriber.to_bare())
         .collect();
     for subscription in subscriptions {
-        let subscriber = &subscription.subscriber;
-        let account = subscriber.to_bare();
+        let account = &subscription.account;
+        let subscriber = Jid::from(account.clone());
         let evidence = PrincipalEvidence::Stream(subscription.evidence);
-        let sent = !state.serves(&account)
-            && deliverable.contains(subscriber)
-            && subscriber_reads(state, service, node, &account, &evidence).await
-            && room_visible(state, &room, &account, &evidence).await
+        let sent = !state.serves(account)
+            && deliverable.contains(account)
+            && subscriber_reads(state, service, node, account, &evidence).await
+            && room_admits(state, &room, account, &evidence).await
             && state.deps.remote_route.space_event(
                 service,
-                subscriber,
-                Stanza::Message(for_remote_subscriber(event, subscriber)),
+                &subscriber,
+                Stanza::Message(for_remote_subscriber(event, &subscriber)),
             );
         if !sent {
             telemetry::event_withheld();
