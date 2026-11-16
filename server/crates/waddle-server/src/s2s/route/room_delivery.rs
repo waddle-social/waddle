@@ -4,7 +4,10 @@
 //! A stanza from a remote JID to a local full JID may be room traffic, and
 //! deciding that needs the shared occupancy table, which a stream's task
 //! must not wait for. Such stanzas are queued here and decided, applied and
-//! delivered by a few workers. Each room bare JID always lands on the same
+//! delivered by a few workers. Account traffic, which the account side
+//! decides against the account's roster and resources, takes the same
+//! queues, keyed by its sender's bare JID, so that one sender's stanzas are
+//! decided in order and under the same bounds. Each room bare JID always lands on the same
 //! shard and is served in arrival order, so an occupant sees a room's
 //! presence and messages in the room's order, and the room's own presence
 //! moves the occupancy on before the room's next stanza is decided. Within
@@ -70,6 +73,9 @@ pub(super) enum RoomWork {
     /// own request: sent, and the seat ended, only if the room no longer
     /// seats the occupant under the seat's generation.
     Departure(Box<(Seat, Stanza)>),
+    /// Account traffic from a remote principal for a local account, which
+    /// arrived on `stream` (gate G18).
+    Account(Box<AccountTraffic>),
 }
 
 /// A stanza for a local room, as it arrived.
@@ -82,6 +88,15 @@ pub(super) struct LocalRoomRequest {
     /// it came from, as its stream authenticated them.
     pub local: CanonicalDomain,
     pub remote: CanonicalDomain,
+}
+
+/// A stanza for a local account, as it arrived.
+#[derive(Debug)]
+pub(super) struct AccountTraffic {
+    pub stream: VerifiedPeerStream,
+    pub principal: RemotePrincipal,
+    pub to: Jid,
+    pub stanza: Stanza,
 }
 
 /// A stanza that may be a room's traffic, as it arrived.

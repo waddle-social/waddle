@@ -137,8 +137,10 @@ pub(super) async fn serve_local_rooms(router: Arc<Inner>, shard: usize) {
                 let (seat, stanza) = *left;
                 router.confirm_departure(seat, stanza).await;
             }
-            // Work of the queues that serve remote rooms.
-            RoomWork::Traffic(_) | RoomWork::Ended(_) => {}
+            // Work of the queues that serve remote rooms and remote
+            // senders' account traffic, which never reaches these: it is
+            // queued on the room traffic queues alone.
+            RoomWork::Traffic(_) | RoomWork::Ended(_) | RoomWork::Account(_) => {}
         }
     }
 }

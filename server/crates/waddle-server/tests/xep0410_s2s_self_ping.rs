@@ -1,10 +1,12 @@
 //! XEP-0410 self-ping to a room on a remote domain: the ping is an IQ
 //! request to the occupant's own JID, routed and correlated like any
 //! request to a remote entity, and the client receives the room's answer
-//! as the room gave it. A room that reflects the ping to the occupant gets
-//! this server's `service-unavailable`, because IQ requests from remote
-//! entities still reach no local client (ADR-0020 D7), and XEP-0410 §3.2
-//! reads that answer as "still joined".
+//! as the room gave it. A room that reflects the ping to the occupant
+//! (§3.2) reaches the client once the router has an account side, which
+//! admits IQ requests from a room the resource occupies (gate G18), and
+//! the client's answer goes back through the room. A router without an
+//! account side answers the reflection itself with `service-unavailable`
+//! (ADR-0020 D7), which XEP-0410 §3.2 reads as "still joined".
 //!
 //! `home-a.test` runs the S2S router with a recording delivery in place of
 //! WebSocket clients; `home-b.test` serves `muc.home-b.test` with a
@@ -16,13 +18,20 @@
 #[path = "s2s_remote_muc_support/mod.rs"]
 mod support;
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use jid::{FullJid, Jid};
 use minidom::Element;
 use support::{
     error_condition, full, jid, join, outbound_muc, wait_for, ALICE_PHONE, ARRIVES, ROOM,
 };
 use waddle_server::destination::IqOffer;
-use waddle_server::s2s::route::{LocalOrigin, RouterLimits};
+use waddle_server::s2s::route::{
+    AccountWork, LocalAccounts, LocalOrigin, RemotePrincipal, RouterLimits,
+};
 use waddle_xmpp::xep::xep0199::NS_PING;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 
 const ROOM_ALICE: &str = "room@muc.home-b.test/alice";
@@ -127,4 +136,80 @@ async fn a_reflected_self_ping_is_refused_so_the_room_reports_the_occupant_joine
         error_condition(&Element::from(iq)).as_deref(),
         Some("service-unavailable")
     );
+}
+
+/// An account side that admits IQ requests from a remote room the resource
+/// occupies, and nothing else.
+struct RoomOccupantsOnly;
+
+#[async_trait]
+impl LocalAccounts for RoomOccupantsOnly {
+    fn admits(&self, _principal: &RemotePrincipal) -> bool {
+        true
+    }
+
+    async fn receive(
+        &self,
+        _principal: &RemotePrincipal,
+        _to: &Jid,
+        _stanza: Stanza,
+        _work: &AccountWork,
+    ) -> Vec<Stanza> {
+        Vec::new()
+    }
+
+    async fn admits_request(
+        &self,
+        _principal: &RemotePrincipal,
+        _to: &FullJid,
+        room_occupant: bool,
+    ) -> bool {
+        room_occupant
+    }
+
+    async fn may_send(&self, _account: &jid::BareJid) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_reflected_self_ping_reaches_the_client_once_an_account_side_is_attached() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    assert!(a.router.attach_accounts(Arc::new(RoomOccupantsOnly)));
+    muc.reflect_pings();
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    let offered = a.offer_iq(ROOM_ALICE, self_ping("sp5")).await;
+    assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
+    // The room's reflection reaches the occupant, as a request from the
+    // room it occupies.
+    let (to, reflected) = wait_for(ARRIVES, || {
+        a.delivery.iqs("reflected-sp5").into_iter().next()
+    })
+    .await
+    .expect("the reflected ping reaches the client");
+    assert_eq!(to, full(ALICE_PHONE));
+    assert!(matches!(reflected, Iq::Get { .. }), "{reflected:?}");
+    assert_eq!(
+        a.delivery.origins("reflected-sp5"),
+        vec![LocalOrigin::Remote]
+    );
+
+    // The client answers; the room relays the answer to the self-ping.
+    let answered = a
+        .offer_iq(
+            ROOM_ALICE,
+            Iq::Result {
+                from: Some(jid(ALICE_PHONE)),
+                to: Some(jid(ROOM_ALICE)),
+                id: "reflected-sp5".to_owned(),
+                payload: None,
+            },
+        )
+        .await;
+    assert!(matches!(answered, IqOffer::Accepted), "{answered:?}");
+    let iq = answer(&a, "sp5").await;
+    assert!(matches!(iq, Iq::Result { .. }), "{iq:?}");
+    let _ = ROOM;
 }

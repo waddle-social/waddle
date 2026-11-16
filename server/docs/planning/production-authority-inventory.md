@@ -1106,6 +1106,55 @@ was added, and no decision of standing moved.
 - The raw scan holds 1633 records, as before. 4 unchanged records moved
   because the files above gained lines.
 
+On the account-traffic branch (W6c), merged after the twenty-second
+refresh, the selected evidence was refreshed three times of its own. The
+first, through
+`69beb8862c2c540a1b85e202bdcc0b457cdac5c2`, on the account-traffic branch
+(W6c of issue 2047). In the reviewed set only `server/http.rs` changed:
+startup now also attaches the S2S router's account side
+(`WebSocketLocalAccounts`) beside its local delivery, and passes the
+deployment's served domains to the startup roster prune while S2S is
+enabled, so that contacts at domains it does not serve stay in rosters.
+Neither writes a grant, a projection or a membership, and the two anchors
+in that file (`startup-call`, `hg-recovery`) moved lines only. Outside the
+reviewed set, records of `try_send_to`, `record_host_grant_affiliation`,
+`EnrolledScopes`, `record_stanza_for_detached_bound_resource` and
+`pubsub_affiliations` moved lines in `test_support.rs`,
+`handlers/iq/roster/push.rs`, `handlers/presence/subscription/delivery.rs`
+and `server/runtime_owner.rs`. The raw scan holds 1594 records, unchanged in
+content.
+
+The second, through
+`b3ec89bbe41ae4b2692f143120321de43c02c52c`, on the same branch. In the
+reviewed set only `server/http.rs` changed: the startup roster prune now
+receives the deployment's served domains whether S2S is enabled or not,
+so that contacts at domains it does not serve stay in rosters while S2S
+is off. It writes no grant, projection or membership; the `startup-call`
+anchor moved from line 1568 to 1564 and `hg-recovery` did not move.
+Outside the reviewed set, records of `pubsub_affiliations` in
+`server/runtime_owner.rs` (a new runtime grant for
+`s2s_remote_offline_admissions` above it) and of `EnrolledScopes` and
+`record_host_grant_affiliation` in `test_support.rs` (a new test seam that
+runs the startup reconciliation above them) moved lines. The raw scan holds
+1594 records, unchanged in content.
+
+The third, through
+`43e5a44329974d3ea1ee2ebcb47c7472a2a8391c`, on the same branch. In the
+reviewed set only `auth/retirement.rs` changed: `retire_in` also deletes,
+in the retirement's transaction, the retired account's rows of
+`s2s_pending_subscriptions`, `s2s_remote_pubsub_subscriptions` and
+`s2s_remote_offline_admissions`, which hold remote senders' subscription
+requests, the account's records of remote PubSub subscriptions and the
+offline admissions of strangers' messages. It writes no grant, projection
+or membership and reads no authority; the `account-retire` anchor moved
+from line 119 to 121. Outside the reviewed set, records of
+`JoinWithAffiliation` and `JoinAffiliationGrant` in
+`server/routes/websocket/cleanup.rs` (a check of remote senders' stored
+messages before a terminal redrive above them) and of `try_send_to` in
+`handlers/iq/roster/push.rs` (a new parameter of the removal side effects
+above them) moved lines. The raw scan holds 1594 records, unchanged in
+content.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

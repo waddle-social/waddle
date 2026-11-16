@@ -24,7 +24,10 @@
 //! delivered to that resource (D7's room exception; the router's `rooms`
 //! module, against the shared occupancy table). Every other stanza to a
 //! local account, including one from a room the resource never joined, is
-//! decided here.
+//! decided here: an IQ request to the bare JID is answered on the
+//! account's behalf, a response to a full JID completes that resource's
+//! own request, and the rest is account traffic for the account side
+//! (gate G18; `s2s-account-traffic-2047.md`).
 //!
 //! The inventory with each entry's status is recorded in
 //! `server/docs/planning/s2s-routing-2047.md`; enabling a further service
@@ -130,6 +133,11 @@ pub enum InboundReach {
     /// An IQ result or error for a local resource, delivered only when it
     /// completes a request that resource sent (D7's first exception).
     CorrelatedResponse,
+    /// A message or presence for a local account, or an IQ request for one
+    /// of its resources: account traffic, decided by the account side when
+    /// one is attached and refused as [`Refusal::AccountTraffic`]
+    /// otherwise (gate G18).
+    Account,
     /// Refused: an IQ request or a message receives `service-unavailable`;
     /// presence, IQ responses and errors are dropped without a reply.
     Refused(Refusal),
@@ -138,10 +146,12 @@ pub enum InboundReach {
 /// Why a stanza from an S2S stream is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// Traffic to a local account, refused as if the account did not
-    /// exist until account traffic is reviewed (D7, gate G18). Traffic
-    /// from a remote room the account's resource occupies never reaches
-    /// this decision.
+    /// Traffic to a local account refused as if the account did not exist
+    /// (RFC 6121 §8.5.1): an IQ request to the bare JID, which the server
+    /// answers on the account's behalf for no namespace (gate G18), a
+    /// response to the bare JID, and, while no account side is attached,
+    /// all account traffic (D7). Traffic from a remote room the account's
+    /// resource occupies never reaches this decision.
     AccountTraffic,
     /// A request, message or presence for the server domain other than
     /// service discovery and ping (D10).
@@ -176,9 +186,8 @@ pub fn reach(target: LocalTarget, stanza: &Stanza, reachable: Reachable) -> Inbo
         {
             InboundReach::CorrelatedResponse
         }
-        (LocalTarget::AccountBare | LocalTarget::AccountResource, _) => {
-            InboundReach::Refused(Refusal::AccountTraffic)
-        }
+        (LocalTarget::AccountBare, Stanza::Iq(_)) => InboundReach::Refused(Refusal::AccountTraffic),
+        (LocalTarget::AccountBare | LocalTarget::AccountResource, _) => InboundReach::Account,
         (LocalTarget::Service(service @ (ServedService::Muc | ServedService::Spaces)), _) => {
             InboundReach::Refused(Refusal::AwaitingReview(service))
         }

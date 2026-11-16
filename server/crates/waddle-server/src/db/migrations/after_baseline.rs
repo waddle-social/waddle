@@ -43,6 +43,15 @@ pub const S2S_LOCAL_ROOM_SEATS_VERSION: i64 = 2007;
 /// catalog.
 pub const CHANNEL_FEDERATED_VERSION: i64 = 2008;
 
+/// Version of the migration that creates the stores of S2S account
+/// traffic: pending subscription requests from remote senders and the
+/// remote PubSub nodes local accounts subscribed to.
+pub const S2S_ACCOUNT_TRAFFIC_VERSION: i64 = 2010;
+
+/// Version of the migration that creates the offline admissions of
+/// messages from remote senders that are not the account's contacts.
+pub const S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION: i64 = 2011;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -120,6 +129,24 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2008_channel_federated.postgres.sql"
             ),
         },
+        Migration {
+            version: S2S_ACCOUNT_TRAFFIC_VERSION,
+            description: "s2s account traffic".to_string(),
+            sql_sqlite: include_str!("../../../sql/migrations/2010_s2s_account_traffic.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2010_s2s_account_traffic.postgres.sql"
+            ),
+        },
+        Migration {
+            version: S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
+            description: "s2s remote offline admissions".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2011_s2s_remote_offline_admissions.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2011_s2s_remote_offline_admissions.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -129,7 +156,8 @@ mod tests {
     use super::{
         all, CHANNEL_FEDERATED_VERSION, HOST_GRANT_AUTHORITY_VERSION,
         HOST_GRANT_RESTORE_INCARNATION_VERSION, HOST_GRANT_REVOCATION_FENCE_VERSION,
-        RETIRED_ACCOUNT_JIDS_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_IQ_CORRELATIONS_VERSION,
+        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
         S2S_REMOTE_ROOMS_VERSION,
     };
 
@@ -148,7 +176,9 @@ mod tests {
                 HOST_GRANT_REVOCATION_FENCE_VERSION,
                 RETIRED_ACCOUNT_JIDS_VERSION,
                 S2S_LOCAL_ROOM_SEATS_VERSION,
-                CHANNEL_FEDERATED_VERSION
+                CHANNEL_FEDERATED_VERSION,
+                S2S_ACCOUNT_TRAFFIC_VERSION,
+                S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION
             ]
         );
     }

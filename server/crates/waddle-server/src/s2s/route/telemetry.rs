@@ -341,3 +341,48 @@ pub(super) fn seat_row_reclaimed() {
         1,
     );
 }
+
+/// The account side took longer than its deadline to decide one stanza
+/// for a local account, and the worker moved on without answering it.
+pub(super) fn account_traffic_timed_out() {
+    counter_add!(
+        "waddle.s2s.route.account_traffic.timeouts",
+        "{stanza}",
+        "Stanzas from S2S streams to local accounts abandoned because the account side did not decide them before the deadline.",
+        1,
+    );
+}
+
+/// The account side answered one stanza with more replies than the router
+/// sends for one stanza; `count` were dropped.
+pub(super) fn account_replies_dropped(count: usize) {
+    counter_add!(
+        "waddle.s2s.route.account_traffic.replies_dropped",
+        "{stanza}",
+        "Replies to remote senders the account side produced beyond the bound for one received stanza, dropped unsent.",
+        u64::try_from(count).unwrap_or(u64::MAX),
+    );
+}
+
+/// A remote IQ request for a local resource was refused with
+/// `resource-constraint` because its domain, or the replica, had too many
+/// such requests pending.
+pub(super) fn account_request_refused() {
+    counter_add!(
+        "waddle.s2s.route.account_requests.refused",
+        "{stanza}",
+        "IQ requests from S2S streams to local resources refused because too many were pending from their domain or on the replica.",
+        1,
+    );
+}
+
+/// A local account's message or presence for a remote JID was refused
+/// because the account's share of the pair queues was full.
+pub(super) fn account_share_full() {
+    counter_add!(
+        "waddle.s2s.route.account_traffic.share_full",
+        "{stanza}",
+        "Messages and presence of local accounts for remote JIDs refused because the account's share of that pair's queue was full.",
+        1,
+    );
+}

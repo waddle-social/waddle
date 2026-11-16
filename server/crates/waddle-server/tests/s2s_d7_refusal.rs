@@ -1,6 +1,8 @@
-//! ADR-0020 D7 until account traffic across S2S is reviewed (gate G18):
-//! remote traffic to a local account is refused as if the account did not
-//! exist (RFC 6121 §8.5.1). Messages and IQ requests receive
+//! ADR-0020 D7 on a router without an account side: remote traffic to a
+//! local account is refused as if the account did not exist (RFC 6121
+//! §8.5.1). Startup attaches an account side whenever S2S is enabled,
+//! which replaces this refusal for the handlers gate G18 reviewed (the
+//! account-traffic suites); these cases hold for a router without one. Messages and IQ requests receive
 //! `service-unavailable`, presence of every type is ignored, and no error
 //! answers an error, a response or anything else the account never asked
 //! for. Every local account destination here is one no reviewed handler

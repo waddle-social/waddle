@@ -691,7 +691,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     )
     .await?;
     // The router delivers correlated responses and their errors to local
-    // resources through the state it is part of.
+    // resources, and account traffic to local accounts, through the state
+    // it is part of.
     if let Some(router) = &s2s_router {
         router.attach_local(Arc::new(
             crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery::new(
@@ -709,6 +710,13 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             router,
             state.db_pool.global().clone(),
         );
+        // The account side enables traffic between remote senders and
+        // local accounts in both directions (gate G18).
+        router.attach_accounts(Arc::new(
+            crate::server::routes::websocket::s2s_accounts::WebSocketLocalAccounts::new(
+                &websocket_state,
+            ),
+        ));
     }
 
     // Install the OIDC → PEP profile bridge hook now that
@@ -1535,9 +1543,15 @@ async fn create_websocket_state(
         // Account lookups match canonical keys only, so every account row
         // needs its key before the node serves; the roster prune that
         // follows uses them.
-        crate::auth::directory::reconcile_local_accounts(state.db_pool.global_actor())
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
+        // Contacts at domains this deployment does not serve are remote
+        // contacts and stay, with S2S enabled or not (gate G18).
+        let served = service_domains.served_domains(&xmpp_domain);
+        crate::auth::directory::reconcile_local_accounts(
+            state.db_pool.global_actor(),
+            served.as_ref(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
         // Report, without identifiers, the accounts the identity profile
         // treats differently from before; nothing is changed.
         match crate::auth::identity_profile::reconcile_identity_profile(

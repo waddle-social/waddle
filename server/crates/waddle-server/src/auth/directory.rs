@@ -71,8 +71,15 @@ pub(crate) fn exact_account_jid(name: &str, domain: &str) -> Option<CanonicalBar
 /// without one its canonical lookup key, then drop roster items whose
 /// contact is not an account on the owner's domain (rooms, extension bots,
 /// names nobody registered) by the same rule the roster set and subscription
-/// guards apply. Idempotent.
-pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+/// guards apply. `served` names the domains this deployment serves; a
+/// contact at any other domain is a remote contact, which the roster keeps
+/// whether S2S is enabled or not (ADR-0020 D7, gate G18): while S2S is off
+/// it is unreachable, and it is reachable again once S2S is enabled.
+/// Idempotent.
+pub(crate) async fn reconcile_local_accounts(
+    actor: &ActorRef<DbActor>,
+    served: Option<&crate::destination::ServedDomains>,
+) -> Result<(), AuthError> {
     // Nodes starting together can race to key case-variant twins; the
     // loser's UPDATE trips the unique key index. A second pass sees the
     // winner's key and leaves the twin unkeyed, as a lone node would.
@@ -80,7 +87,7 @@ pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Resul
         warn!(%error, "account key backfill failed; retrying once");
         backfill_account_keys(actor).await?;
     }
-    prune_roster_contacts(actor).await
+    prune_roster_contacts(actor, served).await
 }
 
 /// How often a serving node keys account rows written without one. During
@@ -113,7 +120,10 @@ pub(crate) fn spawn_account_key_backfill(actor: &ActorRef<DbActor>, every: std::
 /// Each pruned owner also loses its XEP-0237 version, so a cached roster no
 /// longer matches and is refetched.
 // ponytail: reads every roster row each startup; page by owner if rosters grow large.
-async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+async fn prune_roster_contacts(
+    actor: &ActorRef<DbActor>,
+    served: Option<&crate::destination::ServedDomains>,
+) -> Result<(), AuthError> {
     let items = query(
         actor,
         "SELECT user_jid, contact_jid FROM roster_items",
@@ -128,6 +138,16 @@ async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthErro
             owner.parse::<jid::BareJid>(),
             contact.parse::<jid::BareJid>(),
         ) {
+            (Ok(_), Ok(contact))
+                if served.is_some_and(|served| {
+                    matches!(
+                        served.classify(Some(&jid::Jid::from(contact.clone()))),
+                        crate::destination::Destination::Remote(_)
+                    )
+                }) =>
+            {
+                true
+            }
             (Ok(owner), Ok(contact)) if owner.domain() == contact.domain() => {
                 match accounts.get(&contact) {
                     Some(exists) => *exists,

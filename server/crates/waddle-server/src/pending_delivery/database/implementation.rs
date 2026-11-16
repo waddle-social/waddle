@@ -1276,6 +1276,14 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn delete_unclaimed_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE row_id = ? AND flushed_in_session IS NULL",
+            crate::db_params![id.as_str().to_string()],
+        )
+        .await
+    }
+
     async fn delete_unsequenced_claim(
         &self,
         claim: &PendingClaim,

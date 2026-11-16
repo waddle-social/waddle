@@ -21,7 +21,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "sha256": "fdac25abf231c63eea66ca21d40889bba86f75bb5b3ee7b1aac8a190ea2f0f58"
+      "sha256": "9401d9f14084b124593d5974a9fbd6550075628f0f15c5a2b0067e0e7e8a12a0"
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
@@ -920,7 +920,7 @@
     },
     "account-retire": {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "line": 119,
+      "line": 121,
       "text": "pub async fn retire_account("
     },
     "account-retired-native": {

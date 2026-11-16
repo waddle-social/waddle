@@ -2203,6 +2203,19 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
         let Some(retry_lease) = entry.try_acquire_terminal_ordering_retry() else {
             return TerminalRedriveOutcome::OrderingDeferred;
         };
+        // Remote senders' messages are delivered only while their domain
+        // is still admitted (ADR-0020 D1; gate G18).
+        super::s2s_accounts::forget_unadmitted_remote_messages(
+            &state.deps.app_state,
+            state
+                .deps
+                .service_domains
+                .served_domains(state.deps.auth_state.xmpp_domain.as_str())
+                .as_ref(),
+            &state.deps.protocol.pending_delivery_storage,
+            recipient,
+        )
+        .await;
         let resolver = MamArchiveResolver {
             mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
         };

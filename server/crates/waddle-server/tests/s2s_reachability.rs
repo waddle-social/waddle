@@ -111,7 +111,8 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
     let presence = Stanza::Presence(available(HOME_A, "r"));
 
     use InboundReach::{
-        CorrelatedResponse, Refused, ServerDiscoInfo, ServerDiscoItems, ServerPing, ServerResponse,
+        Account, CorrelatedResponse, Refused, ServerDiscoInfo, ServerDiscoItems, ServerPing,
+        ServerResponse,
     };
     let server = LocalTarget::ServerDomain;
     assert_eq!(
@@ -153,24 +154,22 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
         reach(LocalTarget::AccountResource, &response),
         CorrelatedResponse
     );
+    // Account traffic (gate G18): decided by the account side when one is
+    // attached, refused as D7's interim rule says otherwise. An IQ request
+    // to the bare JID is answered on the account's behalf, for no
+    // namespace, and a response to the bare JID completes nothing.
     for stanza in [
         request(ping_payload()),
         set.clone(),
         message.clone(),
         presence.clone(),
     ] {
-        assert_eq!(
-            reach(LocalTarget::AccountResource, &stanza),
-            Refused(Refusal::AccountTraffic)
-        );
+        assert_eq!(reach(LocalTarget::AccountResource, &stanza), Account);
     }
-    for stanza in [
-        request(ping_payload()),
-        set.clone(),
-        response.clone(),
-        message.clone(),
-        presence.clone(),
-    ] {
+    for stanza in [message.clone(), presence.clone()] {
+        assert_eq!(reach(LocalTarget::AccountBare, &stanza), Account);
+    }
+    for stanza in [request(ping_payload()), set.clone(), response.clone()] {
         assert_eq!(
             reach(LocalTarget::AccountBare, &stanza),
             Refused(Refusal::AccountTraffic)

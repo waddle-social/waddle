@@ -378,6 +378,15 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // owning replica updates the nickname and another replica marks the
     // seat lost or adopts it, and the end of the seat deletes it.
     ("s2s_local_room_seats", READ_WRITE),
+    // S2S account traffic: a remote sender's pending subscription request
+    // is upserted, one per sender and account, and deleted when the account
+    // answers it; a remote PubSub subscription is inserted when the
+    // account's request leaves and deleted when its unsubscribe does.
+    ("s2s_pending_subscriptions", READ_WRITE),
+    ("s2s_remote_pubsub_subscriptions", READ_WRITE),
+    // A remote stranger's message admitted to an account's offline store
+    // is counted by an inserted row; rows older than a day are deleted.
+    ("s2s_remote_offline_admissions", READ_WRITE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

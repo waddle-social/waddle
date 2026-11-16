@@ -15,10 +15,10 @@ manager, W4d discovery and dialback, W5a routing and reachability, W5b first
 host-grant slice, W5c writer fence, W5i identity profile, W5o outcast
 precedence and schema version, W5r restore incarnation, W6b outbound S2S
 rooms (merged at `9766d9c81`), W5d revocation fence (merged at
-`46187e69f`) and W5e remote principals at the effect boundary (merged at
-`763988ff0`); the rows those merges add or change describe the merge and
-the commits after it. W6a is inbound S2S rooms: its rows describe that
-slice's branch, whose targets were compiled and not run. A target lists every slice that touched it,
+`46187e69f`), W5e remote principals at the effect boundary (merged at
+`763988ff0`), W6a inbound S2S rooms and W6c account traffic (merged one
+after the other on top of W5e); the rows those merges add or change
+describe the merge and the commits after it. A target lists every slice that touched it,
 the first being the slice that created it; "integration" is a commit made on
 the integration branch itself.
 
@@ -106,13 +106,13 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run5 final and run6 logs |
 | `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 final and run6 logs |
 | `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run5 final and run6 logs |
-| `s2s_reachability` (8) | W5a, W6b, W6a | loopback | Not run with W6a's changes: two cases added (the MUC service with and without a room host), every call of `reach` changed, and `muc#admin`, `muc#owner` and XEP-0425 requests now reach the room host. 6/6 before them, run5 final and run6 logs |
-| `s2s_d7_refusal` (4) | W5a | none | Run 4/4, run5 final and run6 logs |
+| `s2s_reachability` (8) | W5a, W6b, W6a, W6c | loopback | Not run with the W6a and W6c changes: two cases added (the MUC service with and without a room host), every call of `reach` changed, `muc#admin`, `muc#owner` and XEP-0425 requests now reach the room host, and the account rows changed. 6/6 before them, run5 final and run6 logs |
+| `s2s_d7_refusal` (4) | W5a, W6c (header only) | none | Run 4/4, run5 final and run6 logs |
 | `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run5 final and run6 logs |
 | `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 final and run6 logs |
 | `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run5 final and run6 logs |
 | `xep0045_s2s_outbound_muc` (41) | W6b, integration | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 41/41, run5 final, stress and run6 logs |
-| `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 final, stress and run6 logs |
+| `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Not run since W6c added a case and changed its account side to the new `LocalAccounts` methods (its 4 earlier cases ran: run5 final, stress and run6 logs) |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
 | `xep0045_s2s_inbound_muc` (32) | W6a | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and five cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration) | Not run |
@@ -130,6 +130,17 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0444_s2s_inbound_reactions` (2) | W6a | loopback; in-memory SQLite | Not run |
 | `xep0461_s2s_inbound_replies` (2) | W6a | loopback; in-memory SQLite | Not run |
 | `clustering_remote_room_request` (4) | W6a | none; builds with the `clustering` feature only (`--features test-support,clustering`); one case classifies the relay's typed failures through a test-support seam | Not run |
+| `s2s_account_router` (14) | W6c | loopback; in-memory SQLite | Not run |
+| `s2s_account_traffic_ws` (39), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
+| `xep0160_s2s_account_offline_ws` (6) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0198_s2s_account_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
+| `xep0280_s2s_account_carbons_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0359_s2s_account_stanza_ids_ws` (2) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0191_s2s_account_blocking_ws` (8) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0060_s2s_account_events_ws` (6) | W6c | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Not run |
+| `xep0115_s2s_account_caps_ws` (1) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0313_s2s_account_archive_ws` (2) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -159,7 +170,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18 without `clustering`, run6 host-grant final log |
 | `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run6 host-grant final log |
 | `xep0045_host_grant_revocation` (14) | W5d, integration, W6a | PostgreSQL 17; loopback; one case runs a replica as a second process | Not run with W6a's changes: the sweep's case for a remote occupant is replaced by three (a domain that is not admitted, effective standing with a pending increase, a closed scope). 12/12 before them, run6 host-grant final log |
-| `account_jid_retirement` (10) | W5d | PostgreSQL 17 | Run 10/10, run6 host-grant final log |
+| `account_jid_retirement` (11) | W5d, W6c | PostgreSQL 17 | Not run since W6c added a case for the account-traffic rows retirement removes (its 10 earlier cases ran 10/10, run6 host-grant final log) |
 | `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run6 host-grant final log |
 | `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run6 host-grant final log |
 | `host_grant_remote_principals` (16; 3 `#[ignore]`) | W5e, integration, W6a | PostgreSQL 17; SpiceDB for the ignored cases | Not run with W6a's changes: two `live_spicedb_` cases added (an increase that activates while its initiator's home is trusted, and one dropped because the home is no longer admitted). 14/14 before them, run6 host-grant final log |
@@ -192,8 +203,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 `tests/host_grant_revocation_support/mod.rs` (W5d),
 `tests/xep0060_space_fanout_fence/storage.rs` (W5d),
 `tests/ws_loopback_support/mod.rs` (W5c), `tests/s2s_routing_support/mod.rs`
-(W5a, W6b, W6a), `tests/s2s_remote_muc_support/mod.rs` (W6b, integration)
-and `tests/s2s_inbound_muc_support/mod.rs` with its `managed.rs` and
+(W5a, W6b, W6a), `tests/s2s_remote_muc_support/mod.rs` (W6b, integration),
+`tests/s2s_account_support/mod.rs` (W6c) and
+`tests/s2s_inbound_muc_support/mod.rs` with its `managed.rs` and
 `scripted.rs` (W6a) are compiled into the targets above and add no cases. The inbound MUC support
 creates its rooms federated (its S2S snapshot sets
 `[host_policy] federate_new_rooms`, and the managed fixture sets the
@@ -226,6 +238,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | `waddle-server/src/auth/directory/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/auth/native/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/db/migrations/tests.rs` | W5b | PostgreSQL for the `postgres_` cases; they skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
+| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2010 and 2011 in the version order) | W6c | none | Not run |
 | `waddle-server/src/ingress/room_pin_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/permissions/schema/tests.rs` | W5o | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/muc.rs` | W5c | none | Not run |
@@ -455,12 +468,12 @@ implemented unless the text says so.
   elements, including a TLS end without `close_notify`, is closed, so a
   peer that crashed between stanzas looks like one dropping an idle
   connection and its occupants are not told.
-- Account traffic (W6c): replace both D7 refusals for reviewed handlers,
-  register inbound requests for correlation and define the ingress receipt
-  for a remote target. A message carrying a DM pin marker for a remote peer
-  must still be refused before it is routed: today the outbound D7 refusal
-  keeps the marker off the wire. Check the sender's blocking list before
-  offering messages and presence to remote JIDs.
+- Account traffic (W6c), done on its branch for the handlers it reviewed:
+  both D7 refusals replaced once the account side is attached, inbound
+  requests registered for correlation, the DM pin marker refused by the
+  router, and the sender's blocking list checked before messages and
+  presence are offered. The ingress receipt for a remote target remains
+  (see the account-traffic design below).
 - Effect-boundary admission (W5e): take the `RemotePrincipal` at the
   protected-effect boundary.
 - Capability advertisement (W11): any further feature in server-domain
@@ -469,6 +482,40 @@ implemented unless the text says so.
   MUC mediated invitation to a remote account, are still dropped silently by
   local resource selection.
 - Router metrics through the telemetry macros.
+
+### Account-traffic design (`s2s-account-traffic-2047.md`)
+
+- A remote ingress producer, shared with inbound MUC (W6a, whose branch
+  adds `IngressPrincipal::Remote`): remote senders' messages are stored
+  offline today as `Transient` rows outside the ingress commit, without
+  the recipient's archive, inbox or push notification; at the merge the
+  account side's producer moves to the ingress path, keeping the
+  strangers' bounds, the silent drop and the no-bounce guard
+  (`sm_promotion::is_remote_sender`). The sender's archive and inbox for
+  local accounts' messages to remote contacts, which reach the sender's
+  other devices only as carbons, wait for the same producer.
+- Remote access to vCard-temp, PEP items, account discovery and last
+  activity at an account's bare JID, each with its own review; PEP
+  notifications from local accounts to remote contacts.
+- Directed presence tracking for remote entities.
+- Presence at login to more than about 16 remote contacts with `both`
+  (32 with `from`) on one domain can find the account's share of the
+  pair's queue full and drops the excess.
+- The account lock that serialises roster read-modify-write for remote
+  contacts, the client's roster set included, is per replica; no case
+  forces an inbound subscription stanza to interleave with a roster set,
+  so the lock in the roster set is reviewed, not exercised.
+- A stream left open at retirement is a host-grant design question; the
+  router refuses everything it sends to remote JIDs, but the departure
+  presence of a resource that ends still leaves its remote rooms.
+- A detached session's queue has no bound per sender: the strangers'
+  bound of 512 per account and day keeps them below the queue's 1,000,
+  while a contact's stanzas are bounded by that queue only.
+- The admission of the sender's domain is checked again before an offline
+  flush only while S2S is enabled; messages stored while it was on are
+  delivered after it is turned off.
+- No case drives a store failure (the no-announcement rule of a failed
+  roster write, the failed request lookup).
 
 ### Identity profile design (`identity-profile-2047.md`)
 

@@ -11,10 +11,15 @@
 //! presence and messages for a remote room it joins, occupies or leaves.
 //! An error stanza is never answered.
 //!
-//! A message the route accepted is room traffic, the only account traffic
-//! the route takes. Once accepted, an eligible one is copied to the
-//! sender's other Carbons-enabled resources as a `<sent/>` carbon
-//! (XEP-0280 §6.1, §7); see `sent_carbon_copy`.
+//! With S2S enabled the route also takes a local account's direct messages
+//! and presence for remote contacts (ADR-0020 D7, gate G18;
+//! `s2s-account-traffic-2047.md`). Before such a stanza is offered, the
+//! sender's own XEP-0191 list is checked, as for IQ requests, and a
+//! subscription stanza changes the account's half of the subscription only
+//! once the route took it. Once accepted, an eligible message is copied to
+//! the sender's other Carbons-enabled resources as a `<sent/>` carbon
+//! (XEP-0280 §6.1, §7); see `sent_carbon_copy`. With S2S off nothing here
+//! reads a roster or a blocking list: the route refuses first.
 
 use jid::{FullJid, Jid};
 use tracing::debug;
@@ -73,6 +78,16 @@ pub(crate) async fn route_unserved_message(
     state: &WebSocketState,
 ) -> Vec<String> {
     message.from = Some(Jid::from(sender.clone()));
+    if let Some(reply) = blocked_reply(
+        &Stanza::Message(message.clone()),
+        &destination,
+        sender,
+        state,
+    )
+    .await
+    {
+        return reply;
+    }
     let carbon = match &destination {
         UnservedDestination::Remote(remote) => sent_carbon_copy(&message, remote),
         UnservedDestination::Invalid(_) => None,
@@ -163,14 +178,87 @@ pub(crate) async fn route_unserved_presence(
 ) -> Vec<String> {
     use xmpp_parsers::presence::Type;
     presence.from = Some(match presence.type_ {
-        Type::Subscribe | Type::Subscribed | Type::Unsubscribe | Type::Unsubscribed => {
-            Jid::from(sender.to_bare())
-        }
+        Type::Subscribe
+        | Type::Subscribed
+        | Type::Unsubscribe
+        | Type::Unsubscribed
+        | Type::Probe => Jid::from(sender.to_bare()),
         _ => Jid::from(sender.clone()),
     });
+    // A denial of a remote sender's recorded request is the account's own:
+    // the record is forgotten even when the stanza is refused, such as to
+    // an address the account blocks or with S2S off (gate G18). With S2S
+    // on, the subscription path forgets it as it decides what to route.
+    let denial = presence.type_ == Type::Unsubscribed;
+    if let Some(reply) = blocked_reply(
+        &Stanza::Presence(presence.clone()),
+        &destination,
+        sender,
+        state,
+    )
+    .await
+    {
+        if denial {
+            forget_denied_request(state, sender, &destination).await;
+        }
+        return reply;
+    }
+    let subscription = matches!(
+        presence.type_,
+        Type::Subscribe | Type::Subscribed | Type::Unsubscribe | Type::Unsubscribed
+    );
+    if let (true, true, UnservedDestination::Remote(remote)) = (
+        subscription,
+        crate::server::routes::websocket::s2s_accounts::s2s_enabled(state),
+        &destination,
+    ) {
+        return super::presence::route_remote_subscription(state, sender, presence, remote.clone())
+            .await;
+    }
+    if denial {
+        forget_denied_request(state, sender, &destination).await;
+    }
     offer(Stanza::Presence(presence), destination, sender, state)
         .await
         .replies
+}
+
+/// Forget the subscription request the remote `destination` sent the
+/// sender's account, which the sender denies.
+async fn forget_denied_request(
+    state: &WebSocketState,
+    sender: &FullJid,
+    destination: &UnservedDestination,
+) {
+    if let UnservedDestination::Remote(remote) = destination {
+        super::presence::forget_request(state, &sender.to_bare(), &remote.address().to_bare())
+            .await;
+    }
+}
+
+/// XEP-0191 §3.3: with S2S enabled, a message or presence to a remote
+/// address on the sender's own blocking list is answered with
+/// `not-acceptable` and `<blocked/>` and not routed. With S2S off the
+/// route's own refusal answers first, as before.
+async fn blocked_reply(
+    stanza: &Stanza,
+    destination: &UnservedDestination,
+    sender: &FullJid,
+    state: &WebSocketState,
+) -> Option<Vec<String>> {
+    let UnservedDestination::Remote(remote) = destination else {
+        return None;
+    };
+    if !super::presence::sender_blocks(state, sender, remote.address()).await {
+        return None;
+    }
+    debug!("Refusing a stanza to a remote address on the sender's blocking list");
+    Some(
+        super::presence::outgoing_block_reply(stanza, sender)
+            .map(|reply| stanza_to_xml(&reply))
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// What became of a stanza offered to the remote route.

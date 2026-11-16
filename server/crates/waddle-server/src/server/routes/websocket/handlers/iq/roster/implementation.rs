@@ -174,12 +174,20 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         .first()
         .expect("parse_roster_set guarantees one item");
 
-    // A roster contact is an existing local account; removal stays open for
-    // any JID so junk items can be deleted. RFC 6121 §2.3.3 names no
+    // A roster contact is an existing local account, or with S2S enabled an
+    // address at a domain this deployment does not serve; removal stays
+    // open for any JID so junk items can be deleted. RFC 6121 §2.3.3 names no
     // condition for a contact that does not exist: `not-acceptable` there is
     // for item data the client can fix (type modify), while `item-not-found`
     // (RFC 6120 §8.3.3.7, type cancel) says the addressed JID cannot be found.
-    if !requested.subscription.is_remove() {
+    // With S2S enabled a contact may also be at a domain this deployment
+    // does not serve; its server answers for it (gate G18).
+    let remote_contact = crate::server::routes::websocket::s2s_accounts::s2s_enabled(state)
+        && crate::server::routes::websocket::handlers::presence::is_remote_contact(
+            state,
+            &requested.jid,
+        );
+    if !requested.subscription.is_remove() && !remote_contact {
         match local_account_jid_exists(
             state.deps.app_state.db_pool.global_actor(),
             &requested.jid,
@@ -207,6 +215,22 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         }
     }
 
+    // The account side reads, decides and writes the account's items for
+    // remote contacts under the account's lock (gate G18); the roster set
+    // takes it too, before its own read, so that an inbound subscription
+    // stanza's read-modify-write never interleaves with it and cannot
+    // restore an item the client just changed or removed. It is taken
+    // before the per-user mutation lock below, in the order the account
+    // side takes both, and held until the removal's side effects have
+    // been sent.
+    let remote_lock = if crate::server::routes::websocket::handlers::presence::is_remote_contact(
+        state,
+        &requested.jid,
+    ) {
+        Some(crate::server::routes::websocket::s2s_accounts::lock_account(user_jid).await)
+    } else {
+        None
+    };
     let mut removed_item = None;
     // Hold the per-user mutation lock from the start of the storage write
     // through the end of push fanout below (XEP-0237 §2.6 — pushes for
@@ -342,8 +366,16 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
     // already preserved.
     drop(_user_lock);
     if let Some(item) = removed_item.as_ref() {
-        send_roster_remove_subscription_side_effects(state, storage, user_jid, item).await;
+        send_roster_remove_subscription_side_effects(
+            state,
+            storage,
+            user_jid,
+            item,
+            remote_lock.as_ref(),
+        )
+        .await;
     }
+    drop(remote_lock);
     frames.push(iq_to_xml(build_roster_result_empty(iq)));
     frames
 }

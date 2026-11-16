@@ -24,6 +24,7 @@ pub(in crate::server::routes::websocket::handlers) use delivery::{
 };
 pub(super) use directed::handle_directed_presence;
 pub(super) use roster_state::parse_subscription_state;
+pub(super) use roster_state::{load_existing_roster_item, roster_item_to_row};
 pub(super) use storage::{recipient_blocks_sender, roster_storage};
 
 use delivery::{
