@@ -611,6 +611,15 @@ pub trait RemoteRoute: Send + Sync {
         false
     }
 
+    /// The local room `room`, whose claim moved to this replica, has
+    /// seated its recorded occupants again, `occupants` among them on
+    /// seats taken over with [`Self::adopt_seat`]. What the replica that
+    /// stopped had queued for them is lost, so their occupancies do not
+    /// continue: the route ends each seat, the room removes its occupant,
+    /// and the occupant is told so and enters again (XEP-0045 §11.1). By
+    /// default nothing happens.
+    async fn end_adopted_seats(&self, _room: &jid::BareJid, _occupants: &[FullJid]) {}
+
     /// Take a stanza a remote principal addressed to a local room this
     /// replica holds, which another replica verified on an inbound stream
     /// and carried here with what that stream proved of its sender. A

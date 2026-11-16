@@ -585,8 +585,9 @@ pub async fn start_with_config_and_owner_outbox(
 
     info!("TCP XMPP listener disabled; serving WebSocket C2S only");
 
-    // The S2S service starts draining when the process stop token fires
-    // and is joined below. It shares no lock, permit or task with HTTP.
+    // The S2S service starts draining when the process stop token fires,
+    // after the router's shutdown notices where a router runs, and is
+    // joined below. It shares no lock, permit or task with HTTP.
     // Configured endpoints, and DNS discovery through the system's name
     // servers when the configuration enables it (ADR-0020 D3).
     let s2s_resolver = s2s_config
@@ -596,8 +597,15 @@ pub async fn start_with_config_and_owner_outbox(
         })
         .transpose()?;
     let s2s_service = s2s_config.map(|config| {
+        // With a router, the streams drain once the router has told the
+        // remote occupants of this replica's rooms that it is stopping,
+        // which it does when the process stop token fires; the notices
+        // need the streams. Without one they drain on that token itself.
+        let drain = s2s_router
+            .as_ref()
+            .map_or_else(|| stop_token.clone(), crate::s2s::route::S2sRouter::drained);
         let mut options = crate::s2s::conn::ServiceOptions {
-            stop: Some(stop_token.clone()),
+            stop: Some(drain),
             resolver: s2s_resolver.map(|resolver| {
                 std::sync::Arc::new(resolver)
                     as std::sync::Arc<dyn crate::s2s::conn::EndpointResolver>
@@ -670,8 +678,9 @@ pub async fn start_with_config_and_owner_outbox(
             .shutdown(shutdown_deadline.start().remaining())
             .await;
     }
-    // The router's workers stopped taking stanzas when the stop token
-    // fired; join them within what remains.
+    // The router's workers stopped taking stanzas once its shutdown
+    // notices were written or had their time; join them within what
+    // remains.
     if let Some(router) = s2s_router {
         router.shutdown(shutdown_deadline.start().remaining()).await;
     }
@@ -979,6 +988,18 @@ fn check_trusted_homes(
     })
 }
 
+/// The router's bounds under `config`: its defaults, with the pair queues
+/// the snapshot's `[limits] max_pair_queues` allows. Half of them may be
+/// opened for what remote senders ask for, as by default.
+fn router_limits(config: &crate::s2s::config::S2sConfig) -> crate::s2s::route::RouterLimits {
+    let pairs = config.limits().max_pair_queues;
+    crate::s2s::route::RouterLimits {
+        peer_queues: pairs,
+        reply_queues: (pairs / 2).max(1),
+        ..crate::s2s::route::RouterLimits::default()
+    }
+}
+
 /// The S2S router for an enabled S2S configuration: the destinations this
 /// deployment serves, exactly as the WebSocket classifier sees them, and the
 /// shared correlation and remote room tables in the global database.
@@ -995,13 +1016,14 @@ fn start_s2s_router(
     )
     .served_domains(&xmpp_config.domain)
     .ok_or_else(|| anyhow::anyhow!("the XMPP domain is not a valid domain"))?;
+    let limits = router_limits(&config);
     Ok(crate::s2s::route::S2sRouter::new(
         crate::s2s::route::RouterOptions {
             config,
             served,
             correlations: Arc::new(crate::s2s::route::SqlIqCorrelations::new(global.clone())),
             rooms: Arc::new(crate::s2s::route::SqlRemoteRoomStore::new(global)),
-            limits: crate::s2s::route::RouterLimits::default(),
+            limits,
             stop: Some(stop),
         },
     ))

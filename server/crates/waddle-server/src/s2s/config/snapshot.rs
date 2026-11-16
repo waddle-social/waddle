@@ -847,6 +847,9 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
         max_verifications: cap("max_verifications", document.max_verifications, |l| {
             l.max_verifications
         })?,
+        max_pair_queues: cap("max_pair_queues", document.max_pair_queues, |l| {
+            l.max_pair_queues
+        })?,
         ..default
     };
     let connections = |name, value, default, ceiling| rate(name, value, default, 1, ceiling);

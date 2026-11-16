@@ -9,7 +9,9 @@
 //! request ([`RoomRequest::principal`]). Reaching the host admits nothing.
 
 use async_trait::async_trait;
+use jid::{BareJid, FullJid};
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::principal::RemotePrincipal;
 use super::reach::RoomOperation;
@@ -42,8 +44,17 @@ pub enum SeatChange {
     Unchanged,
     /// The room seated the occupant: the seat stays.
     Seated,
-    /// The room refused the join: the seat opened for it is dropped.
+    /// The room refused the join: the seat opened for it is dropped. For
+    /// a request of an occupant that held its seat before, the room no
+    /// longer admits the occupant: the seat ends and the room removes it.
     Refused,
+    /// The request is presence that enters the room although its sender
+    /// holds a seat: the room no longer seats the occupant under the
+    /// seat's generation, or the occupant asks to enter again. Nothing was
+    /// decided. The router ends the seat, opens another and asks again
+    /// with [`RoomRequest::joining`] set, so the room's answer precedes
+    /// its traffic for the new seat (XEP-0045 §7.1).
+    Rejoin,
 }
 
 /// The host's answer to one request.
@@ -126,12 +137,24 @@ pub enum SeatEnd {
     /// The room stopped being open to accounts at other servers: its
     /// `federated` setting was turned off.
     RoomClosed,
+    /// The host refused a request of the occupant in a way that ends its
+    /// occupancy: its domain is no longer admitted, its room is not open
+    /// to it any more, or its leave could not be answered.
+    Refused,
+    /// The replica that held the room stopped without ending the seat, and
+    /// this replica took the seat over with the room. What that replica
+    /// had queued for the occupant is lost, so the occupancy does not
+    /// continue: the occupant enters again.
+    HolderStopped,
 }
 
 /// The rooms of this deployment, as the S2S router reaches them.
 ///
-/// Calls are made off the stream's task, one at a time for each room, in
-/// the order the room's requests arrived.
+/// Calls are made off the stream's task. [`LocalRooms::handle`] and
+/// [`LocalRooms::unseat`] are called one at a time for each room, in the
+/// order the room's requests arrived; [`LocalRooms::place`] is called
+/// before them, one request of a room at a time, off the workers that call
+/// the others.
 #[async_trait]
 pub trait LocalRooms: Send + Sync {
     /// Decide one request and answer it. A stanza that asks for nothing a
@@ -145,6 +168,8 @@ pub trait LocalRooms: Send + Sync {
     /// facts of its sender's stream, before any seat is opened for it, so
     /// the replica a stream lands on never seats an occupant of a room it
     /// does not hold. A host of a single replica decides everything here.
+    /// Asked only of a host that [`Self::carries`], within a bound of the
+    /// router's own: an answer that comes later is not waited for.
     async fn place(&self, _principal: &RemotePrincipal, _stanza: &Stanza) -> RoomPlacement {
         RoomPlacement::Here
     }
@@ -158,4 +183,22 @@ pub trait LocalRooms: Send + Sync {
     /// Whether the room on this replica seats the occupant under the
     /// seat's generation; `None` when that cannot be told now.
     async fn seats(&self, seat: &Seat) -> Option<bool>;
+
+    /// Whether [`Self::place`] may find a room held by another replica. A
+    /// host that says no decides every request itself, and the router asks
+    /// it nothing before queueing a request for it.
+    fn carries(&self) -> bool {
+        false
+    }
+
+    /// Every occupant `room` seats on this replica, with the occupancy
+    /// generation it is seated under: one answer for all the seats of a
+    /// room. Empty for a room this replica holds no actor for; `None` when
+    /// that cannot be told now.
+    async fn occupancies(
+        &self,
+        _room: &BareJid,
+    ) -> Option<Vec<(FullJid, OccupancySessionGeneration)>> {
+        None
+    }
 }

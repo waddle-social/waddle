@@ -2,7 +2,7 @@
 //! of local entities.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use super::occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomVerdict,
     MAX_JOIN_ID_BYTES,
 };
+use super::placement::{PlacementBounds, Placements};
 use super::principal::RemotePrincipal;
 use super::reach::{reach, InboundReach, LocalTarget, Refusal};
 use super::replies;
@@ -62,12 +63,17 @@ pub struct RouterLimits {
     /// Stanzas waiting for one directional domain pair's stream. A full
     /// queue refuses further stanzas with `resource-constraint`.
     pub queue_per_peer: usize,
-    /// Directional domain pairs with a queue at once.
+    /// Directional domain pairs with a queue at once. The S2S snapshot's
+    /// `[limits] max_pair_queues` sets it for a deployment.
     pub peer_queues: usize,
     /// A reply to a remote sender opens a pair's queue only while fewer
     /// than this many pairs have one, and is dropped otherwise, so remote
     /// senders alone never hold every pair's queue. A reply on a pair that
-    /// already has a queue is not limited by it.
+    /// already has a queue is not limited by it. A remote occupant's join
+    /// opens its pair's queue within the same bound, and a pair keeps its
+    /// queue while this replica seats an occupant of its remote domain, so
+    /// this is also the most remote domains one replica seats occupants
+    /// for.
     pub reply_queues: usize,
     /// Requests to remote entities pending on this replica.
     pub pending_requests: usize,
@@ -183,6 +189,30 @@ pub struct RouterLimits {
     /// How many such stanzas one remote domain may send at once before its
     /// rate applies.
     pub room_request_burst: u32,
+    /// Of its domain's rate, the stanzas one remote account may address to
+    /// the MUC service a second, on average: requests, messages, chat
+    /// states and markers alike. A stanza beyond it is not taken, and the
+    /// domain's rate is not spent on it, so one account cannot spend what
+    /// the other accounts of its domain may send. Never above the domain's
+    /// rate.
+    pub room_request_rate_per_account: u32,
+    /// How many such stanzas one remote account may send at once before
+    /// its rate applies. Never above the domain's burst.
+    pub room_request_burst_per_account: u32,
+    /// Rooms whose requests are being placed at once: asked of the replica
+    /// that holds them, in a deployment that keeps a room on one replica.
+    pub room_placements: usize,
+    /// Of those, the rooms being placed for requests of one remote domain,
+    /// so that a domain whose rooms are held by a replica that does not
+    /// answer leaves the places of every other domain alone.
+    pub room_placements_per_peer: usize,
+    /// How long placing one request may take, waiting for one of those
+    /// places included, before its sender is answered with
+    /// `resource-constraint`.
+    pub room_placement_timeout: Duration,
+    /// How long requests for a room whose holder did not answer are
+    /// answered with `resource-constraint` without asking it again.
+    pub room_placement_backoff: Duration,
     /// Stanzas of local rooms waiting for one directional pair's stream:
     /// answers to remote requests and the rooms' traffic to the seats of
     /// that remote domain. A stanza for a seat that finds no place ends
@@ -191,6 +221,16 @@ pub struct RouterLimits {
     /// How long an answer to a remote request waits for a place among
     /// them before it is given up.
     pub room_reply_wait: Duration,
+    /// Copies of chat states and markers one local room may have queued
+    /// for remote seats a second, on average, and four seconds' worth at
+    /// once. A copy beyond it is dropped.
+    pub seat_ephemeral_rate_per_room: u32,
+    /// Of those, the copies of the chat states and markers of one
+    /// occupant, on the same terms.
+    pub seat_ephemeral_rate_per_sender: u32,
+    /// How long a stopping replica waits for the notices that tell its
+    /// remote occupants so to be taken by their streams.
+    pub shutdown_notice_wait: Duration,
     /// How often each seat held here is checked against the room that
     /// seats it.
     pub seat_reconcile_interval: Duration,
@@ -241,8 +281,17 @@ impl Default for RouterLimits {
             room_request_timeout: Duration::from_secs(30),
             room_request_rate: 50,
             room_request_burst: 200,
+            room_request_rate_per_account: 10,
+            room_request_burst_per_account: 40,
+            room_placements: 64,
+            room_placements_per_peer: 8,
+            room_placement_timeout: Duration::from_secs(5),
+            room_placement_backoff: Duration::from_secs(5),
             seat_traffic_per_peer: 4096,
             room_reply_wait: Duration::from_secs(10),
+            seat_ephemeral_rate_per_room: 1024,
+            seat_ephemeral_rate_per_sender: 256,
+            shutdown_notice_wait: Duration::from_secs(2),
             seat_reconcile_interval: Duration::from_secs(60),
             seat_owner_grace: Duration::from_secs(30),
         }
@@ -354,11 +403,16 @@ struct Hosting {
     store: Arc<dyn SeatStore>,
 }
 
-/// One remote domain's allowance of stanzas for the MUC service.
+/// A token bucket: one remote domain's allowance of stanzas for the MUC
+/// service, one account's share of it, or a room's or a sender's allowance
+/// of chat states and markers for remote seats.
 #[derive(Debug, Clone, Copy)]
 struct Allowance {
     tokens: f64,
     refilled: Instant,
+    /// For a remote domain: the refusals of its accounts' stanzas that may
+    /// still be answered.
+    refusals: f64,
 }
 
 /// The join a queued join presence is.
@@ -531,7 +585,29 @@ struct Inner {
     /// room.
     local_rooms: RoomQueues,
     /// Each remote domain's allowance of stanzas for the MUC service.
+    /// Taken before `account_allowances` when both are held.
     allowances: Mutex<HashMap<String, Allowance>>,
+    /// Each remote account's share of its domain's allowance.
+    account_allowances: Mutex<HashMap<BareJid, Allowance>>,
+    /// Requests for local rooms waiting to be placed, where the room host
+    /// keeps rooms on other replicas.
+    placements: Placements,
+    /// What rooms and their senders may still have queued of chat states
+    /// and markers for remote seats.
+    ephemeral: Mutex<hosting::EphemeralBudgets>,
+    /// Whether a pass that checks seats against their rooms is running.
+    reconciling: AtomicBool,
+    /// The room the last such pass stopped at, when it did not reach the
+    /// last one.
+    reconcile_after: Mutex<Option<BareJid>>,
+    /// The row the last check of this replica's rows stopped at.
+    rows_after: Mutex<Option<(BareJid, FullJid)>>,
+    /// Set once this replica has begun to stop: no seat is opened any
+    /// more.
+    stopping: AtomicBool,
+    /// Cancelled once a stopping replica has told its remote occupants so
+    /// and given the notices their time: the streams may close then.
+    drained: CancellationToken,
     /// The remote room occupancies every replica shares.
     rooms: Arc<dyn RemoteRoomStore>,
     /// The verifications this replica is waiting on, by the service's
@@ -575,9 +651,10 @@ impl S2sRouter {
     /// [`Self::attach_transport`], every stanza for a remote domain is
     /// refused with `resource-constraint`.
     pub fn new(options: RouterOptions) -> Self {
-        let shutdown = options
-            .stop
-            .map_or_else(CancellationToken::new, |stop| stop.child_token());
+        // The router stops in two steps once the process stop fires: it
+        // tells the remote occupants it seats that it is stopping, and
+        // only then ends its workers.
+        let shutdown = CancellationToken::new();
         let room_queues = RoomQueues::new(
             options.limits.room_delivery_workers,
             options.limits.room_deliveries,
@@ -604,6 +681,20 @@ impl S2sRouter {
                 options.limits.room_requests_per_peer,
             ),
             allowances: Mutex::new(HashMap::new()),
+            account_allowances: Mutex::new(HashMap::new()),
+            placements: Placements::new(PlacementBounds {
+                waiting: options.limits.room_requests,
+                waiting_per_room: options.limits.room_requests_per_room,
+                waiting_per_peer: options.limits.room_requests_per_peer,
+                placing: options.limits.room_placements,
+                placing_per_peer: options.limits.room_placements_per_peer,
+            }),
+            ephemeral: Mutex::new(hosting::EphemeralBudgets::default()),
+            reconciling: AtomicBool::new(false),
+            reconcile_after: Mutex::new(None),
+            rows_after: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+            drained: CancellationToken::new(),
             rooms: options.rooms,
             verifications: Mutex::new(HashMap::new()),
             room_queues,
@@ -612,6 +703,16 @@ impl S2sRouter {
             shutdown,
         });
         inner.tasks.spawn(sweep(Arc::clone(&inner)));
+        if let Some(stop) = options.stop {
+            let router = Arc::clone(&inner);
+            inner.tasks.spawn(async move {
+                tokio::select! {
+                    () = router.shutdown.cancelled() => return,
+                    () = stop.cancelled() => {}
+                }
+                router.stop().await;
+            });
+        }
         for shard in 0..inner.room_queues.shards() {
             inner
                 .tasks
@@ -682,6 +783,12 @@ impl S2sRouter {
         self.inner.local.set(local).is_ok()
     }
 
+    /// Requests for local rooms waiting on this replica for the replica
+    /// that holds their room to be found.
+    pub fn requests_being_placed(&self) -> usize {
+        self.inner.placements.waiting()
+    }
+
     /// Requests to remote entities pending on this replica.
     pub fn pending_requests(&self) -> usize {
         self.inner.pending().requests.len()
@@ -693,12 +800,25 @@ impl S2sRouter {
         self.inner.rooms.count().await.unwrap_or(0)
     }
 
-    /// Stop taking stanzas, end every worker and wait for them, at most
+    /// Cancelled once the router, having begun to stop, has told the
+    /// remote occupants it seats that the service is shutting down and has
+    /// given those notices their time to leave. The connection manager
+    /// that carries the router's stanzas drains on this token, so its
+    /// streams are still open while the notices are written.
+    pub fn drained(&self) -> CancellationToken {
+        self.inner.drained.clone()
+    }
+
+    /// Tell the remote occupants this replica seats that it is stopping,
+    /// stop taking stanzas, end every worker and wait for them, at most
     /// `budget`. Stanzas still queued are answered as if their stream could
     /// not be established. `true` when every task ended.
     pub async fn shutdown(&self, budget: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + budget;
+        // Within the budget; the workers end whether or not it finished.
+        let _ = tokio::time::timeout_at(deadline, self.inner.stop()).await;
         self.inner.shutdown.cancel();
+        self.inner.drained.cancel();
         self.inner.tasks.close();
         let ended = tokio::time::timeout_at(deadline, self.inner.tasks.wait())
             .await
@@ -728,6 +848,10 @@ impl RemoteRoute for S2sRouter {
 
     async fn adopt_seat(&self, room: &BareJid, occupant: &FullJid) -> bool {
         self.inner.adopt_seat(room, occupant).await
+    }
+
+    async fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {
+        self.inner.end_adopted_seats(room, occupants);
     }
 
     async fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {
@@ -796,6 +920,15 @@ fn stanza_element(stanza: &Stanza) -> Element {
 }
 
 impl Inner {
+    /// Stop: tell the remote occupants this replica seats, then end the
+    /// workers and let the streams close. Whoever calls it first runs it;
+    /// a later call ends the workers at once.
+    async fn stop(self: &Arc<Self>) {
+        self.farewell().await;
+        self.shutdown.cancel();
+        self.drained.cancel();
+    }
+
     fn pending(&self) -> MutexGuard<'_, PendingRequests> {
         lock(&self.pending)
     }
@@ -2157,19 +2290,27 @@ impl Inner {
     }
 
     /// End an idle pair's queue: `true` when it holds nothing, no place on
-    /// it is reserved, and no other stanza can reach it.
+    /// it is reserved, this replica seats no occupant of its remote domain
+    /// in a room of its local one, and no other stanza can reach it.
     fn retire(
         &self,
         pair: &Pair,
         receiver: &mut mpsc::Receiver<Queued>,
         seats: &mut mpsc::Receiver<Queued>,
     ) -> bool {
+        // A pair whose remote domain this replica seats occupants for
+        // keeps its queue: were it retired, the room's next stanza for
+        // them might find every queue taken and end their seats.
+        let seated = self.seats.seats_pair(
+            pair.local.as_domain_ref().as_str(),
+            pair.remote.as_domain_ref().as_str(),
+        );
         let mut queues = lock(&self.queues);
         let reserved = queues.get(pair).is_some_and(|queue| {
             queue.sender.capacity() < queue.sender.max_capacity()
                 || queue.seats.capacity() < queue.seats.max_capacity()
         });
-        if !receiver.is_empty() || !seats.is_empty() || reserved {
+        if !receiver.is_empty() || !seats.is_empty() || reserved || seated {
             return false;
         }
         queues.remove(pair);
@@ -2763,9 +2904,11 @@ async fn sweep(router: Arc<Inner>) {
         router.sweep_verifications().await;
         router.sweep_due_rooms().await;
         router.sweep_lost_seats().await;
+        // On a task of its own: a pass asks rooms, and this loop records
+        // that the replica is alive.
         if last_reconcile.elapsed() >= router.limits.seat_reconcile_interval {
             last_reconcile = Instant::now();
-            router.reconcile_seats().await;
+            router.start_reconcile();
         }
         if last_prune.elapsed() >= router.limits.prune_after {
             last_prune = Instant::now();
@@ -2812,7 +2955,7 @@ async fn deliver_room_traffic(router: Arc<Inner>, shard: usize) {
             }
             RoomWork::Ended(occupancy) => router.end_lost(*occupancy).await,
             // Work of the queues that serve local rooms.
-            RoomWork::Request(_) | RoomWork::Unseat(_) => {}
+            RoomWork::Request(_) | RoomWork::Unseat(_) | RoomWork::Departure(_) => {}
         }
     }
 }

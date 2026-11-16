@@ -33,6 +33,7 @@ mod correlation;
 mod local;
 mod local_rooms;
 mod occupancy;
+mod placement;
 mod principal;
 mod reach;
 mod replies;

@@ -61,6 +61,11 @@ pub(super) enum RoomWork {
     /// A remote occupant's seat in a local room that ended without the
     /// room deciding it: the room removes the occupant.
     Unseat(Box<(Seat, SeatEnd)>),
+    /// A room's own presence that tells the occupant of a seat that its
+    /// occupancy ended, which reached the router apart from the occupant's
+    /// own request: sent, and the seat ended, only if the room no longer
+    /// seats the occupant under the seat's generation.
+    Departure(Box<(Seat, Stanza)>),
 }
 
 /// A stanza for a local room, as it arrived.
@@ -73,10 +78,6 @@ pub(super) struct LocalRoomRequest {
     /// it came from, as its stream authenticated them.
     pub local: CanonicalDomain,
     pub remote: CanonicalDomain,
-    /// Whether another replica verified the stream and carried the stanza
-    /// here because this replica holds its room. A carried request is
-    /// decided here and never carried again.
-    pub carried: bool,
 }
 
 /// A stanza that may be a room's traffic, as it arrived.

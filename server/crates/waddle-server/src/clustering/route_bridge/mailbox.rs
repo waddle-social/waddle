@@ -568,8 +568,15 @@ async fn seat_room_occupancy_in(
                 seat: record.seat,
             })
             .collect();
-        let occupants = remote_reseating(state, room, occupants).await;
+        let (occupants, adopted) = remote_reseating(state, room, occupants).await;
         let Some(occupants) = host_grant_reseating(state, room, occupants).await else {
+            // Nothing is seated: the seats taken over are ended all the
+            // same, so their occupants are told and no row stays behind.
+            state
+                .deps
+                .remote_route
+                .end_adopted_seats(room, &adopted)
+                .await;
             return false;
         };
         match actor
@@ -587,6 +594,15 @@ async fn seat_room_occupancy_in(
                     discarded = seating.discarded,
                     "seated recovered room occupants"
                 );
+                // An occupant of another server was seated on a seat taken
+                // over from the replica that stopped. Its occupancy does
+                // not continue behind what that replica had queued for it:
+                // the room removes it again, in its own order.
+                state
+                    .deps
+                    .remote_route
+                    .end_adopted_seats(room, &adopted)
+                    .await;
                 // The seats were restored from a decision read before the
                 // actor applied them. A managed room is swept afterwards,
                 // so a seat a revoke overtook meanwhile is removed; that
@@ -598,6 +614,11 @@ async fn seat_room_occupancy_in(
             }
             Err(error) => {
                 tracing::warn!(%error, room = %room, "recovered room occupants not seated");
+                state
+                    .deps
+                    .remote_route
+                    .end_adopted_seats(room, &adopted)
+                    .await;
                 // An ask that timed out or lost its reply may have seated
                 // some of them: the sweep removes any the grants do not
                 // admit.
@@ -625,7 +646,8 @@ async fn seat_room_occupancy_in(
     true
 }
 
-/// The recovered occupants of `room` this replica can seat at all.
+/// The recovered occupants of `room` this replica can seat at all, and of
+/// them the occupants of other servers.
 ///
 /// An occupant at a domain this deployment does not serve was seated over
 /// S2S by the replica that held the room before. Its seat is restored only
@@ -634,31 +656,39 @@ async fn seat_room_occupancy_in(
 /// for a remote JID only while this replica holds its seat. A remote
 /// occupant without one, or whose seat a live replica still holds, is not
 /// restored, in any room.
+///
+/// A seat taken over is restored so that the room can end it in its own
+/// order, not so that the occupancy continues: the caller ends those seats
+/// once the room has seated its occupants
+/// ([`crate::destination::RemoteRoute::end_adopted_seats`]).
 async fn remote_reseating(
     state: &crate::server::routes::websocket::WebSocketState,
     room: &BareJid,
     occupants: Vec<RecoveredOccupant>,
-) -> Vec<RecoveredOccupant> {
+) -> (Vec<RecoveredOccupant>, Vec<jid::FullJid>) {
     let Some(served) = state
         .deps
         .service_domains
         .served_domains(state.deps.auth_state.xmpp_domain.as_str())
     else {
-        return occupants;
+        return (occupants, Vec::new());
     };
     let mut seated = Vec::with_capacity(occupants.len());
+    let mut adopted = Vec::new();
     for occupant in occupants {
-        if served.serves(occupant.real_jid.domain())
-            || state
-                .deps
-                .remote_route
-                .adopt_seat(room, &occupant.real_jid)
-                .await
+        if served.serves(occupant.real_jid.domain()) {
+            seated.push(occupant);
+        } else if state
+            .deps
+            .remote_route
+            .adopt_seat(room, &occupant.real_jid)
+            .await
         {
+            adopted.push(occupant.real_jid.clone());
             seated.push(occupant);
         }
     }
-    seated
+    (seated, adopted)
 }
 
 /// The recovered occupants of `room` whose seats are restored.

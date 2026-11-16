@@ -158,3 +158,94 @@ pub(super) fn room_request_not_carried() {
         1,
     );
 }
+
+/// A stanza for the MUC service was not taken because its account had
+/// spent its share of its domain's request rate.
+pub(super) fn room_request_account_limited() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.account_limited",
+        "{stanza}",
+        "Stanzas from S2S streams to the MUC service not taken because their account had spent its share of its domain's request rate.",
+        1,
+    );
+}
+
+/// The replica that holds a room did not answer within the placement
+/// timeout, and the request's sender was answered with an error.
+pub(super) fn room_placement_timed_out() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.placement_timeouts",
+        "{stanza}",
+        "Stanzas from S2S streams for rooms another replica holds whose holder did not answer within the placement timeout.",
+        1,
+    );
+}
+
+/// A join was refused because no queue for the occupant's domain could be
+/// opened or it was full, so the room's stanzas for the seat could not
+/// leave.
+pub(super) fn seat_refused_unreachable() {
+    counter_add!(
+        "waddle.s2s.route.seats.refused_unreachable",
+        "{seat}",
+        "Joins of remote occupants refused because no place for the room's stanzas to their domain was free.",
+        1,
+    );
+}
+
+/// A copy of a chat state or a marker for a remote seat was dropped: its
+/// room or its sender had spent its allowance of them, or the queue for
+/// the seat's domain was filling.
+pub(super) fn seat_ephemeral_dropped() {
+    counter_add!(
+        "waddle.s2s.route.seat_traffic.ephemeral_dropped",
+        "{stanza}",
+        "Copies of chat states and markers for remote seats dropped because their room or sender had spent its allowance or the queue for the remote domain was filling.",
+        1,
+    );
+}
+
+/// A room's presence that tells an occupant its occupancy ended was
+/// dropped: the room still seats the occupant, so the presence was for an
+/// earlier occupancy.
+pub(super) fn seat_departure_stale() {
+    counter_add!(
+        "waddle.s2s.route.seat_traffic.stale_departures",
+        "{stanza}",
+        "Presence of local rooms ending a remote occupant's earlier occupancy, dropped because the room seats the occupant under a later one.",
+        1,
+    );
+}
+
+/// A remote occupant's seat ended because its room no longer seated the
+/// occupant when the seats were checked against their rooms.
+pub(super) fn seat_ended_unseated() {
+    counter_add!(
+        "waddle.s2s.route.seats.ended_unseated",
+        "{seat}",
+        "Seats of remote occupants ended because their room no longer seated the occupant.",
+        1,
+    );
+}
+
+/// A remote occupant's seat ended because this replica took it over from
+/// one that stopped.
+pub(super) fn seat_ended_holder_stopped() {
+    counter_add!(
+        "waddle.s2s.route.seats.ended_holder_stopped",
+        "{seat}",
+        "Seats of remote occupants ended after this replica took them over from a replica that stopped.",
+        1,
+    );
+}
+
+/// A row of the seat table that named no seat this replica holds was
+/// removed: its removal had failed when its seat ended.
+pub(super) fn seat_row_reclaimed() {
+    counter_add!(
+        "waddle.s2s.route.seats.rows_reclaimed",
+        "{seat}",
+        "Rows of the seat table removed because the replica that owns them holds no seat for them.",
+        1,
+    );
+}

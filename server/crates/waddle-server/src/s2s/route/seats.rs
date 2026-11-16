@@ -20,7 +20,8 @@
 //! (inbound MUC).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use jid::{BareJid, FullJid};
@@ -103,7 +104,8 @@ fn storage(error: impl std::fmt::Display) -> SeatStoreError {
 #[async_trait]
 pub trait SeatStore: Send + Sync {
     /// Insert `seat` unless one for its room and occupant exists or it
-    /// would exceed `limits`.
+    /// would exceed `limits`. A seat that exists is reported as such
+    /// whatever the bounds say: its row is not counted against itself.
     async fn insert(&self, seat: &Seat, limits: &SeatLimits) -> Result<SeatInsert, SeatStoreError>;
 
     /// The seat `occupant` holds in `room`, if any.
@@ -150,6 +152,16 @@ pub trait SeatStore: Send + Sync {
     /// lost.
     async fn lost(&self, owner: &str, limit: usize) -> Result<Vec<Seat>, SeatStoreError>;
 
+    /// At most `limit` seats `owner` owns, in the order of their room and
+    /// occupant, after the seat `after` names when one is given. A caller
+    /// reads every seat of an owner by passing the last seat of each page.
+    async fn owned(
+        &self,
+        owner: &str,
+        after: Option<(&BareJid, &FullJid)>,
+        limit: usize,
+    ) -> Result<Vec<Seat>, SeatStoreError>;
+
     /// At most `limit` seats not written since `before_ms` whose owner has
     /// not recorded that it is alive since then: those a stopped replica
     /// left.
@@ -178,7 +190,17 @@ fn trust_profile_code(profile: TrustProfileKind) -> &'static str {
 #[derive(Clone)]
 pub struct SqlSeatStore {
     db: Database,
+    /// The deployment's seats as last counted, and when. A join reads the
+    /// total from here, so the table is counted once in a while and not
+    /// for every join.
+    total: Arc<Mutex<Option<(usize, Instant)>>>,
 }
+
+/// How long a count of the deployment's seats serves the joins that follow
+/// it. Seats other replicas open or end meanwhile are not in it, so the
+/// deployment's total is held to within what every replica seats in this
+/// time.
+const TOTAL_COUNT_AGE: Duration = Duration::from_secs(5);
 
 const COLUMNS: &str = "room_jid, occupant_jid, nick, session_id, strength, trust_profile, \
      snapshot_generation, owner_id, lost_at_ms, updated_at_ms";
@@ -193,7 +215,40 @@ const PEER_LOCK_SEED: i64 = 0x7332_735f_7365_6174;
 
 impl SqlSeatStore {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            total: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn counted(&self) -> MutexGuard<'_, Option<(usize, Instant)>> {
+        // The cell holds one value written whole, so a poisoned lock still
+        // holds a usable one.
+        match self.total.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The deployment's seats, counted now when the last count is older
+    /// than [`TOTAL_COUNT_AGE`].
+    async fn approximate_total(&self) -> Result<usize, SeatStoreError> {
+        if let Some((total, at)) = *self.counted() {
+            if at.elapsed() < TOTAL_COUNT_AGE {
+                return Ok(total);
+            }
+        }
+        let total = self.count().await?;
+        *self.counted() = Some((total, Instant::now()));
+        Ok(total)
+    }
+
+    /// Apply a seat this store opened (`+1`) or ended (`-1`) to the last
+    /// count, so this replica's own joins are counted without a read.
+    fn adjust_total(&self, by: isize) {
+        if let Some((total, _)) = self.counted().as_mut() {
+            *total = total.saturating_add_signed(by);
+        }
     }
 
     async fn execute(
@@ -297,16 +352,20 @@ impl SeatStore for SqlSeatStore {
         }
         let account = seat.occupant.to_bare();
         let peer = seat.occupant.domain().as_str();
-        // The counts and the insert are one transaction. On SQLite it holds
-        // the write lock throughout. On PostgreSQL it first takes a
-        // transaction advisory lock on the remote domain, so the joins of
-        // one peer, and so of each of its accounts, are counted and
-        // inserted one at a time and the per-peer and per-account bounds
-        // hold exactly; at READ COMMITTED each count then sees every join
-        // committed before the lock was granted. Joins of different peers
-        // run concurrently, so a room's bound and the deployment's total
-        // can be exceeded briefly by the joins of other peers in flight at
-        // once. Each count reads at most its bound's rows through an index.
+        // The deployment's total is read from the last count, outside the
+        // transaction: counting it for every join would read the whole
+        // table under the join's lock.
+        let total = self.approximate_total().await?;
+        // The existence check, the counts and the insert are one
+        // transaction. On SQLite it holds the write lock throughout. On
+        // PostgreSQL it first takes a transaction advisory lock on the
+        // remote domain, so the joins of one peer, and so of each of its
+        // accounts, are counted and inserted one at a time and the per-peer
+        // and per-account bounds hold exactly; at READ COMMITTED each count
+        // then sees every join committed before the lock was granted. Joins
+        // of different peers run concurrently, so a room's bound can be
+        // exceeded briefly by the joins of other peers in flight at once.
+        // Each count reads at most its bound's rows through an index.
         let mut transaction = self.db.begin_immediate().await.map_err(storage)?;
         if self.db.driver() == DatabaseDriver::Postgres {
             transaction
@@ -324,6 +383,20 @@ impl SeatStore for SqlSeatStore {
                 )
                 .await
                 .map_err(storage)?;
+        }
+        // A seat that exists is the caller's to take over or to leave: it
+        // is answered before any bound, which its own row would otherwise
+        // count against.
+        let existing = count_where(
+            &mut transaction,
+            " WHERE room_jid = ? AND occupant_jid = ?",
+            key_params(&seat.room, &seat.occupant),
+            1,
+        )
+        .await?;
+        if existing > 0 {
+            transaction.rollback().await.map_err(storage)?;
+            return Ok(SeatInsert::Exists);
         }
         let in_room = count_where(
             &mut transaction,
@@ -346,7 +419,6 @@ impl SeatStore for SqlSeatStore {
             limits.per_account,
         )
         .await?;
-        let total = count_where(&mut transaction, "", Vec::new(), limits.total).await?;
         if in_room >= limits.per_room
             || of_peer >= limits.per_peer
             || of_account >= limits.per_account
@@ -355,6 +427,10 @@ impl SeatStore for SqlSeatStore {
             transaction.rollback().await.map_err(storage)?;
             return Ok(SeatInsert::Bounds);
         }
+        // No other join can insert this key between the check and here:
+        // the key names an occupant of this peer, whose joins wait for the
+        // lock above. The conflict clause is a guard against a second row,
+        // not a path that is expected to be taken.
         let inserted = transaction
             .execute(
                 "INSERT INTO s2s_local_room_seats \
@@ -381,6 +457,7 @@ impl SeatStore for SqlSeatStore {
             .map_err(storage)?;
         transaction.commit().await.map_err(storage)?;
         Ok(if inserted == 1 {
+            self.adjust_total(1);
             SeatInsert::Inserted
         } else {
             SeatInsert::Exists
@@ -421,6 +498,9 @@ impl SeatStore for SqlSeatStore {
                 params,
             )
             .await?;
+        if removed == 1 {
+            self.adjust_total(-1);
+        }
         Ok(removed == 1)
     }
 
@@ -497,11 +577,15 @@ impl SeatStore for SqlSeatStore {
     }
 
     async fn remove_owned(&self, owner: &str) -> Result<u64, SeatStoreError> {
-        self.execute(
-            "DELETE FROM s2s_local_room_seats WHERE owner_id = ?",
-            crate::db_params![owner],
-        )
-        .await
+        let removed = self
+            .execute(
+                "DELETE FROM s2s_local_room_seats WHERE owner_id = ?",
+                crate::db_params![owner],
+            )
+            .await?;
+        // The next join counts again.
+        *self.counted() = None;
+        Ok(removed)
     }
 
     async fn lost(&self, owner: &str, limit: usize) -> Result<Vec<Seat>, SeatStoreError> {
@@ -513,6 +597,34 @@ impl SeatStore for SqlSeatStore {
         ]
         .concat();
         self.select(&sql, crate::db_params![owner, limit]).await
+    }
+
+    async fn owned(
+        &self,
+        owner: &str,
+        after: Option<(&BareJid, &FullJid)>,
+        limit: usize,
+    ) -> Result<Vec<Seat>, SeatStoreError> {
+        let mut params = crate::db_params![owner];
+        let page = match after {
+            Some((room, occupant)) => {
+                params.push(room.as_str().into());
+                params.push(room.as_str().into());
+                params.push(occupant.as_str().into());
+                " AND (room_jid > ? OR (room_jid = ? AND occupant_jid > ?))"
+            }
+            None => "",
+        };
+        params.push(limit.into());
+        let sql = [
+            "SELECT ",
+            COLUMNS,
+            " FROM s2s_local_room_seats WHERE owner_id = ?",
+            page,
+            " ORDER BY room_jid, occupant_jid LIMIT ?",
+        ]
+        .concat();
+        self.select(&sql, params).await
     }
 
     async fn orphaned(&self, before_ms: i64, limit: usize) -> Result<Vec<Seat>, SeatStoreError> {
@@ -558,12 +670,27 @@ const PENDING_STANZAS: usize = 256;
 struct Held {
     seat: Seat,
     /// The archive identifiers of the room messages most recently handed
-    /// to the seat's queue, oldest first.
-    recent: VecDeque<String>,
+    /// to the seat's queue, oldest first, each with its place in the count
+    /// of all those handed to it.
+    recent: VecDeque<(u64, String)>,
+    /// How many room messages were handed to the seat's queue.
+    copies: u64,
     /// While the join that opened the seat is being answered: the room's
     /// stanzas for the occupant that arrived meanwhile, kept until the
     /// join's own answer is queued so that they follow it (XEP-0045 §7.1).
     pending: Option<Vec<Stanza>>,
+}
+
+impl Held {
+    /// Remember that the room message archived as `archive_id` was handed
+    /// to the seat's queue.
+    fn note(&mut self, archive_id: &str) {
+        if self.recent.len() >= RECENT_COPIES {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((self.copies, archive_id.to_owned()));
+        self.copies += 1;
+    }
 }
 
 /// What became of a room's stanza offered for a seat whose join may still
@@ -588,14 +715,78 @@ pub enum Deferred {
 /// evidence each seat was admitted under ([`SeatEvidence`]).
 #[derive(Debug, Default)]
 pub struct SeatIndex {
-    rooms: Mutex<HashMap<BareJid, HashMap<FullJid, Held>>>,
+    held: Mutex<HeldSeats>,
+}
+
+/// The seats held, with what is counted of them so that nothing reads
+/// every seat to answer how many there are or whether a domain pair has
+/// any.
+#[derive(Debug, Default)]
+struct HeldSeats {
+    rooms: HashMap<BareJid, HashMap<FullJid, Held>>,
+    /// Seats held for each pair of a room's domain and an occupant's.
+    pairs: HashMap<(String, String), usize>,
+    seats: usize,
+}
+
+fn pair_of(seat: &Seat) -> (String, String) {
+    (
+        seat.room.domain().as_str().to_owned(),
+        seat.occupant.domain().as_str().to_owned(),
+    )
+}
+
+impl HeldSeats {
+    fn insert(&mut self, seat: Seat, pending: Option<Vec<Stanza>>) {
+        let pair = pair_of(&seat);
+        let replaced = self.rooms.entry(seat.room.clone()).or_default().insert(
+            seat.occupant.clone(),
+            Held {
+                seat,
+                recent: VecDeque::new(),
+                copies: 0,
+                pending,
+            },
+        );
+        // A seat that replaces one of the same room and occupant is of the
+        // same pair.
+        if replaced.is_none() {
+            self.seats += 1;
+            *self.pairs.entry(pair).or_insert(0) += 1;
+        }
+    }
+
+    fn remove(&mut self, room: &BareJid, occupant: &FullJid) -> Option<Seat> {
+        let seats = self.rooms.get_mut(room)?;
+        let seat = seats.remove(occupant)?.seat;
+        if seats.is_empty() {
+            self.rooms.remove(room);
+        }
+        self.seats = self.seats.saturating_sub(1);
+        let pair = pair_of(&seat);
+        if let Some(count) = self.pairs.get_mut(&pair) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.pairs.remove(&pair);
+            }
+        }
+        Some(seat)
+    }
+
+    fn get_mut(&mut self, room: &BareJid, occupant: &FullJid) -> Option<&mut Held> {
+        self.rooms.get_mut(room)?.get_mut(occupant)
+    }
+
+    fn get(&self, room: &BareJid, occupant: &FullJid) -> Option<&Held> {
+        self.rooms.get(room)?.get(occupant)
+    }
 }
 
 impl SeatIndex {
-    fn rooms(&self) -> MutexGuard<'_, HashMap<BareJid, HashMap<FullJid, Held>>> {
-        // Every update leaves the maps consistent, so a poisoned lock still
-        // holds usable state.
-        match self.rooms.lock() {
+    fn held(&self) -> MutexGuard<'_, HeldSeats> {
+        // Every update leaves the maps and counts consistent, so a poisoned
+        // lock still holds usable state.
+        match self.held.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -603,34 +794,20 @@ impl SeatIndex {
 
     /// Hold `seat`, replacing any seat of the same room and occupant.
     pub fn hold(&self, seat: Seat) {
-        self.insert(seat, None);
+        self.held().insert(seat, None);
     }
 
     /// Hold `seat` while the join that opened it is answered: the room's
     /// stanzas for it are kept until [`Self::settle`].
     pub fn hold_pending(&self, seat: Seat) {
-        self.insert(seat, Some(Vec::new()));
-    }
-
-    fn insert(&self, seat: Seat, pending: Option<Vec<Stanza>>) {
-        self.rooms().entry(seat.room.clone()).or_default().insert(
-            seat.occupant.clone(),
-            Held {
-                seat,
-                recent: VecDeque::new(),
-                pending,
-            },
-        );
+        self.held().insert(seat, Some(Vec::new()));
     }
 
     /// Keep `stanza` for the seat `occupant` holds in `room` if its join is
     /// still being answered, or hand it back to go on now.
     pub fn defer(&self, room: &BareJid, occupant: &FullJid, stanza: Stanza) -> Deferred {
-        let mut rooms = self.rooms();
-        let Some(held) = rooms
-            .get_mut(room)
-            .and_then(|seats| seats.get_mut(occupant))
-        else {
+        let mut held = self.held();
+        let Some(held) = held.get_mut(room, occupant) else {
             return Deferred::NotHeld(stanza);
         };
         match &mut held.pending {
@@ -654,8 +831,8 @@ impl SeatIndex {
         occupant: &FullJid,
         session: OccupancySessionGeneration,
     ) -> Option<Vec<Stanza>> {
-        let mut rooms = self.rooms();
-        let held = rooms.get_mut(room)?.get_mut(occupant)?;
+        let mut held = self.held();
+        let held = held.get_mut(room, occupant)?;
         if held.seat.session != session {
             return None;
         }
@@ -670,17 +847,27 @@ impl SeatIndex {
 
     /// The seat `occupant` holds in `room` here.
     pub fn get(&self, room: &BareJid, occupant: &FullJid) -> Option<Seat> {
-        self.rooms()
-            .get(room)
-            .and_then(|seats| seats.get(occupant))
+        self.held()
+            .get(room, occupant)
             .map(|held| held.seat.clone())
     }
 
     /// Whether `occupant` holds a seat in `room` here.
     pub fn holds(&self, room: &BareJid, occupant: &FullJid) -> bool {
-        self.rooms()
-            .get(room)
-            .is_some_and(|seats| seats.contains_key(occupant))
+        self.held().get(room, occupant).is_some()
+    }
+
+    /// Whether `occupant` holds the seat seated under `session` in `room`
+    /// here.
+    pub fn holds_under(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> bool {
+        self.held()
+            .get(room, occupant)
+            .is_some_and(|held| held.seat.session == session)
     }
 
     /// Stop holding the seat `occupant` holds in `room`, if it is still
@@ -691,22 +878,17 @@ impl SeatIndex {
         occupant: &FullJid,
         session: OccupancySessionGeneration,
     ) -> Option<Seat> {
-        let mut rooms = self.rooms();
-        let seats = rooms.get_mut(room)?;
-        if seats.get(occupant)?.seat.session != session {
+        let mut held = self.held();
+        if held.get(room, occupant)?.seat.session != session {
             return None;
         }
-        let released = seats.remove(occupant).map(|held| held.seat);
-        if seats.is_empty() {
-            rooms.remove(room);
-        }
-        released
+        held.remove(room, occupant)
     }
 
     /// Record the nickname the room now seats `occupant` under.
     pub fn rename(&self, room: &BareJid, occupant: &FullJid, nick: &str) -> Option<Seat> {
-        let mut rooms = self.rooms();
-        let held = rooms.get_mut(room)?.get_mut(occupant)?;
+        let mut held = self.held();
+        let held = held.get_mut(room, occupant)?;
         held.seat.nick = nick.to_owned();
         Some(held.seat.clone())
     }
@@ -715,27 +897,61 @@ impl SeatIndex {
     /// to the seat's queue: `false` when it already was, so the copy
     /// offered again is not sent twice, or when no such seat is held.
     pub fn note_copy(&self, room: &BareJid, occupant: &FullJid, archive_id: &str) -> bool {
-        let mut rooms = self.rooms();
-        let Some(held) = rooms
-            .get_mut(room)
-            .and_then(|seats| seats.get_mut(occupant))
-        else {
+        let mut held = self.held();
+        let Some(held) = held.get_mut(room, occupant) else {
             return false;
         };
-        if held.recent.iter().any(|seen| seen == archive_id) {
+        if held.recent.iter().any(|(_, seen)| seen == archive_id) {
             return false;
         }
-        if held.recent.len() >= RECENT_COPIES {
-            held.recent.pop_front();
-        }
-        held.recent.push_back(archive_id.to_owned());
+        held.note(archive_id);
         true
+    }
+
+    /// A mark for [`Self::answers_with`]: the copies handed to the seat's
+    /// queue from now on are told apart from those handed to it before.
+    pub fn copy_mark(&self, room: &BareJid, occupant: &FullJid) -> u64 {
+        self.held()
+            .get(room, occupant)
+            .map_or(0, |held| held.copies)
+    }
+
+    /// Whether the answer to a request of the seat's occupant carries the
+    /// room message archived as `archive_id`, where `mark` was taken
+    /// before the request was decided. It does not when the message was
+    /// handed to the seat's queue since `mark`: the room gave the sender
+    /// its copy where it fanned the message out, and the answer would
+    /// repeat it. A message handed to the seat before `mark` is one the
+    /// occupant sent again, whose answer is given again.
+    pub fn answers_with(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        archive_id: &str,
+        mark: u64,
+    ) -> bool {
+        let mut held = self.held();
+        let Some(held) = held.get_mut(room, occupant) else {
+            return true;
+        };
+        match held.recent.iter().find(|(_, seen)| seen == archive_id) {
+            Some((at, _)) => *at < mark,
+            None => {
+                held.note(archive_id);
+                true
+            }
+        }
     }
 
     /// Every seat of an occupant at `occupant_domain` in a room at
     /// `room_domain` held here.
     pub fn of_pair(&self, room_domain: &str, occupant_domain: &str) -> Vec<Seat> {
-        self.rooms()
+        let held = self.held();
+        let pair = (room_domain.to_owned(), occupant_domain.to_owned());
+        if !held.pairs.contains_key(&pair) {
+            return Vec::new();
+        }
+        held.rooms
             .iter()
             .filter(|(room, _)| room.domain().as_str() == room_domain)
             .flat_map(|(_, seats)| seats.values())
@@ -744,38 +960,68 @@ impl SeatIndex {
             .collect()
     }
 
+    /// Whether any seat of an occupant at `occupant_domain` in a room at
+    /// `room_domain` is held here.
+    pub fn seats_pair(&self, room_domain: &str, occupant_domain: &str) -> bool {
+        self.held()
+            .pairs
+            .contains_key(&(room_domain.to_owned(), occupant_domain.to_owned()))
+    }
+
     /// Every seat held here in `room`.
     pub fn of_room(&self, room: &BareJid) -> Vec<Seat> {
-        self.rooms()
+        self.held()
+            .rooms
             .get(room)
             .map(|seats| seats.values().map(|held| held.seat.clone()).collect())
             .unwrap_or_default()
     }
 
-    /// Every seat held here whose join is answered.
-    pub fn settled(&self) -> Vec<Seat> {
-        self.rooms()
+    /// Every seat held here in `room` whose join is answered.
+    pub fn settled_of_room(&self, room: &BareJid) -> Vec<Seat> {
+        self.held()
+            .rooms
+            .get(room)
+            .map(|seats| {
+                seats
+                    .values()
+                    .filter(|held| held.pending.is_none())
+                    .map(|held| held.seat.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every room with a seat held here.
+    pub fn rooms(&self) -> Vec<BareJid> {
+        self.held().rooms.keys().cloned().collect()
+    }
+
+    /// Every seat held here.
+    pub fn all(&self) -> Vec<Seat> {
+        self.held()
+            .rooms
             .values()
             .flat_map(|seats| seats.values())
-            .filter(|held| held.pending.is_none())
             .map(|held| held.seat.clone())
             .collect()
     }
 
     /// How many seats are held here.
     pub fn len(&self) -> usize {
-        self.rooms().values().map(HashMap::len).sum()
+        self.held().seats
     }
 
     /// Whether no seat is held here.
     pub fn is_empty(&self) -> bool {
-        self.rooms().is_empty()
+        self.held().seats == 0
     }
 }
 
 impl SeatEvidence for SeatIndex {
     fn of_account(&self, room: &BareJid, account: &BareJid) -> Vec<StreamEvidence> {
-        self.rooms()
+        self.held()
+            .rooms
             .get(room)
             .map(|seats| {
                 seats

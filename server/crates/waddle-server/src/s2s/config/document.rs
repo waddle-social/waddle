@@ -196,6 +196,8 @@ pub(super) struct LimitsDocument {
     pub(super) max_streams: Option<usize>,
     pub(super) max_peers: Option<usize>,
     pub(super) max_negotiating_per_peer: Option<usize>,
+    /// Directional domain pairs the router keeps an outbound queue for.
+    pub(super) max_pair_queues: Option<usize>,
     pub(super) accept_per_second: Option<u32>,
     pub(super) accept_burst: Option<u32>,
     pub(super) accept_per_address_per_second: Option<u32>,
