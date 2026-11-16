@@ -1,11 +1,11 @@
 {
   "format": 2,
-  "baseline_commit": "ea4af8ac6ab157ae3140ea6675d81942a9096382",
+  "baseline_commit": "7e24c46002b2e3e8e8415f99fbab5fa6d3cb0727",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "sha256": "14015589b59b779ce864f047405602fdd3edc4a6f77b78f9241d66069255eae9"
+      "sha256": "dd7c4975366cace4adcd8a6994544710e06b2658c7686ea6d9865d33cc3a00fa"
     },
     {
       "path": "server/crates/waddle-server/src/admin/mod.rs",
@@ -1082,7 +1082,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "362d6c021624136c0967f7698c30b0c19344696f52de29bc2cc92e46cfbfdfdd",
+    "sha256": "047c43da89d06c7ca10775049a147ff132d77ea59858fbe17e2601895031cc7e",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,

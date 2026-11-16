@@ -13,7 +13,7 @@ with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
 `8f6088ba601528090ec1bc82294b1a12422f5519`, and inbound S2S rooms through
 `31fd3f41591d0ff3072dc667e35207c522ae0dc6` and, with remote room
 administration, the federated setting and requests carried between
-replicas, through `ea4af8ac6ab157ae3140ea6675d81942a9096382` (see the last refresh below); the original
+replicas, through `7e24c46002b2e3e8e8415f99fbab5fa6d3cb0727` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -819,7 +819,7 @@ occupants at other servers in rooms of this deployment.
   `ingress/mod.rs`. The scan holds 1607 records in all.
 
 The selected evidence was refreshed an eighteenth time, through
-`ea4af8ac6ab157ae3140ea6675d81942a9096382`, after reviewing the delta of the reviewed
+`7e24c46002b2e3e8e8415f99fbab5fa6d3cb0727`, after reviewing the delta of the reviewed
 files since the seventeenth refresh. This refresh covers what remote
 principals were given since: room administration, rooms opened to other
 servers by a setting of their own, the standard message extensions, and a
