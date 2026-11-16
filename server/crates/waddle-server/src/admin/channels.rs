@@ -1348,7 +1348,13 @@ async fn withhold_managed_rooms(
             .room(RoomBinding::Channel(&channel_id))
             .await
         {
-            RoomGate::Managed(grants) if grants.allows(caller, HostGrantAction::View) => {
+            RoomGate::Managed(grants)
+                if grants.allows_as(
+                    caller,
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    HostGrantAction::View,
+                ) =>
+            {
                 config.members_only = true;
                 managed.insert(key.clone(), grants);
             }
@@ -1665,7 +1671,10 @@ pub(crate) async fn explicit_channel_affiliations_for_jids(
                 .into_iter()
                 .filter(|jid| seen.insert(jid.clone()))
                 .map(|jid| {
-                    let affiliation = match room.standing(&jid) {
+                    let affiliation = match room.standing_as(
+                        &jid,
+                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    ) {
                         RoomAffiliation::Outcast => Affiliation::Outcast,
                         RoomAffiliation::None => Affiliation::None,
                         RoomAffiliation::Member => Affiliation::Member,

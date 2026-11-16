@@ -1329,7 +1329,12 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 .deps
                 .app_state
                 .host_grants
-                .allows(RoomBinding::Room(&room_jid), &sender_jid.to_bare(), action)
+                .allows_as(
+                    RoomBinding::Room(&room_jid),
+                    &sender_jid.to_bare(),
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    action,
+                )
                 .await
             {
                 RoomGate::Unmanaged => {
@@ -1757,9 +1762,10 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 .deps
                 .app_state
                 .host_grants
-                .allows(
+                .allows_as(
                     RoomBinding::Room(&room_jid),
                     &sender_jid.to_bare(),
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
                     HostGrantAction::Moderate,
                 )
                 .await

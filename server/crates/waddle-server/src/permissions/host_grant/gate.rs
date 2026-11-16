@@ -34,8 +34,8 @@
 //! ticket ([`FenceTicket`]): the registration and the scope generation it
 //! was read under. [`ManagedRoomGrants::allows_as`] and
 //! [`ManagedRoomGrants::standing_as`], which every decision goes through
-//! whatever evidence it holds, answer nothing once the ticket is no longer
-//! current, so a decision the replica has acknowledged a newer
+//! with the evidence its surface names, answer nothing once the ticket is
+//! no longer current, so a decision the replica has acknowledged a newer
 //! generation over, or that outlived the replica's lease, admits nothing
 //! however long its caller held it (see `fence`).
 //!
@@ -128,8 +128,10 @@ pub struct ManagedRoomGrants {
 
 impl ManagedRoomGrants {
     /// Whether `subject` may perform `action`, decided without stream
-    /// evidence: a local session's own request, or a subject the surface
-    /// names (an occupant, a member, a recipient). See [`Self::allows_as`].
+    /// evidence, for suites. A surface names the evidence it decides with
+    /// ([`Self::allows_as`]), so that a request an S2S stream carried is
+    /// never decided as one no stream did.
+    #[cfg(feature = "test-support")]
     pub fn allows(&self, subject: &BareJid, action: HostGrantAction) -> bool {
         self.allows_as(subject, &PrincipalEvidence::NoStream, action)
     }
@@ -151,7 +153,9 @@ impl ManagedRoomGrants {
     }
 
     /// The standing `subject` is honoured with, decided without stream
-    /// evidence. See [`Self::standing_as`].
+    /// evidence, for suites; a surface names its evidence
+    /// ([`Self::standing_as`]).
+    #[cfg(feature = "test-support")]
     pub fn standing(&self, subject: &BareJid) -> super::model::RoomAffiliation {
         self.standing_as(subject, &PrincipalEvidence::NoStream)
     }
@@ -456,7 +460,9 @@ impl HostGrantGate {
     }
 
     /// Whether `subject` may perform `action` in the room `binding` names,
-    /// decided without stream evidence.
+    /// decided without stream evidence, for suites; a surface names its
+    /// evidence ([`Self::allows_as`]).
+    #[cfg(feature = "test-support")]
     pub async fn allows(
         &self,
         binding: RoomBinding<'_>,

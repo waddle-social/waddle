@@ -135,7 +135,10 @@ pub(crate) async fn host_grant_admission(
         RoomGate::Unmanaged => Ok(None),
         RoomGate::Unavailable => Err(()),
         RoomGate::Managed(room) => Ok(Some((
-            match room.standing(user_jid) {
+            match room.standing_as(
+                user_jid,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            ) {
                 RoomAffiliation::Outcast => Some(Affiliation::Outcast),
                 RoomAffiliation::None => None,
                 RoomAffiliation::Member => Some(Affiliation::Member),

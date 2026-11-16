@@ -255,9 +255,10 @@ pub(crate) async fn derive_current_voice(
             .deps
             .app_state
             .host_grants
-            .allows(
+            .allows_as(
                 RoomBinding::Room(room_jid),
                 &full_jid.to_bare(),
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
                 HostGrantAction::SendMessage,
             )
             .await

@@ -365,7 +365,11 @@ impl SystemMessageAudience<'_> {
             }
         }
         self.decision.as_ref().is_some_and(|decision| {
-            decision.allows(&occupant.full_jid.to_bare(), HostGrantAction::Read)
+            decision.allows_as(
+                &occupant.full_jid.to_bare(),
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                HostGrantAction::Read,
+            )
         })
     }
 }
@@ -431,7 +435,11 @@ async fn system_message_audience<'o>(
             occupants: occupants
                 .iter()
                 .filter(|occupant| {
-                    grants.allows(&occupant.full_jid.to_bare(), HostGrantAction::Read)
+                    grants.allows_as(
+                        &occupant.full_jid.to_bare(),
+                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                        HostGrantAction::Read,
+                    )
                 })
                 .collect(),
             decision: Some(grants),

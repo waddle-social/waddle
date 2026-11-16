@@ -110,9 +110,10 @@ async fn managed_room_viewable(
             .deps
             .app_state
             .host_grants
-            .allows(
+            .allows_as(
                 RoomBinding::Channel(channel_id),
                 requester,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
                 HostGrantAction::View
             )
             .await,

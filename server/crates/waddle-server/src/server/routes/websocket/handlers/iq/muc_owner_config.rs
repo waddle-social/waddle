@@ -550,8 +550,9 @@ fn owner_config_admitted(
     initiator: Option<&FullJid>,
 ) -> bool {
     initiator.is_some_and(|initiator| {
-        grants.allows(
+        grants.allows_as(
             &initiator.to_bare(),
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
             crate::permissions::host_grant::HostGrantAction::Manage,
         )
     })

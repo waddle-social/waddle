@@ -1340,9 +1340,10 @@ async fn host_grant_channel_mention(
         .deps
         .app_state
         .host_grants
-        .allows(
+        .allows_as(
             RoomBinding::Room(room),
             &sender.to_bare(),
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
             HostGrantAction::Moderate,
         )
         .await

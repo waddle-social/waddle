@@ -60,14 +60,21 @@ pub(super) fn muc_affiliation(affiliation: RoomAffiliation) -> Affiliation {
 /// The standing the canonical grants honour for `sender`, as the MUC
 /// affiliation the room actor applies an administration request under.
 pub(super) fn sender_affiliation(room: &ManagedRoomGrants, sender: &FullJid) -> Affiliation {
-    muc_affiliation(room.standing(&sender.to_bare()))
+    muc_affiliation(room.standing_as(
+        &sender.to_bare(),
+        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+    ))
 }
 
 /// Whether `sender` may moderate the room: change roles, read the role
 /// lists and see the room's administration lists. Only an owner or admin
 /// standing that admission honours confers it.
 pub(super) fn sender_moderates(room: &ManagedRoomGrants, sender: &FullJid) -> bool {
-    room.allows(&sender.to_bare(), HostGrantAction::Moderate)
+    room.allows_as(
+        &sender.to_bare(),
+        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+        HostGrantAction::Moderate,
+    )
 }
 
 /// The affiliation list of a room an enrolled scope manages, from the
@@ -81,8 +88,12 @@ pub(super) fn host_grant_affiliation_list(
     filter: Option<Affiliation>,
 ) -> Result<Vec<(BareJid, Affiliation)>, Box<StanzaError>> {
     let sender_bare = sender.to_bare();
-    let member_list =
-        filter == Some(Affiliation::Member) && room.allows(&sender_bare, HostGrantAction::Read);
+    let member_list = filter == Some(Affiliation::Member)
+        && room.allows_as(
+            &sender_bare,
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            HostGrantAction::Read,
+        );
     if !member_list && !sender_moderates(room, sender) {
         return Err(Box::new(forbidden_iq_error("Operation not permitted.")));
     }
@@ -151,7 +162,13 @@ pub(crate) async fn record_host_grant_affiliation(
             subject: subject.clone(),
             affiliation: room_affiliation(affiliation),
         };
-        match authority.set_affiliation(&command).await {
+        match authority
+            .set_affiliation_as(
+                &command,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            )
+            .await
+        {
             Ok(receipt) => {
                 let recorded = receipt.record().generation;
                 spawn_reconcile(gate.clone(), authority, command);

@@ -184,9 +184,10 @@ pub(super) async fn handle_pin_query_iq(
             .deps
             .app_state
             .host_grants
-            .allows(
+            .allows_as(
                 RoomBinding::Room(&room_jid),
                 &sender_bare,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
                 HostGrantAction::Read,
             )
             .await

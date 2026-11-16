@@ -148,9 +148,10 @@ async fn host_grant_call_refusal(
         .deps
         .app_state
         .host_grants
-        .allows(
+        .allows_as(
             RoomBinding::Room(room_jid),
             &sender_jid.to_bare(),
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
             HostGrantAction::SendMessage,
         )
         .await

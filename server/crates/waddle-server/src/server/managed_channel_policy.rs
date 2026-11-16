@@ -70,7 +70,11 @@ pub(crate) async fn host_grant_channel_permission(
             let Ok(subject) = subject.parse::<jid::BareJid>() else {
                 return Ok(Some(false));
             };
-            Ok(Some(room.allows(&subject, action)))
+            Ok(Some(room.allows_as(
+                &subject,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                action,
+            )))
         }
     }
 }

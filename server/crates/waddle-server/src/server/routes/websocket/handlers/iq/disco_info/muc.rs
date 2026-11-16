@@ -661,9 +661,13 @@ async fn enrolled_room_view(
         RoomGate::Unmanaged => EnrolledRoomView::Unmanaged,
         RoomGate::Unavailable => EnrolledRoomView::Unavailable,
         RoomGate::Managed(room) => {
-            if requester
-                .is_some_and(|requester| room.allows(&requester.to_bare(), HostGrantAction::View))
-            {
+            if requester.is_some_and(|requester| {
+                room.allows_as(
+                    &requester.to_bare(),
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    HostGrantAction::View,
+                )
+            }) {
                 EnrolledRoomView::Admitted
             } else {
                 EnrolledRoomView::Hidden

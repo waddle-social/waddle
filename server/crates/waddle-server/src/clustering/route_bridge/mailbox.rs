@@ -655,10 +655,17 @@ async fn host_grant_reseating(
             .into_iter()
             .filter_map(|mut occupant| {
                 let account = occupant.real_jid.to_bare();
-                if !grants.allows(&account, HostGrantAction::Read) {
+                if !grants.allows_as(
+                    &account,
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    HostGrantAction::Read,
+                ) {
                     return None;
                 }
-                occupant.affiliation = match grants.standing(&account) {
+                occupant.affiliation = match grants.standing_as(
+                    &account,
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                ) {
                     RoomAffiliation::Owner => waddle_xmpp::Affiliation::Owner,
                     RoomAffiliation::Admin => waddle_xmpp::Affiliation::Admin,
                     RoomAffiliation::Member => waddle_xmpp::Affiliation::Member,
@@ -666,7 +673,11 @@ async fn host_grant_reseating(
                     RoomAffiliation::Outcast => waddle_xmpp::Affiliation::Outcast,
                 };
                 if occupant.role == waddle_xmpp::Role::Moderator
-                    && !grants.allows(&account, HostGrantAction::Moderate)
+                    && !grants.allows_as(
+                        &account,
+                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                        HostGrantAction::Moderate,
+                    )
                 {
                     occupant.role = waddle_xmpp::Role::Participant;
                 }

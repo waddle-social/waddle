@@ -249,11 +249,10 @@ impl HostGrantAuthority {
         Ok(receipt)
     }
 
-    /// Record an affiliation change under this authority's issuance policy,
-    /// asked for by a local session whose request no S2S stream carried.
-    /// A receipt means the change is recorded, not that an increase is
-    /// effective: [`Self::reconcile`] makes it so. The witnesses follow the
-    /// commit on a task of their own; the receipt does not wait for them.
+    /// Record an affiliation change under this authority's issuance policy
+    /// whose initiator's request no S2S stream carried, for suites; a caller
+    /// names the initiator's evidence ([`Self::set_affiliation_as`]).
+    #[cfg(feature = "test-support")]
     pub async fn set_affiliation(
         &self,
         command: &SetAffiliation,
@@ -262,8 +261,12 @@ impl HostGrantAuthority {
             .await
     }
 
-    /// [`Self::set_affiliation`] for an initiator whose request reached this
-    /// replica with `initiator` (see [`HostGrantStore::set_affiliation_as`]).
+    /// Record an affiliation change under this authority's issuance policy,
+    /// asked for by an initiator whose request reached this replica with
+    /// `initiator` (see [`HostGrantStore::set_affiliation_as`]). A receipt
+    /// means the change is recorded, not that an increase is effective:
+    /// [`Self::reconcile`] makes it so. The witnesses follow the commit on a
+    /// task of their own; the receipt does not wait for them.
     pub async fn set_affiliation_as(
         &self,
         command: &SetAffiliation,

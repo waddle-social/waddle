@@ -43,9 +43,10 @@ pub(super) async fn handle_muc_self_ping_iq(
             .deps
             .app_state
             .host_grants
-            .allows(
+            .allows_as(
                 RoomBinding::Room(&room_jid),
                 &sender_jid.to_bare(),
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
                 HostGrantAction::Read,
             )
             .await

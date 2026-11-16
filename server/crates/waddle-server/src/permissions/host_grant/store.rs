@@ -847,8 +847,10 @@ impl HostGrantStore {
         own(async move { store.enroll_owned(&command, &bases, mode).await }).await
     }
 
-    /// Record one affiliation change asked for by a local session, whose
-    /// request no S2S stream carried; see [`Self::set_affiliation_as`].
+    /// Record one affiliation change whose initiator's request no S2S
+    /// stream carried, for suites; a caller names the initiator's evidence
+    /// ([`Self::set_affiliation_as`]).
+    #[cfg(feature = "test-support")]
     pub async fn set_affiliation(
         &self,
         command: &SetAffiliation,
