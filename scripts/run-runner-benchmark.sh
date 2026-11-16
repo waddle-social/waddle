@@ -9,8 +9,9 @@
 set -euo pipefail
 
 name="${1:-runner-shapes}"
-if [[ "$#" -gt 1 || ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
-  echo "Usage: $0 [branch-name]   (pushes to ci-benchmark/<branch-name>)" >&2
+variants="${2:-}"
+if [[ "$#" -gt 2 || ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ || ! "$variants" =~ ^([0-9a-z-]+(,[0-9a-z-]+)*)?$ ]]; then
+  echo "Usage: $0 [branch-name [variant,variant...]]   (pushes to ci-benchmark/<branch-name>)" >&2
   exit 2
 fi
 cd "$(git rev-parse --show-toplevel)"
@@ -22,6 +23,6 @@ export GIT_INDEX_FILE="$index"
 git read-tree "$head"
 blob="$({ git show "$head:$file"; printf '// ci-benchmark nonce %s\n' "$(date -u +%Y%m%dT%H%M%SZ)"; } | git hash-object -w --stdin)"
 git update-index --cacheinfo "100644,$blob,$file"
-commit="$(git commit-tree "$(git write-tree)" -p "$head" -m "chore(ci): runner benchmark nonce")"
+commit="$(git commit-tree "$(git write-tree)" -p "$head" -m "chore(ci): runner benchmark nonce${variants:+ variants=$variants}")"
 git push --force origin "$commit:refs/heads/ci-benchmark/$name"
 echo "Benchmark started for $head as $commit on ci-benchmark/$name"

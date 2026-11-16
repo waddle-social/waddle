@@ -1,6 +1,7 @@
 package runnerbenchmark
 
 import (
+	"encoding/json"
 	"list"
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
@@ -53,7 +54,11 @@ workflow: {
 	name: "waddle-ci-runner-benchmark"
 	on: {
 		push: branches: ["ci-benchmark/**"]
-		workflow_dispatch: {}
+		workflow_dispatch: inputs: variants: {
+			description: "Comma-separated variants to run; empty runs all"
+			type:        "string"
+			default:     ""
+		}
 	}
 	concurrency: {
 		group:                "${{ github.workflow }}-${{ github.ref }}"
@@ -63,12 +68,37 @@ workflow: {
 	jobs: {
 		contracts: {
 			name:              "runner-benchmark/contracts"
+			outputs: matrix: "${{ steps.select.outputs.matrix }}"
 			"runs-on":         "ubuntu-24.04"
 			"timeout-minutes": 5
 			permissions: contents: "read"
 			steps: [
 				{name: "Checkout", uses: _checkout},
 				{name: "Validate measurement contracts", run: "python3 scripts/test-ci-machine-usage.py"},
+				{
+					// A pushed commit selects variants with `variants=a,b` in its
+					// message (scripts/run-runner-benchmark.sh writes it).
+					name:  "Select variants"
+					id:    "select"
+					shell: "bash"
+					env: {
+						ALL_VARIANTS: json.Marshal(_variants)
+						SELECTION:    "${{ inputs.variants && format('variants={0}', inputs.variants) || github.event.head_commit.message }}"
+					}
+					run: #"""
+						python3 - >> "$GITHUB_OUTPUT" <<'PY'
+						import json, os, re
+						variants = json.loads(os.environ["ALL_VARIANTS"])
+						names = [item["variant"] for item in variants]
+						chosen = re.search(r"variants=([0-9a-z,-]+)", os.environ.get("SELECTION", ""))
+						wanted = chosen.group(1).split(",") if chosen else names
+						unknown = sorted(set(wanted) - set(names))
+						if unknown:
+						    raise SystemExit(f"unknown variants: {unknown}")
+						print("matrix=" + json.dumps({"include": [item for item in variants if item["variant"] in wanted]}))
+						PY
+						"""#
+				},
 			]
 		}
 		lane: {
@@ -83,7 +113,7 @@ workflow: {
 			strategy: {
 				"fail-fast":    false
 				"max-parallel": 1
-				matrix: include: _variants
+				matrix: "${{ fromJSON(needs.contracts.outputs.matrix) }}"
 			}
 			steps: list.Concat([_setupSteps, [
 				{

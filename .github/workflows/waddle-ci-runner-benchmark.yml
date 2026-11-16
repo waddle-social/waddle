@@ -6,7 +6,12 @@ name: waddle-ci-runner-benchmark
   push:
     branches:
       - ci-benchmark/**
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: Comma-separated variants to run; empty runs all
+        type: string
+        default: ""
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,6 +19,8 @@ permissions: {}
 jobs:
   contracts:
     name: runner-benchmark/contracts
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -23,6 +30,24 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Validate measurement contracts
         run: python3 scripts/test-ci-machine-usage.py
+      - name: Select variants
+        id: select
+        shell: bash
+        env:
+          ALL_VARIANTS: '[{"variant":"32x64","lane":"32x64","vcpu":32,"memory":64},{"variant":"32x64-j16","lane":"32x64-j16","vcpu":32,"memory":64},{"variant":"16x32","lane":"16x32","vcpu":16,"memory":32},{"variant":"16x32-j8","lane":"16x32-j8","vcpu":16,"memory":32},{"variant":"8x32","lane":"8x32","vcpu":8,"memory":32}]'
+          SELECTION: ${{ inputs.variants && format('variants={0}', inputs.variants) || github.event.head_commit.message }}
+        run: |-
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, re
+          variants = json.loads(os.environ["ALL_VARIANTS"])
+          names = [item["variant"] for item in variants]
+          chosen = re.search(r"variants=([0-9a-z,-]+)", os.environ.get("SELECTION", ""))
+          wanted = chosen.group(1).split(",") if chosen else names
+          unknown = sorted(set(wanted) - set(names))
+          if unknown:
+              raise SystemExit(f"unknown variants: {unknown}")
+          print("matrix=" + json.dumps({"include": [item for item in variants if item["variant"] in wanted]}))
+          PY
   lane:
     name: runner-benchmark/${{ matrix.variant }}
     needs:
@@ -37,28 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 1
-      matrix:
-        include:
-          - variant: 32x64
-            lane: 32x64
-            vcpu: 32
-            memory: 64
-          - variant: 32x64-j16
-            lane: 32x64-j16
-            vcpu: 32
-            memory: 64
-          - variant: 16x32
-            lane: 16x32
-            vcpu: 16
-            memory: 32
-          - variant: 16x32-j8
-            lane: 16x32-j8
-            vcpu: 16
-            memory: 32
-          - variant: 8x32
-            lane: 8x32
-            vcpu: 8
-            memory: 32
+      matrix: ${{ fromJSON(needs.contracts.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

@@ -385,10 +385,10 @@
                   mv "''${reports[0]}" "$out/$1"
                 }
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$whole_filter"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads ${toString lane.shardCores} -E "$whole_filter"
                 take_junit_report junit-whole.xml
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$shared_filter" --partition "hash:${toString partition}/4"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads ${toString lane.shardCores} -E "$shared_filter" --partition "hash:${toString partition}/4"
                 take_junit_report junit-shared.xml
                 runHook postCheck
               '';

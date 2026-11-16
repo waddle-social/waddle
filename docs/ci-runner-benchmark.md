@@ -171,7 +171,7 @@ it and also eases the GitHub 20-job limit.
 the pull-request shard lane, unchanged apart from its machine and the two
 settings below, once per variant:
 
-| Variant | Machine | Cores per shard | Cargo jobs | Memory floor | Question |
+| Variant | Machine | Cores and test threads per shard | Cargo jobs | Memory floor | Question |
 | --- | --- | ---: | ---: | ---: | --- |
 | `32x64` | 32x64 | 8 | 4 | 56 GiB | Baseline: today's lane |
 | `32x64-j16` | 32x64 | 8 | 16 | 56 GiB | Does the compile use the cores if allowed to? |
@@ -202,7 +202,9 @@ gives every variant a source tree no cache has seen, as a pull request that
 edits the server does; without it a later pass substitutes earlier archives
 and reports no compile time. Each benchmark lane also has its own archive
 derivation, including `32x64`, which repeats the production settings. Run the
-script again for another pass and delete the branch afterwards. After the
+script again for another pass and delete the branch afterwards. To run only
+some variants, name them:
+`bash scripts/run-runner-benchmark.sh runner-shapes 16x32,8x32`. After the
 workflow is on `main` it can also be dispatched manually. The comparison table
 is in the run's `runner-benchmark/summary` job; raw samples and metrics are in
 the `runner-benchmark-*` artifacts.
@@ -245,16 +247,17 @@ baseline. Its test phase is the first whole-machine measurement of the lane:
 The job waited 58 minutes for a runner. During the test phase the machine was
 about 95% idle, PostgreSQL included.
 
-### Pass 1, 2026-11-16 (in progress)
+### Pass 1, 2026-11-16
 
 [Run 43787962349](https://github.com/waddle-social/waddle/actions/runs/43787962349).
-Every variant compiles from scratch. Variants are added as they finish.
+Every variant compiles from scratch.
 
 | Variant | Outcome | Queue wait | Lane | Compile | Slowest shard | vCPU-min | Busy cores compile (mean / max) | Busy cores tests (mean / max) | Peak memory |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `32x64` (baseline) | pass | 72 min | 20.8 min | 5.9 min | 12.7 min | 665 | 10.1 / 26.9 | 1.6 / 11.0 | 19.6 GB |
 | `32x64-j16` | pass | 116 min | 20.8 min | 5.7 min | 13.2 min | 665 | 8.1 / 31.9 | 1.7 / 11.4 | 20.3 GB |
-| `16x32` | **fail** (one test) | 161 min | — | 6.1 min | — | — | 6.5 / 13.9 | 1.6 / 14.8 | 18.7 GB |
+| `16x32` | invalid (see below) | 161 min | — | 6.1 min | — | — | 6.5 / 13.9 | 1.6 / 14.8 | 18.7 GB |
+| `16x32-j8` | invalid (see below) | 180 min | — | 6.2 min | — | — | 6.7 / 15.9 | 1.5 / 15.0 | 19.4 GB |
 
 Baseline observations:
 
@@ -273,14 +276,26 @@ used all 32 cores and then averaged fewer than the baseline, so it is limited
 by a few large crates that build one after another, not by the job count.
 Option 2 is not worth pursuing on its own.
 
-`16x32`: one test failed, so this is not a result for the shape yet.
+`16x32` and `16x32-j8` failed because of the benchmark's own configuration,
+not the machine. Both stopped shards 1 and 4 after about 30 seconds with
+"tests were not run" and no failing test (`16x32` also hit the known
+`xep0198_durable_ws` restart-resume flake once).
 
-- The failure was `xep0198_durable_ws`
-  `a_session_live_when_the_process_died_resumes_after_a_restart` in shard 4
-  ("no frame after m2: Timeout waiting for message"). The same test is being
-  fixed as a flake on `test/server-sm-restart-resume-flake`. One run cannot
-  tell whether four cores per shard make it fail more often.
-- Shard 1 was stopped when shard 4 failed, so there is no lane time.
-- What did complete was not slower: compile took 366 s against 353 s, and
-  shards 2 and 3 took 572 s and 588 s against 604 s and 609 s.
-- Peak memory was 18.7 GB of 32, set by the compile.
+- Cause: the first version of these lanes pinned each shard to 4 cores but
+  still passed `--test-threads 8`. With more test threads than cores, nextest
+  0.9.143 silently drops the tests of a `max-threads = 1` group that are
+  queued behind a `threads-required = 'num-cpus'` test in the same group. The
+  `postgres` group has exactly that shape. A 275-test toy crate reproduces
+  it: pinned to 4 CPUs, `--test-threads 8` runs 266 tests and fails;
+  `--test-threads 4` runs all 275.
+- Fix: every lane now passes `--test-threads` equal to its cores per shard.
+  Production is unchanged at 8 and 8.
+- Consequence for a real change: `--cores` and `--test-threads` must move
+  together. The lane fails loudly if they do not, but only by not running
+  tests.
+- What did complete on 16x32 was not slower: compile took 366 s and 371 s
+  against 353 s, and shards 2 and 3 took about 570 s and 585 s against 604 s
+  and 609 s. Peak memory was 19 GB of 32, set by the compile.
+- The `8x32` variant was cancelled; it had the same fault.
+
+The three smaller variants are re-run as pass 2 below.
