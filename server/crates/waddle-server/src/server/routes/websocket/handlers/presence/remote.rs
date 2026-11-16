@@ -754,7 +754,7 @@ fn lookup_failed(presence: &Presence, sender: &FullJid) -> Vec<String> {
 /// roster. A request the contact sent is forgotten. The contact is sent
 /// `unsubscribe` if the account was subscribed to it or asked to be, and
 /// `unsubscribed` if it was subscribed to the account; nothing is sent to a
-/// contact the account blocks (XEP-0191 §3.3).
+/// contact the account blocks (XEP-0191 §3.3), or while S2S is off.
 pub(crate) async fn remove_remote_contact(
     state: &WebSocketState,
     account: &BareJid,
@@ -762,7 +762,9 @@ pub(crate) async fn remove_remote_contact(
 ) {
     let _lock = lock_account(account).await;
     forget_request(state, account, &item.jid).await;
-    if blocks(state, account, &Jid::from(item.jid.clone())).await {
+    // With S2S off nothing could leave; with it on, nothing leaves for a
+    // contact the account blocks.
+    if !s2s_enabled(state) || blocks(state, account, &Jid::from(item.jid.clone())).await {
         return;
     }
     let mut types = Vec::new();
