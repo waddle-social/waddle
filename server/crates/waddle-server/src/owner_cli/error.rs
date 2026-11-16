@@ -92,6 +92,13 @@ pub enum OwnerCliError {
     /// A room's last owner of a served account cannot be revoked.
     #[error("{refused} revoke(s) were refused; the rest are recorded")]
     RevokesRefused { refused: usize },
+    /// Some rooms of a `revoke-account` act could not be revoked, or their
+    /// acknowledgement could not be read; the other rooms are recorded.
+    #[error(
+        "{failed} room(s) could not be revoked or their acknowledgement read; the rest are \
+         recorded: run the command again with the same --operation-id"
+    )]
+    RevokeAccountIncomplete { failed: usize },
     #[error("the account was not retired")]
     Retirement(#[source] crate::auth::retirement::RetireAccountError),
 }
@@ -102,7 +109,10 @@ impl OwnerCliError {
             Self::Configuration(_) | Self::Read { .. } | Self::OutputIsSymlink { .. } => {
                 ExitStatus::Usage
             }
-            Self::Write { .. } | Self::Connect(_) | Self::FenceUnacknowledged => ExitStatus::Failed,
+            Self::Write { .. }
+            | Self::Connect(_)
+            | Self::FenceUnacknowledged
+            | Self::RevokeAccountIncomplete { .. } => ExitStatus::Failed,
             Self::RevokesRefused { .. } => ExitStatus::Refused,
             Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {
                 ExitStatus::Usage
@@ -177,7 +187,9 @@ fn transient_failure(error: &(dyn Error + 'static)) -> bool {
 /// A failed statement or connection, an expired bound or an unacknowledged
 /// commit: a rerun may succeed. Everything else is a verdict on the store or
 /// the request.
-fn host_grant_error_is_transient(error: &crate::permissions::host_grant::HostGrantError) -> bool {
+pub(super) fn host_grant_error_is_transient(
+    error: &crate::permissions::host_grant::HostGrantError,
+) -> bool {
     use crate::permissions::host_grant::HostGrantError;
     matches!(
         error,

@@ -251,53 +251,59 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                 .subject_grants(&subject)
                 .await
                 .map_err(OwnerCliError::HostGrant)?;
-            let (mut refused, mut unacknowledged, mut witnessed) = (0_usize, false, Vec::new());
+            let wait = Duration::from_secs(fence_wait);
+            let mut tally = RevokeTally::default();
+            let mut witnessed = Vec::new();
             for (lifecycle, grant) in grants {
                 // A revoke leaves a ban in place, and nothing is recorded
-                // where the account already holds what is asked for.
-                if grant.affiliation == target
-                    || (!ban && grant.affiliation == RoomAffiliation::Outcast)
-                {
-                    continue;
-                }
-                let command = OperatorRevoke {
-                    operation: room_operation(operation_id, lifecycle, &grant.room),
-                    lifecycle,
-                    room: grant.room.clone(),
-                    subject: subject.clone(),
-                    ban,
-                };
-                let outcome = match store.operator_revoke(&command, &served).await {
-                    Ok(receipt) => {
-                        let generation = receipt.record().generation;
-                        witnessed.push(lifecycle);
-                        let fence = store
-                            .await_revocation_fence(
-                                lifecycle,
-                                generation,
-                                Duration::from_secs(fence_wait),
+                // where the account already holds what is asked for. Such a
+                // room is still reported with the fence's answer at its
+                // scope's current generation, which covers the revoke or ban
+                // an earlier run (or anyone) recorded there: a repeated act
+                // confirms every room, not only those it changed.
+                let unchanged = grant.affiliation == target
+                    || (!ban && grant.affiliation == RoomAffiliation::Outcast);
+                let outcome = if unchanged {
+                    match store.scope(lifecycle).await {
+                        Ok(Some(scope)) => {
+                            let fence = store
+                                .await_revocation_fence(lifecycle, scope.generation, wait)
+                                .await;
+                            tally.fence_line(
+                                json!({ "recorded": false, "unchanged": true }),
+                                scope.generation,
+                                fence,
                             )
-                            .await
-                            .map_err(OwnerCliError::HostGrant)?;
-                        unacknowledged |= !fence.acknowledged();
-                        json!({
-                            "recorded": true,
-                            "operation_id": command.operation.as_uuid().to_string(),
-                            "generation": generation.value(),
-                            "fence": fence_json(fence),
-                        })
+                        }
+                        Ok(None) => tally.failure(HostGrantError::UnknownScope),
+                        Err(error) => tally.failure(error),
                     }
-                    // What an operator has to resolve in that room; the
-                    // other rooms are still revoked.
-                    Err(
-                        error @ (HostGrantError::LastOwner
-                        | HostGrantError::ScopeRetired
-                        | HostGrantError::ScopeExhausted),
-                    ) => {
-                        refused += usize::from(matches!(error, HostGrantError::LastOwner));
-                        json!({ "recorded": false, "refusal": error.kind() })
+                } else {
+                    let command = OperatorRevoke {
+                        operation: room_operation(operation_id, lifecycle, &grant.room),
+                        lifecycle,
+                        room: grant.room.clone(),
+                        subject: subject.clone(),
+                        ban,
+                    };
+                    match store.operator_revoke(&command, &served).await {
+                        Ok(receipt) => {
+                            let generation = receipt.record().generation;
+                            witnessed.push(lifecycle);
+                            let fence = store
+                                .await_revocation_fence(lifecycle, generation, wait)
+                                .await;
+                            tally.fence_line(
+                                json!({
+                                    "recorded": true,
+                                    "operation_id": command.operation.as_uuid().to_string(),
+                                }),
+                                generation,
+                                fence,
+                            )
+                        }
+                        Err(error) => tally.failure(error),
                     }
-                    Err(error) => return Err(OwnerCliError::HostGrant(error)),
                 };
                 let mut line = json!({
                     "scope": lifecycle.to_storage(),
@@ -322,13 +328,8 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                     .is_err();
                 report_witnesses(failed);
             }
-            if refused > 0 {
-                return Err(OwnerCliError::RevokesRefused { refused });
-            }
-            if unacknowledged {
-                return Err(OwnerCliError::FenceUnacknowledged);
-            }
-            eprintln!("every recorded revoke is acknowledged by the revocation fence");
+            tally.finish()?;
+            eprintln!("every room is revoked and acknowledged by the revocation fence");
         }
         HostGrantActionArgs::Fence { scope } => {
             let state = store
@@ -366,6 +367,83 @@ fn room_operation(act: Uuid, lifecycle: ScopeLifecycleId, room: &jid::BareJid) -
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     GrantOperationId::from_uuid(Uuid::from_bytes(bytes))
+}
+
+/// What a `revoke-account` act found across its rooms. Every room is
+/// reported on its own line; one room's failure does not stop the others.
+#[derive(Default)]
+struct RevokeTally {
+    /// Rooms the store refused to revoke (a room's last owner, a closed
+    /// scope's lasting refusal).
+    refused: usize,
+    /// Rooms whose revoke or acknowledgement could not be read: the act is
+    /// run again.
+    failed: usize,
+    /// Rooms whose revoke is recorded and not yet acknowledged.
+    unacknowledged: usize,
+}
+
+impl RevokeTally {
+    /// The line of a room whose revoke is recorded (now or before), with the
+    /// fence's answer at `generation`.
+    fn fence_line(
+        &mut self,
+        mut line: serde_json::Value,
+        generation: crate::permissions::host_grant::GrantGeneration,
+        fence: Result<FenceAcknowledgement, HostGrantError>,
+    ) -> serde_json::Value {
+        let fence = match fence {
+            Ok(fence) => {
+                self.unacknowledged += usize::from(!fence.acknowledged());
+                fence_json(fence)
+            }
+            Err(error) => {
+                self.failed += 1;
+                json!({ "acknowledged": false, "error": error.kind() })
+            }
+        };
+        if let Some(fields) = line.as_object_mut() {
+            fields.insert("generation".to_owned(), json!(generation.value()));
+            fields.insert("fence".to_owned(), fence);
+        }
+        line
+    }
+
+    /// The line of a room that was not revoked. The scope's lasting
+    /// refusals are what an operator resolves there (or, for a closed
+    /// scope, nothing is admitted anyway); any other error is one the act
+    /// is repeated for.
+    fn failure(&mut self, error: HostGrantError) -> serde_json::Value {
+        match error {
+            HostGrantError::LastOwner => self.refused += 1,
+            HostGrantError::ScopeRetired | HostGrantError::ScopeExhausted => {}
+            ref error if super::error::host_grant_error_is_transient(error) => {
+                self.failed += 1;
+                return json!({ "recorded": false, "error": error.kind() });
+            }
+            _ => self.refused += 1,
+        }
+        json!({ "recorded": false, "refusal": error.kind() })
+    }
+
+    /// The command's outcome: a room that has to be run again first, then
+    /// a refusal, then a revoke that is recorded and not yet acknowledged.
+    fn finish(&self) -> Result<(), OwnerCliError> {
+        if self.failed > 0 {
+            return Err(OwnerCliError::RevokeAccountIncomplete {
+                failed: self.failed,
+            });
+        }
+        if self.refused > 0 {
+            return Err(OwnerCliError::RevokesRefused {
+                refused: self.refused,
+            });
+        }
+        if self.unacknowledged > 0 {
+            return Err(OwnerCliError::FenceUnacknowledged);
+        }
+        Ok(())
+    }
 }
 
 fn fence_json(fence: FenceAcknowledgement) -> serde_json::Value {
