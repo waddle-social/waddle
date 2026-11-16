@@ -455,10 +455,12 @@ stopped, and its expired requests are pruned before it answers them.
 
 **Inbound requests.** The table's `inbound` direction holds a remote
 entity's request to a local entity, completed by the local response. No
-inbound request reaches a local entity in this slice, so it is never
-written, and every local IQ response offered to the route is dropped. The
-slices that let remote requests reach local handlers (W6a, W6c) register
-them.
+inbound request reaches a local entity, so it is never written, and every
+local IQ response offered to the route is dropped. The requests remote
+entities address to the MUC service ([Inbound MUC](#inbound-muc-w6a)) are
+answered by the service itself on the replica that received them, with the
+request's own id, and need no correlation. The slice that lets remote
+requests reach local accounts (W6c) registers them.
 
 ## Federated handoff contract (G8)
 

@@ -1807,9 +1807,13 @@ yet uses two replicas; that is verification step 4.
   scope's Space is served; W7a depends on it), and with it what `view` of a
   scope's Space means: until then its node is described and listed to
   nobody.
-- Remote principals reaching these surfaces over S2S (W6a); the decision
-  they reach is recorded under [Remote principals at the effect
-  boundary](#remote-principals-at-the-effect-boundary-g17).
+- Remote principals reaching these surfaces over S2S: the join, the
+  archive read, discovery, self-ping and the room's acceptance are reached
+  through [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a), and the
+  decision they reach is recorded under [Remote principals at the effect
+  boundary](#remote-principals-at-the-effect-boundary-g17). Room
+  administration and the other surfaces of this section are not reachable
+  over S2S.
 - Recreation of a scope, a room or a node under a new lifecycle.
 - A deployment-wide policy guard; the first slice's community generation
   still does not fence a changed deployment override.
@@ -3003,8 +3007,9 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
   reads it for a managed room, and other readers of it are not audited here.
 - A plain presence update of a seated, revoked occupant is still broadcast
   until the sweep removes the seat.
-- Remote principals at these surfaces (W5e, W6a) and the remaining items of
-  the writer fence's list.
+- Remote principals at these surfaces are decided under
+  [Remote principals at the effect boundary](#remote-principals-at-the-effect-boundary-g17);
+  the remaining items of the writer fence's list stay open.
 - Surfaces that decide before an await and act after it without deciding
   again, beyond those this section re-decides: XEP-0425 message moderation,
   channel-wide mention delivery, Muji call start and the release of a media
@@ -3420,9 +3425,10 @@ like its grants, which needs a migration and an operation of its own.
 
 `tests/host_grant_remote_principals.rs` decides each case under snapshots
 loaded through the production S2S loader from files, with a stream's
-evidence given in place of a live stream: no inbound stream reaches a
-managed room before W6a. The acceptance-matrix rows marked W5e map onto
-its cases; over live streams they are verification steps 6 and 7. It needs
+evidence given in place of a live stream. The acceptance-matrix rows marked
+W5e map onto its cases; over live streams, which reach a managed room
+through inbound MUC, they are the cases listed at the end of this section
+and verification steps 6 and 7. It needs
 PostgreSQL only, except
 `live_spicedb_an_increase_whose_initiator_is_no_longer_trusted_is_dropped`,
 which reconciles through a disposable SpiceDB like the other `live_spicedb_`
