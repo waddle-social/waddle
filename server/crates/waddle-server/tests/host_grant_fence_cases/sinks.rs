@@ -1365,7 +1365,8 @@ async fn the_moderator_role_is_granted_to_served_accounts_only() {
         is_error(&reply, DefinedCondition::NotAllowed)
             && mentions(
                 &Element::from(reply.clone()),
-                "The moderator role is granted to this deployment's accounts only."
+                "The moderator role is granted to accounts of this deployment and, over a \
+                 certificate-authenticated stream, of its trusted servers only."
             ),
         "a remote occupant was made a moderator: {reply:?}"
     );
