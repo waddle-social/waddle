@@ -1969,6 +1969,11 @@ runbook (G24):
   once. A configuration whose per-account rates add up to more than the
   domain's lets one account spend its domain's rate, and the domain's
   stream then waits for it as it waits for all its accounts together.
+- **`service-unavailable` in a message error ends a seat.** A server
+  answers a `groupchat` message for a full JID with no such resource with
+  it (RFC 6121 §8.5.3.2.1), and the room sends a seat no other message. A
+  client that answers a room's message with that condition itself is
+  taken for gone, and enters again.
 - **A leave that cannot be placed is late, or lost.** A leave or an
   error that ends a seat, for a room whose holder cannot be asked, is
   kept and placed again for up to 120 s; meanwhile the holder still seats
