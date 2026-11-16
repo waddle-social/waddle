@@ -905,7 +905,7 @@ impl ReplicaFence {
         generation: GrantGeneration,
     ) -> FenceTicket {
         FenceTicket {
-            fence: Some(Arc::clone(&self.shared)),
+            fence: Arc::clone(&self.shared),
             registration,
             lifecycle,
             generation,
@@ -969,9 +969,10 @@ async fn keep_lease(shared: Weak<Shared>, wake: Arc<Notify>) {
 /// while its ticket is current.
 #[derive(Clone)]
 pub struct FenceTicket {
-    /// `None` for a decision no fence covers: a store read directly, never
-    /// through a replica's gate.
-    fence: Option<Arc<Shared>>,
+    /// The fence of the replica whose gate read the grants. Every ticket
+    /// belongs to one: grants read outside a gate carry no ticket at all
+    /// ([`super::StoredRoomGrants`]).
+    fence: Arc<Shared>,
     registration: u64,
     lifecycle: ScopeLifecycleId,
     generation: GrantGeneration,
@@ -980,7 +981,6 @@ pub struct FenceTicket {
 impl std::fmt::Debug for FenceTicket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FenceTicket")
-            .field("fenced", &self.fence.is_some())
             .field("registration", &self.registration)
             .field("generation", &self.generation)
             .finish_non_exhaustive()
@@ -988,17 +988,6 @@ impl std::fmt::Debug for FenceTicket {
 }
 
 impl FenceTicket {
-    /// The ticket of grants read from a store directly, outside any
-    /// replica's gate. It is always current: nothing acknowledges for it.
-    pub fn unfenced(lifecycle: ScopeLifecycleId, generation: GrantGeneration) -> Self {
-        Self {
-            fence: None,
-            registration: 0,
-            lifecycle,
-            generation,
-        }
-    }
-
     /// The scope the decision was read for.
     pub fn lifecycle(&self) -> ScopeLifecycleId {
         self.lifecycle
@@ -1017,10 +1006,7 @@ impl FenceTicket {
     /// lease it was read under and has installed no newer generation of its
     /// scope.
     pub fn is_current(&self) -> bool {
-        match &self.fence {
-            None => true,
-            Some(shared) => self.current_in(&shared.read()),
-        }
+        self.current_in(&self.fence.read())
     }
 
     /// Run `effect` if the decision is still current, under the lock an
@@ -1028,21 +1014,14 @@ impl FenceTicket {
     /// after `effect` has returned, or `effect` does not run. `effect`
     /// must not block.
     pub fn admit<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
-        match &self.fence {
-            None => Some(effect()),
-            Some(shared) => {
-                let state = shared.read();
-                self.current_in(&state).then(effect)
-            }
-        }
+        let state = self.fence.read();
+        self.current_in(&state).then(effect)
     }
 
     /// Ask the replica's server to sweep the decision's scope: an effect
     /// that began under this ticket finished after the ticket stopped being
     /// current.
     pub fn request_sweep(&self) {
-        if let Some(shared) = &self.fence {
-            shared.request_sweep(self.lifecycle);
-        }
+        self.fence.request_sweep(self.lifecycle);
     }
 }

@@ -129,6 +129,14 @@ impl RoomGrants {
             .map_or(RoomAffiliation::None, |(recorded, _)| *recorded)
     }
 
+    /// The affiliation in effect for `subject`: the one admission honours.
+    /// A recorded increase that is not yet effective does not show here.
+    pub fn effective_affiliation(&self, subject: &BareJid) -> RoomAffiliation {
+        self.grants
+            .get(subject.as_str())
+            .map_or(RoomAffiliation::None, |(_, effective)| *effective)
+    }
+
     /// The subjects whose recorded affiliation is `affiliation`, in
     /// canonical order. A recorded increase that is not yet effective is
     /// listed; this is the room's list as administered, not as admitted.

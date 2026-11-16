@@ -62,8 +62,8 @@ use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::{Affiliation, Stanza};
 
 use crate::permissions::host_grant::{
-    HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomAffiliation,
-    RoomBinding, RoomGate, ScopeLifecycleId, SubjectHome,
+    HostGrantGate, PrincipalEvidence, RoomAffiliation, RoomBinding, RoomGate, ScopeLifecycleId,
+    StoredRoomGrants,
 };
 use crate::room_effect_outbox::RoomEffectArmSupervisor;
 use crate::server::routes::websocket::WebSocketState;
@@ -238,7 +238,7 @@ impl Sweep {
         let mut finished = true;
 
         // The actor's own last-owner rule counts the owners its list holds.
-        for owner in grants.grants.recorded(RoomAffiliation::Owner) {
+        for owner in grants.recorded(RoomAffiliation::Owner) {
             if held.affiliation(&owner) != Affiliation::Owner {
                 finished &= ask(actor.ask(ChangeAffiliation {
                     jid: owner,
@@ -364,23 +364,20 @@ enum Correction {
 /// admits nobody. Its other uses of the room are each decided with the
 /// evidence of the request that makes them.
 fn correction(
-    grants: &ManagedRoomGrants,
+    grants: &StoredRoomGrants,
     account: &BareJid,
     mirrored: Affiliation,
     seated: bool,
 ) -> Option<Correction> {
-    let recorded = muc_affiliation(grants.grants.recorded_affiliation(account));
-    let banned =
-        grants.standing_unfenced(account, &PrincipalEvidence::NoStream) == RoomAffiliation::Outcast;
-    let admitted = grants.grants.allows(
-        account,
-        &PrincipalEvidence::NoStream,
-        HostGrantAction::Read,
-        &grants.principals,
-    );
-    let served = grants.principals.served().home_of(account) == SubjectHome::Served;
+    let recorded = muc_affiliation(grants.recorded_affiliation(account));
+    let banned = grants.standing(account, &PrincipalEvidence::NoStream) == RoomAffiliation::Outcast;
+    let admitted = grants.reads(account, &PrincipalEvidence::NoStream);
+    let served = grants
+        .witness(account, &PrincipalEvidence::NoStream)
+        .remote()
+        .is_none();
     let denied_on_every_stream =
-        banned || recorded < Affiliation::Member || !grants.grants.scope_admits;
+        banned || recorded < Affiliation::Member || !grants.scope_admits();
     if seated && !admitted && (served || denied_on_every_stream) {
         return Some(Correction::Remove(if banned {
             Some(Affiliation::Outcast)

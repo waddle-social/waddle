@@ -174,19 +174,6 @@ impl ManagedRoomGrants {
         self.grants.standing(subject, evidence, &self.principals)
     }
 
-    /// The standing the grants as read honour `subject`, reaching the
-    /// decision with `evidence`, with, whether or not the decision may
-    /// still be acted on. It is what the grants said, for a caller that puts
-    /// derived state back in line with them and checks the ticket itself;
-    /// nothing may be admitted from it.
-    pub fn standing_unfenced(
-        &self,
-        subject: &BareJid,
-        evidence: &PrincipalEvidence,
-    ) -> super::model::RoomAffiliation {
-        self.grants.standing(subject, evidence, &self.principals)
-    }
-
     /// The subjects whose grants allow `action`, each decided without
     /// stream evidence.
     pub fn admitted(&self, action: HostGrantAction) -> Vec<BareJid> {
@@ -194,6 +181,64 @@ impl ManagedRoomGrants {
     }
 
     /// What `subject`, reaching the surface with `evidence`, is decided as.
+    pub fn witness(&self, subject: &BareJid, evidence: &PrincipalEvidence) -> PrincipalWitness {
+        self.principals.witness(subject, evidence)
+    }
+}
+
+/// A managed room's canonical grants as the store holds them, read without
+/// the replica's lease: what [`HostGrantGate::room_as_stored`] returns.
+///
+/// It carries no ticket of the revocation fence and is not a decision. It
+/// answers what the grants say, for the caller that puts derived state back
+/// in line with them (the revocation sweep removes an occupant, lowers an
+/// entry). It offers no `allows_as` and is no [`ManagedRoomGrants`], so no
+/// surface can admit a request from it.
+#[derive(Clone, Debug)]
+pub struct StoredRoomGrants {
+    grants: RoomGrants,
+    principals: PrincipalPolicy,
+}
+
+impl StoredRoomGrants {
+    /// Whether the scope admits anybody: it is active under the current
+    /// authority incarnation and policy version.
+    pub fn scope_admits(&self) -> bool {
+        self.grants.scope_admits
+    }
+
+    /// The standing the grants honour `subject` with on `evidence`.
+    pub fn standing(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+    ) -> super::model::RoomAffiliation {
+        self.grants.standing(subject, evidence, &self.principals)
+    }
+
+    /// Whether the grants would let `subject` read the room on `evidence`.
+    pub fn reads(&self, subject: &BareJid, evidence: &PrincipalEvidence) -> bool {
+        self.grants
+            .allows(subject, evidence, HostGrantAction::Read, &self.principals)
+    }
+
+    /// The affiliation recorded for `subject`, effective or not yet.
+    pub fn recorded_affiliation(&self, subject: &BareJid) -> super::model::RoomAffiliation {
+        self.grants.recorded_affiliation(subject)
+    }
+
+    /// The affiliation in effect for `subject`: what admission honours.
+    pub fn effective_affiliation(&self, subject: &BareJid) -> super::model::RoomAffiliation {
+        self.grants.effective_affiliation(subject)
+    }
+
+    /// The subjects whose recorded affiliation is `affiliation`.
+    pub fn recorded(&self, affiliation: super::model::RoomAffiliation) -> Vec<BareJid> {
+        self.grants.recorded(affiliation)
+    }
+
+    /// What `subject` is decided as on `evidence`, under the snapshot the
+    /// replica runs.
     pub fn witness(&self, subject: &BareJid, evidence: &PrincipalEvidence) -> PrincipalWitness {
         self.principals.witness(subject, evidence)
     }
@@ -406,8 +451,9 @@ impl HostGrantGate {
     /// with the grants: what such a caller does on a read that shows no
     /// standing (it removes an occupant, lowers a role) needs no admission,
     /// and it must keep working while the replica's lease is lapsed.
-    /// Nothing may be admitted from it.
-    pub async fn room_as_stored(&self, binding: RoomBinding<'_>) -> RoomGate<ManagedRoomGrants> {
+    /// Nothing can be admitted from it: [`StoredRoomGrants`] is not a
+    /// decision and carries no fence ticket.
+    pub async fn room_as_stored(&self, binding: RoomBinding<'_>) -> RoomGate<StoredRoomGrants> {
         let Some(store) = &self.store else {
             return RoomGate::Unmanaged;
         };
@@ -420,14 +466,10 @@ impl HostGrantGate {
             return RoomGate::Unavailable;
         };
         match tokio::time::timeout(ROOM_READ_DEADLINE, store.room_grants(binding)).await {
-            Ok(Ok(RoomLookup::Managed(grants))) => {
-                let fence = FenceTicket::unfenced(grants.lifecycle, grants.generation);
-                RoomGate::Managed(ManagedRoomGrants {
-                    grants,
-                    principals: attachment.principals().clone(),
-                    fence,
-                })
-            }
+            Ok(Ok(RoomLookup::Managed(grants))) => RoomGate::Managed(StoredRoomGrants {
+                grants,
+                principals: attachment.principals().clone(),
+            }),
             _ => RoomGate::Unavailable,
         }
     }
