@@ -19,7 +19,6 @@
 //! and it is what every admission reads.
 
 use jid::{BareJid, FullJid};
-use waddle_xmpp::identity::CanonicalDomain;
 use xmpp_parsers::stanza_error::StanzaError;
 
 use super::{
@@ -203,28 +202,16 @@ impl RecordRefusal {
     }
 }
 
-/// The issuance policy of this replica: its served account domains, the
-/// domains of its own services, and no trusted home. Until the operator's
-/// trusted-home list is configured, an owner or admin grant to a remote
-/// account is refused (ADR-0020 D8).
+/// The issuance policy of this replica (see
+/// `XmppServiceDomains::host_grant_issuance_policy`).
 fn issuance_policy(
     state: &WebSocketState,
     served: &crate::permissions::host_grant::ServedAccountDomains,
 ) -> Option<IssuancePolicy> {
-    let domains = &state.deps.service_domains;
-    let services = [
-        &domains.muc,
-        &domains.spaces,
-        &domains.upload,
-        &domains.extensions,
-        &domains.push,
-        &domains.community,
-    ]
-    .into_iter()
-    .map(|domain| CanonicalDomain::parse_exact(domain))
-    .collect::<Result<Vec<_>, _>>()
-    .ok()?;
-    IssuancePolicy::for_served(served, services, []).ok()
+    state
+        .deps
+        .service_domains
+        .host_grant_issuance_policy(served)
 }
 
 /// Delays before each further reconciliation pass of a recorded change whose

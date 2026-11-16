@@ -930,6 +930,7 @@ async fn attach_host_grant_store(
     ingress: &Arc<IngressAuthority>,
     state: &AppState,
     account_domain: waddle_xmpp::identity::CanonicalDomain,
+    service_domains: &XmppServiceDomains,
     restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     stop: tokio_util::sync::CancellationToken,
 ) {
@@ -945,10 +946,12 @@ async fn attach_host_grant_store(
     // drops it.
     state.host_grants.bind_attachment(Arc::clone(&gate));
     let permissions = state.permission_actor.clone();
+    let served = ServedAccountDomains::new([account_domain]);
+    let issuance = service_domains.host_grant_issuance_policy(&served);
     gate.install_verifier(
         store.clone(),
         permissions.clone(),
-        ServedAccountDomains::new([account_domain]),
+        served,
         restore_epoch,
         stop.clone(),
     );
@@ -959,7 +962,13 @@ async fn attach_host_grant_store(
         }
     }
     gate.watch(crate::permissions::host_grant::REVERIFY_INTERVAL);
-    spawn_host_grant_recovery(gate, store, permissions, stop);
+    match issuance {
+        Some(issuance) => spawn_host_grant_recovery(gate, store, permissions, issuance, stop),
+        None => warn!(
+            kind = "issuance_policy",
+            "Host-grant projection recovery was not started: a service domain is not canonical"
+        ),
+    }
 }
 
 /// How often recovery looks whether the replica's gate has attached.
@@ -972,14 +981,18 @@ const HOST_GRANT_RECOVERY_POLL: std::time::Duration = std::time::Duration::from_
 /// replica, an unreachable projection) becomes effective here, or stays
 /// recorded and not effective, and a scope a declared restore closed is
 /// reconstructed. Nothing is projected while the fence refuses the
-/// authority. Outcomes are logged by kind, without a scope identifier.
+/// authority. A reconstruction records lowered grants, deciding by
+/// `issuance` what may be recorded for whom, so recovery runs under the
+/// replica's issuance policy. Outcomes are logged by kind, without a scope
+/// identifier.
 fn spawn_host_grant_recovery(
     gate: Arc<crate::permissions::host_grant::HostGrantAttachmentGate>,
     store: crate::permissions::host_grant::HostGrantStore,
     permissions: kameo::actor::ActorRef<crate::permissions::PermissionActor>,
+    issuance: crate::permissions::host_grant::IssuancePolicy,
     stop: tokio_util::sync::CancellationToken,
 ) {
-    use crate::permissions::host_grant::{HostGrantAuthority, IssuancePolicy, Reconciliation};
+    use crate::permissions::host_grant::{HostGrantAuthority, Reconciliation};
     tokio::spawn(async move {
         while !gate.verified() {
             tokio::select! {
@@ -987,9 +1000,7 @@ fn spawn_host_grant_recovery(
                 () = tokio::time::sleep(HOST_GRANT_RECOVERY_POLL) => {}
             }
         }
-        // Recovery projects recorded intent only; it issues nothing, so it
-        // needs no issuance policy.
-        let authority = HostGrantAuthority::new(store, permissions, IssuancePolicy::default());
+        let authority = HostGrantAuthority::new(store, permissions, issuance);
         match authority.recover_pending().await {
             Ok(outcomes) => {
                 let unresolved = outcomes
@@ -1764,6 +1775,7 @@ async fn create_websocket_state(
         &ingress,
         &state,
         account_domain.clone(),
+        &service_domains,
         server_config.host_grant_restore_epoch,
         shutdown_handle.stop_token(),
     )
