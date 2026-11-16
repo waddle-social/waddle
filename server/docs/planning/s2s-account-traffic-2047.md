@@ -30,13 +30,14 @@ not run until verification (D9):
   and D7's refusal while no account side is attached;
 - `crates/waddle-server/tests/s2s_account_traffic_ws.rs`: the RFC 6121
   account-traffic suite, a loopback S2S peer against the production `/ws`
-  router and the real router: messages, offline storage and its bounds,
-  presence, subscriptions in both directions, probes, IQ requests, the
+  router and the real router: messages, presence, subscriptions in both directions, probes, IQ requests, the
   no-enumeration matrix, retired JIDs and a retired account's open stream,
   D1 at the effect boundary and S2S off;
-- `crates/waddle-server/tests/s2s_account_sm_expiry.rs`: the expiry of a
-  detached XEP-0198 session holding a stranger's message, through the
+- `crates/waddle-server/tests/xep0198_s2s_account_expiry.rs`: the expiry
+  of a detached XEP-0198 session holding a stranger's message, through the
   promotion chain every expiry path runs;
+- `crates/waddle-server/tests/xep0160_s2s_account_offline_ws.rs`: offline
+  storage of remote senders' messages and the strangers' bounds;
 - `crates/waddle-server/tests/xep0280_s2s_account_carbons_ws.rs`:
   received and sent carbons of messages exchanged with remote accounts,
   and carbon wrappers removed from remote messages;
@@ -215,9 +216,12 @@ even while such rows or a resource remain.
   sender is taken as remote when its `from` is neither the server domain
   nor below it; a MUC or Spaces service an operator moved outside the
   server domain is then treated the same way, its messages dropped rather
-  than retained beyond the quota. Such a transfer counts against the
-  store's quota only, not a stranger's bounds: the session's replay window
-  bounds it, and its resource had taken the message.
+  than retained beyond the quota. A stranger's message is handed to a
+  detached session only once admitted within the bounds above, as if it
+  were stored at once, and one beyond them is dropped. A message a live
+  resource took and had not acknowledged when its stream was lost counts
+  against the store's quota only, since the session's replay window
+  already bounds it.
 - **`groupchat`** to an account is answered with `service-unavailable`
   (§8.5.2.1.1 and §8.5.2.2.1 require an error for the bare JID; the full
   JID takes the same answer so that no state is distinguishable).
@@ -551,15 +555,15 @@ store. This is the slice's rollout part (G24).
 | G18-2 | No enumeration: for a non-contact, every class has one remote-visible result whatever the account's state (table above). Existence, retirement included, is checked first. | RFC 6121 §8.5.1 error for nonexistent accounts and offline storage for existing ones (rejected: distinguishes them). |
 | G18-3 | IQ requests to the bare JID are answered `service-unavailable`; no namespace is answered on an account's behalf for remote requesters. | Enabling vCard, PEP and account discovery (deferred: each needs its own access review). |
 | G18-4 | IQ requests to a full JID reach the resource for a requester with `from` or `both`, or a remote room the resource occupies, registered as `inbound` correlation rows. | Directed-presence admission (not tracked). |
-| G18-5 | Messages go to one most available resource; with none, the message is stored offline, from a contact and a stranger alike, and nothing ever answers a remote sender's message (owner decision OD1, 2026-11-16). Strangers are held to bounds per sender, parent domain and account; beyond a bound or the quota a message is dropped silently. The minimal producer writes a `Transient` offline row; archive, inbox and push wait for the remote ingress producer. | `service-unavailable` to contacts and dropping strangers' messages (replaced: a contact could tell an offline account from an online one); erroring to everybody (rejected: presence leak). |
+| G18-5 | Messages go to one most available resource; with none, the message is stored offline, from a contact and a stranger alike, and nothing ever answers a remote sender's message (owner decision, 2026-11-16). Strangers are held to bounds per sender, parent domain and account; beyond a bound or the quota a message is dropped silently. The minimal producer writes a `Transient` offline row; archive, inbox and push wait for the remote ingress producer. | `service-unavailable` to contacts and dropping strangers' messages (replaced: a contact could tell an offline account from an online one); erroring to everybody (rejected: presence leak). |
 | G18-6 | Broadcast presence is accepted only from contacts the account is subscribed to; probes are answered only for contacts with `from` or `both`, and otherwise ignored. | §8.5.2.1.2 delivery from anyone; `unsubscribed` to every unauthorised prober. |
 | G18-7 | Subscriptions: the account's own roster half only; inbound requests recorded durably, bounded, delivered at each new session; pre-approval supported. | The client path's in-memory pending queue (rejected: per replica, lost on restart, unbounded across requesters). |
 | G18-8 | Event notifications only for a node the account subscribed to, recorded when the request leaves, or from the PEP service of a contact the account is subscribed to. | Recording on the service's result (rejected: the `<subscription/>` element is optional and pending subscriptions would be missed). |
 | G18-9 | D1 is decided at the account side, from the stream's evidence and the snapshot the replica runs, before any effect and again before a recorded request is delivered. | Deciding at enqueue only. |
-| G18-10 | Remote contacts stay in rosters with S2S off, dormant; the roster set may still refuse a new one while it is off (owner decision OD2, 2026-11-16). | Pruning them at every start with S2S off (replaced: a deployment that turns S2S off for a while lost its users' remote contacts). |
+| G18-10 | Remote contacts stay in rosters with S2S off, dormant; the roster set may still refuse a new one while it is off (owner decision, 2026-11-16). | Pruning them at every start with S2S off (replaced: a deployment that turns S2S off for a while lost its users' remote contacts). |
 | G18-11 | No path answers a remote sender's message: the account side, the expiry of a detached session and the ingress quota bounce all drop instead of bouncing a sender at a domain the deployment does not serve. | Bouncing on quota as for local senders (rejected: tells the sender the account is offline). |
 | G18-12 | The router abandons account work at its deadline and the account side then applies nothing more; roster read-modify-write runs under a per-account lock; a change is announced only once stored. | Letting abandoned work run to its end (replaced: its effects could land after the sender's next stanza's). |
-| G18-13 | A retired account's open stream sends no account traffic, refused at the router's account route with a fail-closed check (integrator decision N14). | Ending the stream at retirement (out of scope: retirement does not end streams). |
+| G18-13 | A retired account's open stream sends no account traffic, refused at the router's account route with a fail-closed check. | Ending the stream at retirement (out of scope: retirement does not end streams). |
 
 ## Restrictions and risks
 
@@ -626,21 +630,20 @@ store. This is the slice's rollout part (G24).
 - Advertising any of this, in the server domain's `disco#info` for remote
   askers or elsewhere, stays with capability advertisement (W11).
 
-## Decisions taken after review
+## Decisions
 
-- **OD1 (owner, 2026-11-16).** Messages from remote senders to an offline
-  account are stored, from contacts and strangers alike, with no
-  difference observable to the sender and no bounce; strangers' messages
-  are subject to blocking and to bounds per sender and per domain, beyond
-  which they are dropped silently. The offline contact gets nothing back
-  either (G18-5, G18-11).
-- **OD2 (owner, 2026-11-16).** With S2S off remote contacts stay in rosters,
-  dormant; the roster set may still refuse a new one (G18-10).
-- **N3 (integrator).** A blocked contact telling it is blocked from an
-  offline account is accepted as a consequence of XEP-0191 §3.3 (see "No
+- **Offline storage for remote senders (owner, 2026-11-16).** Messages from
+  remote senders to an offline account are stored, from contacts and
+  strangers alike, with no difference observable to the sender and no
+  bounce; strangers' messages are subject to blocking and to bounds per
+  sender and per domain, beyond which they are dropped silently. An
+  offline account's contact gets nothing back either (G18-5, G18-11).
+- **Remote contacts with S2S off (owner, 2026-11-16).** They stay in
+  rosters, dormant; the roster set may still refuse a new one (G18-10).
+- **A blocked contact can tell it is blocked** from an offline account; this
+  is accepted as a consequence of XEP-0191 §3.3 (see "No enumeration").
+- **Receipts and markers** are a client's duty, per XEP-0184 §8 (see "No
   enumeration").
-- **N4 (integrator).** Receipts and markers are a client's duty, per
-  XEP-0184 §8 (see "No enumeration").
-- **N14 (integrator).** A retired account's still-open session sends no
-  account traffic or presence, refused at the outbound account route and
-  failing closed (G18-13).
+- **A retired account's still-open session** sends no account traffic or
+  presence, refused at the outbound account route and failing closed
+  (G18-13).
