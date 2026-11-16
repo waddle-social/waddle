@@ -253,6 +253,7 @@ Every variant compiles from scratch. Variants are added as they finish.
 | Variant | Outcome | Queue wait | Lane | Compile | Slowest shard | vCPU-min | Busy cores compile (mean / max) | Busy cores tests (mean / max) | Peak memory |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `32x64` (baseline) | pass | 72 min | 20.8 min | 5.9 min | 12.7 min | 665 | 10.1 / 26.9 | 1.6 / 11.0 | 19.6 GB |
+| `32x64-j16` | pass | 116 min | 20.8 min | 5.7 min | 13.2 min | 665 | 8.1 / 31.9 | 1.7 / 11.4 | 20.3 GB |
 
 Baseline observations:
 
@@ -264,3 +265,9 @@ Baseline observations:
 - Shard times were 761 s, 604 s, 609 s and 395 s, within 2% of the
   preliminary run. Shard 1 sets the lane length.
 - The job waited 72 minutes for a machine and ran for 21.
+
+`32x64-j16`: raising `CARGO_BUILD_JOBS` from 4 to 16 saved 13 seconds of
+compile (341 s against 353 s) and nothing on the lane. The compile briefly
+used all 32 cores and then averaged fewer than the baseline, so it is limited
+by a few large crates that build one after another, not by the job count.
+Option 2 is not worth pursuing on its own.
