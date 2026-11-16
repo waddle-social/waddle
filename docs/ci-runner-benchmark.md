@@ -2,7 +2,7 @@
 
 CI feels slow because jobs wait for runners, not because they run slowly. This
 document records the measurements behind that, the options for fixing it, and
-the benchmark that tests the main option. Results are added as runs complete.
+the benchmark that tests the main option. The conclusion is at the end.
 
 ## Findings: 2026-11-14 to 2026-11-15
 
@@ -156,8 +156,8 @@ it and also eases the GitHub 20-job limit.
 
 | # | Change | Expected effect | Status |
 | --- | --- | --- | --- |
-| 1 | Run the shard lane on a smaller machine | Halves or quarters the lane's 65% share | Benchmarked here |
-| 2 | Raise `CARGO_BUILD_JOBS` on the machine already paid for | Shorter compile | Benchmarked here |
+| 1 | Run the shard lane on a smaller machine | Halves or quarters the lane's 65% share | Benchmarked: use 16x32 |
+| 2 | Raise `CARGO_BUILD_JOBS` on the machine already paid for | Shorter compile | Benchmarked: no effect |
 | 3 | Rebalance the four shards | About 3 minutes per run | Not started |
 | 4 | Run the lane less often (drafts, merge queue only) | Removes most cancelled runs | Policy decision |
 | 5 | Drop or demote `namespaceRustChecks` `test` | 7% of capacity | Policy decision |
@@ -259,6 +259,12 @@ Every variant compiles from scratch.
 | `16x32` | invalid (see below) | 161 min | — | 6.1 min | — | — | 6.5 / 13.9 | 1.6 / 14.8 | 18.7 GB |
 | `16x32-j8` | invalid (see below) | 180 min | — | 6.2 min | — | — | 6.7 / 15.9 | 1.5 / 15.0 | 19.4 GB |
 
+Queue wait here and in pass 2 counts from the start of the run, so it
+includes the variants that ran before. The waits for a machine themselves
+were 72 minutes for the first variant of pass 1, 13 minutes for pass 2 and
+45 minutes for pass 3; later variants in a pass mostly started within a
+minute or two of the previous one finishing.
+
 Baseline observations:
 
 - The machine averaged 4.1 busy cores of 32 over the whole job and never used
@@ -340,10 +346,58 @@ still comparable because nothing stopped early.
 - Raising cargo jobs to 8 on 16 vCPUs made no measurable difference, as on
   32 vCPUs.
 
+### Pass 3, 2026-11-16
+
+[Run 43819149809](https://github.com/waddle-social/waddle/actions/runs/43819149809):
+the same three variants again.
+
+| Variant | Outcome | Lane | Compile | Slowest shard | vCPU-min | Busy cores compile (mean / max) | Busy cores tests (mean / max) | Peak memory |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `16x32` | **fail** (one test) | 23.9 min | 6.5 min | 14.0 min | 382 | 6.8 / 14.0 | 1.7 / 6.2 | 18.5 GB |
+| `16x32-j8` | pass | 23.8 min | 6.0 min | 14.2 min | 381 | 6.7 / 15.8 | 2.0 / 7.0 | 18.8 GB |
+| `8x32` | **fail** (one test) | 28.7 min | 10.4 min | 16.5 min | 230 | 4.6 / 7.9 | 1.7 / 4.9 | 18.0 GB |
+
+- `16x32` failed `xep0198_durable_ws`
+  `a_session_live_when_the_process_died_resumes_after_a_restart`, a known
+  flake that is being fixed separately.
+- `8x32` failed `selector_cluster_characterization`
+  `durable_coordinator::stanza_from_the_same_node_to_a_detached_session`
+  ("Timed out waiting for XMPP close acknowledgement"), and its compile took
+  623 s against 373 s in pass 2.
+
 ### Flakiness limits what one run shows
 
 The production lane failed twice out of three attempts on this pull request
 during the benchmark, on two different cluster tests
 (`live_session_resumes_on_the_other_node` and the `failure_matrix` test
 above). A single failure on a smaller shape therefore cannot be blamed on the
-shape. Pass 3 repeats the three smaller variants.
+shape, which is why the smaller variants ran twice.
+
+## Conclusion
+
+Move the shard lane to 16 vCPU / 32 GB, with 4 cores and 4 test threads per
+shard and `CARGO_BUILD_JOBS` left at 4.
+
+| Shape | Valid runs | Lane | Compile | Slowest shard | vCPU-min | Failures |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 32 vCPU / 64 GB | 2 | 20.8 min | 5.7 to 5.9 min | 12.7 to 13.2 min | 665 | none |
+| 16 vCPU / 32 GB | 4 | 22.5 to 24.0 min | 6.0 to 7.5 min | 13.4 to 14.4 min | 360 to 384 | two, both flakes seen elsewhere |
+| 8 vCPU / 32 GB | 2 | 24.1 to 28.7 min | 6.2 to 10.4 min | 16.4 to 16.5 min | 193 to 230 | two, neither seen elsewhere |
+
+- **16 vCPU costs about 3 minutes.** The lane takes 2 to 3 minutes longer and
+  uses 43% fewer vCPU-minutes. Two lanes fit under the Namespace limit where
+  one fits today, so the wait for a machine, which was 13 to 72 minutes
+  for the first variant of each pass, should fall by more than the lane grows.
+- **Cargo jobs do not matter.** 8 jobs against 4 on 16 vCPUs, and 16 against
+  4 on 32, are within run-to-run noise.
+- **8 vCPU is not safe.** Both runs failed a timing-sensitive test that failed
+  nowhere else, the slowest shard is 3 to 4 minutes slower, and compile time
+  varied from 6 to 10 minutes. Two runs do not prove the shape causes the
+  failures, but the saving over 16 vCPU is not worth finding out.
+- **Cores and test threads must change together.** `--cores` 4 with
+  `--test-threads 8` silently skips tests (pass 1).
+- **Memory is not a constraint.** No run used more than 20.3 GB.
+
+The shape change itself is not in this pull request. It is one edit to
+`productionShardLane` in `flake.nix` plus the runner label in
+`ci/rust-tests`.
