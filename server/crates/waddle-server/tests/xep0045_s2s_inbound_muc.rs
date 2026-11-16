@@ -9,7 +9,8 @@
 //! room's traffic for it cannot be queued (§11.1). A remote principal
 //! creates no room, holds an owner or admin standing only for a trusted
 //! home on a `pkix` stream, and reaches nothing outside the reviewed
-//! operations: private messages and room administration are refused.
+//! operations: private messages and room administration are refused, and
+//! only the text of its messages reaches the room.
 //!
 //! `example.com` runs the production room host, S2S router and connection
 //! manager over a WebSocket state with an in-memory SQLite database;
@@ -160,6 +161,65 @@ async fn messages_fan_out_to_and_from_a_remote_occupant() {
         .await
         .expect("the reflection for the remote sender");
     assert_eq!(body(&reflection).as_deref(), Some("hello from there"));
+}
+
+#[tokio::test]
+async fn only_the_text_of_a_remote_occupants_message_reaches_the_room() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // A payload the room's pipeline has not reviewed for a remote
+    // principal rides along with the text.
+    let mut carried = remote_groupchat(BOB, ROOM, "carried-1", "text with baggage");
+    carried
+        .payloads
+        .push(Element::builder("pinned", "urn:waddle:pin:0").build());
+    carried.subjects.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "not a subject change".to_owned(),
+    );
+    hosted.from_peer(carried).await;
+    let received = local_receives(&mut alice, ARRIVES, |stanza| {
+        body(stanza).as_deref() == Some("text with baggage")
+    })
+    .await
+    .expect("the text for the local occupant");
+    assert!(
+        received
+            .children()
+            .all(|child| child.ns() != "urn:waddle:pin:0" && child.name() != "subject"),
+        "{received:?}"
+    );
+
+    // XEP-0045 §8.1: a subject change is refused.
+    let mut subject = Message::new_with_type(MessageType::Groupchat, Some(jid(ROOM)));
+    subject.from = Some(jid(BOB));
+    subject.id = Some(xmpp_parsers::message::Id("subject-1".to_owned()));
+    subject.subjects.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "taken over".to_owned(),
+    );
+    hosted.from_peer(subject).await;
+    let refused = hosted.answered("subject-1").await;
+    assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
+
+    // A message without text is neither relayed nor answered.
+    let mut state = Message::new_with_type(MessageType::Groupchat, Some(jid(ROOM)));
+    state.from = Some(jid(BOB));
+    state.id = Some(xmpp_parsers::message::Id("state-1".to_owned()));
+    state
+        .payloads
+        .push(Element::builder("composing", "http://jabber.org/protocol/chatstates").build());
+    hosted.from_peer(state).await;
+    assert!(
+        local_receives(&mut alice, QUIET, |stanza| {
+            stanza.name() == "message" && stanza.attr("id") == Some("state-1")
+        })
+        .await
+        .is_none(),
+        "a message without text reached the room"
+    );
+    assert!(hosted.captured.with_id("state-1").is_empty());
+    assert!(hosted.seat(ROOM, BOB).is_some());
 }
 
 #[tokio::test]

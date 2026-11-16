@@ -19,12 +19,13 @@
 //!   `pkix` stream carried the request.
 //!
 //! What a remote principal may ask is narrower than what a session may:
-//! joining, changing nickname and availability, leaving, sending to the
-//! room, reading its archive, `disco#info`, `disco#items` and ping. Private
-//! messages, invitations, voice requests, room administration and
+//! joining, changing nickname and availability, leaving, sending text to
+//! the room, reading its archive, `disco#info`, `disco#items` and ping.
+//! Private messages, invitations, voice requests, room administration and
 //! configuration, and every extension of this deployment (calls, pins,
-//! hats, commands) are refused or dropped; presence from a remote occupant
-//! is reduced to its availability before the room sees it.
+//! hats, commands) are refused or dropped: presence from a remote occupant
+//! is reduced to its availability, and a message to its text, before the
+//! room sees it.
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -267,6 +268,31 @@ fn reduced_presence(presence: &Presence) -> Presence {
         reduced.payloads.push(Element::builder("x", NS_MUC).build());
     }
     reduced
+}
+
+/// A remote occupant's message as the room sees it: its text, its thread
+/// and the identifier its client gave it (XEP-0359 `origin-id`). Every
+/// other payload is dropped before the room plans the message. The room's
+/// pipeline acts on several of them (a subject change, a pin, a forum
+/// action, a displayed marker, a correction, retraction or reaction naming
+/// an archived message), and none of those has been reviewed for a remote
+/// principal. `None` when the message carries no text.
+fn reduced_message(message: &Message) -> Option<Message> {
+    if message.bodies.is_empty() {
+        return None;
+    }
+    let mut reduced = Message::new_with_type(MessageType::Groupchat, message.to.clone());
+    reduced.from = message.from.clone();
+    reduced.id = message.id.clone();
+    reduced.bodies = message.bodies.clone();
+    reduced.thread = message.thread.clone();
+    reduced.payloads = message
+        .payloads
+        .iter()
+        .filter(|payload| payload.is("origin-id", waddle_xmpp_core::xep0359::NS_SID))
+        .cloned()
+        .collect();
+    Some(reduced)
 }
 
 /// Whether `replies` hold the room's own available presence for the
@@ -689,7 +715,18 @@ impl Asked<'_> {
                 "You are not an occupant of this room.",
             ));
         };
-        let mut message = message.clone();
+        let Some(mut message) = reduced_message(message) else {
+            // XEP-0045 §8.1: a subject change by an occupant that may not
+            // make one is `forbidden`. Anything else without text (a chat
+            // state, a marker, a reaction) is not relayed and not answered.
+            return if message.subjects.is_empty() {
+                RoomReplies::none()
+            } else {
+                self.refuse(forbidden(
+                    "Occupants from other servers cannot change the room subject.",
+                ))
+            };
+        };
         message.from = Some(Jid::from(occupant.clone()));
         message.to = Some(Jid::from(room.clone()));
         let target = NormalizedTarget::Bare(room.clone());
