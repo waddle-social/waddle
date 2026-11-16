@@ -13,7 +13,9 @@ Slice slugs follow the plan: W1 authorization ID codec, W2 destination
 classifier, W3 client identity, W4a S2S codec, W4b verifier, W4c connection
 manager, W4d discovery and dialback, W5a routing and reachability, W5b first
 host-grant slice, W5c writer fence, W5i identity profile, W5o outcast
-precedence and schema version. A target lists every slice that touched it,
+precedence and schema version, W6b outbound S2S rooms (merged at
+`9766d9c81`; the rows it adds or changes describe that merge and the
+commits after it). A target lists every slice that touched it,
 the first being the slice that created it; "integration" is a commit made on
 the integration branch itself.
 
@@ -40,6 +42,9 @@ the integration branch itself.
 | Source | What it shows |
 | --- | --- |
 | `integration-run2-s2s.log` | nextest on integration at `6e4cceebb`: `waddle-xmpp` 133 of 133 passed across 4 binaries, `waddle-server` 361 of 361 passed across 11 binaries; no skips reported. |
+| `integration-run5-s2s.log` | nextest on integration at `b887a2941` (the W6b merge, the inventory refresh and the PostgreSQL account-bound cases), with `WADDLE_TEST_REQUIRE_POSTGRES=1` and PostgreSQL 17.11: `waddle-xmpp` 133 of 133 passed across 4 binaries; `waddle-server` 426 of 427 passed across 15 binaries. The failure, `s2s_connection_manager` `limits::a_full_backoff_table_neither_refuses_a_healthy_destination_nor_flushes_a_wait`, was an outbound attempt that told its dialler of its failure before releasing its dial slot, so an immediate retry was refused as in progress; fixed in `9313de477`. |
+| `integration-run5-s2s-rerun.log` | the same selection at `9313de477`: `waddle-xmpp` 133 of 133 and `waddle-server` 427 of 427 passed, the two PostgreSQL cases of `xep0045_s2s_outbound_muc` included; no skips reported. |
+| `integration-run5-s2s-stress.log` | `s2s_connection_manager`, `s2s_stream_end`, `xep0045_s2s_outbound_muc` and `xep0410_s2s_self_ping` at `9313de477`, five consecutive nextest runs, PostgreSQL required: 5 of 5 runs passed. |
 | `integration-run2-hostgrant-b.log` | nextest of the first host-grant slice's set: 110 of 110 passed across 8 binaries, including the `#[ignore]` SpiceDB cases. |
 | `integration-run2-hostgrant-c.log` | nextest of the writer fence's set: 64 of 64 passed across 6 binaries. |
 | `integration-run4-c.log` | nextest of the writer fence's set at `def22148d` (the commit is the log's first line): 66 of 66 passed across 6 binaries, including the `#[ignore]` SpiceDB cases. |
@@ -64,10 +69,10 @@ tests of `waddle-server`, `bun test` for `chat`, or the `clustering` feature.
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `s2s_codec` (54 cases) | W4a, W4c, W5a | none | Run 54/54, s2s log |
-| `s2s_pre_authentication` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s log |
-| `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s log |
-| `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, s2s log |
+| `s2s_codec` (54 cases) | W4a, W4c, W5a | none | Run 54/54, s2s and run5 rerun logs |
+| `s2s_pre_authentication` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s and run5 rerun logs |
+| `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s and run5 rerun logs |
+| `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, s2s and run5 rerun logs |
 | `identity_profile` (19) | W5i | none (loopback address checks only) | Not run |
 | `xep0313_mam` (edited, 11) | W5c | none; two cases need PostgreSQL and skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0402_pep_native_bookmarks` (edited, 15) | W5i | none | Not run |
@@ -77,17 +82,21 @@ tests of `waddle-server`, `bun test` for `chat`, or the `clustering` feature.
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, s2s log |
-| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d | loopback | Run 54/54, s2s log |
-| `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, s2s log |
-| `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, s2s log |
-| `s2s_routing` (15) | W5a, integration | loopback | Run 15/15, s2s log |
-| `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, s2s log |
-| `s2s_reachability` (6) | W5a | none | Run 6/6, s2s log |
-| `s2s_d7_refusal` (4) | W5a | none | Run 4/4, s2s log |
-| `xep0030_s2s_server_discovery` (4) | W5a | loopback | Run 4/4, s2s log |
-| `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, s2s log |
-| `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, s2s log |
+| `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, run5 rerun log |
+| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b | loopback | Run 54/54, run5 rerun log |
+| `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, run5 rerun log |
+| `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run5 rerun log |
+| `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 rerun log |
+| `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run5 rerun log |
+| `s2s_reachability` (6) | W5a, W6b | none | Run 6/6, run5 rerun log |
+| `s2s_d7_refusal` (4) | W5a | none | Run 4/4, run5 rerun log |
+| `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run5 rerun log |
+| `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 rerun log |
+| `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run5 rerun log |
+| `xep0045_s2s_outbound_muc` (41) | W6b, integration | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 41/41, run5 rerun and stress logs |
+| `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 rerun and stress logs |
+| `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 rerun and stress logs |
+| `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 rerun log |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -139,8 +148,9 @@ tests of `waddle-server`, `bun test` for `chat`, or the `clustering` feature.
 ### Shared support modules (not targets)
 
 `tests/host_grant_support/mod.rs` (W5b), `tests/ws_loopback_support/mod.rs`
-(W5c) and `tests/s2s_routing_support/mod.rs` (W5a) are compiled into the
-targets above and add no cases. The submodules of `s2s_verifier`,
+(W5c), `tests/s2s_routing_support/mod.rs` (W5a, W6b) and
+`tests/s2s_remote_muc_support/mod.rs` (W6b, integration) are compiled into
+the targets above and add no cases. The submodules of `s2s_verifier`,
 `s2s_connection_manager`, `xep0220_s2s_dialback`, `xep0368_s2s_discovery` and
 `host_grant_fence_cases/sinks.rs` are counted under their parent targets.
 
@@ -187,11 +197,11 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 69 (51 integration targets, 16 library test modules, 2 chat test files) |
-| Run, with a cited log | 28 targets, 658 cases, all passed (`host_grant_projection` is counted once) |
+| Test targets listed | 73 (55 integration targets, 16 library test modules, 2 chat test files) |
+| Run, with a cited log | 32 targets, 724 cases, all passed in their latest cited run (`host_grant_projection` is counted once) |
 | Not run | 41 targets (16 of them library modules) |
 
-By log: the S2S log covers 15 targets (133 `waddle-xmpp` cases in 4, 361 `waddle-server` cases in 11);
+By log: the run5 S2S rerun log covers 19 targets (133 `waddle-xmpp` cases in 4, 427 `waddle-server` cases in 15);
 the host-grant logs cover 13 targets, with `host_grant_projection` in both.
 
 A target is counted as run only when the whole binary's cases appear in a
@@ -329,9 +339,12 @@ implemented unless the text says so.
 - Inbound MUC (W6a) and Spaces (W7a): enable their handlers for remote
   principals in `reach`, the inventory and the reachability suite, and list
   them in server-domain `disco#items`.
-- Outbound MUC (W6b): messages and presence for a remote room the account
-  occupies or is joining, exempt from the outbound D7 refusal; traffic from
-  a joined remote room to the occupant's full JID.
+- Outbound MUC (W6b), merged: a stream that waited for the router and ends
+  for a deadline, eviction or replacement before reading again is reported
+  as lost even when the peer wrote nothing more; end of file between
+  elements, including a TLS end without `close_notify`, is closed, so a
+  peer that crashed between stanzas looks like one dropping an idle
+  connection and its occupants are not told.
 - Account traffic (W6c): replace both D7 refusals for reviewed handlers,
   register inbound requests for correlation and define the ingress receipt
   for a remote target. A message carrying a DM pin marker for a remote peer
