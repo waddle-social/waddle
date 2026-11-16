@@ -360,6 +360,11 @@ fn spawn_session_recovery_delivery(
     let blocking_storage = std::sync::Arc::clone(&state.deps.protocol.blocking_storage);
     let mam_storage = std::sync::Arc::clone(&state.deps.protocol.mam_storage);
     let server_domain = state.deps.auth_state.xmpp_domain.clone();
+    let app_state = std::sync::Arc::clone(&state.deps.app_state);
+    let served = state
+        .deps
+        .service_domains
+        .served_domains(server_domain.as_str());
     let recipient = resource.to_bare();
     let resource = resource.clone();
     let owner = *owner;
@@ -386,6 +391,15 @@ fn spawn_session_recovery_delivery(
             }
             let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
             if let Some(plan) = flush_plan.filter(|_| still_owner) {
+                // Remote senders' messages are delivered only while their
+                // domain is still admitted (ADR-0020 D1; gate G18).
+                crate::server::routes::websocket::s2s_accounts::forget_unadmitted_remote_messages(
+                    &app_state,
+                    served.as_ref(),
+                    &storage,
+                    &recipient,
+                )
+                .await;
                 let resolver = MamArchiveResolver { mam_storage };
                 let outcome = crate::pending_delivery::flush_for_resource_with_retry(
                     &storage,

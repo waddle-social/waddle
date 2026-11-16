@@ -35,6 +35,7 @@ use tracing::warn;
 use waddle_xmpp::carbons::CARBONS_NS;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::muc::presence::NS_MUC_USER;
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::protocol::dm_routing::{classify_dm_intake, OnlineResources, PendingDecision};
 use waddle_xmpp::protocol::Blocklist;
@@ -57,6 +58,7 @@ use crate::db::s2s_accounts::{
     OfflineAdmission, RemoteOfflineAdmissions, RemotePubSubSubscriptions, SubscriptionOutcome,
 };
 use crate::db::Database;
+use crate::destination::{ServedDomains, UnservedDestination};
 use crate::permissions::host_grant::PrincipalEvidence;
 use crate::s2s::route::{AccountWork, LocalAccounts, RemotePrincipal};
 use crate::server::routes::interpret::{
@@ -259,11 +261,75 @@ pub(crate) fn admits(state: &WebSocketState, principal: &RemotePrincipal) -> boo
 
 /// Whether the S2S snapshot the replica runs admits `domain` now.
 pub(crate) fn admits_domain(state: &WebSocketState, domain: &jid::DomainRef) -> bool {
-    let Some(federation) = state.deps.app_state.s2s_federation.as_ref() else {
+    snapshot_admits(&state.deps.app_state, domain)
+}
+
+/// Whether the S2S snapshot in `app_state` admits `domain` now; nothing is
+/// admitted without one.
+fn snapshot_admits(app_state: &crate::server::AppState, domain: &jid::DomainRef) -> bool {
+    let Some(federation) = app_state.s2s_federation.as_ref() else {
         return false;
     };
     CanonicalDomain::parse_canonical(domain.as_str())
         .is_ok_and(|domain| federation.admission().decide(&domain).is_ok())
+}
+
+/// Delete from `account`'s offline store the messages of remote senders
+/// whose domain the replica's S2S snapshot no longer admits (ADR-0020 D1),
+/// before the store is flushed to a session of the account: a domain
+/// removed from the allowlist or denylisted after its senders' messages
+/// were stored gets none of them delivered. A sender is remote when its
+/// domain is not one this deployment serves (`served`). Only rows no
+/// session has claimed are deleted; a claimed row is being handed to a
+/// session already.
+///
+/// With S2S off nothing is checked: no remote traffic arrives then, the
+/// messages stored while it was on were admitted when they arrived, and a
+/// deployment without federation pays no extra read of the store at each
+/// login. A store that cannot be read leaves every row in place.
+pub(crate) async fn forget_unadmitted_remote_messages(
+    app_state: &crate::server::AppState,
+    served: Option<&ServedDomains>,
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    account: &BareJid,
+) {
+    if app_state.s2s_federation.is_none() {
+        return;
+    }
+    let Some(served) = served else {
+        return;
+    };
+    let rows = match storage.list(account).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, "reading an offline store to check remote senders' admission failed");
+            return;
+        }
+    };
+    for row in rows {
+        if row.flushed_in_session.is_some() {
+            continue;
+        }
+        let PendingPayload::Transient(message) = &row.payload else {
+            continue;
+        };
+        let Some(sender) = message.from.as_ref() else {
+            continue;
+        };
+        let remote = matches!(
+            served.classify(Some(sender)).unserved(),
+            Some(UnservedDestination::Remote(_))
+        );
+        if !remote || snapshot_admits(app_state, sender.domain()) {
+            continue;
+        }
+        match storage.delete_row(&row.id).await {
+            Ok(_) => telemetry::offline_unadmitted(),
+            Err(error) => {
+                warn!(%error, "deleting a stored message of a domain no longer admitted failed");
+            }
+        }
+    }
 }
 
 pub(crate) async fn database(state: &WebSocketState) -> Option<Database> {
@@ -999,13 +1065,24 @@ pub(crate) mod telemetry {
     }
 
     /// A remote sender's message no resource took was dropped unanswered:
-    /// the sender's, its parent domain's or the account's bound for
+    /// the sender's, its domain's or the account's bound for
     /// non-contacts, or the offline store's quota, was reached.
     pub(crate) fn offline_dropped() {
         counter_add!(
             "waddle.s2s.account_traffic.offline_dropped",
             "{stanza}",
             "Messages from remote senders that no resource of the local account took, dropped unanswered because a bound on offline storage for remote senders or the offline store's quota was reached.",
+            1,
+        );
+    }
+
+    /// A stored message of a remote sender whose domain is no longer
+    /// admitted was deleted before the offline store was flushed.
+    pub(crate) fn offline_unadmitted() {
+        counter_add!(
+            "waddle.s2s.account_traffic.offline_unadmitted",
+            "{stanza}",
+            "Stored messages from remote senders deleted before an offline flush because the replica's S2S snapshot no longer admits the sender's domain.",
             1,
         );
     }
