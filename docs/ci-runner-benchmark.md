@@ -117,10 +117,19 @@ many such jobs fit under the limit at once.
 
 ### Running it
 
-Add the `ci-benchmark` label to a pull request. Add it again to measure a
-newer commit. After the workflow is on `main` it can also be dispatched
-manually. The comparison table is in the run's `runner-benchmark/summary` job;
-raw samples and metrics are in the `runner-benchmark-*` artifacts.
+Push the commit to measure to a branch named `ci-benchmark/<anything>`:
+
+```sh
+git push origin HEAD:refs/heads/ci-benchmark/runner-shapes
+```
+
+Push again to measure a newer commit; delete the branch afterwards. After the
+workflow is on `main` it can also be dispatched manually. The comparison table
+is in the run's `runner-benchmark/summary` job; raw samples and metrics are in
+the `runner-benchmark-*` artifacts.
+
+It is deliberately not a `pull_request` workflow: `scripts/integration-ci.ts`
+mirrors every such workflow into the merge queue as a verification lane.
 
 Variants run one at a time and carry no `job.priority`, so the benchmark holds
 at most one machine and ordinary CI is scheduled first. A full pass takes

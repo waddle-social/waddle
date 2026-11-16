@@ -10,8 +10,9 @@ import (
 // run one at a time, without `job.priority`, so the benchmark never holds
 // more than one machine and ordinary CI is scheduled ahead of it.
 //
-// A pull request runs it when the `ci-benchmark` label is added; add the
-// label again to measure a newer commit.
+// Push a commit to a `ci-benchmark/**` branch to measure it. This is not a
+// `pull_request` workflow on purpose: scripts/integration-ci.ts mirrors every
+// one of those into the merge queue as a verification lane.
 let _checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
 let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 let _download = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -49,20 +50,17 @@ let _setupSteps = [
 workflow: {
 	name: "waddle-ci-runner-benchmark"
 	on: {
-		pull_request: types: ["labeled"]
+		push: branches: ["ci-benchmark/**"]
 		workflow_dispatch: {}
 	}
 	concurrency: {
-		// Keyed by label too: another label added to the pull request must
-		// not cancel a running benchmark.
-		group:                "${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ github.event.label.name || 'dispatch' }}"
+		group:                "${{ github.workflow }}-${{ github.ref }}"
 		"cancel-in-progress": true
 	}
 	permissions: {}
 	jobs: {
 		contracts: {
 			name:              "runner-benchmark/contracts"
-			if:                "${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'ci-benchmark' }}"
 			"runs-on":         "ubuntu-24.04"
 			"timeout-minutes": 5
 			permissions: contents: "read"
@@ -141,7 +139,7 @@ workflow: {
 		summary: {
 			name: "runner-benchmark/summary"
 			needs: ["lane"]
-			if:                "${{ !cancelled() && needs.lane.result != 'skipped' }}"
+			if:                "${{ !cancelled() }}"
 			"runs-on":         "ubuntu-24.04"
 			"timeout-minutes": 5
 			permissions: contents: "read"

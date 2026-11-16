@@ -3,18 +3,17 @@
 
 name: waddle-ci-runner-benchmark
 "on":
-  pull_request:
-    types:
-      - labeled
+  push:
+    branches:
+      - ci-benchmark/**
   workflow_dispatch: {}
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ github.event.label.name || 'dispatch' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 permissions: {}
 jobs:
   contracts:
     name: runner-benchmark/contracts
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'ci-benchmark' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -127,7 +126,7 @@ jobs:
     name: runner-benchmark/summary
     needs:
       - lane
-    if: ${{ !cancelled() && needs.lane.result != 'skipped' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
