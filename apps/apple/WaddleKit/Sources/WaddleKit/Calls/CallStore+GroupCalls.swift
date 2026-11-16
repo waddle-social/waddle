@@ -15,6 +15,7 @@ extension CallStore {
         cancelTimers()
         transition(.joiningGroup(attempt))
         setGroupMarkers(hand: false, muted: !media.audio)
+        groupControl.advertisedHand = false
         let identity = ownJID()
         guard groupStillPending(attempt, epoch: epoch) else { return false }
         return await runGroupSetup(attempt, identity: identity, epoch: epoch)

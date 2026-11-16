@@ -5,12 +5,11 @@ extension CallStore {
         let epoch = generation
         groupControl.handRevision += 1
         let revision = groupControl.handRevision
-        let previous = isHandRaised
         setGroupMarkers(hand: raised)
-        // Undone inside the queue: the next presence must not go out still
-        // carrying a hand the room was never told about.
+        // Undone inside the queue, to what the room was last told: the next
+        // presence must not carry a hand state nobody chose.
         let sent = await restampGroupPresence(target, epoch: epoch) { [self] in
-            if groupControl.handRevision == revision { setGroupMarkers(hand: previous) }
+            if groupControl.handRevision == revision { setGroupMarkers(hand: groupControl.advertisedHand) }
         }
         guard generation == epoch, let sent else { return false }
         if !sent, case .inGroup(let current) = state, current.sid == target.sid, current.room == target.room {
@@ -40,10 +39,13 @@ extension CallStore {
             guard generation == epoch, case .inGroup(let current) = state,
                 current.sid == target.sid, current.room == target.room else { return nil }
             // Snapshot both flags inside the queue, after the exact slot check.
+            let hand = isHandRaised
             let sent = await port.updateGroupCallPresence(
-                .init(state: .active(video: current.media.video), isHandRaised: isHandRaised, isMuted: isSelfMuteAdvertised),
+                .init(state: .active(video: current.media.video), isHandRaised: hand, isMuted: isSelfMuteAdvertised),
                 in: current.room, nick: current.nick)
-            if !sent, generation == epoch, case .inGroup(let now) = state, now.sid == target.sid, now.room == target.room {
+            guard generation == epoch else { return sent }
+            if sent { groupControl.advertisedHand = hand }
+            if !sent, case .inGroup(let now) = state, now.sid == target.sid, now.room == target.room {
                 onFailure()
             }
             return sent

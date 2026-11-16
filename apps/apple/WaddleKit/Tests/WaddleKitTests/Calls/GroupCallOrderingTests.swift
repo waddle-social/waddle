@@ -105,6 +105,31 @@ import Testing
         f.store.clear()
     }
 
+    @Test func aFailedHandToggleFallsBackToWhatTheRoomWasLastTold() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.port.callSends = []
+        f.port.heldCallVerbs = ["groupPresence"]
+        let muting = Task { await f.store.advertiseSelfMute(true) }
+        await eventually { f.port.callSends.count == 1 }
+        // Two toggles queue behind the mute; by the time they send, the hand is down again.
+        let raising = Task { await f.store.setHandRaised(true) }
+        let lowering = Task { await f.store.setHandRaised(false) }
+        await Task.yield()
+        f.port.releaseCallSends()
+        await eventually { f.port.callSends.count == 2 }
+        f.port.callResults["groupPresence"] = false
+        f.port.releaseCallSends()
+        await eventually { f.port.callSends.count == 3 }
+        f.port.releaseCallSends()
+        #expect(await muting.value)
+        #expect(await raising.value)
+        #expect(await !lowering.value)
+        // Every presence that reached the room said the hand was down.
+        #expect(!f.store.isHandRaised)
+        f.store.clear()
+    }
+
     @Test func losingTheStreamWhileJoiningAbandonsTheJoin() async {
         let f = GroupFixture()
         let joining = await f.begin()

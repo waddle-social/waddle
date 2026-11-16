@@ -9,6 +9,9 @@
     let peersTimeout: Duration
     let acceptTimeout: Duration
     var handRevision = 0
+    /// The hand state of the last active presence that reached the room in
+    /// this call; what a failed toggle falls back to.
+    var advertisedHand = false
     var accepts: [String: Accept] = [:]
     /// Bounded, session-local correlation for accepts first arriving after cancellation.
     var abandonedAccepts: [String: BareJID] = [:]
