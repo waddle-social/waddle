@@ -18,6 +18,13 @@
 //! ([`Reachable`]), so a router without the handlers refuses the whole
 //! service.
 //!
+//! A replica that hosts its Spaces for remote principals (the Spaces host
+//! is attached to its router) likewise lets the operations of the Spaces
+//! PubSub service reviewed for a remote principal reach that host
+//! ([`SpaceOperation`]; XEP-0503 over XEP-0060). Every one is an IQ
+//! request: messages, presence and IQ responses addressed to the Spaces
+//! service are refused, as is every request outside those operations.
+//!
 //! One decision depends on state and so is taken by the router before this
 //! one: a message or presence from a remote room to the full JID of a
 //! local resource that occupies, is joining or has just left that room is
@@ -36,6 +43,7 @@
 
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::muc::{NS_MUC_ADMIN, NS_MUC_OWNER};
+use waddle_xmpp::pubsub::{NS_PUBSUB, NS_PUBSUB_OWNER};
 use waddle_xmpp::xep::xep0199::NS_PING;
 use waddle_xmpp::xep::xep0425::NS_MESSAGE_MODERATE;
 use waddle_xmpp::xep::xep0430::NS_MAM;
@@ -81,6 +89,31 @@ impl LocalTarget {
 pub struct Reachable {
     /// The inbound MUC handlers: remote occupants of local rooms.
     pub rooms: bool,
+    /// The Spaces host: remote principals discovering, reading and
+    /// subscribing to local Spaces.
+    pub spaces: bool,
+}
+
+/// An operation of the Spaces PubSub service a remote principal reaches
+/// (XEP-0503 over XEP-0060, with XEP-0030 and XEP-0199). Each is decided by
+/// the Spaces host for that principal and the evidence of its stream;
+/// reaching the host admits nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpaceOperation {
+    /// XEP-0030 `disco#info` of the service or of a Space node.
+    DiscoInfo,
+    /// XEP-0030 `disco#items` of the service: the Spaces it hosts.
+    DiscoItems,
+    /// XEP-0199 ping of the service.
+    Ping,
+    /// A XEP-0060 request in the `pubsub` namespace: item retrieval,
+    /// `<subscribe/>` and `<unsubscribe/>`, and `<publish/>` and
+    /// `<retract/>`.
+    PubSub,
+    /// A XEP-0060 request in the `pubsub#owner` namespace: a node's
+    /// configuration, its deletion and purge, and its affiliations and
+    /// subscriptions.
+    Owner,
 }
 
 /// An operation of the MUC service a remote principal reaches (XEP-0045,
@@ -119,6 +152,9 @@ pub enum RoomOperation {
 pub enum InboundReach {
     /// An operation of the MUC service, handed to the room's host.
     Room(RoomOperation),
+    /// An operation of the Spaces PubSub service, handed to the Spaces
+    /// host.
+    Space(SpaceOperation),
     /// XEP-0030 `disco#info` of the server domain, answered by the router.
     ServerDiscoInfo,
     /// XEP-0030 `disco#items` of the server domain, answered by the router.
@@ -158,10 +194,14 @@ pub enum Refusal {
     ServerRequest,
     /// MUC or the Spaces PubSub service: enabled for remote senders by D10,
     /// but this replica has no handler reviewed for a remote principal
-    /// attached for it. MUC is refused this way wherever the inbound MUC
-    /// handlers are not attached; the Spaces service everywhere, until its
-    /// handlers are reviewed.
+    /// attached for it: the inbound MUC handlers for the MUC service, the
+    /// Spaces host for the Spaces service.
     AwaitingReview(ServedService),
+    /// A stanza for the Spaces PubSub service outside the operations
+    /// reviewed for a remote principal: any other IQ request, every
+    /// message and presence, and every IQ result or error, since the
+    /// service sends no request to a remote entity.
+    SpaceRequest,
     /// A request to the MUC service outside the operations reviewed for a
     /// remote principal: registration, vCards, pins, call signalling and
     /// any other IQ request; and every IQ result or error, since no room
@@ -177,6 +217,7 @@ pub enum Refusal {
 pub fn reach(target: LocalTarget, stanza: &Stanza, reachable: Reachable) -> InboundReach {
     match (target, stanza) {
         (LocalTarget::Service(ServedService::Muc), stanza) if reachable.rooms => room(stanza),
+        (LocalTarget::Service(ServedService::Spaces), stanza) if reachable.spaces => space(stanza),
         (LocalTarget::ServerDomain, Stanza::Iq(iq)) => server_iq(iq),
         (LocalTarget::ServerDomain | LocalTarget::ServerResource, _) => {
             InboundReach::Refused(Refusal::ServerRequest)
@@ -248,4 +289,31 @@ fn room(stanza: &Stanza) -> InboundReach {
         },
     };
     InboundReach::Room(operation)
+}
+
+/// A stanza addressed to the Spaces PubSub service, on a replica that hosts
+/// its Spaces for remote principals.
+fn space(stanza: &Stanza) -> InboundReach {
+    let Stanza::Iq(iq) = stanza else {
+        return InboundReach::Refused(Refusal::SpaceRequest);
+    };
+    let operation = match iq.as_ref() {
+        Iq::Get { payload, .. } if payload.is("query", DISCO_INFO_NS) => SpaceOperation::DiscoInfo,
+        Iq::Get { payload, .. } if payload.is("query", DISCO_ITEMS_NS) => {
+            SpaceOperation::DiscoItems
+        }
+        Iq::Get { payload, .. } if payload.is("ping", NS_PING) => SpaceOperation::Ping,
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } if payload.is("pubsub", NS_PUBSUB) => {
+            SpaceOperation::PubSub
+        }
+        Iq::Get { payload, .. } | Iq::Set { payload, .. }
+            if payload.is("pubsub", NS_PUBSUB_OWNER) =>
+        {
+            SpaceOperation::Owner
+        }
+        Iq::Get { .. } | Iq::Set { .. } | Iq::Result { .. } | Iq::Error { .. } => {
+            return InboundReach::Refused(Refusal::SpaceRequest);
+        }
+    };
+    InboundReach::Space(operation)
 }

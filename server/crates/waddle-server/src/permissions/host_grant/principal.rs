@@ -254,9 +254,11 @@ impl StreamEvidence {
         }
     }
 
-    /// The evidence a seat recorded when its join was admitted: what the
-    /// seat's row holds, written from the [`RemotePrincipal`] whose join
-    /// established it. Only the seat store reads rows into evidence.
+    /// The evidence a seat recorded when its join was admitted, or a
+    /// subscription to a Space when its request was: what the row holds,
+    /// written from the [`RemotePrincipal`] whose request established it.
+    /// Only the seat store and the store of Space subscriptions read rows
+    /// into evidence.
     pub(crate) fn recorded(
         strength: AuthenticationStrength,
         trust_profile: Option<TrustProfileKind>,

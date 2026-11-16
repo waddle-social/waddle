@@ -1380,6 +1380,14 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         .delete_node(&state.spaces_jid, &node_name)
         .await
         .map_err(|e| internal_err(format!("pubsub delete_node failed: {e}")))?;
+    // A deleted Space is open to nobody: its `federated` setting and the
+    // subscriptions remote accounts made to it go with it.
+    crate::server::routes::websocket::s2s_spaces::forget_space(
+        state.db_pool.global(),
+        &state.spaces_jid,
+        &node_name,
+    )
+    .await;
 
     let _existed = state
         .spaces_metadata_store

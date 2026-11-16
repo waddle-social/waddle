@@ -134,8 +134,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
         crate::server::routes::websocket::handlers::iq::extension_route_room(state, owner, node)
             .await;
 
-    let node_cfg = match storage.get_node(owner, node).await {
-        Ok(Some(record)) => record.config,
+    let node_record = match storage.get_node(owner, node).await {
+        Ok(Some(record)) => record,
         Ok(None) => {
             warn!(
                 owner = %owner,
@@ -154,6 +154,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
             return;
         }
     };
+
+    let node_cfg = node_record.config.clone();
 
     // Private PEP nodes carve out of roster + CAPS fan-out even though
     // the published payload is broadcast at the pubsub layer. Whitelist
@@ -241,6 +243,11 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     let mut still_deliverable: Option<HashSet<waddle_xmpp::pubsub::SubId>> = None;
 
     for sub in subscribers {
+        // A Space's subscriber at another server holds no resource here.
+        // Its notification leaves over S2S, decided apart (below).
+        if space_node && !state.serves(&sub.subscriber.to_bare()) {
+            continue;
+        }
         // A room-bound extension node delivers to whoever may read the room
         // now: a subscription and its affiliation outlive a ban.
         if crate::server::routes::websocket::handlers::iq::extension_route_account_access(
@@ -405,6 +412,19 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 },
             }
         }
+    }
+
+    // A Space's subscribers at other servers: each is notified only for a
+    // subscription it made itself, decided on the evidence that
+    // subscription recorded, and only of a room it may be told of.
+    if space_node {
+        crate::server::routes::websocket::s2s_spaces::notify_remote_subscribers(
+            state,
+            owner,
+            &node_record,
+            &event,
+        )
+        .await;
     }
 
     // XEP-0163 §3: presence-driven fan-out. Two passes follow the

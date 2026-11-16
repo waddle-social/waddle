@@ -30,6 +30,7 @@ use super::correlation::{
 };
 use super::local::{LocalDelivery, LocalOrigin};
 use super::local_rooms::{CarriedRoomOutcome, CarriedRoomRequest, LocalRooms};
+use super::local_spaces::LocalSpaces;
 use super::occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomVerdict,
     MAX_JOIN_ID_BYTES,
@@ -292,6 +293,29 @@ pub struct RouterLimits {
     /// behalf, may hold at once; a further one for that pair is refused as
     /// the full queue would refuse it. Each pair has its own share.
     pub account_queue_per_sender: usize,
+    /// Requests one remote domain may address to the Spaces PubSub service,
+    /// on average each second. A request beyond the domain's allowance is
+    /// answered with `resource-constraint` within an allowance of such
+    /// answers and dropped beyond it; it never holds its stream.
+    pub space_request_rate: u32,
+    /// Requests one remote domain may address to the Spaces service at
+    /// once.
+    pub space_request_burst: u32,
+    /// Of the domain's allowance, the requests of one remote account, on
+    /// average each second, so that one account cannot spend what the
+    /// other accounts of its domain may ask.
+    pub space_request_rate_per_account: u32,
+    /// Requests one remote account may address to the Spaces service at
+    /// once.
+    pub space_request_burst_per_account: u32,
+    /// How long a worker waits for the Spaces host to decide one request
+    /// before it moves on to the sender's next one; an answer that comes
+    /// later is dropped.
+    pub space_timeout: Duration,
+    /// Event notifications of local Spaces waiting for one directional
+    /// pair's stream at once. A notification beyond it is dropped: it is a
+    /// headline, and its subscriber reads the Space's items instead.
+    pub space_events_per_peer: usize,
 }
 
 impl Default for RouterLimits {
@@ -356,6 +380,12 @@ impl Default for RouterLimits {
             account_requests_per_peer: 256,
             account_request_ttl: Duration::from_secs(60),
             account_queue_per_sender: 32,
+            space_request_rate: 50,
+            space_request_burst: 200,
+            space_request_rate_per_account: 10,
+            space_request_burst_per_account: 40,
+            space_timeout: Duration::from_secs(5),
+            space_events_per_peer: 256,
         }
     }
 }
@@ -459,6 +489,15 @@ enum Purpose {
     /// waits until it is written or given up: `_held` is released when the
     /// pair's worker is done with the stanza.
     Notice { _held: hosting::Notice },
+    /// An event notification of a local Space for a subscriber at another
+    /// server (XEP-0060 §7.1). It is sent only while peer admission admits
+    /// the subscriber's domain, and nothing answers it if it cannot be
+    /// sent: it is a headline, never sent again.
+    SpaceEvent {
+        /// The place of the pair's share of event notifications it holds
+        /// until it is sent or dropped.
+        _share: spaces::EventShare,
+    },
 }
 
 /// The two queues of one directional domain pair, served by one worker.
@@ -666,6 +705,15 @@ struct Inner {
     /// The room host and the seat table, once this replica hosts rooms for
     /// remote occupants. Until then the MUC service refuses remote senders.
     hosting: OnceLock<Hosting>,
+    /// The host of this deployment's Spaces for remote principals, once
+    /// attached.
+    spaces: OnceLock<Arc<dyn LocalSpaces>>,
+    /// What remote domains and their accounts may still ask of the Spaces
+    /// service.
+    space_allowances: Mutex<spaces::SpaceAllowances>,
+    /// The places event notifications of local Spaces hold on each pair's
+    /// queue.
+    space_event_shares: spaces::EventShares,
     /// The seats of the remote occupants this replica seats.
     seats: Arc<SeatIndex>,
     /// Stanzas for local rooms, decided by the room host in order per
@@ -795,6 +843,9 @@ impl S2sRouter {
             queues: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingRequests::default()),
             hosting: OnceLock::new(),
+            spaces: OnceLock::new(),
+            space_allowances: Mutex::new(spaces::SpaceAllowances::default()),
+            space_event_shares: spaces::EventShares::default(),
             seats: Arc::new(SeatIndex::default()),
             local_rooms: RoomQueues::new(
                 options.limits.room_request_workers,
@@ -873,6 +924,24 @@ impl S2sRouter {
     /// senders. `false` when a host was already attached.
     pub fn attach_rooms(&self, host: Arc<dyn LocalRooms>, store: Arc<dyn SeatStore>) -> bool {
         self.inner.hosting.set(Hosting { host, store }).is_ok()
+    }
+
+    /// Have this replica serve its Spaces to remote principals through
+    /// `host`: the Spaces PubSub service then becomes reachable for the
+    /// operations reviewed for a remote principal (ADR-0020 D10). `false`
+    /// when a host was already attached.
+    pub fn attach_spaces(&self, host: Arc<dyn LocalSpaces>) -> bool {
+        self.inner.spaces.set(host).is_ok()
+    }
+
+    /// Queue `stanza`, an event notification of the local Space service
+    /// `service`, for `subscriber` at another server, without waiting.
+    /// `false` when it was not taken: the subscriber's domain is not
+    /// admitted now, its pair has no queue and may open none, or the
+    /// pair's share of event notifications is full. Nothing is kept for a
+    /// notification that was not taken.
+    pub fn offer_space_event(&self, service: &BareJid, subscriber: &Jid, stanza: Stanza) -> bool {
+        self.inner.offer_space_event(service, subscriber, stanza)
     }
 
     /// The seats of the remote occupants this replica seats, with the
@@ -1033,6 +1102,13 @@ impl RemoteRoute for S2sRouter {
             );
         }
     }
+
+    fn space_event(&self, service: &BareJid, subscriber: &Jid, stanza: Stanza) -> bool {
+        // Only a replica that serves its Spaces to remote principals sends
+        // their notifications to remote subscribers.
+        self.inner.spaces.get().is_some()
+            && self.inner.offer_space_event(service, subscriber, stanza)
+    }
 }
 
 impl StanzaSink for S2sRouter {
@@ -1168,6 +1244,7 @@ impl Inner {
             | Purpose::Seat { .. }
             | Purpose::RoomReply
             | Purpose::Notice { .. }
+            | Purpose::SpaceEvent { .. }
             | Purpose::Account { .. } => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
@@ -2617,7 +2694,8 @@ impl Inner {
             | Purpose::Reply
             | Purpose::Departure
             | Purpose::RoomReply
-            | Purpose::Notice { .. } => return,
+            | Purpose::Notice { .. }
+            | Purpose::SpaceEvent { .. } => return,
         };
         if registered {
             match self.correlations.withdraw(&pending.key).await {
@@ -2721,6 +2799,9 @@ impl Inner {
         match reach(target, &stanza, self.reachable()) {
             InboundReach::Room(operation) => {
                 return self.room_request(stream, principal, operation, stanza);
+            }
+            InboundReach::Space(operation) => {
+                return self.space_request(stream, principal, operation, stanza);
             }
             InboundReach::ServerDiscoInfo => self.answer_disco_info(stream, &stanza, &home),
             InboundReach::ServerDiscoItems => self.answer_disco_items(stream, &stanza, &home),
@@ -2870,19 +2951,22 @@ impl Inner {
             return self.answer_item_not_found(stream, stanza, home);
         }
         // A service is listed once remote senders reach it on this replica:
-        // the MUC service, while rooms are hosted for remote occupants.
-        let items = if self.reachable().rooms {
-            self.served
-                .domains_of(ServedService::Muc)
-                .map(|domain| xmpp_parsers::disco::Item {
-                    jid: Jid::from(BareJid::from_parts(None, domain)),
-                    node: None,
-                    name: None,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // the MUC service, while rooms are hosted for remote occupants, and
+        // the Spaces PubSub service, while Spaces are.
+        let reachable = self.reachable();
+        let items = [
+            (reachable.rooms, ServedService::Muc),
+            (reachable.spaces, ServedService::Spaces),
+        ]
+        .into_iter()
+        .filter(|(reached, _)| *reached)
+        .flat_map(|(_, service)| self.served.domains_of(service))
+        .map(|domain| xmpp_parsers::disco::Item {
+            jid: Jid::from(BareJid::from_parts(None, domain)),
+            node: None,
+            name: None,
+        })
+        .collect();
         let result = DiscoItemsResult {
             node: None,
             items,
@@ -3222,6 +3306,7 @@ async fn deliver_room_traffic(router: Arc<Inner>, shard: usize) {
             }
             RoomWork::Ended(occupancy) => router.end_lost(*occupancy).await,
             RoomWork::Account(traffic) => router.account_traffic(*traffic).await,
+            RoomWork::Space(traffic) => router.space_traffic(*traffic).await,
             // Work of the queues that serve local rooms, which never reaches
             // these: the room host's requests and seats are queued on the
             // local room queues alone.
@@ -3361,6 +3446,14 @@ impl PairWorker {
                     return;
                 }
             }
+            // An event notification leaves only for a domain peer admission
+            // admits now, whatever admitted its subscription.
+            Purpose::SpaceEvent { .. } => {
+                if !self.router.admits(&self.pair.remote) {
+                    telemetry::space_event_dropped();
+                    return;
+                }
+            }
             Purpose::Request { .. }
             | Purpose::Response { .. }
             | Purpose::Reply
@@ -3430,6 +3523,7 @@ impl PairWorker {
             | Purpose::Seat { .. }
             | Purpose::RoomReply
             | Purpose::Notice { .. }
+            | Purpose::SpaceEvent { .. }
             | Purpose::Account { .. } => false,
         };
         let mut element = stanza_element(&queued.stanza);
@@ -3487,5 +3581,6 @@ impl PairWorker {
 }
 
 mod hosting;
+mod spaces;
 
 pub use hosting::is_unanswered_message;

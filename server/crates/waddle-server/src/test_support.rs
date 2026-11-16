@@ -330,6 +330,20 @@ pub fn host_rooms_for_remote_occupants(
     crate::server::routes::websocket::s2s_rooms::host_rooms(state, router, seats);
 }
 
+/// Have `router` serve the Spaces of `state` to remote principals, as
+/// startup does for a replica with S2S enabled: the router hands what
+/// remote principals ask of the Spaces PubSub service to the state's
+/// Spaces, and takes their event notifications for subscribers at other
+/// servers. The state's remote route must be `router` for those
+/// notifications to leave.
+#[cfg(feature = "test-support")]
+pub fn host_spaces_for_remote_principals(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+) {
+    crate::server::routes::websocket::s2s_spaces::host_spaces(state, router);
+}
+
 /// [`host_rooms_for_remote_occupants`] for a replica whose requests for
 /// rooms another replica holds are carried by `carrier`, in place of the
 /// cluster's room claims and relay.

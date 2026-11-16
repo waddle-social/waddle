@@ -52,6 +52,14 @@ pub const S2S_ACCOUNT_TRAFFIC_VERSION: i64 = 2010;
 /// messages from remote senders that are not the account's contacts.
 pub const S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION: i64 = 2011;
 
+/// Version of the migration that creates the table of the Spaces open to
+/// accounts at other servers.
+pub const S2S_FEDERATED_SPACES_VERSION: i64 = 2012;
+
+/// Version of the migration that creates the table of the subscriptions
+/// remote accounts hold to local Spaces.
+pub const S2S_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2013;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -147,6 +155,26 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2011_s2s_remote_offline_admissions.postgres.sql"
             ),
         },
+        Migration {
+            version: S2S_FEDERATED_SPACES_VERSION,
+            description: "s2s federated spaces".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2012_s2s_federated_spaces.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2012_s2s_federated_spaces.postgres.sql"
+            ),
+        },
+        Migration {
+            version: S2S_SPACE_SUBSCRIPTIONS_VERSION,
+            description: "s2s space subscriptions".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2013_s2s_space_subscriptions.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2013_s2s_space_subscriptions.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -156,9 +184,10 @@ mod tests {
     use super::{
         all, CHANNEL_FEDERATED_VERSION, HOST_GRANT_AUTHORITY_VERSION,
         HOST_GRANT_RESTORE_INCARNATION_VERSION, HOST_GRANT_REVOCATION_FENCE_VERSION,
-        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_IQ_CORRELATIONS_VERSION,
-        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
-        S2S_REMOTE_ROOMS_VERSION,
+        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION,
+        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+        S2S_SPACE_SUBSCRIPTIONS_VERSION,
     };
 
     #[test]
@@ -178,7 +207,9 @@ mod tests {
                 S2S_LOCAL_ROOM_SEATS_VERSION,
                 CHANNEL_FEDERATED_VERSION,
                 S2S_ACCOUNT_TRAFFIC_VERSION,
-                S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION
+                S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
+                S2S_FEDERATED_SPACES_VERSION,
+                S2S_SPACE_SUBSCRIPTIONS_VERSION
             ]
         );
     }

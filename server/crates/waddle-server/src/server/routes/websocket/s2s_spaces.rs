@@ -1,0 +1,1256 @@
+//! The Spaces of this deployment as accounts at other servers use them
+//! (ADR-0020 D10 and D4; XEP-0503 version 0.3.0 over XEP-0060, with
+//! XEP-0030 and XEP-0199).
+//!
+//! The S2S router hands each IQ request a remote principal addressed to the
+//! Spaces PubSub service to [`WebSocketLocalSpaces`], which decides it for
+//! that principal on the evidence of the stream that carried it
+//! ([`PrincipalEvidence::of`]) and answers with typed stanzas. Nothing here
+//! is a session: a remote principal holds no account and no connection on
+//! this deployment. Each request is decided in this order:
+//!
+//! 1. Peer admission (D1), under the S2S snapshot the replica runs: a
+//!    domain it does not admit, or a stream below what host policy
+//!    requires, is refused whatever a Space holds for the account.
+//! 2. What the request itself says: a request that is not well formed, or
+//!    that names an address other than the sender's own to subscribe, is
+//!    refused the same way whatever node it names.
+//! 3. Whether the node is a Space open to this asker ([`Asked::space`]): it
+//!    exists, its `federated` setting is on, no enrolled host-grant scope
+//!    owns it, and it is public or the asker holds an affiliation in it
+//!    that is honoured for its stream. Any other node is answered as one
+//!    that does not exist ([`no_such_node`]), in every operation alike.
+//! 4. The operation, for an open Space.
+//!
+//! A PubSub affiliation of a remote principal is honoured as the effect
+//! boundary honours any standing (D8, [`honoured`]): a ban always, a
+//! membership while the domain is admitted, and the owner and publisher
+//! affiliations only for a trusted home on a `pkix` stream, where one that
+//! is not honoured contributes nothing at all. Every operation that changes
+//! a Space needs honoured privilege first, and is then decided by the
+//! checks a session's request meets.
+//!
+//! What a Space lists is its rooms. A remote principal is told of a room
+//! only where the room's own host would describe it to that principal
+//! ([`Asked::child_visible`]): its `federated` setting is on, and, for a
+//! room an enrolled host-grant scope manages, its grants admit the
+//! principal to view it on that evidence, behind the revocation fence. A
+//! subscription to a Space is no grant in any of those rooms: entering one
+//! is a join of the room, decided by the room.
+//!
+//! [`notify_remote_subscribers`] sends a Space's event notifications to the
+//! subscribers at other servers, each only for a subscription the remote
+//! account made itself and decided on the evidence that subscription
+//! recorded.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
+
+use async_trait::async_trait;
+use jid::{BareJid, Jid};
+use minidom::Element;
+use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
+use waddle_xmpp::pubsub::{
+    build_pubsub_error, build_pubsub_items_result, build_pubsub_subscribe_result,
+    build_pubsub_success, parse_pubsub_iq, AccessModel, Affiliation, PubSubError, PubSubItem,
+    PubSubNode, PubSubRequest, SubId, NS_PUBSUB, NS_PUBSUB_OWNER,
+};
+use waddle_xmpp::xep::build_spaces_metadata_form_for_remote;
+use waddle_xmpp::xep::xep0402::NS_BOOKMARKS2;
+use waddle_xmpp::Stanza;
+use xmpp_parsers::disco::{
+    DiscoInfoQuery, DiscoInfoResult, DiscoItemsQuery, DiscoItemsResult, Feature, Identity,
+};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+use super::handlers::iq::spaces_change_for_remote;
+use super::handlers::presence::{get_managed_channel_for_room, principal_witness};
+use super::WebSocketState;
+use crate::db::s2s_spaces::{
+    FederatedSpaces, SpaceSubscriptions, SubscriptionRecord, SubscriptionRequest,
+};
+use crate::db::Database;
+use crate::permissions::host_grant::{
+    HostGrantAction, PrincipalEvidence, PrincipalWitness, RoomBinding, RoomGate,
+};
+use crate::s2s::route::{LocalSpaces, SpaceOperation, SpaceRequest};
+use crate::space_identity::SpaceNode;
+
+/// The field of a Space's configuration form that says whether accounts at
+/// other servers may reach the Space: a boolean, off unless its owner turns
+/// it on.
+pub const FIELD_SPACE_FEDERATED: &str = "urn:waddle:spaces:federated";
+
+/// The most Spaces one `disco#items` answer lists to a remote asker.
+const MAX_LISTED_SPACES: usize = 256;
+
+/// The most items one answer returns to a remote asker.
+const MAX_RETURNED_ITEMS: u32 = 256;
+
+/// Publications of one Space, on average each second, whose notifications
+/// leave for subscribers at other servers.
+const EVENT_RATE: f64 = 4.0;
+
+/// Publications of one Space at once whose notifications leave for
+/// subscribers at other servers.
+const EVENT_BURST: f64 = 16.0;
+
+/// Spaces whose allowance of notified publications is kept. A Space that
+/// finds the table full of Spaces still spending theirs sends none to other
+/// servers, so the table never grows with the Spaces that publish.
+const EVENT_ALLOWANCES: usize = 4096;
+
+/// What one Space may still have notified to other servers.
+struct EventAllowance {
+    tokens: f64,
+    refilled: Instant,
+}
+
+/// The allowances of notified publications of this replica's Spaces.
+static EVENT_BUDGET: Mutex<Option<HashMap<String, EventAllowance>>> = Mutex::new(None);
+
+/// Take one publication of the allowance of publications notified to other
+/// servers that the Space `node` of `service` has: `false` when it is spent
+/// or the table has no place for the Space.
+fn take_event(service: &BareJid, node: &str) -> bool {
+    let node = [service.as_str(), "/", node].concat();
+    let node = node.as_str();
+    let now = Instant::now();
+    let mut budget = EVENT_BUDGET
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+    let allowances = budget.get_or_insert_with(HashMap::new);
+    if allowances.len() >= EVENT_ALLOWANCES && !allowances.contains_key(node) {
+        // A Space whose allowance has refilled needs no entry.
+        allowances.retain(|_, allowance| {
+            now.duration_since(allowance.refilled).as_secs_f64() * EVENT_RATE
+                < EVENT_BURST - allowance.tokens
+        });
+        if allowances.len() >= EVENT_ALLOWANCES {
+            return false;
+        }
+    }
+    let allowance = allowances.entry(node.to_owned()).or_insert(EventAllowance {
+        tokens: EVENT_BURST,
+        refilled: now,
+    });
+    let refill = now.duration_since(allowance.refilled).as_secs_f64() * EVENT_RATE;
+    allowance.tokens = (allowance.tokens + refill).min(EVENT_BURST);
+    allowance.refilled = now;
+    if allowance.tokens >= 1.0 {
+        allowance.tokens -= 1.0;
+        true
+    } else {
+        false
+    }
+}
+
+mod telemetry {
+    use waddle_xmpp::counter_add;
+
+    /// A request reached the Spaces host from a domain the replica's S2S
+    /// snapshot does not admit, or over a stream below what host policy
+    /// requires.
+    pub(super) fn not_admitted() {
+        counter_add!(
+            "waddle.s2s.spaces.requests.not_admitted",
+            "{stanza}",
+            "Requests from S2S streams that reached the Spaces host from a domain the replica's S2S snapshot does not admit, or over a stream below what host policy requires, refused with forbidden.",
+            1,
+        );
+    }
+
+    /// A remote account's subscription to a local Space was refused for a
+    /// bound on such subscriptions.
+    pub(super) fn subscription_limited() {
+        counter_add!(
+            "waddle.s2s.spaces.subscriptions.limited",
+            "{stanza}",
+            "Subscriptions of remote accounts to local Spaces refused with resource-constraint because a bound on the Space's remote subscribers, on the account's or its domain's subscriptions or on the deployment's was reached.",
+            1,
+        );
+    }
+
+    /// A publication of a local Space was not notified to its subscribers
+    /// at other servers: the Space had spent its allowance of notified
+    /// publications.
+    pub(super) fn publication_limited() {
+        counter_add!(
+            "waddle.s2s.spaces.events.limited",
+            "{event}",
+            "Publications of local Spaces whose event notifications were not sent to subscribers at other servers because the Space had spent its allowance of notified publications.",
+            1,
+        );
+    }
+
+    /// An event notification was withheld from one subscriber at another
+    /// server: its subscription is no longer deliverable or honoured, or it
+    /// may not learn of the room the event names.
+    pub(super) fn event_withheld() {
+        counter_add!(
+            "waddle.s2s.spaces.events.withheld",
+            "{stanza}",
+            "Event notifications of local Spaces withheld from a subscriber at another server because its subscription is no longer deliverable or honoured, or it may not learn of the room the event names.",
+            1,
+        );
+    }
+}
+
+/// [`LocalSpaces`] over the WebSocket state's PubSub storage and grants.
+///
+/// It holds the state weakly: the state holds the router, which holds this.
+pub struct WebSocketLocalSpaces {
+    state: Weak<WebSocketState>,
+}
+
+impl WebSocketLocalSpaces {
+    pub fn new(state: &Arc<WebSocketState>) -> Self {
+        Self {
+            state: Arc::downgrade(state),
+        }
+    }
+}
+
+/// Have `router` serve the Spaces of `state` to remote principals: the
+/// router hands what they ask of the Spaces PubSub service to
+/// [`WebSocketLocalSpaces`], and takes the event notifications of those
+/// Spaces for subscribers at other servers.
+pub(crate) fn host_spaces(state: &Arc<WebSocketState>, router: &crate::s2s::route::S2sRouter) {
+    router.attach_spaces(Arc::new(WebSocketLocalSpaces::new(state)));
+}
+
+fn error(type_: ErrorType, condition: DefinedCondition, text: &str) -> StanzaError {
+    StanzaError::new(type_, condition, "en", text)
+}
+
+fn forbidden(text: &str) -> StanzaError {
+    error(ErrorType::Auth, DefinedCondition::Forbidden, text)
+}
+
+fn unavailable() -> StanzaError {
+    error(
+        ErrorType::Cancel,
+        DefinedCondition::ServiceUnavailable,
+        "The request is not available to entities at other servers.",
+    )
+}
+
+fn bad_request() -> StanzaError {
+    error(
+        ErrorType::Modify,
+        DefinedCondition::BadRequest,
+        "The request is not well formed.",
+    )
+}
+
+/// The answer for a node a remote asker may not learn about: one that does
+/// not exist, one whose `federated` setting is off, the Space of an
+/// enrolled host-grant scope, and a private Space in which the asker holds
+/// no honoured affiliation. They are answered alike, in condition, type
+/// and text and with no application condition, so the answer says nothing
+/// about which.
+fn no_such_node() -> StanzaError {
+    error(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "Requested item not found.",
+    )
+}
+
+fn internal() -> StanzaError {
+    error(
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "The service could not answer now; try again later.",
+    )
+}
+
+fn busy() -> StanzaError {
+    error(
+        ErrorType::Wait,
+        DefinedCondition::ResourceConstraint,
+        "Too many subscriptions; try again later.",
+    )
+}
+
+/// The error answering the request `iq`, from the address it was sent to.
+fn refuse(iq: &Iq, error: StanzaError) -> Vec<Stanza> {
+    vec![Stanza::Iq(Box::new(Iq::Error {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_owned(),
+        payload: None,
+        error,
+    }))]
+}
+
+/// The result answering the request `iq`, from the address it was sent to.
+fn result(iq: &Iq, payload: Option<Element>) -> Vec<Stanza> {
+    vec![Stanza::Iq(Box::new(Iq::Result {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_owned(),
+        payload,
+    }))]
+}
+
+fn answer(iq: Iq) -> Vec<Stanza> {
+    vec![Stanza::Iq(Box::new(iq))]
+}
+
+/// The frames a PubSub handler written for WebSocket sessions returns are
+/// that transport's wire form; they are read back into typed stanzas once,
+/// here. `None` when one of them is not an IQ: an answer read only in part
+/// must not be taken for the whole.
+fn iqs_of(frames: Vec<String>) -> Option<Vec<Stanza>> {
+    frames
+        .into_iter()
+        .map(|frame| {
+            let element = frame.parse::<Element>().ok()?;
+            Iq::try_from(element)
+                .ok()
+                .map(|iq| Stanza::Iq(Box::new(iq)))
+        })
+        .collect()
+}
+
+/// What a PubSub affiliation `stored` for a remote principal is honoured as
+/// under `witness` (ADR-0020 D8). A ban always stands. A membership counts
+/// while the principal's grants are honoured at all. The owner and
+/// publisher affiliations, which administer a Space and place rooms in it,
+/// count only where privilege is honoured: a trusted home on a `pkix`
+/// stream. An affiliation that is not honoured contributes nothing, not
+/// the membership it would otherwise imply.
+fn honoured(witness: &PrincipalWitness, stored: Affiliation) -> Affiliation {
+    match stored {
+        Affiliation::Outcast => Affiliation::Outcast,
+        Affiliation::Member if witness.grants_honoured() => Affiliation::Member,
+        Affiliation::Owner | Affiliation::Publisher | Affiliation::PublishOnly
+            if witness.privilege_honoured() =>
+        {
+            stored
+        }
+        Affiliation::Owner
+        | Affiliation::Publisher
+        | Affiliation::PublishOnly
+        | Affiliation::Member
+        | Affiliation::None => Affiliation::None,
+    }
+}
+
+/// Whether an honoured `affiliation` lets its holder read and subscribe to
+/// a Space of `access`: anybody who is not banned in a public Space, and
+/// the Space's members, publishers and owners in a private one. A
+/// publish-only affiliation reads nothing (XEP-0060 §4.1).
+fn reads(access: AccessModel, affiliation: Affiliation) -> bool {
+    match (access, affiliation) {
+        (_, Affiliation::Outcast) => false,
+        (AccessModel::Open, _) => true,
+        (
+            AccessModel::Whitelist,
+            Affiliation::Owner | Affiliation::Publisher | Affiliation::Member,
+        ) => true,
+        (AccessModel::Whitelist, Affiliation::PublishOnly | Affiliation::None) => false,
+        (AccessModel::Presence | AccessModel::Roster | AccessModel::Authorize, _) => false,
+    }
+}
+
+/// Whether a node is a Space open to the asker cannot be told now: the
+/// request is answered with a retryable error.
+struct Undecided;
+
+/// A Space a remote asker is answered about.
+struct OpenSpace {
+    node: PubSubNode,
+    /// The asker's affiliation in it, as honoured for its stream.
+    affiliation: Affiliation,
+}
+
+impl OpenSpace {
+    fn created_at_ms(&self) -> i64 {
+        self.node.created_at.timestamp_millis()
+    }
+}
+
+/// One request, as its handlers read it.
+struct Asked<'a> {
+    state: &'a Arc<WebSocketState>,
+    iq: &'a Iq,
+    /// The Spaces service's address.
+    service: BareJid,
+    /// The sender's bare JID: the subject of every decision.
+    account: BareJid,
+    /// What the stream that carried the request proved.
+    evidence: PrincipalEvidence,
+    witness: PrincipalWitness,
+    /// The S2S snapshot that stream was admitted under.
+    snapshot: uuid::Uuid,
+}
+
+fn database(state: &WebSocketState) -> &Database {
+    state.deps.app_state.db_pool.global()
+}
+
+/// Whether the Space `node` of `service` is open to other servers: its
+/// `federated` setting is on for this very node. `None` when the setting
+/// cannot be read.
+pub(crate) async fn space_federated(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &PubSubNode,
+) -> Option<bool> {
+    FederatedSpaces::new(database(state).clone())
+        .is_federated(service, &node.node_name, node.created_at.timestamp_millis())
+        .await
+        .ok()
+}
+
+/// Set the `federated` setting of the Space `node` of `service`, created at
+/// `node_created_at_ms`. Turning it off forgets the subscriptions remote
+/// accounts made to the Space, so nothing more leaves for them. `false`
+/// when the setting could not be written.
+pub(crate) async fn set_space_federated(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &str,
+    node_created_at_ms: i64,
+    federated: bool,
+) -> bool {
+    let db = database(state);
+    if federated {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        return matches!(
+            FederatedSpaces::new(db.clone())
+                .enable(service, node, node_created_at_ms, now_ms)
+                .await,
+            Ok(true)
+        );
+    }
+    let closed = FederatedSpaces::new(db.clone())
+        .disable(service, node)
+        .await;
+    let forgotten = SpaceSubscriptions::new(db.clone())
+        .forget_node(service, node)
+        .await;
+    closed.is_ok() && forgotten.is_ok()
+}
+
+/// Forget what S2S recorded for the Space `node` of `service`, which was
+/// deleted: its `federated` setting and the subscriptions remote accounts
+/// made to it. A row that could not be removed counts for nothing anyway,
+/// since it names the deleted node's creation time.
+pub(crate) async fn forget_space(db: &Database, service: &BareJid, node: &str) {
+    let closed = FederatedSpaces::new(db.clone())
+        .disable(service, node)
+        .await;
+    let forgotten = SpaceSubscriptions::new(db.clone())
+        .forget_node(service, node)
+        .await;
+    if closed.is_err() || forgotten.is_err() {
+        tracing::warn!("failed to forget the S2S records of a deleted Space");
+    }
+}
+
+/// The configuration form `response` carries, with the Space's
+/// [`FIELD_SPACE_FEDERATED`] field added.
+pub(crate) fn with_federated_field(mut response: Iq, federated: bool) -> Iq {
+    let field = || {
+        Element::builder("field", waddle_xmpp::xep::xep0004::NS_DATA_FORMS)
+            .attr(
+                minidom::rxml::xml_ncname!("var").to_owned(),
+                FIELD_SPACE_FEDERATED,
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "boolean")
+            .attr(
+                minidom::rxml::xml_ncname!("label").to_owned(),
+                "Open to accounts at other servers",
+            )
+            .append(
+                Element::builder("value", waddle_xmpp::xep::xep0004::NS_DATA_FORMS)
+                    .append(if federated { "1" } else { "0" })
+                    .build(),
+            )
+            .build()
+    };
+    if let Iq::Result {
+        payload: Some(pubsub),
+        ..
+    } = &mut response
+    {
+        for configure in pubsub
+            .children_mut()
+            .filter(|child| child.name() == "configure")
+        {
+            for form in configure
+                .children_mut()
+                .filter(|child| child.is("x", waddle_xmpp::xep::xep0004::NS_DATA_FORMS))
+            {
+                form.append_child(field());
+            }
+        }
+    }
+    response
+}
+
+/// The value of [`FIELD_SPACE_FEDERATED`] in the configuration form `iq`
+/// submits: `Ok(None)` when the form does not carry the field, and `Err`
+/// for a value that is no XEP-0004 boolean.
+pub(crate) fn submitted_federated(iq: &Iq) -> Result<Option<bool>, ()> {
+    let Iq::Set { payload, .. } = iq else {
+        return Ok(None);
+    };
+    let value = payload
+        .children()
+        .filter(|child| child.name() == "configure")
+        .flat_map(Element::children)
+        .filter(|child| child.is("x", waddle_xmpp::xep::xep0004::NS_DATA_FORMS))
+        .flat_map(Element::children)
+        .find(|field| field.name() == "field" && field.attr("var") == Some(FIELD_SPACE_FEDERATED))
+        .map(|field| {
+            field
+                .children()
+                .find(|child| child.name() == "value")
+                .map(Element::text)
+        });
+    match value {
+        None => Ok(None),
+        Some(Some(value)) => match value.trim() {
+            "1" | "true" => Ok(Some(true)),
+            "0" | "false" => Ok(Some(false)),
+            _ => Err(()),
+        },
+        Some(None) => Err(()),
+    }
+}
+
+/// The room a Space item names, when it is a XEP-0402 bookmark of a room
+/// of this deployment's MUC service; `None` for any other item.
+fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) -> Option<BareJid> {
+    if payload.is_some_and(|payload| !payload.is("conference", NS_BOOKMARKS2)) {
+        return None;
+    }
+    let room = id.parse::<BareJid>().ok()?;
+    (room.node().is_some() && room.domain().as_str() == state.deps.service_domains.muc)
+        .then_some(room)
+}
+
+/// Whether a remote principal `account`, deciding on `evidence`, may be
+/// told of `room` as a child of a Space: what the room's own host would
+/// tell it. The room's catalog row says it is open to other servers and is
+/// no group conversation; and a room an enrolled host-grant scope manages
+/// is told only to a principal its grants admit to view it on that
+/// evidence. A room that cannot be decided now is not told.
+async fn room_visible(
+    state: &WebSocketState,
+    room: &BareJid,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+) -> bool {
+    let open = matches!(
+        get_managed_channel_for_room(state, room).await,
+        Ok(Some(channel))
+            if channel.federated
+                && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+    );
+    if !open {
+        return false;
+    }
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .allows_as(
+            RoomBinding::Room(room),
+            account,
+            evidence,
+            HostGrantAction::View,
+        )
+        .await
+    {
+        RoomGate::Unmanaged => true,
+        RoomGate::Managed(allowed) => allowed,
+        RoomGate::Unavailable => false,
+    }
+}
+
+impl Asked<'_> {
+    fn refuse(&self, error: StanzaError) -> Vec<Stanza> {
+        refuse(self.iq, error)
+    }
+
+    fn pubsub_error(&self, error: PubSubError) -> Vec<Stanza> {
+        answer(build_pubsub_error(self.iq, error))
+    }
+
+    fn storage(&self) -> &Arc<dyn waddle_xmpp::pubsub::PubSubStorage> {
+        &self.state.deps.protocol.pubsub_storage
+    }
+
+    /// The Space `node`, when this asker is answered about it; `Ok(None)`
+    /// for a node answered as one that does not exist, and `Err` when that
+    /// cannot be told now.
+    ///
+    /// The `federated` setting is read first, by the node's name alone, so
+    /// a failure to read it answers every name alike; any later failure is
+    /// reached only for a name whose setting is on. Nothing else about the
+    /// node, the asker's standing in it included, is looked at before that.
+    async fn space(&self, node: &str) -> Result<Option<OpenSpace>, Undecided> {
+        let enabled_for = FederatedSpaces::new(database(self.state).clone())
+            .enabled_for(&self.service, node)
+            .await
+            .map_err(|_| Undecided)?;
+        let Some(enabled_for) = enabled_for else {
+            return Ok(None);
+        };
+        // The Space of an enrolled host-grant scope is served to nobody:
+        // no grant of the scope is a Space's, so nobody's standing in it
+        // can be decided.
+        match self
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .space_enrolled(node)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => return Ok(None),
+            Err(_) => return Err(Undecided),
+        }
+        let stored = self
+            .storage()
+            .get_node(&self.service, node)
+            .await
+            .map_err(|_| Undecided)?;
+        let Some(stored) =
+            stored.filter(|stored| stored.created_at.timestamp_millis() == enabled_for)
+        else {
+            return Ok(None);
+        };
+        let affiliation = self
+            .storage()
+            .affiliation(&self.service, node, &self.account)
+            .await
+            .map_err(|_| Undecided)?;
+        let affiliation = honoured(&self.witness, affiliation);
+        // A private Space is told only to those it admits; a public one to
+        // anybody, a banned account included, which is refused in it.
+        let told = match stored.config.access_model {
+            AccessModel::Open => true,
+            access => reads(access, affiliation),
+        };
+        Ok(told.then_some(OpenSpace {
+            node: stored,
+            affiliation,
+        }))
+    }
+
+    /// The open Space `node`, or the answer that refuses the request.
+    async fn open(&self, node: &str) -> Result<OpenSpace, Vec<Stanza>> {
+        match self.space(node).await {
+            Ok(Some(space)) => Ok(space),
+            Ok(None) => Err(self.refuse(no_such_node())),
+            Err(Undecided) => Err(self.refuse(internal())),
+        }
+    }
+
+    /// The Space's name as its metadata records it, or its node name.
+    async fn title(&self, node: &str) -> String {
+        match self
+            .state
+            .deps
+            .app_state
+            .spaces_metadata_store
+            .get_by_node(&SpaceNode::from(node))
+            .await
+        {
+            Ok(Some(metadata)) => metadata.name,
+            _ => node.to_owned(),
+        }
+    }
+
+    /// Whether this asker may be told of the Space item `item`: a bookmark
+    /// of a room it may be told of. Nothing else a Space holds is served to
+    /// a remote principal.
+    async fn child_visible(&self, id: &str, payload: Option<&Element>) -> bool {
+        match bookmarked_room(self.state, id, payload) {
+            Some(room) => room_visible(self.state, &room, &self.account, &self.evidence).await,
+            None => false,
+        }
+    }
+
+    // --- service discovery and ping ------------------------------------------
+
+    /// XEP-0030 §3: the service's identity and what it is, or a Space
+    /// node's identity with the meta-data form that names it a Space
+    /// (XEP-0503, "Fetching the metadata associated to a space"). The
+    /// features told are service discovery and the PubSub protocol; any
+    /// further one stays unadvertised until its use across servers has
+    /// been demonstrated (ADR-0020 gate G21).
+    async fn disco_info(&self) -> Vec<Stanza> {
+        let Iq::Get { payload, .. } = self.iq else {
+            return self.refuse(bad_request());
+        };
+        let Ok(query) = DiscoInfoQuery::try_from(payload.clone()) else {
+            return self.refuse(bad_request());
+        };
+        let features = vec![
+            Feature::new(DISCO_INFO_NS),
+            Feature::new(DISCO_ITEMS_NS),
+            Feature::new(NS_PUBSUB),
+        ];
+        let Some(node) = query.node else {
+            let info = DiscoInfoResult {
+                node: None,
+                identities: vec![Identity {
+                    category: "pubsub".to_owned(),
+                    type_: "service".to_owned(),
+                    lang: None,
+                    name: None,
+                }],
+                features,
+                extensions: Vec::new(),
+            };
+            return result(self.iq, Some(Element::from(info)));
+        };
+        let space = match self.open(&node).await {
+            Ok(space) => space,
+            Err(refused) => return refused,
+        };
+        if space.affiliation.is_outcast() {
+            return self.refuse(forbidden("You are banned from this Space."));
+        }
+        let title = self.title(&node).await;
+        let form = build_spaces_metadata_form_for_remote(&title);
+        let info = DiscoInfoResult {
+            node: Some(node),
+            identities: vec![Identity {
+                category: "pubsub".to_owned(),
+                type_: "leaf".to_owned(),
+                lang: None,
+                name: Some(title),
+            }],
+            features: vec![Feature::new(DISCO_INFO_NS), Feature::new(NS_PUBSUB)],
+            extensions: Vec::new(),
+        };
+        let mut query = Element::from(info);
+        query.append_child(form);
+        result(self.iq, Some(query))
+    }
+
+    /// XEP-0503, "Fetching spaces from a spaces service": the Spaces this
+    /// asker would be answered about, at most [`MAX_LISTED_SPACES`] of the
+    /// Spaces whose `federated` setting is on. A node on the query asks
+    /// for a Space's items as discovery items, which are not served: the
+    /// node is answered as [`Self::open`] answers it, and an open one
+    /// lists nothing.
+    async fn disco_items(&self) -> Vec<Stanza> {
+        let Iq::Get { payload, .. } = self.iq else {
+            return self.refuse(bad_request());
+        };
+        let Ok(query) = DiscoItemsQuery::try_from(payload.clone()) else {
+            return self.refuse(bad_request());
+        };
+        if let Some(node) = query.node {
+            return match self.open(&node).await {
+                Ok(_) => result(
+                    self.iq,
+                    Some(Element::from(DiscoItemsResult {
+                        node: Some(node),
+                        items: Vec::new(),
+                        rsm: None,
+                    })),
+                ),
+                Err(refused) => refused,
+            };
+        }
+        let Ok(federated) = FederatedSpaces::new(database(self.state).clone())
+            .list(&self.service, MAX_LISTED_SPACES)
+            .await
+        else {
+            return self.refuse(internal());
+        };
+        let mut items = Vec::new();
+        for (node, _) in federated {
+            // A Space that cannot be decided now is left out of the list.
+            let Ok(Some(space)) = self.space(&node).await else {
+                continue;
+            };
+            if space.affiliation.is_outcast() {
+                continue;
+            }
+            items.push(xmpp_parsers::disco::Item {
+                jid: Jid::from(self.service.clone()),
+                name: Some(self.title(&node).await),
+                node: Some(node),
+            });
+        }
+        result(
+            self.iq,
+            Some(Element::from(DiscoItemsResult {
+                node: None,
+                items,
+                rsm: None,
+            })),
+        )
+    }
+
+    // --- XEP-0060 ---------------------------------------------------------
+
+    async fn pubsub(&self, operation: SpaceOperation) -> Vec<Stanza> {
+        let Ok(request) = parse_pubsub_iq(self.iq) else {
+            return self.refuse(bad_request());
+        };
+        // The namespace a request arrived in is the one its operation
+        // belongs to: nothing of the owner's is reached through `pubsub`,
+        // and the reverse.
+        let owner_namespace = self.iq_payload_ns() == Some(NS_PUBSUB_OWNER);
+        if owner_namespace != (operation == SpaceOperation::Owner) {
+            return self.refuse(bad_request());
+        }
+        match request {
+            PubSubRequest::Items {
+                node,
+                max_items,
+                item_ids,
+            } => self.items(&node, max_items, &item_ids).await,
+            PubSubRequest::Subscribe { node, jid } => self.subscribe(&node, &jid).await,
+            PubSubRequest::Unsubscribe { node, jid, subid } => {
+                self.unsubscribe(&node, &jid, subid.as_deref()).await
+            }
+            // No Space is created for a remote principal: creating one
+            // makes its creator the owner.
+            PubSubRequest::CreateNode { .. } => self.refuse(forbidden(
+                "Spaces are created by accounts of this deployment.",
+            )),
+            PubSubRequest::Unsupported { feature } => {
+                self.pubsub_error(PubSubError::UnsupportedFeature(feature))
+            }
+            request @ (PubSubRequest::Publish { .. }
+            | PubSubRequest::Retract { .. }
+            | PubSubRequest::ConfigureNode { .. }
+            | PubSubRequest::ConfigureNodeSet { .. }
+            | PubSubRequest::DeleteNode { .. }
+            | PubSubRequest::PurgeNode { .. }
+            | PubSubRequest::AffiliationsGet { .. }
+            | PubSubRequest::AffiliationsSet { .. }
+            | PubSubRequest::OwnerSubscriptionsGet { .. }
+            | PubSubRequest::OwnerSubscriptionsSet { .. }) => self.change(request).await,
+            // A request kind this build does not classify is not served.
+            _ => self.refuse(unavailable()),
+        }
+    }
+
+    fn iq_payload_ns(&self) -> Option<&'static str> {
+        match self.iq {
+            Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
+                if payload.is("pubsub", NS_PUBSUB_OWNER) {
+                    Some(NS_PUBSUB_OWNER)
+                } else if payload.is("pubsub", NS_PUBSUB) {
+                    Some(NS_PUBSUB)
+                } else {
+                    None
+                }
+            }
+            Iq::Result { .. } | Iq::Error { .. } => None,
+        }
+    }
+
+    /// XEP-0503, "Discovering the content of a space": the bookmarks of the
+    /// Space's rooms this asker may be told of, read from the store and
+    /// nothing else. A session's read also publishes bookmarks the Space
+    /// lacks and repairs a room's parent; a remote principal's read writes
+    /// nothing.
+    async fn items(&self, node: &str, max_items: Option<u32>, item_ids: &[String]) -> Vec<Stanza> {
+        if !matches!(self.iq, Iq::Get { .. }) {
+            return self.refuse(bad_request());
+        }
+        let space = match self.open(node).await {
+            Ok(space) => space,
+            Err(refused) => return refused,
+        };
+        if !reads(space.node.config.access_model, space.affiliation) {
+            return self.refuse(forbidden("You may not read this Space."));
+        }
+        let most = max_items.map_or(MAX_RETURNED_ITEMS, |asked| asked.min(MAX_RETURNED_ITEMS));
+        let Ok(stored) = self
+            .storage()
+            .get_items(&self.service, node, Some(most), item_ids)
+            .await
+        else {
+            return self.refuse(internal());
+        };
+        let mut items: Vec<PubSubItem> = Vec::new();
+        for item in &stored {
+            let item = item.to_pubsub_item();
+            let told = match item.id.as_deref() {
+                Some(id) => self.child_visible(id, item.payload.as_ref()).await,
+                None => false,
+            };
+            if told {
+                // The publisher of an item is an account of this
+                // deployment and is not named to a remote asker.
+                items.push(PubSubItem {
+                    publisher: None,
+                    ..item
+                });
+            }
+        }
+        answer(build_pubsub_items_result(self.iq, node, &items))
+    }
+
+    /// XEP-0503, "Joining a space": a subscription to the Space's node, for
+    /// the sender's own address only. It is recorded with what the
+    /// sender's stream proved, within the bounds on remote subscriptions,
+    /// and grants nothing in any room of the Space.
+    async fn subscribe(&self, node: &str, jid: &Jid) -> Vec<Stanza> {
+        if !matches!(self.iq, Iq::Set { .. }) {
+            return self.refuse(bad_request());
+        }
+        // XEP-0060 §6.1.3.1: the subscribed address must be the sender's.
+        // Decided before the node is looked at, for every node alike.
+        if jid.to_bare() != self.account {
+            return self.pubsub_error(PubSubError::InvalidJid);
+        }
+        let space = match self.open(node).await {
+            Ok(space) => space,
+            Err(refused) => return refused,
+        };
+        if !reads(space.node.config.access_model, space.affiliation) {
+            return self.refuse(forbidden("You may not subscribe to this Space."));
+        }
+        let subscriptions = SpaceSubscriptions::new(database(self.state).clone());
+        let PrincipalEvidence::Stream(evidence) = self.evidence else {
+            // A request without a stream is no remote principal's.
+            return self.refuse(internal());
+        };
+        let recorded = subscriptions
+            .record(
+                &self.service,
+                node,
+                space.created_at_ms(),
+                SubscriptionRequest {
+                    subscriber: jid,
+                    account: &self.account,
+                    evidence,
+                    snapshot: self.snapshot,
+                    now_ms: chrono::Utc::now().timestamp_millis(),
+                },
+            )
+            .await;
+        match recorded {
+            Ok(SubscriptionRecord::Recorded) => {}
+            Ok(SubscriptionRecord::Bounds) => {
+                telemetry::subscription_limited();
+                return self.refuse(busy());
+            }
+            Err(_) => return self.refuse(internal()),
+        }
+        match self.storage().subscribe(&self.service, node, jid).await {
+            Ok(subscription) => answer(build_pubsub_subscribe_result(
+                self.iq,
+                node,
+                jid,
+                &subscription.subid,
+            )),
+            Err(_) => {
+                // Nothing is delivered for a record without the service's
+                // own subscription; it is removed all the same.
+                let _ = subscriptions.remove(&self.service, node, jid).await;
+                self.refuse(internal())
+            }
+        }
+    }
+
+    /// XEP-0060 §6.2: the sender's own subscription ends. Leaving is
+    /// allowed whatever the sender's standing in the Space has become.
+    async fn unsubscribe(&self, node: &str, jid: &Jid, subid: Option<&str>) -> Vec<Stanza> {
+        if !matches!(self.iq, Iq::Set { .. }) {
+            return self.refuse(bad_request());
+        }
+        // XEP-0060 §6.2.3.3, decided before the node is looked at.
+        if jid.to_bare() != self.account {
+            return self.refuse(forbidden("Only your own subscription can be removed."));
+        }
+        if let Err(refused) = self.open(node).await {
+            return refused;
+        }
+        let subid = subid.map(SubId::from_raw);
+        let removed = self
+            .storage()
+            .unsubscribe(&self.service, node, jid, subid.as_ref())
+            .await;
+        match removed {
+            Ok(true) => {
+                let forgotten = SpaceSubscriptions::new(database(self.state).clone())
+                    .remove(&self.service, node, jid)
+                    .await;
+                if forgotten.is_err() {
+                    return self.refuse(internal());
+                }
+                answer(build_pubsub_success(self.iq))
+            }
+            Ok(false) => self.pubsub_error(PubSubError::NotSubscribed),
+            Err(_) => self.refuse(internal()),
+        }
+    }
+
+    /// A request that changes a Space: publishing and retracting an item,
+    /// which places a room in the Space or takes it out, and everything of
+    /// the `pubsub#owner` namespace. It needs honoured privilege first
+    /// (ADR-0020 D8: a trusted home on a `pkix` stream), whatever the
+    /// Space's own policy would allow, and is then decided by the checks a
+    /// session's request meets, for the remote account as their subject.
+    async fn change(&self, request: PubSubRequest) -> Vec<Stanza> {
+        let node = match &request {
+            PubSubRequest::Publish { node, .. }
+            | PubSubRequest::Retract { node, .. }
+            | PubSubRequest::ConfigureNode { node }
+            | PubSubRequest::ConfigureNodeSet { node, .. }
+            | PubSubRequest::DeleteNode { node }
+            | PubSubRequest::PurgeNode { node }
+            | PubSubRequest::AffiliationsGet { node }
+            | PubSubRequest::AffiliationsSet { node, .. }
+            | PubSubRequest::OwnerSubscriptionsGet { node }
+            | PubSubRequest::OwnerSubscriptionsSet { node, .. } => node.clone(),
+            _ => return self.refuse(unavailable()),
+        };
+        let space = match self.open(&node).await {
+            Ok(space) => space,
+            Err(refused) => return refused,
+        };
+        if space.affiliation.is_outcast() || !self.witness.privilege_honoured() {
+            return self.refuse(forbidden(
+                "Changing a Space from another server requires a privileged standing in it, a \
+                 trusted server and a certificate-authenticated stream.",
+            ));
+        }
+        // An owner's change of subscriptions may name a JID at another
+        // server. Nothing is sent to it: a notification leaves only for a
+        // subscription the remote account made itself.
+        let frames = spaces_change_for_remote(self.state, self.iq, &self.account, request).await;
+        match iqs_of(frames) {
+            Some(answers) if !answers.is_empty() => answers,
+            _ => self.refuse(internal()),
+        }
+    }
+}
+
+#[async_trait]
+impl LocalSpaces for WebSocketLocalSpaces {
+    async fn handle(&self, request: SpaceRequest) -> Vec<Stanza> {
+        let Some(state) = self.state.upgrade() else {
+            return Vec::new();
+        };
+        let Stanza::Iq(iq) = &request.stanza else {
+            return Vec::new();
+        };
+        let iq = iq.as_ref();
+        if !matches!(iq, Iq::Get { .. } | Iq::Set { .. }) {
+            return Vec::new();
+        }
+        let account = request.principal.account().as_bare_jid().clone();
+        let evidence = PrincipalEvidence::of(&request.principal);
+        // The D1 decision where the effect happens: a domain the snapshot
+        // this replica runs does not admit, or a stream below host policy's
+        // strength, is refused whatever a Space holds for the account.
+        let Some(witness) = principal_witness(&state, &account, &evidence)
+            .filter(PrincipalWitness::grants_honoured)
+        else {
+            telemetry::not_admitted();
+            return refuse(iq, forbidden("This service does not admit your server."));
+        };
+        // The service is its bare domain: no node of it and no Space has
+        // an address of its own for a remote principal.
+        let Some(service) = iq
+            .to()
+            .filter(|to| to.node().is_none() && to.resource().is_none())
+            .map(Jid::to_bare)
+            .filter(|to| to.as_str() == state.deps.service_domains.spaces)
+        else {
+            return refuse(iq, unavailable());
+        };
+        let asked = Asked {
+            state: &state,
+            iq,
+            service,
+            account,
+            evidence,
+            witness,
+            snapshot: request.principal.generation(),
+        };
+        match request.operation {
+            SpaceOperation::DiscoInfo => asked.disco_info().await,
+            SpaceOperation::DiscoItems => asked.disco_items().await,
+            SpaceOperation::Ping => match iq {
+                Iq::Get { .. } => result(iq, None),
+                _ => refuse(iq, bad_request()),
+            },
+            operation @ (SpaceOperation::PubSub | SpaceOperation::Owner) => {
+                asked.pubsub(operation).await
+            }
+        }
+    }
+}
+
+/// The item a Space's event notification names, and so the room a
+/// subscriber must be allowed to learn of to receive it.
+fn event_item(event: &Message) -> Option<(String, Option<Element>)> {
+    let items = event
+        .payloads
+        .iter()
+        .filter(|payload| payload.is("event", waddle_xmpp::pubsub::NS_PUBSUB_EVENT))
+        .flat_map(Element::children)
+        .find(|child| child.name() == "items")?;
+    let named = items
+        .children()
+        .find(|child| matches!(child.name(), "item" | "retract"))?;
+    let id = named.attr("id")?.to_owned();
+    Some((id, named.children().next().cloned()))
+}
+
+/// The event notification as a subscriber at another server receives it:
+/// the event as built, without the address of the account that published
+/// the item.
+fn for_remote_subscriber(event: &Message, to: &Jid) -> Message {
+    let mut message = event.clone();
+    message.to = Some(to.clone());
+    for payload in &mut message.payloads {
+        if !payload.is("event", waddle_xmpp::pubsub::NS_PUBSUB_EVENT) {
+            continue;
+        }
+        for items in payload.children_mut() {
+            for item in items.children_mut() {
+                if item.name() == "item" {
+                    item.set_attr(
+                        minidom::rxml::Namespace::NONE,
+                        minidom::rxml::xml_ncname!("publisher").to_owned(),
+                        None::<String>,
+                    );
+                }
+            }
+        }
+    }
+    message
+}
+
+/// Send `event`, an event notification of the Space `node` of `service`,
+/// to the Space's subscribers at other servers (XEP-0060 §7.1).
+///
+/// A notification leaves only where all of this holds when it is handed
+/// over:
+///
+/// - the Space is open to other servers and the replica serves its Spaces
+///   to them;
+/// - the subscriber made the subscription itself over an inbound stream,
+///   and the service's own record still holds it as deliverable, read
+///   for this publication;
+/// - the subscriber's domain is admitted now (D1) and its standing in the
+///   Space, honoured for the evidence its subscription recorded (D8),
+///   still lets it read the Space;
+/// - the room the event names is one the subscriber may be told of.
+///
+/// One publication sends at most one stanza to each of at most 256 remote
+/// subscribers, within the Space's allowance of notified publications;
+/// what does not fit a domain pair's queue is dropped, as a headline may
+/// be. Nothing is sent to an address at a domain this deployment serves.
+pub(crate) async fn notify_remote_subscribers(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &PubSubNode,
+    event: &Message,
+) {
+    let db = database(state).clone();
+    let created_at_ms = node.created_at.timestamp_millis();
+    let federated = FederatedSpaces::new(db.clone())
+        .is_federated(service, &node.node_name, created_at_ms)
+        .await;
+    if !matches!(federated, Ok(true)) {
+        return;
+    }
+    let Ok(subscriptions) = SpaceSubscriptions::new(db)
+        .of_node(service, &node.node_name, created_at_ms)
+        .await
+    else {
+        tracing::warn!("event notifications withheld: the remote subscriptions could not be read");
+        return;
+    };
+    if subscriptions.is_empty() {
+        return;
+    }
+    let Some((item_id, item_payload)) = event_item(event) else {
+        return;
+    };
+    let Some(room) = bookmarked_room(state, &item_id, item_payload.as_ref()) else {
+        return;
+    };
+    if !take_event(service, &node.node_name) {
+        telemetry::publication_limited();
+        return;
+    }
+    // The service's own record, read for this publication just before the
+    // first hand-over: a subscription removed, or an account banned, since
+    // the remote subscription was recorded receives nothing.
+    let Ok(deliverable) = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .list_deliverable_subscribers(service, &node.node_name)
+        .await
+    else {
+        tracing::warn!("event notifications withheld: the subscriptions could not be read");
+        return;
+    };
+    let deliverable: Vec<Jid> = deliverable
+        .into_iter()
+        .map(|subscription| subscription.subscriber)
+        .collect();
+    for subscription in subscriptions {
+        let subscriber = &subscription.subscriber;
+        let account = subscriber.to_bare();
+        let evidence = PrincipalEvidence::Stream(subscription.evidence);
+        let sent = !state.serves(&account)
+            && deliverable.contains(subscriber)
+            && subscriber_reads(state, service, node, &account, &evidence).await
+            && room_visible(state, &room, &account, &evidence).await
+            && state.deps.remote_route.space_event(
+                service,
+                subscriber,
+                Stanza::Message(for_remote_subscriber(event, subscriber)),
+            );
+        if !sent {
+            telemetry::event_withheld();
+        }
+    }
+}
+
+/// Whether the remote `account` may read the Space `node` now, on the
+/// evidence its subscription recorded: its domain is admitted, and its
+/// affiliation, as honoured for that evidence, lets it read a Space of the
+/// node's access model.
+async fn subscriber_reads(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &PubSubNode,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+) -> bool {
+    let Some(witness) =
+        principal_witness(state, account, evidence).filter(PrincipalWitness::grants_honoured)
+    else {
+        return false;
+    };
+    let Ok(stored) = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .affiliation(service, &node.node_name, account)
+        .await
+    else {
+        return false;
+    };
+    reads(node.config.access_model, honoured(&witness, stored))
+}

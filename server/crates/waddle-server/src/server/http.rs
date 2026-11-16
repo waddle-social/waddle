@@ -710,6 +710,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             router,
             state.db_pool.global().clone(),
         );
+        // The same state serves its Spaces to remote principals: a Space is
+        // reached only while its `federated` setting is on, and its event
+        // notifications leave for the subscriptions remote accounts made
+        // themselves.
+        crate::server::routes::websocket::s2s_spaces::host_spaces(&websocket_state, router);
         // The account side enables traffic between remote senders and
         // local accounts in both directions (gate G18).
         router.attach_accounts(Arc::new(

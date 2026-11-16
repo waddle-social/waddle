@@ -140,7 +140,10 @@ pub(super) async fn serve_local_rooms(router: Arc<Inner>, shard: usize) {
             // Work of the queues that serve remote rooms and remote
             // senders' account traffic, which never reaches these: it is
             // queued on the room traffic queues alone.
-            RoomWork::Traffic(_) | RoomWork::Ended(_) | RoomWork::Account(_) => {}
+            RoomWork::Traffic(_)
+            | RoomWork::Ended(_)
+            | RoomWork::Account(_)
+            | RoomWork::Space(_) => {}
         }
     }
 }
@@ -425,7 +428,7 @@ fn set_to(stanza: &mut Stanza, to: Jid) {
 /// `key`, the entries that have refilled are forgotten first; `None` when
 /// every entry is still spending, so that the table never grows beyond
 /// `cap`.
-fn bucket<'a, K: Hash + Eq + Clone>(
+pub(super) fn bucket<'a, K: Hash + Eq + Clone>(
     buckets: &'a mut HashMap<K, Allowance>,
     key: &K,
     rate: f64,
@@ -458,7 +461,7 @@ fn bucket<'a, K: Hash + Eq + Clone>(
 
 /// Spend one of the answered refusals `allowance` keeps: `false` when none
 /// is left, or no entry could be kept for it.
-fn spend_refusal(allowance: Option<&mut Allowance>) -> bool {
+pub(super) fn spend_refusal(allowance: Option<&mut Allowance>) -> bool {
     allowance.is_some_and(|allowance| {
         let spent = allowance.refusals >= 1.0;
         if spent {
@@ -500,10 +503,12 @@ pub(super) struct EphemeralBudgets {
 
 impl Inner {
     /// What this replica lets remote senders reach beyond the server
-    /// domain: the MUC service, once a room host is attached.
+    /// domain: the MUC service, once a room host is attached, and the
+    /// Spaces PubSub service, once a Spaces host is.
     pub(super) fn reachable(&self) -> Reachable {
         Reachable {
             rooms: self.hosting.get().is_some(),
+            spaces: self.spaces.get().is_some(),
         }
     }
 

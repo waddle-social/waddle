@@ -160,6 +160,30 @@ pub(super) async fn handle_pubsub_admin_request(
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
             };
             let response = build_pubsub_configure_form_result(iq, &node, &node_meta.config);
+            // A Space's owner is shown whether the Space is open to other
+            // servers. A request without a session is a remote principal's,
+            // which neither reads nor changes that setting.
+            let is_spaces_service = matches!(
+                spaces_service_bare_jid(spaces_domain),
+                Ok(spaces_jid) if target_jid == &spaces_jid
+            );
+            if is_spaces_service && authenticated_session.is_some() {
+                let federated = crate::server::routes::websocket::s2s_spaces::space_federated(
+                    state, target_jid, &node_meta,
+                )
+                .await;
+                let Some(federated) = federated else {
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::InternalServerError,
+                    ))];
+                };
+                return vec![iq_to_xml(
+                    crate::server::routes::websocket::s2s_spaces::with_federated_field(
+                        response, federated,
+                    ),
+                )];
+            }
             vec![iq_to_xml(response)]
         }
 
@@ -190,6 +214,20 @@ pub(super) async fn handle_pubsub_admin_request(
                 Ok(deleted) => {
                     if deleted {
                         debug!(node = %node, "PubSub node deleted via WebSocket");
+                        // A deleted Space is open to nobody: its setting and
+                        // the subscriptions remote accounts made to it go
+                        // with it.
+                        if matches!(
+                            spaces_service_bare_jid(spaces_domain),
+                            Ok(spaces_jid) if target_jid == &spaces_jid
+                        ) {
+                            crate::server::routes::websocket::s2s_spaces::forget_space(
+                                state.deps.app_state.db_pool.global(),
+                                target_jid,
+                                &node,
+                            )
+                            .await;
+                        }
                         let response = build_pubsub_success(iq);
                         vec![iq_to_xml(response)]
                     } else {
@@ -414,6 +452,22 @@ pub(super) async fn handle_pubsub_admin_request(
                     ))];
                 }
             };
+            // Whether the Space is open to other servers is its owner's to
+            // set, in the same form (`urn:waddle:spaces:federated`). The
+            // submitted value is read before anything is written, and
+            // applied once the configuration is; a request without a
+            // session is a remote principal's and never changes it.
+            let federated = if is_spaces_service && authenticated_session.is_some() {
+                match crate::server::routes::websocket::s2s_spaces::submitted_federated(iq) {
+                    Ok(federated) => federated,
+                    Err(()) => {
+                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                    }
+                }
+            } else {
+                None
+            };
+            let node_created_at_ms = existing_node.created_at.timestamp_millis();
             let config = config_patch.apply_to(existing_node.config);
             let config = if is_spaces_service {
                 let access_model = config.access_model;
@@ -455,6 +509,23 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
             {
                 Ok(_) => {
+                    if let Some(federated) = federated {
+                        let applied =
+                            crate::server::routes::websocket::s2s_spaces::set_space_federated(
+                                state,
+                                target_jid,
+                                &node,
+                                node_created_at_ms,
+                                federated,
+                            )
+                            .await;
+                        if !applied {
+                            return vec![iq_to_xml(build_pubsub_error(
+                                iq,
+                                PubSubError::InternalServerError,
+                            ))];
+                        }
+                    }
                     vec![iq_to_xml(build_pubsub_success(iq))]
                 }
                 Err(_) => {
