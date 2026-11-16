@@ -9,11 +9,19 @@ struct WaddleApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #endif
 
+    private static let isHostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environment(appState)
-                .onAppear { appDelegate.attach(appState) }
+            if Self.isHostingTests {
+                // The unit-test bundle runs inside the app: without the root
+                // view the host never restores a session or loads providers.
+                Color.clear
+            } else {
+                RootView()
+                    .environment(appState)
+                    .onAppear { appDelegate.attach(appState) }
+            }
         }
         #if os(macOS)
         .defaultSize(width: 1_280, height: 840)

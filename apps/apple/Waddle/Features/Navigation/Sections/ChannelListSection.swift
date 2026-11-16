@@ -58,7 +58,7 @@ struct NoChannelsView: View {
             Text("Channels keep conversations organized by topic.")
         } actions: {
             Button("Create a channel", action: onCreate)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.huddle(.primary))
         }
         .frame(maxWidth: .infinity)
     }

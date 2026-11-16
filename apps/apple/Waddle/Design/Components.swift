@@ -1,11 +1,9 @@
 import SwiftUI
 import WaddleKit
 
-/// XEP-0084 avatar with an initials fallback in the XEP-0392 color.
+/// XEP-0084 avatar with an initials fallback on a name-derived tint.
 struct AvatarView: View {
     let name: String
-    /// Identifier hashed for the fallback color (bare JID or nick).
-    let colorKey: String
     var image: AvatarImage?
     var size: CGFloat = Theme.Size.avatar
 
@@ -17,16 +15,31 @@ struct AvatarView: View {
                     .scaledToFill()
             } else {
                 ZStack {
-                    Color.consistent(for: colorKey)
+                    Self.tint(for: name)
                     Text(initials)
-                        .font(.system(size: size * 0.4, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .font(HuddleFonts.swiftUIFont(.body, size: size * 0.36, weight: 700))
+                        .foregroundStyle(Theme.Colors.avatarFg)
                 }
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.3, style: .continuous))
+        .clipShape(Circle())
         .accessibilityHidden(true)
+    }
+
+    /// The fallback tint for `name`: the web client's djb2 over code
+    /// points (unsigned 32-bit) modulo the avatar tints, so a person keeps
+    /// one colour on web, Android and Apple.
+    static func tint(for name: String) -> Color {
+        let tints = Theme.Colors.avatarTints
+        return tints[tintIndex(for: name, count: tints.count)]
+    }
+
+    static func tintIndex(for name: String, count: Int) -> Int {
+        let hash = name.unicodeScalars.reduce(UInt32(5381)) { hash, scalar in
+            hash &* 33 &+ scalar.value
+        }
+        return Int(hash % UInt32(count))
     }
 
     private var initials: String {
@@ -48,7 +61,6 @@ struct JIDAvatar: View {
     var body: some View {
         AvatarView(
             name: name ?? jid.localpart ?? jid.domain,
-            colorKey: jid.description,
             image: session.avatars.image(for: jid),
             size: size
         )
@@ -66,25 +78,59 @@ struct JIDAvatar: View {
     }
 }
 
-/// RFC 6121 availability dot.
+/// RFC 6121 availability dot. Every state has its own shape, never
+/// colour alone: filled when here, half-filled when away, barred for do
+/// not disturb, hollow when offline.
 struct PresenceDot: View {
     let availability: Availability
     var size: CGFloat = 10
+    /// The colour the dot sits on; its ring and cut-outs are drawn in it.
+    var ground: Color = Theme.Colors.bg
 
     var body: some View {
-        Circle()
-            .fill(color)
+        mark
             .frame(width: size, height: size)
-            .overlay(Circle().strokeBorder(Color.primaryBackground, lineWidth: size * 0.2))
+            .overlay(Circle().strokeBorder(ground, lineWidth: ringWidth))
             .accessibilityLabel(Text(label))
+    }
+
+    private var ringWidth: CGFloat { size * 0.14 }
+    private var strokeWidth: CGFloat { max(1.5, size * 0.14) }
+
+    @ViewBuilder
+    private var mark: some View {
+        let inner = Circle().inset(by: ringWidth)
+        switch availability {
+        case .available, .chat:
+            Circle().fill(color)
+        case .away, .extendedAway:
+            ZStack {
+                Circle().fill(ground)
+                // The leading half, as on the web.
+                inner.fill(color).mask(alignment: .leading) {
+                    Rectangle().frame(width: size / 2)
+                }
+                inner.strokeBorder(color, lineWidth: strokeWidth)
+            }
+        case .doNotDisturb:
+            ZStack {
+                Circle().fill(color)
+                Capsule().fill(ground).frame(width: size * 0.42, height: strokeWidth)
+            }
+        case .offline:
+            ZStack {
+                Circle().fill(ground)
+                inner.strokeBorder(color, lineWidth: strokeWidth)
+            }
+        }
     }
 
     private var color: Color {
         switch availability {
-        case .available, .chat: return .green
-        case .away, .extendedAway: return .orange
-        case .doNotDisturb: return .red
-        case .offline: return .gray.opacity(0.6)
+        case .available, .chat: return Theme.Colors.presenceAvailable
+        case .away, .extendedAway: return Theme.Colors.presenceAway
+        case .doNotDisturb: return Theme.Colors.presenceDnd
+        case .offline: return Theme.Colors.presenceOffline
         }
     }
 
@@ -99,21 +145,28 @@ struct PresenceDot: View {
     }
 }
 
-/// Unread count capsule; the mention variant is filled with the accent.
+/// Unread count pill. Gold means "this is for you", so only the mention
+/// variant is gold; plain unread is quiet.
 struct UnreadBadge: View {
     let count: Int
     var isMention = false
 
+    private static var height: CGFloat { 20 }
+
     var body: some View {
         if count > 0 {
             Text(count > 99 ? "99+" : "\(count)")
-                .font(.caption2.weight(.bold).monospacedDigit())
-                .foregroundStyle(isMention ? Color.white : Color.primary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(
-                    Capsule().fill(isMention ? Color.accentColor : Color.secondary.opacity(0.22))
-                )
+                .huddleText(Theme.Typography.badge)
+                .monospacedDigit()
+                .foregroundStyle(isMention ? Theme.Colors.goldFg : Theme.Colors.fgMuted)
+                .padding(.horizontal, WaddleTokens.Spacing.s1Half)
+                .frame(minWidth: Self.height, minHeight: Self.height)
+                .background(Capsule().fill(isMention ? Theme.Colors.gold : Theme.Colors.surface2))
+                .overlay {
+                    if !isMention {
+                        Capsule().strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
+                    }
+                }
                 .accessibilityLabel(Text(isMention ? "\(count) unread, mentions you" : "\(count) unread"))
         }
     }
@@ -129,34 +182,63 @@ struct ConnectionBanner: View {
                 if content.showsProgress {
                     ProgressView().controlSize(.small)
                 } else {
+                    // A fixed box: symbol metrics change between OS releases.
                     Image(systemName: content.symbol)
+                        .frame(width: 20, height: 20)
                 }
                 Text(content.text)
-                    .font(.footnote.weight(.medium))
+                    .huddleText(Theme.Typography.label)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.vertical, Theme.Spacing.s)
-            .foregroundStyle(content.tint)
-            .background(content.tint.opacity(0.12))
+            .foregroundStyle(content.foreground)
+            .background(content.background)
             .transition(.move(edge: .top).combined(with: .opacity))
             .accessibilityElement(children: .combine)
         }
     }
 
-    private var content: (text: String, symbol: String, tint: Color, showsProgress: Bool)? {
+    private struct Content {
+        let text: String
+        let symbol: String
+        let foreground: Color
+        let background: Color
+        var showsProgress = false
+    }
+
+    private var content: Content? {
+        typealias Colors = Theme.Colors
         switch status {
         case .online, .signedOut:
             return nil
         case .connecting:
-            return ("Connecting…", "arrow.triangle.2.circlepath", .secondary, true)
+            return Content(
+                text: "Connecting…",
+                symbol: "arrow.triangle.2.circlepath",
+                foreground: Colors.fgMuted,
+                background: Colors.surface2,
+                showsProgress: true
+            )
         case let .offline(retryAt):
-            if let retryAt, retryAt > Date() {
-                return ("Offline. Retrying \(retryAt.formatted(.relative(presentation: .named)))", "wifi.slash", .orange, false)
+            let text = if let retryAt, retryAt > Date() {
+                "Offline. Retrying \(retryAt.formatted(.relative(presentation: .named)))"
+            } else {
+                "Offline. Reconnecting…"
             }
-            return ("Offline. Reconnecting…", "wifi.slash", .orange, false)
+            return Content(
+                text: text,
+                symbol: "wifi.slash",
+                foreground: Colors.warningText,
+                background: Colors.warningSubtle
+            )
         case .authenticationFailed:
-            return ("Your session expired. Sign in again.", "person.crop.circle.badge.exclamationmark", .red, false)
+            return Content(
+                text: "Your session expired. Sign in again.",
+                symbol: "person.crop.circle.badge.exclamationmark",
+                foreground: Colors.dangerText,
+                background: Colors.dangerSubtle
+            )
         }
     }
 }
@@ -168,11 +250,25 @@ struct EmptyStateView: View {
     let symbol: String
 
     var body: some View {
-        ContentUnavailableView {
-            Label(title, systemImage: symbol)
-        } description: {
+        VStack(spacing: Theme.Spacing.s) {
+            Image(systemName: symbol)
+                .font(.system(size: 40, weight: .regular))
+                .frame(height: 48)
+                .foregroundStyle(Theme.Colors.fgSoft)
+                .padding(.bottom, Theme.Spacing.xs)
+                .accessibilityHidden(true)
+            Text(title)
+                .huddleText(Theme.Typography.title)
+                .foregroundStyle(Theme.Colors.fg)
             Text(message)
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(Theme.Colors.fgMuted)
         }
+        .multilineTextAlignment(.center)
+        .padding(Theme.Spacing.xl)
+        .frame(maxWidth: 420)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 

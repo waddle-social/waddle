@@ -208,7 +208,6 @@ private struct MessageRowContent: View {
         let nick = item.conversation.isRoom ? item.from?.resource : nil
         navigation.showProfile(PeerProfileRoute(
             name: author.name,
-            colorKey: author.colorKey,
             jid: author.avatarJID,
             room: nick == nil ? nil : item.conversation.jid,
             nick: nick

@@ -21,12 +21,11 @@ enum SheetRoute: Identifiable, Hashable {
     var id: Self { self }
 }
 
-/// Whose profile a peer sheet shows: the name and XEP-0392 color key a
-/// message row shows for them, their real bare JID when known, and the
+/// Whose profile a peer sheet shows: the name a message row shows for
+/// them, their real bare JID when known, and the
 /// room occupant (room and nick) the row came from, for room presence.
 struct PeerProfileRoute: Hashable {
     let name: String
-    let colorKey: String
     let jid: BareJID?
     let room: BareJID?
     let nick: String?

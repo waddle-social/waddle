@@ -44,7 +44,7 @@ struct TimelineLoadFailed: View {
             Text("Check your connection and try again.")
         } actions: {
             Button("Try Again", action: retry)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.huddle(.primary))
         }
     }
 }
