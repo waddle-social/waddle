@@ -85,12 +85,14 @@ struct CallDock: View {
             accept: onThisCall { _ = await calls.acceptIncoming() },
             decline: onThisCall { _ = await calls.declineIncoming() },
             hangUp: onThisCall { await calls.hangUp() },
+            // A device choice belongs to a session in progress; a tap that
+            // lands as the call ends must not become the next call's choice.
             toggleMicrophone: onThisCall {
-                guard let media else { return }
+                guard let media, case .active = calls.state else { return }
                 await media.setMicrophone(!media.isMicrophoneOn)
             },
             toggleCamera: onThisCall {
-                guard let media else { return }
+                guard let media, case .active = calls.state else { return }
                 await media.setCamera(!media.isCameraOn)
             },
             dismiss: onThisCall { calls.dismiss() }

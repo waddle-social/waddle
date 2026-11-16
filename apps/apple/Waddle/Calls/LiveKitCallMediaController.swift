@@ -37,8 +37,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
         guard room == nil else { throw CallMediaError.alreadyConnected }
-        let observer = RoomObserver { [weak self] room, change in self?.handle(change, in: room) }
+        let (changes, observer) = RoomObserver.make()
         let room = Room(delegate: observer)
+        // One consumer, so the room's reports are handled in the order the
+        // SDK made them. It ends when the observer is released.
+        Task { [weak self] in
+            for await change in changes { self?.handle(change, in: room) }
+        }
         // Owned before connecting, so a drop the SFU reports while the
         // connect is still returning is not lost.
         self.room = room
@@ -146,10 +151,26 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard changed === room else { return }
         switch change {
         case .dropped: onFailure?()
-        // Read from the room, so two reports arriving out of order cannot
-        // leave the phase stuck on reconnecting.
-        case .connection: phase = changed.connectionState == .reconnecting ? .reconnecting : .connected
-        case .tracks: refreshTracks()
+        case .reconnecting: phase = .reconnecting
+        case .reconnected:
+            phase = .connected
+            refreshTracks()
+            enforceCaptureChoices(in: changed)
+        case .tracks:
+            refreshTracks()
+            enforceCaptureChoices(in: changed)
+        }
+    }
+
+    /// A reconnect republishes the tracks it had, and a tap during it finds
+    /// nothing to mute. Whatever comes back, a device the person turned
+    /// off goes off again.
+    private func enforceCaptureChoices(in room: Room) {
+        if isMicrophoneOn, captureChoices[.audio] == false {
+            Task { await setSource(.audio, enabled: false, in: room) }
+        }
+        if isCameraOn, captureChoices[.video] == false {
+            Task { await setSource(.video, enabled: false, in: room) }
         }
     }
 
@@ -179,24 +200,33 @@ enum CallMediaError: Error {
 private enum RoomChange {
     /// The media session died after it was established.
     case dropped
-    /// A reconnect started or finished.
-    case connection
+    case reconnecting
+    case reconnected
     /// A track was published, subscribed, muted or removed, on either side.
     case tracks
 }
 
-/// Forwards room events to the main actor. The reconnect-mode callbacks
-/// are used because, unlike `roomIsReconnecting`, they also fire for a
-/// quick reconnect.
+/// Hands room events to the controller as an ordered stream. The
+/// reconnect-mode callbacks are used because a quick reconnect changes
+/// neither `connectionState` nor `roomIsReconnecting`.
 private final class RoomObserver: NSObject, RoomDelegate, Sendable {
-    private let onChange: @MainActor (Room, RoomChange) -> Void
+    private let changes: AsyncStream<RoomChange>.Continuation
 
-    init(onChange: @escaping @MainActor (Room, RoomChange) -> Void) {
-        self.onChange = onChange
+    static func make() -> (AsyncStream<RoomChange>, RoomObserver) {
+        let (stream, continuation) = AsyncStream<RoomChange>.makeStream()
+        return (stream, RoomObserver(changes: continuation))
     }
 
-    private func forward(_ change: RoomChange, from room: Room) {
-        Task { @MainActor in onChange(room, change) }
+    private init(changes: AsyncStream<RoomChange>.Continuation) {
+        self.changes = changes
+    }
+
+    deinit {
+        changes.finish()
+    }
+
+    private func forward(_ change: RoomChange, from _: Room) {
+        changes.yield(change)
     }
 
     func room(_ room: Room, didDisconnectWithError _: LiveKitError?) {
@@ -204,11 +234,11 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
     }
 
     func room(_ room: Room, didStartReconnectWithMode _: ReconnectMode) {
-        forward(.connection, from: room)
+        forward(.reconnecting, from: room)
     }
 
     func room(_ room: Room, didCompleteReconnectWithMode _: ReconnectMode) {
-        forward(.connection, from: room)
+        forward(.reconnected, from: room)
     }
 
     func room(_ room: Room, participant _: LocalParticipant, didPublishTrack _: LocalTrackPublication) {

@@ -23,11 +23,13 @@
     func update(_ state: CallState) {
         let active: ActiveCall?
         if case .active(let call) = state { active = call } else { active = nil }
-        // A migration passes through `.incoming` on its way to the next
-        // session; only an empty or ended slot is the end of the call.
+        // Choices are dropped where a new call begins, not where one ends:
+        // a replaced session can pass through `.ended` on its way to an
+        // already-accepted invitation, and that is still the same call.
         switch state {
-        case .idle, .ended: media.forgetCaptureChoices()
-        case .incoming, .outgoing, .active: break
+        case .outgoing: media.forgetCaptureChoices()
+        case .incoming(let call) where !call.isAccepting: media.forgetCaptureChoices()
+        case .idle, .incoming, .active, .ended: break
         }
         if let active, targetSid == active.sid { return }
 

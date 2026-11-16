@@ -110,21 +110,46 @@ import Testing
         store.clear()
     }
 
-    @Test func muteAndCameraChoicesLastThroughAMigrationAndEndWithTheCall() async {
+    @Test func muteAndCameraChoicesBelongToOneCallIncludingItsMigration() async {
         let port = FakePort()
         let media = RecordingCallMedia()
         let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { "c-old" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
         store.handle(CallEvent(from: callPeer, sid: "c-old", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
+        // A call we place starts from a clean slate.
+        let atStart = media.captureChoiceResets
+        #expect(atStart >= 1)
         // The peer's client replaces the session; to the person it is the same call.
         store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .propose(callAudio)))
         await eventually { media.calls.count == 2 }
         store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .sessionInitiate(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 3 }
-        #expect(media.captureChoiceResets == 0)
         await store.hangUp()
-        #expect(media.captureChoiceResets == 1)
+        #expect(media.captureChoiceResets == atStart)
+        // The next ring is another call.
+        store.handle(CallEvent(from: callPeer, sid: "c-next", kind: .propose(callAudio)))
+        #expect(media.captureChoiceResets == atStart + 1)
+        store.clear()
+    }
+
+    @Test func choicesSurviveAMigrationWhoseOldSessionEndedOnTheWay() async {
+        let port = FakePort()
+        let media = RecordingCallMedia()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { "c-old" })
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        store.handle(CallEvent(from: callPeer, sid: "c-old", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        await eventually { media.calls.count == 1 }
+        let atStart = media.captureChoiceResets
+        // The re-proposal and the old session's end arrive back to back.
+        port.heldCallVerbs = ["migrated"]
+        store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .propose(callAudio)))
+        await eventually { port.callSends.contains(.migrated(callPeer, "c-old", "c-new")) }
+        store.handle(CallEvent(from: callPeer, sid: "c-old", kind: .sessionTerminate(reason: .success)))
+        port.heldCallVerbs = []
+        port.releaseCallSends()
+        await eventually { store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callAudio, isAccepting: true)) }
+        #expect(media.captureChoiceResets == atStart)
         store.clear()
     }
 
