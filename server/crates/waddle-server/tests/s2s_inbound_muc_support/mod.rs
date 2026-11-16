@@ -41,6 +41,11 @@ pub use routing::{error_condition, full, jid, send, wait_for, CapturingSink, ARR
 
 /// The account domain the WebSocket test state serves.
 pub const DOMAIN: &str = "example.com";
+
+/// [`DOMAIN`] is the test state's pinned account domain and lies outside
+/// `.test`, so both configurations name the public peer scope; every
+/// listener and endpoint is still a loopback address.
+pub const PUBLIC_SCOPE: &str = "peer_scope = \"public\"";
 /// Its MUC service.
 pub const MUC: &str = "muc.example.com";
 /// A room on it.
@@ -77,11 +82,13 @@ impl Wiring {
         let (local_listener, address) = listener().await;
         let (peer_listener, peer_address) = listener().await;
         let mut spec = Spec::new(DOMAIN, HOME_B);
+        spec.top.push(PUBLIC_SCOPE.to_owned());
         spec.local.push(MUC);
         spec.endpoints = vec![(HOME_B, peer_address)];
         spec.tables.extend(federating_new_rooms());
         adjust(&mut spec);
         let mut peer = Spec::new(HOME_B, DOMAIN);
+        peer.top.push(PUBLIC_SCOPE.to_owned());
         peer.allow = spec.local.clone();
         peer.private = spec.local.clone();
         peer.endpoints = spec.local.iter().map(|local| (*local, address)).collect();
@@ -100,6 +107,7 @@ impl Wiring {
     /// stream admitted before is still open.
     pub async fn without_peer(&self) -> S2sConfig {
         let mut spec = Spec::new(DOMAIN, "elsewhere.test");
+        spec.top.push(PUBLIC_SCOPE.to_owned());
         spec.local.push(MUC);
         spec.tables.extend(federating_new_rooms());
         spec.load(&self.pki).await.expect("a valid configuration")

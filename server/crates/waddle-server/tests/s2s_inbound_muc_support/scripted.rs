@@ -36,7 +36,7 @@ use crate::s2s_inbound_muc_support::routing::transport::{self, listener, Deploym
 use crate::s2s_inbound_muc_support::routing::{
     correlation_database, send, start_routed_stopping, wait_for, CapturingSink, Routed, ARRIVES,
 };
-use crate::s2s_inbound_muc_support::{DOMAIN, MUC, NS_MUC, NS_MUC_USER};
+use crate::s2s_inbound_muc_support::{DOMAIN, MUC, NS_MUC, NS_MUC_USER, PUBLIC_SCOPE};
 
 /// The second remote domain of these cases.
 pub const HOME_C: &str = "home-c.test";
@@ -710,6 +710,7 @@ impl Scripted {
         let (listener_b, address_b) = listener().await;
         let (listener_c, address_c) = listener().await;
         let mut spec = Spec::new(DOMAIN, transport::HOME_B);
+        spec.top.push(PUBLIC_SCOPE.to_owned());
         spec.local.push(MUC);
         spec.allow.push(HOME_C);
         spec.private.push(HOME_C);
@@ -726,6 +727,7 @@ impl Scripted {
         assert!(routed.router.attach_rooms(host.clone(), seats.clone()));
         let peer = |domain: &'static str| {
             let mut peer = Spec::new(domain, DOMAIN);
+            peer.top.push(PUBLIC_SCOPE.to_owned());
             peer.allow = spec.local.clone();
             peer.private = spec.local.clone();
             peer.endpoints = spec.local.iter().map(|local| (*local, address)).collect();
