@@ -577,10 +577,13 @@ schema.#Project & {
 					if ! python3 server/scripts/test_default_publish_graph.py; then
 					  overall_status=1
 					fi
-					# The explicit input lists that replaced broad globs, and the
-					# client crate lists, must still match the repository.
-					if ! python3 server/scripts/test_ci_trigger_inputs.py; then
-					  overall_status=1
+					# Only the checkAllCiDrift task (rootSync pipeline) sets this: the
+					# guard's inputs are globs that would wake the billed server
+					# pipeline if checkCiDrift declared them.
+					if [[ "${WADDLE_CI_INPUT_GUARD:-}" == 1 ]]; then
+					  if ! python3 server/scripts/test_ci_trigger_inputs.py; then
+					    overall_status=1
+					  fi
 					fi
 					exit "${overall_status}"
 				"""#]
@@ -588,7 +591,6 @@ schema.#Project & {
 				"env.cue",
 				"deployment.cue",
 				"scripts/test_default_publish_graph.py",
-				"scripts/test_ci_trigger_inputs.py",
 				schema.#ModuleFiles & {paths: [
 					".github/workflows/hestia-cache-gc.yml",
 					"ci/contributors/cuenv.cue",
@@ -635,63 +637,25 @@ schema.#Project & {
 			hermetic: false
 			command:  tasks.checkCiDrift.command
 			args:     tasks.checkCiDrift.args
+			env: WADDLE_CI_INPUT_GUARD: "1"
+			// Globs on purpose: this lane runs on a free runner, and these are the
+			// roots server/scripts/test_ci_trigger_inputs.py reads, so a new project,
+			// workflow, rules file, Android module, Apple test or crate manifest
+			// wakes it before the guard can fail a publish run.
 			inputs: list.Concat([tasks.checkCiDrift.inputs, [
 				schema.#ModuleFiles & {paths: [
-					"apps/android/env.cue",
+					"**/env.cue",
+					".github/workflows/*.yml",
+					"infrastructure/waddle.cloud/rules/mimir/*.yaml",
+					"apps/android/**/build.gradle.kts",
+					"apps/android/**/src/**",
+					"apps/apple/**",
+					"scripts/*",
+					"ci/contributors/*.cue",
 					"apps/linux/Cargo.toml",
-					"apps/linux/env.cue",
-					"chat/env.cue",
-					"colony/env.cue",
-					"design/env.cue",
-					"env.cue",
-					"infrastructure/waddle.cloud/env.cue",
-					"server/env.cue",
-					"website/env.cue",
-					".github/workflows/waddle-android-default.yml",
-					".github/workflows/waddle-android-devicetests.yml",
-					".github/workflows/waddle-android-pullrequest.yml",
-					".github/workflows/waddle-apple-default.yml",
-					".github/workflows/waddle-apple-pullrequest.yml",
-					".github/workflows/waddle-chat-default.yml",
-					".github/workflows/waddle-chat-pullrequest.yml",
-					".github/workflows/waddle-ci-cache-benchmark.yml",
-					".github/workflows/waddle-cloud-default.yml",
-					".github/workflows/waddle-cloud-pullrequest.yml",
-					".github/workflows/waddle-colony-default.yml",
-					".github/workflows/waddle-colony-pullrequest.yml",
-					".github/workflows/waddle-design-pullrequest.yml",
-					".github/workflows/waddle-integration.yml",
-					".github/workflows/waddle-linux-default.yml",
-					".github/workflows/waddle-linux-pullrequest.yml",
-					".github/workflows/waddle-server-authzidcodec.yml",
-					".github/workflows/waddle-server-default.yml",
-					".github/workflows/waddle-server-federationgrantfence.yml",
-					".github/workflows/waddle-server-federationgrantfencepullrequest.yml",
-					".github/workflows/waddle-server-namespacerustchecks.yml",
-					".github/workflows/waddle-server-parentmovenative.yml",
-					".github/workflows/waddle-server-publish-tags-to-flakehub.yml",
-					".github/workflows/waddle-server-pullrequest.yml",
-					".github/workflows/waddle-server-roomchildcontract.yml",
-					".github/workflows/waddle-server-rootsync.yml",
-					".github/workflows/waddle-server-rusttests.yml",
-					".github/workflows/waddle-server-spacefanoutcontract.yml",
-					".github/workflows/waddle-server-xmppcompliance.yml",
-					".github/workflows/waddle-server-xmppservercompliance.yml",
-					".github/workflows/waddle-website-default.yml",
-					".github/workflows/waddle-website-pullrequest.yml",
-					// Read by scripts/test_ci_trigger_inputs.py, which runs in this
-					// task's script. Listing them here (not in checkCiDrift) keeps
-					// the billed server pipeline from starting on their edits.
-					"apps/android/env.cue",
-					"apps/linux/Cargo.toml",
-					"apps/linux/env.cue",
-					"chat/env.cue",
 					"server/Cargo.toml",
-					"server/crates/waddle-xmpp-client-ffi/Cargo.toml",
-					"server/crates/waddle-xmpp-client-wasm/Cargo.toml",
-					"server/crates/waddle-xmpp-client/Cargo.toml",
-					"server/crates/waddle-xmpp-core/Cargo.toml",
-					"server/crates/waddle-client-session/Cargo.toml",
+					"server/crates/*/Cargo.toml",
+					"server/scripts/test_ci_trigger_inputs.py",
 				]},
 			]])
 		}
@@ -835,7 +799,7 @@ schema.#Project & {
 				"crates/waddle-server/src/clustering/alert_metric_contract.json",
 				"crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
 				schema.#ModuleFiles & {paths: [
-					"infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+					"infrastructure/waddle.cloud/rules/mimir/*.yaml",
 					"flake.nix",
 					"flake.lock",
 				]},

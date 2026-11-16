@@ -138,14 +138,10 @@ REPLACED_GLOBS = [
     # Read relative to the server project: server/**/env.cue.
     ("server/env.cue", lambda p: cue_task_inputs(p, "checkCiDrift"), "server/",
      ["**/env.cue"]),
-    ("server/env.cue", lambda p: cue_task_inputs(p, "checkAllCiDrift"), "",
-     ["**/env.cue", ".github/workflows/waddle-*.yml"]),
     ("server/env.cue", lambda p: cue_task_inputs(p, "checkRootSyncDrift"), "",
      ["ci/contributors/*.cue"]),
     ("server/env.cue", lambda p: cue_list(p, r"let _namespaceRustTaskInputs ="), "",
      ["ci/contributors/*.cue"]),
-    ("server/env.cue", lambda p: cue_task_inputs(p, "checkAlertRules"), "",
-     ["infrastructure/waddle.cloud/rules/mimir/*.yaml"]),
     ("server/env.cue", lambda p: cue_task_inputs(p, "checkSwitchableAlternativeProgram"), "",
      ["apps/apple/**/Tests/**"]),
     ("apps/android/env.cue", lambda p: cue_task_inputs(p, "checkCiDrift"), "",
@@ -185,6 +181,30 @@ class ExplicitInputListsTest(unittest.TestCase):
                         and entry not in FILES
                     ]
                     self.assertEqual([], stale, "listed files that are not tracked")
+
+
+class CargoConfigTest(unittest.TestCase):
+    def test_tracked_cargo_config_is_an_input(self):
+        # A ModuleFiles path that matches nothing is a hard error, so these
+        # directories cannot be listed until a config is tracked.
+        lists = {
+            "apps/android/env.cue `_ffiInputs`": cue_list("apps/android/env.cue", r"let _ffiInputs ="),
+            "chat/env.cue `_WasmSourceInputs`": cue_list("chat/env.cue", r"let _WasmSourceInputs ="),
+            "chat/env.cue `_NativeTelemetryContractInputs`": cue_list(
+                "chat/env.cue", r"let _NativeTelemetryContractInputs ="),
+        }
+        configs = [
+            (path, ".cargo/**" if path.startswith(".cargo/") else path.split("/.cargo/")[0] + "/.cargo/**")
+            for path in FILES
+            if re.match(r"(?:\.cargo|server/\.cargo|server/crates/[^/]+/\.cargo)/", path)
+        ]
+        for lane, entries in lists.items():
+            for path, wanted in sorted(set(configs)):
+                with self.subTest(lane=lane, config=path):
+                    self.assertIn(
+                        wanted, entries,
+                        f"{path} is tracked: add {wanted!r} to {lane}",
+                    )
 
 
 def crate_closure(roots):

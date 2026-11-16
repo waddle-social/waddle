@@ -7,41 +7,15 @@ on:
     branches:
     - main
     paths:
+    - '**'
     - '*.cue'
+    - .github/workflows/**
     - .github/workflows/hestia-cache-gc.yml
     - .github/workflows/hestia-cache-gc.yml/**
-    - .github/workflows/waddle-android-default.yml
-    - .github/workflows/waddle-android-default.yml/**
-    - .github/workflows/waddle-android-devicetests.yml
-    - .github/workflows/waddle-android-devicetests.yml/**
-    - .github/workflows/waddle-android-pullrequest.yml
-    - .github/workflows/waddle-android-pullrequest.yml/**
-    - .github/workflows/waddle-apple-default.yml
-    - .github/workflows/waddle-apple-default.yml/**
-    - .github/workflows/waddle-apple-pullrequest.yml
-    - .github/workflows/waddle-apple-pullrequest.yml/**
-    - .github/workflows/waddle-chat-default.yml
-    - .github/workflows/waddle-chat-default.yml/**
-    - .github/workflows/waddle-chat-pullrequest.yml
-    - .github/workflows/waddle-chat-pullrequest.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
-    - .github/workflows/waddle-cloud-default.yml
-    - .github/workflows/waddle-cloud-default.yml/**
-    - .github/workflows/waddle-cloud-pullrequest.yml
-    - .github/workflows/waddle-cloud-pullrequest.yml/**
-    - .github/workflows/waddle-colony-default.yml
-    - .github/workflows/waddle-colony-default.yml/**
-    - .github/workflows/waddle-colony-pullrequest.yml
-    - .github/workflows/waddle-colony-pullrequest.yml/**
-    - .github/workflows/waddle-design-pullrequest.yml
-    - .github/workflows/waddle-design-pullrequest.yml/**
     - .github/workflows/waddle-integration.yml
     - .github/workflows/waddle-integration.yml/**
-    - .github/workflows/waddle-linux-default.yml
-    - .github/workflows/waddle-linux-default.yml/**
-    - .github/workflows/waddle-linux-pullrequest.yml
-    - .github/workflows/waddle-linux-pullrequest.yml/**
     - .github/workflows/waddle-server-authzidcodec.yml
     - .github/workflows/waddle-server-authzidcodec.yml/**
     - .github/workflows/waddle-server-default.yml
@@ -70,43 +44,32 @@ on:
     - .github/workflows/waddle-server-xmppcompliance.yml/**
     - .github/workflows/waddle-server-xmppservercompliance.yml
     - .github/workflows/waddle-server-xmppservercompliance.yml/**
-    - .github/workflows/waddle-website-default.yml
-    - .github/workflows/waddle-website-default.yml/**
-    - .github/workflows/waddle-website-pullrequest.yml
-    - .github/workflows/waddle-website-pullrequest.yml/**
     - .gitignore
     - .gitignore/**
     - .rules.cue
     - .rules.cue/**
-    - apps/android/env.cue
-    - apps/android/env.cue/**
+    - apps/android/**
+    - apps/apple/**
     - apps/linux/Cargo.toml
     - apps/linux/Cargo.toml/**
-    - apps/linux/env.cue
-    - apps/linux/env.cue/**
-    - chat/env.cue
-    - chat/env.cue/**
     - ci/*.cue
     - ci/cache-benchmark/**
+    - ci/contributors/**
     - ci/contributors/*.cue
     - ci/contributors/cuenv.cue
     - ci/contributors/cuenv.cue/**
     - ci/contributors/nix.cue
     - ci/contributors/nix.cue/**
     - ci/rust-tests/**
-    - colony/env.cue
-    - colony/env.cue/**
     - cue.mod/**
     - cue.mod/module.cue
     - cue.mod/module.cue/**
     - cuenv.lock
     - cuenv.lock/**
-    - design/env.cue
-    - design/env.cue/**
     - env.cue
     - env.cue/**
-    - infrastructure/waddle.cloud/env.cue
-    - infrastructure/waddle.cloud/env.cue/**
+    - infrastructure/waddle.cloud/rules/mimir/**
+    - scripts/**
     - scripts/ci-cache-benchmark.py
     - scripts/ci-cache-benchmark.py/**
     - scripts/integration-ci-project.py
@@ -128,16 +91,7 @@ on:
     - server/*.cue
     - server/Cargo.toml
     - server/Cargo.toml/**
-    - server/crates/waddle-client-session/Cargo.toml
-    - server/crates/waddle-client-session/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-ffi/Cargo.toml
-    - server/crates/waddle-xmpp-client-ffi/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-wasm/Cargo.toml
-    - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
-    - server/crates/waddle-xmpp-client/Cargo.toml
-    - server/crates/waddle-xmpp-client/Cargo.toml/**
-    - server/crates/waddle-xmpp-core/Cargo.toml
-    - server/crates/waddle-xmpp-core/Cargo.toml/**
+    - server/crates/**
     - server/deployment.cue
     - server/deployment.cue/**
     - server/env.cue
@@ -146,47 +100,19 @@ on:
     - server/scripts/test_ci_trigger_inputs.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
-    - website/env.cue
-    - website/env.cue/**
   pull_request:
     branches:
     - main
     paths:
+    - '**'
     - '*.cue'
+    - .github/workflows/**
     - .github/workflows/hestia-cache-gc.yml
     - .github/workflows/hestia-cache-gc.yml/**
-    - .github/workflows/waddle-android-default.yml
-    - .github/workflows/waddle-android-default.yml/**
-    - .github/workflows/waddle-android-devicetests.yml
-    - .github/workflows/waddle-android-devicetests.yml/**
-    - .github/workflows/waddle-android-pullrequest.yml
-    - .github/workflows/waddle-android-pullrequest.yml/**
-    - .github/workflows/waddle-apple-default.yml
-    - .github/workflows/waddle-apple-default.yml/**
-    - .github/workflows/waddle-apple-pullrequest.yml
-    - .github/workflows/waddle-apple-pullrequest.yml/**
-    - .github/workflows/waddle-chat-default.yml
-    - .github/workflows/waddle-chat-default.yml/**
-    - .github/workflows/waddle-chat-pullrequest.yml
-    - .github/workflows/waddle-chat-pullrequest.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
-    - .github/workflows/waddle-cloud-default.yml
-    - .github/workflows/waddle-cloud-default.yml/**
-    - .github/workflows/waddle-cloud-pullrequest.yml
-    - .github/workflows/waddle-cloud-pullrequest.yml/**
-    - .github/workflows/waddle-colony-default.yml
-    - .github/workflows/waddle-colony-default.yml/**
-    - .github/workflows/waddle-colony-pullrequest.yml
-    - .github/workflows/waddle-colony-pullrequest.yml/**
-    - .github/workflows/waddle-design-pullrequest.yml
-    - .github/workflows/waddle-design-pullrequest.yml/**
     - .github/workflows/waddle-integration.yml
     - .github/workflows/waddle-integration.yml/**
-    - .github/workflows/waddle-linux-default.yml
-    - .github/workflows/waddle-linux-default.yml/**
-    - .github/workflows/waddle-linux-pullrequest.yml
-    - .github/workflows/waddle-linux-pullrequest.yml/**
     - .github/workflows/waddle-server-authzidcodec.yml
     - .github/workflows/waddle-server-authzidcodec.yml/**
     - .github/workflows/waddle-server-default.yml
@@ -215,43 +141,32 @@ on:
     - .github/workflows/waddle-server-xmppcompliance.yml/**
     - .github/workflows/waddle-server-xmppservercompliance.yml
     - .github/workflows/waddle-server-xmppservercompliance.yml/**
-    - .github/workflows/waddle-website-default.yml
-    - .github/workflows/waddle-website-default.yml/**
-    - .github/workflows/waddle-website-pullrequest.yml
-    - .github/workflows/waddle-website-pullrequest.yml/**
     - .gitignore
     - .gitignore/**
     - .rules.cue
     - .rules.cue/**
-    - apps/android/env.cue
-    - apps/android/env.cue/**
+    - apps/android/**
+    - apps/apple/**
     - apps/linux/Cargo.toml
     - apps/linux/Cargo.toml/**
-    - apps/linux/env.cue
-    - apps/linux/env.cue/**
-    - chat/env.cue
-    - chat/env.cue/**
     - ci/*.cue
     - ci/cache-benchmark/**
+    - ci/contributors/**
     - ci/contributors/*.cue
     - ci/contributors/cuenv.cue
     - ci/contributors/cuenv.cue/**
     - ci/contributors/nix.cue
     - ci/contributors/nix.cue/**
     - ci/rust-tests/**
-    - colony/env.cue
-    - colony/env.cue/**
     - cue.mod/**
     - cue.mod/module.cue
     - cue.mod/module.cue/**
     - cuenv.lock
     - cuenv.lock/**
-    - design/env.cue
-    - design/env.cue/**
     - env.cue
     - env.cue/**
-    - infrastructure/waddle.cloud/env.cue
-    - infrastructure/waddle.cloud/env.cue/**
+    - infrastructure/waddle.cloud/rules/mimir/**
+    - scripts/**
     - scripts/ci-cache-benchmark.py
     - scripts/ci-cache-benchmark.py/**
     - scripts/integration-ci-project.py
@@ -273,16 +188,7 @@ on:
     - server/*.cue
     - server/Cargo.toml
     - server/Cargo.toml/**
-    - server/crates/waddle-client-session/Cargo.toml
-    - server/crates/waddle-client-session/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-ffi/Cargo.toml
-    - server/crates/waddle-xmpp-client-ffi/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-wasm/Cargo.toml
-    - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
-    - server/crates/waddle-xmpp-client/Cargo.toml
-    - server/crates/waddle-xmpp-client/Cargo.toml/**
-    - server/crates/waddle-xmpp-core/Cargo.toml
-    - server/crates/waddle-xmpp-core/Cargo.toml/**
+    - server/crates/**
     - server/deployment.cue
     - server/deployment.cue/**
     - server/env.cue
@@ -291,8 +197,6 @@ on:
     - server/scripts/test_ci_trigger_inputs.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
-    - website/env.cue
-    - website/env.cue/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -380,6 +284,7 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+        WADDLE_CI_INPUT_GUARD: '1'
   checkRootSyncDrift:
     permissions:
       contents: read

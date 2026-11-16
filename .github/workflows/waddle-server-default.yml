@@ -84,6 +84,7 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server/**
     - infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml
     - infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml/**
+    - infrastructure/waddle.cloud/rules/mimir/**
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
     - namespace.cue
@@ -187,8 +188,6 @@ on:
     - server/scripts/test_check_required_tests.py/**
     - server/scripts/test_check_test_postgres_env.py
     - server/scripts/test_check_test_postgres_env.py/**
-    - server/scripts/test_ci_trigger_inputs.py
-    - server/scripts/test_ci_trigger_inputs.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
     - server/scripts/test_nextest_archive_transfer.py

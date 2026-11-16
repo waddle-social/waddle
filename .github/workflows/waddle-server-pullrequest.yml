@@ -74,6 +74,7 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
+    - infrastructure/waddle.cloud/rules/mimir/**
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
     - scripts/ci-cache-benchmark.py
@@ -128,8 +129,6 @@ on:
     - server/scripts/observer_release.py/**
     - server/scripts/test_chart_shutdown_budget.py
     - server/scripts/test_chart_shutdown_budget.py/**
-    - server/scripts/test_ci_trigger_inputs.py
-    - server/scripts/test_ci_trigger_inputs.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
     - server/scripts/test_observer_release.py
