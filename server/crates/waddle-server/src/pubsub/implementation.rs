@@ -406,6 +406,37 @@ impl PubSubStorage for DatabasePubSubStorage {
         Ok(out)
     }
 
+    async fn subscription_deliverable(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subid: &SubId,
+    ) -> Result<bool, XmppError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT 1
+                FROM pubsub_subscriptions s
+                LEFT JOIN pubsub_affiliations a
+                  ON a.owner_jid = s.owner_jid
+                 AND a.node_name = s.node_name
+                 AND a.entity_jid = s.subscriber_jid
+                WHERE s.owner_jid = ?
+                  AND s.node_name = ?
+                  AND s.subid = ?
+                  AND s.state = 'subscribed'
+                  AND (a.affiliation IS NULL OR a.affiliation <> 'outcast')
+                "#,
+                crate::db_params![owner.to_string(), node_name, subid.as_str().to_string()],
+            )
+            .await?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+            .is_some())
+    }
+
     async fn set_affiliation(
         &self,
         owner: &BareJid,

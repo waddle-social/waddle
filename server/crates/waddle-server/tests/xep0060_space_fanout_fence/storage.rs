@@ -1,11 +1,14 @@
-//! Delegates every storage result to real PostgreSQL; only delays one completed query.
-use crate::pubsub::DatabasePubSubStorage;
+//! A PubSub storage that delegates every call to real PostgreSQL and delays
+//! the return of one completed subscriber listing, so that a case can commit
+//! changes between a fan-out's capture of its subscribers and its hand-over
+//! of the event.
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use waddle_server::pubsub::DatabasePubSubStorage;
 use waddle_xmpp::pubsub::{
     Affiliation, NodeConfig, PubSubItem, PubSubNode, PubSubStorage, PublicationError,
     PublicationNode, PublicationVersion, PublishResult, StoredItem, SubId, Subscription,
@@ -225,6 +228,16 @@ impl PubSubStorage for CapturingStorage {
                 .expect("controller must release captured PostgreSQL query");
         }
         Ok(rows)
+    }
+    async fn subscription_deliverable(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subid: &SubId,
+    ) -> Result<bool, XmppError> {
+        self.inner
+            .subscription_deliverable(owner, node_name, subid)
+            .await
     }
     async fn set_affiliation(
         &self,

@@ -102,7 +102,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     // then the event is dropped. The Spaces and extensions services are
     // recognised by the owner alone: a request addressed to a service
     // counts as a PEP request for `is_pep`.
-    if owner.as_str() == state.deps.service_domains.spaces {
+    let space_node = owner.as_str() == state.deps.service_domains.spaces;
+    if space_node {
         let host_grants = &state.deps.app_state.host_grants;
         let enrolled = match host_grants.space_enrolled(node).await {
             Err(_) => host_grants.space_enrolled(node).await,
@@ -292,6 +293,31 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 all
             }
         };
+
+        // A Space node's event goes to whoever may receive it when it is
+        // handed over, not to whoever could when the subscribers were
+        // listed: the list was captured before the event was built and the
+        // resources were enumerated, and a subscription removed or an
+        // entity banned since then receives nothing. The subscription is
+        // read again here, immediately before the first hand-over, and a
+        // read that fails withholds the event from that subscriber.
+        if space_node {
+            match storage
+                .subscription_deliverable(owner, node, &sub.subid)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    warn!(
+                        node_kind = "space",
+                        error = %error,
+                        "Fan-out withheld an event: a captured subscription could not be read again"
+                    );
+                    continue;
+                }
+            }
+        }
 
         if target_resources.is_empty() {
             // Bare-JID subscriber fully offline (no live, no resumable),

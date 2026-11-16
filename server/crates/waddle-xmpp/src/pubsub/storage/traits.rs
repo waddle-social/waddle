@@ -230,6 +230,29 @@ pub trait PubSubStorage: Send + Sync + 'static {
         node_name: &str,
     ) -> Result<Vec<Subscription>, XmppError>;
 
+    /// Whether the subscription `subid` is one a publication is delivered
+    /// to now: it exists, its state is `Subscribed` and its entity is not
+    /// `Outcast`, by the rule of [`Self::list_deliverable_subscribers`].
+    ///
+    /// Fan-out asks it for a subscription it captured earlier, immediately
+    /// before it hands that subscriber an event, so that a subscription
+    /// removed or an entity banned since the capture receives nothing.
+    ///
+    /// The default lists the node's deliverable subscribers again; a store
+    /// that can read one subscription implements this itself.
+    async fn subscription_deliverable(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subid: &SubId,
+    ) -> Result<bool, XmppError> {
+        Ok(self
+            .list_deliverable_subscribers(owner, node_name)
+            .await?
+            .iter()
+            .any(|subscription| &subscription.subid == subid))
+    }
+
     /// Set or remove an affiliation. Setting `Affiliation::None` deletes
     /// the row. Returns the previous affiliation (`Affiliation::None` if
     /// no row existed).
