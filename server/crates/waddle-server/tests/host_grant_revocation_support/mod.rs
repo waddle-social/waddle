@@ -3,7 +3,8 @@
 //!
 //! Each replica is a WebSocket state on the fixture's PostgreSQL database,
 //! wired as a PostgreSQL deployment is (`websocket_state_with_host_grant_fence`)
-//! and served over its own loopback socket. A replica has its own room
+//! and served over its own loopback socket. A replica can also be started
+//! in another process, from the database's URL and the deployment's lineage. A replica has its own room
 //! registry and room actors, its own enrolled set and its own part of the
 //! revocation fence: a lease, the generations it installed and the sweep of
 //! the rooms it hosts. The replicas share only the database, which is what
@@ -18,14 +19,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jid::BareJid;
-use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
-use waddle_server::permissions::host_grant::{HostGrantAttachment, ReplicaFence};
-use waddle_server::test_support::websocket_state_with_host_grant_fence;
+use uuid::Uuid;
+use waddle_server::auth::{NativeUserStore, RegisterRequest};
+use waddle_server::config::LineageConfig;
+use waddle_server::db::actor::DbExecute;
+use waddle_server::db::lineage::DeploymentUuid;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool, PoolConfig};
+use waddle_server::ingress::IngressAuthority;
+use waddle_server::permissions::host_grant::{HostGrantAttachment, HostGrantStore, ReplicaFence};
+use waddle_server::test_support::{
+    router, seed_local_account, websocket_state_with_host_grant_fence, WebSocketState,
+};
 use waddle_ws_test_support::WsXmppClient;
 use xmpp_parsers::minidom::Element;
 
 use crate::host_grant_support::{served, GrantFixture};
-use crate::ws_loopback_support::Loopback;
 
 pub const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
@@ -33,14 +41,158 @@ pub const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub const NS_MAM: &str = "urn:xmpp:mam:2";
 pub const NS_PING: &str = "urn:xmpp:ping";
 
+/// The test state pins its account domain.
+pub const DOMAIN: &str = "example.com";
+const PASSWORD: &str = "revocation-account-password";
+
 /// How long a case waits for something the revocation sweep sends: the
 /// sweep starts within a tick of the fence and retries every second.
 pub const SWEEP_BUDGET: Duration = Duration::from_secs(8);
 
+/// One replica of a deployment: a WebSocket state on the deployment's
+/// database, served over a loopback socket.
+pub struct Replica {
+    pub state: Arc<WebSocketState>,
+    /// The replica's `/ws` endpoint.
+    pub url: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Replica {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl Replica {
+    /// Start a replica on the migrated database at `database_url`, whose
+    /// lineage is `deployment`'s. Room-manifest acceptance and every other
+    /// surface decide with one attachment, as on a server.
+    pub async fn start(database_url: &str, deployment: Uuid) -> Self {
+        let config = DatabaseConfig::new(DatabaseDriver::Postgres, database_url);
+        let database = Database::from_config("revocation-replica", &config)
+            .await
+            .expect("replica database");
+        let store = HostGrantStore::open(database.clone()).expect("replica store");
+        let authority = Arc::new(
+            IngressAuthority::try_new(
+                Default::default(),
+                database,
+                LineageConfig {
+                    deployment_uuid: Some(DeploymentUuid(deployment)),
+                    action: None,
+                },
+                #[cfg(feature = "clustering")]
+                None,
+            )
+            .await
+            .expect("replica ingress authority"),
+        );
+        assert!(authority.attach_host_grants(
+            HostGrantAttachment::unfenced_for_test(&store, served())
+                .await
+                .expect("attachment")
+        ));
+        let pool = Arc::new(
+            DatabasePool::try_new(config, PoolConfig)
+                .await
+                .expect("replica database pool"),
+        );
+        let state = websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await;
+        assert!(state
+            .deps
+            .app_state
+            .host_grants
+            .bind_attachment(authority.host_grant_gate()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let app = router(Arc::clone(&state));
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            state,
+            url: format!("ws://{address}/ws"),
+            server,
+        }
+    }
+
+    /// Create the native account `localpart@example.com`. Accounts live in
+    /// the database, so every replica of the deployment serves them.
+    pub async fn account(&self, localpart: &str) {
+        seed_local_account(&self.state, localpart).await;
+        NativeUserStore::new(self.state.deps.app_state.db_pool.global_actor().clone())
+            .register(RegisterRequest {
+                username: localpart.to_owned(),
+                domain: DOMAIN.to_owned(),
+                password: PASSWORD.to_owned(),
+                email: None,
+            })
+            .await
+            .expect("register native account");
+    }
+
+    /// Insert the channel catalog row of a room, as the admin commands and
+    /// the topology bootstrap write it.
+    pub async fn channel(&self, id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "INSERT INTO channels (id, name, description, channel_type, position, \
+                      is_default, pin_permission, members_only, public_room, created_at, \
+                      updated_at) VALUES (?, ?, ?, 'text', 0, ?, 'anyone', ?, ?, ?, ?)"
+                    .to_owned(),
+                params: vec![
+                    id.into(),
+                    id.into(),
+                    None::<String>.into(),
+                    false.into(),
+                    false.into(),
+                    true.into(),
+                    now.clone().into(),
+                    now.into(),
+                ],
+            })
+            .await
+            .expect("channel catalog row");
+    }
+
+    /// An authenticated client of `localpart` on this replica, with
+    /// `resource` bound.
+    pub async fn client(&self, localpart: &str, resource: &str) -> WsXmppClient {
+        connect(&self.url, localpart, resource).await
+    }
+
+    /// The replica's part of the revocation fence.
+    pub fn fence(&self) -> ReplicaFence {
+        self.state
+            .deps
+            .app_state
+            .host_grants
+            .fence()
+            .expect("a PostgreSQL replica has a fence")
+            .clone()
+    }
+}
+
+/// An authenticated client of `localpart` on the replica at `url`, with
+/// `resource` bound.
+pub async fn connect(url: &str, localpart: &str, resource: &str) -> WsXmppClient {
+    WsXmppClient::connect_and_auth(url, DOMAIN, localpart, PASSWORD, resource)
+        .await
+        .expect("authenticated client")
+}
+
 /// The fixture's scope served by `replicas.len()` replicas.
 pub struct Deployment {
     pub grants: GrantFixture,
-    pub replicas: Vec<Loopback>,
+    pub replicas: Vec<Replica>,
 }
 
 impl Deployment {
@@ -50,57 +202,26 @@ impl Deployment {
         let grants = GrantFixture::active(label).await?;
         let mut replicas = Vec::new();
         for index in 0..count {
-            let pool = Arc::new(
-                DatabasePool::try_new(
-                    DatabaseConfig::new(
-                        grants.ingress.db.driver(),
-                        grants.ingress.db.database_url(),
-                    ),
-                    PoolConfig,
-                )
-                .await
-                .expect("replica database pool"),
-            );
-            // Room-manifest acceptance and every other surface decide with
-            // one attachment, as on a server.
-            let authority = Arc::new(grants.ingress.authority().await);
-            assert!(authority.attach_host_grants(
-                HostGrantAttachment::unfenced_for_test(&grants.store, served())
-                    .await
-                    .expect("attachment")
-            ));
-            let state = websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await;
-            assert!(state
-                .deps
-                .app_state
-                .host_grants
-                .bind_attachment(authority.host_grant_gate()));
-            let server = Loopback::serve(state).await;
+            let replica = Replica::start(
+                grants.ingress.db.database_url(),
+                grants.ingress.deployment_uuid(),
+            )
+            .await;
             if index == 0 {
                 for account in ["owner", "romeo", "alice", "carol"] {
-                    server.account(account).await;
+                    replica.account(account).await;
                 }
-                server.channel(&grants.scope.channel_id, false).await;
+                // The catalog row says the room is open; the room's binding
+                // makes it members-only whatever the row says.
+                replica.channel(&grants.scope.channel_id).await;
             }
-            replicas.push(server);
+            replicas.push(replica);
         }
         Some(Self { grants, replicas })
     }
 
     pub fn room(&self) -> &BareJid {
         &self.grants.scope.room
-    }
-
-    /// The revocation fence of replica `index`.
-    pub fn fence(&self, index: usize) -> ReplicaFence {
-        self.replicas[index]
-            .state
-            .deps
-            .app_state
-            .host_grants
-            .fence()
-            .expect("a PostgreSQL replica has a fence")
-            .clone()
     }
 
     pub async fn close(self) {

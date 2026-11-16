@@ -23,7 +23,6 @@ mod host_grant_revocation_support;
 mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
-mod ws_loopback_support;
 
 use std::time::Duration;
 
@@ -101,7 +100,7 @@ async fn a_self_ping_takes_no_decision_while_the_grants_cannot_be_read() {
     // The replica stops renewing its revocation-fence lease, as one that
     // lost its database would: once the lease has run out it decides
     // nothing for the room.
-    let fence = deployment.fence(0);
+    let fence = deployment.replicas[0].fence();
     fence.suspend_for_test(true);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while fence.leased() {

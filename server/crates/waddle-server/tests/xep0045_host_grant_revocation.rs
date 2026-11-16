@@ -30,24 +30,23 @@ mod host_grant_revocation_support;
 mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
-mod ws_loopback_support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use host_grant_revocation_support::{
-    admin_item, error_condition, groupchat, join, mam_query, presence_from, receives_groupchat,
-    role_item, room_presence, Deployment, SWEEP_BUDGET,
+    admin_item, connect, error_condition, groupchat, join, mam_query, presence_from,
+    receives_groupchat, role_item, room_presence, Deployment, Replica, NS_PING, SWEEP_BUDGET,
 };
 use host_grant_support::{bare, subject, OWNER, PEER, SENDER};
 use jid::FullJid;
 use kameo::error::SendError;
 use waddle_server::permissions::host_grant::{
     FenceAcknowledgement, GrantOperationId, HostGrantAction, ManagedRoomGrants, OperatorRevoke,
-    RetireScope, RoomAffiliation, RoomBinding, RoomGate,
+    RetireScope, RoomAffiliation, RoomBinding, RoomGate, FENCE_LEASE_TTL,
 };
 use waddle_server::test_support::{sweep_host_grant_room, WebSocketState};
 use waddle_ws_test_support::iq::round_trip;
-use waddle_ws_test_support::stanza::{is_error, is_result, set};
+use waddle_ws_test_support::stanza::{get, is_error, is_result, set};
 use waddle_xmpp::muc::admin::AdminItem;
 use waddle_xmpp::muc::durable::AdminMutationId;
 use waddle_xmpp::muc::room_actor::{
@@ -58,6 +57,7 @@ use waddle_xmpp::muc::room_registry_actor::GetRoom;
 use waddle_xmpp::muc::RoomActorError;
 use waddle_xmpp::{Affiliation, Role};
 use waddle_xmpp_core::OccupancySessionGeneration;
+use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
 /// How long a case waits to see that nothing arrives.
@@ -623,5 +623,225 @@ async fn the_sweep_changes_nothing_while_the_grants_cannot_be_read() {
     assert!(sweep_host_grant_room(&server.state, &room).await);
     assert!(seated(&server.state, &room, PEER).await);
     drop(alice);
+    deployment.close().await;
+}
+
+/// The database a second replica process serves, the deployment it is
+/// enrolled for, and the file the process writes its endpoint to.
+const REPLICA_DATABASE: &str = "WADDLE_REVOCATION_REPLICA_DATABASE";
+const REPLICA_DEPLOYMENT: &str = "WADDLE_REVOCATION_REPLICA_DEPLOYMENT";
+const REPLICA_ENDPOINT_FILE: &str = "WADDLE_REVOCATION_REPLICA_ENDPOINT_FILE";
+
+/// The body of a second replica process: a replica of the deployment on the
+/// given database, served until the process is killed. Run by the suite
+/// itself it does nothing.
+#[tokio::test]
+async fn second_replica_process_entry() {
+    let Ok(database) = std::env::var(REPLICA_DATABASE) else {
+        return;
+    };
+    let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is set"));
+    let deployment = variable(REPLICA_DEPLOYMENT)
+        .parse()
+        .expect("deployment UUID");
+    let endpoint_file = std::path::PathBuf::from(variable(REPLICA_ENDPOINT_FILE));
+    let replica = Replica::start(&database, deployment).await;
+    // The endpoint appears in one step, once the replica serves.
+    let staged = endpoint_file.with_extension("staged");
+    std::fs::write(&staged, &replica.url).expect("write the endpoint");
+    std::fs::rename(&staged, &endpoint_file).expect("publish the endpoint");
+    tokio::time::sleep(Duration::from_secs(600)).await;
+}
+
+/// A second replica of a deployment, as a separate operating-system process
+/// of this test binary.
+struct ReplicaProcess {
+    process: tokio::process::Child,
+    url: String,
+    _directory: tempfile::TempDir,
+}
+
+impl ReplicaProcess {
+    async fn start(deployment: &Deployment) -> Self {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let endpoint_file = directory.path().join("endpoint");
+        let process =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "second_replica_process_entry", "--nocapture"])
+                .env(
+                    REPLICA_DATABASE,
+                    deployment.grants.ingress.db.database_url(),
+                )
+                .env(
+                    REPLICA_DEPLOYMENT,
+                    deployment.grants.ingress.deployment_uuid().to_string(),
+                )
+                .env(REPLICA_ENDPOINT_FILE, &endpoint_file)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start the replica process");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let url = loop {
+            if let Ok(url) = std::fs::read_to_string(&endpoint_file) {
+                break url;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the replica process did not start serving"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        Self {
+            process,
+            url,
+            _directory: directory,
+        }
+    }
+
+    /// Stop or continue the process without ending it: a stopped process
+    /// renews no lease, installs nothing and answers nothing, and knows
+    /// nothing of the time that passes.
+    fn signal(&self, signal: libc::c_int) {
+        let pid = self.process.id().expect("a running replica process") as libc::pid_t;
+        // SAFETY: the pid names a live child this value owns and has not
+        // reaped, so the signal cannot reach a recycled pid.
+        let result = unsafe { libc::kill(pid, signal) };
+        assert_eq!(result, 0, "signalling the replica process failed");
+    }
+}
+
+/// A ping of an occupant's own nick (XEP-0410).
+fn self_ping(id: &str, room: &jid::BareJid, nick: &str) -> xmpp_parsers::iq::Iq {
+    get(
+        id,
+        &format!("{room}/{nick}"),
+        Element::builder("ping", NS_PING).build(),
+    )
+}
+
+#[tokio::test]
+async fn two_processes_a_stopped_replica_is_waited_for_and_admits_nothing_when_it_continues() {
+    let Some(deployment) = Deployment::start("hg_revoke_processes", 1).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let first = &deployment.replicas[0];
+    let second = ReplicaProcess::start(&deployment).await;
+    let lifecycle = deployment.grants.scope.lifecycle;
+
+    // The owner is on this process's replica; two members sit in the room
+    // actor of the other process.
+    let mut owner = first.client("owner", "desk").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    let mut alice = connect(&second.url, "alice", "phone").await;
+    let mut romeo = connect(&second.url, "romeo", "phone").await;
+    for (client, nick) in [(&mut alice, "alice"), (&mut romeo, "romeo")] {
+        let joined = join(client, &room, nick).await;
+        assert_eq!(error_condition(&joined), None, "{nick} joins: {joined:?}");
+    }
+    let reply = round_trip(&mut alice, self_ping("joined", &room, "alice")).await;
+    assert!(is_result(&reply), "a seated member's self-ping: {reply:?}");
+
+    // While both processes run, a revoke is acknowledged by both within a
+    // tick of the other's fence, and the other process removes the seat it
+    // hosts.
+    let started = Instant::now();
+    let reply = round_trip(
+        &mut owner,
+        set("revoke-romeo", room.as_str(), admin_item("none", SENDER)),
+    )
+    .await;
+    assert!(is_result(&reply), "the owner's revoke: {reply:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        deployment
+            .grants
+            .store
+            .revocation_fence(lifecycle, deployment.grants.generation().await)
+            .await
+            .expect("fence reading"),
+        FenceAcknowledgement::Acknowledged { replicas: 2 }
+    );
+    let removed = presence_from(&mut romeo, &room, "romeo", SWEEP_BUDGET)
+        .await
+        .expect("the revoked member's removal in the other process");
+    assert!(room_presence(&removed).statuses.contains(&"321".to_owned()));
+
+    // The other process stops: it holds a lease, cannot renew it and
+    // installs nothing. The owner's next revoke is recorded at once and its
+    // reply waits until that lease has run out, when the stopped process
+    // can no longer be deciding anything.
+    second.signal(libc::SIGSTOP);
+    let started = Instant::now();
+    let reply = round_trip(
+        &mut owner,
+        set("revoke-alice", room.as_str(), admin_item("none", PEER)),
+    )
+    .await;
+    assert!(is_result(&reply), "the owner's revoke: {reply:?}");
+    let waited = started.elapsed();
+    assert!(
+        waited >= FENCE_LEASE_TTL - Duration::from_millis(800),
+        "the revoke was acknowledged after {waited:?}, before the stopped replica's lease ran out"
+    );
+    assert_eq!(
+        deployment
+            .grants
+            .store
+            .revocation_fence(lifecycle, deployment.grants.generation().await)
+            .await
+            .expect("fence reading"),
+        FenceAcknowledgement::Acknowledged { replicas: 1 }
+    );
+
+    // It continues with everything it held when it stopped: the member's
+    // seat, and a lease that ran out while it was not looking. It decides
+    // nothing under that lease. From the first answer on the revoked member
+    // is never told it is joined, and it is removed once the process has
+    // registered again and swept its rooms.
+    second.signal(libc::SIGCONT);
+    let reply = round_trip(&mut alice, self_ping("continued", &room, "alice")).await;
+    assert!(
+        is_error(&reply, DefinedCondition::RemoteServerTimeout)
+            || is_error(&reply, DefinedCondition::NotAcceptable),
+        "the revoked member's self-ping when the process continues: {reply:?}"
+    );
+    let removed = presence_from(&mut alice, &room, "alice", SWEEP_BUDGET)
+        .await
+        .expect("the revoked member's removal once the process has registered again");
+    let removed = room_presence(&removed);
+    assert!(removed.unavailable);
+    assert!(
+        removed.statuses.contains(&"321".to_owned()),
+        "{:?}",
+        removed.statuses
+    );
+    let reply = round_trip(&mut alice, self_ping("removed", &room, "alice")).await;
+    assert!(
+        is_error(&reply, DefinedCondition::NotAcceptable),
+        "the revoked member's self-ping after its removal: {reply:?}"
+    );
+    let rejoin = join(&mut alice, &room, "alice").await;
+    assert_eq!(
+        error_condition(&rejoin).as_deref(),
+        Some("registration-required")
+    );
+    // The process serves again under a new registration.
+    let generation = deployment.grants.generation().await;
+    let reading = deployment
+        .grants
+        .store
+        .await_revocation_fence(lifecycle, generation, Duration::from_secs(10))
+        .await
+        .expect("fence reading");
+    assert_eq!(reading, FenceAcknowledgement::Acknowledged { replicas: 2 });
+    drop((owner, alice, romeo, second));
     deployment.close().await;
 }
