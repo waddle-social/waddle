@@ -84,12 +84,13 @@ impl RoomReplies {
     }
 }
 
-/// How long a host's [`LocalRooms::place`] waits for the replica that holds
-/// a room before it answers [`RoomPlacement::Silent`]. It is below the
-/// router's own bound on placing one request
-/// ([`super::RouterLimits::room_placement_timeout`], 5 s by default), so a
-/// holder that does not answer is reported by the host and not only by the
-/// router's timer.
+/// How long a host's [`LocalRooms::place`] takes at most for one request,
+/// its lookups and its asks of the replica that holds the room together,
+/// before it answers. It is below the router's own bound on placing one
+/// request ([`super::RouterLimits::room_placement_timeout`], 5 s by
+/// default), so a holder that does not answer is reported by the host and
+/// not only by the router's timer, and a slow lookup is not taken for a
+/// silent holder.
 pub const HOLDER_ASK_LIMIT: Duration = Duration::from_millis(4_500);
 
 /// Where a request for a room is decided.
@@ -192,8 +193,12 @@ pub trait LocalRooms: Send + Sync {
     /// does not hold. A host of a single replica decides everything here.
     /// Asked only of a host that [`Self::carries`], within a bound of the
     /// router's own: an answer that comes later is not waited for. A host
-    /// that waits for another replica answers [`RoomPlacement::Silent`]
-    /// once [`HOLDER_ASK_LIMIT`] has passed without an answer.
+    /// answers within [`HOLDER_ASK_LIMIT`] in all, every lookup of where
+    /// the room is held and every ask of its holder included: with
+    /// [`RoomPlacement::Silent`] when that time ran out while it waited
+    /// for the holder, or the holder could not be reached, and with
+    /// [`RoomPlacement::Refused`] when it ran out while it looked the room
+    /// up, which says nothing of the holder.
     async fn place(&self, _principal: &RemotePrincipal, _stanza: &Stanza) -> RoomPlacement {
         RoomPlacement::Here
     }

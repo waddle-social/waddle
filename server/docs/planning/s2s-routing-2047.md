@@ -1356,11 +1356,15 @@ every other domain alone. Waiting for one of those places and asking the
 holder are bounded apart, each at 5 s. A request that finds no place in
 time is answered with `resource-constraint` (type `wait`) alone: the wait
 says nothing of its room's holder. The ask does. The relay's own bound on
-it is 4.5 s (1 s for the holder to take the request, 3 s for its answer
-and half a second for the lookup), below the router's, so a holder that
-does not answer, or cannot be reached, is reported as such by the
-replica that asked (`RoomPlacement::Silent`), and the router's 5 s is a
-backstop. Either way the request is answered with `resource-constraint`
+placing one request is 4.5 s in all (1 s for the holder to take the
+request, 3 s for its answer and half a second for the lookups), covering
+the lookups of the room's claim and catalog row and both asks when the
+claim moved between them, below the router's 5 s. A holder that does not
+answer within it, or cannot be reached, is reported as such by the
+replica that asked (`RoomPlacement::Silent`); time that runs out during a
+lookup, or before an ask could begin, is answered with
+`resource-constraint` and says nothing of the holder. The router's 5 s is
+a backstop. Either way the request is answered with `resource-constraint`
 (type `wait`), and so is everything that waits for the same room then;
 for the next 5 s requests for that room are answered the same way
 without asking again, so a silent holder costs each of its rooms one wait
@@ -1534,7 +1538,7 @@ reached.
 | Refusals of an account's stanzas beyond its share, and of requests for a full room, that are answered, for one remote domain | 5 a second, 20 |
 | Refusals of one remote account's joins beyond its share of presence that are answered (beyond it they are dropped) | 0.1 a second, 6 |
 | Rooms being placed at once on one replica, and for the requests of one remote domain | 64, 8 |
-| How long a request may wait for a place among the rooms being placed, how long asking the holder may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s (4.5 s for the relay's own ask), 5 s |
+| How long a request may wait for a place among the rooms being placed, how long asking the holder may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s (4.5 s for the relay's lookups and asks together), 5 s |
 | Requests waiting for the room host on one replica (four workers of 256) | 1,024 |
 | Requests waiting for one room, never above half of a domain's share (a stanza beyond it is answered as its kind is, and holds no stream; a leave and a delivery error are not counted) | 32 |
 | Requests waiting from one remote domain, of one worker's 256 | 64 |
