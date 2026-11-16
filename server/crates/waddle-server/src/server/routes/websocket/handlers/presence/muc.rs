@@ -2562,6 +2562,8 @@ use implementation::run_resolver_affiliation_sync_worker;
 #[cfg(test)]
 use implementation::sync_resolver_affiliation_on_rejection_with_registry;
 pub(crate) use implementation::try_deliver_registered_remote_resource;
+#[cfg(feature = "test-support")]
+pub(crate) use implementation::undone_join_recipients;
 #[cfg(test)]
 use implementation::JoinAdmissionDenial;
 #[cfg(test)]

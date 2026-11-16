@@ -358,6 +358,35 @@ pub async fn relayed_remote_room_request(
     crate::server::routes::websocket::relayed_remote_room_request(state, message).await
 }
 
+/// Whether a failed ask of a room's owner over the cluster relay says that
+/// the owner did not answer or could not be reached, so that the router
+/// answers the room's requests without asking it for a while, rather than
+/// that it answered without taking the request.
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub fn room_owner_silent(error: &crate::clustering::relay::RelayAskError) -> bool {
+    crate::server::routes::websocket::owner_silent(error)
+}
+
+/// The occupants told that a remote joiner left when its seat, given on a
+/// standing its stream does not honour, was undone: of those the room
+/// seats now (`seated`), every one but the joiner, those the room answered
+/// the joiner with (`present`) and those that hold the joiner's nickname
+/// now (`nick_holders`).
+#[cfg(feature = "test-support")]
+pub fn undone_join_recipients(
+    seated: Vec<jid::FullJid>,
+    present: &std::collections::HashSet<jid::FullJid>,
+    joiner: &jid::FullJid,
+    nick_holders: &[jid::FullJid],
+) -> Vec<jid::FullJid> {
+    crate::server::routes::websocket::handlers::presence::undone_join_recipients(
+        seated,
+        present,
+        joiner,
+        nick_holders,
+    )
+}
+
 /// Make the account `localpart` of the state's domain an owner of the
 /// deployment in the legacy permission store: the standing that lets an
 /// account create a room no channel backs.

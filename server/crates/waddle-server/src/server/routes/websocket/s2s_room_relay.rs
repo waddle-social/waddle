@@ -129,7 +129,7 @@ async fn catalogued(state: &WebSocketState, room: &BareJid) -> Catalogued {
 
 /// Whether a failed ask says that the owner did not answer or could not be
 /// reached, rather than that it answered without taking the request.
-fn owner_silent(error: &RelayAskError) -> bool {
+pub(crate) fn owner_silent(error: &RelayAskError) -> bool {
     match error {
         // The owner's relay is not in the swarm.
         RelayAskError::NotFound { .. } => true,

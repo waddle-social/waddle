@@ -904,6 +904,16 @@ impl S2sRouter {
         self.inner.drained.clone()
     }
 
+    /// The first step of [`Self::shutdown`] alone: tell the remote
+    /// occupants this replica seats that it is stopping and give their
+    /// seats up, waiting for those notices at most the notice wait, while
+    /// every worker and stream goes on. For suites that look at what a
+    /// stopping replica decides while its streams still carry it.
+    #[cfg(feature = "test-support")]
+    pub async fn farewell(&self) {
+        self.inner.farewell().await;
+    }
+
     /// Tell the remote occupants this replica seats that it is stopping,
     /// stop taking stanzas, end every worker and wait for them, at most
     /// `budget`. Stanzas still queued are answered as if their stream could

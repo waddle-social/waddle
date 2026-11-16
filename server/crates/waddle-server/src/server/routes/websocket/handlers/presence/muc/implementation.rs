@@ -403,6 +403,25 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn run_r
     }
 }
 
+/// Of the occupants a room seats now (`seated`), those told that a remote
+/// joiner left when its unannounced seat was undone: every one but the
+/// joiner itself, those the room answered the joiner with (`present`), and
+/// those that now hold the joiner's nickname (`nick_holders`), whose own
+/// occupant JID the presence would name.
+pub(crate) fn undone_join_recipients(
+    seated: Vec<FullJid>,
+    present: &HashSet<FullJid>,
+    joiner: &FullJid,
+    nick_holders: &[FullJid],
+) -> Vec<FullJid> {
+    seated
+        .into_iter()
+        .filter(|occupant| {
+            occupant != joiner && !present.contains(occupant) && !nick_holders.contains(occupant)
+        })
+        .collect()
+}
+
 /// How long the room is read for its occupants after a remote joiner's
 /// seat was undone.
 const UNDONE_JOIN_READ: std::time::Duration = std::time::Duration::from_secs(2);
@@ -493,15 +512,19 @@ impl UndoneJoin {
         let Ok(from) = self.room_jid.with_resource_str(&self.nick) else {
             return;
         };
-        let holders = snapshot.room.occupant_sessions(&self.nick);
+        let recipients = undone_join_recipients(
+            snapshot
+                .room
+                .seated_session_generations()
+                .into_iter()
+                .map(|(occupant, _)| occupant)
+                .collect(),
+            &self.present,
+            &self.joiner,
+            &snapshot.room.occupant_sessions(&self.nick),
+        );
         let joiner_bare = self.joiner.to_bare();
-        for (occupant, _) in snapshot.room.seated_session_generations() {
-            if occupant == self.joiner
-                || self.present.contains(&occupant)
-                || holders.contains(&occupant)
-            {
-                continue;
-            }
+        for occupant in recipients {
             let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
                 bare_jid: &joiner_bare,
                 real_jid: Some(&self.joiner),

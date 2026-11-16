@@ -45,6 +45,8 @@ mod subscription;
 
 pub use muc::parse_room_jid_context;
 pub(crate) use muc::registered_remote_resource_write_accepted_delivery;
+#[cfg(feature = "test-support")]
+pub(crate) use muc::undone_join_recipients;
 pub(crate) use muc::RegisteredRemoteDelivery;
 pub(crate) use muc::{deliver_room_presence_locally, route_room_presence_to_occupant};
 pub use muc::{

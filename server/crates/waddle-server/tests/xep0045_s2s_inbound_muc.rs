@@ -5,8 +5,12 @@
 //! occupants, sends to the room and receives its messages, and leaves
 //! (§7.2, §7.4, §7.14). Its seat records what its stream proved, is bounded
 //! per room, and ends with status 333 when its stream is lost, when its
-//! server answers the room with a delivery error (§17.1.2) and when the
-//! room's traffic for it cannot be queued (§11.1). A remote principal
+//! server answers the room with a delivery error (§17.1.2) or with
+//! `service-unavailable` for a `groupchat` message (RFC 6121 §8.5.3.2.1),
+//! and when the room's traffic for it cannot be queued (§11.1). A join
+//! undone because its stream does not honour its standing is announced
+//! only to the occupants that entered while it was seated, and not to one
+//! that now holds its nickname. A remote principal
 //! creates no room, holds an owner or admin standing only for a trusted
 //! home on a `pkix` stream, and reaches nothing outside the reviewed
 //! operations: private messages and room administration are refused, and
@@ -1130,6 +1134,52 @@ async fn a_delivery_error_from_the_occupants_server_removes_it_with_status_333()
     hosted.from_peer(bounce).await;
     removed_with_333(&mut alice).await;
     assert!(hosted.unseated(ROOM, BOB).await);
+}
+
+#[tokio::test]
+async fn a_groupchat_bounce_for_an_absent_resource_removes_the_occupant_with_status_333() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // RFC 6121 §8.5.3.2.1: the occupant's server answers a `groupchat`
+    // message for a full JID with no such resource with
+    // `service-unavailable`; the occupant is gone.
+    let mut bounce = Message::new_with_type(MessageType::Error, Some(jid(ROOM)));
+    bounce.from = Some(jid(BOB));
+    bounce.payloads.push(Element::from(StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ServiceUnavailable,
+        "en",
+        "No such resource.",
+    )));
+    hosted.from_peer(bounce).await;
+    removed_with_333(&mut alice).await;
+    assert!(hosted.unseated(ROOM, BOB).await);
+}
+
+#[test]
+fn an_undone_joins_departure_reaches_only_those_that_entered_while_it_was_seated() {
+    let joiner = full(BOB);
+    // Present when the joiner was seated: never told of it, so not told
+    // of its departure either.
+    let present_then = full("alice@example.com/desk");
+    // Entered while the joiner was seated, and saw it.
+    let later = full("carol@example.com/laptop");
+    // Holds the joiner's nickname now: the departure would name its own
+    // occupant JID.
+    let same_nick = full("dave@example.com/phone");
+    let present = std::collections::HashSet::from([present_then.clone()]);
+    let told = waddle_server::test_support::undone_join_recipients(
+        vec![
+            joiner.clone(),
+            present_then.clone(),
+            later.clone(),
+            same_nick.clone(),
+        ],
+        &present,
+        &joiner,
+        std::slice::from_ref(&same_nick),
+    );
+    assert_eq!(told, vec![later]);
 }
 
 #[tokio::test]

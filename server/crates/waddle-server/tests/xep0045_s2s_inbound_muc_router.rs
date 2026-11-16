@@ -18,10 +18,13 @@
 //! hold is answered at once. A join beyond its account's share of presence
 //! is answered while the account's allowance of answers lasts, and neither
 //! one account's joins nor its leaves delay another account of the same
-//! domain. A room restored on the replica that seats its occupants keeps
-//! their seats, a seat whose join is still answered gets no notice when the
-//! replica stops, and an occupant of another server the room seats without
-//! a seat is removed.
+//! domain, whose first leave for a seat is taken beyond its allowance. A
+//! leave for a room whose holder does not answer is kept and placed once
+//! it does. A room restored on the replica that seats its occupants keeps
+//! their seats, a join still being answered or whose seat opens when the
+//! replica stops is refused rather than told it entered, the streams drain
+//! only once the stopping replica's notices are out, and an occupant of
+//! another server the room seats without a seat is removed.
 //!
 //! `example.com` runs the production router and connection manager with a
 //! scripted host (`s2s_inbound_muc_support/scripted.rs`); `home-b.test` and
@@ -1148,6 +1151,15 @@ async fn a_seats_first_leave_is_taken_beyond_its_accounts_allowance() {
         .expect("the room's answer to the leave");
 }
 
+/// A refusal of a join because the replica stops: error presence with
+/// `resource-constraint`.
+fn is_shutdown_refusal(stanza: &Element, id: &str) -> bool {
+    stanza.name() == "presence"
+        && stanza.attr("id") == Some(id)
+        && stanza.attr("type") == Some("error")
+        && error_condition(stanza).as_deref() == Some("resource-constraint")
+}
+
 #[tokio::test]
 async fn a_seat_whose_join_is_answered_gets_no_notice_when_the_replica_stops() {
     let hosted = Scripted::start("inbound-router-stop-pending", RouterLimits::default()).await;
@@ -1163,11 +1175,16 @@ async fn a_seat_whose_join_is_answered_gets_no_notice_when_the_replica_stops() {
     })
     .await
     .expect("the join reaches the room");
-    let router = hosted.router.clone();
-    let stopping = tokio::spawn(async move { router.shutdown(Duration::from_secs(5)).await });
-    tokio::time::sleep(QUIET).await;
+    // The replica tells its occupants that it stops and gives their seats
+    // up; its workers and streams go on, so what it then answers the join
+    // with reaches the occupant's server.
+    hosted.router.farewell().await;
     hosted.host.release();
-    let _ = stopping.await;
+    let refused = hosted
+        .home_b
+        .received(|stanza| is_shutdown_refusal(stanza, "join-pending"))
+        .await;
+    assert!(refused.is_some(), "the join was not refused");
     tokio::time::sleep(QUIET).await;
     // The occupant was never told that it entered: it is told neither
     // that the service is shutting down (XEP-0045 §11.2) nor, after
@@ -1180,27 +1197,108 @@ async fn a_seat_whose_join_is_answered_gets_no_notice_when_the_replica_stops() {
     );
     assert_eq!(hosted.home_b.count(is_own_presence), 0);
     assert!(hosted.router.seats().is_empty());
+    hosted.router.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn a_join_whose_seat_opens_after_the_farewell_is_refused() {
+    let hosted = Scripted::start("inbound-router-stop-opening", RouterLimits::default()).await;
+    // The join has passed the check that the replica is not stopping and
+    // waits on the seat table, before its seat is held.
+    hosted.seats.hold().await;
+    hosted
+        .home_b
+        .send(remote_join(BOB, ROOM, "bob", "join-opening"))
+        .await;
+    wait_for(ARRIVES, || (hosted.seats.arrived() >= 1).then_some(()))
+        .await
+        .expect("the join reaches the seat table");
+    // The farewell gives every seat up while the join's row is written.
+    hosted.router.farewell().await;
+    hosted.seats.release();
+    // The seat opened after the farewell is not held, and the join is
+    // refused rather than answered as entered, while the streams still
+    // carry the answer.
+    let refused = hosted
+        .home_b
+        .received(|stanza| is_shutdown_refusal(stanza, "join-opening"))
+        .await;
+    assert!(refused.is_some(), "the join was not refused");
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(hosted.home_b.count(is_own_presence), 0);
+    assert!(hosted.router.seats().is_empty());
+    assert!(hosted.seat(ROOM, BOB).is_none());
+    hosted.router.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
 async fn the_streams_drain_on_the_routers_token_once_its_notices_are_out() {
-    let hosted = Scripted::start("inbound-router-drain", RouterLimits::default()).await;
-    with_bob(&hosted).await;
+    // The router and the connection manager wired to the process stop as
+    // the server's lifecycle wires them.
     let stop = tokio_util::sync::CancellationToken::new();
-    // With a router the connection manager drains on the router's token,
-    // not on the process stop: the router's notices need the streams.
-    let drain = S2sRouter::service_stop(Some(&hosted.router), &stop);
+    let hosted = Scripted::start_stopping(
+        "inbound-router-drain",
+        RouterLimits::default(),
+        |_| {},
+        Some(stop.clone()),
+    )
+    .await;
+    with_bob(&hosted).await;
+    let drained = hosted.router.drained();
+    assert!(!drained.is_cancelled());
+    // The process stop alone: the router tells its occupants and only
+    // then lets the streams drain, so its notices still leave on them.
     stop.cancel();
-    tokio::time::sleep(QUIET).await;
-    assert!(!drain.is_cancelled());
-    hosted.router.shutdown(Duration::from_secs(5)).await;
-    assert!(drain.is_cancelled());
     let told = hosted
         .home_b
-        .received(is_own_departure)
+        .received(|stanza| is_own_departure(stanza) && statuses(stanza).contains(&"332".to_owned()))
         .await
-        .expect("the occupant's own presence");
-    assert!(statuses(&told).contains(&"332".to_owned()), "{told:?}");
-    // Without one, it drains on the process stop itself.
+        .expect("the occupant is told that the service is shutting down");
+    assert!(statuses(&told).contains(&"110".to_owned()), "{told:?}");
+    wait_for(ARRIVES, || drained.is_cancelled().then_some(()))
+        .await
+        .expect("the streams drain once the notices are out");
+    // Without a router the connection manager drains on the process stop
+    // itself.
     assert!(S2sRouter::service_stop(None, &stop).is_cancelled());
+    hosted.router.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn a_leave_for_a_room_whose_holder_is_silent_is_placed_once_it_answers() {
+    let limits = RouterLimits {
+        room_placement_backoff: Duration::from_secs(1),
+        sweep_interval: Duration::from_millis(200),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start_with("inbound-router-kept-leave", limits, |host| {
+        host.carry();
+    })
+    .await;
+    with_bob(&hosted).await;
+    // The room's holder stops answering, and the occupant leaves.
+    hosted.host.silence(ROOM);
+    hosted
+        .home_b
+        .send(remote_leave(BOB, ROOM, "bob", "leave-silent"))
+        .await;
+    wait_for(ARRIVES, || (hosted.host.placed() >= 2).then_some(()))
+        .await
+        .expect("the holder is asked to place the leave");
+    // The leave is not answered with an error and not lost: once the
+    // holder answers again it is placed, and the seat ends.
+    tokio::time::sleep(HOLDER_ASK_LIMIT).await;
+    hosted.host.unsilence(ROOM);
+    let left = wait_for(Duration::from_secs(15), || {
+        hosted.seat(ROOM, BOB).is_none().then_some(())
+    })
+    .await;
+    assert!(left.is_some(), "the leave was not placed again");
+    assert!(!hosted.host.handled_with("leave-silent").is_empty());
+    assert!(hosted
+        .home_b
+        .captured
+        .with_id("leave-silent")
+        .iter()
+        .all(|stanza| stanza.attr("type") != Some("error")));
 }

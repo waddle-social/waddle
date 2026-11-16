@@ -86,7 +86,7 @@ pub(crate) mod s2s_delivery;
 mod s2s_room_relay;
 #[cfg(feature = "clustering")]
 pub(crate) use s2s_room_relay::{
-    relayed_remote_room_request, REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT,
+    owner_silent, relayed_remote_room_request, REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT,
     REMOTE_ROOM_REQUEST_REPLY_TIMEOUT,
 };
 pub(crate) mod s2s_rooms;

@@ -22,7 +22,8 @@ use waddle_server::db::Database;
 use waddle_server::s2s::conn::ServiceOptions;
 use waddle_server::s2s::route::{
     LocalRooms, RemotePrincipal, RoomOperation, RoomPlacement, RoomReplies, RoomRequest,
-    RouterLimits, S2sRouter, Seat, SeatChange, SeatEnd, SqlSeatStore, HOLDER_ASK_LIMIT,
+    RouterLimits, S2sRouter, Seat, SeatChange, SeatEnd, SeatInsert, SeatLimits, SeatStore,
+    SeatStoreError, SqlSeatStore, HOLDER_ASK_LIMIT,
 };
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
@@ -33,7 +34,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::s2s_inbound_muc_support::routing::transport::{self, listener, Deployment, Pki, Spec};
 use crate::s2s_inbound_muc_support::routing::{
-    correlation_database, send, start_routed, wait_for, CapturingSink, Routed, ARRIVES,
+    correlation_database, send, start_routed_stopping, wait_for, CapturingSink, Routed, ARRIVES,
 };
 use crate::s2s_inbound_muc_support::{DOMAIN, MUC, NS_MUC, NS_MUC_USER};
 
@@ -106,6 +107,12 @@ impl ScriptedRooms {
     /// `room` is held by a replica that never answers.
     pub fn silence(&self, room: &str) {
         lock(&self.silent).push(bare(room));
+    }
+
+    /// `room`'s holder answers again.
+    pub fn unsilence(&self, room: &str) {
+        let room = bare(room);
+        lock(&self.silent).retain(|silent| *silent != room);
     }
 
     /// `room` refuses every join.
@@ -494,6 +501,119 @@ impl LocalRooms for ScriptedRooms {
     }
 }
 
+/// The deployment's seat table, whose inserts a case can hold: a join then
+/// waits after the router decided to open its seat and before the seat is
+/// held.
+pub struct GatedSeats {
+    table: Arc<SqlSeatStore>,
+    gate: Arc<tokio::sync::RwLock<()>>,
+    held: Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
+    /// Inserts that reached the gate.
+    arrived: AtomicUsize,
+}
+
+impl GatedSeats {
+    fn new(table: Arc<SqlSeatStore>) -> Self {
+        Self {
+            table,
+            gate: Arc::new(tokio::sync::RwLock::new(())),
+            held: Mutex::new(None),
+            arrived: AtomicUsize::new(0),
+        }
+    }
+
+    /// Hold every insert from now on.
+    pub async fn hold(&self) {
+        let guard = Arc::clone(&self.gate).write_owned().await;
+        *lock(&self.held) = Some(guard);
+    }
+
+    /// Let the held inserts go on.
+    pub fn release(&self) {
+        lock(&self.held).take();
+    }
+
+    /// How many inserts reached the gate.
+    pub fn arrived(&self) -> usize {
+        self.arrived.load(Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl SeatStore for GatedSeats {
+    async fn insert(&self, seat: &Seat, limits: &SeatLimits) -> Result<SeatInsert, SeatStoreError> {
+        self.arrived.fetch_add(1, Ordering::AcqRel);
+        let _open = self.gate.read().await;
+        self.table.insert(seat, limits).await
+    }
+
+    async fn get(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+    ) -> Result<Option<Seat>, SeatStoreError> {
+        self.table.get(room, occupant).await
+    }
+
+    async fn remove(&self, seat: &Seat) -> Result<bool, SeatStoreError> {
+        self.table.remove(seat).await
+    }
+
+    async fn rename(&self, seat: &Seat, nick: &str, now_ms: i64) -> Result<bool, SeatStoreError> {
+        self.table.rename(seat, nick, now_ms).await
+    }
+
+    async fn adopt(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        owner: &str,
+        before_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<Seat>, SeatStoreError> {
+        self.table
+            .adopt(room, occupant, owner, before_ms, now_ms)
+            .await
+    }
+
+    async fn mark_lost(
+        &self,
+        room_domain: &str,
+        occupant_domain: &str,
+        owner: &str,
+        now_ms: i64,
+    ) -> Result<u64, SeatStoreError> {
+        self.table
+            .mark_lost(room_domain, occupant_domain, owner, now_ms)
+            .await
+    }
+
+    async fn remove_owned(&self, owner: &str) -> Result<u64, SeatStoreError> {
+        self.table.remove_owned(owner).await
+    }
+
+    async fn lost(&self, owner: &str, limit: usize) -> Result<Vec<Seat>, SeatStoreError> {
+        self.table.lost(owner, limit).await
+    }
+
+    async fn owned(
+        &self,
+        owner: &str,
+        after: Option<(&BareJid, &FullJid)>,
+        limit: usize,
+    ) -> Result<Vec<Seat>, SeatStoreError> {
+        self.table.owned(owner, after, limit).await
+    }
+
+    async fn orphaned(&self, before_ms: i64, limit: usize) -> Result<Vec<Seat>, SeatStoreError> {
+        self.table.orphaned(before_ms, limit).await
+    }
+
+    async fn count(&self) -> Result<usize, SeatStoreError> {
+        self.table.count().await
+    }
+}
+
 pub fn bare(raw: &str) -> BareJid {
     raw.parse().expect("a bare JID")
 }
@@ -551,6 +671,9 @@ pub struct Scripted {
     pub router: S2sRouter,
     pub host: Arc<ScriptedRooms>,
     pub store: Arc<SqlSeatStore>,
+    /// The seat table as the router writes it, with inserts a case can
+    /// hold.
+    pub seats: Arc<GatedSeats>,
     pub database: Database,
     pub home_b: Peer,
     pub home_c: Peer,
@@ -570,6 +693,18 @@ impl Scripted {
         limits: RouterLimits,
         script: impl FnOnce(&ScriptedRooms),
     ) -> Self {
+        Self::start_stopping(name, limits, script, None).await
+    }
+
+    /// [`Self::start_with`], with the hosting deployment's router and
+    /// connection manager wired to `stop` as the server's lifecycle wires
+    /// them to the process stop.
+    pub async fn start_stopping(
+        name: &str,
+        limits: RouterLimits,
+        script: impl FnOnce(&ScriptedRooms),
+        stop: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
         let pki = Pki::new();
         let (local_listener, address) = listener().await;
         let (listener_b, address_b) = listener().await;
@@ -580,12 +715,15 @@ impl Scripted {
         spec.private.push(HOME_C);
         spec.endpoints = vec![(transport::HOME_B, address_b), (HOME_C, address_c)];
         let database = correlation_database(name).await;
-        let routed = start_routed(&pki, &spec, local_listener, database.clone(), limits).await;
+        let routed =
+            start_routed_stopping(&pki, &spec, local_listener, database.clone(), limits, stop)
+                .await;
         let host = Arc::new(ScriptedRooms::default());
         script(&host);
         let store = Arc::new(SqlSeatStore::new(database.clone()));
+        let seats = Arc::new(GatedSeats::new(Arc::clone(&store)));
         let _ = host.router.set(routed.router.clone());
-        assert!(routed.router.attach_rooms(host.clone(), store.clone()));
+        assert!(routed.router.attach_rooms(host.clone(), seats.clone()));
         let peer = |domain: &'static str| {
             let mut peer = Spec::new(domain, DOMAIN);
             peer.allow = spec.local.clone();
@@ -620,6 +758,7 @@ impl Scripted {
             routed,
             host,
             store,
+            seats,
             database,
             home_b: Peer {
                 domain: transport::HOME_B,
