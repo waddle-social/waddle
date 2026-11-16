@@ -152,6 +152,38 @@ it and also eases the GitHub 20-job limit.
 - Chat: `Install Bun dependencies` runs 146 times at 35 seconds with no
   package cache.
 
+## Job-by-job review: 2026-11-16
+
+Every job that had not been looked at, from step timings (old window plus
+119 runs after #2472) and one typical slow log per job. Nothing here has been
+changed or measured after a change; each row is a lead with its evidence.
+
+Since #2472 the shard lane no longer runs on pull requests (manual dispatch
+only). It still runs after every merge as `nixTestLocal`, so the 16x32
+conclusion below applies there.
+
+| # | Job | Time | What the log shows | Lead |
+| --- | --- | ---: | --- | --- |
+| 1 | `mainDoctest`, `nixDoctest` | 6 to 10 min | `cargo test --doc --workspace --all-features` compiles 729 crates for 8.3 min to run about 50 doctests | Run doctests only for the crates that have them, or inside the test job |
+| 2 | `mainTest`, `namespaceRustChecks` `test` | 15 to 18 min | 9.2 min build: third-party crates finish after 3 min, then 6 min for `waddle-server` and 319 test binaries with the default linker; tests 6.8 min | mold and lighter debug info, as the Nix lane already has; dependency cache |
+| 3 | `roomChildContractPostgres` | 9.6 min | 7.7 min compiling all of `waddle-server` to run 5 tests in 3 s; fetches 2.7 GiB of store paths and a rustup toolchain each run | Move the tests behind a smaller crate or onto the Nix test archive |
+| 4 | `federationGrantFenceProof` | 4.9 min | rustup toolchain download each run; one test (`postgres_guard_first_stage`) takes 66 s | Small |
+| 5 | `parentMoveNativeBuildClosure` | 1 or 7 min | On a cache miss it builds the `waddle-server-clippy` derivation for 5.3 min, the same thing `nixClippy` builds | Depend on the clippy job instead of rebuilding |
+| 6 | FFI bindings | 2 to 4 min each | `checkXmppClientFfiBindings` builds the client twice (82 s and 59 s); `mainChecks` repeats it; Android builds it twice per job (4 min in `default`) | One build per job, shared features |
+| 7 | One-minute checks | 1.5 min each | Besides 40 s of setup steps, every cuenv task waits 25 to 45 s before its command starts. Seven such jobs per server pull request are 80% overhead | One job for `checkCiDrift`, `checkAllCiDrift`, `checkRootSyncDrift`, `checkAlertRules`, `checkSwitchableAlternativeProgram`, `nixFmt` |
+| 8 | `renderDeployment` | 3 min | One silent 65 s step before chart linting; the chart is linted three times | Find the 65 s step |
+| 9 | `waddle-android-pullRequest` | 6 to 12 min | No Gradle configuration cache hit; lint analysis of two flavours takes about 4 min; R8 release minify runs on pull requests; SDK packages install each run | Fix the configuration cache; lint one flavour on pull requests |
+| 10 | `waddle-android-deviceTests` | 8 to 9 min | 79 s emulator start, 200 s for 60 tests | Fine |
+| 11 | `waddle-chat-pullRequest` | 4.2 min | 71 s wasm release build, `astro check` runs twice, Bun install 30 to 45 s | Small |
+| 12 | `apple-xmpp-client` | 5.5 min | Six cargo builds of 14 to 33 s, XCFramework 131 s; up from 4.2 min in the old window | Fine; macOS never queues |
+| 13 | `nixXmppServerTests` | 26.6 min | The slowest job in the repository: 6 min compile, 18.6 min for 6,113 tests on a 4 vCPU GitHub runner. Runs on main only | Shard it if main's turnaround matters |
+| 14 | `nixXmppUnitTests` | 3.5 min | 2 min compiling `waddle-xmpp`, 15 s of tests | Fine |
+| 15 | website, colony, design, cloud, linux | 1 to 1.5 min | Setup only | Fine |
+
+Rows 1, 2 and 7 are the largest. Rows 1 and 2 hold Namespace machines after
+every merge and on every server pull request; row 7 is seven of the 20
+concurrent GitHub job slots for work that takes seconds.
+
 ## Options
 
 | # | Change | Expected effect | Status |
