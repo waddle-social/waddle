@@ -15,20 +15,6 @@ tests:
           - labels: 'ALERTS{alertname="RelayOutcomeUncertain",alertstate="firing",severity="warning",team="waddle"}'
             value: 1
 
-  - name: a panicked actor fires at once and a clean stop stays quiet
-    interval: 1m
-    input_series:
-      - series: 'waddle_actor_stopped_total{instance="a",actor="room",reason="panicked"}'
-        values: '0x5 1x20'
-      - series: 'waddle_actor_stopped_total{instance="a",actor="user",reason="stopped"}'
-        values: '0+5x25'
-    promql_expr_test:
-      - expr: 'ALERTS{alertname="ActorPanicked",alertstate="firing"}'
-        eval_time: 7m
-        exp_samples:
-          - labels: 'ALERTS{alertname="ActorPanicked",alertstate="firing",actor="room",severity="critical",team="waddle"}'
-            value: 1
-
   - name: a lost keypair fence fires at once
     interval: 1m
     input_series:

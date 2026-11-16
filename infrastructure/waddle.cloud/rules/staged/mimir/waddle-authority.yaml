@@ -52,31 +52,3 @@ groups:
           annotations:
             runbook: docs/runbooks/node-recovery-and-drain.md, "Relay uncertainty backlog". `incompatible_peer` during a rollout means two message versions are live at once.
             summary: Ordered relay deliveries are being refused, timing out or meeting a peer on another message version.
-    - name: waddle-actors
-      rules:
-        - alert: ActorPanicked
-          expr: sum by (actor) (increase(waddle_actor_stopped_total{reason="panicked"}[15m])) > 0
-          labels:
-            severity: critical
-            team: waddle
-          annotations:
-            runbook: Find the panic in the pod log by actor name; kameo logs the stop reason. A registry or database actor does not restart, so check that the pod is still serving. Connection actor panics are also counted by TransportTaskPanickedOrAbandoned.
-            summary: An actor stopped because a handler or lifecycle hook panicked.
-        - alert: ActorQueueWaitHigh
-          expr: histogram_quantile(0.99, sum by (le, actor) (rate(waddle_actor_message_queue_wait_seconds_bucket[10m]))) > 1
-          for: 10m
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: Open the Waddle actors dashboard. Compare the actor's busy fraction and handler duration; a long wait with short handlers means senders are blocked on a full mailbox. The wait is recorded only for handled messages, so a stuck actor shows as a handled rate that stops instead. The threshold is not measured.
-            summary: Messages wait more than a second for their actor at the 99th percentile.
-        - alert: ActorSaturated
-          expr: sum by (actor, instance) (rate(waddle_actor_message_handle_duration_seconds_sum{actor=~"room_registry|user_registry|permission|db|relay"}[10m])) > 0.8
-          for: 15m
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: These actors run one instance per pod, so the handler-seconds rate is the fraction of time the actor is busy. Find the slow message type in Tempo (`actor.handle_message` spans by `message`). The threshold is not measured.
-            summary: A single-instance actor spends more than 80% of its time in handlers.
