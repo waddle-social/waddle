@@ -11,7 +11,9 @@ through `9b2e2d57ebd13329ddc045b2d1343f03b9619089`, and the effect boundary for
 remote principals through `c9111c714cfb821e571cc7f3b63d4a9ef37d11ba`, merged
 with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
 `8f6088ba601528090ec1bc82294b1a12422f5519`, and inbound S2S rooms through
-`31fd3f41591d0ff3072dc667e35207c522ae0dc6` (see the last refresh below); the original
+`31fd3f41591d0ff3072dc667e35207c522ae0dc6` and, with remote room
+administration, the federated setting and requests carried between
+replicas, through `ea4af8ac6ab157ae3140ea6675d81942a9096382` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -815,6 +817,87 @@ occupants at other servers in rooms of this deployment.
   of the hook (`route_to_connection/implementation.rs` and the room
   presence router in the join handler's file) and the re-export in
   `ingress/mod.rs`. The scan holds 1607 records in all.
+
+The selected evidence was refreshed an eighteenth time, through
+`ea4af8ac6ab157ae3140ea6675d81942a9096382`, after reviewing the delta of the reviewed
+files since the seventeenth refresh. This refresh covers what remote
+principals were given since: room administration, rooms opened to other
+servers by a setting of their own, the standard message extensions, and a
+request carried to the replica that holds its room.
+
+- Remote principals now reach writers. The room host
+  (`s2s-room-host`, moved) hands a `muc#admin` request (`s2s-room-admin`)
+  and a `muc#owner` or XEP-0425 request (`s2s-room-owner`) to the handlers
+  a session's requests reach, through two entry points that pass the
+  evidence of the request's stream and no session (`s2s-remote-admin`,
+  `s2s-remote-owner`, in `handlers/iq/muc_remote_admin.rs`, new in the
+  reviewed set). No writer was added: the handlers are the existing ones,
+  and every decision they take for the requester now names the evidence
+  it was passed.
+  - In a room an enrolled scope manages, `record_host_grant_affiliation`
+    (`hg-room-admin`, moved) passes that evidence to
+    `set_affiliation_as`, so the store decides a remote initiator under
+    the scope's guard on its stream; the owner request's decision
+    (`hg-owner-iq`, moved), the configuration's two re-reads
+    (`hg-owner-config`, moved) and the moderation decision
+    (`hg-moderation`, moved) name it too. `hg-mirror-repair` moved.
+  - In any other room the standing the room actor holds for the requester
+    is honoured for its evidence before it decides anything
+    (`admin-context-honoured`, in `muc_admin.rs`; `room-admin`,
+    `admin-rollback` and `e-rollback` moved), and the owner check and the
+    moderator check do the same. A remote principal's configuration
+    request is passed no session, so the owner relationship a session's
+    request writes is not written for it.
+  - The cluster's forward of a `muc#admin` list request names its
+    requester without evidence and is taken only for a session's request.
+- The admin command that sets a room affiliation (`admin-set-affiliation`,
+  in `admin/channels.rs`) refuses an owner or admin affiliation for an
+  account that is neither served nor of a trusted home before it persists
+  anything. `group-dm`, `group-dm-sql`, `group-dm-delete` and
+  `hg-group-dm` moved with it. The Spaces relations are still written
+  without that check.
+- A room is reached by a remote principal only while its `federated`
+  setting is on (`s2s-room-federated`), decided before its grants are
+  read; `s2s-room-archive` and `s2s-room-message` moved, and the archive
+  gate no longer decides a group conversation, which is never federated.
+  The setting is a field of the room configuration and a column of the
+  channel catalog (`topology.rs` and the join handler read it; the owner's
+  configuration writes it); it grants nothing by itself.
+- A new producer of stream evidence exists. A replica builds a
+  `RemotePrincipal` for a room it holds from the facts of a stream another
+  replica verified (`s2s-carried-principal`, in `s2s/route/principal.rs`,
+  new in the reviewed set), which arrive over the cluster relay
+  (`s2s-relayed-request`, in `server/routes/websocket/s2s_room_relay.rs`,
+  new in the reviewed set) and are queued by the router
+  (`s2s-carried-request`) after it checked the stanza against them. The
+  host asks where a request is decided before any seat is opened for it
+  (`s2s-room-placement`). The carried facts are the address, the
+  strength, the trust-profile kind and the snapshot generation; admission
+  and standing are decided by the receiving replica.
+  `hg-seat-evidence` moved.
+- The room effect outbox offers a recipient without a connection to the
+  delivery hook before it looks for a resource registered on another node
+  (`outbox-seat-delivery`, in `room_effect_outbox/drain.rs`, new in the
+  reviewed set), so a seat receives what a durable mutation caused. The
+  hook takes it only for a seat it holds (`s2s-seat-egress`, moved), and
+  gained the call that ends a room's seats when its setting is turned off
+  (`connection_registry.rs`).
+- A remote occupant's message is rebuilt from an allowlist before the room
+  plans it; a correction or retraction is the sender's own only when the
+  archived message records its account as the author
+  (`room_dispatch.rs`, and `groupchat_validation.rs` outside the reviewed
+  set). The inbox and activity projections write only for an address the
+  deployment serves. Neither is a grant writer.
+- `xmpp_state.rs` re-exports the catalog's setter for the setting.
+- The raw scan holds 1608 records of the tokens it held, one more: the
+  outbox's `offer_foreign`. Four tokens were added to the scan,
+  `carried_room_request`, `muc_admin_for_remote`,
+  `muc_owner_or_moderation_for_remote` and `CarriedPrincipal`, for the new
+  entry points and the new producer; they match 24 further records, in
+  the files named above, the router's public method, the carried
+  request's type in `s2s/route/local_rooms.rs`, the trait method of the
+  remote route in `destination.rs` and the re-exports in `s2s/route.rs`
+  and `handlers/iq/mod.rs`. The scan holds 1632 records in all.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
