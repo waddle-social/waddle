@@ -15,8 +15,11 @@
 //! the lanes of a domain whose rooms are held by a replica that does not
 //! answer cannot take the places every other domain's lanes need. What
 //! waits here is bounded for the replica, for each room and for each remote
-//! domain; a stanza beyond a bound holds its stream until it fits, as for
-//! the queues behind this stage.
+//! domain. A stanza beyond the replica's or its domain's bound holds its
+//! stream until it fits, as for the queues behind this stage; one beyond
+//! its room's is handed back at once ([`Full::Room`]), so that a room whose
+//! lane is full holds back no other room of its domain. A stanza that ends
+//! a seat does not count against its room's lane.
 //!
 //! A room whose holder did not answer in time is remembered for a short
 //! while, and requests for it are answered at once meanwhile, so that one
@@ -31,7 +34,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::room_delivery::{LocalRoomRequest, Placed};
+use super::room_delivery::{Full, LocalRoomRequest};
 
 /// Rooms remembered as held by a replica that did not answer, before the
 /// entries whose time has passed are dropped.
@@ -45,6 +48,9 @@ pub(super) struct Waiting {
     pub peer: String,
     /// When the request reached this stage.
     pub arrived: Instant,
+    /// Whether the request counts against its room's lane: everything but
+    /// a stanza that ends a seat.
+    pub in_room: bool,
 }
 
 /// Bounds on what waits to be placed and on how many lanes are placed at
@@ -85,7 +91,22 @@ pub(super) enum Offered {
     /// task.
     Started,
     /// A bound refused it.
-    Refused(Box<Waiting>),
+    Refused(Box<Waiting>, Full),
+}
+
+/// What became of a request offered to the stage by a caller that waits
+/// while the stage or its domain's share is full.
+#[derive(Debug)]
+pub(super) enum Laned {
+    /// It waits; `started` when its room had no lane and the caller starts
+    /// the lane's task.
+    Queued { started: bool },
+    /// Its room's lane is full: handed back at once.
+    RoomFull(Box<Waiting>),
+    /// The deadline passed; it was not queued.
+    TimedOut,
+    /// The router is stopping; it was not queued.
+    Stopped,
 }
 
 /// The lanes, their bounds and the places for concurrent placements.
@@ -130,12 +151,14 @@ impl Placements {
     pub(super) fn offer(&self, room: &BareJid, waiting: Waiting) -> Offered {
         let mut lanes = lock(&self.lanes);
         let of_peer = lanes.peers.get(&waiting.peer).copied().unwrap_or(0);
-        let in_room = lanes.rooms.get(room).map_or(0, VecDeque::len);
-        if lanes.waiting >= self.bounds.waiting
-            || in_room >= self.bounds.waiting_per_room
-            || of_peer >= self.bounds.waiting_per_peer
-        {
-            return Offered::Refused(Box::new(waiting));
+        let of_room = lanes.rooms.get(room).map_or(0, |lane| {
+            lane.iter().filter(|waiting| waiting.in_room).count()
+        });
+        if waiting.in_room && of_room >= self.bounds.waiting_per_room {
+            return Offered::Refused(Box::new(waiting), Full::Room);
+        }
+        if lanes.waiting >= self.bounds.waiting || of_peer >= self.bounds.waiting_per_peer {
+            return Offered::Refused(Box::new(waiting), Full::Shared);
         }
         lanes.waiting += 1;
         *lanes.peers.entry(waiting.peer.clone()).or_insert(0) += 1;
@@ -151,16 +174,16 @@ impl Placements {
         }
     }
 
-    /// Queue `waiting` for `room`, waiting for a place under the bounds
-    /// until `deadline` or until `stop` is cancelled. `true` with
-    /// [`Placed::Queued`] when the caller starts the room's lane.
+    /// Queue `waiting` for `room`, waiting for a place while the stage or
+    /// the domain's share is full, until `deadline` or until `stop` is
+    /// cancelled. A full lane is not waited for.
     pub(super) async fn offer_or_wait(
         &self,
         room: &BareJid,
         mut waiting: Waiting,
         deadline: Instant,
         stop: &CancellationToken,
-    ) -> (Placed, bool) {
+    ) -> Laned {
         loop {
             // Registered before the attempt, so a place freed between the
             // attempt and the wait is not missed.
@@ -168,14 +191,15 @@ impl Placements {
             tokio::pin!(freed);
             freed.as_mut().enable();
             match self.offer(room, waiting) {
-                Offered::Queued => return (Placed::Queued, false),
-                Offered::Started => return (Placed::Queued, true),
-                Offered::Refused(refused) => waiting = *refused,
+                Offered::Queued => return Laned::Queued { started: false },
+                Offered::Started => return Laned::Queued { started: true },
+                Offered::Refused(refused, Full::Room) => return Laned::RoomFull(refused),
+                Offered::Refused(refused, Full::Shared) => waiting = *refused,
             }
             tokio::select! {
                 biased;
-                () = stop.cancelled() => return (Placed::Stopped, false),
-                () = tokio::time::sleep_until(deadline) => return (Placed::TimedOut, false),
+                () = stop.cancelled() => return Laned::Stopped,
+                () = tokio::time::sleep_until(deadline) => return Laned::TimedOut,
                 () = &mut freed => {}
             }
         }

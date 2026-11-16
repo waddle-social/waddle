@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use waddle_xmpp::identity::CanonicalDomain;
-use waddle_xmpp::muc::presence::NS_MUC_USER;
+use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::xep::xep0085::NS_CHATSTATES;
 use waddle_xmpp::xep::xep0333::NS_CHAT_MARKERS;
 use waddle_xmpp::xep::xep0334::NS_HINTS;
@@ -55,12 +55,12 @@ use crate::s2s::conn::{SinkVerdict, SinkWait, VerifiedPeerStream, Waited};
 use crate::s2s::route::local_rooms::{
     CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd,
 };
-use crate::s2s::route::placement::{Offered, Waiting};
+use crate::s2s::route::placement::{Laned, Offered, Waiting};
 use crate::s2s::route::principal::RemotePrincipal;
 use crate::s2s::route::reach::{reach, InboundReach, LocalTarget};
 use crate::s2s::route::reach::{Reachable, RoomOperation};
 use crate::s2s::route::replies;
-use crate::s2s::route::room_delivery::{LocalRoomRequest, Placed, RoomWork};
+use crate::s2s::route::room_delivery::{Admitted, Full, LocalRoomRequest, RoomWork};
 use crate::s2s::route::seats::{Deferred, Seat, SeatInsert, SeatLimits, SeatStoreError};
 use crate::s2s::route::telemetry;
 
@@ -261,25 +261,84 @@ fn is_delivery_error(stanza: &Stanza) -> bool {
         })
 }
 
-/// Whether `stanza` counts against its account's share of its domain's
-/// request rate. A leave and an error an occupant's server sends for it
-/// end a seat and are always taken; they count against the domain alone.
-fn counts_against_account(stanza: &Stanza) -> bool {
-    match stanza {
-        Stanza::Iq(_) => true,
-        Stanza::Message(message) => message.type_ != MessageType::Error,
-        Stanza::Presence(presence) => presence.type_ == PresenceType::None,
+/// What a stanza for the MUC service is to the bounds on what remote
+/// senders may address to it: which shares of its domain's rate it counts
+/// against, and how it is answered when one of them, or its room's share of
+/// the queues, refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// An IQ, or a message that carries something: it counts against its
+    /// account's share, and a refusal is answered with an error.
+    Request,
+    /// Available presence that enters a room (XEP-0045 §7.2): it carries
+    /// the bare `muc` element, or comes from a sender that holds no seat
+    /// in a room this replica decides. It counts against its account's
+    /// share of presence and not against its other share. A refusal is
+    /// answered with error presence; a join is never dropped.
+    Join,
+    /// Any other available presence to an occupant JID, a change of
+    /// availability or nickname: it counts against both of its account's
+    /// shares, and a refusal is dropped.
+    PresenceChange,
+    /// A chat state or a marker (XEP-0085, XEP-0333): it counts against
+    /// its account's share, and a refusal is dropped.
+    Ephemeral,
+    /// A leave, or an error the occupant's server sends: it ends a seat,
+    /// counts against no account's share and not against its room's share
+    /// of the queues, so it is never refused for either.
+    Ending,
+    /// Presence of any other type, which the host ignores: it counts
+    /// against no account's share, and a refusal is dropped.
+    Ignored,
+}
+
+impl Kind {
+    /// Whether it counts against its account's share of its domain's rate.
+    fn counts_against_account(self) -> bool {
+        matches!(self, Self::Request | Self::PresenceChange | Self::Ephemeral)
+    }
+
+    /// Whether it counts against its account's share of presence.
+    fn counts_against_presence(self) -> bool {
+        matches!(self, Self::Join | Self::PresenceChange)
+    }
+
+    /// Whether a refusal of it is answered.
+    fn answered(self) -> bool {
+        matches!(self, Self::Request | Self::Join)
+    }
+
+    /// Whether it counts against its room's share of the queues.
+    fn in_room(self) -> bool {
+        self != Self::Ending
     }
 }
 
-/// Whether a stanza refused for its account's spent share is answered: a
-/// request that expects an answer and a message that carries something. A
-/// chat state, a marker and presence are dropped unanswered.
-fn answers_refusal(stanza: &Stanza) -> bool {
+/// Whether `presence` carries the bare `muc` element a client sends when it
+/// enters a room (XEP-0045 §7.2.1).
+fn enters(presence: &Presence) -> bool {
+    presence
+        .payloads
+        .iter()
+        .any(|payload| payload.is("x", NS_MUC))
+}
+
+/// The kind of `stanza`. `unseated` says whether its sender is known to
+/// hold no seat in the room it addresses, which only the replica that
+/// decides the room can tell; presence that does not carry the `muc`
+/// element enters the room only from such a sender.
+fn kind_of(stanza: &Stanza, unseated: impl FnOnce() -> bool) -> Kind {
     match stanza {
-        Stanza::Iq(_) => true,
-        Stanza::Message(_) => !is_ephemeral(stanza),
-        Stanza::Presence(_) => false,
+        Stanza::Iq(_) => Kind::Request,
+        Stanza::Message(message) if message.type_ == MessageType::Error => Kind::Ending,
+        Stanza::Message(_) if is_ephemeral(stanza) => Kind::Ephemeral,
+        Stanza::Message(_) => Kind::Request,
+        Stanza::Presence(presence) => match presence.type_ {
+            PresenceType::None if enters(presence) || unseated() => Kind::Join,
+            PresenceType::None => Kind::PresenceChange,
+            PresenceType::Unavailable | PresenceType::Error => Kind::Ending,
+            _ => Kind::Ignored,
+        },
     }
 }
 
@@ -338,8 +397,9 @@ enum Spend {
     Taken,
     /// The domain's rate is spent for this long.
     Wait(Duration),
-    /// The account has spent its share: the stanza is not taken, and is
-    /// answered with an error only when `answered`.
+    /// The account has spent a share the stanza counts against: the
+    /// stanza is not taken, and is answered with an error only when
+    /// `answered`.
     AccountSpent { answered: bool },
 }
 
@@ -387,10 +447,12 @@ impl Inner {
 
     /// Take a stanza for the MUC service: for the stage that places it, in
     /// a deployment that keeps rooms on one replica each, or else for the
-    /// room host's queue. A stanza that finds its domain's rate spent or
-    /// the queues full holds its stream until it fits. A stanza beyond its
-    /// account's share of the domain's rate is not taken at all: the
-    /// stream goes on, and the other accounts of the domain with it.
+    /// room host's queue. A stanza that finds its domain's rate spent, or
+    /// the queues or its domain's share of them full, holds its stream
+    /// until it fits. A stanza beyond a share of its account, or beyond
+    /// its room's share of the queues, is not taken at all and is answered
+    /// as its kind is ([`Kind`]): the stream goes on, and the other
+    /// accounts and rooms of the domain with it.
     pub(super) fn room_request(
         self: &Arc<Self>,
         stream: &VerifiedPeerStream,
@@ -413,9 +475,8 @@ impl Inner {
             local: stream.local().clone(),
             remote: stream.remote().clone(),
         };
-        let account =
-            counts_against_account(&stanza).then(|| principal.account().as_bare_jid().clone());
-        let answers = answers_refusal(&stanza);
+        let kind = self.kind_here(&stanza, &room, &principal, hosting);
+        let account = principal.account().as_bare_jid().clone();
         let mut request = LocalRoomRequest {
             principal,
             operation,
@@ -423,7 +484,7 @@ impl Inner {
             local: pair.local.clone(),
             remote: pair.remote.clone(),
         };
-        let mut pause = match self.take_allowance(&peer, account.as_ref(), answers) {
+        let mut pause = match self.take_allowance(&peer, &account, kind) {
             Spend::Taken => None,
             Spend::Wait(wait) => Some(wait),
             Spend::AccountSpent { answered } => {
@@ -432,9 +493,13 @@ impl Inner {
             }
         };
         if pause.is_none() {
-            match self.admit(&room, request, &peer, staged) {
+            match self.admit(&room, request, &peer, staged, kind) {
                 Ok(()) => return SinkVerdict::Accepted,
-                Err(refused) => request = *refused,
+                Err((refused, Full::Room)) => {
+                    self.refuse_room_full(&pair, &refused.stanza, kind);
+                    return SinkVerdict::Accepted;
+                }
+                Err((refused, Full::Shared)) => request = *refused,
             }
         }
         telemetry::room_request_waited();
@@ -451,7 +516,7 @@ impl Inner {
                     () = router.shutdown.cancelled() => return Waited::Stopping,
                     () = tokio::time::sleep(wait) => {}
                 }
-                pause = match router.take_allowance(&peer, account.as_ref(), answers) {
+                pause = match router.take_allowance(&peer, &account, kind) {
                     Spend::Taken => None,
                     Spend::Wait(wait) => Some(wait),
                     Spend::AccountSpent { answered } => {
@@ -460,54 +525,104 @@ impl Inner {
                     }
                 };
             }
-            let placed = if staged {
+            if staged {
                 let waiting = Waiting {
                     request,
                     peer: peer.clone(),
                     arrived: tokio::time::Instant::now(),
+                    in_room: kind.in_room(),
                 };
-                let (placed, started) = router
+                let laned = router
                     .placements
                     .offer_or_wait(&room, waiting, deadline, &router.shutdown)
                     .await;
-                if started {
-                    router
-                        .tasks
-                        .spawn(place_room(Arc::clone(&router), room.clone()));
+                match laned {
+                    Laned::Queued { started } => {
+                        if started {
+                            router
+                                .tasks
+                                .spawn(place_room(Arc::clone(&router), room.clone()));
+                        }
+                        Waited::Taken
+                    }
+                    Laned::RoomFull(refused) => {
+                        router.refuse_room_full(&pair, &refused.request.stanza, kind);
+                        Waited::Taken
+                    }
+                    Laned::TimedOut => {
+                        telemetry::room_request_overloaded();
+                        Waited::Overloaded
+                    }
+                    Laned::Stopped => Waited::Stopping,
                 }
-                placed
             } else {
                 let work = RoomWork::Request(Box::new(request));
-                router
+                let admitted = router
                     .local_rooms
-                    .push_or_wait(room, work, &peer, deadline, &router.shutdown)
-                    .await
-            };
-            match placed {
-                Placed::Queued => Waited::Taken,
-                Placed::TimedOut => {
-                    telemetry::room_request_overloaded();
-                    Waited::Overloaded
+                    .offer_or_wait(
+                        room,
+                        work,
+                        &peer,
+                        kind.in_room(),
+                        deadline,
+                        &router.shutdown,
+                    )
+                    .await;
+                match admitted {
+                    Admitted::Queued => Waited::Taken,
+                    Admitted::RoomFull(work) => {
+                        if let RoomWork::Request(refused) = work {
+                            router.refuse_room_full(&pair, &refused.stanza, kind);
+                        }
+                        Waited::Taken
+                    }
+                    Admitted::TimedOut => {
+                        telemetry::room_request_overloaded();
+                        Waited::Overloaded
+                    }
+                    Admitted::Stopped => Waited::Stopping,
                 }
-                Placed::Stopped => Waited::Stopping,
             }
         }))
     }
 
+    /// The kind of `stanza` from `principal` for `room`, as this replica
+    /// can tell it: whether presence without the `muc` element enters the
+    /// room is known only where this replica decides every room itself.
+    fn kind_here(
+        &self,
+        stanza: &Stanza,
+        room: &BareJid,
+        principal: &RemotePrincipal,
+        hosting: &Hosting,
+    ) -> Kind {
+        kind_of(stanza, || {
+            !hosting.host.carries()
+                && principal
+                    .full()
+                    .is_some_and(|occupant| !self.seats.holds(room, &occupant))
+        })
+    }
+
     /// Queue `request` without waiting: for placement when the host keeps
-    /// rooms on other replicas (`staged`), or else for the room host.
+    /// rooms on other replicas (`staged`), or else for the room host. The
+    /// request is handed back with the bound that refused it.
     fn admit(
         self: &Arc<Self>,
         room: &BareJid,
         request: LocalRoomRequest,
         peer: &str,
         staged: bool,
-    ) -> Result<(), Box<LocalRoomRequest>> {
+        kind: Kind,
+    ) -> Result<(), (Box<LocalRoomRequest>, Full)> {
         if !staged {
             let work = RoomWork::Request(Box::new(request));
-            return match self.local_rooms.try_push(room.clone(), work, peer) {
+            return match self
+                .local_rooms
+                .offer(room.clone(), work, peer, kind.in_room())
+            {
                 Ok(()) => Ok(()),
-                Err(RoomWork::Request(refused)) => Err(refused),
+                Err((RoomWork::Request(refused), full)) => Err((refused, full)),
                 // Only the work offered is handed back.
                 Err(_) => Ok(()),
             };
@@ -516,6 +631,7 @@ impl Inner {
             request,
             peer: peer.to_owned(),
             arrived: tokio::time::Instant::now(),
+            in_room: kind.in_room(),
         };
         match self.placements.offer(room, waiting) {
             Offered::Queued => Ok(()),
@@ -523,7 +639,7 @@ impl Inner {
                 self.tasks.spawn(place_room(Arc::clone(self), room.clone()));
                 Ok(())
             }
-            Offered::Refused(refused) => Err(Box::new(refused.request)),
+            Offered::Refused(refused, full) => Err((Box::new(refused.request), full)),
         }
     }
 
@@ -548,6 +664,7 @@ impl Inner {
             request,
             peer,
             arrived,
+            ..
         } = waiting;
         if self.placements.silent(room) {
             telemetry::room_request_not_carried();
@@ -609,9 +726,11 @@ impl Inner {
     }
 
     /// Queue a request placed on this replica for the room host, waiting
-    /// for a place until `deadline`. The stream that carried the stanza is
-    /// not waiting for it any more, so a stanza that finds no place in
-    /// time is answered rather than its stream closed.
+    /// for a place while the queues or the domain's share are full, until
+    /// `deadline`. The stream that carried the stanza is not waiting for
+    /// it any more, so a stanza that finds no place in time is answered
+    /// as its kind is rather than its stream closed; one whose room's
+    /// share is full is answered so at once.
     async fn queue_placed(
         self: &Arc<Self>,
         room: &BareJid,
@@ -619,23 +738,42 @@ impl Inner {
         peer: &str,
         deadline: tokio::time::Instant,
     ) {
-        let refusal = replies::error_reply(
-            &request.stanza,
-            self.busy("The room is busy; try again later."),
-        );
+        // This replica decides the room, so whether its sender holds a
+        // seat here says whether presence enters it.
+        let kind = kind_of(&request.stanza, || {
+            request
+                .principal
+                .full()
+                .is_some_and(|occupant| !self.seats.holds(room, &occupant))
+        });
         let pair = Pair {
             local: request.local.clone(),
             remote: request.remote.clone(),
         };
+        let stanza = request.stanza.clone();
         let work = RoomWork::Request(Box::new(request));
-        let queued = self
+        let admitted = self
             .local_rooms
-            .push_or_wait(room.clone(), work, peer, deadline, &self.shutdown)
+            .offer_or_wait(
+                room.clone(),
+                work,
+                peer,
+                kind.in_room(),
+                deadline,
+                &self.shutdown,
+            )
             .await;
-        if queued == Placed::TimedOut {
-            telemetry::room_request_overloaded();
-            if let Some(refusal) = refusal {
-                self.offer_room_reply(&pair, refusal);
+        match admitted {
+            Admitted::Queued | Admitted::Stopped => {}
+            Admitted::RoomFull(_) => self.refuse_room_full(&pair, &stanza, kind),
+            Admitted::TimedOut => {
+                telemetry::room_request_overloaded();
+                self.refuse_kind(
+                    &pair,
+                    &stanza,
+                    kind,
+                    self.busy("The room is busy; try again later."),
+                );
             }
         }
     }
@@ -669,7 +807,7 @@ impl Inner {
     }
 
     /// Answer a stanza that was not taken because its account had spent
-    /// its share of its domain's request rate, when it is one that is
+    /// a share of its domain's request rate, when it is one that is
     /// answered and the domain's allowance of such answers allowed it.
     fn refuse_spent(self: &Arc<Self>, pair: &Pair, stanza: &Stanza, answered: bool) {
         telemetry::room_request_account_limited();
@@ -677,6 +815,29 @@ impl Inner {
             return;
         }
         let error = self.busy("Too many requests from this account; try again later.");
+        if let Some(reply) = replies::error_reply(stanza, error) {
+            self.offer_room_reply(pair, reply);
+        }
+    }
+
+    /// Answer a stanza that was not taken because what already waits for
+    /// its room fills the room's share of the queues, as its kind is.
+    fn refuse_room_full(self: &Arc<Self>, pair: &Pair, stanza: &Stanza, kind: Kind) {
+        telemetry::room_request_room_full();
+        self.refuse_kind(
+            pair,
+            stanza,
+            kind,
+            self.busy("The room is busy; try again later."),
+        );
+    }
+
+    /// Answer a stanza that was not taken with `error` when its kind is
+    /// answered, if a place for the answer is free; drop it otherwise.
+    fn refuse_kind(self: &Arc<Self>, pair: &Pair, stanza: &Stanza, kind: Kind, error: StanzaError) {
+        if !kind.answered() {
+            return;
+        }
         if let Some(reply) = replies::error_reply(stanza, error) {
             self.offer_room_reply(pair, reply);
         }
@@ -725,6 +886,13 @@ impl Inner {
         let room = to.to_bare();
         let remote = principal.home().clone();
         let peer = remote.as_domain_ref().as_str().to_owned();
+        // This replica decides the room, so whether its sender holds a
+        // seat here says whether presence enters it.
+        let kind = kind_of(&stanza, || {
+            principal
+                .full()
+                .is_some_and(|occupant| !self.seats.holds(&room, &occupant))
+        });
         let work = RoomWork::Request(Box::new(LocalRoomRequest {
             principal,
             operation,
@@ -732,25 +900,33 @@ impl Inner {
             local,
             remote,
         }));
-        match self.local_rooms.try_push(room, work, &peer) {
+        match self.local_rooms.offer(room, work, &peer, kind.in_room()) {
             Ok(()) => CarriedRoomOutcome::Queued,
             Err(_) => CarriedRoomOutcome::Busy,
         }
     }
 
-    /// Take one stanza of `peer`'s allowance for the MUC service and, for
-    /// a stanza that counts against one, of `account`'s share of it; or
+    /// Take one stanza of `peer`'s allowance for the MUC service and of
+    /// the shares of `account` that a stanza of `kind` counts against; or
     /// say how long until the domain's rate allows the next, or that the
-    /// account has spent its share. `answers` says whether the stanza is
-    /// one whose refusal is answered.
-    fn take_allowance(&self, peer: &str, account: Option<&BareJid>, answers: bool) -> Spend {
+    /// account has spent a share.
+    ///
+    /// A join is never dropped: when its account's share of presence is
+    /// spent it is refused with an answer while the domain's allowance of
+    /// answered refusals lasts, and otherwise waits, holding its stream,
+    /// until the share allows it.
+    fn take_allowance(&self, peer: &str, account: &BareJid, kind: Kind) -> Spend {
         let rate = f64::from(self.limits.room_request_rate.max(1));
         let burst = f64::from(self.limits.room_request_burst.max(1));
         let account_rate = f64::from(self.limits.room_request_rate_per_account.max(1)).min(rate);
         let account_burst = f64::from(self.limits.room_request_burst_per_account.max(1)).min(burst);
+        let presence_rate = f64::from(self.limits.room_presence_rate_per_account.max(1)).min(rate);
+        let presence_burst =
+            f64::from(self.limits.room_presence_burst_per_account.max(1)).min(burst);
         let now = Instant::now();
         let mut allowances = lock(&self.allowances);
         let mut accounts = lock(&self.account_allowances);
+        let mut presences = lock(&self.presence_allowances);
         let peer = peer.to_owned();
         // A domain table full of spending domains cannot be: an admitted
         // domain has an entry only while it spends, and far fewer are
@@ -758,35 +934,65 @@ impl Inner {
         let Some(of_peer) = bucket(&mut allowances, &peer, rate, burst, now, ALLOWANCES) else {
             return Spend::Wait(Duration::from_secs_f64(1.0 / rate));
         };
-        let of_account = match account {
-            Some(account) => {
-                let share = bucket(
-                    &mut accounts,
-                    account,
-                    account_rate,
-                    account_burst,
-                    now,
-                    ACCOUNT_ALLOWANCES,
-                );
-                match share {
-                    Some(share) if share.tokens >= 1.0 => Some(share),
-                    // Spent, or no entry can be kept for it.
-                    _ => {
-                        let answered = answers && of_peer.refusals >= 1.0;
-                        if answered {
-                            of_peer.refusals -= 1.0;
-                        }
-                        return Spend::AccountSpent { answered };
+        let of_account = if kind.counts_against_account() {
+            let share = bucket(
+                &mut accounts,
+                account,
+                account_rate,
+                account_burst,
+                now,
+                ACCOUNT_ALLOWANCES,
+            );
+            match share {
+                Some(share) if share.tokens >= 1.0 => Some(share),
+                // Spent, or no entry can be kept for it.
+                _ => {
+                    let answered = kind.answered() && of_peer.refusals >= 1.0;
+                    if answered {
+                        of_peer.refusals -= 1.0;
                     }
+                    return Spend::AccountSpent { answered };
                 }
             }
-            None => None,
+        } else {
+            None
+        };
+        let of_presence = if kind.counts_against_presence() {
+            let share = bucket(
+                &mut presences,
+                account,
+                presence_rate,
+                presence_burst,
+                now,
+                ACCOUNT_ALLOWANCES,
+            );
+            match share {
+                Some(share) if share.tokens >= 1.0 => Some(share),
+                spent => {
+                    if kind != Kind::Join {
+                        return Spend::AccountSpent { answered: false };
+                    }
+                    if of_peer.refusals >= 1.0 {
+                        of_peer.refusals -= 1.0;
+                        return Spend::AccountSpent { answered: true };
+                    }
+                    let missing = spent.map_or(1.0, |share| 1.0 - share.tokens);
+                    return Spend::Wait(Duration::from_secs_f64(
+                        (missing / presence_rate).max(0.001),
+                    ));
+                }
+            }
+        } else {
+            None
         };
         if of_peer.tokens < 1.0 {
             return Spend::Wait(Duration::from_secs_f64((1.0 - of_peer.tokens) / rate));
         }
         of_peer.tokens -= 1.0;
         if let Some(share) = of_account {
+            share.tokens -= 1.0;
+        }
+        if let Some(share) = of_presence {
             share.tokens -= 1.0;
         }
         Spend::Taken

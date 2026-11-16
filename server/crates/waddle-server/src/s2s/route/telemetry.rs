@@ -159,6 +159,18 @@ pub(super) fn room_request_not_carried() {
     );
 }
 
+/// A stanza for the MUC service was not taken because what already waited
+/// for its room filled the room's share of the queues; it was answered as
+/// its kind is, and its stream went on.
+pub(super) fn room_request_room_full() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.room_full",
+        "{stanza}",
+        "Stanzas from S2S streams to the MUC service not taken because their room's share of the room request queues was full.",
+        1,
+    );
+}
+
 /// A stanza for the MUC service was not taken because its account had
 /// spent its share of its domain's request rate.
 pub(super) fn room_request_account_limited() {

@@ -199,6 +199,22 @@ pub struct RouterLimits {
     /// How many such stanzas one remote account may send at once before
     /// its rate applies. Never above the domain's burst.
     pub room_request_burst_per_account: u32,
+    /// Of its domain's rate, the available presence one remote account may
+    /// address to occupant JIDs a second, on average: joins, changes of
+    /// availability or nickname, and entering a room again, each of which
+    /// makes the room send presence to its occupants. A change counts
+    /// against this and the account's other share; a join against this
+    /// alone, so that an account's other stanzas never cost it a join. A
+    /// change beyond it is dropped. A join beyond it is answered with
+    /// `resource-constraint` while its domain's allowance of answered
+    /// refusals lasts, and otherwise waits for it, holding its stream: a
+    /// join is never dropped. Never above the domain's rate.
+    pub room_presence_rate_per_account: u32,
+    /// How many such presence stanzas one remote account may send at once
+    /// before its rate applies: by default as many as the seats it may
+    /// hold, so that a client entering every room it may at once is not
+    /// refused. Never above the domain's burst.
+    pub room_presence_burst_per_account: u32,
     /// Rooms whose requests are being placed at once: asked of the replica
     /// that holds them, in a deployment that keeps a room on one replica.
     pub room_placements: usize,
@@ -285,6 +301,8 @@ impl Default for RouterLimits {
             room_request_burst: 200,
             room_request_rate_per_account: 10,
             room_request_burst_per_account: 40,
+            room_presence_rate_per_account: 1,
+            room_presence_burst_per_account: 64,
             room_placements: 64,
             room_placements_per_peer: 8,
             room_placement_timeout: Duration::from_secs(5),
@@ -589,8 +607,12 @@ struct Inner {
     /// Each remote domain's allowance of stanzas for the MUC service.
     /// Taken before `account_allowances` when both are held.
     allowances: Mutex<HashMap<String, Allowance>>,
-    /// Each remote account's share of its domain's allowance.
+    /// Each remote account's share of its domain's allowance. Taken
+    /// before `presence_allowances` when both are held.
     account_allowances: Mutex<HashMap<BareJid, Allowance>>,
+    /// Each remote account's share of its domain's allowance for the
+    /// presence it addresses to occupant JIDs.
+    presence_allowances: Mutex<HashMap<BareJid, Allowance>>,
     /// Requests for local rooms waiting to be placed, where the room host
     /// keeps rooms on other replicas.
     placements: Placements,
@@ -684,6 +706,7 @@ impl S2sRouter {
             ),
             allowances: Mutex::new(HashMap::new()),
             account_allowances: Mutex::new(HashMap::new()),
+            presence_allowances: Mutex::new(HashMap::new()),
             placements: Placements::new(PlacementBounds {
                 waiting: options.limits.room_requests,
                 waiting_per_room: options.limits.room_requests_per_room,
