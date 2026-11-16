@@ -2,9 +2,12 @@
 //! `server/docs/planning/s2s-account-traffic-2047.md`), with a recording
 //! account side in place of the WebSocket one: what reaches the account
 //! side and in which order, the answers the router sends back and their
-//! bound, IQ requests to local resources and their correlation, the bound
-//! on remote requests per domain, and a local account's messages and
-//! presence for remote JIDs once the account side is attached.
+//! bound, the deadline after which the router abandons the account side's
+//! work, IQ requests to local resources and their correlation, the bound
+//! on remote requests per domain, a domain the account side no longer
+//! admits, and a local account's messages and presence for remote JIDs
+//! once the account side is attached, refused for a retired account and
+//! beyond the account's share of the pair queues.
 //!
 //! `home-a.test` runs the router; `home-b.test` sends through its own
 //! connection manager and keeps what it receives. No PostgreSQL, SpiceDB or
@@ -31,7 +34,7 @@ use waddle_server::destination::{
     offer_stanza, IqOffer, StanzaOffer, UnroutableReason, REMOTE_ROUTE_OFFER_TIMEOUT,
 };
 use waddle_server::s2s::route::{
-    LocalAccounts, RemotePrincipal, RouterLimits, MAX_ACCOUNT_REPLIES,
+    AccountWork, LocalAccounts, RemotePrincipal, RouterLimits, MAX_ACCOUNT_REPLIES,
 };
 use waddle_xmpp::xep::xep0199::NS_PING;
 use waddle_xmpp::Stanza;
@@ -45,14 +48,21 @@ const ALICE: &str = "alice@home-a.test";
 const ALICE_PHONE: &str = "alice@home-a.test/phone";
 
 /// An account side that records what reaches it, answers with what a case
-/// gives it, and admits IQ requests while told to.
+/// gives it, admits IQ requests while told to, and takes as long as a case
+/// tells it for a given stanza.
 #[derive(Default)]
 struct RecordingAccounts {
     received: Mutex<Vec<(Jid, Jid, Stanza)>>,
     answers: Mutex<HashMap<String, Vec<Stanza>>>,
     admit: AtomicBool,
     occupant_requests: Mutex<Vec<bool>>,
-    delay: Mutex<Option<Duration>>,
+    delays: Mutex<HashMap<String, Duration>>,
+    /// The stanzas whose work the router had abandoned when it ended.
+    abandoned: Mutex<Vec<String>>,
+    /// The sender's domain is no longer admitted.
+    domain_refused: AtomicBool,
+    /// The local account has been retired.
+    retired: AtomicBool,
 }
 
 impl RecordingAccounts {
@@ -77,10 +87,17 @@ impl RecordingAccounts {
         };
     }
 
-    fn delay(&self, delay: Duration) {
-        match self.delay.lock() {
-            Ok(mut held) => *held = Some(delay),
-            Err(poisoned) => *poisoned.into_inner() = Some(delay),
+    fn delay(&self, id: &str, delay: Duration) {
+        match self.delays.lock() {
+            Ok(mut delays) => delays.insert(id.to_owned(), delay),
+            Err(poisoned) => poisoned.into_inner().insert(id.to_owned(), delay),
+        };
+    }
+
+    fn abandoned(&self) -> Vec<String> {
+        match self.abandoned.lock() {
+            Ok(abandoned) => abandoned.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
 }
@@ -95,15 +112,31 @@ fn stanza_id(stanza: &Stanza) -> Option<String> {
 
 #[async_trait]
 impl LocalAccounts for RecordingAccounts {
-    async fn receive(&self, principal: &RemotePrincipal, to: &Jid, stanza: Stanza) -> Vec<Stanza> {
-        let delay = match self.delay.lock() {
-            Ok(held) => *held,
-            Err(poisoned) => *poisoned.into_inner(),
+    fn admits(&self, _principal: &RemotePrincipal) -> bool {
+        !self.domain_refused.load(Ordering::SeqCst)
+    }
+
+    async fn receive(
+        &self,
+        principal: &RemotePrincipal,
+        to: &Jid,
+        stanza: Stanza,
+        work: &AccountWork,
+    ) -> Vec<Stanza> {
+        let id = stanza_id(&stanza).unwrap_or_default();
+        let delay = match self.delays.lock() {
+            Ok(delays) => delays.get(&id).copied(),
+            Err(poisoned) => poisoned.into_inner().get(&id).copied(),
         };
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
-        let id = stanza_id(&stanza).unwrap_or_default();
+        if work.abandoned() {
+            match self.abandoned.lock() {
+                Ok(mut abandoned) => abandoned.push(id.clone()),
+                Err(poisoned) => poisoned.into_inner().push(id.clone()),
+            }
+        }
         match self.received.lock() {
             Ok(mut received) => received.push((principal.address().clone(), to.clone(), stanza)),
             Err(poisoned) => {
@@ -129,6 +162,10 @@ impl LocalAccounts for RecordingAccounts {
             Err(poisoned) => poisoned.into_inner().push(room_occupant),
         }
         self.admit.load(Ordering::SeqCst)
+    }
+
+    async fn may_send(&self, _account: &jid::BareJid) -> bool {
+        !self.retired.load(Ordering::SeqCst)
     }
 }
 
@@ -369,13 +406,14 @@ async fn remote_requests_beyond_a_domains_share_are_refused_with_resource_constr
 }
 
 #[tokio::test]
-async fn a_slow_account_side_does_not_hold_the_worker_beyond_its_deadline() {
+async fn a_slow_account_side_is_abandoned_at_its_deadline_and_the_sender_moves_on() {
     let limits = RouterLimits {
         account_timeout: Duration::from_millis(200),
         ..RouterLimits::default()
     };
     let (_pki, _a, b, captured, accounts) = with_accounts(limits).await;
-    accounts.delay(Duration::from_secs(5));
+    let slow = Duration::from_secs(3);
+    accounts.delay("slow", slow);
     accounts.answer(
         "slow",
         vec![Stanza::Presence(presence(
@@ -386,6 +424,7 @@ async fn a_slow_account_side_does_not_hold_the_worker_beyond_its_deadline() {
         ))],
     );
 
+    let started = tokio::time::Instant::now();
     send(
         &b,
         HOME_B,
@@ -393,8 +432,79 @@ async fn a_slow_account_side_does_not_hold_the_worker_beyond_its_deadline() {
         presence(BOB, ALICE, PresenceType::Subscribe, "slow"),
     )
     .await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The same sender's next stanza is decided after the slow one's
+    // deadline, long before its work ends.
+    send(&b, HOME_B, HOME_A, chat(BOB_PHONE, ALICE, "next")).await;
+    wait_for(ARRIVES, || {
+        accounts
+            .received_ids()
+            .contains(&"next".to_owned())
+            .then_some(())
+    })
+    .await
+    .expect("the next stanza reaches the account side");
+    assert!(
+        started.elapsed() < slow,
+        "the worker waited for the slow stanza: {:?}",
+        started.elapsed()
+    );
+    assert!(!accounts.received_ids().contains(&"slow".to_owned()));
+
+    // The slow work ends abandoned, after the next stanza, and its answer
+    // never leaves.
+    wait_for(ARRIVES, || {
+        accounts
+            .abandoned()
+            .contains(&"slow".to_owned())
+            .then_some(())
+    })
+    .await
+    .expect("the slow work sees that it was abandoned");
+    assert_eq!(accounts.received_ids(), vec!["next", "slow"]);
+    let control = ping(BOB_PHONE, HOME_A, "after-slow");
+    send(&b, HOME_B, HOME_A, control).await;
+    wait_for(ARRIVES, || {
+        captured.with_id("after-slow").into_iter().next()
+    })
+    .await
+    .expect("the server answers a ping on the same pair after the slow work ended");
     assert!(captured.with_id("late").is_empty());
+}
+
+#[tokio::test]
+async fn a_request_from_a_domain_the_account_side_no_longer_admits_is_not_answered() {
+    let (_pki, a, b, captured, accounts) = with_accounts(RouterLimits::default()).await;
+    accounts.admit.store(true, Ordering::SeqCst);
+    accounts.domain_refused.store(true, Ordering::SeqCst);
+
+    send(
+        &b,
+        HOME_B,
+        HOME_A,
+        ping(BOB_PHONE, ALICE_PHONE, "unadmitted"),
+    )
+    .await;
+    send(
+        &b,
+        HOME_B,
+        HOME_A,
+        ping(BOB_PHONE, HOME_A, "unadmitted-control"),
+    )
+    .await;
+    wait_for(ARRIVES, || {
+        captured.with_id("unadmitted-control").into_iter().next()
+    })
+    .await
+    .expect("the server answers a ping on the same pair");
+    tokio::time::sleep(QUIET).await;
+
+    assert!(captured.with_id("unadmitted").is_empty());
+    assert!(a.delivery.iqs("unadmitted").is_empty());
+    let asked = match accounts.occupant_requests.lock() {
+        Ok(seen) => seen.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    assert!(asked.is_empty(), "the request was decided: {asked:?}");
 }
 
 #[tokio::test]
@@ -426,6 +536,89 @@ async fn with_an_account_side_a_local_accounts_direct_message_and_subscription_l
             .await
             .unwrap_or_else(|| panic!("`{id}` leaves"));
     }
+}
+
+#[tokio::test]
+async fn a_retired_accounts_messages_and_presence_never_leave() {
+    let (_pki, a, b, captured, accounts) = with_accounts(RouterLimits::default()).await;
+    accounts.retired.store(true, Ordering::SeqCst);
+
+    for stanza in [
+        Stanza::Message(chat(ALICE_PHONE, BOB, "retired-dm")),
+        Stanza::Presence(presence(ALICE, BOB, PresenceType::Subscribe, "retired-sub")),
+        Stanza::Presence(presence(ALICE, BOB, PresenceType::Probe, "retired-probe")),
+        Stanza::Presence(presence(
+            ALICE_PHONE,
+            BOB,
+            PresenceType::None,
+            "retired-broadcast",
+        )),
+    ] {
+        let refused = offer(&a, stanza).await;
+        assert!(
+            matches!(
+                refused,
+                StanzaOffer::Refused {
+                    reason: UnroutableReason::RefusedByPolicy,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+    }
+    send(
+        &b,
+        HOME_B,
+        HOME_A,
+        ping(BOB_PHONE, HOME_A, "retired-control"),
+    )
+    .await;
+    wait_for(ARRIVES, || {
+        captured.with_id("retired-control").into_iter().next()
+    })
+    .await
+    .expect("the server answers a ping on the same pair");
+    tokio::time::sleep(QUIET).await;
+    assert!(captured
+        .stanzas()
+        .iter()
+        .all(|stanza| stanza.attr("id") == Some("retired-control")));
+}
+
+#[tokio::test]
+async fn an_account_beyond_its_share_of_the_pair_queues_is_refused_as_a_full_queue_refuses() {
+    let limits = RouterLimits {
+        account_queue_per_sender: 0,
+        ..RouterLimits::default()
+    };
+    let (_pki, a, _b, _captured, _accounts) = with_accounts(limits).await;
+
+    let refused = offer(&a, Stanza::Message(chat(ALICE_PHONE, BOB, "share"))).await;
+    assert!(
+        matches!(
+            refused,
+            StanzaOffer::Refused {
+                reason: UnroutableReason::EgressBusy,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    let refused = offer(
+        &a,
+        Stanza::Presence(presence(ALICE, BOB, PresenceType::Probe, "share-probe")),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            StanzaOffer::Refused {
+                reason: UnroutableReason::EgressBusy,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]

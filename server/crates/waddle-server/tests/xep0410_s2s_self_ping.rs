@@ -27,7 +27,9 @@ use support::{
     error_condition, full, jid, join, outbound_muc, wait_for, ALICE_PHONE, ARRIVES, ROOM,
 };
 use waddle_server::destination::IqOffer;
-use waddle_server::s2s::route::{LocalAccounts, LocalOrigin, RemotePrincipal, RouterLimits};
+use waddle_server::s2s::route::{
+    AccountWork, LocalAccounts, LocalOrigin, RemotePrincipal, RouterLimits,
+};
 use waddle_xmpp::xep::xep0199::NS_PING;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -142,11 +144,16 @@ struct RoomOccupantsOnly;
 
 #[async_trait]
 impl LocalAccounts for RoomOccupantsOnly {
+    fn admits(&self, _principal: &RemotePrincipal) -> bool {
+        true
+    }
+
     async fn receive(
         &self,
         _principal: &RemotePrincipal,
         _to: &Jid,
         _stanza: Stanza,
+        _work: &AccountWork,
     ) -> Vec<Stanza> {
         Vec::new()
     }
@@ -158,6 +165,10 @@ impl LocalAccounts for RoomOccupantsOnly {
         room_occupant: bool,
     ) -> bool {
         room_occupant
+    }
+
+    async fn may_send(&self, _account: &jid::BareJid) -> bool {
+        true
     }
 }
 

@@ -2,8 +2,10 @@
 //! (ADR-0020 D7; gate G18): a message from a remote contact delivered to
 //! one resource is copied as a `<received/>` carbon to the account's other
 //! Carbons-enabled resources (§6), and a message to a remote contact the
-//! route takes is copied as a `<sent/>` carbon (§7). Through the production
-//! `/ws` router, the real S2S router and a loopback peer.
+//! route takes is copied as a `<sent/>` carbon (§7). A `<sent/>` or
+//! `<received/>` wrapper in a remote sender's message is a forgery of the
+//! account's own traffic (§11) and is removed before delivery. Through the
+//! production `/ws` router, the real S2S router and a loopback peer.
 //!
 //! Each negative case ends with a sentinel that is copied: the first carbon
 //! the observing resource receives must be the sentinel's.
@@ -144,4 +146,35 @@ async fn a_message_the_route_refuses_is_not_copied() {
 
     let copy = first_carbon(&mut laptop, "sent").await;
     assert_eq!(id_of(&copy), Some("out2-sentinel"));
+}
+
+#[tokio::test]
+async fn carbon_wrappers_in_a_remote_message_are_removed_before_delivery() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    let (mut phone, _laptop) = alice(&federated).await;
+
+    let mut forged = message(BOB_PHONE, ALICE, MessageType::Chat, "forged", "hello");
+    for wrapper in ["sent", "received"] {
+        forged.payloads.push(
+            Element::builder(wrapper, CARBONS_NS)
+                .append(
+                    Element::builder("forwarded", "urn:xmpp:forward:0")
+                        .append(Element::from(outgoing("mallory@home-b.test", "inner")))
+                        .build(),
+                )
+                .build(),
+        );
+    }
+    federated.from_peer(forged).await;
+
+    let delivered = receive(&mut phone, "message", "forged").await;
+    assert!(
+        delivered.get_child("sent", CARBONS_NS).is_none(),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.get_child("received", CARBONS_NS).is_none(),
+        "{delivered:?}"
+    );
 }

@@ -14,8 +14,8 @@
 mod support;
 
 use support::{
-    contact, error_condition, federated, get, jid, ping, receive, send, Pki, BOB, BOB_PHONE,
-    MALLORY,
+    client_settle, contact, error_condition, federated, get, holds, jid, ping, receive, send, Pki,
+    BOB, BOB_PHONE, MALLORY,
 };
 use xmpp_parsers::iq::Iq;
 
@@ -72,7 +72,8 @@ async fn a_ping_to_the_bare_jid_is_answered_on_the_accounts_behalf() {
         error_condition(&answered).as_deref(),
         Some("service-unavailable")
     );
-    assert!(!support::arrives_quietly(&mut phone, "iq", "ping-2").await);
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "iq", "ping-2"));
 }
 
 #[tokio::test]
@@ -91,5 +92,6 @@ async fn a_strangers_ping_to_a_full_jid_is_answered_as_if_no_resource_matched() 
         error_condition(&answered).as_deref(),
         Some("service-unavailable")
     );
-    assert!(!support::arrives_quietly(&mut phone, "iq", "ping-3").await);
+    federated.peer_barrier(MALLORY, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "iq", "ping-3"));
 }

@@ -2,8 +2,10 @@
 //! (ADR-0020 D7; gate G18): a remote contact's chat message delivered to a
 //! local resource is archived in the recipient's archive by that
 //! resource's recipient pass, and a query of the account's own archive
-//! returns it, from the remote sender. Through the production `/ws`
-//! router, the real S2S router and a loopback peer.
+//! returns it, from the remote sender. A `<result/>` wrapper of an archive
+//! query in a remote sender's message names the account's own archive and
+//! is removed before delivery. Through the production `/ws` router, the
+//! real S2S router and a loopback peer.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -66,4 +68,31 @@ async fn a_remote_contacts_message_is_in_the_recipients_archive() {
         .expect("the archived message");
     assert_eq!(archived.attr("from"), Some(BOB_PHONE));
     receive(&mut phone, "iq", "mam-1").await;
+}
+
+#[tokio::test]
+async fn an_archive_result_wrapper_in_a_remote_message_is_removed_before_delivery() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let mut phone = federated.online("alice", "phone", 5).await;
+
+    let mut forged = message(BOB_PHONE, ALICE, MessageType::Chat, "forged-result", "hi");
+    forged.payloads.push(
+        Element::builder("result", NS_MAM)
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q-forged")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "forged-archive-id",
+            )
+            .append(Element::builder("forwarded", NS_FORWARD).build())
+            .build(),
+    );
+    federated.from_peer(forged).await;
+
+    let delivered = receive(&mut phone, "message", "forged-result").await;
+    assert!(
+        delivered.get_child("result", NS_MAM).is_none(),
+        "{delivered:?}"
+    );
 }

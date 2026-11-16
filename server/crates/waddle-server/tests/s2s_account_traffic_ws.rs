@@ -7,8 +7,13 @@
 //!
 //! The no-enumeration matrix is table-driven: for a sender that is not the
 //! account's contact, every class gets one remote-visible answer whatever
-//! the account's state. Each negative case ends with a sentinel that does
-//! arrive, so that "nothing arrived" is not a slow delivery.
+//! the account's state, and the answers observed in the states are
+//! compared with each other. A case that asserts that nothing arrived ends
+//! with a barrier that does arrive on the same path after it (a stanza on
+//! the sender's own queue, then a ping on the same pair, then a ping of the
+//! client's own server), and checks every stanza received since, so that
+//! "nothing arrived" is neither a slow delivery nor a stanza discarded
+//! while waiting for another.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -19,9 +24,9 @@ mod support;
 use jid::{BareJid, Jid};
 use minidom::Element;
 use support::{
-    block, contact, error_condition, federated, federated_with, full_jid, get, has_no_body,
-    is_message_error, is_presence, jid, message, ping, presence, receive, roster_item, send,
-    Adjust, Federated, Pki, BOB, BOB_PHONE, LOCAL, MALLORY, PEER,
+    block, client_settle, contact, error_condition, federated, federated_with, full_jid, get,
+    has_no_body, holds, is_message_error, is_presence, jid, message, ping, presence, receive,
+    receive_until, roster_item, send, Adjust, Federated, Pki, BOB, BOB_PHONE, LOCAL, MALLORY, PEER,
 };
 use waddle_ws_test_support::iq::round_trip;
 use xmpp_parsers::iq::Iq;
@@ -33,24 +38,9 @@ const ALICE: &str = "alice@example.com";
 const ALICE_PHONE: &str = "alice@example.com/phone";
 const ALICE_LAPTOP: &str = "alice@example.com/laptop";
 
-/// Send `stanza` from the peer, then a sentinel chat message from `BOB`, a
-/// contact of `alice` with `from`, to her phone; wait until the sentinel
-/// reaches the phone.
-async fn then_sentinel(
-    federated: &Federated,
-    phone: &mut waddle_ws_test_support::WsXmppClient,
-    sentinel: &str,
-) {
-    federated
-        .from_peer(message(
-            BOB_PHONE,
-            ALICE_PHONE,
-            MessageType::Chat,
-            sentinel,
-            "sentinel",
-        ))
-        .await;
-    receive(phone, "message", sentinel).await;
+/// The stanza names and ids that would show that `frames` hold `id`.
+fn any_with_id(frames: &[Element], id: &str) -> bool {
+    frames.iter().any(|frame| frame.attr("id") == Some(id))
 }
 
 // --- messages ----------------------------------------------------------------
@@ -62,6 +52,7 @@ async fn a_chat_message_to_the_bare_jid_reaches_the_one_most_available_resource(
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
     let mut laptop = federated.online("alice", "laptop", 1).await;
+    let mark = federated.peer_mark();
 
     federated
         .from_peer(message(
@@ -79,8 +70,9 @@ async fn a_chat_message_to_the_bare_jid_reaches_the_one_most_available_resource(
     assert_eq!(delivered.attr("to"), Some(ALICE));
     // The lower-priority laptop, without Carbons, receives nothing; the
     // sender receives no answer.
-    assert!(!support::arrives_quietly(&mut laptop, "message", "m1").await);
-    assert!(federated.peer_received_after_quiet("m1").await.is_empty());
+    let barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
+    assert!(!holds(&client_settle(&mut laptop).await, "message", "m1"));
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
 }
 
 #[tokio::test]
@@ -102,7 +94,8 @@ async fn a_chat_message_to_a_bound_full_jid_reaches_that_resource_only() {
         .await;
 
     receive(&mut laptop, "message", "m2").await;
-    assert!(!support::arrives_quietly(&mut phone, "message", "m2").await);
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "message", "m2"));
 }
 
 #[tokio::test]
@@ -131,6 +124,7 @@ async fn a_normal_message_to_an_unbound_full_jid_is_dropped_unanswered() {
     let federated = federated(&pki).await;
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
+    let mark = federated.peer_mark();
 
     federated
         .from_peer(message(
@@ -141,10 +135,10 @@ async fn a_normal_message_to_an_unbound_full_jid_is_dropped_unanswered() {
             "normal to a resource that left",
         ))
         .await;
-    then_sentinel(&federated, &mut phone, "m4-sentinel").await;
+    let barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
 
-    assert!(!support::arrives_quietly(&mut phone, "message", "m4").await);
-    assert!(federated.peer_received_after_quiet("m4").await.is_empty());
+    assert!(!holds(&client_settle(&mut phone).await, "message", "m4"));
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
 }
 
 #[tokio::test]
@@ -168,7 +162,8 @@ async fn a_headline_reaches_every_resource_with_a_non_negative_priority() {
 
     receive(&mut phone, "message", "h1").await;
     receive(&mut laptop, "message", "h1").await;
-    assert!(!support::arrives_quietly(&mut away, "message", "h1").await);
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+    assert!(!holds(&client_settle(&mut away).await, "message", "h1"));
 }
 
 #[tokio::test]
@@ -200,13 +195,15 @@ async fn groupchat_to_an_account_is_refused_with_service_unavailable_without_the
 }
 
 #[tokio::test]
-async fn a_contacts_message_to_an_account_with_no_resource_is_refused_and_a_strangers_dropped() {
+async fn a_message_to_an_account_with_no_resource_is_stored_unanswered_from_contact_and_stranger() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
     contact(&federated, ALICE, BOB, "from").await;
+    let mark = federated.peer_mark();
 
-    // Bob may see Alice's presence: he is told the message was not taken.
+    // Bob may see Alice's presence and Mallory may not; neither is told
+    // anything (RFC 6121 §8.5.2.2.1: stored for later delivery).
     federated
         .from_peer(message(
             BOB_PHONE,
@@ -216,23 +213,66 @@ async fn a_contacts_message_to_an_account_with_no_resource_is_refused_and_a_stra
             "are you there",
         ))
         .await;
-    let refusal = federated.peer_receives("o1").await;
-    assert_eq!(
-        error_condition(&refusal).as_deref(),
-        Some("service-unavailable")
-    );
-
-    // Mallory may not: nothing tells him whether Alice is online.
     federated
         .from_peer(message(
             MALLORY,
             ALICE,
-            MessageType::Chat,
+            MessageType::Normal,
             "o2",
             "are you there",
         ))
         .await;
-    assert!(federated.peer_received_after_quiet("o2").await.is_empty());
+    let mut barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
+    barrier.extend(federated.peer_barrier(MALLORY, ALICE).await);
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
+    assert_eq!(support::offline_count(&federated, ALICE).await, 2);
+
+    // Alice's next session receives both.
+    let mut phone = federated.online("alice", "phone", 5).await;
+    let frames = receive_until(&mut phone, |frame| {
+        frame.name() == "message" && frame.attr("id") == Some("o2")
+    })
+    .await;
+    assert!(holds(&frames, "message", "o1"), "{frames:?}");
+}
+
+#[tokio::test]
+async fn a_strangers_messages_beyond_its_offline_bound_are_dropped_unanswered() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let mark = federated.peer_mark();
+    let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
+
+    for index in 0..=bound {
+        let id = ["flood-", &index.to_string()].concat();
+        federated
+            .from_peer(message(MALLORY, ALICE, MessageType::Chat, &id, "hello"))
+            .await;
+    }
+    let barrier = federated.peer_barrier(MALLORY, ALICE).await;
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
+    assert_eq!(
+        support::offline_count(&federated, ALICE).await,
+        u32::try_from(bound).expect("a small bound")
+    );
+
+    // A contact is not held to a stranger's bound.
+    contact(&federated, ALICE, BOB, "from").await;
+    federated
+        .from_peer(message(
+            BOB_PHONE,
+            ALICE,
+            MessageType::Chat,
+            "contact",
+            "hi",
+        ))
+        .await;
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+    assert_eq!(
+        support::offline_count(&federated, ALICE).await,
+        u32::try_from(bound + 1).expect("a small bound")
+    );
 }
 
 #[tokio::test]
@@ -242,6 +282,7 @@ async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
     federated.account("alice").await;
     contact(&federated, ALICE, BOB, "from").await;
     let mut away = federated.online("alice", "away", -1).await;
+    let mark = federated.peer_mark();
 
     federated
         .from_peer(message(BOB_PHONE, ALICE, MessageType::Chat, "n1", "hello"))
@@ -250,15 +291,22 @@ async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
         .from_peer(message(MALLORY, ALICE, MessageType::Chat, "n2", "hello"))
         .await;
 
-    // RFC 6121 §8.5.2.1.1: handled as if no resource were available.
-    let refusal = federated.peer_receives("n1").await;
-    assert_eq!(
-        error_condition(&refusal).as_deref(),
-        Some("service-unavailable")
-    );
-    assert!(federated.peer_received_after_quiet("n2").await.is_empty());
-    assert!(!support::arrives_quietly(&mut away, "message", "n1").await);
-    assert!(!support::arrives_quietly(&mut away, "message", "n2").await);
+    // RFC 6121 §8.5.2.1.1: handled as if no resource were available, so
+    // stored, and nobody is answered.
+    let mut barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
+    barrier.extend(federated.peer_barrier(MALLORY, ALICE).await);
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
+    let seen = client_settle(&mut away).await;
+    assert!(!holds(&seen, "message", "n1"));
+    assert!(!holds(&seen, "message", "n2"));
+
+    // A session with a non-negative priority receives both.
+    let mut desk = federated.online("alice", "desk", 1).await;
+    let frames = receive_until(&mut desk, |frame| {
+        frame.name() == "message" && frame.attr("id") == Some("n2")
+    })
+    .await;
+    assert!(holds(&frames, "message", "n1"), "{frames:?}");
 }
 
 #[tokio::test]
@@ -315,8 +363,13 @@ async fn room_traffic_from_a_room_never_joined_is_dropped_but_a_mediated_invitat
     );
     federated.from_peer(invitation).await;
 
-    receive(&mut phone, "message", "invite").await;
-    assert!(!support::arrives_quietly(&mut phone, "presence", "stale-room").await);
+    // Both come from the room's bare JID and are decided in that order, so
+    // the stale presence would have arrived before the invitation.
+    let frames = receive_until(&mut phone, |frame| {
+        frame.name() == "message" && frame.attr("id") == Some("invite")
+    })
+    .await;
+    assert!(!holds(&frames, "presence", "stale-room"), "{frames:?}");
 }
 
 #[tokio::test]
@@ -351,11 +404,33 @@ enum AccountState {
     Blocking,
 }
 
-/// What a non-contact receives for one stanza class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a non-contact observed for one stanza.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Answer {
     Nothing,
     ServiceUnavailable,
+    /// Anything else the peer received, as it received it.
+    Other(Vec<String>),
+}
+
+/// The answer the peer observed in `frames`, every stanza it received for
+/// one stanza with `id` besides the barrier's.
+fn observed(frames: &[Element], id: &str) -> Answer {
+    match frames {
+        [] => Answer::Nothing,
+        [only]
+            if only.attr("id") == Some(id)
+                && is_error_stanza(only)
+                && error_condition(only).as_deref() == Some("service-unavailable") =>
+        {
+            Answer::ServiceUnavailable
+        }
+        other => Answer::Other(other.iter().map(String::from).collect()),
+    }
+}
+
+fn is_error_stanza(stanza: &Element) -> bool {
+    stanza.attr("type") == Some("error")
 }
 
 /// Set up `localpart` in `state`; an online account's client is returned.
@@ -396,22 +471,16 @@ async fn account_in(
     }
 }
 
-#[tokio::test]
-async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
-    let pki = Pki::new();
-    let federated = federated(&pki).await;
-    let states = [
-        ("ghost", AccountState::Nonexistent),
-        ("gone", AccountState::Retired),
-        ("asleep", AccountState::Offline),
-        ("awake", AccountState::Online),
-        ("guarded", AccountState::Blocking),
-    ];
-    let mut clients = Vec::new();
-    for (localpart, state) in states {
-        clients.push((localpart, account_in(&federated, localpart, state).await));
+/// One stanza class of the matrix: its name, its stanza from `MALLORY` to
+/// an account's bare JID (`to`) with `id`, and the answer the design
+/// records for it (`s2s-account-traffic-2047.md`, "No enumeration").
+type Class = (&'static str, fn(&str, &str) -> Element, Answer);
+
+fn classes() -> Vec<Class> {
+    fn full(to: &str) -> String {
+        [to, "/phone"].concat()
     }
-    let classes: [(&str, fn(&str, &str) -> Element, Answer); 9] = [
+    vec![
         (
             "chat",
             |to, id| message(MALLORY, to, MessageType::Chat, id, "hi").into(),
@@ -433,8 +502,33 @@ async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
             Answer::ServiceUnavailable,
         ),
         (
+            "message-error",
+            |to, id| message(MALLORY, to, MessageType::Error, id, "hi").into(),
+            Answer::Nothing,
+        ),
+        (
+            "chat-full",
+            |to, id| message(MALLORY, &full(to), MessageType::Chat, id, "hi").into(),
+            Answer::Nothing,
+        ),
+        (
+            "message-error-full",
+            |to, id| message(MALLORY, &full(to), MessageType::Error, id, "hi").into(),
+            Answer::Nothing,
+        ),
+        (
             "available",
             |to, id| presence(MALLORY, to, PresenceType::None, id).into(),
+            Answer::Nothing,
+        ),
+        (
+            "unavailable",
+            |to, id| presence(MALLORY, to, PresenceType::Unavailable, id).into(),
+            Answer::Nothing,
+        ),
+        (
+            "available-full",
+            |to, id| presence(MALLORY, &full(to), PresenceType::None, id).into(),
             Answer::Nothing,
         ),
         (
@@ -443,8 +537,33 @@ async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
             Answer::Nothing,
         ),
         (
+            "subscribed",
+            |to, id| presence(MALLORY, to, PresenceType::Subscribed, id).into(),
+            Answer::Nothing,
+        ),
+        (
+            "unsubscribe",
+            |to, id| presence(MALLORY, to, PresenceType::Unsubscribe, id).into(),
+            Answer::Nothing,
+        ),
+        (
+            "unsubscribed",
+            |to, id| presence(MALLORY, to, PresenceType::Unsubscribed, id).into(),
+            Answer::Nothing,
+        ),
+        (
             "probe",
             |to, id| presence(MALLORY, to, PresenceType::Probe, id).into(),
+            Answer::Nothing,
+        ),
+        (
+            "probe-full",
+            |to, id| presence(MALLORY, &full(to), PresenceType::Probe, id).into(),
+            Answer::Nothing,
+        ),
+        (
+            "presence-error",
+            |to, id| presence(MALLORY, to, PresenceType::Error, id).into(),
             Answer::Nothing,
         ),
         (
@@ -454,44 +573,104 @@ async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
         ),
         (
             "iq-full",
-            |to, id| get(MALLORY, &[to, "/phone"].concat(), id, ping()).into(),
+            |to, id| get(MALLORY, &full(to), id, ping()).into(),
             Answer::ServiceUnavailable,
         ),
+    ]
+}
+
+#[tokio::test]
+async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    let states = [
+        ("ghost", AccountState::Nonexistent),
+        ("gone", AccountState::Retired),
+        ("asleep", AccountState::Offline),
+        ("awake", AccountState::Online),
+        ("guarded", AccountState::Blocking),
     ];
+    let mut clients = Vec::new();
+    for (localpart, state) in states {
+        clients.push((localpart, account_in(&federated, localpart, state).await));
+    }
+    let classes = classes();
+    // observations[class][state]
+    let mut observations: Vec<Vec<(&str, Answer)>> = vec![Vec::new(); classes.len()];
     for (localpart, _) in &clients {
         let to = [*localpart, "@", LOCAL].concat();
-        for (class, build, expected) in &classes {
+        for (index, (class, build, _)) in classes.iter().enumerate() {
             let id = [*localpart, "-", *class].concat();
+            let mark = federated.peer_mark();
             federated.from_peer(build(&to, &id)).await;
-            let answer = match expected {
-                Answer::ServiceUnavailable => {
-                    let reply = federated.peer_receives(&id).await;
-                    assert_eq!(
-                        error_condition(&reply).as_deref(),
-                        Some("service-unavailable"),
-                        "{localpart} {class}"
-                    );
-                    Answer::ServiceUnavailable
-                }
-                Answer::Nothing => {
-                    assert!(
-                        federated.peer_received_after_quiet(&id).await.is_empty(),
-                        "{localpart} {class}"
-                    );
-                    Answer::Nothing
-                }
-            };
-            assert_eq!(answer, *expected, "{localpart} {class}");
+            // Everything the peer receives for this stanza has arrived once
+            // a later stanza of Mallory's, decided after it, is answered.
+            let barrier = federated.peer_barrier(MALLORY, &to).await;
+            let frames = federated.peer_received_besides(mark, &barrier);
+            observations[index].push((*localpart, observed(&frames, &id)));
         }
+    }
+    for ((class, _, expected), observed) in classes.iter().zip(&observations) {
+        let (first_state, first) = &observed[0];
+        for (state, answer) in observed {
+            assert_eq!(
+                answer, first,
+                "{class}: {state} is told apart from {first_state}"
+            );
+        }
+        assert_eq!(first, expected, "{class}");
     }
     // Nothing from Mallory reached the retired account's open stream or the
     // blocking account.
     for (localpart, client) in clients.iter_mut() {
         if let (Some(client), "gone" | "guarded") = (client.as_mut(), *localpart) {
-            let chat = [*localpart, "-chat"].concat();
-            assert!(!support::arrives_quietly(client, "message", &chat).await);
+            let seen = client_settle(client).await;
+            let from_mallory: Vec<&Element> = seen
+                .iter()
+                .filter(|frame| {
+                    frame
+                        .attr("from")
+                        .is_some_and(|from| from.starts_with("mallory@"))
+                })
+                .collect();
+            assert!(from_mallory.is_empty(), "{localpart}: {from_mallory:?}");
         }
     }
+}
+
+#[tokio::test]
+async fn a_contacts_message_gets_nothing_back_whether_the_account_is_online_or_offline() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("asleep").await;
+    contact(&federated, "asleep@example.com", BOB, "both").await;
+    federated.account("awake").await;
+    contact(&federated, "awake@example.com", BOB, "both").await;
+    let mut phone = federated.online("awake", "phone", 5).await;
+
+    let mut answers = Vec::new();
+    for to in ["asleep@example.com", "awake@example.com"] {
+        let id = [to, "-contact-chat"].concat();
+        let mark = federated.peer_mark();
+        federated
+            .from_peer(message(BOB_PHONE, to, MessageType::Chat, &id, "hi"))
+            .await;
+        let barrier = federated.peer_barrier(BOB_PHONE, to).await;
+        answers.push(observed(
+            &federated.peer_received_besides(mark, &barrier),
+            &id,
+        ));
+    }
+    assert_eq!(answers, vec![Answer::Nothing, Answer::Nothing]);
+    let frames = receive_until(&mut phone, |frame| {
+        frame.name() == "message" && frame.attr("id") == Some("awake@example.com-contact-chat")
+    })
+    .await;
+    assert!(!frames.is_empty());
+    assert_eq!(
+        support::offline_count(&federated, "asleep@example.com").await,
+        1
+    );
 }
 
 // --- presence ------------------------------------------------------------------
@@ -514,7 +693,8 @@ async fn presence_to_the_bare_jid_reaches_available_resources_only_from_a_subscr
 
     receive(&mut phone, "presence", "pr1").await;
     receive(&mut laptop, "presence", "pr1").await;
-    assert!(!support::arrives_quietly(&mut phone, "presence", "pr2").await);
+    federated.peer_barrier(MALLORY, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "presence", "pr2"));
 }
 
 #[tokio::test]
@@ -591,18 +771,20 @@ async fn a_probe_from_a_sender_without_from_is_not_answered() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
-    let mut phone = federated.online("alice", "phone", 5).await;
+    let _phone = federated.online("alice", "phone", 5).await;
     // Added after the initial presence, so no login probe reaches Bob.
     contact(&federated, ALICE, BOB, "to").await;
+    let mark = federated.peer_mark();
 
     federated
         .from_peer(presence(BOB, ALICE, PresenceType::Probe, "pb3"))
         .await;
-    then_sentinel(&federated, &mut phone, "pb3-sentinel").await;
+    let barrier = federated.peer_barrier(BOB, ALICE).await;
 
-    assert!(federated
-        .peer_received(|stanza| stanza.name() == "presence" && stanza.attr("to") == Some(BOB))
-        .is_empty());
+    // Nothing at all, whatever its id: an answer would be presence the
+    // server builds, without the probe's id.
+    let received = federated.peer_received_besides(mark, &barrier);
+    assert!(received.is_empty(), "{received:?}");
 }
 
 // --- subscriptions, inbound ----------------------------------------------------------
@@ -712,11 +894,16 @@ async fn a_pre_approval_routes_nothing_and_approves_the_later_request() {
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
 
+    let mark = federated.peer_mark();
     let mut pre_approval = Presence::new(PresenceType::Subscribed);
     pre_approval.to = Some(jid(BOB));
     pre_approval.id = Some("pre".to_owned());
     send(&mut phone, pre_approval).await;
-    assert!(federated.peer_received_after_quiet("pre").await.is_empty());
+    // Whatever left for the pre-approval would leave before the client's
+    // next stanza on the same pair.
+    let barrier = federated.client_barrier(&mut phone, BOB).await;
+    let received = federated.peer_received_besides(mark, &[barrier]);
+    assert!(received.is_empty(), "{received:?}");
     let item = roster_item(&federated, ALICE, BOB).await;
     assert_eq!(item.map(|(_, _, approved)| approved), Some(true));
 
@@ -748,9 +935,9 @@ async fn subscribed_without_a_pending_request_is_ignored() {
     federated
         .from_peer(presence(BOB, ALICE, PresenceType::Subscribed, "s6"))
         .await;
-    then_sentinel(&federated, &mut phone, "s6-sentinel").await;
+    federated.peer_barrier(BOB, ALICE).await;
 
-    assert!(!support::arrives_quietly(&mut phone, "presence", "s6").await);
+    assert!(!holds(&client_settle(&mut phone).await, "presence", "s6"));
     assert_eq!(roster_item(&federated, ALICE, BOB).await, None);
 }
 
@@ -973,6 +1160,7 @@ async fn a_message_carrying_the_dm_pin_marker_never_leaves() {
     let federated = federated(&pki).await;
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
+    let mark = federated.peer_mark();
 
     let mut pin = xmpp_parsers::message::Message::chat(Some(jid(BOB)));
     pin.id = Some(xmpp_parsers::message::Id("out-pin".to_owned()));
@@ -987,10 +1175,11 @@ async fn a_message_carrying_the_dm_pin_marker_never_leaves() {
         error_condition(&refusal).as_deref(),
         Some("service-unavailable")
     );
-    assert!(federated
-        .peer_received_after_quiet("out-pin")
-        .await
-        .is_empty());
+    let barrier = federated.client_barrier(&mut phone, BOB).await;
+    assert!(!any_with_id(
+        &federated.peer_received_besides(mark, &[barrier]),
+        "out-pin"
+    ));
 }
 
 // --- IQ ------------------------------------------------------------------------------
@@ -1042,6 +1231,7 @@ async fn a_response_from_another_resource_does_not_complete_a_remote_request() {
     let mut phone = federated.online("alice", "phone", 5).await;
     let mut laptop = federated.online("alice", "laptop", 5).await;
 
+    let mark = federated.peer_mark();
     federated
         .from_peer(get(BOB_PHONE, ALICE_PHONE, "iq4", ping()))
         .await;
@@ -1057,7 +1247,10 @@ async fn a_response_from_another_resource_does_not_complete_a_remote_request() {
         },
     )
     .await;
-    assert!(federated.peer_received_after_quiet("iq4").await.is_empty());
+    // The laptop's answer would leave before its next stanza on the pair.
+    let barrier = federated.client_barrier(&mut laptop, BOB).await;
+    let received = federated.peer_received_besides(mark, &[barrier]);
+    assert!(!any_with_id(&received, "iq4"), "{received:?}");
 }
 
 // --- D1 at the effect boundary ------------------------------------------------------
@@ -1082,6 +1275,7 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
     // Added after the initial presence, so no login probe or broadcast
     // reaches Bob.
     contact(&federated, ALICE, BOB, "both").await;
+    let mark = federated.peer_mark();
 
     federated
         .from_peer(message(
@@ -1098,15 +1292,122 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
     federated
         .from_peer(get(BOB_PHONE, ALICE_PHONE, "d1-iq", ping()))
         .await;
+    federated
+        .from_peer(message(
+            BOB_PHONE,
+            ALICE,
+            MessageType::Groupchat,
+            "d1-groupchat",
+            "not a room",
+        ))
+        .await;
 
-    assert!(!support::arrives_quietly(&mut phone, "message", "d1").await);
-    assert!(!support::arrives_quietly(&mut phone, "iq", "d1-iq").await);
-    assert!(federated
-        .peer_received(|stanza| stanza.name() == "presence" && stanza.attr("to") == Some(BOB))
-        .is_empty());
+    // The account side answers nothing at all for the domain, not even
+    // the groupchat every admitted sender is refused: after a quiet
+    // period, a ping on the same pair is the barrier.
+    tokio::time::sleep(support::QUIET).await;
+    let barrier = federated.peer_ping_barrier(BOB_PHONE).await;
+    let received = federated.peer_received_besides(mark, &[barrier]);
+    assert!(received.is_empty(), "{received:?}");
+    let seen = client_settle(&mut phone).await;
+    assert!(!holds(&seen, "message", "d1"));
+    assert!(!holds(&seen, "iq", "d1-iq"));
+    assert_eq!(support::offline_count(&federated, ALICE).await, 0);
+}
+
+// --- retired accounts ------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_retired_accounts_open_stream_sends_nothing_to_remote_jids() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    let account = federated.account("alice").await;
+    contact(&federated, ALICE, BOB, "both").await;
+    let mut phone = federated.online("alice", "phone", 5).await;
+    waddle_server::auth::retirement::retire_account(
+        federated.loopback.state.deps.app_state.db_pool.global(),
+        &account,
+    )
+    .await
+    .expect("the account is retired");
+    let mark = federated.peer_mark();
+
+    let mut chat = xmpp_parsers::message::Message::chat(Some(jid(BOB)));
+    chat.id = Some(xmpp_parsers::message::Id("retired-chat".to_owned()));
+    chat.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "still here".to_owned());
+    send(&mut phone, chat).await;
+    let refusal = receive(&mut phone, "message", "retired-chat").await;
+    assert!(is_message_error(&refusal), "{refusal:?}");
+
+    // A presence update would be broadcast to Bob, a contact with `both`.
+    let mut update = Presence::new(PresenceType::None).with_priority(5);
+    update.id = Some("retired-update".to_owned());
+    send(&mut phone, update).await;
+    let mut request = Presence::new(PresenceType::Subscribe);
+    request.to = Some(jid("carol@home-b.test"));
+    request.id = Some("retired-subscribe".to_owned());
+    send(&mut phone, request).await;
+    // The client's stanzas were handled once its own ping is answered; a
+    // ping on the pair then follows anything they queued.
+    client_settle(&mut phone).await;
+    let barrier = federated.peer_ping_barrier(BOB_PHONE).await;
+    let received = federated.peer_received_besides(mark, &[barrier]);
+    assert!(received.is_empty(), "{received:?}");
+    assert_eq!(
+        roster_item(&federated, ALICE, "carol@home-b.test").await,
+        None
+    );
 }
 
 // --- S2S off ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn with_s2s_off_the_startup_prune_keeps_remote_contacts_and_drops_unknown_local_ones() {
+    let state = waddle_server::test_support::websocket_state().await;
+    let loopback = support::ws::Loopback::serve(state).await;
+    loopback.account("alice").await;
+    let storage = waddle_server::db::roster::DatabaseRosterStorage::new(
+        loopback.state.deps.app_state.db_pool.global().clone(),
+    );
+    let account: BareJid = ALICE.parse().expect("a JID");
+    for (contact, subscription) in [(BOB, "both"), ("nobody@example.com", "none")] {
+        storage
+            .apply_roster_change(
+                &account,
+                waddle_server::db::roster::RosterRowChange::Upsert(
+                    waddle_server::db::roster::RosterItemRow {
+                        contact_jid: contact.to_owned(),
+                        name: None,
+                        subscription: subscription.to_owned(),
+                        ask: None,
+                        approved: false,
+                        groups: Vec::new(),
+                    },
+                ),
+            )
+            .await
+            .expect("a roster item");
+    }
+
+    waddle_server::test_support::reconcile_local_accounts(&loopback.state)
+        .await
+        .expect("the reconciliation runs");
+
+    let bob: BareJid = BOB.parse().expect("a JID");
+    let kept = storage
+        .get_roster_item(&account, &bob)
+        .await
+        .expect("the roster is readable")
+        .expect("the remote contact stays, dormant while S2S is off");
+    assert_eq!(kept.subscription, "both");
+    let nobody: BareJid = "nobody@example.com".parse().expect("a JID");
+    assert!(storage
+        .get_roster_item(&account, &nobody)
+        .await
+        .expect("the roster is readable")
+        .is_none());
+}
 
 #[tokio::test]
 async fn with_s2s_off_a_remote_contact_is_refused_and_no_roster_state_changes() {

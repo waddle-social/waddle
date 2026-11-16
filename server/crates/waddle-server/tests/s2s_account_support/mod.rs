@@ -207,10 +207,89 @@ impl Federated {
             .unwrap_or_else(|| panic!("the peer receives `{id}`"))
     }
 
-    /// The stanzas the peer received with `id`, after a quiet period.
-    pub async fn peer_received_after_quiet(&self, id: &str) -> Vec<Element> {
-        tokio::time::sleep(QUIET).await;
-        self.captured.with_id(id)
+    /// How many stanzas the peer has received so far: a mark for
+    /// [`Federated::peer_received_since`].
+    pub fn peer_mark(&self) -> usize {
+        self.captured.stanzas().len()
+    }
+
+    /// Every stanza the peer received after `mark`, whatever its id: the
+    /// presence the server builds on an account's behalf carries none of
+    /// the ids the peer sent.
+    pub fn peer_received_since(&self, mark: usize) -> Vec<Element> {
+        self.captured.stanzas().into_iter().skip(mark).collect()
+    }
+
+    /// Every stanza the peer received after `mark`, but for the answers
+    /// to the barrier stanzas whose ids are `barrier`.
+    pub fn peer_received_besides(&self, mark: usize, barrier: &[String]) -> Vec<Element> {
+        self.peer_received_since(mark)
+            .into_iter()
+            .filter(|stanza| {
+                !stanza
+                    .attr("id")
+                    .is_some_and(|id| barrier.iter().any(|barrier| barrier == id))
+            })
+            .collect()
+    }
+
+    /// A barrier behind everything `sender` sent so far: a `groupchat`
+    /// message from `sender` to the local account `account`, which the
+    /// account side answers with `service-unavailable` whatever the
+    /// account's state, after every earlier stanza of the same sender
+    /// (they share one queue, in order), and then a ping of the local
+    /// server domain on the same pair. Once both answers are back, every
+    /// answer to `sender`'s earlier stanzas has reached the peer, and every
+    /// delivery they caused has been handed to the account's connections.
+    /// The ids of the barrier's own answers.
+    pub async fn peer_barrier(&self, sender: &str, account: &str) -> Vec<String> {
+        let barrier = unique("barrier");
+        self.from_sender(
+            sender,
+            message(sender, account, MessageType::Groupchat, &barrier, "barrier"),
+        )
+        .await;
+        let answer = self.peer_receives(&barrier).await;
+        assert_eq!(
+            error_condition(&answer).as_deref(),
+            Some("service-unavailable"),
+            "the barrier is answered as every groupchat to an account is"
+        );
+        vec![barrier, self.peer_ping_barrier(sender).await]
+    }
+
+    /// A ping of the local server domain from `sender`, answered on the
+    /// pair's queue: once its answer arrives, everything queued for the
+    /// peer before it has been written. For stanzas the account side gives
+    /// no answer at all, such as from a domain it no longer admits, it
+    /// follows a quiet period. The id of its answer.
+    pub async fn peer_ping_barrier(&self, sender: &str) -> String {
+        let id = unique("ping-barrier");
+        self.from_sender(sender, get(sender, LOCAL, &id, ping()))
+            .await;
+        self.peer_receives(&id).await;
+        id
+    }
+
+    /// Send `stanza` from the peer on the stream of `sender`'s domain, one
+    /// the peer serves.
+    pub async fn from_sender(&self, sender: &str, stanza: impl Into<Element>) {
+        let domain = jid(sender).domain().as_str().to_owned();
+        routing::send(&self.peer, &domain, LOCAL, stanza).await;
+    }
+
+    /// A barrier behind everything `client` sent so far towards the peer:
+    /// a chat message from `client` to `to` at the peer, which leaves on
+    /// the same pair after anything `client` sent before it. Waits until
+    /// the peer receives it; its id.
+    pub async fn client_barrier(&self, client: &mut WsXmppClient, to: &str) -> String {
+        let id = unique("client-barrier");
+        let mut chat = Message::chat(Some(jid(to)));
+        chat.id = Some(Id(id.clone()));
+        chat.bodies.insert(Lang::new(), "barrier".to_owned());
+        send(client, chat).await;
+        self.peer_receives(&id).await;
+        id
     }
 
     /// Every stanza the peer received so far that `matches`.
@@ -326,17 +405,51 @@ pub async fn receive_matching(
     frame.parse::<Element>().expect("stanza XML")
 }
 
-/// Whether a stanza named `name` with `id` reaches `client` within
-/// [`QUIET`].
-pub async fn arrives_quietly(client: &mut WsXmppClient, name: &str, id: &str) -> bool {
-    client
-        .recv_matching_within(QUIET, |frame| {
-            frame
-                .parse::<Element>()
-                .is_ok_and(|element| element.name() == name && element.attr("id") == Some(id))
-        })
-        .await
-        .is_ok()
+/// Every stanza that reaches `client` until one `matches`, that one last;
+/// nothing is discarded, so that a case can assert what else arrived.
+pub async fn receive_until(
+    client: &mut WsXmppClient,
+    matches: impl Fn(&Element) -> bool,
+) -> Vec<Element> {
+    let mut frames = Vec::new();
+    loop {
+        let frame = client.recv_timeout(WAIT).await.unwrap_or_else(|error| {
+            panic!("a matching stanza reaches the client: {error}; before it: {frames:?}")
+        });
+        let Ok(element) = frame.parse::<Element>() else {
+            continue;
+        };
+        let done = matches(&element);
+        frames.push(element);
+        if done {
+            return frames;
+        }
+    }
+}
+
+/// Ping `client`'s own server and return every stanza that reached the
+/// client before the answer. Whatever was handed to the client's
+/// connection before the ping arrives before its answer, so after a
+/// [`Federated::peer_barrier`] this is everything a remote sender's
+/// earlier stanzas delivered to `client`.
+pub async fn client_settle(client: &mut WsXmppClient) -> Vec<Element> {
+    let id = unique("settle");
+    let mut request = Iq::from_get(id.clone(), xmpp_parsers::ping::Ping);
+    *request.to_mut() = Some(jid(LOCAL));
+    send(client, request).await;
+    let mut frames = receive_until(client, |element| {
+        element.name() == "iq" && element.attr("id") == Some(id.as_str())
+    })
+    .await;
+    frames.pop();
+    frames
+}
+
+/// Whether `frames` hold a stanza named `name` with `id`.
+pub fn holds(frames: &[Element], name: &str, id: &str) -> bool {
+    frames
+        .iter()
+        .any(|frame| frame.name() == name && frame.attr("id") == Some(id))
 }
 
 /// Make `contact` a contact of `account` with `subscription` (`none`,
@@ -396,6 +509,42 @@ pub async fn roster_item(
         .await
         .expect("the roster is readable")
         .map(|row| (row.subscription, row.ask, row.approved))
+}
+
+/// How many messages `account`'s offline store holds.
+pub async fn offline_count(federated: &Federated, account: &str) -> u32 {
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    let account: jid::BareJid = account.parse().expect("an account JID");
+    federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .count(&account)
+        .await
+        .expect("the offline store is readable")
+}
+
+/// Whether `account` holds a recorded subscription request from
+/// `contact`.
+pub async fn pending_request(federated: &Federated, account: &str, contact: &str) -> bool {
+    let store = waddle_server::db::s2s_accounts::PendingSubscriptions::new(
+        federated
+            .loopback
+            .state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .clone(),
+    );
+    let account: jid::BareJid = account.parse().expect("an account JID");
+    let contact: jid::BareJid = contact.parse().expect("a contact JID");
+    store
+        .holds(&account, &contact, chrono::Utc::now().timestamp_millis())
+        .await
+        .expect("the request store is readable")
 }
 
 /// Block `blocked` on `account`'s XEP-0191 list.

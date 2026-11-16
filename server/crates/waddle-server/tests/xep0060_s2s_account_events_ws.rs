@@ -3,7 +3,9 @@
 //! account only for a node it subscribed to (recorded when its
 //! `<subscribe/>` leaves, forgotten when its `<unsubscribe/>` does), or from
 //! the personal eventing service (XEP-0163) of a remote account whose
-//! presence it is subscribed to. Anything else carrying an event is dropped
+//! presence it is subscribed to. A notification is admitted only when every
+//! node it names is, and the gate applies before anything else, a message
+//! of type `error` included. Anything else carrying an event is dropped
 //! unanswered. Through the production `/ws` router, the real S2S router and
 //! a loopback peer serving `home-b.test` and `pubsub.home-b.test`.
 #![cfg(feature = "test-support")]
@@ -14,7 +16,10 @@
 mod support;
 
 use minidom::Element;
-use support::{contact, federated_with, jid, receive, send, Adjust, Federated, Pki, BOB, PEER};
+use support::{
+    client_settle, contact, federated_with, holds, jid, receive, send, Adjust, Federated, Pki, BOB,
+    PEER,
+};
 use waddle_server::db::s2s_accounts::RemotePubSubSubscriptions;
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::pubsub::{NS_PUBSUB, NS_PUBSUB_EVENT};
@@ -36,26 +41,34 @@ async fn with_service(pki: &Pki) -> Federated {
     .await
 }
 
-/// An event notification about `node` from `from` to `to`.
-fn event(from: &str, to: &str, node: &str, id: &str) -> Message {
+/// The `<items/>` of an event notification about `node`.
+fn items(node: &str) -> Element {
+    Element::builder("items", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .append(
+            Element::builder("item", NS_PUBSUB_EVENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "item-1")
+                .build(),
+        )
+        .build()
+}
+
+/// An event notification about each of `nodes` from `from` to `to`.
+fn event_about(from: &str, to: &str, nodes: &[&str], id: &str) -> Message {
     let mut message = Message::new_with_type(MessageType::Headline, Some(jid(to)));
     message.from = Some(jid(from));
     message.id = Some(Id(id.to_owned()));
     message.payloads.push(
         Element::builder("event", NS_PUBSUB_EVENT)
-            .append(
-                Element::builder("items", NS_PUBSUB_EVENT)
-                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-                    .append(
-                        Element::builder("item", NS_PUBSUB_EVENT)
-                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "item-1")
-                            .build(),
-                    )
-                    .build(),
-            )
+            .append_all(nodes.iter().map(|node| items(node)))
             .build(),
     );
     message
+}
+
+/// An event notification about `node` from `from` to `to`.
+fn event(from: &str, to: &str, node: &str, id: &str) -> Message {
+    event_about(from, to, &[node], id)
 }
 
 /// A `<subscribe/>` or `<unsubscribe/>` request for `node` of the service.
@@ -128,12 +141,14 @@ async fn a_notification_for_a_node_never_subscribed_to_is_dropped() {
     let federated = with_service(&pki).await;
     let mut phone = online_alice(&federated).await;
 
+    let mark = federated.peer_mark();
     federated
         .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-2"))
         .await;
 
-    assert!(!support::arrives_quietly(&mut phone, "message", "ev-2").await);
-    assert!(federated.peer_received_after_quiet("ev-2").await.is_empty());
+    let barrier = federated.peer_barrier(SERVICE, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "message", "ev-2"));
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
 }
 
 #[tokio::test]
@@ -151,7 +166,50 @@ async fn a_notification_after_unsubscribing_is_dropped() {
     federated
         .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-3"))
         .await;
-    assert!(!support::arrives_quietly(&mut phone, "message", "ev-3").await);
+    federated.peer_barrier(SERVICE, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "message", "ev-3"));
+}
+
+#[tokio::test]
+async fn an_error_carrying_an_event_is_dropped_even_for_a_subscribed_node() {
+    let pki = Pki::new();
+    let federated = with_service(&pki).await;
+    let mut phone = online_alice(&federated).await;
+    send(&mut phone, subscription("sub-4", "subscribe")).await;
+    recorded(&federated, true).await;
+
+    // An error to a bound full JID is otherwise delivered; one carrying an
+    // event is no notification the account asked for (§7.1).
+    let mut error = event(SERVICE, "alice@example.com/phone", NODE, "ev-4");
+    error.type_ = MessageType::Error;
+    federated.from_peer_service(SERVICE, error).await;
+    federated.peer_barrier(SERVICE, ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "message", "ev-4"));
+}
+
+#[tokio::test]
+async fn a_notification_naming_any_node_not_subscribed_to_is_dropped_whole() {
+    let pki = Pki::new();
+    let federated = with_service(&pki).await;
+    let mut phone = online_alice(&federated).await;
+    send(&mut phone, subscription("sub-5", "subscribe")).await;
+    recorded(&federated, true).await;
+
+    federated
+        .from_peer_service(
+            SERVICE,
+            event_about(SERVICE, ALICE, &[NODE, "other_node"], "ev-5"),
+        )
+        .await;
+    federated
+        .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-5-control"))
+        .await;
+    // The control, decided after it, arrives; the mixed one never did.
+    let frames = support::receive_until(&mut phone, |frame| {
+        frame.name() == "message" && frame.attr("id") == Some("ev-5-control")
+    })
+    .await;
+    assert!(!holds(&frames, "message", "ev-5"), "{frames:?}");
 }
 
 #[tokio::test]
@@ -175,6 +233,7 @@ async fn a_personal_eventing_notification_reaches_an_account_subscribed_to_its_o
             "pep-2",
         ))
         .await;
-    assert!(!support::arrives_quietly(&mut phone, "message", "pep-2").await);
+    federated.peer_barrier("mallory@home-b.test", ALICE).await;
+    assert!(!holds(&client_settle(&mut phone).await, "message", "pep-2"));
     let _ = PEER;
 }
