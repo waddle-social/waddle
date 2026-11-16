@@ -354,6 +354,7 @@ pub async fn handle_iq_with_conn_state(
             muc_domain,
             state,
             phase.bound_jid(),
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
             response_from,
             response_to,
         )

@@ -32,7 +32,9 @@
 //! module, that inventory and the reachability suite.
 
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
+use waddle_xmpp::muc::{NS_MUC_ADMIN, NS_MUC_OWNER};
 use waddle_xmpp::xep::xep0199::NS_PING;
+use waddle_xmpp::xep::xep0425::NS_MESSAGE_MODERATE;
 use waddle_xmpp::xep::xep0430::NS_MAM;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -79,9 +81,9 @@ pub struct Reachable {
 }
 
 /// An operation of the MUC service a remote principal reaches (XEP-0045,
-/// with XEP-0030, XEP-0199, XEP-0410 and XEP-0313). Each is decided by the
-/// room's host for that principal and the evidence of its stream; reaching
-/// the handler admits nothing.
+/// with XEP-0030, XEP-0199, XEP-0410, XEP-0313 and XEP-0425). Each is
+/// decided by the room's host for that principal and the evidence of its
+/// stream; reaching the handler admits nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoomOperation {
     /// XEP-0030 `disco#info` of the service, a room or its nodes.
@@ -98,6 +100,15 @@ pub enum RoomOperation {
     Presence,
     /// A message to a room or an occupant JID.
     Message,
+    /// A XEP-0045 `muc#admin` request: the affiliation and role lists of a
+    /// room and changes to them (kick, ban, role and affiliation).
+    Admin,
+    /// A XEP-0045 `muc#owner` request: a room's configuration and its
+    /// destruction.
+    Owner,
+    /// A XEP-0425 moderation request: a moderator's retraction of another
+    /// occupant's message.
+    Moderation,
 }
 
 /// What the router does with a stanza from an S2S stream.
@@ -142,11 +153,9 @@ pub enum Refusal {
     /// handlers are reviewed.
     AwaitingReview(ServedService),
     /// A request to the MUC service outside the operations reviewed for a
-    /// remote principal: room administration, configuration and
-    /// destruction, registration, vCards, pins, message moderation, call
-    /// signalling and any other IQ request;
-    /// and every IQ result or error, since no room sends a request to a
-    /// remote entity.
+    /// remote principal: registration, vCards, pins, call signalling and
+    /// any other IQ request; and every IQ result or error, since no room
+    /// sends a request to a remote entity.
     RoomRequest,
     /// A service D10 does not enable for remote senders: HTTP upload,
     /// push, the community and extension services and the call mixer.
@@ -210,6 +219,19 @@ fn room(stanza: &Stanza) -> InboundReach {
             Iq::Get { payload, .. } if payload.is("ping", NS_PING) => RoomOperation::Ping,
             Iq::Get { payload, .. } | Iq::Set { payload, .. } if payload.is("query", NS_MAM) => {
                 RoomOperation::Archive
+            }
+            Iq::Get { payload, .. } | Iq::Set { payload, .. }
+                if payload.is("query", NS_MUC_ADMIN) =>
+            {
+                RoomOperation::Admin
+            }
+            Iq::Get { payload, .. } | Iq::Set { payload, .. }
+                if payload.is("query", NS_MUC_OWNER) =>
+            {
+                RoomOperation::Owner
+            }
+            Iq::Set { payload, .. } if payload.is("moderate", NS_MESSAGE_MODERATE) => {
+                RoomOperation::Moderation
             }
             Iq::Get { .. } | Iq::Set { .. } | Iq::Result { .. } | Iq::Error { .. } => {
                 return InboundReach::Refused(Refusal::RoomRequest);

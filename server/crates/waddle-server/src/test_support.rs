@@ -1327,6 +1327,7 @@ pub async fn record_room_affiliation_under_commit_fault(
             state,
             &grants,
             initiator,
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
             target,
             affiliation,
         ),
@@ -1353,6 +1354,7 @@ pub async fn record_room_affiliation_with_grants(
         state,
         grants,
         initiator,
+        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
         target,
         affiliation,
     )

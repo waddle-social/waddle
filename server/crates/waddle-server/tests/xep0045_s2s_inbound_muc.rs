@@ -51,8 +51,8 @@ use s2s_inbound_muc_support::{
     body, error_condition, error_of, federated_form, full, item, jid, local_groupchat, local_join,
     local_receives, local_receives_payload, local_set, naming, not_federating, owner_form,
     presence_between, remote_get, remote_groupchat, remote_join, remote_leave, remote_payload,
-    room_with_remote_occupant, stanza_id, statuses, Hosted, Wiring, ARRIVES, BOB, HOME_B, MUC,
-    QUIET, ROOM,
+    remote_set, room_with_remote_occupant, stanza_id, statuses, Hosted, Wiring, ARRIVES, BOB,
+    HOME_B, MUC, QUIET, ROOM,
 };
 use waddle_server::db::{Database, MigrationRunner};
 use waddle_server::permissions::host_grant::{RoomAffiliation, SeatEvidence, StreamEvidence};
@@ -71,6 +71,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 const BOB_OCCUPANT: &str = "lounge@muc.example.com/bob";
 const ALICE_OCCUPANT: &str = "lounge@muc.example.com/alice";
 const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
 const NS_SID: &str = "urn:xmpp:sid:0";
 const NS_REPLY: &str = "urn:xmpp:reply:0";
 const NS_MARKERS: &str = "urn:xmpp:chat-markers:0";
@@ -584,7 +585,7 @@ async fn a_trusted_homes_occupant_on_a_pkix_stream_may_be_made_moderator() {
 }
 
 #[tokio::test]
-async fn private_messages_and_room_administration_are_refused_to_remote_occupants() {
+async fn private_messages_are_refused_to_remote_occupants() {
     let (hosted, _alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     let mut private = Message::new_with_type(MessageType::Chat, Some(jid(ALICE_OCCUPANT)));
@@ -596,19 +597,392 @@ async fn private_messages_and_room_administration_are_refused_to_remote_occupant
         error_condition(&refused).as_deref(),
         Some("feature-not-implemented")
     );
-    let list = remote_get(
-        BOB,
-        ROOM,
-        "admin-1",
-        Element::builder("query", NS_MUC_ADMIN).build(),
-    );
-    hosted.from_peer(list).await;
-    let refused = hosted.answered("admin-1").await;
-    assert_eq!(
-        error_condition(&refused).as_deref(),
-        Some("service-unavailable")
+    assert!(hosted.seat(ROOM, BOB).is_some(), "a refusal ended the seat");
+}
+
+/// A `muc#admin` list request for `affiliation` (XEP-0045 §9.5, §9.8).
+fn affiliation_list(affiliation: &str) -> Element {
+    Element::builder("query", NS_MUC_ADMIN)
+        .append(
+            Element::builder("item", NS_MUC_ADMIN)
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    affiliation,
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn owner_query() -> Element {
+    Element::builder("query", NS_MUC_OWNER).build()
+}
+
+fn destroy() -> Element {
+    Element::builder("query", NS_MUC_OWNER)
+        .append(Element::builder("destroy", NS_MUC_OWNER).build())
+        .build()
+}
+
+#[tokio::test]
+async fn room_administration_is_forbidden_to_a_remote_occupant_without_standing() {
+    // `home-b.test` is a trusted home: what refuses the occupant is that
+    // the room holds no standing for it.
+    let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await;
+    // XEP-0045 §9.8, §8.2, §10.2 and §10.9: `forbidden` for a requester
+    // that is neither moderator, admin nor owner.
+    hosted
+        .from_peer(remote_get(
+            BOB,
+            ROOM,
+            "admin-1",
+            affiliation_list("outcast"),
+        ))
+        .await;
+    hosted
+        .from_peer(remote_set(BOB, ROOM, "admin-2", role_item("none", "alice")))
+        .await;
+    hosted
+        .from_peer(remote_set(
+            BOB,
+            ROOM,
+            "admin-3",
+            affiliation_item("member", "carol@example.com"),
+        ))
+        .await;
+    hosted
+        .from_peer(remote_get(BOB, ROOM, "owner-1", owner_query()))
+        .await;
+    hosted
+        .from_peer(remote_set(BOB, ROOM, "owner-2", federated_form(false)))
+        .await;
+    hosted
+        .from_peer(remote_set(BOB, ROOM, "owner-3", destroy()))
+        .await;
+    for id in [
+        "admin-1", "admin-2", "admin-3", "owner-1", "owner-2", "owner-3",
+    ] {
+        let refused = hosted.answered(id).await;
+        assert_eq!(refused.attr("type"), Some("error"), "{id}: {refused:?}");
+        assert_eq!(
+            error_condition(&refused).as_deref(),
+            Some("forbidden"),
+            "{id}"
+        );
+        assert_eq!(refused.attr("from"), Some(ROOM), "{id}");
+        assert_eq!(refused.attr("to"), Some(BOB), "{id}");
+    }
+    // Nothing was applied: the local occupant is still seated and the
+    // room is still there.
+    assert!(
+        local_receives(&mut alice, QUIET, |stanza| {
+            stanza.name() == "presence" && stanza.attr("type") == Some("unavailable")
+        })
+        .await
+        .is_none(),
+        "a refused request removed an occupant"
     );
     assert!(hosted.seat(ROOM, BOB).is_some(), "a refusal ended the seat");
+}
+
+#[tokio::test]
+async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
+    let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await;
+    let granted = local_set(
+        &mut alice,
+        ROOM,
+        "grant-1",
+        affiliation_item("admin", "bob@home-b.test"),
+    )
+    .await;
+    assert_eq!(granted.attr("type"), Some("result"), "{granted:?}");
+    hosted
+        .at_peer(|stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && item(stanza).is_some_and(|(_, affiliation)| affiliation == "admin")
+        })
+        .await
+        .expect("the remote occupant is told of its standing");
+    let mut carol = hosted.client("carol", "desk").await;
+    let joined = local_join(&mut carol, ROOM, "carol").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+
+    // XEP-0045 §9.8: an admin reads the ban list.
+    hosted
+        .from_peer(remote_get(BOB, ROOM, "list-1", affiliation_list("outcast")))
+        .await;
+    let list = hosted.answered("list-1").await;
+    assert_eq!(list.attr("type"), Some("result"), "{list:?}");
+    assert_eq!(list.attr("to"), Some(BOB));
+
+    // §9.3: it grants a membership.
+    hosted
+        .from_peer(remote_set(
+            BOB,
+            ROOM,
+            "member-1",
+            affiliation_item("member", "dave@example.com"),
+        ))
+        .await;
+    let granted = hosted.answered("member-1").await;
+    assert_eq!(granted.attr("type"), Some("result"), "{granted:?}");
+    hosted
+        .from_peer(remote_get(BOB, ROOM, "list-2", affiliation_list("member")))
+        .await;
+    let members = hosted.answered("list-2").await;
+    assert!(
+        members
+            .children()
+            .flat_map(Element::children)
+            .any(|entry| entry.attr("jid") == Some("dave@example.com")),
+        "{members:?}"
+    );
+
+    // ADR-0020 D8 at issuance holds whoever asks: no owner or admin
+    // standing for an account of a home that is not trusted.
+    hosted
+        .from_peer(remote_set(
+            BOB,
+            ROOM,
+            "admin-1",
+            affiliation_item("admin", "erin@elsewhere.test"),
+        ))
+        .await;
+    let refused = hosted.answered("admin-1").await;
+    assert_eq!(error_condition(&refused).as_deref(), Some("not-allowed"));
+
+    // §8.2: it kicks an occupant, which is told with status 307, and the
+    // result follows.
+    hosted
+        .from_peer(remote_set(BOB, ROOM, "kick-1", role_item("none", "carol")))
+        .await;
+    let kicked = local_receives(&mut carol, ARRIVES, |stanza| {
+        stanza.name() == "presence"
+            && stanza.attr("type") == Some("unavailable")
+            && statuses(stanza).contains(&"307".to_owned())
+    })
+    .await;
+    assert!(kicked.is_some(), "the kicked occupant was not told");
+    let done = hosted.answered("kick-1").await;
+    assert_eq!(done.attr("type"), Some("result"), "{done:?}");
+
+    // §10.2 and §10.9: an admin is no owner.
+    hosted
+        .from_peer(remote_get(BOB, ROOM, "owner-1", owner_query()))
+        .await;
+    hosted
+        .from_peer(remote_set(BOB, ROOM, "owner-2", destroy()))
+        .await;
+    for id in ["owner-1", "owner-2"] {
+        let refused = hosted.answered(id).await;
+        assert_eq!(
+            error_condition(&refused).as_deref(),
+            Some("forbidden"),
+            "{id}"
+        );
+    }
+    assert!(hosted.seat(ROOM, BOB).is_some());
+}
+
+#[tokio::test]
+async fn an_owner_of_a_trusted_home_configures_and_destroys_the_room() {
+    let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await;
+    let granted = local_set(
+        &mut alice,
+        ROOM,
+        "grant-1",
+        affiliation_item("owner", "bob@home-b.test"),
+    )
+    .await;
+    assert_eq!(granted.attr("type"), Some("result"), "{granted:?}");
+    hosted
+        .at_peer(|stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && item(stanza).is_some_and(|(_, affiliation)| affiliation == "owner")
+        })
+        .await
+        .expect("the remote occupant is told of its standing");
+
+    // XEP-0045 §10.2: the form names the room's settings, the federated
+    // setting among them.
+    hosted
+        .from_peer(remote_get(BOB, ROOM, "config-1", owner_query()))
+        .await;
+    let form = hosted.answered("config-1").await;
+    assert_eq!(form.attr("type"), Some("result"), "{form:?}");
+    let fields: Vec<String> = form
+        .children()
+        .flat_map(Element::children)
+        .flat_map(Element::children)
+        .filter_map(|field| field.attr("var").map(str::to_owned))
+        .collect();
+    assert!(
+        fields.contains(&"urn:waddle:roomconfig:federated".to_owned()),
+        "{fields:?}"
+    );
+    hosted
+        .from_peer(remote_set(
+            BOB,
+            ROOM,
+            "config-2",
+            owner_form(&[("muc#roomconfig_changesubject", "1")]),
+        ))
+        .await;
+    let configured = hosted.answered("config-2").await;
+    assert_eq!(configured.attr("type"), Some("result"), "{configured:?}");
+
+    // §10.9: the owner destroys the room. Every occupant is told, the
+    // remote one over S2S, and its seat ends.
+    hosted
+        .from_peer(remote_set(BOB, ROOM, "destroy-1", destroy()))
+        .await;
+    let destroyed = local_receives(&mut alice, ARRIVES, |stanza| {
+        stanza.name() == "presence"
+            && stanza.attr("type") == Some("unavailable")
+            && stanza
+                .children()
+                .flat_map(Element::children)
+                .any(|child| child.name() == "destroy")
+    })
+    .await;
+    assert!(destroyed.is_some(), "the local occupant was not told");
+    let done = hosted.answered("destroy-1").await;
+    assert_eq!(done.attr("type"), Some("result"), "{done:?}");
+    assert!(hosted.unseated(ROOM, BOB).await);
+}
+
+#[tokio::test]
+async fn a_remote_admin_of_a_managed_room_changes_its_affiliations_through_its_grants() {
+    let Some(managed) = Managed::start("s2s_in_admin", |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await
+    else {
+        return;
+    };
+    let room = managed.room();
+    // The guest's canonical grant is an admin standing, effective once
+    // its projection is activated.
+    managed
+        .deployment
+        .grants
+        .set(OWNER, GUEST, RoomAffiliation::Admin)
+        .await
+        .expect("the remote admin standing");
+    managed
+        .deployment
+        .grants
+        .activate_current(&managed.deployment.grants.scope)
+        .await;
+    let (_owner, own) = managed_room_with_remote_member(&managed).await;
+    assert_eq!(
+        item(&own),
+        Some(("moderator".to_owned(), "admin".to_owned()))
+    );
+    // The change is recorded in the host-grant store, which decides the
+    // initiator on the evidence of the stream that carried the request,
+    // and answered once the revocation fence has acknowledged it.
+    managed
+        .hosted
+        .from_peer(remote_set(
+            GUEST_PHONE,
+            room.as_str(),
+            "grant-1",
+            affiliation_item("member", "alice@example.com"),
+        ))
+        .await;
+    let granted = managed.hosted.answered("grant-1").await;
+    assert_eq!(granted.attr("type"), Some("result"), "{granted:?}");
+    managed
+        .hosted
+        .from_peer(remote_get(
+            GUEST_PHONE,
+            room.as_str(),
+            "list-1",
+            affiliation_list("member"),
+        ))
+        .await;
+    let members = managed.hosted.answered("list-1").await;
+    assert!(
+        members
+            .children()
+            .flat_map(Element::children)
+            .any(|entry| entry.attr("jid") == Some("alice@example.com")),
+        "{members:?}"
+    );
+    // A managed room ends only when its scope is retired: no affiliation
+    // destroys it.
+    managed
+        .hosted
+        .from_peer(remote_set(
+            GUEST_PHONE,
+            room.as_str(),
+            "destroy-1",
+            destroy(),
+        ))
+        .await;
+    let refused = managed.hosted.answered("destroy-1").await;
+    assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
+    managed.deployment.close().await;
+}
+
+#[tokio::test]
+async fn a_remote_member_of_a_managed_room_administers_nothing() {
+    let Some(managed) = Managed::start("s2s_in_noadmin", |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await
+    else {
+        return;
+    };
+    let room = managed.room();
+    let (_owner, _own) = managed_room_with_remote_member(&managed).await;
+    managed
+        .hosted
+        .from_peer(remote_set(
+            GUEST_PHONE,
+            room.as_str(),
+            "grant-1",
+            affiliation_item("member", "alice@example.com"),
+        ))
+        .await;
+    managed
+        .hosted
+        .from_peer(remote_set(
+            GUEST_PHONE,
+            room.as_str(),
+            "kick-1",
+            role_item("none", "owner"),
+        ))
+        .await;
+    managed
+        .hosted
+        .from_peer(remote_set(
+            GUEST_PHONE,
+            room.as_str(),
+            "config-1",
+            federated_form(false),
+        ))
+        .await;
+    for id in ["grant-1", "kick-1", "config-1"] {
+        let refused = managed.hosted.answered(id).await;
+        assert_eq!(
+            error_condition(&refused).as_deref(),
+            Some("forbidden"),
+            "{id}"
+        );
+    }
+    assert!(managed.hosted.seat(room.as_str(), GUEST_PHONE).is_some());
+    managed.deployment.close().await;
 }
 
 #[tokio::test]

@@ -20,10 +20,12 @@
 //!
 //! What a remote principal may ask is narrower than what a session may:
 //! joining, changing nickname and availability, leaving, sending to the
-//! room, reading its archive, `disco#info`, `disco#items` and ping.
-//! Private messages, invitations, voice requests and every extension of
-//! this deployment (calls, pins, hats, commands, forum actions, mentions)
-//! are refused or dropped. Presence and messages from a remote occupant
+//! room, reading its archive, `disco#info`, `disco#items` and ping, and
+//! administering the room (`muc#admin`, `muc#owner`, XEP-0425 moderation)
+//! with a standing the effect boundary honours for its stream. Private
+//! messages, invitations, voice requests and every extension of this
+//! deployment (calls, pins, hats, commands, forum actions, mentions) are
+//! refused or dropped. Presence and messages from a remote occupant
 //! are rebuilt from an allowlist before the room sees them
 //! ([`reduced_presence`], [`reduced_message`]): what is not named there
 //! does not reach the room's pipeline, whose handlers act on payloads.
@@ -68,7 +70,10 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use super::cleanup::{
     get_room_actor, get_room_actor_result, is_muc_room_jid, sweep_abandoned_room_occupancy,
 };
-use super::handlers::iq::muc_disco_info_for_remote;
+use super::frame::{ResponseBatch, ResponseFrame};
+use super::handlers::iq::{
+    muc_admin_for_remote, muc_disco_info_for_remote, muc_owner_or_moderation_for_remote,
+};
 use super::handlers::presence::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
     host_grant_read_still_admitted_as, principal_witness, resolve_muc_room_archive_access_as,
@@ -346,6 +351,26 @@ fn stanzas_of(frames: Vec<String>) -> Option<Vec<Stanza>> {
             }
         })
         .collect()
+}
+
+/// The stanza a response frame of a session handler carries; `None` for
+/// a frame that is no stanza, which no handler reached here produces.
+fn stanza_of(frame: ResponseFrame) -> Option<Stanza> {
+    match frame {
+        ResponseFrame::Stanza(stanza) => Some(*stanza),
+        ResponseFrame::Provenanced { frame, .. } | ResponseFrame::Replay { frame, .. } => {
+            stanza_of(*frame)
+        }
+        ResponseFrame::Element(element) => match element.name() {
+            "message" => Message::try_from(element).ok().map(Stanza::Message),
+            "presence" => Presence::try_from(element).ok().map(Stanza::Presence),
+            "iq" => Iq::try_from(element)
+                .ok()
+                .map(|iq| Stanza::Iq(Box::new(iq))),
+            _ => None,
+        },
+        ResponseFrame::SmEnabled(_) | ResponseFrame::StreamError(_) => None,
+    }
 }
 
 /// A remote occupant's presence as the room sees it: its availability
@@ -908,6 +933,92 @@ impl Asked<'_> {
             .is_ok_and(|config| config.occupants_may_change_subject)
     }
 
+    // --- administration -------------------------------------------------------
+
+    /// XEP-0045 `muc#admin`: the affiliation and role lists of a room and
+    /// changes to them. The requester is decided on its stream's evidence
+    /// by the handler a session's request reaches: in a room an enrolled
+    /// scope manages from its canonical grants, with an affiliation change
+    /// recorded through the store on that evidence and behind the
+    /// revocation fence; in any other room from the standing the room
+    /// holds for it, honoured as D8 says.
+    async fn admin(&self, iq: &Iq) -> RoomReplies {
+        let Some(requester) = self.request.principal.full() else {
+            return self.refuse(forbidden("Operation not permitted."));
+        };
+        let batch = muc_admin_for_remote(self.state, iq, &requester, &self.evidence).await;
+        self.answered(batch).await
+    }
+
+    /// XEP-0045 `muc#owner` (configuration and destruction) and XEP-0425
+    /// moderation, decided as [`Self::admin`] is.
+    async fn owner_or_moderation(&self, iq: &Iq) -> RoomReplies {
+        let Some(requester) = self.request.principal.full() else {
+            return self.refuse(forbidden("Operation not permitted."));
+        };
+        let batch =
+            muc_owner_or_moderation_for_remote(self.state, iq, &requester, &self.evidence).await;
+        // The handler answers nothing to a moderation element that is no
+        // request to retract a message; an IQ request is always answered
+        // (RFC 6120 §8.2.3). An owner's destruction may answer nothing
+        // here: its completion is then delivered by the room's outbox.
+        if self.request.operation == RoomOperation::Moderation
+            && batch.frames.is_empty()
+            && batch.completions.is_empty()
+        {
+            return self.refuse(error(
+                ErrorType::Modify,
+                DefinedCondition::BadRequest,
+                "Malformed moderation request.",
+            ));
+        }
+        self.answered(batch).await
+    }
+
+    /// The answer of a handler written for sessions, for the remote
+    /// requester. A session's connection settles what the batch carries
+    /// beside its frames once its writer has taken them; here the answer is
+    /// handed to the router's queue for the sender's domain, which is all
+    /// the custody a reply to a remote sender has, so they are settled as
+    /// the answer is returned.
+    async fn answered(&self, batch: ResponseBatch) -> RoomReplies {
+        let ResponseBatch {
+            frames,
+            completions,
+            mut ingress_reports,
+            ..
+        } = batch;
+        let stanzas: Option<Vec<Stanza>> = frames.into_iter().map(stanza_of).collect();
+        for report in &mut ingress_reports {
+            let completed = self
+                .state
+                .deps
+                .protocol
+                .ingress
+                .complete_frame_obligations(report)
+                .await;
+            if completed.is_err() {
+                tracing::warn!("recording a remote principal's answered room request failed");
+            }
+        }
+        for completion in completions {
+            // An effect whose completion is not recorded stays leased and
+            // is delivered again by the room's outbox.
+            let recorded =
+                crate::room_effect_outbox::drain::complete_after_write(self.state, &completion)
+                    .await;
+            if recorded.is_err() {
+                tracing::warn!("recording a remote principal's delivered room effect failed");
+            }
+        }
+        match stanzas {
+            Some(stanzas) => RoomReplies::of(stanzas),
+            // The request may have been applied, and its answer cannot be
+            // given in full.
+            None => self.refuse(internal()),
+        }
+    }
+
     // --- messages -------------------------------------------------------------
 
     async fn message(&self, message: &Message) -> RoomReplies {
@@ -1089,7 +1200,10 @@ impl LocalRooms for WebSocketLocalRooms {
         // sender is refused before its room is looked at, so those say
         // nothing about the room either.
         let names_room = match request.operation {
-            RoomOperation::DiscoInfo => true,
+            RoomOperation::DiscoInfo
+            | RoomOperation::Admin
+            | RoomOperation::Owner
+            | RoomOperation::Moderation => true,
             // A query addressed to an occupant JID is refused the same way
             // whatever its room is.
             RoomOperation::Archive => to.resource().is_none(),
@@ -1108,6 +1222,10 @@ impl LocalRooms for WebSocketLocalRooms {
             (RoomOperation::Archive, Stanza::Iq(iq)) => asked.archive(iq).await,
             (RoomOperation::Presence, Stanza::Presence(presence)) => asked.presence(presence).await,
             (RoomOperation::Message, Stanza::Message(message)) => asked.message(message).await,
+            (RoomOperation::Admin, Stanza::Iq(iq)) => asked.admin(iq).await,
+            (RoomOperation::Owner | RoomOperation::Moderation, Stanza::Iq(iq)) => {
+                asked.owner_or_moderation(iq).await
+            }
             _ => asked.refuse(unavailable()),
         }
     }

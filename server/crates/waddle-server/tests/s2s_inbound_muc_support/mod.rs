@@ -395,6 +395,16 @@ pub fn remote_get(from: &str, to: &str, id: &str, payload: Element) -> Iq {
     }
 }
 
+/// A remote entity's IQ `set` to `to`.
+pub fn remote_set(from: &str, to: &str, id: &str, payload: Element) -> Iq {
+    Iq::Set {
+        from: Some(jid(from)),
+        to: Some(jid(to)),
+        id: id.to_owned(),
+        payload,
+    }
+}
+
 /// The XEP-0045 status codes a presence carries.
 pub fn statuses(presence: &Element) -> Vec<String> {
     presence

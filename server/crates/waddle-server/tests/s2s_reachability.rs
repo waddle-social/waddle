@@ -215,6 +215,10 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
     }
 }
 
+const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+const NS_MODERATE: &str = "urn:xmpp:message-moderate:1";
+
 #[test]
 fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_operations() {
     let hosting = Reachable { rooms: true };
@@ -247,6 +251,18 @@ fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_
             Stanza::Presence(available(MUC, "r")),
             RoomOperation::Presence,
         ),
+        // Room administration: the lists and changes of `muc#admin`, the
+        // configuration and destruction of `muc#owner`, and a moderator's
+        // retraction (XEP-0425). Reaching the host admits nothing: it
+        // decides the requester's standing on its stream's evidence.
+        (request(query(NS_MUC_ADMIN)), RoomOperation::Admin),
+        (set(query(NS_MUC_ADMIN)), RoomOperation::Admin),
+        (request(query(NS_MUC_OWNER)), RoomOperation::Owner),
+        (set(query(NS_MUC_OWNER)), RoomOperation::Owner),
+        (
+            set(Element::builder("moderate", NS_MODERATE).build()),
+            RoomOperation::Moderation,
+        ),
     ] {
         assert_eq!(reach_with(muc, &stanza, hosting), room(operation));
         // Without a room host the whole service refuses.
@@ -255,8 +271,9 @@ fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_
             InboundReach::Refused(Refusal::AwaitingReview(ServedService::Muc))
         );
     }
-    // Administration, configuration, registration, vCards and every IQ
-    // response stay outside the reviewed operations.
+    // Registration, vCards, pins, a moderation element that is not a
+    // request to moderate and every IQ response stay outside the reviewed
+    // operations.
     let response = Stanza::Iq(Box::new(Iq::Result {
         from: Some(jid(BOB)),
         to: None,
@@ -264,11 +281,10 @@ fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_
         payload: None,
     }));
     for stanza in [
-        request(query("http://jabber.org/protocol/muc#admin")),
-        set(query("http://jabber.org/protocol/muc#admin")),
-        set(query("http://jabber.org/protocol/muc#owner")),
         set(query("jabber:iq:register")),
         request(query("vcard-temp")),
+        request(query("urn:waddle:pin:0")),
+        request(Element::builder("moderate", NS_MODERATE).build()),
         response,
     ] {
         assert_eq!(
@@ -340,17 +356,30 @@ async fn a_replica_that_hosts_rooms_lets_reviewed_muc_operations_reach_the_host(
         assert_eq!(reply.attr("type"), Some("result"), "{id}");
         assert_eq!(reply.attr("to"), Some(BOB), "{id}");
     }
+    // An administration request reaches the host, which decides it.
+    send(&b, HOME_B, MUC, get(&room, "h5", query(NS_MUC_ADMIN))).await;
+    let reply = wait_for(ARRIVES, || captured.with_id("h5").into_iter().next())
+        .await
+        .expect("the room host's answer");
+    assert_eq!(reply.attr("type"), Some("result"));
     // What is outside the reviewed operations never reaches the host.
-    let admin = Iq::Get {
+    let register = Iq::Get {
         from: Some(jid(BOB)),
         to: Some(jid(&room)),
         id: "h3".into(),
-        payload: query("http://jabber.org/protocol/muc#admin"),
+        payload: query("jabber:iq:register"),
     };
-    send(&b, HOME_B, MUC, admin).await;
+    send(&b, HOME_B, MUC, register).await;
     refused_with(&captured, "h3", "service-unavailable").await;
     let reached = rooms.reached.lock().expect("recorded operations").clone();
-    assert_eq!(reached, vec![RoomOperation::DiscoInfo, RoomOperation::Ping]);
+    assert_eq!(
+        reached,
+        vec![
+            RoomOperation::DiscoInfo,
+            RoomOperation::Ping,
+            RoomOperation::Admin
+        ]
+    );
     // The server domain lists the service it now lets remote askers reach.
     send(&b, HOME_B, HOME_A, get(HOME_A, "h4", query(DISCO_ITEMS_NS))).await;
     let items = wait_for(ARRIVES, || captured.with_id("h4").into_iter().next())

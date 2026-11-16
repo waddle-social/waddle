@@ -458,11 +458,17 @@ pub(super) async fn delete_channel_parent_tuple(
     }
 }
 
+/// Whether a room no enrolled scope manages holds `sender_jid` as an
+/// owner, as that standing is honoured for a request that reached the room
+/// with `evidence`: as stored for a session of this deployment, and for a
+/// remote principal only for a trusted home on a `pkix` stream (ADR-0020
+/// D8).
 pub(super) async fn muc_owner_authorized(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
     _session: Option<&Session>,
+    evidence: &crate::permissions::host_grant::PrincipalEvidence,
 ) -> Result<bool, XmppError> {
     let room_actor = get_room_actor_result(state, room_jid)
         .await
@@ -472,14 +478,15 @@ pub(super) async fn muc_owner_authorized(
         .ask(GetSnapshot)
         .await
         .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
-    if matches!(
-        snapshot.room.affiliation(&sender_jid.to_bare()),
-        Affiliation::Owner
-    ) {
-        return Ok(true);
-    }
-
-    Ok(false)
+    let account = sender_jid.to_bare();
+    let honoured =
+        crate::server::routes::websocket::handlers::presence::honoured_legacy_affiliation(
+            state,
+            &account,
+            evidence,
+            Some(snapshot.room.affiliation(&account)),
+        );
+    Ok(honoured == Some(Affiliation::Owner))
 }
 
 pub(super) async fn build_muc_owner_config_response(

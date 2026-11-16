@@ -107,6 +107,8 @@ pub(crate) mod muc_admin_relay;
 // the exact same tuple write the admin affiliation path uses.
 pub(in crate::server::routes::websocket::handlers) use muc_admin::persist_managed_channel_affiliation;
 mod muc_occupant_disco;
+mod muc_remote_admin;
+pub(crate) use muc_remote_admin::{muc_admin_for_remote, muc_owner_or_moderation_for_remote};
 mod muc_owner_config;
 pub(crate) mod muc_owner_moderation;
 mod muc_self_ping;
@@ -162,7 +164,6 @@ use full_jid_forward::{outgoing_block_frames, route_full_jid_iq};
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
-use muc_owner_config::apply_muc_owner_config;
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
 use muc_self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;

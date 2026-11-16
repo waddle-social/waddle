@@ -5164,6 +5164,27 @@ async fn run_set_affiliation(
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
     let next_affiliation = args.affiliation.to_muc();
+    // ADR-0020 D8 at issuance: this command writes the room's legacy
+    // affiliation stores for any JID, so an owner or admin standing is
+    // written only for an account of this deployment or of a trusted home
+    // of the S2S snapshot the replica runs, as the `muc#admin` writer
+    // does. A standing written for any other home would not be honoured
+    // at the effect either. A fixture that runs the command without a
+    // WebSocket state has no snapshot to ask and writes as before.
+    if matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin)
+        && websocket_state.is_some_and(|websocket_state| {
+            !crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::privileged_standing_may_be_issued(
+                websocket_state,
+                &args.member_jid,
+            )
+        })
+    {
+        return Err(Box::new(CommandResult::Error(XmppError::not_allowed(Some(
+            "owner and admin standing is granted to accounts of this deployment and of its \
+             trusted servers only"
+                .to_string(),
+        )))));
+    }
     if next_affiliation != Affiliation::Owner && previous_affiliation == Affiliation::Owner {
         let owners = actor
             .ask(ListAffiliations {
