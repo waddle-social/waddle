@@ -104,6 +104,24 @@ import WaddleKit
         }
     }
 
+    @Test func onePersonUnderTwoNicksIsOneRow() {
+        let presence = [
+            participant("ally", "alice@x.test/web", muted: true), participant("bob", "bob@x.test/web"),
+            participant("alice", "alice@x.test/phone", hand: true),
+        ]
+        let merged = [
+            GroupCallRosterRow(nick: "ally", jid: bare("alice@x.test"), isHandRaised: true),
+            GroupCallRosterRow(nick: "bob", jid: bare("bob@x.test")),
+        ]
+        // A hand on either device is up; a person is muted only if every device is.
+        #expect(rows(presence: presence) == merged)
+        #expect(rows(presence: presence, live: ["alice@x.test/web", "bob@x.test/web", "alice@x.test/phone"]) == merged)
+    }
+
+    @Test func twoPeopleWhoseAccountsAreUnknownStaySeparate() {
+        #expect(rows(presence: [participant("ally", nil), participant("alice", nil)]).count == 2)
+    }
+
     @Test func onePersonOnTwoDevicesIsOneRowKeepingTheFirstPosition() {
         let roster = rows(live: ["alice@x.test/web", "carol@x.test/web", "alice@x.test/phone"])
         #expect(roster == [

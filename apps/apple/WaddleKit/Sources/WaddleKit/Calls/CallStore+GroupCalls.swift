@@ -14,7 +14,7 @@ extension CallStore {
         let epoch = generation
         cancelTimers()
         transition(.joiningGroup(attempt))
-        setGroupMarkers(hand: false, muted: !media.audio)
+        setGroupMarkers(hand: false, muted: !media.audio, confirmedMute: !media.audio)
         groupControl.advertisedHand = false
         let identity = ownJID()
         guard groupStillPending(attempt, epoch: epoch) else { return false }
@@ -22,8 +22,19 @@ extension CallStore {
     }
 
     /// Room presence is parsed at the bridge, including absence as a leave marker.
+    ///
+    /// This device is in a room's call only while the slot says so. The room
+    /// can echo a presence we sent just before leaving after we have left,
+    /// and that must not put us back in the call; another device of ours is
+    /// someone else as far as this goes.
     public func handleGroupPresence(_ presence: WirePresence) {
-        groupPresence.apply(presence)
+        groupPresence.apply(presence, ignoringCallMarker: isLateOwnEcho(presence))
+    }
+
+    private func isLateOwnEcho(_ presence: WirePresence) -> Bool {
+        guard presence.groupCall?.media != nil, !groupSlotHolds(presence.from.bare),
+            let occupant = presence.occupant else { return false }
+        return occupant.realJID.map { $0 == ownJID() } ?? occupant.statusCodes.contains(110)
     }
 
     private func runGroupSetup(_ attempt: GroupCallAttempt, identity: JID?, epoch: Int) async -> Bool {
@@ -148,7 +159,7 @@ extension CallStore {
         if !cleared { reportError("muji leave presence failed", epoch: epoch) }
         // A successor may have claimed the room while the leave was in flight.
         if !groupSlotHolds(room) { groupPresence.clearParticipant(in: room, nick: nick, realJID: identity) }
-        if !state.isGroupPhase { setGroupMarkers(hand: false, muted: false) }
+        if !state.isGroupPhase { setGroupMarkers(hand: false, muted: false, confirmedMute: false) }
     }
 
     func terminateGroup(in room: BareJID, sid: String, epoch: Int) async {

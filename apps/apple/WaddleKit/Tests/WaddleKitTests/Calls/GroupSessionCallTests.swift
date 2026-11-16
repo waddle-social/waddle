@@ -11,7 +11,7 @@ import Testing
         port.emit(.authenticationFailed)
         await eventually { coordinator.connection == .authenticationFailed }
         #expect(coordinator.calls.groupPresence.participants == [groupRoom: [
-            GroupCallParticipant(nick: "alice", realJID: callOwn, media: CallMedia(audio: true, video: true),
+            GroupCallParticipant(nick: "bob", realJID: callPeer, media: CallMedia(audio: true, video: true),
                 isHandRaised: true, isMuted: true)]])
         #expect(coordinator.calls.groupPresence.media == [groupRoom: CallMedia(audio: true, video: true)])
         await coordinator.stop()
@@ -137,8 +137,9 @@ import Testing
     }
 
     private var activePresence: WirePresence {
-        WirePresence(from: JID(parsing: "room@muc.waddle.test/alice")!, kind: .available,
-            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]),
+        // Someone else's: our own device is in a call only while our slot says so.
+        WirePresence(from: JID(parsing: "room@muc.waddle.test/bob")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callPeer, statusCodes: []),
             groupCall: .init(isPreparing: false, media: CallMedia(audio: true, video: true), isHandRaised: true, isMuted: true))
     }
 

@@ -8,6 +8,9 @@ import Observation
     public private(set) var isHandRaised = false
     /// Capture owns mute state; a failed presence write leaves this choice intact.
     public private(set) var isSelfMuteAdvertised = false
+    /// The mute state the room last heard from us. It trails
+    /// `isSelfMuteAdvertised` while a send is on its way or has failed.
+    public private(set) var confirmedSelfMute = false
     @ObservationIgnored let groupControl: GroupCallControl
 
     /// The one call slot; terminal states remain until dismissed or replaced.
@@ -148,7 +151,7 @@ import Observation
         generation += 1
         groupControl.clear()
         groupPresence.clear()
-        setGroupMarkers(hand: false, muted: false)
+        setGroupMarkers(hand: false, muted: false, confirmedMute: false)
         effectTask?.cancel()
         effectTask = nil
         effects.removeAll()
@@ -158,9 +161,10 @@ import Observation
 
     func nextGroupSid() -> String { newSid() }
 
-    func setGroupMarkers(hand: Bool? = nil, muted: Bool? = nil) {
+    func setGroupMarkers(hand: Bool? = nil, muted: Bool? = nil, confirmedMute: Bool? = nil) {
         if let hand { isHandRaised = hand }
         if let muted { isSelfMuteAdvertised = muted }
+        if let confirmedMute, confirmedSelfMute != confirmedMute { confirmedSelfMute = confirmedMute }
     }
 
     /// Local teardown claims the slot without erasing the last wire failure.

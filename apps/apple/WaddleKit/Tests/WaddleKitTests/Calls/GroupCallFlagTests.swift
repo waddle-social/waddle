@@ -131,6 +131,24 @@ extension GroupCallFlagTests {
 }
 
 extension GroupCallFlagTests {
+    @Test func theRoomIsOnlyKnownToHaveHeardAMuteThatWasSent() async {
+        let f = GroupFixture()
+        await f.activate()
+        #expect(!f.store.confirmedSelfMute)
+        f.port.callResults["groupPresence"] = false
+        #expect(await !f.store.advertiseSelfMute(true))
+        // What we meant to say and what the room heard now differ, so
+        // whoever keeps them in step knows there is still something to send.
+        #expect(f.store.isSelfMuteAdvertised)
+        #expect(!f.store.confirmedSelfMute)
+        f.port.callResults["groupPresence"] = true
+        // Any presence that gets through carries the mute with it.
+        #expect(await f.store.setHandRaised(true))
+        #expect(f.store.confirmedSelfMute)
+        f.store.clear()
+        #expect(!f.store.confirmedSelfMute)
+    }
+
     @Test func flagRestampsRequireActiveGroup() async {
         let f = GroupFixture()
         #expect(await !f.store.setHandRaised(true))

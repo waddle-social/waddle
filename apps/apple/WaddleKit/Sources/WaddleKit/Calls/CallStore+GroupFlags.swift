@@ -40,14 +40,20 @@ extension CallStore {
                 current.sid == target.sid, current.room == target.room else { return nil }
             // Snapshot both flags inside the queue, after the exact slot check.
             let hand = isHandRaised
+            let muted = isSelfMuteAdvertised
             let sent = await port.updateGroupCallPresence(
-                .init(state: .active(video: current.media.video), isHandRaised: hand, isMuted: isSelfMuteAdvertised),
+                .init(state: .active(video: current.media.video), isHandRaised: hand, isMuted: muted),
                 in: current.room, nick: current.nick)
             // Bookkeeping belongs to the call that sent: a send that returns
             // after the slot moved on must not touch the next call's.
             guard generation == epoch, case .inGroup(let now) = state,
                 now.sid == target.sid, now.room == target.room else { return sent }
-            if sent { groupControl.advertisedHand = hand } else { onFailure?() }
+            if sent {
+                groupControl.advertisedHand = hand
+                setGroupMarkers(confirmedMute: muted)
+            } else {
+                onFailure?()
+            }
             return sent
         }
     }

@@ -41,7 +41,9 @@ public enum GroupCallRoster {
     /// whose real JID is that exact identity, or from the entry that matched
     /// another device of the same account; without one it is labelled by
     /// its localpart and shows no badges, since badges belong to a room nick.
-    /// One person on two devices is one row, in the first device's place.
+    /// One person on two devices is one row, in the first device's place
+    /// and under its nick even when the devices hold different nicks; the
+    /// row has a hand up if either does and is muted only if both are.
     ///
     /// Then rows whose account is in `speaking` light up, and our own row
     /// moves to the front; everyone else keeps their order, so nobody jumps
@@ -50,7 +52,7 @@ public enum GroupCallRoster {
     /// - Parameter live: the SFU's participant identities, ours included,
     ///   while we are in the call; empty when we are not.
     public static func rows(presence: [GroupCallParticipant], live: [JID], speaking: Set<BareJID>, own: BareJID) -> [GroupCallRosterRow] {
-        let roster = live.isEmpty ? presence.map(row(for:)) : liveRows(live, presence: presence)
+        let roster = onePerAccount(live.isEmpty ? presence.map(row(for:)) : liveRows(live, presence: presence))
         let marked = roster.map { row in
             var row = row
             row.isSpeaking = row.jid.map(speaking.contains) ?? false
@@ -65,6 +67,21 @@ public enum GroupCallRoster {
     /// dropped rather than guessed at.
     public static func speakers(_ identities: some Sequence<String>) -> Set<BareJID> {
         Set(identities.compactMap { JID(parsing: $0)?.bare }.filter { $0.localpart != nil })
+    }
+
+    /// Rows whose account is unknown are left alone: a shared nick is not
+    /// proof of one person.
+    private static func onePerAccount(_ rows: [GroupCallRosterRow]) -> [GroupCallRosterRow] {
+        var merged: [GroupCallRosterRow] = []
+        for row in rows {
+            guard let jid = row.jid, let index = merged.firstIndex(where: { $0.jid == jid }) else {
+                merged.append(row)
+                continue
+            }
+            merged[index].isHandRaised = merged[index].isHandRaised || row.isHandRaised
+            merged[index].isMuted = merged[index].isMuted && row.isMuted
+        }
+        return merged
     }
 
     private static func row(for participant: GroupCallParticipant) -> GroupCallRosterRow {

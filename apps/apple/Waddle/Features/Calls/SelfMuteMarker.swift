@@ -9,6 +9,8 @@ import WaddleKit
 private struct SelfMuteMarker: ViewModifier {
     let calls: CallStore
     let media: any CallMediaControls
+    /// The room can be reached; coming back online is a reason to try again.
+    let isOnline: Bool
 
     /// The microphone starts a moment after media comes up, at the first
     /// connect and again after a reconnect republishes it. For this long
@@ -23,15 +25,17 @@ private struct SelfMuteMarker: ViewModifier {
 
     func body(content: Content) -> some View {
         content.task(id: marker) {
-            guard let marker, marker.isMuted != calls.isSelfMuteAdvertised else { return }
+            guard let marker, marker.isMuted != calls.confirmedSelfMute else { return }
             let sinceUp = media.mediaUpSince.map { Date.now.timeIntervalSince($0) } ?? Self.settle
             if sinceUp < Self.settle {
                 try? await Task.sleep(for: .seconds(Self.settle - sinceUp))
             }
-            for attempt in 0...Self.retries {
+            for _ in 0...Self.retries {
                 // A newer state cancels this task; a moved slot ends it.
                 guard !Task.isCancelled, case .inGroup(let call) = calls.state, call.sid == marker.sid else { return }
-                if attempt == 0, marker.isMuted == calls.isSelfMuteAdvertised { return }
+                // Compared with what the room heard, not with what we meant
+                // to say: a send that failed is still owed.
+                if marker.isMuted == calls.confirmedSelfMute { return }
                 if await calls.advertiseSelfMute(marker.isMuted) { return }
                 try? await Task.sleep(for: Self.retryDelay)
             }
@@ -41,7 +45,7 @@ private struct SelfMuteMarker: ViewModifier {
     /// Only a room's call the mixer accepted, with its media connected, has
     /// a microphone to report on.
     private var marker: Marker? {
-        guard case .inGroup(let call) = calls.state, media.phase == .connected else { return nil }
+        guard isOnline, case .inGroup(let call) = calls.state, media.phase == .connected else { return nil }
         return Marker(sid: call.sid, isMuted: !media.isMicrophoneOn)
     }
 
@@ -53,7 +57,7 @@ private struct SelfMuteMarker: ViewModifier {
 
 extension View {
     /// Keeps the room's mute marker in step with the microphone (see `SelfMuteMarker`).
-    func advertisingSelfMute(calls: CallStore, media: any CallMediaControls) -> some View {
-        modifier(SelfMuteMarker(calls: calls, media: media))
+    func advertisingSelfMute(calls: CallStore, media: any CallMediaControls, isOnline: Bool) -> some View {
+        modifier(SelfMuteMarker(calls: calls, media: media, isOnline: isOnline))
     }
 }

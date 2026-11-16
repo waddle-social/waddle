@@ -177,6 +177,21 @@ import Testing
         f.store.clear()
     }
 
+    @Test func aLateEchoOfOurOwnPresenceDoesNotPutUsBackInACallWeLeft() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        await f.store.hangUp()
+        // The room echoes a hand raise we sent just before leaving.
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        #expect(f.store.groupPresence.participants[groupRoom] == nil)
+        // Another device of ours is a call we can still join.
+        let sibling = JID(parsing: "\(callOwn.bare)/other")!
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: sibling))
+        #expect(f.store.groupPresence.participants[groupRoom]?.count == 1)
+        f.store.clear()
+    }
+
     @Test func aCallTheMixerEndedDropsUsFromItsRosterAtOnce() async {
         let f = GroupFixture()
         await f.activate()
