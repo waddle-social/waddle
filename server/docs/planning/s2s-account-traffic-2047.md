@@ -549,6 +549,11 @@ is off they are unreachable:
   deployment does not serve are deleted when the replica's snapshot no
   longer admits their domain, so a domain removed from the allowlist or
   denylisted after its messages were stored gets none of them delivered.
+  A row is deleted only while no flush has claimed it (one statement
+  checks and deletes): a flush that claimed it after the purge read the
+  store is offering or has pushed it, and a delete then would lose a
+  message the session may already hold. Such a row is delivered by that
+  flush.
   With S2S off this is not checked: no remote traffic arrives then, the
   messages stored while it was on were admitted when they arrived, and a
   deployment without federation pays no extra read of the store at each
@@ -559,11 +564,6 @@ is off they are unreachable:
   sender (64), per worker (256) and per remote domain (64 of a worker's
   256), and the same back-pressure on the stream that carried a stanza
   that does not fit. A worker waits 10 s for one stanza's account work and
-  A row is deleted only while no flush has claimed it (one statement
-  checks and deletes): a flush that claimed it after the purge read the
-  store is offering or has pushed it, and a delete then would lose a
-  message the session may already hold. Such a row is delivered by that
-  flush.
   then abandons it and moves on to the sender's next stanza. The work runs
   in a task of its own, so that a write in progress is not cut short, but
   checks before every effect (a roster or store write, a delivery), under
