@@ -1360,10 +1360,13 @@ placing one request is 4.5 s in all (1 s for the holder to take the
 request, 3 s for its answer and half a second for the lookups), covering
 the lookups of the room's claim and catalog row and both asks when the
 claim moved between them, below the router's 5 s. A holder that does not
-answer within it, or cannot be reached, is reported as such by the
-replica that asked (`RoomPlacement::Silent`); time that runs out during a
-lookup, or before an ask could begin, is answered with
-`resource-constraint` and says nothing of the holder. The router's 5 s is
+answer an ask begun with its two windows (4 s) still ahead, or cannot be
+reached, is reported as such by the replica that asked
+(`RoomPlacement::Silent`); time that runs out during a lookup, before an
+ask could begin, or during an ask begun with less than those windows
+left, is answered with `resource-constraint` and says nothing of the
+holder, which could have answered in its windows and still too late. The
+router's 5 s is
 a backstop. Either way the request is answered with `resource-constraint`
 (type `wait`), and so is everything that waits for the same room then;
 for the next 5 s requests for that room are answered the same way

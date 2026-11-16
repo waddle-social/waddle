@@ -24,8 +24,11 @@
 //! Placing one request, every lookup of the room's claim and catalog row
 //! and every ask of its owner included, takes at most [`HOLDER_ASK_LIMIT`],
 //! below the router's own bound on it. Time that runs out during an ask
-//! reports the owner as silent; time that runs out during a lookup is a
-//! retryable refusal and says nothing of the owner.
+//! that began with the owner's two windows still ahead of it reports the
+//! owner as silent. Time that runs out during a lookup, or during an ask
+//! that began with less than those windows left, is a retryable refusal
+//! and says nothing of the owner: an owner that answers within its
+//! windows could not have answered that ask in time.
 
 use std::sync::Weak;
 use std::time::Duration;
@@ -60,9 +63,13 @@ pub(crate) const REMOTE_ROOM_REQUEST_REPLY_TIMEOUT: Duration = Duration::from_se
 /// transport of one ask. A second ask, after the claim moved, has what
 /// remains.
 const PLACE_LIMIT: Duration = HOLDER_ASK_LIMIT;
+/// The owner's two windows: an ask that begins with less than this left
+/// before the placement's deadline may outlast it on an owner that answers
+/// in time.
+const OWNER_WINDOWS: Duration =
+    REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT.saturating_add(REMOTE_ROOM_REQUEST_REPLY_TIMEOUT);
 const _: () = assert!(
-    REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT
-        .saturating_add(REMOTE_ROOM_REQUEST_REPLY_TIMEOUT)
+    OWNER_WINDOWS
         .saturating_add(Duration::from_millis(500))
         .as_millis()
         <= PLACE_LIMIT.as_millis()
@@ -226,11 +233,25 @@ impl RoomCarrier for ClusterRoomCarrier {
                 trace: Default::default(),
             };
             // Time the lookups spent is not the owner's: an ask with none
-            // left says nothing of it.
-            if tokio::time::Instant::now() >= deadline {
+            // left says nothing of it, and one with less than the owner's
+            // windows left says nothing of it if it runs out.
+            let begun = tokio::time::Instant::now();
+            if begun >= deadline {
                 return lookup_timed_out();
             }
-            match ask_owner(&state, &owner, message, deadline).await {
+            let windows_ahead = deadline.saturating_duration_since(begun) >= OWNER_WINDOWS;
+            let answered = match ask_owner(&state, &owner, message, deadline).await {
+                Asked::Answered(answered) => answered,
+                Asked::OutOfTime if windows_ahead => {
+                    tracing::warn!(
+                        owner = %owner.node_id,
+                        "the room owner did not answer a carried room request in time"
+                    );
+                    return RoomPlacement::Silent;
+                }
+                Asked::OutOfTime => return lookup_timed_out(),
+            };
+            match answered {
                 Ok(RelayRemoteRoomRequestReply::Queued) => return RoomPlacement::Carried,
                 Ok(RelayRemoteRoomRequestReply::NotOwner) if !reresolved => reresolved = true,
                 Ok(RelayRemoteRoomRequestReply::Busy) => {
@@ -267,14 +288,23 @@ impl RoomCarrier for ClusterRoomCarrier {
     }
 }
 
-/// Ask `owner` to take `message`, until `deadline`: an ask the deadline
-/// outlasts, or one begun after it, is a reply timeout.
+/// What became of one ask of a room's owner.
+enum Asked {
+    /// The relay answered: the owner's reply, or why there is none, the
+    /// owner's own windows passing included.
+    Answered(Result<RelayRemoteRoomRequestReply, RelayAskError>),
+    /// The placement's deadline passed first; the owner may still decide
+    /// the stanza.
+    OutOfTime,
+}
+
+/// Ask `owner` to take `message`, until `deadline`.
 async fn ask_owner(
     state: &WebSocketState,
     owner: &waddle_xmpp::ownership::NodeIdentity,
     message: RelayRemoteRoomRequest,
     deadline: tokio::time::Instant,
-) -> Result<RelayRemoteRoomRequestReply, RelayAskError> {
+) -> Asked {
     let Some(bridge) = state
         .deps
         .app_state
@@ -282,20 +312,15 @@ async fn ask_owner(
         .ordered_relay_delivery_bridge
         .as_ref()
     else {
-        return Err(RelayAskError::NotFound {
+        return Asked::Answered(Err(RelayAskError::NotFound {
             node_id: NodeId::new(owner.node_id.clone()),
-        });
+        }));
     };
     let mut handle = bridge.remote_room_request_handle(owner);
-    tokio::time::timeout_at(deadline, handle.remote_room_request(message))
-        .await
-        .unwrap_or_else(|_| {
-            Err(RelayAskError::Send {
-                failure: crate::clustering::relay::RelaySendFailure::ReplyTimeout,
-                effect: crate::clustering::relay::RelaySendEffect::MaybeCommitted,
-                message: "the room owner did not answer in time".to_owned(),
-            })
-        })
+    match tokio::time::timeout_at(deadline, handle.remote_room_request(message)).await {
+        Ok(answered) => Asked::Answered(answered),
+        Err(_) => Asked::OutOfTime,
+    }
 }
 
 /// Owner side: queue a carried stanza for the local room host, when this
