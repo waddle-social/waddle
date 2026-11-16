@@ -7,7 +7,7 @@ Post-baseline drift was manually reviewed through target main
 S2S routing and the host-grant restore incarnation through
 `0ac974978f2ba9a664b1964788f37e8fb2a6de18`, outbound S2S rooms through
 `9766d9c8175f09d56fff6f4e6f8c65b93b0984eb`, and the host-grant revocation fence
-through `939db7350afb262b044d17a1abef370fef609776` (see the last refresh below);
+through `46187e69f0638041d109eeb7497d37c6402c5c09` (see the last refresh below);
 the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -588,6 +588,19 @@ reviewed files since the ninth refresh:
   one `list_deliverable_subscribers`, and the second audience decision of a
   room's own message one `system_message_audience`. No legacy tuple writer,
   grant store or acceptance authority was added, and none was widened.
+
+The selected evidence was refreshed an eleventh time, through
+`46187e69f0638041d109eeb7497d37c6402c5c09`, the merge of the revocation fence
+with the outbound S2S rooms, after reviewing the merged tree against both of its
+parents:
+
+- No reviewed file and no anchor differs from the revocation fence's tenth
+  refresh; the outbound S2S rooms changed none of the reviewed files.
+- The raw scan holds 1596 records, identical in content to the tenth refresh;
+  the 13 lines the eighth refresh recorded as moved in
+  `routes/websocket/cleanup.rs`, `routes/interpret/carbons.rs`,
+  `runtime_owner.rs` and `test_support.rs` moved again, as they had there. No
+  production grant writer, grant store or acceptance authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
