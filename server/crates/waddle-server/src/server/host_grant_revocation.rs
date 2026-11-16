@@ -31,6 +31,10 @@
 //! (retired, restored, fenced) admits nobody, which a read shows: its rooms
 //! are emptied with status 321.
 //!
+//! A room's administration request applies its own change to the actor,
+//! with the administrator and the reason it names; the sweep waits for a
+//! request that is under way on this process before it looks at the room.
+//!
 //! The acknowledgement of a revoke does not wait for the sweep (see `fence`).
 //! Until the sweep has removed it, a revoked occupant that is still seated
 //! receives the presence the room actor broadcasts to its occupants and
@@ -200,6 +204,11 @@ impl Sweep {
             Ok(Ok(None)) => return true,
             Ok(Err(_)) | Err(_) => return false,
         };
+        // A request that administers the room holds this lock from before it
+        // records a change until the room actor applied it. Waiting for it
+        // leaves the removal to that request, which names who acted and why;
+        // the sweep then finds the room in line.
+        let _administration = crate::admin::channels::acquire_room_config_lock(room).await;
         // Only a read that shows the grants is acted on.
         let grants = match self.grants.room_as_stored(RoomBinding::Room(room)).await {
             RoomGate::Managed(grants) => grants,
