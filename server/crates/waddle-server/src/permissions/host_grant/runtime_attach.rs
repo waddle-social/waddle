@@ -464,9 +464,27 @@ impl HostGrantAttachmentGate {
         true
     }
 
-    /// The attachment acceptances compare with, if any.
+    /// The attachment acceptances compare with, if any. It is kept while
+    /// the gate verifies a changed authority again, and after such a
+    /// verification failed, so that acceptance compares it with the binding
+    /// it reads and refuses; surfaces that do not compare bindings read
+    /// [`Self::verified_attachment`] instead.
     pub fn current(&self) -> Option<HostGrantAttachment> {
         self.read().attachment.clone()
+    }
+
+    /// The attachment, only while the gate is [`GateState::Attached`]: the
+    /// last verification of the authority passed and nothing since has
+    /// found it changed. The state and the attachment are read together.
+    /// While the gate verifies again, or after a verification failed, this
+    /// is `None` even if an attachment is still held, so a surface that
+    /// decides managed rooms without comparing the binding fails closed.
+    pub fn verified_attachment(&self) -> Option<HostGrantAttachment> {
+        let inner = self.read();
+        match inner.state {
+            GateState::Attached => inner.attachment.clone(),
+            GateState::Unattached | GateState::Reverifying | GateState::ReverifyFailed => None,
+        }
     }
 
     pub fn state(&self) -> GateState {

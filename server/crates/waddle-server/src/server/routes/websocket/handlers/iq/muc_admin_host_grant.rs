@@ -28,8 +28,8 @@ use super::{
 };
 use crate::permissions::host_grant::{
     GrantOperationId, GrantSubject, HostGrantAction, HostGrantAuthority, HostGrantError,
-    IssuancePolicy, ManagedRoomGrants, OperationOutcome, RoomAffiliation, RoomBinding, RoomGate,
-    SetAffiliation,
+    HostGrantGate, IssuancePolicy, ManagedRoomGrants, OperationOutcome, RoomAffiliation,
+    RoomBinding, RoomGate, SetAffiliation,
 };
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
@@ -150,14 +150,14 @@ pub(crate) async fn record_host_grant_affiliation(
         };
         match authority.set_affiliation(&command).await {
             Ok(_) => {
-                spawn_reconcile(authority, command);
+                spawn_reconcile(gate.clone(), authority, command);
                 return Ok(());
             }
             Err(HostGrantError::StaleGeneration { current }) => generation = current,
             Err(HostGrantError::CommitOutcomeUnknown) => {
                 return match store.operation_outcome(command.operation).await {
                     Ok(OperationOutcome::Committed(_)) => {
-                        spawn_reconcile(authority, command);
+                        spawn_reconcile(gate.clone(), authority, command);
                         Ok(())
                     }
                     Ok(OperationOutcome::Absent) => Err(RecordRefusal::refused(
@@ -232,32 +232,48 @@ const RECONCILE_RETRY_DELAYS: [std::time::Duration; 6] = [
 /// the change stays recorded and not effective until the next change of
 /// the scope or the recovery pass a replica runs when it attaches to the
 /// store. A contradiction or a scope that no longer admits changes is not
-/// retried.
-fn spawn_reconcile(authority: HostGrantAuthority, command: SetAffiliation) {
+/// retried. No pass runs while the replica's attachment gate is not
+/// attached (`host_grants`): the authority may have been restored or failed over
+/// under the replica, and nothing is projected or activated for it until
+/// the fence verifies it again; such a pass counts as one that did not
+/// finish.
+fn spawn_reconcile(
+    host_grants: HostGrantGate,
+    authority: HostGrantAuthority,
+    command: SetAffiliation,
+) {
     use crate::permissions::host_grant::Reconciliation;
     tokio::spawn(async move {
         let mut delays = RECONCILE_RETRY_DELAYS.iter();
         loop {
-            let retry = match authority.reconcile(command.lifecycle).await {
-                Ok(Reconciliation::Activated(_) | Reconciliation::AlreadyActive(_)) => {
-                    tracing::debug!("Reconciled a room affiliation change's projection");
-                    return;
+            let retry = if host_grants.attachment().is_none() {
+                tracing::debug!(
+                    "A room affiliation change's projection waits for the host-grant authority \
+                     to be verified again"
+                );
+                true
+            } else {
+                match authority.reconcile(command.lifecycle).await {
+                    Ok(Reconciliation::Activated(_) | Reconciliation::AlreadyActive(_)) => {
+                        tracing::debug!("Reconciled a room affiliation change's projection");
+                        return;
+                    }
+                    // A scope a declared restore closed was rebuilt and stays
+                    // closed until an operator reopens it.
+                    Ok(Reconciliation::Reconstructed(_)) => {
+                        tracing::debug!("Reconstructed a restored scope's projection");
+                        return;
+                    }
+                    Ok(Reconciliation::Contradiction(_)) => {
+                        warn!(
+                            kind = "contradiction",
+                            "A room affiliation change's projection contradicts the store"
+                        );
+                        return;
+                    }
+                    Ok(Reconciliation::Superseded | Reconciliation::ProjectionUnknown) => true,
+                    Err(error) => reconcile_error_is_transient(&error),
                 }
-                // A scope a declared restore closed was rebuilt and stays
-                // closed until an operator reopens it.
-                Ok(Reconciliation::Reconstructed(_)) => {
-                    tracing::debug!("Reconstructed a restored scope's projection");
-                    return;
-                }
-                Ok(Reconciliation::Contradiction(_)) => {
-                    warn!(
-                        kind = "contradiction",
-                        "A room affiliation change's projection contradicts the store"
-                    );
-                    return;
-                }
-                Ok(Reconciliation::Superseded | Reconciliation::ProjectionUnknown) => true,
-                Err(error) => reconcile_error_is_transient(&error),
             };
             let Some(delay) = delays.next().filter(|_| retry) else {
                 warn!(
