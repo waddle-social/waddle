@@ -1,12 +1,13 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import CreateChannelDialog from "@/components/modals/CreateChannelDialog.vue";
 import WaddleSettingsDialog from "@/components/modals/WaddleSettingsDialog.vue";
 import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
-import NewGroupDmDialog from "@/components/modals/NewGroupDmDialog.vue";
 import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { ChatAppController } from "@/shell/chat-app-controller";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 
 const props = defineProps<{
   controller: ChatAppController;
@@ -34,6 +35,15 @@ const {
   handleRemoveMember,
   confirmRemoveMember,
 } = props.controller;
+
+/** "Add people" from a 1:1 DM: that person is already in the new group. */
+const groupDmSeed = computed(() => {
+  const jid = ui.groupDmSeedPeerJid.value;
+  if (!jid) return null;
+  const contact = props.controller.rosterContacts.contacts.value.find((c) => c.jid === jid);
+  const conversation = props.controller.dmConversations.conversations.value.find((c) => c.peerJid === jid);
+  return { jid, label: contact?.name?.trim() || conversation?.peerUsername || jidLocalpart(jid) || jid };
+});
 </script>
 
 <template>
@@ -41,17 +51,12 @@ const {
     <NewDmDialog
       v-model:open="ui.showNewDm.value"
       :search-recipients="searchDmRecipients"
-      @submit="handleNewDm"
-    />
-    <NewGroupDmDialog
-      v-model:open="ui.showNewGroupDm.value"
       :contacts="controller.rosterContacts.contacts.value"
-      :is-submitting="waddles.isSubmitting.value"
       :self-jid="controller.connectionStore.session?.jid ?? null"
-      :excluded-jids="ui.groupDmSeedPeerJid.value ? [ui.groupDmSeedPeerJid.value] : []"
-      :minimum-selected-contacts="ui.groupDmSeedPeerJid.value ? 1 : 2"
-      :title="ui.groupDmSeedPeerJid.value ? 'Add people' : 'New group message'"
-      @submit="handleCreateGroupDm"
+      :seed="groupDmSeed"
+      :is-submitting="waddles.isSubmitting.value"
+      @submit="handleNewDm"
+      @create-group="handleCreateGroupDm"
     />
     <CreateChannelDialog
       v-model:open="ui.showCreateChannel.value"

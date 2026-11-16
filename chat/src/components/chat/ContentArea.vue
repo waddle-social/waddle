@@ -80,6 +80,7 @@ const props = defineProps<{
     peerUsername: string;
     presenceShow?: string;
     presenceIdleSince?: number;
+    mucPm?: boolean;
   } | null;
   sidebarMode?: "channels" | "dms";
   messages: TimelineMessage[];
@@ -160,6 +161,7 @@ const emit = defineEmits<{
   search: [query: string];
   clearSearch: [];
   openDm: [peerJid: string];
+  addPeopleToDm: [peerJid: string];
   openThread: [threadId: string, targetMessageId?: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   leaveChannelCall: [roomJid: string];
@@ -900,6 +902,7 @@ const cls = {
       @open-details="emit('openDetails')"
       @edit-channel="emit('editChannel')"
       @select-member="(jid: string) => emit('openDm', jid)"
+      @add-people="dmPeer?.peerJid && emit('addPeopleToDm', dmPeer.peerJid)"
     />
     <ConversationCallBanner
       :room-jid="callRoomJid"
