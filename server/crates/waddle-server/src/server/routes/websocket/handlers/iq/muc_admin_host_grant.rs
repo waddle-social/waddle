@@ -125,7 +125,7 @@ pub(crate) async fn record_host_grant_affiliation(
             "The room is not available.",
         )));
     };
-    let issuance = issuance_policy(state, attachment.served()).ok_or_else(|| {
+    let issuance = issuance_policy(state, attachment.principals()).ok_or_else(|| {
         RecordRefusal::refused(service_unavailable_iq_error("The room is not available."))
     })?;
     let initiator = GrantSubject::new(initiator.clone())
@@ -254,12 +254,12 @@ impl RecordRefusal {
 /// `XmppServiceDomains::host_grant_issuance_policy`).
 fn issuance_policy(
     state: &WebSocketState,
-    served: &crate::permissions::host_grant::ServedAccountDomains,
+    principals: &crate::permissions::host_grant::PrincipalPolicy,
 ) -> Option<IssuancePolicy> {
     state
         .deps
         .service_domains
-        .host_grant_issuance_policy(served)
+        .host_grant_issuance_policy(principals)
 }
 
 /// Delays before each further reconciliation pass of a recorded change whose
@@ -547,16 +547,18 @@ pub(super) async fn managed_room(
         .await
 }
 
-/// Whether the occupants named by `nicks` are all accounts of a domain this
-/// deployment serves. The moderator role is room moderation, which a remote
-/// principal holds only under ADR-0020 D8's conditions; this boundary does
-/// not see them, so the role is granted to served accounts only.
-pub(super) async fn occupants_are_served_accounts(
+/// Whether the occupants named by `nicks` may all hold the moderator role.
+/// The role is room moderation, which a principal holds only when its
+/// witness honours privilege (ADR-0020 D8): an account of a served domain,
+/// or a trusted home's account whose request a `pkix` stream carried. An
+/// occupant named here is not the requester, so it is decided without
+/// stream evidence and an occupant of a remote home is refused.
+pub(super) async fn occupants_may_moderate(
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     room: &ManagedRoomGrants,
     nicks: &[&str],
 ) -> Result<bool, ()> {
-    use crate::permissions::host_grant::SubjectHome;
+    use crate::permissions::host_grant::PrincipalEvidence;
     let snapshot = room_actor.ask(GetSnapshot).await.map_err(|_| ())?;
     Ok(nicks.iter().all(|nick| {
         snapshot
@@ -565,7 +567,8 @@ pub(super) async fn occupants_are_served_accounts(
             .values()
             .find(|occupant| occupant.nick == *nick)
             .is_some_and(|occupant| {
-                room.served.home_of(&occupant.real_jid.to_bare()) == SubjectHome::Served
+                room.witness(&occupant.real_jid.to_bare(), &PrincipalEvidence::NoStream)
+                    .privilege_honoured()
             })
     }))
 }

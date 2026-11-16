@@ -142,8 +142,10 @@ domain (the stream's authenticated remote domain), the stream's
 authentication strength and trust-profile kind, and the connection and
 configuration generation it arrived under. It is built only from a stanza
 on an inbound stream whose remote domain is exactly the address's domain;
-it is never a session, an account or a grant. The effect-boundary admission
-slice (W5e) consumes it.
+it is never a session, an account or a grant. The host-grant effect
+boundary takes the facts of its stream as evidence
+(`PrincipalEvidence::of`) and decides its grants from its canonical bare
+JID and that evidence under the S2S snapshot the replica runs.
 
 ## Reachability inventory (G23)
 
@@ -1050,8 +1052,11 @@ runbook (G24):
   for a remote target. A message carrying a DM pin marker for a remote peer
   must still be refused before it is routed, since DM pins are local-only:
   today the outbound D7 refusal is what keeps the marker off the wire.
-- Effect-boundary admission (W5e): take the `RemotePrincipal` at the
-  protected-effect boundary.
+- Remote principals at protected effects (W6a, W7a): pass each
+  `RemotePrincipal`'s evidence (`PrincipalEvidence::of`) to the host-grant
+  decision of every protected effect a remote stanza reaches, and decide
+  D1 admission with `PrincipalPolicy::witness` at each effect in a room no
+  scope manages.
 - Capability advertisement (W11): any further feature in server-domain
   `disco#info` for remote askers.
 - Stanzas the interpreter routes to a remote JID other than IQs, such as a

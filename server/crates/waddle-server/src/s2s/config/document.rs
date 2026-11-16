@@ -38,6 +38,21 @@ pub(super) struct Document {
     pub(super) discovery: DiscoveryDocument,
     #[serde(default)]
     pub(super) dialback: DialbackDocument,
+    #[serde(default)]
+    pub(super) host_policy: HostPolicyDocument,
+}
+
+/// Host policy for the grants of remote principals (ADR-0020 D2 and D5).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HostPolicyDocument {
+    /// Honour a remote principal's grants only when the stream that carried
+    /// its request has `pkix` strength, member-level grants included. Off
+    /// by default: a member-level grant is honoured on a dialback stream
+    /// too, while privileged grants and room moderation always need `pkix`
+    /// (ADR-0020 D8).
+    #[serde(default)]
+    pub(super) require_pkix: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

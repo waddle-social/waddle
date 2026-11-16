@@ -51,6 +51,13 @@ set has run against disposable stores (see
 With no scope enrolled it changes, beyond its migrations, what
 [its rollout part](#rollout-part-of-the-revocation-fence-g24) lists.
 
+The effect-boundary slice for remote principals (W5e in the plan, gate
+G17) is implemented as well (`permissions/host_grant/principal.rs`, the
+`[host_policy]` table of the S2S snapshot). Its decisions are recorded
+under [Remote principals at the effect
+boundary](#remote-principals-at-the-effect-boundary-g17); its cases have
+not run.
+
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
 for its scope, records the decision here and has it independently reviewed
@@ -564,15 +571,20 @@ S2S.
 | Raw versus typed JIDs; XML character references; case, sharp-s, trailing-dot and A-label/U-label pairs | Enforce the approved identity profile before lossy parsing; reject unsupported input without aliasing another account. Provisioning/authentication/lookup/ingress agree on audited bindings. | W5i (step 2); W5a at S2S ingress (step 6) |
 | Privileged or moderator grant issued through this slice's path to a remote JID, with the trusted-home set supplied as input | Refused for a home outside the set; recorded for a home in it. | W5b |
 | Privileged or moderator grant for a JID of a home not on the trusted-home list, written by bootstrap or repair | Refused. | W5c (step 4) |
-| Stored privileged grant for a remote principal: trusted home on `pkix` and on dialback-only streams; home removed from the list; home never listed, grant stored outside the canonical path | Honored only for a listed home on `pkix`; otherwise ignored, whatever is stored. | W5e (steps 6 and 7) |
-| Room moderation by a remote principal: trusted home on `pkix` and on dialback-only streams; home not on the list, on `pkix`; a message author's own edit and delete | Moderation honored only for a listed home on `pkix`; the author's own edit and delete are not moderation and are not restricted by it. | W5e (steps 6 and 7) |
-| Former admin of a home removed from the trusted-home list, holding no separate member-level grant | Cannot moderate or read through that grant: an unhonored grant contributes no permission. | W5e (steps 6 and 7) |
+| Stored privileged grant for a remote principal: trusted home on `pkix` and on dialback-only streams; home removed from the list; home never listed, grant stored outside the canonical path | Honored only for a listed home on `pkix`; otherwise ignored, whatever is stored. | W5e (steps 4, 6 and 7) |
+| Room moderation by a remote principal: trusted home on `pkix` and on dialback-only streams; home not on the list, on `pkix`; a message author's own edit and delete | Moderation honored only for a listed home on `pkix`; the author's own edit and delete are not moderation and are not restricted by it. | W5e (steps 4, 6 and 7) |
+| Former admin of a home removed from the trusted-home list, holding no separate member-level grant | Cannot moderate or read through that grant: an unhonored grant contributes no permission. | W5e (steps 4, 6 and 7) |
+| Work from a remote domain decided after it stopped being admitted (removed from the allowlist, a parent domain denylisted, `closed` mode, S2S off), including work queued before the change | Refused at the decision; its grants contribute nothing, member-level grants included. | W5e (steps 4, 6 and 7) |
+| Remote member on a dialback stream, with host policy requiring `pkix` | Its member-level grant contributes nothing; on `pkix` it is honoured. | W5e (steps 4, 6 and 7) |
+| Trusted home whose snapshot requires a private-CA profile, on a public-profile `pkix` stream and on a dialback stream whose certificate verified under the private CA | Privileged grant honoured only on the private-CA `pkix` stream. | W5e (steps 4, 6 and 7) |
+| Remote initiator of an affiliation change: trusted home on `pkix` and on weaker streams, home removed from the list | Acts with its honoured standing only on the trusted home's `pkix` stream while the home is listed. | W5e (steps 4, 6 and 7) |
+| Issuance, bootstrap and repair under the S2S snapshot the replica runs | Privileged grants issued to accounts of its trusted homes; none while S2S is off; a trusted home that is a service domain refused. | W5e (step 4) |
 | Outcast on every action the SQL policy protects, including channel `moderate`, `manage` and `delete` and an outcast author's own message `edit` and `delete` | The SQL policy evaluates outcast for every action it protects, and outcast wins each at this slice's admission. | W5b |
 | Acknowledged revoke across two replicas with queued work at joins, protected reads, PubSub and stream-management fanout and room administration | No new protected admission under the revoked grant after the fence, on any replica. | W5d |
 | Retired account JID on a Waddle home | Never issued to a new holder through any provisioning path. | W5d |
 | Groupchat planned by the room planner for a revoked member, a member of the parent Space without a room grant, and a seated account without a grant | The acceptance is reduced to the admitted audience: none of them is routed, projected, pushed or notified anything, nothing is recorded for a later replay to deliver, and the admitted members receive the message. | W5b |
 | Plan that holds work a managed room does not account for; room address that is not canonical | The stanza is refused with a committed error of type `cancel`; a sender who is not admitted is told only that. | W5b |
-| Stored owner or admin grant of a remote account at this slice's admission and as a mutation's initiator | Contributes nothing, member-level access included, and does not count as the owner a room keeps; a member-level grant of a remote account is honored. | W5b |
+| Stored owner or admin grant of a remote account at this slice's admission and as a mutation's initiator, on a replica with S2S off | Contributes nothing, member-level access included, and does not count as the owner a room keeps; with S2S off a member-level grant of a remote account contributes nothing either, since no remote domain is admitted (with S2S on, the W5e rows). | W5b |
 | Replica whose runtime role does not match the store's privilege profile | Holds no attachment and serves no enrolled scope; rooms no scope manages are unaffected. | W5b |
 | Enrollment and retirement with the runtime credential | Refused by PostgreSQL before anything changes. | W5b |
 | Projection read that does not answer | The permission actor keeps answering what it decides without SpiceDB; the read ends at its deadline with an unknown outcome. | W5b |
@@ -1047,27 +1059,23 @@ admit, or when the room's address is not in canonical form. A sender who is
 not admitted is told only that. A refusal is a recorded outcome that a
 retransmission resolves to for good, so none is of type `wait`.
 
-Remote privilege at this boundary (ADR-0020 D8). Honoring a privileged or
-moderator grant of a remote principal requires its home to be trusted and
-the stream it arrived on to have `pkix` strength, and neither is visible
-here. Until the effect-boundary slice (W5e) supplies them, this boundary
-fails closed: an `owner` or `admin` grant, the only privileged or moderator
-affiliations this slice holds, whose subject is not an account of a domain
-this deployment serves is honored as no grant
-(`policy::honoured_affiliation`). At admission it yields neither `moderate`
-nor the `read` and `send_message` the table would derive from it, for the
-sender and for every named principal; as a mutation's initiator it
-authorizes nothing; and it does not count as the owner a room must keep.
-Member-level and negative grants of remote accounts are honored as stored.
-The served account domains are the replica's configured account domain:
-admission takes them from its attachment (B1) and a mutation from its
-issuance policy. A replica that serves no account domain honors no
-privileged grant. Both sets must come from one configuration value: issuance
-records an owner or admin grant as `local` because its subject's domain is
-served, and admission honors it only if it agrees. No issuance policy is
-built from configuration in this slice; when one is, it takes the account
-domains from the value the attachment takes them from. W5e replaces this rule with the trusted-home and `pkix`
-evaluation. Issuance is unchanged by it.
+Remote principals at this boundary (ADR-0020 D1 and D8). Whose grants
+admission honors is decided by the principal's admission witness, as
+recorded under [Remote principals at the effect
+boundary](#remote-principals-at-the-effect-boundary-g17): an account of a
+served domain is honored as stored; a remote principal's grants contribute
+nothing unless its domain is admitted under the S2S snapshot the replica
+runs, and its `owner` or `admin` grant, the only privileged or moderator
+affiliations this slice holds, only for a trusted home on a `pkix` stream.
+A grant that is not honored yields neither `moderate` nor the `read` and
+`send_message` the table would derive from it. The sender is decided with
+the evidence of how its request arrived, and every named principal without
+stream evidence. The served account domains and the S2S snapshot are the
+replica's principal policy: admission takes it from its attachment (B1) and
+a mutation from its issuance policy, both built from one value, so issuance
+records an owner or admin grant as `local` exactly for the accounts
+admission honors as served. A replica that serves no account domain honors
+no privileged grant of a local account.
 
 A mutation's initiator is an account whose authority is evaluated from the
 state under the guard, in the transaction that records the change: only an
@@ -1075,10 +1083,12 @@ effective owner grants or removes owner and admin standing, an effective
 owner or admin changes other standing, and a room always keeps an owner who
 can administer it: one whose standing is recorded, effective and honored. A
 standing that was revoked, demoted or not yet activated authorizes nothing,
-nor does a privileged standing of a remote account (above), and a command
-decided under an earlier generation is refused as stale first. An
-enrollment is refused unless every room starts with an owner of a served
-account domain.
+nor does a standing the initiator's witness does not honor (above), and a
+command decided under an earlier generation is refused as stale first. The
+owner a room keeps is an owner of a served account domain: a remote
+owner's standing is honored only on some streams and only while the
+snapshot lists its home, so it is never counted. An enrollment is refused
+unless every room starts with an owner of a served account domain.
 
 Issuance to remote accounts (ADR-0020 D8). `IssuancePolicy` takes the domains
 the deployment serves and the trusted-home set as inputs. An owner or admin
@@ -1086,10 +1096,10 @@ affiliation for an account whose domain is neither served here nor an exact
 member of that set is refused before anything is recorded; member-level and
 negative affiliations are issued to any account; an identity of a local
 service is refused as a subject. The accepted basis (`local`, `trusted_home`,
-`unprivileged`) is recorded with the grant. A grant recorded for a trusted
-home is not honored by this slice's admission or as an initiator, as
-described above; whether it is honored on a `pkix` stream is decided by
-W5e.
+`unprivileged`) is recorded with the grant. A replica's issuance policy
+takes the trusted-home set from the S2S snapshot it runs (none while S2S is
+off). A grant recorded for a trusted home is honored as described above: on
+that home's `pkix` stream, while the home stays admitted and listed.
 
 ### B6 as it applies to grant subjects
 
@@ -1197,9 +1207,10 @@ of the first slice they rely on.
 A room an enrolled scope manages (a *managed room* below, as in the first
 slice) is decided on every surface from its canonical grants, with the
 admission policy of the first slice (`policy::grant_allows`): the
-recorded and effective affiliation, outcast winning, and an owner or admin
-grant of an account of a domain the replica does not serve honoured as no
-grant. `HostGrantGate` (`permissions/host_grant/gate.rs`) is that decision
+recorded and effective affiliation, outcast winning, and each grant
+honoured as its subject's admission witness says ([Remote principals at the
+effect boundary](#remote-principals-at-the-effect-boundary-g17)).
+`HostGrantGate` (`permissions/host_grant/gate.rs`) is that decision
 outside room-manifest acceptance. For a room it answers:
 
 - *unmanaged*: the replica's enrolled set (below) does not name the room,
@@ -1208,7 +1219,8 @@ outside room-manifest acceptance. For a room it answers:
 - *managed*: the room's canonical grants, read in one `REPEATABLE READ`
   snapshot that takes no row lock (`HostGrantStore::room_grants`), bounded
   by 500 ms for a lock, 1 s for a statement and 1.5 s for the whole read,
-  together with the account domains the replica serves;
+  together with the replica's principal policy (the account domains it
+  serves and the S2S snapshot it runs);
 - *unavailable*: the enrolled set has not loaded, the room's address
   reaches an enrolled room in a form that is not the identity profile's
   canonical form, the grants could not be read within the bounds, or the
@@ -1358,7 +1370,7 @@ scope.
 | --- | --- |
 | Permission actor `WriteTuple`, `DeleteTuple`, `ReplaceExclusiveRelation`, `SwapExclusiveRelation` (every legacy caller below) | Refused (first slice): object, Space subject or channel subject of an enrolled scope. |
 | XEP-0045 affiliation change (`iq/muc_admin.rs`, graph-first `persist_managed_channel_affiliation` and its `SwapExclusiveRelation` rollback) | Store: the change is recorded in the host-grant store before the room actor applies it; no relationship is written and nothing is rolled back. The graph-first write and its rollback remain for unmanaged channels only. |
-| XEP-0045 role change and moderator role | Authority from the store (`moderate`); the moderator role is granted to served accounts only. Roles are occupancy, not grants. |
+| XEP-0045 role change and moderator role | Authority from the store (`moderate`); the moderator role is granted only to an occupant whose witness honours room moderation, decided without stream evidence, so to served accounts. Roles are occupancy, not grants. |
 | XEP-0045 owner configuration (`muc_owner_config.rs` channel owner tuple) | Store authority (`manage`); writes no owner relationship; members-only is kept. |
 | XEP-0045 destroy | Refused: no room affiliation confers `delete`; a managed room ends when its scope is retired. |
 | Mediated invitation (`message/muc_invite.rs` member grant, its rollback and rebuild) | Refused when planned; an invitation accepted before enrollment is delivered without granting membership. Its rollback writes neither the legacy relation nor the room actor's list of a managed room, or of a room whose management cannot be told. |
@@ -1449,14 +1461,19 @@ relationships, alike on every permission backend
   channel's parent changes nothing until a placement by someone with the
   authority above.
 
-Remote privilege (D8). Every surface above honours a privileged or moderator
-grant only for an account of a domain the replica serves, as the first
-slice's acceptance does; the moderator role likewise. W5e replaces the rule
-with the trusted-home and `pkix` evaluation. Bootstrap and repair writers are
-given the trusted-home set they use, and are given none today: the owner
-reseed refuses Owner for an account outside the served domain and that set,
-and account bootstrap provisions deployment ownership only for an account of
-the served domain.
+Remote principals (D1 and D8). Every surface above honours a grant as its
+subject's admission witness says, as the first slice's acceptance does
+([Remote principals at the effect
+boundary](#remote-principals-at-the-effect-boundary-g17)). A surface that
+decides a local session's request, or a subject it names (an occupant, a
+member, a mention), decides without stream evidence, so a remote subject
+holds no privileged authority or room moderation there and the moderator
+role is granted to served accounts only. Bootstrap and repair writers take
+the trusted-home set from the replica's principal policy: the owner reseed
+refuses Owner for an account outside the served domain and the trusted
+homes of the S2S snapshot the replica runs, and account bootstrap
+provisions deployment ownership only for an account of the served domain,
+since owners are configured by localpart.
 
 Members-only binding. A managed room's binding is members-only. The binding
 is applied wherever a room actor's configuration is built for such a room
@@ -1779,7 +1796,9 @@ yet uses two replicas; that is verification step 4.
   scope's Space is served; W7a depends on it), and with it what `view` of a
   scope's Space means: until then its node is described and listed to
   nobody.
-- Remote principals at these surfaces (W5e, W6a).
+- Remote principals reaching these surfaces over S2S (W6a); the decision
+  they reach is recorded under [Remote principals at the effect
+  boundary](#remote-principals-at-the-effect-boundary-g17).
 - Recreation of a scope, a room or a node under a new lifecycle.
 - A deployment-wide policy guard; the first slice's community generation
   still does not fence a changed deployment override.
@@ -2245,10 +2264,11 @@ When the scope's marker was written under another incarnation, the pass:
    at `none` otherwise; and, only when operations were lost, every canonical
    grant lowered to what the projection holds for its subject, `none` where
    it holds nothing. Nothing is raised, in the affiliation or in what
-   admission honours: lowering an owner or admin grant of an account this
-   deployment does not serve (honoured as none) to the projection's
-   `member` is recorded at `none`. An affiliation issuance refuses for its
-   subject is recorded no higher than `none`;
+   admission honours on any decision: lowering an owner or admin grant of
+   an account this deployment does not serve, which every decision but a
+   trusted home's `pkix` request honours as none (`policy::honoured_floor`),
+   to the projection's `member` is recorded at `none`. An affiliation
+   issuance refuses for its subject is recorded no higher than `none`;
 4. if operations were lost, the operation of step 3 also marks the scope as
    one a restore lost operations in (`host_grant_scopes.lost_operations`),
    and is recorded even when no grant changes, unless the scope holds the
@@ -3059,6 +3079,192 @@ PostgreSQL-backed SpiceDB and nextest's default parallelism: 245 of 245
 cases passed, 32 of them in the five binaries above. No run recorded here
 shows that a new case fails without its fix.
 
+## Remote principals at the effect boundary (G17)
+
+These are the decisions of the effect-boundary slice (W5e in the plan) for
+gate G17 and its part of G14. Like those of the slices before it, they are
+decisions: the acceptance-matrix rows marked W5e and the suite named under
+[Evidence of the effect boundary](#evidence-of-the-effect-boundary) are
+their evidence, and none of it has run.
+
+### The principal policy
+
+- One value per replica decides whose host grants are honoured:
+  `PrincipalPolicy` (`permissions/host_grant/principal.rs`), the served
+  account domains (the canonical `WADDLE_XMPP_DOMAIN`) and the S2S snapshot
+  the replica runs (`FederationSnapshot`: its generation, its admission
+  policy with the trusted-home list and `require_private_ca`, and the
+  host-policy `pkix` switch). It holds no snapshot while S2S is off.
+- The replica builds it from `AppState::grant_principals`, and every
+  host-grant path takes it from there: the attachment, and the verifier
+  that rebuilds the attachment each time the fence runs again, so
+  room-manifest acceptance and every `HostGrantGate` surface; the issuance
+  policy of room administration and of projection recovery
+  (`IssuancePolicy::for_principals`); the topology bootstrap; and the
+  Spaces owner seeds of Space and node creation. The served account
+  domains and the trusted homes therefore each come from one configuration
+  value.
+- Startup refuses an S2S snapshot whose trusted-home list names a domain of
+  one of the deployment's services (upload, push, the community and
+  extension services). The S2S loader refuses the local domains it knows;
+  issuance cannot grant to a service domain.
+- The snapshot is immutable for the life of the process: a replica applies
+  a changed one when it restarts with it, as the connection-manager design
+  has no reload. Every decision reads the snapshot the replica runs at that
+  moment, and a remote principal's witness names that snapshot's
+  generation. A change is complete only when every replica runs it
+  (ADR-0020 D1); until then a replica that still runs the previous snapshot
+  decides by it. This is what makes the snapshot safe as a deployment-wide
+  policy input without a guard of its own: within a process no decision
+  can read any other snapshot.
+
+### The witness
+
+`PrincipalPolicy::witness` decides what the principal of a decision is,
+from its bare JID and the evidence of how its request arrived:
+
+- *Evidence.* `PrincipalEvidence::Stream` carries the authentication
+  strength and the trust-profile kind of the inbound S2S stream that
+  carried the request. Outside test support it is built only from a
+  `RemotePrincipal`, which only a verified inbound stream produces.
+  `PrincipalEvidence::NoStream` is a local session's own request, or a
+  principal the decision names without its request (a recipient, a seated
+  occupant, a listed subject).
+- A subject of a served account domain without stream evidence is
+  `Served`, and its grants are honoured as stored. The local path is
+  unchanged.
+- Every other subject is remote. Its witness (`RemoteWitness`) binds its
+  home domain; the strength and trust-profile kind of its stream (none
+  without one); the snapshot's generation; the D1 admission decision for
+  that domain (`AdmissionPolicy::decide`, a denylisted parent domain
+  included); whether the home is on the trusted-home list; whether it is a
+  trusted home for that stream (`AdmissionPolicy::is_trusted_home` with the
+  stream's profile, so a home whose `require_private_ca` entry the profile
+  does not meet is not); and whether host policy requires `pkix`. Beside
+  D1's refusals, a remote principal is refused when S2S is off, when its
+  domain is not in canonical form, and when a stream claims an account of
+  a served domain, which is never decided as local.
+- Admission and trusted-home status are never carried with work: a
+  `RemotePrincipal` carries only the facts of its stream, and the rest is
+  evaluated again at each decision. Work queued before its domain stopped
+  being admitted, or before its home left the list, is refused when it is
+  decided.
+
+### The rule
+
+What a remote principal's effective affiliation is honoured as
+(`PrincipalWitness::honour`, used by `policy::grant_allows`):
+
+| Witness | Honoured as |
+| --- | --- |
+| Effective `outcast` | `outcast`, always; a recorded `outcast` denies every action whatever the effective column holds |
+| Domain not admitted (S2S off, a D1 refusal, not canonical, a served domain on a stream) | none |
+| Host policy requires `pkix` and no `pkix` stream carried the request | none |
+| `owner` or `admin`, unless a trusted home's `pkix` stream with a verified certificate carried the request | none |
+| Anything else | as stored |
+
+None allows nothing, so a grant that is not honoured contributes nothing,
+the member-level `read` and `send_message` the table would derive from it
+included (D8). A member-level grant is honoured on any stream while the
+domain is admitted. A message author's own correction and retraction need
+what `send_message` needs, so the moderation conditions do not restrict
+them.
+
+### Where it is decided
+
+- Room-manifest acceptance (`admit_room_acceptance`): the sender with the
+  evidence of its request, every named recipient without stream evidence.
+  The acceptance's witness (`AdmissionWitness::sender`) records what the
+  sender was decided as. Every ingress producer (a local session, an
+  extension, a room's own result) submits without a stream, so the
+  acceptance passes `NoStream`; the slice that admits remote senders to
+  rooms (W6a) adds a producer that passes its stream's evidence.
+- The gate's surfaces: `ManagedRoomGrants::allows`, `standing` and
+  `admitted` decide without stream evidence, as for a local session's
+  request or a subject the surface names; `allows_as`, `standing_as` and
+  `HostGrantGate::allows_as` take the evidence of a remote request.
+- A mutation's initiator: `HostGrantStore::set_affiliation_as` (and
+  `HostGrantAuthority::set_affiliation_as`) takes the initiator's evidence
+  and decides its standing under the issuance policy's principal policy,
+  evaluated when the command is submitted; `set_affiliation` is a local
+  session's request. The evidence is not part of the operation's
+  fingerprint: an exact retry returns the recorded outcome and authorizes
+  nothing again, and a refused initiator records nothing.
+- The moderator role (an XEP-0045 role change): granted only to an occupant
+  whose witness honours room moderation. The occupant is not the
+  requester, so it is decided without stream evidence, and the role is
+  granted to served accounts only.
+
+### Decided without stream evidence
+
+These rules are decided by the served account domains alone, whatever the
+snapshot and the stream, because what they protect outlives any one
+request:
+
+- The owner a room keeps (`LastOwner`) is an owner of a served account
+  domain. A remote owner's standing is honoured only on some streams and
+  only while the snapshot lists its home, so a room only it owned could be
+  left with nobody who can administer it.
+- Enrollment: every room starts with an owner of a served account domain.
+- An operator's revoke: its recorded basis and the owners it keeps.
+- Reconstruction compares a lowering under the floor
+  (`policy::honoured_floor`): what a grant is honoured as on every decision
+  that honours it at all. Lowering a remote admin to member, which some
+  decisions would honour above the admin grant, is recorded at `none`.
+
+### Host policy requiring `pkix`
+
+`require_pkix` in the `[host_policy]` table of the S2S snapshot (off by
+default) makes every grant of a remote principal contribute nothing unless
+a `pkix` stream carried its request, member-level grants included. It is
+deployment-wide. ADR-0020 D2 allows host policy to require `pkix` for a
+community or a room; a per-scope requirement is not built. It would be a
+policy input of the scope, recorded and fenced by the scope's generation
+like its grants, which needs a migration and an operation of its own.
+
+### What stays open
+
+- A principal named without its request has no stream evidence. A trusted
+  home's admin is therefore not in an acceptance's audience, not listed as
+  a reader and not re-seated after a claim move; with `require_pkix`, no
+  remote member is. Deciding a remote occupant's deliveries on the evidence
+  of the stream its occupancy was established on is the decision of the
+  slice that seats remote occupants (W6a).
+- Rooms no scope manages keep their legacy checks, which evaluate neither
+  D1 nor D8 at the effect. No surface serves remote principals there yet
+  (D10 refuses MUC and the Spaces service to S2S senders until W6a and
+  W7a); those slices decide each effect they open to remote principals with
+  `PrincipalPolicy::witness`.
+- Account bootstrap provisions deployment ownership for served accounts
+  only, which is stricter than D8 requires.
+- A per-scope `pkix` requirement (above).
+
+### Evidence of the effect boundary
+
+`tests/host_grant_remote_principals.rs` decides each case under snapshots
+loaded through the production S2S loader from files, with a stream's
+evidence given in place of a live stream: no inbound stream reaches a
+managed room before W6a. The acceptance-matrix rows marked W5e map onto
+its cases; over live streams they are verification steps 6 and 7. It needs
+PostgreSQL only. `host_grant_authority.rs` and
+`xep0045_host_grant_admission.rs` cover a replica with S2S off.
+
+### Rollout part of the effect boundary (G24)
+
+- With S2S off, a remote account's member-level grant in a managed room no
+  longer admits anything, because no remote domain is admitted. No remote
+  principal reaches a managed room while S2S is off; a remote recipient
+  planned in a groupchat is frozen no child, where it was frozen one that
+  could not be delivered.
+- `[host_policy]` is a new table of the S2S snapshot. The loader refuses
+  unknown keys, so a binary that predates the table refuses a snapshot that
+  holds it: replicas run the new image before the snapshot uses it.
+- A snapshot whose trusted-home list names a service domain stops startup.
+- With S2S on, a trusted home's privileged grants and room moderation are
+  honoured on its `pkix` streams and member-level grants of admitted
+  domains on any stream. No surface serves remote principals yet (D10), so
+  nothing changes for a deployment until W6a.
+
 ## Blocking review ledger
 
 Slice names refer to [the federation plan](../../../docs/planning/federation-2047.md),
@@ -3068,7 +3274,7 @@ evidence.
 | ID | Unresolved decision/evidence | Work blocked | Under ADR-0020 |
 | --- | --- | --- | --- |
 | B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation: [recorded](#b1-store-capabilities-and-credential-separation-g11)) and W5c (writer inventory and exclusion: [recorded](#b1-writer-and-reader-exclusion-g11)); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
-| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e; W5d decides the actor's seats, roles and media after a revoke ([recorded](#seated-occupants-roles-and-media-g14)). Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part), and W5c's [as well](#b2-policy-for-the-surfaces-this-slice-protects-g14-part). |
+| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e; W5d decides the actor's seats, roles and media after a revoke ([recorded](#seated-occupants-roles-and-media-g14)). Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part), W5c's [as well](#b2-policy-for-the-surfaces-this-slice-protects-g14-part), and W5e's for remote principals [too](#remote-principals-at-the-effect-boundary-g17). |
 | B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences ([recorded](#b3-projection-of-the-writers-this-slice-fences-g15-part)), W5o decides the fenced schema transition and W5r bounded reconstruction ([recorded](#verified-reconstruction-g15-part)). Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences ([recorded](#b4-lock-order-of-the-surfaces-g12)) and by W5d with the queue in front of the guard ([recorded](#the-queue-in-front-of-the-guard-g12)). |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c ([recorded](#b5-sink-contracts-g16)); W5d defines what a revoke's acknowledgement means at each sink ([recorded](#sink-contracts-under-the-fence-g16)), and its focused set with the #2056 control is the evidence ([run](#running-the-revocation-slices-focused-set)). A PubSub admission identity for a scope's Space is still not built. |

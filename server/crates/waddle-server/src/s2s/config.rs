@@ -5,10 +5,13 @@
 //! [`S2sConfig`] snapshot is loaded and validated before any S2S socket
 //! exists: the local domains and their credentials, peer admission
 //! ([`AdmissionPolicy`]), per-domain trust profiles for the verifier,
-//! configured endpoints, and the resource model ([`ResourceLimits`] and
-//! [`Deadlines`]). A configuration that is contradictory or incomplete fails
-//! to load and S2S does not start. A change takes effect when the process
-//! restarts with a new snapshot; there is no reload.
+//! configured endpoints, the resource model ([`ResourceLimits`] and
+//! [`Deadlines`]), and the host-policy switch that honours remote
+//! principals' grants only on `pkix` streams
+//! ([`S2sConfig::grants_require_pkix`]). A configuration that is
+//! contradictory or incomplete fails to load and S2S does not start. A
+//! change takes effect when the process restarts with a new snapshot; there
+//! is no reload.
 //!
 //! Configured endpoints are reached with STARTTLS or, when configured so,
 //! XEP-0368 direct TLS. DNS discovery ([`S2sConfig::discovery_enabled`])

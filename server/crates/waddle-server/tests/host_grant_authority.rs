@@ -5,7 +5,8 @@
 //! between a recorded and an effective grant, exact retries and identity
 //! reuse, revalidation of the initiator under the scope's guard, issuance to
 //! remote accounts under a supplied trusted-home set and what a stored
-//! privileged grant of a remote account is honoured as, exhaustion, readback
+//! privileged grant of a remote account is honoured as while S2S is off
+//! (with S2S on, `host_grant_remote_principals.rs`), exhaustion, readback
 //! of an unacknowledged commit, and the runtime role's capabilities,
 //! including the owner-phase operations it cannot run.
 //!
@@ -41,10 +42,11 @@ use waddle_server::permissions::host_grant::{
     Activation, AdmissionState, BootstrapGrant, ClosedReason, EnrollScope, GrantGeneration,
     GrantOperationId, GrantSubject, GrantSubjectError, HostGrantAction, HostGrantAttachment,
     HostGrantCommitFault, HostGrantError, HostGrantStore, IssuanceBasis, IssuancePolicy,
-    IssuanceRefusal, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome, ProjectedGrant,
-    ProjectionIntent, ProjectionMarker, ProjectionRefusal, RestoreEpoch, RetireScope,
-    RoomAffiliation, ScopeKey, ScopeLifecycleId, ServedAccountDomains, SubjectHome,
-    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    IssuanceRefusal, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome,
+    PrincipalEvidence, PrincipalPolicy, PrincipalWitness, ProjectedGrant, ProjectionIntent,
+    ProjectionMarker, ProjectionRefusal, RemoteRefusal, RestoreEpoch, RetireScope, RoomAffiliation,
+    ScopeKey, ScopeLifecycleId, ServedAccountDomains, SubjectHome, HOST_GRANT_POLICY_VERSION,
+    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
 use waddle_server::permissions::{Object, ObjectType, PermissionActor, PermissionError};
 use waddle_server::test_support::activate_host_grant_marker;
@@ -864,32 +866,47 @@ async fn a_privileged_grant_to_a_remote_account_needs_a_trusted_home() {
 }
 
 #[test]
-fn a_privileged_grant_is_honoured_only_for_a_served_account() {
+fn with_s2s_off_only_a_served_account_s_grants_are_honoured() {
+    // A replica that runs no S2S snapshot admits no remote domain, so a
+    // remote account's grant contributes nothing, member-level grants
+    // included; a ban is still a ban. A served account's grants are
+    // honoured as stored.
+    let principals = PrincipalPolicy::local(served());
+    let local = principals.witness(&bare(OWNER), &PrincipalEvidence::NoStream);
+    assert_eq!(local, PrincipalWitness::Served);
     for affiliation in RoomAffiliation::ALL {
-        assert_eq!(
-            honoured_affiliation(affiliation, SubjectHome::Served),
-            affiliation
-        );
-        let remote = honoured_affiliation(affiliation, SubjectHome::Remote);
-        match affiliation {
-            RoomAffiliation::Owner | RoomAffiliation::Admin => {
-                assert_eq!(remote, RoomAffiliation::None);
+        assert_eq!(honoured_affiliation(affiliation, &local), affiliation);
+        for remote in ["owner@sub.example.com", "owner@trusted.example"] {
+            let witness = principals.witness(&bare(remote), &PrincipalEvidence::NoStream);
+            assert_eq!(
+                witness.remote().map(|witness| witness.admission()),
+                Some(Err(RemoteRefusal::S2sDisabled)),
+                "{remote}"
+            );
+            let expected = if affiliation == RoomAffiliation::Outcast {
+                RoomAffiliation::Outcast
+            } else {
+                RoomAffiliation::None
+            };
+            assert_eq!(honoured_affiliation(affiliation, &witness), expected);
+            for action in HostGrantAction::ALL {
+                assert!(
+                    !grant_allows(affiliation, affiliation, &witness, action),
+                    "{remote} {affiliation:?} {action:?}"
+                );
             }
-            other => assert_eq!(remote, other),
         }
-        // What is not honoured contributes nothing, member-level access
-        // included; a recorded ban denies whatever the effective column says.
+        // A recorded ban denies whatever the effective column says.
         for action in HostGrantAction::ALL {
             assert_eq!(
-                grant_allows(affiliation, affiliation, SubjectHome::Remote, action),
-                affiliation == RoomAffiliation::Member
-                    && affiliation_allows(RoomAffiliation::Member, action),
+                grant_allows(affiliation, affiliation, &local, action),
+                affiliation != RoomAffiliation::Outcast && affiliation_allows(affiliation, action),
                 "{affiliation:?} {action:?}"
             );
             assert!(!grant_allows(
                 RoomAffiliation::Outcast,
                 affiliation,
-                SubjectHome::Served,
+                &local,
                 action
             ));
         }
@@ -940,7 +957,8 @@ async fn a_remote_privileged_grant_authorizes_no_change_and_keeps_no_room_admini
         Some((RoomAffiliation::Owner, RoomAffiliation::Owner))
     );
 
-    // The remote owner's standing is recorded and effective, and it
+    // The remote owner's standing is recorded and effective, and, decided
+    // without a trusted home's `pkix` stream (here S2S is off), it
     // authorizes nothing: not a member grant, not a revoke, not a ban.
     let generation = fixture.generation().await;
     for (target, affiliation) in [

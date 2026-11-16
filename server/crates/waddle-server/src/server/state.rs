@@ -92,6 +92,12 @@ pub struct AppState {
     /// global database; it admits a managed room only once the replica has
     /// verified its runtime role's privileges on the store.
     pub host_grants: crate::permissions::host_grant::HostGrantGate,
+    /// The S2S snapshot this replica runs, as host-grant decisions read it:
+    /// peer admission, the trusted-home list and the host-policy `pkix`
+    /// switch (ADR-0020 D1, D2 and D8). `None` while S2S is off. Issuance,
+    /// bootstrap, repair and admission take it, with the served account
+    /// domain, through [`AppState::grant_principals`].
+    pub s2s_federation: Option<crate::permissions::host_grant::FederationSnapshot>,
     /// Sole typed authority for HTTP readiness and WebSocket admission.
     /// Cluster self-fencing moves it to `FencedRecovering`; an unexpected
     /// critical registry death latches `Failed` until this process exits.
@@ -239,6 +245,7 @@ impl AppState {
             permission_actor,
             server_owner_jids,
             host_grants,
+            s2s_federation: None,
             node_lifecycle,
             websocket_inventory: IoCustodianInventory::new(max_websocket_connections.get())
                 .expect("validated WebSocket capacity is positive"),
@@ -284,6 +291,20 @@ impl WebSocketAdmissionGate<'_> {
 }
 
 impl AppState {
+    /// Whose host grants this replica honours when it serves accounts of
+    /// `account_domain`: that domain and the S2S snapshot it runs. Every
+    /// issuance, bootstrap, repair and admission path builds its policy from
+    /// this one value (ADR-0020 D8).
+    pub fn grant_principals(
+        &self,
+        account_domain: CanonicalDomain,
+    ) -> crate::permissions::host_grant::PrincipalPolicy {
+        crate::permissions::host_grant::PrincipalPolicy::new(
+            crate::permissions::host_grant::ServedAccountDomains::new([account_domain]),
+            self.s2s_federation.clone(),
+        )
+    }
+
     #[cfg(feature = "test-support")]
     pub fn websocket_inventory_for_test(&self) -> &IoCustodianInventory {
         &self.websocket_inventory

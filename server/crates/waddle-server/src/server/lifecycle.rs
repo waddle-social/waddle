@@ -136,6 +136,9 @@ pub async fn start_with_config_and_owner_outbox(
     // trust profile and limit, is loaded and validated before any S2S
     // socket exists; while it is off nothing S2S is read, bound or dialled.
     let s2s_config = crate::s2s::conn::load_enabled_config(&xmpp_config).await?;
+    if let Some(config) = &s2s_config {
+        check_trusted_homes(config, &xmpp_config)?;
+    }
 
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
@@ -444,6 +447,11 @@ pub async fn start_with_config_and_owner_outbox(
         clustering_enabled: server_config.clustering.enabled,
     });
     state.host_grants = host_grants;
+    // Host-grant decisions about remote principals read the snapshot this
+    // replica runs; while S2S is off they admit no remote domain.
+    state.s2s_federation = s2s_config
+        .as_deref()
+        .map(crate::permissions::host_grant::FederationSnapshot::of);
     let state = Arc::new(state);
     if let Some(matched) = global_adopt_matched {
         state.note_lineage_adopt_match(matched);
@@ -931,6 +939,43 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
         return Ok(());
     }
     anyhow::bail!("MAM storage did not expose a lineage backend")
+}
+
+/// Every trusted home of the S2S snapshot must be a remote domain host
+/// grants can be issued to (ADR-0020 D8): neither the account domain nor a
+/// domain of one of this deployment's services. The snapshot's loader
+/// refuses the domains it names as local; this refuses the service domains
+/// it does not know, and a service domain that is not canonical, which no
+/// issuance policy can be built from. A deployment whose XMPP domain is not
+/// canonical is refused later in startup, with its own error.
+fn check_trusted_homes(
+    config: &crate::s2s::config::S2sConfig,
+    xmpp_config: &XmppConfig,
+) -> anyhow::Result<()> {
+    use crate::permissions::host_grant::{
+        FederationSnapshot, PrincipalPolicy, ServedAccountDomains,
+    };
+    let Ok(account) = waddle_xmpp::identity::CanonicalDomain::parse_canonical(&xmpp_config.domain)
+    else {
+        return Ok(());
+    };
+    let principals = PrincipalPolicy::new(
+        ServedAccountDomains::new([account]),
+        Some(FederationSnapshot::of(config)),
+    );
+    crate::server::routes::websocket::XmppServiceDomains::new(
+        &xmpp_config.domain,
+        xmpp_config.muc_domain.as_str(),
+        xmpp_config.spaces_jid.domain().as_str(),
+    )
+    .host_grant_issuance_policy(&principals)
+    .map(|_| ())
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "S2S configuration: admission.trusted_homes names a domain of one of this \
+             deployment's services, or a service domain is not canonical"
+        )
+    })
 }
 
 /// The S2S router for an enabled S2S configuration: the destinations this

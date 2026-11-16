@@ -59,8 +59,8 @@ use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::{Affiliation, Stanza};
 
 use crate::permissions::host_grant::{
-    HostGrantAction, HostGrantGate, ManagedRoomGrants, RoomAffiliation, RoomBinding, RoomGate,
-    ScopeLifecycleId,
+    HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomAffiliation,
+    RoomBinding, RoomGate, ScopeLifecycleId,
 };
 use crate::room_effect_outbox::RoomEffectArmSupervisor;
 use crate::server::routes::websocket::WebSocketState;
@@ -358,10 +358,14 @@ fn correction(
     seated: bool,
 ) -> Option<Correction> {
     let recorded = muc_affiliation(grants.grants.recorded_affiliation(account));
-    let banned = grants.standing_as_read(account) == RoomAffiliation::Outcast;
-    let admitted = grants
-        .grants
-        .allows(account, HostGrantAction::Read, &grants.served);
+    let banned =
+        grants.standing_unfenced(account, &PrincipalEvidence::NoStream) == RoomAffiliation::Outcast;
+    let admitted = grants.grants.allows(
+        account,
+        &PrincipalEvidence::NoStream,
+        HostGrantAction::Read,
+        &grants.principals,
+    );
     if seated && !admitted {
         return Some(Correction::Remove(if banned {
             Some(Affiliation::Outcast)

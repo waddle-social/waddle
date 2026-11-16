@@ -1420,14 +1420,15 @@ impl XmppServiceDomains {
         }
     }
 
-    /// The host-grant issuance policy of a replica serving `served`: those
-    /// account domains, the domains of its own services, and no trusted
-    /// home. Until the operator's trusted-home list is configured, an owner
-    /// or admin grant to a remote account is refused (ADR-0020 D8). `None`
-    /// when a service domain is not in canonical form.
+    /// The host-grant issuance policy of a replica deciding under
+    /// `principals`: its served account domains, the trusted-home list of
+    /// the S2S snapshot it runs, and the domains of its own services. While
+    /// S2S is off no trusted home is listed, so an owner or admin grant to a
+    /// remote account is refused (ADR-0020 D8). `None` when a service domain
+    /// is not in canonical form, or a trusted home is one of them.
     pub(crate) fn host_grant_issuance_policy(
         &self,
-        served: &crate::permissions::host_grant::ServedAccountDomains,
+        principals: &crate::permissions::host_grant::PrincipalPolicy,
     ) -> Option<crate::permissions::host_grant::IssuancePolicy> {
         let services = [
             &self.muc,
@@ -1441,7 +1442,7 @@ impl XmppServiceDomains {
         .map(|domain| waddle_xmpp::identity::CanonicalDomain::parse_exact(domain))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-        crate::permissions::host_grant::IssuancePolicy::for_served(served, services, []).ok()
+        crate::permissions::host_grant::IssuancePolicy::for_principals(principals, services).ok()
     }
 
     /// The exact typed domain inventory for destination classification:

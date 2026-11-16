@@ -40,6 +40,12 @@
 //!   replica's attachment gate holds an attachment. Legacy reads of a
 //!   managed room's authorization objects through the permission actor
 //!   answer nothing.
+//! - Whose grants every one of those decisions honours is the replica's
+//!   [`PrincipalPolicy`]: the account domains it serves and the S2S snapshot
+//!   it runs (ADR-0020 D1 and D8, gate G17). A remote principal's grants
+//!   contribute nothing unless its domain is admitted now, and its owner or
+//!   admin grant only for a trusted home on a `pkix` stream; the trusted
+//!   homes issuance accepts come from the same value.
 //! - Whether an object is enrolled at all is answered from the replica's
 //!   in-memory enrolled set ([`EnrolledScopes`]), refreshed in the
 //!   background, so rooms no scope manages never wait on PostgreSQL.
@@ -66,6 +72,7 @@ mod issuance;
 mod marker;
 mod model;
 mod policy;
+mod principal;
 mod projection;
 mod rate_limited;
 mod restore;
@@ -111,6 +118,10 @@ pub use model::{
     HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
+pub use principal::{
+    FederationSnapshot, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, RemoteRefusal,
+    RemoteWitness, StreamEvidence,
+};
 pub use projection::{
     MarkerObservation, ProjectedGrant, ProjectedRelationship, ProjectionIntent,
     ProjectionObservation, ProjectionPlan, ProjectionRefusal, ProjectionWrite, RestoredPlan,

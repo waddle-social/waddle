@@ -110,7 +110,8 @@ pub(super) async fn admit_host_grants(
     use super::host_grant_plan::{named_principals, reduce_to_audience};
     use crate::ingress_uow::HostGrantAdmissionRepository;
     use crate::permissions::host_grant::{
-        AdmissionDenial, HostGrantAction, RoomAcceptance, RoomAdmission, RoomManagement,
+        AdmissionDenial, HostGrantAction, PrincipalEvidence, RoomAcceptance, RoomAdmission,
+        RoomManagement,
     };
     use crate::server::routes::interpret::effects::RoomExecutionPath;
     let RoomExecutionPath::Local {
@@ -153,9 +154,13 @@ pub(super) async fn admit_host_grants(
         &RoomAcceptance {
             room,
             sender,
+            // Every producer of an ingress submission (a local session, an
+            // extension, a room's own result) submits without an S2S
+            // stream; the sender is decided on that evidence.
+            sender_evidence: PrincipalEvidence::NoStream,
             action: HostGrantAction::SendMessage,
             audience: named.as_deref().unwrap_or_default(),
-            served: attachment.served(),
+            principals: attachment.principals(),
             binding: attachment.binding(),
         },
     )

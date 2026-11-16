@@ -23,8 +23,8 @@ use waddle_server::ingress_uow::CanonicalMessageRepository;
 use waddle_server::permissions::host_grant::{
     Activation, BootstrapGrant, EnrollScope, GrantGeneration, GrantOperationId, GrantSubject,
     HostGrantAttachment, HostGrantError, HostGrantStore, IssuancePolicy, ManagedRoom,
-    MutationReceipt, RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState, ServedAccountDomains,
-    SetAffiliation,
+    MutationReceipt, PrincipalPolicy, RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState,
+    ServedAccountDomains, SetAffiliation,
 };
 use waddle_server::test_support::activate_host_grant_marker;
 use waddle_xmpp::identity::CanonicalDomain;
@@ -98,10 +98,17 @@ impl GrantFixture {
     /// projection has not been activated. `None` when the lane does not
     /// provide PostgreSQL and does not require it.
     pub async fn enrolled(label: &str) -> Option<Self> {
+        Self::enrolled_under(label, served().into()).await
+    }
+
+    /// [`Self::enrolled`] on a replica whose attachment decides under
+    /// `principals`: its served account domains and the S2S snapshot it
+    /// runs.
+    pub async fn enrolled_under(label: &str, principals: PrincipalPolicy) -> Option<Self> {
         let ingress = IngressFixture::postgres(label).await?;
         let store = HostGrantStore::open(ingress.db.clone()).expect("host-grant store");
         assert!(ingress.uow.attach_host_grants(
-            HostGrantAttachment::unfenced_for_test(&store, served())
+            HostGrantAttachment::unfenced_for_test(&store, principals)
                 .await
                 .expect("attachment bound to the fixture's authority")
         ));
@@ -120,7 +127,13 @@ impl GrantFixture {
     /// verified projection: these suites exercise the canonical store and
     /// SQL admission, which do not read SpiceDB.
     pub async fn active(label: &str) -> Option<Self> {
-        let fixture = Self::enrolled(label).await?;
+        Self::active_under(label, served().into()).await
+    }
+
+    /// [`Self::active`] on a replica whose attachment decides under
+    /// `principals`.
+    pub async fn active_under(label: &str, principals: PrincipalPolicy) -> Option<Self> {
+        let fixture = Self::enrolled_under(label, principals).await?;
         assert_eq!(
             fixture.activate_current(&fixture.scope).await,
             Activation::Activated

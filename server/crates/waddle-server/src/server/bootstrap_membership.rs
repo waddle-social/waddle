@@ -19,7 +19,8 @@ pub struct BootstrapMembershipConfig {
     owner_localparts: Vec<String>,
     /// The account domain the deployment serves. Deployment ownership is a
     /// privileged grant, so it is provisioned only for an account of this
-    /// domain (ADR-0020 D8); bootstrap is given no trusted home.
+    /// domain (ADR-0020 D8): owners are configured by localpart, and no
+    /// account of another home, a trusted home included, is provisioned.
     account_domain: Option<String>,
 }
 

@@ -3304,8 +3304,9 @@ async fn live_spicedb_reconstruction_lowers_a_remote_privileged_grant_to_none() 
     let lifecycle = live.fixture.scope.lifecycle;
     let (authority, _actor) = live.replica().await;
     authority.reconcile(lifecycle).await.expect("first pass");
-    // A remote account of a trusted home holds an admin grant, which this
-    // deployment honours as no grant at all.
+    // A remote account of a trusted home holds an admin grant, which no
+    // decision honours without that home's `pkix` stream, and none on a
+    // replica that runs no S2S snapshot.
     let remote = "frank@trusted.example.net";
     let trusted = host_grant_support::issuance_policy(&["trusted.example.net"]);
     let command = live

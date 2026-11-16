@@ -19,21 +19,28 @@
 //! the audience: of the principals the acceptance would deliver to, project
 //! for or notify, those whose honoured affiliation allows `Read`. The caller
 //! accepts nothing for anyone else. A subject whose recorded affiliation is
-//! `outcast` is refused whatever else is stored, and an owner or admin grant
-//! of an account this deployment does not serve is honoured as no grant
-//! (`policy::honoured_affiliation`).
+//! `outcast` is refused whatever else is stored.
+//!
+//! Whose grants are honoured is decided by the replica's
+//! [`PrincipalPolicy`] at this decision (ADR-0020 D1 and D8, gate G17): the
+//! sender with the evidence of how its request arrived, and every named
+//! recipient without stream evidence. A remote principal's grants
+//! contribute nothing unless its domain is admitted under the S2S snapshot
+//! the replica runs, and an owner or admin grant of a remote principal only
+//! for a trusted home on a `pkix` stream. The witness names what the
+//! sender was decided as.
 
 use std::collections::BTreeMap;
 
 use jid::BareJid;
 use waddle_xmpp::identity::CanonicalBareJid;
 
-use super::issuance::ServedAccountDomains;
 use super::model::{
     guard_queue_key, AuthorityIncarnation, GrantGeneration, GrantOperationId, RoomAffiliation,
     ScopeLifecycleId, HOST_GRANT_POLICY_VERSION,
 };
 use super::policy::{grant_allows, HostGrantAction};
+use super::principal::{PrincipalEvidence, PrincipalPolicy, PrincipalWitness};
 use super::restore::AuthorityBinding;
 use super::store::{binding_query, decode_binding};
 use crate::db::{DatabaseError, Transaction};
@@ -52,13 +59,15 @@ pub struct RoomAcceptance<'a> {
     pub room: &'a BareJid,
     /// The bare JID of the principal the acceptance is made for.
     pub sender: &'a BareJid,
+    /// How the sender's request reached the acceptance.
+    pub sender_evidence: PrincipalEvidence,
     /// The action the sender performs.
     pub action: HostGrantAction,
     /// The bare JID of every principal the acceptance names as a recipient:
     /// whoever it would deliver to, project an inbox row for or notify.
     pub audience: &'a [BareJid],
-    /// The account domains this deployment serves.
-    pub served: &'a ServedAccountDomains,
+    /// The served account domains and the S2S snapshot the replica runs.
+    pub principals: &'a PrincipalPolicy,
     /// The authority the replica's attachment verified: its incarnation,
     /// restore epoch, PostgreSQL server start and database.
     pub binding: &'a AuthorityBinding,
@@ -72,6 +81,10 @@ pub struct AdmissionWitness {
     pub incarnation: AuthorityIncarnation,
     pub generation: GrantGeneration,
     pub operation: GrantOperationId,
+    /// What the sender was decided as: a served account, or a remote
+    /// principal with its domain, stream evidence, D1 admission decision
+    /// and trusted-home status under the snapshot the replica runs.
+    pub sender: PrincipalWitness,
 }
 
 /// Why a managed room's acceptance is refused.
@@ -234,24 +247,27 @@ pub(crate) async fn admit_room_acceptance(
     }
     drop(rows);
 
-    let allows = |subject: &BareJid, action: HostGrantAction| {
+    let allows = |subject: &BareJid, witness: &PrincipalWitness, action: HostGrantAction| {
         held.get(subject.as_str())
             .is_some_and(|(recorded, effective)| {
-                grant_allows(
-                    *recorded,
-                    *effective,
-                    acceptance.served.home_of(subject),
-                    action,
-                )
+                grant_allows(*recorded, *effective, witness, action)
             })
     };
-    if !allows(acceptance.sender, acceptance.action) {
+    let sender = acceptance
+        .principals
+        .witness(acceptance.sender, &acceptance.sender_evidence);
+    if !allows(acceptance.sender, &sender, acceptance.action) {
         return Ok(RoomAdmission::Denied(AdmissionDenial::SenderNotAdmitted));
     }
     let audience = acceptance
         .audience
         .iter()
-        .filter(|recipient| allows(recipient, HostGrantAction::Read))
+        .filter(|recipient| {
+            let witness = acceptance
+                .principals
+                .witness(recipient, &PrincipalEvidence::NoStream);
+            allows(recipient, &witness, HostGrantAction::Read)
+        })
         .cloned()
         .collect();
     Ok(RoomAdmission::Admitted {
@@ -260,6 +276,7 @@ pub(crate) async fn admit_room_acceptance(
             incarnation,
             generation,
             operation,
+            sender,
         },
         audience,
     })

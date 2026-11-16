@@ -45,7 +45,8 @@ use super::model::{
     RetireScope, RoomAffiliation, ScopeLifecycleId, ScopeState, SetAffiliation,
     HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
 };
-use super::policy::{grant_allows, honoured_affiliation, initiator_may_change, HostGrantAction};
+use super::policy::{grant_allows, honoured_floor, initiator_may_change, HostGrantAction};
+use super::principal::{PrincipalEvidence, PrincipalPolicy, PrincipalWitness};
 use super::projection::{projection_digest, ProjectedGrant, ProjectionIntent, ProjectionPlan};
 use super::restore::{
     fence_fingerprint, reopen_fingerprint, restore_fingerprint, AuthorityBinding, FenceEvidence,
@@ -812,26 +813,44 @@ impl HostGrantStore {
         own(async move { store.enroll_owned(&command, &bases, mode).await }).await
     }
 
-    /// Record one affiliation change.
-    ///
-    /// The scope must be at `expected_generation`, and the initiator's
-    /// authority is evaluated again from the state locked by this
-    /// transaction. A reduction of the subject's access is effective when
-    /// the transaction commits; an increase is recorded and not effective
-    /// until its projection is verified and activated.
+    /// Record one affiliation change asked for by a local session, whose
+    /// request no S2S stream carried; see [`Self::set_affiliation_as`].
     pub async fn set_affiliation(
         &self,
         command: &SetAffiliation,
         policy: &IssuancePolicy,
     ) -> Result<MutationReceipt, HostGrantError> {
+        self.set_affiliation_as(command, policy, &PrincipalEvidence::NoStream)
+            .await
+    }
+
+    /// Record one affiliation change whose initiator's request reached this
+    /// replica with `initiator`.
+    ///
+    /// The scope must be at `expected_generation`, and the initiator's
+    /// authority is evaluated again from the state locked by this
+    /// transaction, with its grants honoured as `policy`'s
+    /// [`PrincipalPolicy`] decides for that evidence now (ADR-0020 D1 and
+    /// D8). A reduction of the subject's access is effective when the
+    /// transaction commits; an increase is recorded and not effective until
+    /// its projection is verified and activated.
+    pub async fn set_affiliation_as(
+        &self,
+        command: &SetAffiliation,
+        policy: &IssuancePolicy,
+        initiator: &PrincipalEvidence,
+    ) -> Result<MutationReceipt, HostGrantError> {
         let basis = policy.check(&command.subject, command.affiliation)?;
         let served = policy.served_account_domains().clone();
+        let initiator = policy
+            .principals()
+            .witness(command.initiator.jid(), initiator);
         let store = self.clone();
         let command = command.clone();
         let mode = commit_mode();
         own(async move {
             store
-                .set_affiliation_owned(&command, basis, &served, mode)
+                .set_affiliation_owned(&command, basis, &served, &initiator, mode)
                 .await
         })
         .await
@@ -1032,15 +1051,36 @@ impl HostGrantStore {
     }
 
     /// Read the policy state for one subject and action outside any
-    /// acceptance transaction, honouring grants as admission does for a
-    /// deployment that serves `served`. The answer is a candidate: it holds
-    /// no lock and acceptance decides again.
+    /// acceptance transaction, honouring grants as admission does under
+    /// `principals` for a subject that reaches it without stream evidence.
+    /// The answer is a candidate: it holds no lock and acceptance decides
+    /// again.
     pub async fn candidate_admission(
         &self,
         room: &BareJid,
         subject: &GrantSubject,
         action: HostGrantAction,
-        served: &ServedAccountDomains,
+        principals: impl Into<PrincipalPolicy>,
+    ) -> Result<CandidateAdmission, HostGrantError> {
+        self.candidate_admission_as(
+            room,
+            subject,
+            &PrincipalEvidence::NoStream,
+            action,
+            &principals.into(),
+        )
+        .await
+    }
+
+    /// [`Self::candidate_admission`] for a subject whose request reaches
+    /// the decision with `evidence`.
+    pub async fn candidate_admission_as(
+        &self,
+        room: &BareJid,
+        subject: &GrantSubject,
+        evidence: &PrincipalEvidence,
+        action: HostGrantAction,
+        principals: &PrincipalPolicy,
     ) -> Result<CandidateAdmission, HostGrantError> {
         let mut tx = self.begin_read().await?;
         let mut rows = tx
@@ -1081,15 +1121,46 @@ impl HostGrantStore {
         };
         drop(rows);
         tx.rollback().await?;
+        let witness = principals.witness(subject.jid(), evidence);
         let admitted = scope_admits(&scope, current)
             && held.is_some_and(|(recorded, effective)| {
-                grant_allows(recorded, effective, served.home_of(subject.jid()), action)
+                grant_allows(recorded, effective, &witness, action)
             });
         Ok(CandidateAdmission {
             admitted,
             lifecycle: Some(lifecycle),
             generation: Some(scope.generation),
         })
+    }
+
+    /// Decide `acceptance` as a fresh room-manifest acceptance does, under
+    /// the scope's guard, in a transaction of its own that records nothing
+    /// and is rolled back. `None` when no scope manages the room or its
+    /// address is not canonical. For suites that decide for a sender no
+    /// ingress producer submits.
+    #[cfg(feature = "test-support")]
+    pub async fn decide_room_acceptance_for_test(
+        &self,
+        acceptance: &super::admission::RoomAcceptance<'_>,
+    ) -> Result<Option<super::admission::RoomAdmission>, HostGrantError> {
+        use super::admission::{
+            admit_room_acceptance, managing_scope, AdmissionRelations, RoomManagement,
+        };
+        let relations = AdmissionRelations {
+            rooms: "host_grant_rooms".to_owned(),
+            scopes: "host_grant_scopes".to_owned(),
+            grants: "host_grants".to_owned(),
+            authority: "host_grant_authority".to_owned(),
+        };
+        let mut tx = self.begin_write().await?;
+        let decision = match managing_scope(&mut tx, &relations, acceptance.room).await? {
+            RoomManagement::Managed(scope) => {
+                Some(admit_room_acceptance(&mut tx, &relations, &scope, acceptance).await?)
+            }
+            RoomManagement::Unmanaged | RoomManagement::NotCanonical => None,
+        };
+        tx.rollback().await?;
+        Ok(decision)
     }
 
     /// Whether `object` is an authorization object of an enrolled scope: the
@@ -1434,6 +1505,7 @@ impl HostGrantStore {
         command: &SetAffiliation,
         basis: IssuanceBasis,
         served: &ServedAccountDomains,
+        initiator_witness: &PrincipalWitness,
         mode: CommitMode,
     ) -> Result<MutationReceipt, HostGrantError> {
         let fingerprint = command.fingerprint();
@@ -1482,8 +1554,10 @@ impl HostGrantStore {
             // The initiator's standing is what is effective and honoured
             // now, under the guard: a grant that was revoked, demoted or
             // never activated authorizes nothing, whatever the initiator saw
-            // earlier, and neither does a privileged grant of an account
-            // this deployment does not serve. While a restore is handled no
+            // earlier, and neither does a grant its witness does not honour
+            // (a remote initiator's grant while its domain is not admitted,
+            // or its owner or admin grant unless a trusted home's `pkix`
+            // stream carried the request). While a restore is handled no
             // standing is honoured: the grant rows are those of the restored
             // database until an operator reopens the scope.
             let restore_handling = scope
@@ -1493,19 +1567,18 @@ impl HostGrantStore {
                 .filter(|grant| grant.affiliation != RoomAffiliation::Outcast)
                 .filter(|_| !restore_handling)
                 .map_or(RoomAffiliation::None, |grant| {
-                    honoured_affiliation(
-                        grant.effective_affiliation,
-                        served.home_of(grant.subject.jid()),
-                    )
+                    initiator_witness.honour(grant.effective_affiliation)
                 });
             if !initiator_may_change(initiator, recorded.max(effective), command.affiliation) {
                 return Err(HostGrantError::InitiatorNotAuthorized);
             }
             // The room keeps an owner who can administer it: one whose
-            // standing is recorded, effective and honoured. An owner that
-            // still waits for its projection cannot yet administer the room,
-            // and an owner of an account this deployment does not serve is
-            // not honoured as one.
+            // standing is recorded, effective and honoured whatever stream
+            // carries a request. An owner that still waits for its
+            // projection cannot yet administer the room, and an owner of an
+            // account this deployment does not serve is not counted: its
+            // standing is honoured only on a trusted home's `pkix` stream
+            // and only while the S2S snapshot lists that home.
             let administers = |grant: &GrantRow| {
                 grant.affiliation == RoomAffiliation::Owner
                     && grant.effective_affiliation == RoomAffiliation::Owner
@@ -2379,12 +2452,14 @@ impl HostGrantStore {
                 let home = served.home_of(change.subject.jid());
                 let write = match held {
                     // Only a lowering is recorded for a subject that holds a
-                    // row, and only one that lowers what admission honours:
-                    // a privileged grant of an account this deployment does
-                    // not serve is honoured as none, so it is lowered to
-                    // `none` or `outcast`, never to `member`.
+                    // row, and only one that lowers what admission honours
+                    // on every decision: a privileged grant of an account
+                    // this deployment does not serve is honoured as none
+                    // wherever no trusted home's `pkix` stream carries the
+                    // request, so it is lowered to `none` or `outcast`,
+                    // never to `member`.
                     Some(grant) if change.affiliation < grant.affiliation => {
-                        let honoured = |affiliation| honoured_affiliation(affiliation, home);
+                        let honoured = |affiliation| honoured_floor(affiliation, home);
                         let target = if honoured(change.affiliation) > honoured(grant.affiliation) {
                             change.affiliation.min(RoomAffiliation::None)
                         } else {

@@ -67,11 +67,13 @@ pub(crate) async fn bootstrap_fresh_xmpp_topology(
 ) -> Result<()> {
     // The bootstrap writes Owner affiliations for the configured server
     // owners only; a privileged seed names an account of this deployment's
-    // account domain, and no trusted home is configured for bootstrap
-    // (ADR-0020 D8).
-    let issuance =
-        crate::permissions::host_grant::IssuancePolicy::new([account_domain.clone()], [], [])
-            .map_err(|error| anyhow::anyhow!("invalid bootstrap issuance policy: {error}"))?;
+    // account domain or of a trusted home of the S2S snapshot it runs
+    // (ADR-0020 D8), from the value admission decides from.
+    let issuance = crate::permissions::host_grant::IssuancePolicy::for_principals(
+        &state.grant_principals(account_domain.clone()),
+        [],
+    )
+    .map_err(|error| anyhow::anyhow!("invalid bootstrap issuance policy: {error}"))?;
     let seed_policy = crate::spaces_pubsub_seed::OwnerSeedPolicy {
         issuance: &issuance,
         host_grants: &state.host_grants,

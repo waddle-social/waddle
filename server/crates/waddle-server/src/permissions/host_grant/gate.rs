@@ -17,9 +17,11 @@
 //! it answers [`RoomGate::Unmanaged`] without touching PostgreSQL, and the
 //! surface keeps its existing checks. A managed room is answered from its
 //! canonical grants alone, read from PostgreSQL in one bounded snapshot,
-//! with the policy room-manifest admission applies (`policy::grant_allows`):
-//! legacy tuples, durable room affiliations, PubSub affiliations, Space
-//! membership and the room actor's occupancy admit nothing. It answers
+//! with the policy room-manifest admission applies (`policy::grant_allows`)
+//! and the replica's [`PrincipalPolicy`], which decides whose grants are
+//! honoured (ADR-0020 D1 and D8): legacy tuples, durable room affiliations,
+//! PubSub affiliations, Space membership and the room actor's occupancy
+//! admit nothing. It answers
 //! [`RoomGate::Unavailable`] when the enrolled set has not loaded, when the
 //! address reaches a managed room in a form that is not canonical, when the
 //! grants cannot be read within the bounds, on a replica whose
@@ -30,9 +32,10 @@
 //!
 //! Every decision for a managed room carries the replica's revocation-fence
 //! ticket ([`FenceTicket`]): the registration and the scope generation it
-//! was read under. [`ManagedRoomGrants::allows`] and
-//! [`ManagedRoomGrants::standing`] answer nothing once the ticket is no
-//! longer current, so a decision the replica has acknowledged a newer
+//! was read under. [`ManagedRoomGrants::allows_as`] and
+//! [`ManagedRoomGrants::standing_as`], which every decision goes through
+//! whatever evidence it holds, answer nothing once the ticket is no longer
+//! current, so a decision the replica has acknowledged a newer
 //! generation over, or that outlived the replica's lease, admits nothing
 //! however long its caller held it (see `fence`).
 //!
@@ -47,8 +50,8 @@ use jid::BareJid;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
-use super::issuance::ServedAccountDomains;
 use super::policy::HostGrantAction;
+use super::principal::{PrincipalEvidence, PrincipalPolicy, PrincipalWitness};
 use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
@@ -110,45 +113,85 @@ pub enum RoomGate<T> {
     Unavailable,
 }
 
-/// A managed room's canonical grants together with the account domains the
-/// replica serves, which decide whose privileged grants are honoured, and
-/// the revocation-fence ticket the grants were read under.
+/// A managed room's canonical grants together with the replica's
+/// [`PrincipalPolicy`] at the decision (the account domains it serves and
+/// the S2S snapshot it runs, which decide whose grants are honoured) and the
+/// revocation-fence ticket the grants were read under.
 #[derive(Clone, Debug)]
 pub struct ManagedRoomGrants {
     pub grants: RoomGrants,
-    pub served: ServedAccountDomains,
+    pub principals: PrincipalPolicy,
     /// What the grants were read under. A decision is acted on only while
     /// it is current.
     pub fence: FenceTicket,
 }
 
 impl ManagedRoomGrants {
-    /// Whether `subject` may perform `action`, and the decision may still
-    /// be acted on: a decision whose ticket is no longer current allows
-    /// nothing.
+    /// Whether `subject` may perform `action`, decided without stream
+    /// evidence: a local session's own request, or a subject the surface
+    /// names (an occupant, a member, a recipient). See [`Self::allows_as`].
     pub fn allows(&self, subject: &BareJid, action: HostGrantAction) -> bool {
-        self.fence.is_current() && self.grants.allows(subject, action, &self.served)
+        self.allows_as(subject, &PrincipalEvidence::NoStream, action)
     }
 
-    /// The standing `subject` is honoured with; `None` once the decision's
-    /// ticket is no longer current.
+    /// Whether `subject`, whose request reached the surface with
+    /// `evidence`, may perform `action`, and the decision may still be acted
+    /// on: a decision whose ticket is no longer current allows nothing,
+    /// whatever the evidence.
+    pub fn allows_as(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+        action: HostGrantAction,
+    ) -> bool {
+        self.fence.is_current()
+            && self
+                .grants
+                .allows(subject, evidence, action, &self.principals)
+    }
+
+    /// The standing `subject` is honoured with, decided without stream
+    /// evidence. See [`Self::standing_as`].
     pub fn standing(&self, subject: &BareJid) -> super::model::RoomAffiliation {
+        self.standing_as(subject, &PrincipalEvidence::NoStream)
+    }
+
+    /// The standing `subject`, whose request reached the surface with
+    /// `evidence`, is honoured with; `None` once the decision's ticket is no
+    /// longer current, whatever the evidence.
+    pub fn standing_as(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+    ) -> super::model::RoomAffiliation {
         if !self.fence.is_current() {
             return super::model::RoomAffiliation::None;
         }
-        self.grants.standing(subject, &self.served)
+        self.grants.standing(subject, evidence, &self.principals)
     }
 
-    /// The standing the grants as read honour `subject` with, whether or
-    /// not the decision may still be acted on. It is what the grants said,
-    /// for a caller that puts derived state back in line with them and
-    /// checks the ticket itself.
-    pub fn standing_as_read(&self, subject: &BareJid) -> super::model::RoomAffiliation {
-        self.grants.standing(subject, &self.served)
+    /// The standing the grants as read honour `subject`, reaching the
+    /// decision with `evidence`, with, whether or not the decision may
+    /// still be acted on. It is what the grants said, for a caller that puts
+    /// derived state back in line with them and checks the ticket itself;
+    /// nothing may be admitted from it.
+    pub fn standing_unfenced(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+    ) -> super::model::RoomAffiliation {
+        self.grants.standing(subject, evidence, &self.principals)
     }
 
+    /// The subjects whose grants allow `action`, each decided without
+    /// stream evidence.
     pub fn admitted(&self, action: HostGrantAction) -> Vec<BareJid> {
-        self.grants.admitted(action, &self.served)
+        self.grants.admitted(action, &self.principals)
+    }
+
+    /// What `subject`, reaching the surface with `evidence`, is decided as.
+    pub fn witness(&self, subject: &BareJid, evidence: &PrincipalEvidence) -> PrincipalWitness {
+        self.principals.witness(subject, evidence)
     }
 }
 
@@ -308,7 +351,7 @@ impl HostGrantGate {
                     if ticket.is_current() {
                         return RoomGate::Managed(ManagedRoomGrants {
                             grants,
-                            served: attachment.served().clone(),
+                            principals: attachment.principals().clone(),
                             fence: ticket,
                         });
                     }
@@ -377,7 +420,7 @@ impl HostGrantGate {
                 let fence = FenceTicket::unfenced(grants.lifecycle, grants.generation);
                 RoomGate::Managed(ManagedRoomGrants {
                     grants,
-                    served: attachment.served().clone(),
+                    principals: attachment.principals().clone(),
                     fence,
                 })
             }
@@ -412,36 +455,51 @@ impl HostGrantGate {
         }
     }
 
-    /// Whether `subject` may perform `action` in the room `binding` names.
+    /// Whether `subject` may perform `action` in the room `binding` names,
+    /// decided without stream evidence.
     pub async fn allows(
         &self,
         binding: RoomBinding<'_>,
         subject: &BareJid,
         action: HostGrantAction,
     ) -> RoomGate<bool> {
+        self.allows_as(binding, subject, &PrincipalEvidence::NoStream, action)
+            .await
+    }
+
+    /// Whether `subject`, whose request reached the surface with
+    /// `evidence`, may perform `action` in the room `binding` names.
+    pub async fn allows_as(
+        &self,
+        binding: RoomBinding<'_>,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+        action: HostGrantAction,
+    ) -> RoomGate<bool> {
         match self.room(binding).await {
             RoomGate::Unmanaged => RoomGate::Unmanaged,
             RoomGate::Unavailable => RoomGate::Unavailable,
-            RoomGate::Managed(room) => RoomGate::Managed(room.allows(subject, action)),
+            RoomGate::Managed(room) => RoomGate::Managed(room.allows_as(subject, evidence, action)),
         }
     }
 
-    /// Whether `subject` may still perform `action` in the room `decided`
-    /// was read for, asked once an await separated that decision from the
-    /// effect it guards: the decision itself while its ticket is current,
-    /// otherwise a decision read now. A room that cannot be decided now
-    /// allows nothing.
+    /// Whether `subject`, whose request reached the surface with
+    /// `evidence`, may still perform `action` in the room `decided` was read
+    /// for, asked once an await separated that decision from the effect it
+    /// guards: the decision itself while its ticket is current, otherwise a
+    /// decision read now. A room that cannot be decided now allows nothing.
     pub async fn still_allows(
         &self,
         decided: &ManagedRoomGrants,
         subject: &BareJid,
+        evidence: &PrincipalEvidence,
         action: HostGrantAction,
     ) -> bool {
         if decided.fence.is_current() {
-            return decided.allows(subject, action);
+            return decided.allows_as(subject, evidence, action);
         }
         match self.room(RoomBinding::Room(&decided.grants.room)).await {
-            RoomGate::Managed(now) => now.allows(subject, action),
+            RoomGate::Managed(now) => now.allows_as(subject, evidence, action),
             RoomGate::Unmanaged | RoomGate::Unavailable => false,
         }
     }

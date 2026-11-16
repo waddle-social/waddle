@@ -960,9 +960,10 @@ async fn run_create(
     // convention of slugified-name + short-id by lowercasing+slugifying
     // the name and appending a short UUID tail.
     // A privileged seed names an account of this deployment's account
-    // domain (ADR-0020 D8); a domain that yields no issuance policy refuses
-    // the creation before anything is written.
-    let issuance = crate::spaces_pubsub_seed::account_domain_seed_issuance(account_domain)
+    // domain or of a trusted home of the S2S snapshot it runs (ADR-0020 D8);
+    // a domain that yields no issuance policy refuses the creation before
+    // anything is written.
+    let issuance = crate::spaces_pubsub_seed::replica_seed_issuance(state, account_domain)
         .ok_or_else(|| internal_err("the account domain yields no owner seed issuance policy"))?;
     let localpart = mint_space_localpart(&args.name);
     let domain = state.spaces_jid.domain();

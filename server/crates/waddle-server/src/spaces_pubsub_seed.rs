@@ -29,7 +29,7 @@ use tracing::warn;
 use waddle_xmpp::pubsub::{Affiliation, PubSubStorage};
 use waddle_xmpp::XmppError;
 
-use crate::permissions::host_grant::{HostGrantGate, IssuancePolicy};
+use crate::permissions::host_grant::{HostGrantGate, IssuancePolicy, PrincipalPolicy};
 
 /// What a seed may write.
 #[derive(Clone, Copy)]
@@ -108,12 +108,32 @@ pub async fn seed_owner_on_all_nodes(
 }
 
 /// The issuance policy of a seed on a deployment whose accounts live at
-/// `account_domain`: privileged seeds name accounts of that domain, and no
-/// trusted home is configured for bootstrap and repair writers (ADR-0020
-/// D8). `None` when the domain is not a canonical account domain.
+/// `account_domain` and that runs no S2S snapshot: privileged seeds name
+/// accounts of that domain only (ADR-0020 D8). `None` when the domain is not
+/// a canonical account domain.
 pub fn account_domain_seed_issuance(account_domain: &str) -> Option<IssuancePolicy> {
     let domain = waddle_xmpp::identity::CanonicalDomain::parse_exact(account_domain).ok()?;
     IssuancePolicy::new([domain], [], []).ok()
+}
+
+/// The issuance policy of a seed on a replica deciding under `principals`:
+/// privileged seeds name accounts of its served domains or of a trusted
+/// home of the S2S snapshot it runs (ADR-0020 D8), as admission and room
+/// administration decide from the same value. `None` when a trusted home is
+/// not a remote domain.
+pub fn seed_issuance(principals: &PrincipalPolicy) -> Option<IssuancePolicy> {
+    IssuancePolicy::for_principals(principals, []).ok()
+}
+
+/// [`seed_issuance`] for the replica `state` describes, serving accounts of
+/// `account_domain`. `None` when the domain is not a canonical account
+/// domain.
+pub(crate) fn replica_seed_issuance(
+    state: &crate::server::AppState,
+    account_domain: &str,
+) -> Option<IssuancePolicy> {
+    let domain = waddle_xmpp::identity::CanonicalDomain::parse_exact(account_domain).ok()?;
+    seed_issuance(&state.grant_principals(domain))
 }
 
 async fn node_may_be_seeded(policy: OwnerSeedPolicy<'_>, node: &str) -> bool {

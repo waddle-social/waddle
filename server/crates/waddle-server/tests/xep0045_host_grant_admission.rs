@@ -1099,8 +1099,11 @@ async fn a_replica_admits_a_managed_room_only_after_it_verified_its_privileges()
     fixture.close().await;
 }
 
+/// The fixture's replica runs no S2S snapshot, so it admits no remote
+/// domain: every grant of a remote account contributes nothing there. The
+/// decisions with S2S on are covered in `host_grant_remote_principals.rs`.
 #[tokio::test]
-async fn a_privileged_grant_of_a_remote_account_contributes_nothing_at_admission() {
+async fn with_s2s_off_no_grant_of_a_remote_account_contributes_at_admission() {
     let Some(fixture) = GrantFixture::active("hg_remote_privileged").await else {
         return;
     };
@@ -1131,7 +1134,7 @@ async fn a_privileged_grant_of_a_remote_account_contributes_nothing_at_admission
 
     // The stored admin grant is honoured as no grant: it confers neither
     // moderation nor the member-level read and send the table derives from
-    // it. The member-level grant of a remote account is honoured.
+    // it. Neither is the member-level grant: its domain is not admitted.
     for action in HostGrantAction::ALL {
         assert!(
             !fixture
@@ -1148,13 +1151,9 @@ async fn a_privileged_grant_of_a_remote_account_contributes_nothing_at_admission
             "{action:?}"
         );
     }
-    for (action, admitted) in [
-        (HostGrantAction::Read, true),
-        (HostGrantAction::SendMessage, true),
-        (HostGrantAction::Moderate, false),
-    ] {
-        assert_eq!(
-            fixture
+    for action in HostGrantAction::ALL {
+        assert!(
+            !fixture
                 .store
                 .candidate_admission(
                     &fixture.scope.room,
@@ -1165,13 +1164,12 @@ async fn a_privileged_grant_of_a_remote_account_contributes_nothing_at_admission
                 .await
                 .expect("candidate admission")
                 .admitted,
-            admitted,
             "{action:?}"
         );
     }
 
-    // Acceptance decides the same under the guard: the remote admin is
-    // frozen no child, the remote member is.
+    // Acceptance decides the same under the guard: neither remote account
+    // is frozen a child, and the served members are.
     let seated = room_submission(
         &fixture.ingress,
         &fixture.scope.room,
@@ -1188,7 +1186,7 @@ async fn a_privileged_grant_of_a_remote_account_contributes_nothing_at_admission
         .expect("accepted for the admitted audience");
     assert_eq!(
         frozen_accounts(&fixture, &decision).await,
-        vec![PEER.to_owned(), remote_member.to_owned(), SENDER.to_owned()]
+        vec![PEER.to_owned(), SENDER.to_owned()]
     );
 
     // A deployment that serves no account domain honours no privileged

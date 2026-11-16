@@ -89,6 +89,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::error::HostGrantError;
 use super::issuance::ServedAccountDomains;
+use super::principal::PrincipalPolicy;
 use super::restore::{
     refresh_refused_rooms, verify_restore_fence_with, AuthorityBinding, FenceMemory, RestoreEpoch,
     RestoreFenceRefusal, RestoreFenceReport,
@@ -146,14 +147,16 @@ const ALERT_INTERVAL_MS: i64 = 60_000;
 
 /// What a replica established about its host-grant store: its runtime role
 /// holds exactly the store's privileges, the restore fence passed, and the
-/// authority it verified. It also carries the account domains the replica
-/// serves, which admission honours privileged grants for.
+/// authority it verified. It also carries the replica's
+/// [`PrincipalPolicy`]: the account domains it serves and the S2S snapshot
+/// it runs, from which every decision under the attachment tells whose
+/// grants it honours.
 ///
 /// The value exists only after the checks passed, and an acceptance
 /// transaction admits a managed room only when its unit of work holds one.
 #[derive(Clone, Debug)]
 pub struct HostGrantAttachment {
-    served: ServedAccountDomains,
+    principals: PrincipalPolicy,
     binding: AuthorityBinding,
 }
 
@@ -164,12 +167,12 @@ impl HostGrantAttachment {
     pub async fn verify(
         store: &HostGrantStore,
         permissions: &ActorRef<PermissionActor>,
-        served: ServedAccountDomains,
+        principals: impl Into<PrincipalPolicy>,
         configured: RestoreEpoch,
     ) -> Result<Self, HostGrantError> {
         store.verify_runtime_privileges().await?;
         let memory = FenceMemory::default();
-        Self::fenced(store, permissions, served, configured, &memory)
+        Self::fenced(store, permissions, principals.into(), configured, &memory)
             .await
             .map(|(attachment, _)| attachment)
     }
@@ -180,11 +183,11 @@ impl HostGrantAttachment {
     pub async fn fenced_for_test(
         store: &HostGrantStore,
         permissions: &ActorRef<PermissionActor>,
-        served: ServedAccountDomains,
+        principals: impl Into<PrincipalPolicy>,
         configured: RestoreEpoch,
     ) -> Result<Self, HostGrantError> {
         let memory = FenceMemory::default();
-        Self::fenced(store, permissions, served, configured, &memory)
+        Self::fenced(store, permissions, principals.into(), configured, &memory)
             .await
             .map(|(attachment, _)| attachment)
     }
@@ -195,10 +198,10 @@ impl HostGrantAttachment {
     #[cfg(feature = "test-support")]
     pub async fn unfenced_for_test(
         store: &HostGrantStore,
-        served: ServedAccountDomains,
+        principals: impl Into<PrincipalPolicy>,
     ) -> Result<Self, HostGrantError> {
         Ok(Self {
-            served,
+            principals: principals.into(),
             binding: store.authority_binding().await?,
         })
     }
@@ -206,14 +209,20 @@ impl HostGrantAttachment {
     /// An attachment bound to `binding` as given, for cases that stand in
     /// for an authority that changed after the replica attached.
     #[cfg(feature = "test-support")]
-    pub fn with_binding_for_test(served: ServedAccountDomains, binding: AuthorityBinding) -> Self {
-        Self { served, binding }
+    pub fn with_binding_for_test(
+        principals: impl Into<PrincipalPolicy>,
+        binding: AuthorityBinding,
+    ) -> Self {
+        Self {
+            principals: principals.into(),
+            binding,
+        }
     }
 
     async fn fenced(
         store: &HostGrantStore,
         permissions: &ActorRef<PermissionActor>,
-        served: ServedAccountDomains,
+        principals: PrincipalPolicy,
         configured: RestoreEpoch,
         memory: &FenceMemory,
     ) -> Result<(Self, RestoreFenceReport), HostGrantError> {
@@ -233,12 +242,23 @@ impl HostGrantAttachment {
                  refuse their rooms (docs/operations/authz-host-grant-restore.md)"
             );
         }
-        Ok((Self { served, binding }, report))
+        Ok((
+            Self {
+                principals,
+                binding,
+            },
+            report,
+        ))
     }
 
     /// The account domains this replica serves.
     pub fn served(&self) -> &ServedAccountDomains {
-        &self.served
+        self.principals.served()
+    }
+
+    /// The served account domains and the S2S snapshot this replica runs.
+    pub fn principals(&self) -> &PrincipalPolicy {
+        &self.principals
     }
 
     /// The authority this replica verified, which every acceptance compares
@@ -253,7 +273,7 @@ impl HostGrantAttachment {
 struct GateVerifier {
     store: HostGrantStore,
     permissions: ActorRef<PermissionActor>,
-    served: ServedAccountDomains,
+    principals: PrincipalPolicy,
     configured: RestoreEpoch,
     /// Whether the runtime role's privileges are checked too; only suites
     /// whose login owns the schema skip it.
@@ -284,7 +304,7 @@ impl GateVerifier {
         HostGrantAttachment::fenced(
             &self.store,
             &self.permissions,
-            self.served.clone(),
+            self.principals.clone(),
             self.configured,
             memory,
         )
@@ -592,14 +612,14 @@ impl HostGrantAttachmentGate {
         &self,
         store: HostGrantStore,
         permissions: ActorRef<PermissionActor>,
-        served: ServedAccountDomains,
+        principals: impl Into<PrincipalPolicy>,
         configured: RestoreEpoch,
         stop: CancellationToken,
     ) {
         let _ = self.verifier.set(GateVerifier {
             store,
             permissions,
-            served,
+            principals: principals.into(),
             configured,
             privileges: true,
             stop,
@@ -613,13 +633,13 @@ impl HostGrantAttachmentGate {
         &self,
         store: HostGrantStore,
         permissions: ActorRef<PermissionActor>,
-        served: ServedAccountDomains,
+        principals: impl Into<PrincipalPolicy>,
         configured: RestoreEpoch,
     ) {
         let _ = self.verifier.set(GateVerifier {
             store,
             permissions,
-            served,
+            principals: principals.into(),
             configured,
             privileges: false,
             stop: CancellationToken::new(),
