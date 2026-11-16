@@ -290,6 +290,72 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// The default in-memory WebSocket state of a replica that runs the S2S
+/// snapshot `config`, as startup records it when S2S is enabled: decisions
+/// about remote principals read its admission policy and trusted-home list.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_running_s2s(
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            s2s_federation: Some(crate::permissions::host_grant::FederationSnapshot::of(
+                config,
+            )),
+            ..Default::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// Have `router` host the rooms of `state` for remote occupants, with their
+/// seats in `seats`, as startup does for a replica with S2S enabled: the
+/// router hands what remote principals ask of the MUC service to the
+/// state's rooms, a room's stanza for a remote occupant leaves through the
+/// router, and decisions that name a seated remote occupant read the
+/// evidence its seat was admitted under.
+#[cfg(feature = "test-support")]
+pub fn host_rooms_for_remote_occupants(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+    seats: crate::db::Database,
+) {
+    crate::server::routes::websocket::s2s_rooms::host_rooms(state, router, seats);
+}
+
+/// Make the account `localpart` of the state's domain an owner of the
+/// deployment in the legacy permission store: the standing that lets an
+/// account create a room no channel backs.
+///
+/// # Panics
+/// Panics if the relationship cannot be written.
+#[cfg(feature = "test-support")]
+pub async fn make_deployment_owner(state: &WebSocketState, localpart: &str) {
+    use crate::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
+    let account = [localpart, "@", state.deps.auth_state.xmpp_domain.as_str()].concat();
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(
+                    ObjectType::Server,
+                    crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID,
+                ),
+                Relation::new("owner"),
+                Subject::user(&account),
+            ),
+        })
+        .await
+        .expect("deployment owner relationship");
+}
+
 /// The default in-memory WebSocket state whose app state names the Spaces
 /// service the test state's Spaces handlers serve (`spaces.example.com`),
 /// so that the code reading the app state's service (a join's Space parent
@@ -1080,6 +1146,36 @@ pub async fn websocket_state_with_host_grant_fence(
     db_pool: Arc<DatabasePool>,
     ingress: Arc<IngressAuthority>,
 ) -> Arc<WebSocketState> {
+    host_grant_fence_state(db_pool, ingress, None).await
+}
+
+/// [`websocket_state_with_host_grant_fence`] for a replica that runs the
+/// S2S snapshot `config`, as startup records it when S2S is enabled.
+///
+/// # Panics
+/// Panics if the pool is not PostgreSQL, or if fixture construction fails.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_host_grant_fence_running_s2s(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    host_grant_fence_state(
+        db_pool,
+        ingress,
+        Some(crate::permissions::host_grant::FederationSnapshot::of(
+            config,
+        )),
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+async fn host_grant_fence_state(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+    s2s_federation: Option<crate::permissions::host_grant::FederationSnapshot>,
+) -> Arc<WebSocketState> {
     use crate::permissions::host_grant::{EnrolledScopes, HostGrantGate, HostGrantStore};
     use kameo::actor::Spawn;
     let database = db_pool.global().clone();
@@ -1123,6 +1219,7 @@ pub async fn websocket_state_with_host_grant_fence(
     );
     app_state.permission_actor = permission_actor;
     app_state.host_grants = host_grants;
+    app_state.s2s_federation = s2s_federation;
     let pending_delivery_storage = Arc::new(
         DatabasePendingDeliveryStorage::from_database(
             database.clone(),

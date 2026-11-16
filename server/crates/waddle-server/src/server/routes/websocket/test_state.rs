@@ -75,6 +75,10 @@ pub(crate) struct TestStateOverrides {
     /// never ran startup's selection, instead of selecting the durable store
     /// on the fixture's database.
     pub(crate) without_durable_sm: bool,
+    /// The S2S snapshot the replica runs, as startup records it when S2S is
+    /// enabled. Unset, the state runs with S2S off. Ignored with an explicit
+    /// `app_state`, which carries its own.
+    pub(crate) s2s_federation: Option<crate::permissions::host_grant::FederationSnapshot>,
 }
 
 /// Push-service signing secret shared by every test state in this process, so
@@ -136,6 +140,7 @@ where
         notification_settings_projection: notification_settings_projection_override,
         share_app_room_registry,
         without_durable_sm,
+        s2s_federation,
     } = overrides;
     let db_pool = match db_pool_override {
         Some(db_pool) => db_pool,
@@ -210,6 +215,7 @@ where
             if let Some(clustering) = clustering_override {
                 state.clustering_claims = clustering;
             }
+            state.s2s_federation = s2s_federation;
             Arc::new(state)
         }
     };
