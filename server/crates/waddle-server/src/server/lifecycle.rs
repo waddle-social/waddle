@@ -945,8 +945,9 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
 /// grants can be issued to (ADR-0020 D8): neither the account domain nor a
 /// domain of one of this deployment's services. The snapshot's loader
 /// refuses the domains it names as local; this refuses the service domains
-/// it does not know. A deployment whose XMPP domain is not canonical is
-/// refused later in startup, with its own error.
+/// it does not know, and a service domain that is not canonical, which no
+/// issuance policy can be built from. A deployment whose XMPP domain is not
+/// canonical is refused later in startup, with its own error.
 fn check_trusted_homes(
     config: &crate::s2s::config::S2sConfig,
     xmpp_config: &XmppConfig,
@@ -972,7 +973,7 @@ fn check_trusted_homes(
     .ok_or_else(|| {
         anyhow::anyhow!(
             "S2S configuration: admission.trusted_homes names a domain of one of this \
-             deployment's services"
+             deployment's services, or a service domain is not canonical"
         )
     })
 }
