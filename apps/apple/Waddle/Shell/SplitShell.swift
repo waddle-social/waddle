@@ -32,13 +32,6 @@ struct SplitShell: View {
         .sheet(isPresented: $navigation.isQuickSwitcherPresented) {
             QuickSwitcher()
         }
-        .onChange(of: navigation.selection) { _, _ in
-            // A thread belongs to the conversation it was opened in; details
-            // and pins follow the new selection.
-            if case .thread = navigation.inspector {
-                navigation.inspector = nil
-            }
-        }
     }
 
     @ViewBuilder

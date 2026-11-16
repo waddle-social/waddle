@@ -66,7 +66,16 @@ struct FocusRequest: Equatable {
 @MainActor
 @Observable
 final class NavigationModel {
-    var selection: ConversationID?
+    var selection: ConversationID? {
+        didSet {
+            // A thread belongs to the conversation it was opened in; details
+            // and pins follow the new selection.
+            if selection != oldValue, case .thread = inspector {
+                inspector = nil
+            }
+        }
+    }
+
     var splitSection: SplitSection = .home
     var inspector: InspectorRoute?
     var sheet: SheetRoute?
@@ -100,8 +109,16 @@ final class NavigationModel {
         selection = nil
         inspector = nil
         splitSection = section
-        // So an iPad that shrinks to compact width lands on the same place.
-        tab = section == .inbox ? .inbox : .home
+        // So an iPad that shrinks to compact width lands on the same place,
+        // at the root of that tab.
+        switch section {
+        case .home:
+            tab = .home
+            homePath = []
+        case .inbox:
+            tab = .inbox
+            inboxPath = []
+        }
     }
 
     /// Scrolls the conversation already on screen to `messageID`. Used from
