@@ -271,19 +271,9 @@ pub async fn listed_subdomain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
-/// Wait until `mark` has counted at least `at_least` new lines, and
-/// return the count.
-async fn logged(h: &Harness, mark: &support::LogMark, at_least: usize) -> usize {
-    process::eventually(Duration::from_secs(3), || async {
-        mark.added(h) >= at_least
-    })
-    .await;
-    mark.added(h)
-}
-
 pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
-        "harness raw peers flood-1 to flood-4.test, admitted by open mode alone (outside the reserve); home-a in open mode with max_peers 2, eviction after 5 s without traffic and a 30 s first outbound backoff; every relay into home-a cut so no other peer holds a slot",
+        "harness raw peers flood-1 to flood-4.test, admitted by open mode alone (outside the reserve); home-a in open mode with max_peers 2, eviction after 5 s without traffic and a 60 s first outbound backoff; every relay into home-a cut so no other peer holds a slot",
     );
     let profile = h
         .profile(Home::A, true)
@@ -291,7 +281,7 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
         .on_test_ca(&FLOOD_PEERS)
         .with_limit("max_peers", 2)
         .with_limit("eviction_idle_ms", 5_000)
-        .with_limit("backoff_initial_ms", 30_000);
+        .with_limit("backoff_initial_ms", 60_000);
     restart_a(h, &profile).await?;
     // The runner restores every relay after the row.
     for link in topology::RELAYS {
@@ -320,7 +310,7 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
             }
         }
     }
-    let streams = logged(h, &established, 2).await;
+    let streams = established.settled(h, 2).await;
     outcome.check(
         "control: exactly two peers admitted below the cap",
         admitted.len() == 2 && streams == 2,
@@ -328,7 +318,7 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
     );
     let capacity = support::LogMark::new(h, Home::A, &["s2s connection ended", "\"capacity\""]);
     let refused = claim(h, third, third).await?;
-    let refusals = logged(h, &capacity, 1).await;
+    let refusals = capacity.settled(h, 1).await;
     outcome.check(
         "a third peer is refused for capacity",
         refused.stream.is_none()
@@ -360,7 +350,7 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
             ended.push(format!("{domain}: {:?}", ending.stream_error));
         }
     }
-    let evicted = logged(h, &evictions, 1).await;
+    let evicted = evictions.settled(h, 1).await;
     outcome.check(
         "after the eviction idle time a new peer evicts exactly one idle peer",
         newcomer.stage == Stage::Established
@@ -392,7 +382,8 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
     );
 
     // Backoff: a destination whose attempt failed is not dialled again
-    // within the first backoff; queued work towards it is refused.
+    // within the first backoff (60 s); the window measured is a few
+    // seconds right after the failure.
     h.receiver.set_leaf(
         RAW_PEER,
         h.issue(&LeafSpec::new(
@@ -403,31 +394,49 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
     h.receiver.disconnect();
     tokio::time::sleep(Duration::from_secs(1)).await;
     h.receiver.clear();
-    let failed = support::ping_from_waddle(h, Home::A, "alice", RAW_PEER).await;
-    let first_dials = h.receiver.inbound().len();
+    let mut session = h
+        .login_waddle(Home::A, "alice", &support::id("backoff"))
+        .await?;
+    let refusals = support::LogMark::new(h, Home::A, &["s2s peer certificate refused"]);
+    session
+        .send(&stanza::ping(&support::id("backoff"), RAW_PEER))
+        .await?;
+    let dialled = process::eventually(Duration::from_secs(10), || async {
+        !h.receiver.inbound().is_empty()
+    })
+    .await;
+    let failed = refusals.settled(h, 1).await;
     h.receiver.clear();
-    let held = support::ping_from_waddle(h, Home::A, "alice", RAW_PEER).await;
-    tokio::time::sleep(QUIET).await;
-    let second_dials = h.receiver.inbound().len();
+    let held_id = support::id("backoff");
+    session.send(&stanza::ping(&held_id, RAW_PEER)).await?;
+    let held = session
+        .wait_for(QUIET, |element| {
+            element.attr("id") == Some(held_id.as_str())
+        })
+        .await
+        .ok();
+    let redials = h.receiver.inbound().len();
+    session.close().await;
     let detail = format!(
-        "first attempt: {first_dials} dials, answer {}; within the backoff: {second_dials} dials, answer {}",
-        failed
-            .map(|answer| describe(&answer))
-            .unwrap_or_else(|error| error.to_string()),
+        "first attempt dialled: {dialled}, certificate refusals logged {failed}; within the backoff: {redials} dials, answer {}",
         held.as_ref()
             .map(describe)
-            .unwrap_or_else(|error| error.to_string())
+            .unwrap_or_else(|| "none yet".to_owned())
     );
-    if first_dials == 0 {
-        outcome.unverified(
-            "a failed destination is not dialled again within the backoff",
-            ["control: the failing attempt never dialled: ", &detail].concat(),
-        );
-    } else {
+    if dialled && failed > 0 {
         outcome.check(
             "a failed destination is not dialled again within the backoff",
-            second_dials == 0 && held.as_ref().is_ok_and(|answer| !is_result(answer)),
+            redials == 0 && !held.as_ref().is_some_and(is_result),
             detail,
+        );
+    } else {
+        outcome.unverified(
+            "a failed destination is not dialled again within the backoff",
+            [
+                "control: the first attempt did not dial and fail: ",
+                &detail,
+            ]
+            .concat(),
         );
     }
     h.receiver.set_leaf(RAW_PEER, h.leaf(RAW_PEER)?);

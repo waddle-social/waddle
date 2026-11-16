@@ -254,7 +254,16 @@ pub async fn s2s_disabled(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let ports = h.ports;
     h.dirty.insert(Component::Waddle(Home::A));
 
-    // Control: the same file with S2S enabled.
+    // Control: the same file with S2S enabled. The inotify watch starts
+    // here, so the enabled start shows that it sees home-a open the file.
+    let not_opened = "the S2S configuration and its credentials are not opened";
+    let mut watch = match OpenWatch::new(&watched) {
+        Ok(watch) => Some(watch),
+        Err(error) => {
+            outcome.unverified(not_opened, format!("inotify is unavailable: {error:#}"));
+            None
+        }
+    };
     h.waddle(Home::A)?.stop().await?;
     h.waddle(Home::A)?
         .start(
@@ -290,18 +299,30 @@ pub async fn s2s_disabled(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
         true,
         control.describe(),
     );
+    if let Some(active) = watch.as_mut() {
+        let touched = active.touched()?;
+        let config_name = config
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if touched.contains(&config_name) {
+            outcome.check(
+                "control: the watch sees home-a open the configuration with S2S enabled",
+                true,
+                format!("opened or read: {touched:?}"),
+            );
+        } else {
+            outcome.unverified(
+                not_opened,
+                format!(
+                    "control: the watch did not see the enabled start open the configuration (saw {touched:?})"
+                ),
+            );
+            watch = None;
+        }
+    }
 
     // S2S off on the same, readable file.
-    let mut watch = match OpenWatch::new(&watched) {
-        Ok(watch) => Some(watch),
-        Err(error) => {
-            outcome.unverified(
-                "the S2S configuration and its credentials are not opened",
-                format!("inotify is unavailable: {error:#}"),
-            );
-            None
-        }
-    };
     let started = h
         .waddle(Home::A)?
         .start(
@@ -367,7 +388,7 @@ pub async fn s2s_disabled(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     if let Some(watch) = watch.as_mut() {
         let touched = watch.touched()?;
         outcome.check(
-            "the S2S configuration and its credentials are not opened",
+            not_opened,
             touched.is_empty(),
             format!("opened or read while S2S was off: {touched:?}"),
         );

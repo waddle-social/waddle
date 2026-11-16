@@ -46,6 +46,9 @@ pub async fn header_forms(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
+/// The default XMPP server port on both loopback addresses.
+const DEFAULT_PORT_ADDRESSES: [&str; 2] = ["127.0.0.1:5269", "[::1]:5269"];
+
 /// Counts TCP connections to the default XMPP server port on loopback,
 /// where a dial to any of the refused forms would land when no SRV record
 /// or endpoint applies.
@@ -60,7 +63,7 @@ impl DefaultPortListener {
         let accepted = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
         let mut bound = Vec::new();
-        for address in ["127.0.0.1:5269", "[::1]:5269"] {
+        for address in DEFAULT_PORT_ADDRESSES {
             let Ok(listener) = TcpListener::bind(address).await else {
                 continue;
             };
@@ -138,8 +141,16 @@ pub async fn outbound_destinations(h: &mut Harness, _peer: Peer) -> Result<Outco
         true,
         format!("{control_dials} dials to the harness receiving server"),
     );
-    if default_port.bound.is_empty() {
-        outcome.note("loopback port 5269 was in use; dials there are not counted");
+    let unbound: Vec<&str> = DEFAULT_PORT_ADDRESSES
+        .iter()
+        .copied()
+        .filter(|address| !default_port.bound.iter().any(|bound| bound == address))
+        .collect();
+    if !unbound.is_empty() {
+        outcome.unverified(
+            "dials to loopback port 5269 are counted",
+            format!("could not listen on {unbound:?}, so a dial there would not be seen"),
+        );
     }
     for form in REFUSED_FORMS {
         let before = harness_dials(h, &default_port);

@@ -133,22 +133,6 @@ pub fn certificate_refusals(h: &Harness, home: Home) -> usize {
     log_count(h, home, &["s2s peer certificate refused"])
 }
 
-/// Peer certificates the deployment refused with the verifier's `code`
-/// (`identity_mismatch` for a name that does not match, `path` for an
-/// untrusted issuer or an expired certificate).
-pub fn certificate_refusals_coded(h: &Harness, home: Home, code: &str) -> usize {
-    let quoted = ["\"", code, "\""].concat();
-    log_count(h, home, &["s2s peer certificate refused", &quoted])
-}
-
-/// Connections the deployment ended with `outcome` (the lowercase name of
-/// an `S2sOutcome`, such as `capacity`, `evicted`, `admission`,
-/// `redirected`), from its log.
-pub fn ended_with(h: &Harness, home: Home, outcome: &str) -> usize {
-    let quoted = ["\"", outcome, "\""].concat();
-    log_count(h, home, &["s2s connection ended", &quoted])
-}
-
 /// A count of log lines before an action, to compare after it.
 pub struct LogMark {
     home: Home,
@@ -169,6 +153,18 @@ impl LogMark {
     pub fn added(&self, h: &Harness) -> usize {
         let needles: Vec<&str> = self.needles.iter().map(String::as_str).collect();
         log_count(h, self.home, &needles).saturating_sub(self.before)
+    }
+
+    /// Lines added since the mark, once at least `at_least` are there or
+    /// after a few seconds: Waddle writes a refusal's log line after it
+    /// has sent the stream error and closed, so a peer can see the
+    /// refusal before the line exists.
+    pub async fn settled(&self, h: &Harness, at_least: usize) -> usize {
+        process::eventually(Duration::from_secs(3), || async {
+            self.added(h) >= at_least
+        })
+        .await;
+        self.added(h)
     }
 }
 
@@ -257,16 +253,20 @@ pub async fn tap_peer_stream(h: &Harness, peer: Peer) -> Result<&Relay> {
 /// After bytes were injected into the tapped stream: a client of the peer
 /// pings home-a, so the peer writes the ping into the same stream after
 /// the injected bytes. Its answer shows home-a read past them in order on
-/// that stream. `marker` is a string from the injected bytes (its last
-/// occurrence counts, so a replay of earlier bytes is found); the check
-/// requires it before the ping in the tapped stream, no new connection on
-/// the relay and the tapped connection still open.
+/// that stream. `marker` is a string from the injected bytes, which must
+/// occur at least `occurrences` times in the tapped stream (two for a
+/// replay of earlier bytes); its last occurrence must precede the ping.
+/// When the ping took another stream, or the injected bytes are not where
+/// they must be, the follow-up shows nothing and is UNVERIFIED; it fails
+/// only when the ping followed the injected bytes on the tapped
+/// connection and was not answered.
 pub async fn follow_up_on_tap(
     h: &Harness,
     peer: Peer,
     relay: &Relay,
     connections: usize,
     marker: &str,
+    occurrences: usize,
     outcome: &mut Outcome,
 ) -> Result<()> {
     let mut session = h.login_peer(peer, "alice", &id("follow")).await?;
@@ -279,21 +279,31 @@ pub async fn follow_up_on_tap(
         .map(|connection| String::from_utf8_lossy(&connection.initiator_tls).into_owned())
         .unwrap_or_default();
     let injected_at = tapped.rfind(marker);
+    let injected = tapped.matches(marker).count();
     let ping_at = tapped.find(ping_id.as_str());
     let same_stream = relay.connection_count() == connections && !newest_closed(relay);
     let in_order =
         matches!((injected_at, ping_at), (Some(injected), Some(ping)) if injected < ping);
-    outcome.check(
-        "follow-up ping on the same tapped stream is answered after the injected bytes",
-        answer.as_ref().is_ok_and(is_result) && same_stream && in_order,
-        format!(
-            "answer {}; same connection and open: {same_stream}; injected bytes at {injected_at:?}, follow-up ping at {ping_at:?}",
-            answer
-                .as_ref()
-                .map(describe)
-                .unwrap_or_else(|error| error.to_string())
-        ),
+    let name = "follow-up ping on the same tapped stream is answered after the injected bytes";
+    let detail = format!(
+        "answer {}; same connection and open: {same_stream}; injected bytes found {injected} times, last at {injected_at:?}; follow-up ping at {ping_at:?}",
+        answer
+            .as_ref()
+            .map(describe)
+            .unwrap_or_else(|error| error.to_string())
     );
+    if same_stream && in_order && injected >= occurrences {
+        outcome.check(name, answer.as_ref().is_ok_and(is_result), detail);
+    } else {
+        outcome.unverified(
+            name,
+            [
+                "the follow-up did not follow the injected bytes on the tapped connection: ",
+                &detail,
+            ]
+            .concat(),
+        );
+    }
     Ok(())
 }
 

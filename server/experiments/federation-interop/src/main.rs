@@ -143,6 +143,27 @@ async fn run_all(harness: &mut Harness, log: &mut EvidenceLog, filter: &Filter, 
     }
 }
 
+/// Remove the work directory, which holds the run's keys. Services killed
+/// a moment ago may still be writing into it, so a failed removal is
+/// retried briefly and then reported with the path to remove by hand.
+async fn remove_work_dir(root: &Path) {
+    let mut last = None;
+    for _ in 0..10 {
+        match std::fs::remove_dir_all(root) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => last = Some(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    if let Some(error) = last {
+        eprintln!(
+            "the work directory {} could not be removed ({error}); it holds private keys, remove it by hand",
+            root.display()
+        );
+    }
+}
+
 /// SIGINT, SIGTERM and SIGHUP, caught from before the first service starts
 /// so that none of them ends the harness without its cleanup: the default
 /// action would leave every service's process group running.
@@ -240,7 +261,7 @@ async fn main() -> Result<()> {
     if options.keep {
         println!("work directory kept: {}", root.display());
     } else {
-        std::fs::remove_dir_all(&root).ok();
+        remove_work_dir(&root).await;
     }
     anyhow::ensure!(!interrupted, "interrupted; partial evidence written");
     Ok(())

@@ -95,7 +95,7 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     )
     .await?;
     let verified = verifications(&h.redirect);
-    let logged = admission.added(h);
+    let logged = admission.settled(h, 1).await;
     // Admitted, so the refusal comes after TLS, when dialback is offered.
     outcome.check(
         "dialback refused after TLS by the list, before any verification",
@@ -129,7 +129,7 @@ pub async fn after_certificate_failure(h: &mut Harness, _peer: Peer) -> Result<O
     );
     let attempt = initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), &plan).await?;
     let verified = verifications(&h.receiver);
-    let logged = refusals.added(h);
+    let logged = refusals.settled(h, 1).await;
     outcome.check(
         "dialback never offered after the active certificate failure",
         matches!(attempt.stage, Stage::Tls | Stage::Authentication)

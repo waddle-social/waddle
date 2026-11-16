@@ -87,7 +87,7 @@ fn refused_at_tls(attempt: &Attempt) -> bool {
 }
 
 /// An inbound attempt by the raw peer, which must be refused at TLS with
-/// `code` in home-a's log.
+/// a certificate refusal in home-a's log (with `code` when given).
 async fn inbound_refused(
     h: &Harness,
     plan: &Plan,
@@ -95,18 +95,13 @@ async fn inbound_refused(
     outcome: &mut Outcome,
     name: &str,
 ) -> Result<()> {
-    let refusals = refusal_mark(h, code);
+    let refusals = Refusals::mark(h, code);
     let attempt = raw(h, plan).await?;
-    let logged = refusals.added(h);
+    let (coded, any) = refusals.settled(h).await;
     outcome.check(
         name,
-        refused_at_tls(&attempt) && logged > 0,
-        format!(
-            "{}; home-a logged {logged} certificate refusals{}",
-            attempt.describe(),
-            code.map(|code| [" with code ", code].concat())
-                .unwrap_or_default()
-        ),
+        refused_at_tls(&attempt) && coded > 0,
+        format!("{}; {}", attempt.describe(), refusals.describe(coded, any)),
     );
     if let Some(stream) = attempt.stream {
         stream.close().await;
@@ -114,17 +109,41 @@ async fn inbound_refused(
     Ok(())
 }
 
-fn refusal_mark(h: &Harness, code: Option<&str>) -> support::LogMark {
-    match code {
-        Some(code) => {
-            let quoted = ["\"", code, "\""].concat();
-            support::LogMark::new(
-                h,
-                Home::A,
-                &["s2s peer certificate refused", quoted.as_str()],
-            )
+/// home-a's certificate refusals since a mark: those with the expected
+/// code, and all of them.
+struct Refusals {
+    code: Option<String>,
+    coded: support::LogMark,
+    any: support::LogMark,
+}
+
+impl Refusals {
+    fn mark(h: &Harness, code: Option<&str>) -> Self {
+        let quoted = code.map(|code| ["\"", code, "\""].concat());
+        let mut needles = vec!["s2s peer certificate refused"];
+        if let Some(quoted) = &quoted {
+            needles.push(quoted.as_str());
         }
-        None => support::LogMark::new(h, Home::A, &["s2s peer certificate refused"]),
+        Self {
+            code: code.map(str::to_owned),
+            coded: support::LogMark::new(h, Home::A, &needles),
+            any: support::LogMark::new(h, Home::A, &["s2s peer certificate refused"]),
+        }
+    }
+
+    /// The counts once a refusal has been logged, or after a few seconds.
+    async fn settled(&self, h: &Harness) -> (usize, usize) {
+        let any = self.any.settled(h, 1).await;
+        (self.coded.added(h), any)
+    }
+
+    fn describe(&self, coded: usize, any: usize) -> String {
+        match &self.code {
+            Some(code) => {
+                format!("home-a logged {any} certificate refusals, {coded} with code {code}")
+            }
+            None => format!("home-a logged {any} certificate refusals"),
+        }
     }
 }
 
@@ -191,17 +210,18 @@ async fn outbound_refused(
 ) -> Result<()> {
     h.receiver.set_leaf(RAW_PEER, leaf);
     fresh_receiver_stream(h).await;
-    let refusals = refusal_mark(h, Some(code));
+    let refusals = Refusals::mark(h, Some(code));
     let (delivered, _) = ping_raw_receiver(h).await?;
     let dialled = !h.receiver.inbound().is_empty();
-    let logged = refusals.added(h);
+    let (coded, any) = refusals.settled(h).await;
     let detail = format!(
-        "dialled: {dialled}; stanzas delivered: {delivered}; home-a logged {logged} certificate refusals with code {code}"
+        "dialled: {dialled}; stanzas delivered: {delivered}; {}",
+        refusals.describe(coded, any)
     );
     if dialled {
         outcome.check(
             "outbound: refused for the receiving server's certificate, nothing sent",
-            !delivered && h.receiver.stanzas().is_empty() && logged > 0,
+            !delivered && h.receiver.stanzas().is_empty() && coded > 0,
             detail,
         );
     } else {
@@ -209,6 +229,33 @@ async fn outbound_refused(
     }
     h.receiver.set_leaf(RAW_PEER, h.leaf(RAW_PEER)?);
     Ok(())
+}
+
+/// Record a refusal of the stock column. The stock server's certificate
+/// is the one under test only if home-a refused it with the expected
+/// code; a refusal with another code means the server presented something
+/// else (UNVERIFIED), and no refusal at all fails the row.
+fn judge_stock(
+    outcome: &mut Outcome,
+    name: String,
+    failed_across: bool,
+    refusals: &Refusals,
+    (coded, any): (usize, usize),
+    detail: String,
+) {
+    let detail = [detail, "; ".to_owned(), refusals.describe(coded, any)].concat();
+    if coded > 0 || any == 0 {
+        outcome.check(name, failed_across && coded > 0, detail);
+    } else {
+        outcome.unverified(
+            name,
+            [
+                "home-a refused a certificate with another code, so the peer may not have presented the one under test: ",
+                &detail,
+            ]
+            .concat(),
+        );
+    }
 }
 
 /// Ask `to` for disco#info from a home-a client, retrying until a result
@@ -249,43 +296,52 @@ fn dials(relays: &[&Relay]) -> usize {
     relays.iter().map(|relay| relay.connection_count()).sum()
 }
 
-/// Before the swap: the same paths work with the good certificate.
+/// Before the swap: the same paths work with the good certificate. A
+/// control that fails for any reason makes the row UNVERIFIED.
 async fn stock_control(h: &Harness, peer: Peer, host: &str, outcome: &mut Outcome) -> Result<()> {
     fresh_streams(h, peer);
-    let out = disco_from_home_a(h, host, Duration::from_secs(60)).await?;
-    if !is_result(&out) {
-        return Err(Unverifiable(format!(
-            "control: home-a -> {host} with the good certificate was not answered: {}",
-            describe(&out)
-        ))
-        .into());
+    let out = disco_from_home_a(h, host, Duration::from_secs(60)).await;
+    match out {
+        Ok(answer) if is_result(&answer) => outcome.check(
+            ["control: home-a -> ", host, " with the good certificate"].concat(),
+            true,
+            describe(&answer),
+        ),
+        other => {
+            return Err(Unverifiable(format!(
+                "control: home-a -> {host} with the good certificate was not answered: {}",
+                other
+                    .map(|answer| describe(&answer))
+                    .unwrap_or_else(|error| format!("{error:#}"))
+            ))
+            .into())
+        }
     }
-    outcome.check(
-        ["control: home-a -> ", host, " with the good certificate"].concat(),
-        true,
-        describe(&out),
-    );
     if host == Harness::peer_domain(peer) {
         let back =
-            support::ping_until_result(h, peer, false, HOME_A, Duration::from_secs(60)).await?;
-        if !is_result(&back) {
-            return Err(Unverifiable(format!(
-                "control: {} -> home-a with the good certificate was not answered: {}",
-                peer.label(),
-                describe(&back)
-            ))
-            .into());
+            support::ping_until_result(h, peer, false, HOME_A, Duration::from_secs(60)).await;
+        match back {
+            Ok(answer) if is_result(&answer) => outcome.check(
+                [
+                    "control: ",
+                    peer.label(),
+                    " -> home-a with the good certificate",
+                ]
+                .concat(),
+                true,
+                describe(&answer),
+            ),
+            other => {
+                return Err(Unverifiable(format!(
+                    "control: {} -> home-a with the good certificate was not answered: {}",
+                    peer.label(),
+                    other
+                        .map(|answer| describe(&answer))
+                        .unwrap_or_else(|error| format!("{error:#}"))
+                ))
+                .into())
+            }
         }
-        outcome.check(
-            [
-                "control: ",
-                peer.label(),
-                " -> home-a with the good certificate",
-            ]
-            .concat(),
-            true,
-            describe(&back),
-        );
     }
     Ok(())
 }
@@ -332,24 +388,18 @@ async fn both_directions_fail(
 ) -> Result<()> {
     let outbound = outbound_relays(h, peer);
     let before = dials(&outbound);
-    let refusals = refusal_mark(h, Some(code));
+    let refusals = Refusals::mark(h, Some(code));
     let out = disco_from_home_a(h, peer_host, Duration::ZERO).await;
     let dialled = dials(&outbound) > before;
-    let logged = refusals.added(h);
+    let counts = refusals.settled(h).await;
     let name = ["home-a -> ", peer_host, " refused for the certificate"].concat();
-    let detail = [
-        out.as_ref()
-            .map(describe)
-            .unwrap_or_else(|error| error.to_string()),
-        format!("; home-a logged {logged} certificate refusals with code {code}"),
-    ]
-    .concat();
+    let detail = out
+        .as_ref()
+        .map(describe)
+        .unwrap_or_else(|error| error.to_string());
     if dialled {
-        outcome.check(
-            name,
-            out.as_ref().is_ok_and(|answer| !is_result(answer)) && logged > 0,
-            detail,
-        );
+        let failed = out.as_ref().is_ok_and(|answer| !is_result(answer));
+        judge_stock(outcome, name, failed, &refusals, counts, detail);
     } else {
         outcome.unverified(name, ["home-a did not dial the peer: ", &detail].concat());
     }
@@ -357,27 +407,22 @@ async fn both_directions_fail(
         let inbound = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A))?;
         let before = inbound.connection_count();
         let streams = support::established(h, Home::A, "inbound", "").await;
-        let refusals = refusal_mark(h, Some(code));
+        let refusals = Refusals::mark(h, Some(code));
         let back = support::ping_from_peer(h, peer, "alice", HOME_A).await;
         let attempted = inbound.connection_count() > before;
+        let counts = refusals.settled(h).await;
         let opened = support::established(h, Home::A, "inbound", "").await > streams;
-        let logged = refusals.added(h);
         let name = [peer.label(), " -> home-a refused for the certificate"].concat();
         let detail = [
             back.as_ref()
                 .map(describe)
                 .unwrap_or_else(|error| error.to_string()),
-            format!(
-                "; inbound streams established: {opened}; home-a logged {logged} certificate refusals with code {code}"
-            ),
+            format!("; inbound streams established: {opened}"),
         ]
         .concat();
         if attempted {
-            outcome.check(
-                name,
-                !opened && back.as_ref().is_ok_and(|answer| !is_result(answer)) && logged > 0,
-                detail,
-            );
+            let failed = !opened && back.as_ref().is_ok_and(|answer| !is_result(answer));
+            judge_stock(outcome, name, failed, &refusals, counts, detail);
         } else {
             outcome.unverified(name, ["the peer did not attempt S2S: ", &detail].concat());
         }

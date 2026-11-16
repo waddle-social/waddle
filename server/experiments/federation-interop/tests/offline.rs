@@ -123,12 +123,13 @@ fn evidence_text_loses_paths_connection_strings_and_secrets() {
         WADDLE_DATABASE_URL=postgres://waddle:hunter2@127.0.0.1:47111/waddle\n\
         dialing wss://home-a.test:47112/ws as user@host failed\n\
         {\"password\":\"0123456789abcdef0123456789abcdef\"} config=/home/someone/s2s.toml\n\
-        relay 127.0.0.1:47150/x kept";
+        relay 127.0.0.1:47150/x kept password: hunter3 next";
     let scrubbed = scrub(tail);
     for leaked in [
         "/tmp/",
         "/home/someone",
         "hunter2",
+        "hunter3",
         "postgres://",
         "0123456789abcdef0123456789abcdef",
     ] {
@@ -137,6 +138,7 @@ fn evidence_text_loses_paths_connection_strings_and_secrets() {
     assert!(scrubbed.contains("[path]/home-a.test.key"));
     assert!(scrubbed.contains("[path]/s2s.toml"));
     assert!(scrubbed.contains("relay 127.0.0.1:47150/x kept"));
+    assert!(scrubbed.contains("password: [redacted] next"));
     assert!(scrubbed.contains("wss://home-a.test:47112/ws"));
     let long = "x".repeat(10_000);
     assert!(scrub(&long).chars().count() < 2_000);

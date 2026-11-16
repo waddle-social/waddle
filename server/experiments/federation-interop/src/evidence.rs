@@ -330,22 +330,43 @@ const CREDENTIAL_KEYS: [&str; 10] = [
 pub fn scrub(text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(DETAIL_LIMIT + 16));
     let mut token = String::new();
+    // A credential key whose separator ended its token (`password: value`)
+    // redacts the next token.
+    let mut redact_next = false;
+    let flush = |token: &mut String, out: &mut String, redact_next: &mut bool| {
+        if token.is_empty() {
+            return;
+        }
+        if std::mem::take(redact_next) {
+            out.push_str("[redacted]");
+        } else if ends_with_separator(token) && redact_credential(token).is_some() {
+            out.push_str(token);
+            *redact_next = true;
+        } else {
+            out.push_str(&scrub_token(token));
+        }
+        token.clear();
+    };
     for character in text.chars() {
         if character.is_whitespace() {
-            out.push_str(&scrub_token(&token));
-            token.clear();
+            flush(&mut token, &mut out, &mut redact_next);
             out.push(character);
         } else {
             token.push(character);
         }
     }
-    out.push_str(&scrub_token(&token));
+    flush(&mut token, &mut out, &mut redact_next);
     if out.chars().count() > DETAIL_LIMIT {
         let mut cut: String = out.chars().take(DETAIL_LIMIT).collect();
         cut.push_str(" [truncated]");
         return cut;
     }
     out
+}
+
+/// Whether `token` ends with a key's separator and so carries no value.
+fn ends_with_separator(token: &str) -> bool {
+    token.trim_end_matches(['"', '\'']).ends_with([':', '='])
 }
 
 fn scrub_token(token: &str) -> String {

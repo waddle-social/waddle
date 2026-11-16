@@ -116,7 +116,7 @@ pub async fn forged_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         "watched the addressed resource",
     );
     session.close().await;
-    support::follow_up_on_tap(h, peer, relay, connections, &forged_id, &mut outcome).await?;
+    support::follow_up_on_tap(h, peer, relay, connections, &forged_id, 1, &mut outcome).await?;
     Ok(outcome)
 }
 
@@ -179,7 +179,8 @@ pub async fn replayed_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> 
         "watched the requesting resource",
     );
     session.close().await;
-    support::follow_up_on_tap(h, peer, relay, connections, &ping_id, &mut outcome).await?;
+    // The genuine result and the replay: the id twice in the stream.
+    support::follow_up_on_tap(h, peer, relay, connections, &ping_id, 2, &mut outcome).await?;
     Ok(outcome)
 }
 
@@ -266,7 +267,8 @@ pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     if refused {
         outcome.note(["home-a refused the stream: ", &detail].concat());
     } else {
-        support::follow_up_on_tap(h, peer, relay, connections, &message_id, &mut outcome).await?;
+        support::follow_up_on_tap(h, peer, relay, connections, &message_id, 1, &mut outcome)
+            .await?;
     }
     watcher.close().await;
     Ok(outcome)
