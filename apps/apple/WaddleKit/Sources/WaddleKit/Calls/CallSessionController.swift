@@ -21,15 +21,14 @@
     }
 
     func update(_ state: CallState) {
-        let active: ActiveCall?
-        if case .active(let call) = state { active = call } else { active = nil }
+        let active = state.mediaSession
         // Choices are dropped where a new call begins, not where one ends:
         // a replaced session can pass through `.ended` on its way to an
         // already-accepted invitation, and that is still the same call.
         switch state {
-        case .outgoing: media.forgetCaptureChoices()
+        case .outgoing, .joiningGroup: media.forgetCaptureChoices()
         case .incoming(let call) where !call.isAccepting: media.forgetCaptureChoices()
-        case .idle, .incoming, .active, .ended: break
+        case .idle, .incoming, .active, .inGroup, .ended: break
         }
         if let active, targetSid == active.sid { return }
 
@@ -89,6 +88,17 @@
         Task {
             guard revision == expectedRevision else { return }
             await hangUp(sid, reason)
+        }
+    }
+}
+
+private extension CallState {
+    /// Both engines hand the same credentials and agreed tracks to media.
+    var mediaSession: (sid: String, join: CallJoin, media: CallMedia)? {
+        switch self {
+        case .active(let call): (call.sid, call.join, call.media)
+        case .inGroup(let call): (call.sid, call.join, call.media)
+        case .idle, .incoming, .outgoing, .joiningGroup, .ended: nil
         }
     }
 }

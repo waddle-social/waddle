@@ -5,6 +5,7 @@
 ///
 /// `isOwn` marks a carbon of something another of our own devices sent.
 func reduceCallState(_ current: CallState, _ event: CallEvent, isOwn: Bool) -> CallState {
+    guard !current.isGroupPhase else { return current }
     if case .propose(let media) = event.kind {
         // A redelivered proposal for the session the slot already holds,
         // live or ended, is not a new call.
@@ -87,7 +88,7 @@ private func reducePeerEvent(_ current: CallState, _ event: CallEvent) -> CallSt
             return current
         }
 
-    case .idle, .ended:
+    case .idle, .ended, .joiningGroup, .inGroup:
         return current
     }
 }

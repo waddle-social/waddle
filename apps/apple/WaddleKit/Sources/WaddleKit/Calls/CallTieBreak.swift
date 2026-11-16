@@ -74,6 +74,8 @@ extension CallStore {
         case (.incoming(let current), .incoming(let previous)): current.sid == previous.sid
         case (.outgoing(let current), .outgoing(let previous)): current.sid == previous.sid
         case (.active(let current), .active(let previous)): current.sid == previous.sid
+        // Group phases never enter 1:1 migration or tie-breaking.
+        case (.joiningGroup, _), (.inGroup, _), (_, .joiningGroup), (_, .inGroup): false
         default: state == expected
         }
     }

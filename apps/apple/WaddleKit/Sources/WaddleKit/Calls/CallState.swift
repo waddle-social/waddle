@@ -4,6 +4,8 @@ public enum CallState: Hashable, Sendable {
     case incoming(IncomingCall)
     case outgoing(OutgoingCall)
     case active(ActiveCall)
+    case joiningGroup(GroupCallAttempt)
+    case inGroup(GroupCall)
     case ended(sid: String, reason: CallEndReason)
 }
 
@@ -74,14 +76,23 @@ extension CallState {
         case .incoming(let call): call.sid
         case .outgoing(let call): call.sid
         case .active(let call): call.sid
+        case .joiningGroup(let call): call.sid
+        case .inGroup(let call): call.sid
         case .ended(let sid, _): sid
         }
     }
     /// A call is ringing, being placed or in progress: the slot is taken.
     public var isLive: Bool {
         switch self {
-        case .incoming, .outgoing, .active: true
+        case .incoming, .outgoing, .active, .joiningGroup, .inGroup: true
         case .idle, .ended: false
+        }
+    }
+    /// Group phases are owned by the Muji engine, never the 1:1 reducer.
+    public var isGroupPhase: Bool {
+        switch self {
+        case .joiningGroup, .inGroup: true
+        case .idle, .incoming, .outgoing, .active, .ended: false
         }
     }
     var isIncoming: Bool { if case .incoming = self { true } else { false } }

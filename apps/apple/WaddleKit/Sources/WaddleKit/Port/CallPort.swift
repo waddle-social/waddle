@@ -4,6 +4,12 @@ public protocol CallPort: AnyObject, Sendable {
     /// media keeps the SDK's signaling-provided servers.
     func fetchExternalServices() async -> [ExternalService]
 
+    /// XEP-0272 room presence; false means the stanza was not written.
+    func updateGroupCallPresence(_ presence: GroupCallPresenceUpdate, in room: BareJID, nick: String) async -> Bool
+    /// Session IQs return true only when the mixer acknowledged them.
+    func sendGroupCallSessionInitiate(in room: BareJID, initiator: JID, sid: String, video: Bool) async -> Bool
+    func sendGroupCallSessionTerminate(in room: BareJID, sid: String) async -> Bool
+
     func sendCallPropose(to peer: BareJID, sid: String, media: CallMedia) async -> Bool
     func sendCallRinging(to peer: BareJID, sid: String) async -> Bool
     func sendCallProceed(to peer: JID, sid: String) async -> Bool
@@ -15,4 +21,18 @@ public protocol CallPort: AnyObject, Sendable {
     func sendCallSessionInitiate(to peer: JID, initiator: JID, sid: String, media: CallMedia) async -> Bool
     func sendCallSessionAccept(to peer: JID, responder: JID, sid: String, media: CallMedia) async -> Bool
     func sendCallSessionTerminate(to peer: JID, sid: String, reason: JingleReason?) async -> CallTerminateOutcome
+}
+
+/// The Rust core builds Muji contents; leaving drops every in-call marker.
+public struct GroupCallPresenceUpdate: Hashable, Sendable {
+    public enum State: Hashable, Sendable { case preparing, active(video: Bool), left }
+    public let state: State
+    public let isHandRaised: Bool
+    public let isMuted: Bool
+
+    public init(state: State, isHandRaised: Bool = false, isMuted: Bool = false) {
+        self.state = state
+        self.isHandRaised = state == .left ? false : isHandRaised
+        self.isMuted = state == .left ? false : isMuted
+    }
 }

@@ -70,4 +70,57 @@ extension FFIXmppPort {
         )
         return FFIInbound.callTerminateOutcome(outcome)
     }
+
+    /// The Rust core owns the XEP-0272 wire shape; leaving clears both markers.
+    func updateGroupCallPresence(_ presence: GroupCallPresenceUpdate, in room: BareJID, nick: String) async -> Bool {
+        let active: Bool
+        let preparing: Bool
+        let video: Bool
+        switch presence.state {
+        case .preparing:
+            (active, preparing, video) = (false, true, false)
+        case .active(let hasVideo):
+            (active, preparing, video) = (true, false, hasVideo)
+        case .left:
+            (active, preparing, video) = (false, false, false)
+        }
+        let isLeaving = presence.state == .left
+        do {
+            try await client.updateMujiPresence(
+                roomJid: room.description, nick: nick, active: active, preparing: preparing, video: video,
+                flags: WaddleInCallPresenceFlags(
+                    handRaised: !isLeaving && presence.isHandRaised,
+                    muted: !isLeaving && presence.isMuted))
+            return true
+        } catch {
+            BridgeLog.debug("muji presence update failed: \(error)")
+            return false
+        }
+    }
+
+    func sendGroupCallSessionInitiate(in room: BareJID, initiator: JID, sid: String, video: Bool) async -> Bool {
+        do {
+            try await client.sendMujiSessionInitiate(
+                roomJid: room.description, initiatorFullJid: initiator.description, sid: sid, video: video)
+            return true
+        } catch {
+            BridgeLog.debug("muji session initiate failed: \(error)")
+            return false
+        }
+    }
+
+    func sendGroupCallSessionTerminate(in room: BareJID, sid: String) async -> Bool {
+        do {
+            try await client.sendMujiSessionTerminate(roomJid: room.description, sid: sid)
+            return true
+        } catch WaddleError.Stanza(condition: "item-not-found", text: _) {
+            // XEP-0166 unknown-session: the mixer has already dropped the
+            // session. The leave presence that precedes a terminate does
+            // exactly that, so this is the usual answer, not a failure.
+            return true
+        } catch {
+            BridgeLog.debug("muji session terminate failed: \(error)")
+            return false
+        }
+    }
 }

@@ -3,6 +3,13 @@ import Observation
 
 /// A MainActor call slot; inbound reductions run before ordered remote effects.
 @MainActor @Observable public final class CallStore {
+    public let groupPresence = GroupCallPresence()
+    /// Our optimistic choice; room echoes never overwrite local intent.
+    public private(set) var isHandRaised = false
+    /// Capture owns mute state; a failed presence write leaves this choice intact.
+    public private(set) var isSelfMuteAdvertised = false
+    @ObservationIgnored let groupControl: GroupCallControl
+
     /// The one call slot; terminal states remain until dismissed or replaced.
     public private(set) var state: CallState = .idle {
         didSet { mediaSession?.update(state) }
@@ -29,8 +36,13 @@ import Observation
         port: any CallPort, ownJID: @escaping @MainActor () -> JID?, ownBareJID: BareJID,
         media: (any CallMediaController)? = nil,
         ringTimeout: Duration = .seconds(45), sessionTimeout: Duration = .seconds(45),
+        groupPreparingEchoTimeout: Duration = .seconds(2), groupOtherPreparingTimeout: Duration = .seconds(2),
+        groupAcceptTimeout: Duration = .seconds(10),
         newSid: @escaping () -> String = { "c" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased() }
     ) {
+        self.groupControl = GroupCallControl(
+            mixer: BareJID(localpart: nil, domain: "calls." + ownBareJID.domain),
+            echoTimeout: groupPreparingEchoTimeout, peersTimeout: groupOtherPreparingTimeout, acceptTimeout: groupAcceptTimeout)
         self.ringTimeout = ringTimeout
         self.sessionTimeout = sessionTimeout
         self.port = port
@@ -46,6 +58,8 @@ import Observation
 
     /// Reduce arrivals synchronously; only remote-originated effects enter the serial queue.
     public func handle(_ event: CallEvent) {
+        if fulfillGroupAccept(event) { return }
+        if endGroupFromRemote(event) { return }
         let before = state
         switch event.kind {
         case .reject where before.sid != event.sid, .retract where before.sid != event.sid:
@@ -132,11 +146,21 @@ import Observation
         sessionTimer = nil
         recentlyAbortedSids.removeAll()
         generation += 1
+        groupControl.clear()
+        groupPresence.clear()
+        setGroupMarkers(hand: false, muted: false)
         effectTask?.cancel()
         effectTask = nil
         effects.removeAll()
         state = .idle
         lastError = nil
+    }
+
+    func nextGroupSid() -> String { newSid() }
+
+    func setGroupMarkers(hand: Bool? = nil, muted: Bool? = nil) {
+        if let hand { isHandRaised = hand }
+        if let muted { isSelfMuteAdvertised = muted }
     }
 
     /// Local teardown claims the slot without erasing the last wire failure.
