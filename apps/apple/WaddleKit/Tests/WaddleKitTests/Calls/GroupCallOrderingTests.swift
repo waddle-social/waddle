@@ -84,6 +84,27 @@ import Testing
         _ = await rejoining.value
     }
 
+    @Test func aFailedHandRaiseIsUndoneBeforeTheNextPresenceGoesOut() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.port.callSends = []
+        f.port.heldCallVerbs = ["groupPresence"]
+        f.port.callResults["groupPresence"] = false
+        let raising = Task { await f.store.setHandRaised(true) }
+        await eventually { f.port.callSends.count == 1 }
+        let muting = Task { await f.store.advertiseSelfMute(true) }
+        f.port.callResults["groupPresence"] = true
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        #expect(await !raising.value)
+        #expect(await muting.value)
+        // What the room was last told matches what this device shows.
+        #expect(f.port.callSends.last == .groupPresence(
+            groupRoom, "alice", .init(state: .active(video: false), isHandRaised: false, isMuted: true)))
+        #expect(!f.store.isHandRaised)
+        f.store.clear()
+    }
+
     @Test func losingTheStreamWhileJoiningAbandonsTheJoin() async {
         let f = GroupFixture()
         let joining = await f.begin()
