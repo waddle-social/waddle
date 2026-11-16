@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "21641f3c50dd503beac2d8f304a3e12d91e45c88",
+  "baseline_commit": "f41951085420e0581c92e11a96d6aa3a1c25f2f4",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -117,7 +117,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "9466a5bca6a996013e7eb7d84bd4ef8d28e6c44fd6b626d3cfcb622e66b2aed0"
+      "sha256": "a685d70819d5fa73d88380535ccfae5f87f2d61e29d6368de45f9a2c4d199d61"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -161,7 +161,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs",
-      "sha256": "8a9e77e3867821a1ad0f2022c87aaa6e14e377e807d871d2672bf9e0e72a310b"
+      "sha256": "86687736678af200e9423876271fd0cabcbf4c08982b54a2f7dba419a8fc3e0b"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_config.rs",
@@ -349,7 +349,7 @@
     },
     "startup-call": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1522,
+      "line": 1533,
       "text": "crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn("
     },
     "bootstrap": {
@@ -674,7 +674,7 @@
     },
     "hg-room-admin": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs",
-      "line": 113,
+      "line": 112,
       "text": "pub(crate) async fn record_host_grant_affiliation("
     },
     "hg-owner-iq": {
@@ -744,7 +744,7 @@
     },
     "hg-recovery": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 976,
+      "line": 988,
       "text": "fn spawn_host_grant_recovery("
     },
     "placement": {
@@ -819,7 +819,7 @@
     },
     "hg-mirror-repair": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs",
-      "line": 355,
+      "line": 342,
       "text": "pub(super) struct MirrorRepair {"
     },
     "hg-claim-move": {
@@ -894,7 +894,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "1edf77ba9ff2bfe71a1f976db8f6151d70b25daa8c35a18c5f06c25bfba5de81",
+    "sha256": "f4718ef2fa2fd7d90aff7cd189da26c9e26e829c7e904adfcee621caff25406a",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,

@@ -5,7 +5,7 @@ Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
 S2S routing and the host-grant restore incarnation through
-`21641f3c50dd503beac2d8f304a3e12d91e45c88` (see the last refresh below); the original
+`f41951085420e0581c92e11a96d6aa3a1c25f2f4` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -56,7 +56,7 @@ revision. The [local test backend](../../crates/waddle-server/src/permissions/ac
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1522) invokes account reconciliation behind its
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1533) invokes account reconciliation behind its
 lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L142) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L182) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
@@ -95,7 +95,7 @@ whole command committed. Room configuration, roles, explicit affiliations and
 invitations also affect acceptance independently of a channel's inherited read
 permission. E3/E6. For a room an enrolled host-grant scope manages, none of
 this applies: the handler takes the sender's authority from the canonical
-grants, [records one affiliation change in the host-grant store](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs#L113)
+grants, [records one affiliation change in the host-grant store](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs#L112)
 before the room actor applies it, writes no relationship and rolls nothing
 back; owner configuration needs the canonical `manage` action and
 [destroy is refused](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs#L1321); admin channel and Space
@@ -421,8 +421,8 @@ reviewed files since the fourth refresh:
   grant store or acceptance authority was found.
 
 The selected evidence was refreshed a sixth time, through
-`21641f3c50dd503beac2d8f304a3e12d91e45c88`, the merge of the host-grant
-restore incarnation, after reviewing the delta of the reviewed files since
+`f41951085420e0581c92e11a96d6aa3a1c25f2f4`, the merge of the host-grant
+restore incarnation and the fixes after it, after reviewing the delta of the reviewed files since
 the fifth refresh:
 
 - Room-manifest acceptance (`claim`, `hg-admission`) compares the authority
@@ -439,8 +439,11 @@ the fifth refresh:
 - The writer fence's gate (`hg-gate`) reads its attachment from the
   attachment gate at each decision, so a refused or re-verified authority
   closes every surface. Projection recovery (`hg-recovery`) waits for the
-  first attachment. Startup moves `startup-call` without changing backend
-  selection, `EnsureSchema` or account reconciliation.
+  first attachment and runs under the replica's issuance policy, the one
+  room administration (`hg-room-admin`) builds, now from one place, since a
+  reconstruction it reaches records lowered grants. Startup moves
+  `startup-call` without changing backend selection, `EnsureSchema` or
+  account reconciliation.
 - The raw scan holds 1595 records, five more: three documentation
   references to `WriteHostGrantProjection` beside the new actor messages,
   and one `write_relationships` and one `delete_relationships` in the
