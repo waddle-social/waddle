@@ -61,9 +61,11 @@ run against disposable stores (see
 
 The inbound MUC slice (W6a in the plan) is the first producer of stream
 evidence: remote principals reach a managed room's join, archive,
-discovery and self-ping, and its acceptance, on the evidence of their
+discovery and self-ping, its acceptance and its administration
+(`muc#admin`, `muc#owner`, XEP-0425 moderation), on the evidence of their
 streams, and a seated remote occupant is decided on the evidence its seat
-was admitted under. What that changes here is recorded under
+was admitted under. A managed room is reached at all only while its
+`federated` setting is on. What that changes here is recorded under
 [Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)
 and [Where it is decided](#where-it-is-decided); the rest is in
 [the routing design](s2s-routing-2047.md#inbound-muc-w6a). Its cases are
@@ -3203,7 +3205,17 @@ from its bare JID and the evidence of how its request arrived:
 - *Evidence.* `PrincipalEvidence::Stream` carries the authentication
   strength and the trust-profile kind of the inbound S2S stream that
   carried the request. Outside test support it is built only from a
-  `RemotePrincipal`, which only a verified inbound stream produces.
+  `RemotePrincipal`. A replica builds one from a stanza on an inbound
+  stream it verified, or, for a room it holds, from the facts of a stream
+  another replica of the deployment verified and carried to it over the
+  cluster relay with the stanza (`RemotePrincipal::carried`; see
+  [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). The carried facts
+  are the address, the strength, the trust-profile kind and the snapshot
+  generation, and nothing decided from them: the receiving replica
+  evaluates admission and trusted-home status itself. It takes the facts
+  on the relay's word, as it takes every relay message; only replicas of
+  the deployment reach the relay, and no peer server's input builds a
+  principal on any path but a verified stream.
   `PrincipalEvidence::NoStream` is a local session's own request, or a
   principal the decision names without its request (a recipient, a seated
   occupant, a listed subject).
@@ -3267,9 +3279,14 @@ them.
   and `HostGrantGate::still_allows`. A surface that serves a local
   session's request or a subject it names passes `NoStream`. The surfaces a
   remote principal reaches (the join, the archive read before and after the
-  page is read, `disco#info` of the room and the self-ping; see
+  page is read, `disco#info` of the room, the self-ping, and the
+  administration requests: the `muc#admin` lists and changes, the
+  `muc#owner` configuration and XEP-0425 moderation; see
   [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)) pass the evidence of
-  the stream that carried the request (`PrincipalEvidence::of`).
+  the stream that carried the request (`PrincipalEvidence::of`). The
+  administration handlers take the evidence as a parameter: a session's
+  dispatch and the cluster's forward of a session's list request pass
+  `NoStream`, and the room host passes the stream's.
   `ManagedRoomGrants::admitted` lists subjects without stream evidence.
   Each of these asks the revocation fence's ticket of the decision too, so
   a decision made with a stream's evidence is fenced like any other. The
@@ -3280,8 +3297,11 @@ them.
   `HostGrantAuthority::set_affiliation_as`) takes the initiator's evidence
   and decides its standing under the issuance policy's principal policy,
   evaluated when the command is submitted. Room administration passes
-  `NoStream` for its local session; the stream-less `set_affiliation`
-  exists for suites only. A `PrincipalPolicy` is built from served account
+  `NoStream` for a local session and the evidence of the request's stream
+  for a remote principal, so a remote owner's or admin's change is recorded
+  only while its home is a trusted home and a `pkix` stream carried the
+  request, and is acknowledged by the revocation fence like any other; the
+  stream-less `set_affiliation` exists for suites only. A `PrincipalPolicy` is built from served account
   domains alone (S2S off) by name, `PrincipalPolicy::local`; the
   conversion from `ServedAccountDomains` exists for suites only, so a
   replica cannot lose its snapshot through a conversion. The evidence is not part of the operation's
@@ -3406,17 +3426,20 @@ like its grants, which needs a migration and an operation of its own.
   `PrincipalPolicy::witness`: D1 at every request, and D8 on whatever
   standing the legacy checks give the principal
   ([inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). D8 issuance is
-  applied by the `muc#admin` writer of such a room. The other legacy
-  privileged writers (the admin commands, and `channel.manager`,
-  `channel.moderator`, `space.moderator` and `role.manager` of Spaces)
-  still write those relations without asking whether the subject's home is
-  a trusted home; a standing they write for a remote account is not
+  applied by the `muc#admin` writer of such a room and by the admin
+  command that sets a room affiliation (`channels:set-affiliation`). The
+  Spaces relations (`channel.manager`, `channel.moderator`,
+  `space.moderator` and `role.manager`) are still written without asking
+  whether the subject's home is a trusted home, until the Spaces slice
+  (W7a) reviews them; a standing they write for a remote account is not
   honoured at the effect unless its home is trusted and its stream is
   `pkix`.
-- A remote principal's own administration of a room (`muc#admin`,
-  `muc#owner`) is not reachable over S2S. A trusted home's owner or admin
-  holds its standing and the moderator role in the room, and cannot
-  exercise them.
+- A remote principal's administration of a managed room has no fence check
+  beyond the ones a session's has: a moderation request (XEP-0425) and the
+  role list read are decided once, on the grants as read, and an
+  affiliation list is read from one generation of the grants. An
+  acknowledged revoke between such a read and its answer is not seen by
+  that answer, for a remote principal as for a session.
 - Account bootstrap provisions deployment ownership for served accounts
   only, which is stricter than D8 requires.
 - A per-scope `pkix` requirement (above).
@@ -3457,7 +3480,13 @@ Written since that run and not executed:
   `xep0313_s2s_inbound_mam.rs`: a remote member entering a managed room on
   its grant, a stranger refused, messages through the room's acceptance
   both ways, a revoked member removed by the sweep on its seat's evidence
-  and told over S2S, and the archive read decided on the grant.
+  and told over S2S, the archive read decided on the grant, a managed room
+  whose `federated` setting is off answered as a room that does not exist
+  to its own remote member, a trusted home's admin recording a membership
+  through the store on its stream's evidence
+  (`a_remote_admin_of_a_managed_room_changes_its_affiliations_through_its_grants`),
+  and a remote member refused every administration request
+  (`a_remote_member_of_a_managed_room_administers_nothing`).
 
 ### Rollout part of the effect boundary (G24)
 
@@ -3480,7 +3509,12 @@ Written since that run and not executed:
   domains on any stream. The MUC service serves remote principals on a
   replica that runs S2S ([inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)),
   so an enrolled scope's room admits the remote accounts its grants name
-  once their domain is admitted.
+  once their domain is admitted and the room's `federated` setting is on.
+  The setting is off for every room that exists, so enrolling a scope or
+  enabling S2S opens no managed room to another server by itself. A trusted
+  home's owner or admin then administers the room over S2S: its
+  affiliation changes are recorded through the store and acknowledged by
+  the revocation fence as a session's are.
 - The revocation sweep removes a seated occupant of a domain that is not
   admitted, which with S2S off is every domain the deployment does not
   serve. Before, such an occupant kept its seat while its recorded

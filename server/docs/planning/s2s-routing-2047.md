@@ -188,11 +188,13 @@ that resource ([Outbound MUC](#outbound-muc-w6b)).
 
 The MUC service is the one service whose handlers a remote stanza reaches,
 and only on a replica whose router has the room host attached
-(`S2sRouter::attach_rooms`, which startup calls when S2S is enabled). Six
-operations reach the host (`RoomOperation`); each is decided there for the
-remote principal on the evidence of its stream, and reaching the host
-admits nothing ([Inbound MUC](#inbound-muc-w6a)). On a router without the
-host, the whole service is refused as it was before.
+(`S2sRouter::attach_rooms`, which startup calls when S2S is enabled). Nine
+operations reach the host (`RoomOperation`): `disco#info`, `disco#items`,
+ping, a XEP-0313 query, presence, a message, a `muc#admin` request, a
+`muc#owner` request and a XEP-0425 moderation request. Each is decided
+there for the remote principal on the evidence of its stream, and reaching
+the host admits nothing ([Inbound MUC](#inbound-muc-w6a)). On a router
+without the host, the whole service is refused as it was before.
 
 | Destination | IQ `get`/`set` | IQ `result`/`error` | Message | Presence |
 | --- | --- | --- | --- | --- |
@@ -200,7 +202,7 @@ host, the whole service is refused as it was before.
 | Server domain with a resource | `service-unavailable` | Dropped | `service-unavailable` | Ignored |
 | Local account, bare JID | `service-unavailable` (D7) | Dropped | `service-unavailable` (D7) | Ignored (D7) |
 | Local account, full JID | `service-unavailable` (D7) | Delivered to that resource only if it completes a request that resource sent (D7's first exception) | From the bare JID of a remote room at a verified service the resource's join was sent to, or from one of its occupants once the room has sent the resource its own presence, until the leave is answered or its grace ends: delivered to that resource (D7's second exception, below). Otherwise `service-unavailable` (D7) | From a remote room at a verified service the resource's join was sent to, or has just left: delivered to that resource (D7's second exception). Otherwise ignored (D7) |
-| MUC domain: service, rooms, occupants, where rooms are hosted for remote occupants | `disco#info`, `disco#items` and ping (`get`), and a XEP-0313 query (`get` or `set`), reach the room host; anything else, room administration and configuration included, `service-unavailable` | Dropped: no room sends a request to a remote entity | Reaches the room host, which accepts a `groupchat` message to a room's bare JID from an occupant and answers any other with an error; an error message from a seated occupant's address ends its seat when it names a delivery failure and is otherwise ignored | Reaches the room host: a join, a change of availability or nickname, a leave; an error presence from a seated occupant's address ends its seat when it names a delivery failure; anything else is ignored |
+| MUC domain: service, rooms, occupants, where rooms are hosted for remote occupants | `disco#info`, `disco#items` and ping (`get`), a XEP-0313 query, a `muc#admin` request and a `muc#owner` request (`get` or `set`), and a XEP-0425 `moderate` request (`set`) reach the room host; anything else (registration, vCards, pins, call signalling) `service-unavailable` | Dropped: no room sends a request to a remote entity | Reaches the room host, which accepts a `groupchat` message to a room's bare JID from an occupant and answers any other with an error; an error message from a seated occupant's address ends its seat when it names a delivery failure and is otherwise ignored | Reaches the room host: a join, a change of availability or nickname, a leave; an error presence from a seated occupant's address ends its seat when it names a delivery failure; anything else is ignored |
 | MUC domain, on a router without the room host | `service-unavailable` | Dropped | `service-unavailable` | Ignored |
 | Spaces PubSub domain | `service-unavailable` until the Spaces slice (W7a) reviews its handlers | Dropped | `service-unavailable` | Ignored |
 | HTTP upload, push, community, extensions, call mixer | `service-unavailable` (D10: not enabled) | Dropped | `service-unavailable` | Ignored |
@@ -240,9 +242,17 @@ these effects:
   ([Inbound MUC](#inbound-muc-w6a)): an answer queued for the sender's
   domain; a row of the seat table inserted, renamed or removed; a remote
   occupant seated in, or removed from, a local room, with the room's
-  presence to its other occupants; and, for an accepted `groupchat`
-  message, the room's own acceptance: its archive row, its inbox
-  projections and one copy for each occupant;
+  presence to its other occupants; for an accepted `groupchat` message,
+  the room's own acceptance: its archive row, the inbox projections of its
+  local members and one copy for each occupant; and, for an administration
+  request of a principal whose standing the effect boundary honours, what
+  that request does for a session: an affiliation or role changed, an
+  occupant removed, a message retracted by a moderator, the room's
+  configuration changed or the room destroyed;
+- for a stanza addressed to a room another replica holds, one message on
+  the cluster relay that hands it to that replica with the facts of its
+  sender's stream ([Several replicas](#inbound-muc-w6a)); everything above
+  then happens there;
 - the delivery of a correlated response, or of the error that replaces a
   response this server refused, to the one local resource that sent the
   request. Delivery uses the WebSocket delivery path: on another replica
@@ -932,15 +942,19 @@ correlation table.
 
 ## Inbound MUC (W6a)
 
-Accounts at admitted remote domains use the rooms of this deployment
-(XEP-0045, XEP-0313, XEP-0030, XEP-0199 and XEP-0410, pinned at
+Accounts at admitted remote domains use the rooms of this deployment that
+are open to other servers (XEP-0045, XEP-0313, XEP-0030, XEP-0199 and
+XEP-0410, with XEP-0085, XEP-0115, XEP-0308, XEP-0333, XEP-0359, XEP-0424,
+XEP-0425, XEP-0444 and XEP-0461 for what occupants send, pinned at
 4132c531487fe9450ae90b905b8df950d0d478b2; ADR-0020 D10). The router's part
 is in `crates/waddle-server/src/s2s/route/`: `reach.rs` (which operations
 reach the host), `local_rooms.rs` (what the router hands the host and
 expects back), `seats.rs` (the seat table and the replica's index of the
 seats it holds) and `router/hosting.rs` (queues, seats and their ends). The
 host is `server/routes/websocket/s2s_rooms.rs`; it calls the room handlers
-client sessions use, each given the evidence it decides with.
+client sessions use, each given the evidence it decides with
+(`handlers/iq/muc_remote_admin.rs` for administration). With clustering,
+`s2s_room_relay.rs` carries a request to the replica that holds its room.
 
 The router decides transport questions only: which stream carried a
 stanza, whether its sender holds a seat, the bounds on seats and requests,
@@ -978,38 +992,112 @@ remote principal the host passes one that names the remote account and
 nothing else: it is no credential, is stored nowhere and authorizes
 nothing, and the join's decisions name the stream's evidence.
 
+**Which rooms are reached.** A room is reached by remote principals only
+while its `federated` setting is on (`RoomConfig::federated`). The setting
+is off for every room that existed before it did, and for a new room
+unless the S2S snapshot's host policy says otherwise
+(`[host_policy] federate_new_rooms`, off by default; it applies when a
+room is created by its first occupant or by the channel-creation command,
+and never to a room that exists). An owner sets it in the room's
+configuration form (`urn:waddle:roomconfig:federated`, a boolean field of
+the `muc#owner` form). A room an enrolled scope manages needs the setting
+like any other; its grants decide who enters once it is on. A group
+conversation of this deployment's accounts is never federated.
+
+The host decides this before anything else about a room, the sender's
+grants and standing included. A room that is not open to other servers
+answers `disco#info`, a join, a XEP-0313 query and every administration
+request with `item-not-found`, in the condition, type and text of the
+answer for a room that does not exist, so nothing tells the two apart. The
+requests that are answered alike for every address stay so: a ping of a
+room's bare JID is an empty result, `disco#items` an empty list, a message
+from a sender without a seat `not-acceptable`, and presence from such a
+sender that asks for no seat is ignored.
+
+The setting is read from the room's actor where the replica holds one, and
+otherwise from the channel catalog (`channels.federated`, migration 2008),
+which the room's configuration and the channel commands keep in step. A
+room with neither is not found: no room is created for a remote principal.
+While the setting cannot be read the answer is `internal-server-error`
+(type `wait`).
+
+Turning the setting off removes the room's remote occupants once the change
+is committed: each seat ends, the occupant is sent its own unavailable
+presence with statuses 110 and 333, and those who stay see it leave with
+status 333 (XEP-0045 §11.1). A request of an occupant the room still seats
+then is refused as above and removes it.
+
 **What the host answers.**
 
 | Operation | Addressed to | Answer |
 | --- | --- | --- |
-| `disco#info` | The service or a room | The description local sessions get, reduced to its identities and to the features `disco#info`, `disco#items`, `http://jabber.org/protocol/muc` and a room's XEP-0045 type flags (`muc_*`); no extension form. A room an enrolled scope manages is described to an asker its grants admit and is `item-not-found` to any other. A room that does not exist, and any `node`, is `item-not-found`. A description that could not be built is `internal-server-error` (type `wait`), which a peer does not cache as a statement about the address |
+| `disco#info` | The service or a room | The description local sessions get, reduced to its identities and to the features `disco#info`, `disco#items`, `http://jabber.org/protocol/muc` and a room's XEP-0045 type flags (`muc_*`); no extension form. A room an enrolled scope manages is described to an asker its grants admit and is `item-not-found` to any other. A room that does not exist or is not federated, and any `node`, is `item-not-found`. A description that could not be built is `internal-server-error` (type `wait`), which a peer does not cache as a statement about the address |
 | `disco#items` | The service or a room | An empty list: neither rooms nor occupants are listed to remote askers (XEP-0045 §6.3 and §6.5 allow it). A `node` or an occupant JID is `item-not-found` |
 | Ping | The service or a room's bare JID | An empty result |
 | Ping | The sender's own occupant JID | The XEP-0410 self-ping, answered from the sender's seat, the room's grants and its occupancy: a result while joined, `not-acceptable` otherwise, `remote-server-timeout` while a managed room's grants cannot be read |
 | Ping | Another occupant's JID | `service-unavailable`: relaying it would reach an account (D7) |
-| XEP-0313 query | A room's bare JID | Admitted as entry to the room is, for the asker and the evidence of the stream that carried the query, before the archive is read and for a managed room again after it; the results, from the room's bare JID to the asker, then the `<fin/>`. `forbidden` when not admitted, `item-not-found` for a room that does not exist, `service-unavailable` for an occupant JID |
+| XEP-0313 query | A room's bare JID | Admitted as entry to the room is, for the asker and the evidence of the stream that carried the query, before the archive is read and for a managed room again after it; the results, from the room's bare JID to the asker, then the `<fin/>`. `forbidden` when not admitted, `item-not-found` for a room that does not exist or is not federated, `service-unavailable` for an occupant JID |
 | Presence without a type | An occupant JID | A join when the sender holds no seat in the room, otherwise a change of availability or nickname |
 | Unavailable presence | An occupant JID | A leave, for a sender that holds a seat |
-| `groupchat` message | A room's bare JID | From a sender that holds a seat, its text is accepted (below); `not-acceptable` from any other sender (XEP-0045 §7.4). A subject change is `forbidden` (§8.1); any other message without a body is neither relayed nor answered |
+| `groupchat` message | A room's bare JID | From a sender that holds a seat, what it carries of the standard extensions is accepted (below); `not-acceptable` from any other sender (XEP-0045 §7.4). A subject change is put to the room only where the room lets every occupant change it or the sender's moderator standing is honoured for the stream, and is `forbidden` otherwise (§8.1). `resource-constraint` (type `wait`) once the account has spent its allowance of archived messages. A message that carries nothing a room relays is neither relayed nor answered |
 | Any other message | A room or an occupant | `feature-not-implemented`: private messages, invitations, voice requests and declines |
+| `muc#admin` request | A room's bare JID | The affiliation and role lists and changes to them (kick, ban, role, affiliation), decided for the requester on its stream's evidence (below). `forbidden` without a standing the effect boundary honours, `not-allowed` for a change D8 does not issue, `item-not-found` for a room that is not federated |
+| `muc#owner` request | A room's bare JID | The configuration form, a configuration change and the room's destruction, for an owner whose standing is honoured; `forbidden` otherwise. A managed room is configured by its grants' `manage` and never destroyed by a request |
+| XEP-0425 `moderate` request | A room's bare JID | A moderator's retraction of another occupant's message, for a requester whose room moderation is honoured; `forbidden` otherwise, `bad-request` for an element that asks to retract nothing |
 | Error presence or message | A room or an occupant | From a seated occupant's address with a delivery-related condition of XEP-0045 §17.1.2 (`gone`, `item-not-found`, `recipient-unavailable`, `redirect`, `remote-server-not-found`, `remote-server-timeout`): the seat ends. Otherwise ignored |
 
 Every error answers with the id of the request it refuses (RFC 6120
 §8.1.3), the error presence that refuses a join included; the room's own
 presence for an occupant carries none, as for a session.
 
-A remote occupant's presence is reduced to its availability (`show`,
-`status`, `priority`) and, for a join, the bare `muc` element before the
-room sees it (XEP-0045 §17.1.1 lets a service do so): this deployment's
-presence extensions (calls, hats) mean something only for its own
-sessions, and a history request is not honoured. A remote occupant's
-message is reduced the same way, to its bodies, its thread and its
-XEP-0359 `origin-id`: the room's pipeline acts on other payloads (a
-subject, a pin, a forum action, a displayed marker, a correction,
-retraction or reaction that names an archived message), and none of those
-has been reviewed for a remote principal. The XEP-0313 answer is given
-although the feature is not advertised to remote askers; gate G21 decides
-what is advertised.
+**What an occupant's stanzas carry.** Presence and messages from a remote
+occupant are rebuilt from an allowlist before the room sees them
+(`reduced_presence`, `reduced_message`); what the allowlist does not name
+never reaches the room's pipeline, whose handlers act on payloads.
+
+Presence carries its availability (`show`, `status`, `priority`), its
+entity capabilities (the XEP-0115 `<c/>` element, rebuilt from its
+attributes) and, for a join, the bare `muc` element (XEP-0045 §17.1.1 lets
+a service reduce presence). This deployment's presence extensions (calls,
+hats) mean something only for its own sessions, and a history request is
+not honoured. A `muc#user` element is not carried inbound: XEP-0045 has
+the room author it (§7.2.2), the room strips one from a session's presence
+before it adds its own, and the router reads the status codes of the
+room's presence to follow a seat. The room's own presence for and about
+the occupant carries the room's `muc#user` element as for any occupant.
+
+A message carries its bodies, its subject, its thread and these payloads,
+each kind once:
+
+| Extension | Carried | The room's check, as for a session |
+| --- | --- | --- |
+| XEP-0359 | `origin-id`. A `stanza-id` is the room's to assign and is not carried | The room stamps its own `stanza-id` |
+| XEP-0308 | `replace` | Only the original sender, under the same occupancy (§3) |
+| XEP-0424 | `retract` | Only the original sender (§4). A moderator's retraction is XEP-0425, an IQ (above) |
+| XEP-0444 | `reactions` | The sender is an occupant |
+| XEP-0461 | `reply`, with the XEP-0428 `fallback` that marks the quoted part of the body (it may repeat) | The identifier and the address the reply names are well formed |
+| XEP-0333 | `markable`, `received`, `displayed`, `acknowledged` | The sender is an occupant |
+| XEP-0085 | `active`, `composing`, `paused`, `inactive`, `gone` | The sender is an occupant |
+
+"The original sender" needs more than the room's check for a session gives
+it. The room compares the sender's occupant address with the archived
+one, and an occupant at another server chooses its nickname, so it could
+enter under a nickname that somebody else's archived messages carry. A
+correction or retraction is therefore the sender's own only when the
+archived message records the sender's account as its author (the real JID
+the room records for a non-anonymous archive, XEP-0313 §MUC Archives).
+Where a message records its author this holds for every sender; a message
+that records none keeps the address comparison for an address this
+deployment serves and is not revised by a remote occupant.
+
+Dropped from a remote occupant's message: this deployment's own payloads
+(pins, forum actions, framework envelopes and everything else in a
+`urn:waddle:` namespace), mentions (XEP-0513) and references (XEP-0372),
+which notify accounts, processing hints (XEP-0334), which would decide
+what is archived, and every payload the allowlist does not name.
+
+The XEP-0313 answer is given although the feature is not advertised to
+remote askers; gate G21 decides what is advertised.
 
 **Seats.** A seat is one remote full JID's occupancy of one local room on
 the replica that holds the room's actor. It records the room, the
@@ -1077,26 +1165,131 @@ sender of the request it answers.
 | A stanza of the room cannot be queued for the seat, no stream can be established for it, or the stream does not take it | The seat ends at once, so nothing more is queued for it; the room removes the occupant with status 333; the occupant is sent its own unavailable presence with statuses 110 and 333 if a place is free for it |
 | The occupant's server answers the room with a delivery error | The room removes the occupant with status 333 (§17.1.2, "ghost users") |
 | A stanza of the occupant arrives on a stream that proved something else | As for a stanza that cannot be queued |
+| The room's `federated` setting is turned off | Every seat of the room ends once the change is committed: the room removes the occupant with status 333 and the occupant is sent its own unavailable presence with statuses 110 and 333 |
 | The host does not decide a join within 30 s | The seat opened for it ends and the room removes the occupant if it seated it |
 | The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Each seat is checked against its room every 60 s and released when the room says it does not seat that generation |
 | The replica stops | Its rows are removed at shutdown, within the shutdown budget. Rows a replica left without shutting down are removed by another replica once the owner has not recorded that it is alive for ten minutes; a join for the same room and occupant that reaches a live replica replaces such a row after 30 s |
 | The hosting replica's snapshot no longer admits the domain | The occupant's next request is refused, nothing more is written to it, and for a managed room the revocation sweep removes it ([Seated occupants](host-grant-authority-2047.md#seated-occupants-roles-and-media-g14)). An occupant of an unmanaged room that sends nothing keeps its entry in the room until its stream is lost or the replica restarts, which a changed snapshot requires (below) |
 
-**Messages.** The text of a `groupchat` message from a seated remote
-occupant is planned as the room plans any occupant's and committed through
-the ingress authority with a principal of its own kind
-(`IngressPrincipal::Remote`: the remote account and the seat's stream
-evidence), so the room's acceptance decides the sender on that evidence and
-freezes the audience as for a local sender. Nothing a local session's plan
-reads from its stream takes part: no carbons, no blocking list, no
-stream-management position, and no archive row of the sender's own (its
-server keeps that). The room's plan is otherwise the one every occupant's
-message gets: the room's archive row, inbox projections for the room's
-durable members, and, keyed by the remote account, the sender's own inbox
-row and its activity in the room, which nothing reads. The sender's
-reflection (XEP-0045 §7.4) is the answer to its request. A room whose actor
-another replica holds is not served here: the message is answered
-`resource-constraint` (type `wait`).
+**Messages.** A `groupchat` message from a seated remote occupant is
+planned as the room plans any occupant's and committed through the ingress
+authority with a principal of its own kind (`IngressPrincipal::Remote`:
+the remote account and the seat's stream evidence), so the room's
+acceptance decides the sender on that evidence and freezes the audience as
+for a local sender. Nothing a local session's plan reads from its stream
+takes part: no carbons, no blocking list, no stream-management position,
+and no archive row of the sender's own (its server keeps that). The room's
+plan is otherwise the one every occupant's message gets: the room's
+archive row, inbox projections for the room's durable members, and one
+copy for each occupant. The sender's reflection (XEP-0045 §7.4) is the
+answer to its request.
+
+Nothing is kept for an account at another server beside what the room
+itself keeps. The inbox projection and the activity projection write only
+for an address at a domain this deployment serves: a remote sender gets no
+inbox row of its own, a remote durable member none as a recipient, and a
+join, a leave, a chat state or a displayed marker of a remote occupant
+records no activity and marks no row read. Its inbox, its devices and its
+read state are its own server's.
+
+What a remote account can have archived is bounded for the account as well
+as for its domain: five messages a second on average and thirty at once,
+counted on the replica that writes the archive and only for a message the
+room would archive (text, a subject, a correction, a retraction, a
+reaction). A message beyond that is refused with `resource-constraint`
+(type `wait`) and counted (`waddle.s2s.rooms.archive_writes.limited`).
+The allowances are kept for 65,536 accounts; an account that finds the
+table full of accounts still spending theirs is refused the same way.
+
+**Administration.** A remote principal administers a room with a standing
+the effect boundary honours for the stream that carried its request
+(ADR-0020 D8): an owner or admin affiliation, or the moderator role, of an
+account at a trusted home on a `pkix` stream, under a private CA where the
+home's entry requires one. Its `muc#admin`, `muc#owner` and XEP-0425
+requests run through the handlers a session's requests run through, with
+that stream's evidence in place of none and no session at all:
+
+- A room an enrolled scope manages decides the requester from its
+  canonical grants through the evidence-naming forms of the gate
+  (`allows_as`, `standing_as`, `still_allows`). An affiliation change is
+  recorded through the store on the requester's evidence
+  (`set_affiliation_as`), which decides the initiator again under the
+  scope's guard, and is answered once the revocation fence has
+  acknowledged it. A role change is applied by the room actor only while
+  the decision's fence ticket is current. A configuration change reads the
+  grants again under the room's configuration lock and once more just
+  before the actor applies it. A managed room is never destroyed by a
+  request.
+- Any other room decides from the standing it holds for the requester, as
+  D8 honours it (`honoured_legacy_affiliation`, and the moderator role
+  only with honoured privilege): the room actor applies the request under
+  that standing. An owner whose standing is honoured configures and
+  destroys the room.
+- What D8 does not issue is refused whoever asks: an owner or admin
+  affiliation for an account of a home that is neither served nor trusted,
+  and the moderator role for an occupant whose seats do not honour room
+  moderation (`not-allowed`).
+- Everyone else is refused with `forbidden`, as XEP-0045 says for a
+  requester without the standing (§8.2, §9, §10).
+
+A remote principal's configuration request writes no authorization
+relationship for it; a session's writes the channel's owner relationship
+for its account. The answer and the requester's own copies of what the
+request caused (its own presence after a role change, the room's
+announcement of a retraction) are the reply to the request, in the order a
+session receives them; what the request caused for other occupants leaves
+by the room's delivery path. A session's connection settles the room's
+effect records for its own copies once its writer has taken them; for a
+remote requester they are settled when the answer is handed to the
+router's queue for its domain, which is all the custody a reply to a
+remote sender has.
+
+**Several replicas.** A room's actor lives on the replica that owns the
+room's claim, and a peer's inbound stream lands on whichever replica
+accepted it. A stanza for a room another replica holds is carried there
+before anything is decided or seated for it where it arrived
+(`LocalRooms::place`, asked by the router ahead of every seat decision), so
+a seat is only ever on the replica that holds the room. The stanza is
+carried by one relay message,
+`waddle.clustering.relay.remote_room_request.v1`, with the facts of the
+stream that carried it (the sender's address, the authentication
+strength, the trust-profile kind and the snapshot the stream was admitted
+under) and nothing decided from them.
+
+The holder builds the principal from those facts (`RemotePrincipal::carried`),
+checks that the stanza is from that address, for a room at a MUC domain it
+serves and one of the operations a remote principal reaches, and queues it
+behind the room's earlier requests. From there it is a request like one
+from a stream of its own: the host decides peer admission and the sender's
+standing again under the snapshot the holder runs, the seat is opened and
+held there with the carried evidence, and the answer and all later traffic
+for the occupant leave through the holder's router and its own stream to
+the occupant's domain, in the room's order. A later stanza carried with
+other evidence ends the seat as on a single replica. A carried stanza is
+never carried again; a holder that no longer owns the room says so, and
+the carrying replica looks the owner up once more.
+
+The relay's reply says only whether the holder queued the stanza. When it
+did not (its queues are full, it no longer holds the room, it hosts no
+rooms, it could not be reached), the carrying replica answers the sender
+with `resource-constraint` (type `wait`). The carrying replica spends its
+domain's request rate on the stanza; the holder does not spend it again.
+Stanzas for the service itself are answered by the replica they reach. A
+stream lost on the carrying replica marks the pair's seats in the shared
+table, and their holder ends them at its next sweep, as before.
+
+The relay message is a new message id. The ordered relay's envelope and
+its id (`waddle.clustering.relay.deliver_ordered.v16`) are unchanged, and
+no stored room request carries a remote principal: the mailbox and the
+ordered relay name a session's principal without stream evidence and hand
+the answer back to the replica that asked, which would send a join's
+answer and the room's traffic on two streams. During a rolling update a
+holder that predates the message answers `UnknownMessage` before any
+handler runs, and the carrying replica answers the sender with the
+retryable error; a carrying replica that predates it decides the stanza
+itself and refuses a join or a message for a room it does not hold, as it
+did before. Neither order seats an occupant twice or decides a request
+without its evidence.
 
 **Rooms an enrolled scope manages.** Beyond the decisions above:
 
@@ -1121,8 +1314,8 @@ following is applied to a remote principal on top of them:
 - no room is created: a join for a room that has neither a live actor nor a
   channel row is `item-not-found`, since creating a room makes its creator
   the owner;
-- a group conversation of this deployment's accounts admits no remote
-  occupant and serves it no archive (`forbidden`);
+- a group conversation of this deployment's accounts is never federated,
+  so it is not found;
 - D8 where the seat is taken: a stored owner or admin entry counts only for
   a trusted home on a `pkix` stream (`honoured_legacy_affiliation`). An
   entry that is not honoured contributes nothing, and since the room actor
@@ -1130,20 +1323,24 @@ following is applied to a remote principal on top of them:
   room nevertheless seated with an owner or admin affiliation or the
   moderator role, without the witness honouring it, is undone before
   anyone is told;
-- D8 at issuance, in the `muc#admin` writer: an owner or admin affiliation
-  is granted only to an account of a domain this deployment serves or of a
-  trusted home, and the moderator role only to an occupant whose seat's
-  evidence honours room moderation; otherwise `not-allowed`;
+- D8 at issuance, in the `muc#admin` writer and in the admin command that
+  sets a room affiliation (`channels:set-affiliation`): an owner or admin
+  affiliation is granted only to an account of a domain this deployment
+  serves or of a trusted home, and the moderator role only to an occupant
+  whose seat's evidence honours room moderation; otherwise `not-allowed`;
+- D8 at the request, for administration: the standing the room holds for a
+  remote requester counts only as honoured for the stream that carried the
+  request (above);
 - a remote principal's entry never repairs the permission graph;
 - everything else is the room's own: members-only rooms admit a remote
   account only with a stored membership, a ban stands on every stream, and
-  an open room admits any account of an admitted domain as a participant
-  and serves it the archive.
+  a federated room that is not members-only admits any account of an
+  admitted domain as a participant and serves it the archive.
 
-Mentions are payloads, so a remote occupant's message carries none into
-the room: nobody is notified as mentioned, and the channel-wide mention,
-which a managed room decides for its sender without stream evidence, is
-never reached.
+A mention is not among the payloads carried from a remote occupant, so
+nobody is notified as mentioned, and the channel-wide mention, which a
+managed room decides for its sender without stream evidence, is never
+reached.
 
 **Bounds.**
 
@@ -1159,6 +1356,9 @@ never reached.
 | Requests waiting from one remote domain, of one worker's 256 | 64 |
 | How long a stream waits for its domain's rate or a place | 30 s |
 | How long the host may take to decide one request | 30 s |
+| Messages one remote account may have archived, on average and at once | 5 a second, 30 |
+| Remote accounts whose archive allowance is kept on one replica | 65,536 |
+| How long the holder of a room may take to queue a carried request | 1 s to take it, 3 s to answer |
 | Local rooms' stanzas waiting for one directional pair's stream | 4,096 |
 | How long an answer waits for a place among them | 10 s |
 | Room stanzas kept for a seat while its join is answered | 256 |
@@ -1179,21 +1379,15 @@ a time, in the order they arrived.
 
 **Not enabled for remote principals.**
 
-- Room administration and configuration (`muc#admin`, `muc#owner`),
-  registration, vCards, pins, message moderation and call signalling:
-  refused with `service-unavailable` before they reach a handler. A remote
-  account can hold an owner or admin standing and the moderator role under
-  D8, and they show in its presence, but it cannot exercise them over S2S.
-- Private messages to and from remote occupants, mediated invitations and
-  voice requests.
-- Anything in a remote occupant's message beyond its text: subject
-  changes, corrections, retractions, reactions, replies, markers, chat
-  states and this deployment's own payloads. A correction therefore
-  arrives as a new message.
-- Rooms held by another replica: a remote principal's request is decided
-  on the replica its stream landed on, which answers a join or a message
-  for a room it does not hold with an error. Its seat is not relayed.
+- Registration, vCards, pins, voice requests and call signalling: refused
+  with `service-unavailable` before they reach a handler.
+- Private messages to and from remote occupants and mediated invitations.
+- In a remote occupant's message: this deployment's own payloads,
+  mentions, references and processing hints. A mention therefore notifies
+  nobody, and the channel-wide mention, which a managed room decides for
+  its sender without stream evidence, is never reached.
 - Listing rooms or occupants to remote askers.
+- Creating a room.
 
 ## Behaviour with S2S off
 
@@ -1207,10 +1401,10 @@ not S2S is on.
 
 Inbound MUC changes nothing for remote senders while S2S is disabled: no
 router exists, so no room host is attached, no delivery hook is installed
-in the connection registry, and every join, read and administration
-request of a local session is decided without stream evidence as before.
-Three of its changes apply whether or not S2S is on, and are listed below
-with the others.
+in the connection registry, no request is carried between replicas, and
+every join, read and administration request of a local session is decided
+without stream evidence as before. Several of its changes apply whether or
+not S2S is on, and are listed below with the others.
 
 These change behaviour while S2S is disabled, and belong to the rollout
 runbook (G24):
@@ -1267,6 +1461,34 @@ runbook (G24):
   allows. The moderator role is refused the same way for an occupant whose
   seat does not honour room moderation; with S2S off every occupant is a
   local session, which it always does.
+- The admin command that sets a room affiliation
+  (`channels:set-affiliation`) refuses an owner or admin affiliation for
+  such an account the same way. Before, it wrote one for any JID.
+- Migration 2008 adds `channels.federated` on both engines, zero for every
+  row. The owner's configuration form of every room offers a new boolean
+  field, `urn:waddle:roomconfig:federated`, off for every room; setting it
+  has no effect while S2S is off, since no remote principal reaches a room.
+  A configuration change that turns it on or off is announced to the
+  room's occupants as any other change that is not a privacy change
+  (status 104). `[host_policy] federate_new_rooms` is a new key of the S2S
+  snapshot, which is not read while S2S is off; a binary that predates it
+  refuses a snapshot that holds it, so replicas run the new image before
+  the snapshot uses the key, and a rollback removes it first.
+- The inbox and activity projections write only for an address at a domain
+  the deployment serves. Before, a room's durable member at another domain
+  got an inbox row for each message, and a join, a leave, a chat state or a
+  displayed marker of an occupant at another domain recorded activity; with
+  S2S off no session can seat such an occupant, so only a membership
+  recorded for an account of another domain is affected, and nothing read
+  those rows. Rows written before are left as they are.
+- A correction (XEP-0308) or retraction (XEP-0424) of a room message is
+  accepted only from the account the archived message records as its
+  author, where it records one. Before, the room compared occupant
+  addresses only, so an account that entered under the nickname of another
+  account's archived message could retract it. An account revising its own
+  messages sees no change.
+- `waddle.clustering.relay.remote_room_request.v1` is a new relay message
+  id. Nothing sends it while S2S is off.
 - In a room an enrolled scope manages, the revocation sweep removes a
   seated occupant of a domain peer admission does not admit, which with
   S2S off is every domain the deployment does not serve
@@ -1348,30 +1570,70 @@ runbook (G24):
   remote entities reach local clients (W6c), a reflected self-ping is
   answered `service-unavailable` by this server, not by the client.
 
-- **A remote principal is served where its stream lands.** A request is
-  decided on the replica that received it, and a seat lives on the replica
-  that holds the room's actor. With several replicas a peer's stream can
-  reach one that does not hold the room: its join and its messages are
-  then answered with an error, and neither the ordered relay nor the room
-  mailbox carries a remote principal's request to the room's owner. A room
-  whose claim moves to another replica keeps its remote occupants only if
-  that replica takes over their seats, which it does once the previous
-  owner is no longer alive; otherwise they are removed and join again.
-  Verification with two replicas (steps 6 and 8) decides whether inbound
-  streams must be routed to the room's owner before a pilot.
-- **Open rooms are open to every admitted domain.** A room no scope
-  manages that is not members-only admits any account of any admitted
-  domain as a participant and serves it the room's archive, without the
-  account being known to this deployment. With D1 in `allowlist` mode that
-  is the listed peers; under `open` it is every domain that authenticates.
-  Operators who do not want that make the room members-only or enroll it.
+- **A request arrives on one replica and is answered from another.** A
+  stanza for a room another replica holds is carried to that replica, which
+  answers on its own stream to the occupant's domain. A peer that keeps one
+  stream per directional pair, as Waddle does, then sees this deployment's
+  stream to it come from the holder; when two replicas hold rooms with
+  occupants at one domain, or the carrying replica answers a refusal while
+  the holder sends traffic, both dial that peer and alternate as described
+  under "Several replicas, one stream per pair": a seat whose stanza cannot
+  be handed over within the dial's budget ends with status 333. Verification
+  with two replicas (steps 6 and 8) decides whether a pair's egress must be
+  routed through one replica before a pilot.
+- **A carried request's hand-over can have an unknown outcome.** When the
+  relay's reply is lost after the holder queued the stanza, the carrying
+  replica answers the sender with a retryable error and the holder still
+  decides the stanza: a join can be both refused by one replica and
+  answered by the other. Nothing is decided twice, since the carrying
+  replica never asks again after a failure that may have reached a handler,
+  and a client that retries the join finds its seat and is answered as for
+  a change of availability.
+- **Order across a moving claim.** Requests for one room are carried one at
+  a time by the replica they reach and decided by the holder in the order
+  it queued them. While a room's claim moves, a request can reach the old
+  holder, which refuses it, or wait for the new one; a room whose claim
+  moves keeps its remote occupants only if the new holder takes over their
+  seats, which it does once the previous owner is no longer alive, and
+  otherwise they are removed and join again.
+- **The relay carries the stream's facts on the cluster's word.** The
+  holder cannot verify the stream another replica verified. It trusts the
+  carried facts as every relay message is trusted: only replicas of this
+  deployment reach the relay. It decides admission and standing itself,
+  from its own snapshot, so a carrying replica with an older snapshot
+  cannot admit what the holder's snapshot refuses, but a compromised
+  replica could assert evidence for any remote address, as it could
+  already assert any session's.
+- **Federated rooms are open to every admitted domain.** A federated room
+  that is not members-only admits any account of any admitted domain as a
+  participant and serves it the room's archive, without the account being
+  known to this deployment. With D1 in `allowlist` mode that is the listed
+  peers; under `open` it is every domain that authenticates. A room is
+  federated only when its owner, or the deployment's default for new
+  rooms, says so, and the setting is one for all admitted domains: it does
+  not name which.
+- **An archive names its authors.** The rooms are non-anonymous: a remote
+  asker that may read a federated room's archive receives each message
+  with its sender's real JID, as a local reader does.
+- **The setting is read where the room is.** A room's `federated` setting
+  is read from its actor, or from the channel catalog while no replica
+  holds one. A room without a catalog row whose actor no replica holds (a
+  room its first occupant created, after every replica restarted) is not
+  found until a local occupant enters it again.
 - **What an admitted domain can make this deployment store.** Its
-  accounts' messages are archived by the rooms that accept them, at most
-  at the domain's request rate, and each sending account leaves an inbox
-  row and an activity row per room keyed by its JID, which nothing reads
-  or removes. The request rate and the seat bounds are per domain, not per
-  account, so one admitted domain can use a room's 256 seats and its own
-  4,096 with accounts it mints.
+  accounts' messages are archived by the federated rooms that accept them,
+  at most at the domain's request rate and, for each account, at the
+  account's archive allowance. The seat bounds are per room, per domain and
+  per account; the request rate is per domain, so one admitted domain can
+  use a room's 256 seats and its own 4,096 with accounts it mints, each
+  with an allowance of its own. The allowances are kept in memory on the
+  replica that holds the room, so they start full after a restart or a
+  claim move.
+- **An administration request's answer is settled at hand-off.** The
+  room's effect records for a remote requester's own copies are settled
+  when its answer is handed to the router's queue, not when a stream wrote
+  it. An answer the queue then drops is not delivered again; the requester
+  sees the result of its request at its next presence or list request.
 - **A copy is recorded delivered at hand-off.** The ingress receipt of a
   remote occupant's copy means the router's queue took it (the handoff
   contract). The executed evidence that a retried copy is not sent twice,
@@ -1395,12 +1657,16 @@ runbook (G24):
   table, counted against the bounds, until its liveness has lapsed for ten
   minutes or a join for the same room and occupant replaces them after
   30 s.
-- **Per-occupant payloads are dropped.** A remote occupant's presence
-  carries only its availability and its messages only their text; what a
-  third-party client sends beyond that (chat states, markers, corrections,
-  reactions) does not reach the room. This is visible with every
-  third-party client and is the first thing interoperability testing (W10)
-  will report.
+- **Payloads outside the allowlist are dropped.** A remote occupant's
+  presence carries its availability and capabilities, and its messages the
+  payloads listed above; what a third-party client sends beyond that
+  (avatars in presence, mentions, references, hints, file-sharing and
+  other extensions) does not reach the room. Interoperability testing
+  (W10) decides which of those to review next. A correction or retraction
+  from a client that names the original by an identifier other than the
+  one the room expects (the message's own id for a correction, the room's
+  `stanza-id` for a retraction or a reaction) is refused as a session's
+  is.
 - **MAM is answered but not advertised** to remote askers, and
   `disco#items` lists nothing to them: a remote client must be given a
   room's address. XEP-0313 §7 expects the feature in `disco#info`; like
@@ -1450,42 +1716,45 @@ runbook (G24):
   4,096 pending requests for their lifetime.
 - **Metrics.** The router counts dropped unusable presence, dropped room
   traffic and abandoned room deliveries, and for hosted rooms the requests
-  that waited, were given up or timed out at the host, the stanzas refused
-  at the effect boundary and the seats ended by a lost stream or an
-  undeliverable stanza, all with no attribute; its other decisions are
-  logged with codes only, never with an address.
+  that waited, were given up or timed out at the host, were carried to
+  another replica or could not be, the stanzas refused at the effect
+  boundary, the seats ended by a lost stream, an undeliverable stanza or a
+  room that stopped being federated, and the messages refused for an
+  account's archive allowance, all with no attribute; its other decisions
+  are logged with codes only, never with an address.
 
 ## Follow-ups
 
 - Spaces (W7a): enable its handlers for remote principals in `reach`, the
   inventory and the reachability suite, and list it in server-domain
   `disco#items`.
-- Inbound MUC, several replicas: carry a remote principal's request to the
-  replica that holds the room (the mailbox's room requests take a session
-  principal today), or route a peer's inbound streams there.
-- Inbound MUC, room administration: `muc#admin` and `muc#owner` requests
-  from a trusted home's owner or admin on a `pkix` stream. The affiliation
-  and role are honoured where the seat is taken; the request handlers
-  decide their requester as a session and are not reached.
-- Inbound MUC, D8 issuance in the other legacy privileged writers of
-  unmanaged rooms and Spaces: the admin commands and the Spaces relations
-  (`channel.manager`, `channel.moderator`, `space.moderator`,
-  `role.manager`) still write without asking whether the subject's home is
-  a trusted home. The `muc#admin` writer asks.
-- Inbound MUC, message payloads: review corrections, retractions,
-  reactions, replies, markers and chat states for a remote principal and
-  let them through; subject changes with them, for an occupant the room
-  lets change it.
+- Inbound MUC, several replicas: route a domain pair's egress through one
+  replica if verification with two replicas shows the alternation between
+  their streams to one peer.
+- Inbound MUC, D8 issuance in the Spaces relations (W7a):
+  `channel.manager`, `channel.moderator`, `space.moderator` and
+  `role.manager` are still written without asking whether the subject's
+  home is a trusted home. The `muc#admin` writer and the admin command
+  that sets a room affiliation ask.
+- Inbound MUC, further payloads: mentions by remote occupants, with the
+  channel-wide mention of a managed room decided on the sender's stream
+  evidence (it is decided without one today); references, file sharing and
+  presence avatars once reviewed.
 - Inbound MUC, private messages between occupants, with W6c's account
   traffic rules, and mediated invitations to remote accounts.
-- Inbound MUC, per-account shares of the seat bounds and of the request
-  rate, and removal of the inbox and activity rows a remote sender leaves.
-- Inbound MUC, mentions by remote occupants: with the payload review
-  above, decide the channel-wide mention of a managed room on the sender's
-  stream evidence; it is decided without one today.
+- Inbound MUC, a per-account share of the request rate, and an archive
+  allowance that survives a restart or a claim move.
+- Inbound MUC, federation per peer: the `federated` setting opens a room to
+  every admitted domain; a room that names the domains it is open to needs
+  a setting of its own.
+- Inbound MUC, the web client: offer the `federated` field in the room
+  settings.
 - Inbound MUC, an unmanaged room's occupants at a domain the snapshot no
   longer admits: remove them when the replica starts with the new
   snapshot, as the revocation sweep does for a managed room.
+- Local rooms, authorship of a retraction: a session's retraction is
+  compared by occupant address where the archived message records no
+  author; rows written before the room recorded one keep that check.
 - Outbound MUC, blocking list: apply the sender's XEP-0191 list to
   messages and presence for remote rooms, with W6c's check for account
   traffic.
