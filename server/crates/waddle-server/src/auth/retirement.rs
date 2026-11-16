@@ -107,8 +107,10 @@ pub struct AccountRetirement {
 }
 
 /// Retire the account `jid`: record its JID in the ledger and remove its
-/// native credentials, its account row, its identity-provider links and its
-/// sessions, in one transaction. A JID that holds no account is recorded as
+/// native credentials, its account row, its identity-provider links, its
+/// sessions, and what remote senders left for it (recorded subscription
+/// requests, remote PubSub subscription records and offline admissions),
+/// in one transaction. A JID that holds no account is recorded as
 /// well, so that it is never issued. Retiring a retired JID removes whatever
 /// rows it still finds and changes nothing else.
 ///
@@ -243,6 +245,20 @@ async fn retire_in(
     for stored in held {
         accounts += tx
             .execute("DELETE FROM users WHERE jid = ?", crate::db_params![stored])
+            .await?;
+    }
+
+    // What remote senders left for the account (gate G18): their recorded
+    // subscription requests, the account's records of remote PubSub
+    // subscriptions, and the offline admissions of strangers' messages.
+    // Rows are keyed by the account's JID as stanzas name it, which is its
+    // canonical form.
+    for statement in [
+        "DELETE FROM s2s_pending_subscriptions WHERE account_jid = ?",
+        "DELETE FROM s2s_remote_pubsub_subscriptions WHERE account_jid = ?",
+        "DELETE FROM s2s_remote_offline_admissions WHERE account_jid = ?",
+    ] {
+        tx.execute(statement, crate::db_params![canonical.as_str()])
             .await?;
     }
 
