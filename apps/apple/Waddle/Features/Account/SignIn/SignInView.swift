@@ -56,11 +56,11 @@ private struct SignInHeader: View {
     }
 }
 
-/// Soft brand-tinted wash behind the card.
+/// The sea behind the card: shallow water at the top, the page ground below.
 private struct SignInBackdrop: View {
     var body: some View {
         LinearGradient(
-            colors: [Color.accentColor.opacity(0.16), Color.primaryBackground],
+            colors: [Theme.Colors.seaShallow, Color.primaryBackground],
             startPoint: .top,
             endPoint: .center
         )

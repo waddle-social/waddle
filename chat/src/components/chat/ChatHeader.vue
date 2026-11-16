@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
-import { ChevronLeft, Hash, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
+import { ChevronLeft, Hash, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, UserPlus, Users } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
 import { header, iconbtn, tag } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
@@ -46,6 +46,8 @@ const props = withDefaults(defineProps<{
     peerUsername: string;
     presenceShow?: string;
     presenceIdleSince?: number;
+    /** A private message to a room occupant, not an account: no group can grow from it. */
+    mucPm?: boolean;
   } | null;
   callRoomJid?: string | null;
   isForumChannel: boolean;
@@ -174,6 +176,8 @@ const emit = defineEmits<{
   openDetails: [];
   editChannel: [];
   selectMember: [jid: string];
+  /** 1:1 DM only: start a group with this person and more. */
+  addPeople: [];
 }>();
 
 // Below `lg` the header keeps only search and members inline; pins,
@@ -462,6 +466,12 @@ const memberButtonCopy = computed(() => {
             </span>
           </button>
         </AppTooltip>
+        <!-- Where a room shows who is here, a 1:1 DM offers to bring more people in. -->
+        <AppTooltip v-else-if="dmPeer && !dmPeer.mucPm" label="Add people">
+          <button :class="iconbtn()" type="button" aria-label="Add people to this conversation" @click="emit('addPeople')">
+            <UserPlus aria-hidden="true" />
+          </button>
+        </AppTooltip>
       </div>
       <!-- Compact-layout actions: members, then everything else in one overflow menu. -->
       <div v-if="channel || dmPeer" :class="compactOnlyClass">
@@ -473,6 +483,11 @@ const memberButtonCopy = computed(() => {
             @click="emit('openDetails')"
           >
             <Users aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <AppTooltip v-else-if="dmPeer && !dmPeer.mucPm" label="Add people">
+          <button :class="iconbtn()" type="button" aria-label="Add people to this conversation" @click="emit('addPeople')">
+            <UserPlus aria-hidden="true" />
           </button>
         </AppTooltip>
         <ChatHeaderOverflowMenu

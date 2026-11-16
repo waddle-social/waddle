@@ -136,8 +136,7 @@ struct JumpToLatestPill: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .waddleInteractiveGlass(in: Capsule())
-        .shadow(color: Color.black.opacity(0.12), radius: 6, y: 2)
+        .huddleSurface(.raised, in: Capsule())
         .padding(edge == .top ? .top : .bottom, Theme.Spacing.m)
         .accessibilityHint(Text("Scrolls to the newest message"))
     }

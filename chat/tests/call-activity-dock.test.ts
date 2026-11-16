@@ -1671,6 +1671,55 @@ describe("CallActivityDock rendering", () => {
     expect($callUiMode.get()).toBe("expanded");
   });
 
+  test("hides the current-call panel while the call's own stage is on screen", async () => {
+    const dmProps = {
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activeChannelRoomJid: null,
+    };
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-live",
+      media: { audio: true, video: false },
+      join: liveKitJoin,
+    });
+    const panel = 'aria-label="Current call"';
+    expect(await renderVueComponent("../src/components/calls/CurrentCallPanel.vue", {
+      ...dmProps,
+      activePeerJid: "bob@example.com",
+    })).not.toContain(panel);
+    expect(await renderVueComponent("../src/components/calls/CurrentCallPanel.vue", {
+      ...dmProps,
+      activePeerJid: null,
+    })).toContain(panel);
+
+    // A group call's stage only mounts once our nick is in the Muji list.
+    const roomProps = {
+      channels: [{ id: "general", name: "General", jid: "general@conference.example.com" }],
+      conversations: [],
+      activeChannelId: "general",
+      activeChannelRoomJid: "general@conference.example.com",
+      activePeerJid: null,
+    };
+    $callState.set({
+      phase: "active",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-live",
+      media: { audio: true, video: true },
+      join: liveKitJoin,
+      selfNick: "alice",
+    });
+    connectionStore.session = { username: "alice" } as typeof connectionStore.session;
+    $mucCallParticipants.set({ "general@conference.example.com": ["bob"] });
+    expect(await renderVueComponent("../src/components/calls/CurrentCallPanel.vue", roomProps)).toContain(panel);
+    $mucCallParticipants.set({ "general@conference.example.com": ["alice", "bob"] });
+    expect(await renderVueComponent("../src/components/calls/CurrentCallPanel.vue", roomProps)).not.toContain(panel);
+  });
+
   test("filters the current local call out of rediscovery lists", async () => {
     $callState.set({
       phase: "active",

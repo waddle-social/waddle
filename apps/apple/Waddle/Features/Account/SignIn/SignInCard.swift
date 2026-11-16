@@ -17,8 +17,7 @@ struct SignInCard<Content: View>: View {
         if isCard {
             column
                 .padding(Theme.Spacing.xl * 1.5)
-                .waddleGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-                .shadow(color: .black.opacity(0.08), radius: 24, y: 8)
+                .huddleSurface(.dialog, radius: Theme.Radius.sheet)
                 .frame(maxWidth: Self.maxWidth + Theme.Spacing.xl * 3)
         } else {
             column

@@ -75,7 +75,7 @@ struct MessageAvatar: View {
         if let jid = author.avatarJID {
             JIDAvatar(jid: jid, name: author.name, size: size)
         } else {
-            AvatarView(name: author.name, colorKey: author.colorKey, size: size)
+            AvatarView(name: author.name, size: size)
         }
     }
 }

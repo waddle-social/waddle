@@ -6,12 +6,14 @@ import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { menuClasses } from "@/ui/menu-classes";
 import {
   Check,
+  Fullscreen,
   LayoutGrid,
   Maximize2,
   MessageSquare,
   Hand,
   Mic,
   MicOff,
+  Minimize,
   Minimize2,
   MonitorUp,
   MoreHorizontal,
@@ -46,10 +48,8 @@ const props = defineProps<{
   /** True when the parent surface is the expanded variant — flips
    *  the toggle button between "expand" and "collapse". */
   isExpanded: boolean;
-  /** True when the parent surface is the cinematic viewport takeover. */
+  /** True when the parent surface is fullscreen (the immersive takeover). */
   isImmersive?: boolean;
-  /** True while the immersive surface owns browser-native fullscreen. */
-  isNativeFullscreen?: boolean;
   /** True while the Participants dock is open — drives the participants
    *  button's pressed/expanded state. The parent owns the dock store. */
   participantsOpen: boolean;
@@ -79,8 +79,7 @@ const emit = defineEmits<{
   toggleCam: [];
   toggleScreenShare: [];
   toggleExpanded: [];
-  toggleImmersive: [];
-  toggleNativeFullscreen: [];
+  toggleFullscreen: [];
   toggleParticipants: [];
   toggleChat: [];
   sendReaction: [emoji: string];
@@ -487,34 +486,28 @@ onBeforeUnmount(() => {
 
     <span :class="dividerClass" aria-hidden="true" />
 
-    <AppTooltip :label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call' : 'Expand call'">
+    <!-- Three sizes, one step at a time: split ⇄ expanded ⇄ fullscreen. Each
+         size offers at most one step down and one step up, and fullscreen
+         offers only its exit, so the buttons never stack into another
+         "bigger". -->
+    <AppTooltip v-if="!isImmersive" :label="isExpanded ? 'Collapse call' : 'Expand call'">
       <button
         type="button"
         :class="ctlClass"
-        :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
+        :aria-label="isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
         @click="emit('toggleExpanded')"
       >
         <component :is="isExpanded ? Minimize2 : Maximize2" aria-hidden="true" />
       </button>
     </AppTooltip>
-    <AppTooltip v-if="isExpanded && !isImmersive" label="Make call immersive">
+    <AppTooltip v-if="isExpanded" :label="isImmersive ? 'Exit fullscreen' : 'Fullscreen'">
       <button
         type="button"
         :class="ctlClass"
-        aria-label="Make call immersive"
-        @click="emit('toggleImmersive')"
+        :aria-label="isImmersive ? 'Exit fullscreen' : 'Show call fullscreen'"
+        @click="emit('toggleFullscreen')"
       >
-        <Maximize2 aria-hidden="true" />
-      </button>
-    </AppTooltip>
-    <AppTooltip v-if="isImmersive" :label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'">
-      <button
-        type="button"
-        :class="ctlClass"
-        :aria-label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
-        @click="emit('toggleNativeFullscreen')"
-      >
-        <component :is="isNativeFullscreen ? Minimize2 : Maximize2" aria-hidden="true" />
+        <component :is="isImmersive ? Minimize : Fullscreen" aria-hidden="true" />
       </button>
     </AppTooltip>
     <div ref="reactionsWrapEl" :class="popWrapClass">

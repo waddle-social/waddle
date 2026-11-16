@@ -1,23 +1,38 @@
 import SwiftUI
 
-/// Layout and type tokens. Colors come from the system palette plus the
-/// brand accent (`AccentColor` asset) so the apps follow light/dark mode,
-/// increased contrast and Dynamic Type without custom overrides.
+/// The app's design vocabulary: Polar Huddle tokens (`WaddleTokens`,
+/// generated from `design/src/preset.ts`) under the names views use, plus
+/// the app's own layout sizes.
 enum Theme {
+    /// Semantic colours; each follows the Night or Daylight appearance.
+    typealias Colors = WaddleTokens.Colors
+
+    /// Text styles, applied with `.huddleText(_:)`.
+    typealias Typography = WaddleTokens.TextStyles
+
     enum Spacing {
-        static let xxs: CGFloat = 2
-        static let xs: CGFloat = 4
-        static let s: CGFloat = 8
-        static let m: CGFloat = 12
-        static let l: CGFloat = 16
-        static let xl: CGFloat = 24
+        static let xxs = WaddleTokens.Spacing.s0Half
+        static let xs = WaddleTokens.Spacing.s1
+        static let s = WaddleTokens.Spacing.s2
+        static let m = WaddleTokens.Spacing.s3
+        static let l = WaddleTokens.Spacing.s4
+        static let xl = WaddleTokens.Spacing.s6
     }
 
+    /// Concentric radii: an inner radius is the outer one minus the
+    /// padding between them, never below `small`.
     enum Radius {
-        static let small: CGFloat = 6
-        static let medium: CGFloat = 10
-        static let large: CGFloat = 16
-        static let bubble: CGFloat = 18
+        /// Tags and inline code.
+        static let small = WaddleTokens.Radius.tag
+        /// Buttons, fields and rows.
+        static let medium = WaddleTokens.Radius.control
+        /// Panels and popovers.
+        static let large = WaddleTokens.Radius.panel
+        /// Cards.
+        static let card = WaddleTokens.Radius.card
+        static let bubble = WaddleTokens.Radius.bubble
+        /// Sheets and dialogs.
+        static let sheet = WaddleTokens.Radius.sheet
     }
 
     enum Size {
@@ -29,7 +44,7 @@ enum Theme {
         /// Readable line length for the conversation column.
         static let readableWidth: CGFloat = 820
         /// Smallest tap target (Human Interface Guidelines).
-        static let minHitTarget: CGFloat = 44
+        static let minHitTarget = WaddleTokens.ControlHeight.touch
     }
 
     /// Consecutive messages from one author within this window share one
@@ -48,26 +63,14 @@ extension Color {
         Color(hue: consistentColorHue(input: identifier) / 360, saturation: 0.7097, brightness: 0.6975)
     }
 
-    static var secondaryBackground: Color {
-        #if os(macOS)
-        Color(nsColor: .controlBackgroundColor)
-        #else
-        Color(uiColor: .secondarySystemBackground)
-        #endif
-    }
+    /// The page ground.
+    static var primaryBackground: Color { Theme.Colors.bg }
+
+    /// A recessed or grouped area on the page ground.
+    static var secondaryBackground: Color { Theme.Colors.surface2 }
 
     /// Hairline border of raised cards.
-    static var cardBorder: Color {
-        Color.secondary.opacity(0.22)
-    }
-
-    static var primaryBackground: Color {
-        #if os(macOS)
-        Color(nsColor: .windowBackgroundColor)
-        #else
-        Color(uiColor: .systemBackground)
-        #endif
-    }
+    static var cardBorder: Color { Theme.Colors.borderSoft }
 }
 
 extension Image {

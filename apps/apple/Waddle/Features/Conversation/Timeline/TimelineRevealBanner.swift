@@ -28,8 +28,7 @@ struct TimelineRevealBanner: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, Theme.Spacing.m + 2)
         .padding(.vertical, Theme.Spacing.s)
-        .waddleGlass(in: Capsule())
-        .shadow(color: Color.black.opacity(0.12), radius: 6, y: 2)
+        .huddleSurface(.raised, in: Capsule())
         .padding(edge == .top ? .top : .bottom, Theme.Spacing.m)
         .accessibilityElement(children: .combine)
     }

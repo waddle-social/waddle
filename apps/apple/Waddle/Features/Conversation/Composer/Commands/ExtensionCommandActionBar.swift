@@ -31,7 +31,7 @@ struct ExtensionCommandActionBar: View {
         let title = ExtensionCommandCopy.title(for: action)
         if action == actions.last {
             Button(title) { onAction(action) }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.huddle(.primary))
                 .keyboardShortcut(.defaultAction)
         } else {
             Button(title) { onAction(action) }

@@ -37,8 +37,7 @@ struct SignInProviderPanel: View {
             }
             .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
+        .buttonStyle(.huddle(.primary, size: .large))
         .disabled(pendingProvider != nil)
     }
 

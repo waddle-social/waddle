@@ -195,6 +195,7 @@ schema.#Project & {
 				"../scripts/design-tokens/**",
 				"../design/src/preset.ts",
 				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
+				"../apps/apple/Waddle/Design/WaddleTokens.swift",
 				"../apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
 			]
 		}

@@ -542,7 +542,6 @@ export function useChatAppController() {
     selectDm: dmSync.selectDm,
     searchDmRecipients: dmSync.searchDmRecipients,
     handleNewDm: dmSync.handleNewDm,
-    handleNewGroupDm: dmSync.handleNewGroupDm,
     handleAddPeopleToDm: dmSync.handleAddPeopleToDm,
     handleCreateGroupDm: dmSync.handleCreateGroupDm,
     openCreateChannelDialog: workspaceDialogs.openCreateChannelDialog,
