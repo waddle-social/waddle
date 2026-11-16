@@ -1103,7 +1103,7 @@ was added, and no decision of standing moved.
   moved) reports an owner as silent only for an ask that began with the
   owner's two windows ahead of it; an ask begun later that runs out is a
   retryable refusal that says nothing of the owner.
-- The raw scan holds 1633 records, as before. 6 unchanged records moved
+- The raw scan holds 1633 records, as before. 4 unchanged records moved
   because the files above gained lines.
 
 The checker establishes only that these exact files, anchors and raw matches
