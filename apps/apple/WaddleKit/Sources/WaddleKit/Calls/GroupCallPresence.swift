@@ -78,6 +78,11 @@ struct GroupCallPreparationKey: Hashable {
         }
     }
 
+    /// Someone in `room` is advertising a call.
+    public func hasCall(in room: BareJID) -> Bool {
+        participants[room]?.isEmpty == false
+    }
+
     /// A local leave drops its exact resource and an identity-less aggregate entry.
     public func clearParticipant(in room: BareJID, nick: String, realJID: JID? = nil) {
         removeActive(in: room, identity: .init(nick: nick, realJID: realJID), includeAggregate: true)

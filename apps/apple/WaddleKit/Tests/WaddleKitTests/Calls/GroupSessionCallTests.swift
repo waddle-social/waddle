@@ -31,6 +31,39 @@ import Testing
         await coordinator.stop()
     }
 
+    @Test func aRoomsCallCanOnlyBeJoinedFromInsideTheRoom() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        // The conversation can be open before the room has let us in.
+        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
+        #expect(await !coordinator.joinGroupCall(in: groupRoom, video: false))
+        #expect(port.callSends.isEmpty)
+        #expect(coordinator.calls.state == .idle)
+    }
+
+    @Test func aRoomsCallIsJoinedUnderTheNickWeHoldThere() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        coordinator.handle(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/ali")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        #expect(coordinator.canJoinGroupCall(in: groupRoom))
+        let joining = Task { await coordinator.joinGroupCall(in: groupRoom, video: true) }
+        await eventually { !port.callSends.isEmpty }
+        #expect(port.callSends == [.groupPresence(groupRoom, "ali", .init(state: .preparing))])
+        coordinator.calls.clear()
+        _ = await joining.value
+    }
+
+    @Test func aRoomsCallCannotBeJoinedWhileAnotherCallIsLive() async {
+        let (coordinator, _) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        coordinator.handle(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/ali")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
+        coordinator.calls.clear()
+    }
+
     @Test func optedOutSessionIgnoresRoomCallPresence() async {
         let (coordinator, port) = session(handlesCalls: false)
         coordinator.start()

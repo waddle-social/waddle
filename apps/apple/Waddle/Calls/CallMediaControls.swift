@@ -7,6 +7,9 @@ protocol CallMediaControls: AnyObject, Observable {
     var phase: CallMediaPhase { get }
     /// When this call's media first connected; a reconnect keeps it.
     var connectedSince: Date? { get }
+    /// When media last came up: the first connect, or the end of a reconnect.
+    /// The microphone and camera start a moment after it.
+    var mediaUpSince: Date? { get }
     /// Actually publishing, not merely requested.
     var isMicrophoneOn: Bool { get }
     var isCameraOn: Bool { get }

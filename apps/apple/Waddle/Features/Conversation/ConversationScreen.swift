@@ -89,8 +89,10 @@ private struct ConversationContent: View {
             .toolbar {
                 ConversationToolbar(
                     conversation: conversation,
-                    canCall: !session.calls.state.isLive && session.connection == .online,
-                    roomHasCall: conversation.isRoom && session.calls.groupPresence.participants[conversation.jid] != nil,
+                    canCall: conversation.isRoom
+                        ? session.canJoinGroupCall(in: conversation.jid)
+                        : !session.calls.state.isLive && session.connection == .online,
+                    roomHasCall: conversation.isRoom && session.calls.groupPresence.hasCall(in: conversation.jid),
                     onCall: startCall,
                     onSearch: { navigation.sheet = .search(conversation) },
                     onPins: showPins,
@@ -208,7 +210,8 @@ private struct ConversationContent: View {
     /// a room the buttons start the room's call, or join the one in progress.
     private func startCall(video: Bool) {
         guard !conversation.isRoom else {
-            session.joinRoomCall(in: conversation.jid, video: video)
+            let room = conversation.jid
+            Task { await session.joinGroupCall(in: room, video: video) }
             return
         }
         let calls = session.calls

@@ -161,6 +161,34 @@ import Testing
         f.store.clear()
     }
 
+    @Test func leavingRemovesUsFromTheRoomsRosterAtOnce() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        f.store.handleGroupPresence(groupWire(nick: "bob", media: callAudio, realJID: callPeer))
+        // The leave is still on its way to the room.
+        f.port.heldCallVerbs = ["groupPresence"]
+        let leaving = Task { await f.store.hangUp() }
+        await eventually { f.store.state == .idle }
+        #expect(f.store.groupPresence.participants[groupRoom]?.map(\.nick) == ["bob"])
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        await leaving.value
+        f.store.clear()
+    }
+
+    @Test func aCallTheMixerEndedDropsUsFromItsRosterAtOnce() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        f.port.heldCallVerbs = ["groupPresence"]
+        f.store.handle(CallEvent(from: groupMixer, sid: "g1", kind: .sessionTerminate(reason: .success)))
+        #expect(f.store.groupPresence.participants[groupRoom] == nil)
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        f.store.clear()
+    }
+
     @Test func losingTheStreamWhileJoiningAbandonsTheJoin() async {
         let f = GroupFixture()
         let joining = await f.begin()

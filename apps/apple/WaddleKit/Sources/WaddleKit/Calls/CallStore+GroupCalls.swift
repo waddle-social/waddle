@@ -177,11 +177,20 @@ extension CallStore {
         case .idle, .incoming, .outgoing, .active, .ended: return
         }
         if cancelsWaits { cancelGroupWaits(for: claimed) }
+        forgetOwnGroupEntry(in: room, nick: nick, identity: identity, epoch: epoch)
         _ = await groupControl.serializePresence { [self] in
             await leaveGroupPresenceNow(in: room, nick: nick, identity: identity, epoch: epoch)
             if terminates { await terminateGroup(in: room, sid: sid, epoch: epoch) }
             return true
         }
+    }
+
+    /// We are out of the call as soon as the slot says so; the roster must
+    /// not show us in it while the leave is still on its way to the room.
+    /// Skipped when a newer attempt already holds the room.
+    func forgetOwnGroupEntry(in room: BareJID, nick: String, identity: JID?, epoch: Int) {
+        guard generation == epoch, !groupSlotHolds(room) else { return }
+        groupPresence.clearParticipant(in: room, nick: nick, realJID: identity)
     }
 
     /// A claimed attempt's waits end at once, whoever claimed it.
@@ -216,6 +225,11 @@ extension CallStore {
         let epoch = generation
         cancelGroupWaits(for: claimed)
         transition(.ended(sid: event.sid, reason: reason))
+        if case .inGroup(let call) = claimed {
+            forgetOwnGroupEntry(in: call.room, nick: call.nick, identity: ownJID(), epoch: epoch)
+        } else if case .joiningGroup(let call) = claimed {
+            forgetOwnGroupEntry(in: call.room, nick: call.nick, identity: ownJID(), epoch: epoch)
+        }
         Task { [weak self] in
             guard let self else { return }
             await self.teardownGroup(claimed, identity: self.ownJID(), epoch: epoch, cancelsWaits: false)

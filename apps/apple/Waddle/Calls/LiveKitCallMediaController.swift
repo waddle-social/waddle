@@ -15,6 +15,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     private(set) var phase: CallMediaPhase = .idle
     private(set) var connectedSince: Date?
+    private(set) var mediaUpSince: Date?
     private(set) var isMicrophoneOn = false
     private(set) var isCameraOn = false
     private(set) var isMicrophoneBlocked = false
@@ -69,6 +70,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         if phase == .connecting { phase = .connected }
         connectedSince = .now
+        mediaUpSince = .now
         refreshTracks()
         refreshParticipants()
         // Publishing is best effort and separate from joining: a missing
@@ -150,6 +152,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         observer = nil
         phase = .idle
         connectedSince = nil
+        mediaUpSince = nil
         refreshTracks()
         refreshParticipants()
     }
@@ -168,6 +171,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             // A reconnect that failed reports its end too, after the drop.
             guard changed.connectionState == .connected else { return }
             phase = .connected
+            mediaUpSince = .now
             reconcileTracks(in: changed)
             refreshParticipants()
         case .tracks:
@@ -259,11 +263,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             default: (lhs.identity?.stringValue ?? "") < (rhs.identity?.stringValue ?? "")
             }
         }
-        let identities = ([room.localParticipant] + remotes).compactMap { $0.identity?.stringValue }
-        // The SDK keeps a speaker listed until the next speaker update, even
-        // after they leave.
-        let present = Set(identities)
-        let speaking = Set(room.activeSpeakers.compactMap { $0.identity?.stringValue }).intersection(present)
+        let everyone: [Participant] = [room.localParticipant] + remotes
+        let identities = everyone.compactMap { $0.identity?.stringValue }
+        // Each participant's own flag, not `room.activeSpeakers`: the SDK
+        // hears about speakers over two channels and keeps that list up to
+        // date for only one of them.
+        let speaking = Set(everyone.filter(\.isSpeaking).compactMap { $0.identity?.stringValue })
         if participantIdentities != identities { participantIdentities = identities }
         if speakingIdentities != speaking { speakingIdentities = speaking }
     }

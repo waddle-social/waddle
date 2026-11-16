@@ -10,18 +10,20 @@ struct RoomCallBanner: View {
 
     var body: some View {
         let calls = session.calls
-        let presence = calls.groupPresence.participants[room] ?? []
+        let hasCall = calls.groupPresence.hasCall(in: room)
         ZStack {
-            if !presence.isEmpty, !calls.state.isInGroupCall(in: room) {
+            if hasCall, !calls.state.isInGroupCall(in: room) {
                 RoomCallBannerView(
-                    rows: GroupCallRoster.rows(presence: presence, live: [], speaking: [], own: session.account.jid),
-                    canJoin: !calls.state.isLive && session.connection == .online,
-                    onJoin: { session.joinRoomCall(in: room, video: false) }
+                    rows: GroupCallRoster.rows(
+                        presence: calls.groupPresence.participants[room] ?? [], live: [], speaking: [], own: session.account.jid
+                    ),
+                    canJoin: session.canJoinGroupCall(in: room),
+                    onJoin: { Task { await session.joinGroupCall(in: room, video: false) } }
                 )
                 .transition(.opacity)
             }
         }
-        .huddleAnimation(.settle, value: presence.isEmpty)
+        .huddleAnimation(.settle, value: hasCall)
     }
 }
 
@@ -35,6 +37,9 @@ struct RoomCallBannerView: View {
 
     /// Faces drawn before the count says the rest.
     static let maxFaces = 3
+    /// The glyph grows with the text beside it.
+    @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
+    @ScaledMetric(relativeTo: .body) private var glyphBox: CGFloat = 20
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -64,9 +69,9 @@ struct RoomCallBannerView: View {
     private var summary: some View {
         HStack(spacing: Theme.Spacing.s) {
             Image(systemName: "waveform")
-                .font(.system(size: Metrics.glyph, weight: .semibold))
+                .font(.system(size: glyph, weight: .semibold))
                 .foregroundStyle(Theme.Colors.liveText)
-                .frame(width: Metrics.glyphBox, height: Metrics.glyphBox)
+                .frame(width: glyphBox, height: glyphBox)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
                 Text("Call in progress")
@@ -78,7 +83,15 @@ struct RoomCallBannerView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Call in progress, \(people): \(names)"))
+    }
+
+    /// Who is there, for VoiceOver: the faces are only pictures.
+    private var names: String {
+        let shown = rows.prefix(Self.maxFaces).map { $0.isSelf ? "You" : $0.nick }
+        let rest = rows.count - shown.count
+        return (rest > 0 ? shown + ["\(rest) more"] : shown).formatted(.list(type: .and))
     }
 
     /// A few overlapping faces; the count beside them says how many in all.
@@ -105,32 +118,5 @@ struct RoomCallBannerView: View {
 
     private var people: String {
         rows.count == 1 ? "1 person" : "\(rows.count) people"
-    }
-
-    private enum Metrics {
-        static let glyph: CGFloat = 15
-        static let glyphBox: CGFloat = 20
-    }
-}
-
-extension CallState {
-    /// The slot holds `room`'s call, being joined or joined.
-    func isInGroupCall(in room: BareJID) -> Bool {
-        switch self {
-        case .joiningGroup(let call): call.room == room
-        case .inGroup(let call): call.room == room
-        case .idle, .incoming, .outgoing, .active, .ended: false
-        }
-    }
-}
-
-extension SessionCoordinator {
-    /// Starts or joins `room`'s call under the nick we hold there, or the
-    /// account's own when the room has not told us one. The call shows in
-    /// the dock above the shell.
-    func joinRoomCall(in room: BareJID, video: Bool) {
-        let calls = calls
-        let nick = presence.selfNicks[room] ?? account.nick
-        Task { _ = await calls.joinGroupCall(in: room, media: CallMedia(audio: true, video: video), nick: nick) }
     }
 }

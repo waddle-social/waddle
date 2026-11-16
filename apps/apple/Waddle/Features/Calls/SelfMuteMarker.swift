@@ -10,22 +10,31 @@ private struct SelfMuteMarker: ViewModifier {
     let calls: CallStore
     let media: any CallMediaControls
 
-    /// The microphone starts a moment after the media connects. For this
-    /// long after connecting, a state must hold before the room hears it,
-    /// so joining is not broadcast as a mute and then an unmute. After
-    /// that a change is the person's own and goes out at once.
+    /// The microphone starts a moment after media comes up, at the first
+    /// connect and again after a reconnect republishes it. For this long
+    /// after that, a state must hold before the room hears it, so neither
+    /// is broadcast as a mute and then an unmute. Later a change is the
+    /// person's own and goes out at once.
     static let settle: TimeInterval = 1
+    /// A send that fails is tried again a few times; the room must not be
+    /// left showing a mute state that is no longer true.
+    static let retries = 3
+    static let retryDelay: Duration = .seconds(2)
 
     func body(content: Content) -> some View {
         content.task(id: marker) {
             guard let marker, marker.isMuted != calls.isSelfMuteAdvertised else { return }
-            let sinceConnect = media.connectedSince.map { Date.now.timeIntervalSince($0) } ?? Self.settle
-            if sinceConnect < Self.settle {
-                try? await Task.sleep(for: .seconds(Self.settle - sinceConnect))
+            let sinceUp = media.mediaUpSince.map { Date.now.timeIntervalSince($0) } ?? Self.settle
+            if sinceUp < Self.settle {
+                try? await Task.sleep(for: .seconds(Self.settle - sinceUp))
             }
-            guard !Task.isCancelled, case .inGroup(let call) = calls.state, call.sid == marker.sid,
-                marker.isMuted != calls.isSelfMuteAdvertised else { return }
-            _ = await calls.advertiseSelfMute(marker.isMuted)
+            for attempt in 0...Self.retries {
+                // A newer state cancels this task; a moved slot ends it.
+                guard !Task.isCancelled, case .inGroup(let call) = calls.state, call.sid == marker.sid else { return }
+                if attempt == 0, marker.isMuted == calls.isSelfMuteAdvertised { return }
+                if await calls.advertiseSelfMute(marker.isMuted) { return }
+                try? await Task.sleep(for: Self.retryDelay)
+            }
         }
     }
 

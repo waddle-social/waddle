@@ -168,17 +168,6 @@ struct CallDock: View {
     }
 }
 
-private extension CallState {
-    /// A device choice belongs to a session in progress: an accepted 1:1
-    /// session or a room's call the mixer accepted.
-    var isEstablished: Bool {
-        switch self {
-        case .active, .inGroup: true
-        case .idle, .incoming, .outgoing, .joiningGroup, .ended: false
-        }
-    }
-}
-
 extension View {
     /// A sheet or a cover hides the shell's dock, so it carries its own: a
     /// call that arrives while it is open is still seen and can be answered.
