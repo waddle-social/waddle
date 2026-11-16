@@ -80,6 +80,7 @@ const props = defineProps<{
     peerUsername: string;
     presenceShow?: string;
     presenceIdleSince?: number;
+    mucPm?: boolean;
   } | null;
   sidebarMode?: "channels" | "dms";
   messages: TimelineMessage[];

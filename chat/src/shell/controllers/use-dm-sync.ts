@@ -152,6 +152,8 @@ export function useDmSync(deps: DmSyncDeps) {
       ui.actionError.value = BOT_DM_ERROR;
       return;
     }
+    // A room occupant's address is not an account; its bare form is the room.
+    if (dmConversations.conversations.value.some((c) => c.peerJid === peerJid && c.mucPm)) return;
     ui.groupDmSeedPeerJid.value = barePeerJid(peerJid);
     ui.showNewDm.value = true;
   }

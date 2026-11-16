@@ -46,6 +46,8 @@ const props = withDefaults(defineProps<{
     peerUsername: string;
     presenceShow?: string;
     presenceIdleSince?: number;
+    /** A private message to a room occupant, not an account: no group can grow from it. */
+    mucPm?: boolean;
   } | null;
   callRoomJid?: string | null;
   isForumChannel: boolean;
@@ -465,7 +467,7 @@ const memberButtonCopy = computed(() => {
           </button>
         </AppTooltip>
         <!-- Where a room shows who is here, a 1:1 DM offers to bring more people in. -->
-        <AppTooltip v-else-if="dmPeer" label="Add people">
+        <AppTooltip v-else-if="dmPeer && !dmPeer.mucPm" label="Add people">
           <button :class="iconbtn()" type="button" aria-label="Add people to this conversation" @click="emit('addPeople')">
             <UserPlus aria-hidden="true" />
           </button>
@@ -483,7 +485,7 @@ const memberButtonCopy = computed(() => {
             <Users aria-hidden="true" />
           </button>
         </AppTooltip>
-        <AppTooltip v-else-if="dmPeer" label="Add people">
+        <AppTooltip v-else-if="dmPeer && !dmPeer.mucPm" label="Add people">
           <button :class="iconbtn()" type="button" aria-label="Add people to this conversation" @click="emit('addPeople')">
             <UserPlus aria-hidden="true" />
           </button>

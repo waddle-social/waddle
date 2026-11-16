@@ -90,6 +90,7 @@ describe("DM threading UI contract", () => {
     const modals = read("../src/components/chat/ChatAppModals.vue");
 
     expect(header).toContain("emit('addPeople')");
+    expect(header.match(/v-else-if="dmPeer && !dmPeer.mucPm" label="Add people"/g)).toHaveLength(2);
     expect(content).toContain("@add-people=\"dmPeer?.peerJid && emit('addPeopleToDm', dmPeer.peerJid)\"");
     expect(shell).toContain('@add-people-to-dm="handleAddPeopleToDm"');
     expect(modals).toContain(':seed="groupDmSeed"');

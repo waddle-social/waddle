@@ -220,6 +220,18 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
     h.scope.stop();
   });
 
+  test("Add people never seeds a group from a room occupant's private messages", () => {
+    const h = makeHarness();
+    h.conversations.value = [{ peerJid: "general@muc.example.com/sam", peerUsername: "sam", unreadCount: 0, mucPm: true }];
+    h.dmSync.handleAddPeopleToDm("general@muc.example.com/sam");
+    expect(h.ui.showNewDm.value).toBe(false);
+    expect(h.ui.groupDmSeedPeerJid.value).toBeNull();
+    h.dmSync.handleAddPeopleToDm("bob@example.com");
+    expect(h.ui.groupDmSeedPeerJid.value).toBe("bob@example.com");
+    expect(h.ui.showNewDm.value).toBe(true);
+    h.scope.stop();
+  });
+
   test("people picked from earlier searches stay valid until the compose dialog closes", async () => {
     const h = makeHarness();
     const chat = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null };
