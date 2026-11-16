@@ -197,7 +197,21 @@ impl SessionManager {
                 last_used_at,
             })
             .await
-            .map_err(Self::ask_err)?;
+            .map_err(|error| {
+                // The account's JID was retired: no session is created for
+                // it, and no account row either.
+                let retired = matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        crate::db::DatabaseError::QueryFailed(refusal)
+                    ) if refusal == crate::auth::retirement::RETIRED_JID_REFUSAL
+                );
+                if retired {
+                    AuthError::JidRetired
+                } else {
+                    Self::ask_err(error)
+                }
+            })?;
 
         debug!(session_id = %session.id, user_jid = %session.user_jid, "Session created");
         Ok(())

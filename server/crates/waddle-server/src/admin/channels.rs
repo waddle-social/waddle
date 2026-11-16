@@ -2813,6 +2813,25 @@ pub(crate) async fn acquire_room_config_lock(room_jid: &BareJid) -> OwnedSemapho
         .expect("room config lock semaphore is never closed")
 }
 
+/// Longest a client's request waits for a room's configuration lock. An
+/// administration request of a managed room holds it while it records the
+/// change in the host-grant store (up to 3 s for the scope's guard), waits
+/// for the revocation fence's acknowledgement (up to 10 s) and has the room
+/// actor apply it; a request that would wait longer is answered as busy
+/// instead of queueing behind it without bound.
+pub(crate) const ROOM_CONFIG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// [`acquire_room_config_lock`] for at most `limit`: `None` when the lock
+/// was not free by then.
+pub(crate) async fn acquire_room_config_lock_within(
+    room_jid: &BareJid,
+    limit: std::time::Duration,
+) -> Option<OwnedSemaphorePermit> {
+    tokio::time::timeout(limit, acquire_room_config_lock(room_jid))
+        .await
+        .ok()
+}
+
 async fn hydrate_group_dm_member_affiliations(
     state: &AppState,
     actor: &ActorRef<RoomActor>,

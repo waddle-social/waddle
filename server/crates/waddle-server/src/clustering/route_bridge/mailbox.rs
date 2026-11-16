@@ -586,12 +586,21 @@ async fn seat_room_occupancy_in(
                     discarded = seating.discarded,
                     "seated recovered room occupants"
                 );
+                // The seats were restored from a decision read before the
+                // actor applied them. A managed room is swept afterwards,
+                // so a seat a revoke overtook meanwhile is removed; that
+                // holds as well when the seats were not all recorded.
+                state.deps.app_state.host_grants.request_sweep_of(room);
                 if !seating.recorded {
                     return false;
                 }
             }
             Err(error) => {
                 tracing::warn!(%error, room = %room, "recovered room occupants not seated");
+                // An ask that timed out or lost its reply may have seated
+                // some of them: the sweep removes any the grants do not
+                // admit.
+                state.deps.app_state.host_grants.request_sweep_of(room);
                 return false;
             }
         }

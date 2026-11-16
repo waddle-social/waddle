@@ -40,6 +40,17 @@ suite has run against disposable stores (see
 [Running the restore slice's cases](#running-the-restore-slices-cases));
 verification step 4 has not.
 
+The revocation slice (W5d in the plan) is implemented as well: the
+acknowledged revocation fence (`permissions/host_grant/fence`, migration
+2005), the sweep of seated occupants (`server/host_grant_revocation`), the
+ledger of retired account JIDs (`auth/retirement`, migration 2006) and the
+operator acts that go with them. Its decisions are recorded under
+[Revocation fence decisions](#revocation-fence-decisions), and its focused
+set has run against disposable stores (see
+[Running the revocation slice's focused set](#running-the-revocation-slices-focused-set)).
+With no scope enrolled it changes, beyond its migrations, what
+[its rollout part](#rollout-part-of-the-revocation-fence-g24) lists.
+
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
 for its scope, records the decision here and has it independently reviewed
@@ -419,7 +430,8 @@ marker.
 
 Home-account deletion does not automatically revoke remote grants. Waddle homes
 enforce durable non-reuse of retired account JIDs across their provisioning
-paths (the revocation slice, W5d). Other homes cannot be required to. By
+paths (the revocation slice, W5d; see
+[Non-reuse of retired account JIDs](#non-reuse-of-retired-account-jids-d8)). Other homes cannot be required to. By
 ADR-0020 D8, a reassigned JID at a home that is not on the trusted-home list
 may inherit member-level grants, as an accepted limitation, and never room
 moderation or privileged grants; a trusted home is trusted for non-reuse, and
@@ -779,8 +791,10 @@ The acquisition order of the fresh-manifest acceptance transaction
 6. the origin alias and the canonical message row;
 7. for a locally owned clustered room, the room's ownership claim, shared;
 8. the durable room row of the manifest's coordinates, shared, without waiting;
-9. **the scope guard, shared**, and under it the room binding, the authority
-   incarnation and the room's grant rows, read without row locks;
+9. the scope's queue lock, shared (an advisory lock; see
+   [The queue in front of the guard](#the-queue-in-front-of-the-guard-g12)),
+   then **the scope guard, shared**, and under it the room binding, the
+   authority incarnation and the room's grant rows, read without row locks;
 10. every row the acceptance records: effect intents, receipts, archive rows,
     the sealed manifest, the mailbox decision and the stream position.
 
@@ -793,7 +807,8 @@ that row as a denial.
 
 The order of a store transaction: the protocol epoch row, shared (the
 guarded-store entry takes it, so an epoch this binary does not implement
-refuses the write); the scope guard, exclusive; then host-grant rows only.
+refuses the write); the scope's queue lock and then the scope guard, both
+exclusive; then host-grant rows only.
 A store transaction takes no ownership claim and no ingress row, and it
 performs no RPC, actor call, queue wait or socket write.
 
@@ -812,13 +827,13 @@ with the `Timeout` class, nothing is accepted, and other scopes and unmanaged
 rooms are unaffected. A store transaction waits at most 3 s for a lock and
 5 s per statement and then returns `Busy` with nothing changed.
 
-Known limit: PostgreSQL does not queue share lockers behind a waiting
-exclusive locker of a row. A continuous overlap of acceptance transactions in
-one scope can therefore make a mutation of that scope time out repeatedly. It
-never acknowledges a revoke that did not commit, but it can delay one. This
-slice does not change the guard. Whether it needs a fair primitive is a
-decision of the revocation slice (W5d), which defines what a revoke's
-acknowledgement promises and by when.
+Known limit of the row lock: PostgreSQL does not queue share lockers behind a
+waiting exclusive locker of a row. A continuous overlap of acceptance
+transactions in one scope could therefore make a mutation of that scope time
+out repeatedly: never an acknowledged revoke that did not commit, but a
+delayed one. The revocation slice (W5d) puts a queue in front of the guard
+([The queue in front of the guard](#the-queue-in-front-of-the-guard-g12)),
+which removes the limit.
 
 Atomic admission. The decision and what it admits are one transaction: the
 policy state is read under the guard, the manifest is sealed and its children
@@ -1367,7 +1382,7 @@ scope.
 | Legacy permission reads (`CheckPermission`, `ListRelations`, `ListSubjects`, `LookupSubjects`, `LookupResources`) | Answer nothing for an enrolled object, decided from the enrolled set; fail before it has loaded. |
 | Extension host tools (`extension_host_adapter`: room send, archive query, member and channel lists, Space list, PubSub item reads) | Gate, with no deployment-owner fallback; an enrolled Space node is left out of the Space list, and an item read of a node bound to a managed room, or to a room whose management cannot be told, is refused. |
 | XEP-0425 moderation, call setup, Muji call presence, channel-wide mentions, pin list, room system messages | Gate (B2). |
-| Media grant re-assertion and eviction of a live call participant (`sfu_voice_reconcile.rs`, `websocket/muc_call_sfu.rs`, `livekit_webhook.rs`) | Occupancy only: they push the media grants a seated occupant's mirrored voice derives and evict a participant who is no longer an occupant. They do not consult the grants and mint no token; ending a revoked participant's media is the revocation slice's (W5d). |
+| Media grant re-assertion and eviction of a live call participant (`sfu_voice_reconcile.rs`, `websocket/muc_call_sfu.rs`, `livekit_webhook.rs`) | They push the media grants a seated occupant's mirrored voice derives, evict a participant who is no longer an occupant, and mint no token. Since the revocation slice the join webhook and its relayed form decide a participant from the grants first, and the revocation sweep ends a removed occupant's media ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)); the periodic reconciler follows occupancy. |
 | Host-grant enrollment (`HostGrantStore::enroll_scope`) | Refused for a channel whose catalog row is a group direct-message room, read in the enrollment transaction: a group DM's members are its conversation's participants, not grant subjects. |
 | Channel search, Spaces node disco#info, admin channel and Space listings | Gate (B2): a managed room is disclosed only to a subject with `view`, and an enrolled Space node to nobody. Search and the admin listing read the grants by the channel binding the enrolled set named, and withhold the room whatever else the gate answers. |
 | `set_room_affiliation` facade (`xmpp_permission_state.rs`, `xmpp_state.rs`, `waddle-xmpp` `AppState`) | Retired: removed. |
@@ -1394,7 +1409,7 @@ The sweep is lexical and the table is its review, not a call graph.
 | Owner configuration | `manage` |
 | Destroy | `delete`, which no affiliation confers |
 | XEP-0425 moderation | `moderate`; the occupant role the room actor holds decides nothing. |
-| Call setup (LiveKit token) | `send_message`, at every decision that leads to a minted token: the setup on each replica of a relayed initiate and the re-check before the token is released. The media capabilities still follow the voice the room actor mirrors, which can only narrow them. Re-assertion and eviction of a live participant's media grants follow occupancy only (B5). |
+| Call setup (LiveKit token) | `send_message`, at every decision that leads to a minted token: the setup on each replica of a relayed initiate and the re-check before the token is released. The media capabilities still follow the voice the room actor mirrors, which can only narrow them. A live participant's media grants are decided from the grants as well, since the revocation slice ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)). |
 | Muji call presence (starting, joining or preparing a call, and the call-thread anchor it starts) | `send_message`, on the local path and the relayed ordered delivery alike; unreadable grants refuse it with `internal-server-error`. Leaving a call is always accepted. |
 | Channel-wide mention (XEP-0513 `#channel` push) | `moderate`, decided before dispatch for a message that carries a channel mention and passed to the room chain; the role the room actor mirrors decides nothing, and unreadable grants broadcast nothing. A message without one reads no grants. |
 | Pin list | `read` |
@@ -1473,10 +1488,10 @@ change stays recorded, and it is what every admission reads.
   from one snapshot, with no lock held across the actor ask. Seating is not a
   protected effect: what reaches an occupant afterwards (groupchat, inbox,
   notifications, recovery) is admitted again by the acceptance. A revoke
-  that commits after the decision does not eject an occupant seated by it;
-  ejection and the presence an occupant still sees until then are the
-  revocation fence's (W5d), which defines what a revoke's acknowledgement
-  promises.
+  that commits after the decision does not by itself eject an occupant
+  seated by it; the revocation slice removes the seat and defines what an
+  occupant still receives until then
+  ([Revocation fence decisions](#revocation-fence-decisions)).
 - **Protected reads.** An archive page and a room description are admitted by
   a decision taken after they were read: the gate is asked before the read (to
   refuse early) and again after, and the response is sent only if the second
@@ -1498,7 +1513,8 @@ change stays recorded, and it is what every admission reads.
   subscriber list captured for those nodes is therefore never acceptance,
   because nothing is delivered from it. Serving a scope's Space through PubSub
   needs that identity and is not built; the revocation slice's #2056 control
-  is its evidence for unenrolled Spaces.
+  is its evidence for unenrolled Spaces
+  ([Sink contracts under the fence](#sink-contracts-under-the-fence-g16)).
 - **Queued work.** The groupchat audience is the first slice's manifest
   acceptance. Invitations, which would queue a membership grant, are refused.
   Room effects of an administration request are produced by the room actor
@@ -1518,10 +1534,9 @@ change stays recorded, and it is what every admission reads.
   starts, joins or prepares a call asks the gate for `send_message` before
   the room actor records it, on either path, so no call-thread anchor is
   built from a refused one. A token already released stays valid until the
-  media server ends it, and the media grant re-assertion and eviction paths
-  (the webhook on a participant's join and the voice reconciler) decide
-  from occupancy and the mirrored voice only; both are the revocation
-  slice's (W5d).
+  media server ends it; the revocation slice ends a removed occupant's
+  media and decides a participant that joins from the grants
+  ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)).
 - **Mirror of the room actor.** The actor's affiliation list follows the
   canonical grants, never the other way: administration applies a change
   only after its commit, a change the actor did not apply (or that a
@@ -1754,7 +1769,8 @@ yet uses two replicas; that is verification step 4.
 
 ### Not decided here
 
-- Occupant ejection and presence after a revoke (W5d).
+- Occupant ejection and presence after a revoke: decided by the revocation
+  slice ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)).
 - A PubSub admission identity for serving an enrolled Space (needed before a
   scope's Space is served; W7a depends on it), and with it what `view` of a
   scope's Space means: until then its node is described and listed to
@@ -2436,6 +2452,609 @@ past a latched regression by a witness below the server with its latch.
 The position read under the provisioned restricted profile is in
 `tests/restricted_runtime_startup.rs`.
 
+## Revocation fence decisions
+
+These are the decisions of the revocation slice (W5d in the plan): what a
+revoke's acknowledgement promises and by when, the queue in front of a
+scope's guard (G12), what happens to occupants a revoke leaves seated (G14),
+how each sink contract of the writer fence stands once a revoke is
+acknowledged (G16), and non-reuse of retired account JIDs (ADR-0020 D8). The
+acceptance-matrix rows marked W5d are their evidence; the run is recorded
+under [Running the revocation slice's focused set](#running-the-revocation-slices-focused-set).
+They restate the bounds of the earlier slices they rely on and change those
+slices' decisions only where stated.
+
+Gate G18 (remote traffic to local accounts) is not decided here. The plan's
+gate table gives it to W6c and to `s2s-account-traffic-2047.md`, and nothing
+in this section admits or refuses a stanza between a remote sender and a
+local account: the fence covers managed rooms and Spaces, and the ledger of
+retired JIDs only keeps a JID from being issued again. What G18 can rely on
+from here is that no account is provisioned for a retired JID from the
+retirement's commit on (streams the account had open are not ended, see
+[What stays open](#what-stays-open-1)), and that a revoked room grant admits
+nothing new once its revoke is acknowledged.
+
+### What an acknowledgement means
+
+The linearisation point of a revoke, a ban, a demotion or the closing of a
+scope is still the PostgreSQL commit of its operation. Two things follow
+from the commit alone, as in the earlier slices:
+
+- no room-manifest acceptance admits under the revoked grant: the
+  acceptance takes the scope's guard shared and reads the policy state under
+  it (first slice);
+- no decision that reads the grants after the commit admits under it: every
+  other surface reads the canonical grants from PostgreSQL when it decides
+  (writer fence).
+
+What the commit does not cover is a decision that was read before it and
+whose effect has not happened yet, on any replica. ADR-0020 D5 does not
+accept a prior permission check as admission, so the acknowledgement covers
+exactly that (`permissions/host_grant/fence.rs`, migration 2005):
+
+- **Lease.** A replica decides for a managed room only while it holds a
+  lease: a row of `host_grant_fence_replicas` whose `lease_expires_at` it
+  moves 5 s ahead (`FENCE_LEASE_TTL`) every 250 ms (`FENCE_TICK`). The
+  replica measures the lease on its boot-time clock from an instant taken
+  before the renewal was sent, and stops deciding 1 s
+  (`FENCE_LEASE_MARGIN`) before the recorded end. The boot-time clock is
+  `CLOCK_BOOTTIME` on Linux (`permissions/host_grant/boot_clock.rs`), which
+  keeps counting while the host is suspended, so a host that sleeps through
+  the end of its lease finds the lease ended when it wakes. Each of a
+  tick's transactions is abandoned after 1.5 s (`FENCE_TICK_DEADLINE`),
+  0.5 s (`FENCE_TICK_SLACK`) short of the margin and the grace together. A
+  renewal whose answer arrives after the lease it renews ran out here does
+  not revive that lease: the replica counts a lapse, releases the lease and
+  registers again. It registers while its attachment gate is attached, the
+  condition under which the surfaces decide managed rooms, and its enrolled
+  set names a scope; it holds no lease otherwise, and releases its lease
+  while the gate verifies a changed authority again.
+- **Install, then record.** Each tick reads every scope's generation. A
+  generation that moved is installed in memory under the lock every
+  validity check takes, and only afterwards recorded in
+  `host_grant_fence_acks`. A recorded generation never goes back.
+- **Ticket.** Every decision the gate makes for a managed room carries a
+  ticket: the registration it was read under and the scope's generation.
+  The registration is taken before the grants are read. A ticket is current
+  while the replica holds the lease of that registration and has installed
+  no newer generation of the scope. `ManagedRoomGrants::allows` and
+  `standing` answer nothing for a decision whose ticket is not current,
+  however long its caller held it, and the room actor asks the ticket again
+  in the turn that seats an occupant or applies a role change (below). No
+  check waits. A surface that holds a decision across an await (a read of
+  the archive or the room actor, the room's configuration lock) asks it
+  again after the await, and reads the grants again when its ticket is no
+  longer current (`HostGrantGate::still_allows`), before the effect.
+  `FenceTicket::admit` runs a synchronous effect under the lock an
+  installation takes, or not at all; the surfaces fenced so far have no
+  such effect (theirs are replies, actor asks and durable writes) and use
+  the checks.
+- **Acknowledgement.** `HostGrantStore::await_revocation_fence(lifecycle,
+  generation, limit)` reads, after the operation committed, every replica
+  whose lease has not been expired for 1 s (`FENCE_EXPIRY_GRACE`), and
+  answers `Acknowledged` once each of them has recorded the generation.
+
+After the acknowledgement, no replica passes a validity check with a
+decision read before the revoke. A replica that recorded the generation
+installed it first. For one that did not, take the last renewal of its lease
+that committed: the replica sent it at an instant `s` and stops deciding at
+`s` plus 4 s on its own clock. PostgreSQL recorded the lease's end as its
+own clock at the start of the renewal's transaction, which is not earlier
+than `s`, plus 5 s, and the acknowledgement counts the replica 1 s beyond
+that. So the replica stopped deciding at least 2 s before the
+acknowledgement could stop waiting for it, provided the two clocks agree in
+rate over a lease (below). A later renewal cannot make a decision read
+before the revoke current again:
+
+- A renewal that commits while the acknowledgement still counts the lease
+  extends a lease the acknowledgement keeps counting: the replica records
+  the revoke's generation, read in that renewal or the next, or its lease
+  runs out.
+- A renewal sent before the replica's own deadline commits within 1.5 s of
+  being sent or is abandoned, so it commits at least 0.5 s before the
+  acknowledgement can stop counting the lease it renews: that lease ends at
+  least 1 s after the replica's deadline, and is counted 1 s beyond.
+- An answer that arrives after the replica's own deadline, however the
+  renewal fared in PostgreSQL, lapses the lease instead of renewing it, and
+  the replica registers again.
+
+A replica that registers later reads the grants after its registration
+committed, which is after the revoke did. A replica whose lease ran out
+registers again under a new identity; nothing it decided before is current
+under the new registration, and it sweeps every scope before it is of use.
+
+The acknowledgement depends on PostgreSQL alone: no step reads or writes
+SpiceDB, waits for a room actor or calls the media server. It is given
+within one tick while every replica runs, and within the lease and the
+grace (6 s after the last renewal) when one stopped without releasing its
+lease. A replica releases its lease when its fence stops; a process that exits
+before that write is waited for like one that stopped. A caller waits at
+most 10 s (`FENCE_ACKNOWLEDGEMENT_DEADLINE`); an acknowledgement that has
+not arrived or cannot be read leaves the operation committed and is
+reported as such (below).
+
+What acknowledges through the fence: an XEP-0045 affiliation change of a
+managed room replies after the acknowledgement, increases included; the
+operator's `host-grant revoke` and `revoke-account` wait for it and report
+it, `revoke-account` for every room the account holds a row in, including
+rooms an earlier run revoked. A reply that is not acknowledged in time is `resource-constraint` with
+the change recorded; the mirror repair is left armed. A retirement, a
+restore transition, a fence closure and a reopen are owner-phase or
+background acts that return at their commit; replicas install their
+generations like any other, and `host-grant fence` reports a scope's
+standing.
+
+#### Already admitted and in-flight work
+
+After the acknowledgement these may still complete. None of them takes a
+new decision.
+
+| Work | Why it may complete | Bound |
+| --- | --- | --- |
+| Children of a manifest accepted before the commit: routes, inbox rows, pushes, notifications and recovery items, their replay, and the resend of stanzas already in a session's stream-management queue | The first slice's accepted-child contract: frozen target and payload, no new recipient. A revoke does not erase them. | The existing replay and custody bounds; unchanged. |
+| An effect whose validity check passed before its replica installed the generation: a response frame already built for the connection, an event already handed to a queue or a detached stream-management buffer, a token already released, a seat or a role change the room actor had begun to record | It was admitted before that replica recorded the generation, and so before the acknowledgement. | The request that carries it. A seat that completes after the installation is swept (below). |
+| Presence the room actor broadcasts to a revoked occupant that is still seated, and that occupant's own presence without a call | Seating is not a protected effect (writer fence, B5). Everything else the occupant could do or receive is decided from the grants. | Until the sweep of the replica that hosts the room removes the seat: started when that replica installs the generation, retried every second. |
+| A media session of a revoked participant | The media server holds it. | Ended by the same sweep; a participant that joins or reconnects is decided from the grants; the reconciler removes a participant that is no occupant. |
+| Seats held by a replica whose lease ran out | That replica decides nothing, and no occupant of its rooms is admitted to anything new. | Until it registers again, when it sweeps every scope. |
+
+Residual risks of the fence, accepted here:
+
+- A validity check and the effect it guards are separate steps. Where the
+  effect follows in the same poll of the task (a decision turned into a
+  reply) nothing can come between them but the scheduler. Where an await
+  lies between them (the room actor's durable commit of a seat or a role
+  change it has checked, a frame handed to the connection) the replica can
+  install a generation meanwhile; that effect is the in-flight work of the
+  table above, and a seat is swept. A replica that is stopped for more than
+  2 s between a check and its effect, and whose lease ran out meanwhile,
+  can complete that one effect after the acknowledgement; it then holds no
+  lease and decides nothing more.
+- The margin and the slack assume the replica's boot-time clock and
+  PostgreSQL's clock differ in rate by much less than a fifth over one
+  lease. PostgreSQL's clock is the same clock for every replica only while
+  the database stays on one host: a failover to a host whose clock is
+  ahead, or a host clock that steps forward, ends every lease early by the
+  difference, and a revoke can then stop waiting for a replica that still
+  decides. PostgreSQL hosts are therefore kept in sync by NTP with an
+  offset well under 1 s. Each registration and renewal compares the
+  replica's wall clock with PostgreSQL's `clock_timestamp()`: the gauge
+  `waddle.host_grant.fence.clock_skew` records the difference in
+  milliseconds, and a warning, at most one a minute, is logged when it
+  exceeds 500 ms (`FENCE_CLOCK_SKEW_WARNING`) by more than half the round
+  trip. The comparison assumes the replica's own wall clock is in sync; it
+  shows a database host that is not, and takes no part in the fence.
+- On a platform without `CLOCK_BOOTTIME` the lease is measured on a clock
+  that stops while the host is suspended, and the fence warns once when it
+  starts there. Production replicas run on Linux.
+- A replica that renews its lease and cannot record a generation (its
+  acknowledgement write fails while its renewal succeeds) holds the
+  acknowledgement back until the write succeeds; the caller is told after
+  10 s that the operation is recorded and not acknowledged.
+- The tick uses the main connection pool. A pool that is exhausted for more
+  than 4 s costs the replica its lease, and its managed rooms answer
+  unavailable until the next tick registers it again.
+
+### The queue in front of the guard (G12)
+
+The first slice left open whether the guard needs a fair primitive:
+PostgreSQL lets a share locker join the share lockers of a row whatever
+waits for the row exclusively, so overlapping acceptances of one scope could
+keep a mutation of that scope waiting without bound. It does. Whoever takes
+a scope's guard first takes a transaction-scoped advisory lock keyed by the
+scope (`model::guard_queue_key`, the first eight bytes of a hash of the
+lifecycle), in the same mode: an acceptance
+`pg_advisory_xact_lock_shared`, a store transaction
+`pg_advisory_xact_lock`. Advisory locks go through the lock manager, which
+grants in arrival order: a shared request that arrives after a waiting
+exclusive one waits behind it.
+
+- Lock order: the queue lock is taken immediately before the guard, in
+  both kinds of transaction, so the orders of the first slice hold with
+  "the queue lock, then the guard" in place of "the guard". A transaction
+  that takes several guards takes each pair in ascending lifecycle, as
+  before. The batches of a restore transition take scope rows without the
+  queue lock; they wait for the row locks as before and are not part of a
+  revoke's path.
+- Bounds are unchanged: an acceptance waits at most its 100 ms for the
+  queue lock or the guard, a store transaction 3 s.
+- Behavior change: an acceptance that arrives while a mutation of its scope
+  waits no longer overtakes it. It waits behind the mutation and is refused
+  with the `Timeout` class, nothing accepted, if the mutation has not
+  committed within 100 ms. Before, it was admitted beside the acceptances
+  that kept the mutation waiting.
+- Two scopes whose keys collide wait for each other and nothing else.
+
+### Seated occupants, roles and media (G14)
+
+The room actor of a managed room mirrors the grants: who is seated, with
+which affiliation and role. `server/host_grant_revocation.rs` puts that
+back in line. The fence asks for a sweep of a scope whenever the replica
+installs a new generation of it, and of every scope when the replica
+registers. For each room of the scope that this process holds an actor for,
+the sweep reads the grants (without the lease: it admits nothing) and
+applies, per account the actor seats or lists:
+
+| The grants say | The actor holds | The sweep |
+| --- | --- | --- |
+| Banned (recorded or effective outcast) | A seat | Sets the entry to outcast and removes every seat with status 301 (XEP-0045 §9.1). |
+| No membership recorded | A seat | Sets the entry to none and removes every seat with status 321 (§9.4). |
+| Membership recorded, and reading not admitted: the scope admits nobody (retired, restored, fenced), or the grant is a privileged one of an account the replica does not serve | A seat | Removes every seat with status 321 and leaves the entry. |
+| No membership recorded, or banned | An entry above that, no seat | Sets the entry, which also refuses a join of that account the actor has not applied yet. |
+| An affiliation below the mirrored one | Any | Lowers the entry to the recorded one. The role is derived again (an admin that became a member is no moderator), with the affiliation presence. |
+
+A room's own administration request applies its change to the actor
+itself, with the administrator and the reason it names. The sweep does not
+look at a room while such a request is under way on the same process: it
+takes the room's configuration lock, which the request holds from before it
+records the change until the actor applied it, and then finds the room in
+line. It waits at most 1 s for that lock in one pass and comes back to the
+room in the next, so a request that waits for its acknowledgement does not
+hold up the other rooms. While a pass looks at a room it holds the lock
+itself, so a request that administers or configures that room waits for the
+pass to finish with it; every ask of the pass is bounded at 5 s. The lock is
+held by one process: a request and a sweep on different processes are not
+ordered by it. A sweep that reaches the actor first, on another
+process or for a change that was not made through the room, removes without
+naming an actor or a reason.
+
+The removal presence goes to the removed occupant (with status 110) and to
+everyone who stays. The removed sessions' media ends, and a changed voice is
+pushed to the media server. The effects travel as the actor's other
+administration effects do: through the room-effect outbox where the room is
+durable, directly otherwise. A removal that keeps the affiliation
+(`RemoveUnadmittedOccupant` in `waddle-xmpp`) exists because a list that was
+corrected without the seat (the mirror repair) would otherwise leave the
+occupant seated. The recorded owners are written into the actor's list
+first, so the actor's own last-owner rule does not refuse a removal the
+store decided.
+
+- The sweep acts only on a read that shows the grants. While they cannot be
+  read it changes nothing and tries again every second: a database that does
+  not answer never empties a room.
+- It never seats anyone and never raises an entry above the recorded
+  affiliation. The first slice's and the writer fence's rule stands: the
+  actor's list of a managed room is written only from canonical decisions.
+- Only the process that holds a room's actor sweeps it. A replica that only
+  relayed a join keeps its record of the remote membership; nothing reads it
+  for a managed room (self-ping below).
+- A closed scope empties its rooms. The occupants keep their recorded
+  standing and enter again once the scope admits.
+
+**Stale role between check and apply.** A request that changes roles only
+records nothing in the store, so nothing revalidates its sender after the
+grants were read. The room actor asks the decision's ticket in the turn that
+applies the request (`ApplyAdminItemsIfAdmitted`) and applies nothing once a
+newer generation is installed; the request is answered `resource-constraint`
+and decided again when it is repeated. A join carries its ticket the same
+way (`JoinWithAffiliationIfAdmitted`): the actor asks it before the join
+changes anything, and a join that was overtaken is decided again like one
+its own admission revision refused. A seat recorded while the generation
+moved asks for another sweep of its scope. An affiliation change needs
+neither: the store revalidates the initiator under the guard, and its own
+commit is what moves the generation.
+
+**Self-ping (XEP-0410).** The service advertises the self-ping
+optimization, so its answer is authoritative. For a managed room it is
+decided from the grants before occupancy, on whichever replica is asked,
+and before the record a relaying replica keeps of a remote membership: an
+account the grants do not admit to read is answered `not-acceptable`, "not
+joined", whether or not its seat has been removed yet. While the grants
+cannot be read the answer is `remote-server-timeout`, the one error
+XEP-0410 §4 has a client take no decision from; any other error would have
+every occupant leave and rejoin.
+
+**Media.** A live call participant of a managed room is decided from the
+grants (`send_message`) wherever its media grants are derived: the webhook
+on a participant's join, on the replica that receives it or the room's
+owner it is relayed to. An account the grants do not admit is removed from
+the call, so a token released before a revoke does not regain a media
+session. This changes the writer fence's rule that these paths follow
+occupancy only; grants that cannot be read change nothing there.
+
+### Sink contracts under the fence (G16)
+
+The writer fence's contracts (B5) stand. Under the fence each reads as
+follows; "decided" means from the grants, with a ticket.
+
+| Surface | After a revoke is acknowledged |
+| --- | --- |
+| Join | Decided; the actor asks the ticket before it changes anything. An occupant seated before is removed by the sweep. |
+| Archive pages, room disco#info, pin list | The decision after the read answers nothing once its ticket is not current, so a page read before the revoke is not sent on a decision made before it. A response already built is in-flight work. |
+| Fan-out and stream-management fan-out from an enrolled Space node | Nothing is delivered (writer fence). |
+| Fan-out from a Space node no scope enrolls | Not covered by the acknowledgement. The node's deliverable subscriptions are read again once per publication, in one statement, before its first hand-over (`PubSubStorage::list_deliverable_subscribers`), and the event is handed only to captured subscribers still among them, for a live queue and for the detached stream-management buffer alike. A list captured before a ban or an unsubscription hands nothing to the subscriber it removed: the #2056 schedule. The fence of such a change is its storage commit; a hand-over whose read preceded the commit can follow it. |
+| Stream-management resend | Replays what a session's queue already holds: accepted children and events handed over before. It takes no decision and is not filtered. |
+| Queued invitations | Refused when planned (writer fence); nothing is queued that could grant after a revoke. An invitation accepted before enrollment is delivered without granting membership, as before. |
+| Extension delivery | A managed room serves no extension state and seats no extension bot (writer fence); an observer is dropped from each acceptance. Nothing is queued for an extension. |
+| Room administration | An affiliation change is revalidated under the guard. A role change is refused by the actor once its sender's decision is overtaken. An owner's configuration change reads the grants again once it holds the room's configuration lock, which an administration request holds from before it records a change until the actor applied it, and asks that decision again just before the actor applies the change: a demotion acknowledged while the change waited refuses it (`forbidden`). A request waits at most 15 s for the lock (`ROOM_CONFIG_LOCK_WAIT`) and is answered `resource-constraint` after that. The role list is decided again after the actor's occupants were read; the affiliation lists are answered from the decision itself. |
+| Call setup, Muji presence that starts, joins or prepares a call | Decided at each verification; a decision that is not current allows nothing. A live participant is decided from the grants. |
+| Room system messages | The audience of a room's own message is decided before its archive write and again after it, and each occupant is asked again just before its copy is routed; a decision whose ticket is no longer current is read again for the occupants that remain. Grants that cannot be read after the archive write deliver nothing. |
+| An extension's archive query (`query_mam`), the reserved-nick node (XEP-0045 §7.12) | Decided before the read and again after it, as an archive page is. |
+| Channel-wide mentions, moderation, search and discovery | Decided when sent. Some are decided before an await and acted on after it (see What stays open). |
+| Claim-move re-seating | Decided once per claim epoch (writer fence). The re-seating asks for a sweep of the room once the seats are restored, and also when the ask that seats them failed or timed out, since it may have seated some; the sweep removes a seat the grants no longer admit. |
+
+### Operator acts
+
+`waddle-server host-grant` gains, beside the restore acts:
+
+- `revoke`: unchanged in what it records; it now waits `--fence-wait`
+  seconds (15 by default) for the acknowledgement and prints it. Exit code 1
+  with `acknowledged: false` means recorded and not yet acknowledged; the
+  same command with the same operation ID replays the revoke and waits
+  again.
+- `grants --subject`: every grant row an account holds.
+- `revoke-account --subject [--ban]`: an operator's revoke or ban in every
+  room where the account holds a row that differs, each under an operation
+  identity derived from the act's, so the act is replayed as a whole. Every
+  room the account holds a row in is reported on its own line with the
+  fence's answer: at the generation of the revoke recorded now, or, where
+  the row already holds what is asked for (`"unchanged": true`), at the
+  scope's current generation, which covers the revoke an earlier run
+  recorded. A repeated act therefore confirms every room. One room's error
+  does not stop the others. The command exits as failed (1) when a room
+  could not be revoked or its acknowledgement could not be read, then as
+  refused (4) when a room's last owner of a served domain was refused
+  there (`last_owner`), then as failed (1) when a revoke is recorded and not
+  yet acknowledged. It is the act after a reported reassignment of a JID
+  ([runbook](../../../docs/operations/authz-host-grant-reassignment.md)).
+- `fence --scope`: whether the scope's current generation is acknowledged.
+
+The subcommand is no replica: it holds no lease and waits for those that do.
+
+### Non-reuse of retired account JIDs (D8)
+
+A home never issues the JID of a retired account to a new holder
+(`auth/retirement.rs`, migration 2006, both engines).
+
+- **The ledger.** `retired_account_jids` holds the canonical bare JID of
+  every retired account, the key `native_users.jid_key` uses. A row is never
+  updated or deleted. Under the restricted runtime the runtime role may only
+  read it.
+- **Retirement** (`retire_account`, `waddle-server account retire`) is one
+  transaction: it records the JID and removes the account's native
+  credentials and its account row, with the identity-provider links and
+  sessions that hang on it. A JID that holds no account is recorded as well.
+  No account was retired or deleted by the server before this slice; the
+  fixed-account bootstrap of test deployments resets credentials and is not
+  a retirement.
+- **Every provisioning path** reads the ledger where it would create the
+  row:
+
+  | Path | With a retired JID |
+  | --- | --- |
+  | Native registration (`NativeUserStore::register`) | The insert carries the condition; `JidRetired`. |
+  | Provisioning at an identity-provider login (`IdentityService::create_user`) | The insert carries the condition; the name is passed over like a taken one, so the account gets the next free name. The same provider subject returning after its account was retired is provisioned as a new account under another JID. |
+  | Session creation (`CreateAuthSession`), which inserts an account row for a JID that has none | The ledger is read in the transaction, after the insert; neither the row nor the session is created. This covers a login whose credentials were checked before the retirement. |
+  | Fixed-account bootstrap | Goes through native registration and fails. |
+
+  The owner localparts of the deployment configuration name JIDs, not
+  accounts, and create no account; a retired JID named there holds what it
+  is given and nobody can authenticate as it.
+- **Exclusion.** On PostgreSQL the retirement takes `SHARE ROW EXCLUSIVE`
+  on both account tables before it writes. An insert that has not committed
+  finishes first and is removed with the account; one that arrives later
+  waits for the commit and then runs against the ledger that holds the JID.
+  SQLite runs one writing transaction at a time. Every writer of the
+  account tables (provisioning, session creation at every login, changes of
+  native credentials) that arrives while the retirement waits for the lock
+  or holds it is held up until the retirement commits, rolls back or gives
+  up. The wait for the lock is at most 2 s; one that cannot get the lock in
+  time fails without having changed anything, the writers queued behind it
+  proceed, and it is run again. Once it holds the lock the transaction has
+  no deadline of its own: each of its statements runs at most 5 s. They are
+  the ledger insert, the deletes of the account's rows (the delete of its
+  `users` row cascades to its identity-provider links and its sessions; one
+  delete for each row of the account, usually one native row and one
+  account row) and two reads of the account rows that carry no lookup key:
+  five statements for a usual account, so a login can be held up for 2 s of
+  waiting plus up to 25 s, and is in practice for milliseconds. An account
+  whose delete does not finish within the statement bound is not retired;
+  nothing splits that delete.
+- **Not done by retirement:** it does not end the account's open streams,
+  and it does not revoke the account's grants in any room, here or on
+  another deployment. The [retirement runbook](../../../docs/operations/account-retirement.md)
+  orders those steps. Other homes cannot be required to keep such a ledger;
+  ADR-0020 D8 states what a reassigned JID may inherit there.
+
+### Store capabilities of the fence (G11)
+
+The first slice's grant matrix gains two relations, both `SELECT`,
+`INSERT`, `UPDATE` for the runtime role: `host_grant_fence_replicas` and
+`host_grant_fence_acks`. The runtime still deletes no host-grant row: an
+expired lease is a row that no longer counts, and the owner phase removes
+leases that ran out more than a day ago. The store's privilege check and the
+attachment's relation list cover both. `retired_account_jids` is `SELECT`
+only. A holder of the runtime credential can write a lease or an
+acknowledgement with its own SQL, and so make a revoke's acknowledgement
+wait or report a generation it did not install; as in the first slice, the
+runtime is the authority's writer, and the commit of a revoke is unaffected.
+
+### Rollout part of the revocation fence (G24)
+
+- Migration 2005 creates the two fence relations on PostgreSQL and nothing
+  on SQLite; migration 2006 creates the ledger of retired JIDs on both.
+  Version 2004 is not in this catalog. The owner phase applies them and
+  grants from the matrix before any server of the release starts, as for the
+  earlier migrations.
+- With no scope enrolled a replica holds no lease, runs no tick and no
+  sweep, and takes no queue lock. Unmanaged rooms never reach the fence.
+- With a scope enrolled, each serving replica runs four ticks a second on
+  its main connection pool, whether or not anything changes: one
+  transaction that renews its lease and reads every scope's generation
+  (two statements, plus the one that bounds them), and one more that
+  records the generations that moved.
+- For every deployment: native registration and identity-provider
+  provisioning insert under the ledger's condition, and session creation
+  reads the ledger once; fan-out from a node of the Spaces service lists
+  the node's deliverable subscriptions once more per publication before it
+  hands over; a self-ping and the media grants of a call participant ask
+  the gate, which answers from the enrolled set in memory for an unmanaged
+  room. A client's room administration and owner configuration requests
+  wait at most 15 s for the room's configuration lock and are answered
+  `resource-constraint` after that.
+- For enrolled scopes: every decision needs the replica's lease; an
+  affiliation change replies after the acknowledgement; occupants are
+  removed as above; an acceptance behind a waiting mutation waits for it.
+- Clocks, before the first enrollment: serving replicas run on Linux, where
+  the lease is measured on `CLOCK_BOOTTIME`; PostgreSQL hosts, the standby a
+  failover promotes included, are kept in sync by NTP with an offset well
+  under 1 s; and the `waddle.host_grant.fence.clock_skew` gauge of every
+  replica stays below 500 ms
+  ([metrics](../../../docs/operations/server-metrics.md)).
+- Mixed versions: a binary built before this slice holds no lease, so a
+  revoke does not wait for it, and it admits from decisions it does not
+  check. Enrollment therefore requires every serving replica of the
+  deployment on this slice's binary, as it already requires the writer
+  fence's: W13's rollout runbook enrolls no scope until every replica runs
+  it, and no replica of an older binary joins while a scope is enrolled.
+
+### What stays open
+
+- A PubSub admission identity for a scope's Space, and with it an
+  acknowledged fence for PubSub: unenrolled Spaces have the hand-over read
+  only.
+- Ending a retired or revoked account's open streams.
+- A replica whose lease lapsed keeps its seats until it registers again.
+  Removing them on the lapse would need the grants it cannot read.
+- The relayed record of a remote membership (`RemoteMucMemberships`) is not
+  cleared when the room's owner removes an occupant; self-ping no longer
+  reads it for a managed room, and other readers of it are not audited here.
+- A plain presence update of a seated, revoked occupant is still broadcast
+  until the sweep removes the seat.
+- Remote principals at these surfaces (W5e, W6a) and the remaining items of
+  the writer fence's list.
+- Surfaces that decide before an await and act after it without deciding
+  again, beyond those this section re-decides: XEP-0425 message moderation,
+  channel-wide mention delivery, Muji call start and the release of a media
+  token, the owner configuration form (`muc#owner` get), the extension bot
+  list, and the room and Space listings. A revoke acknowledged during that
+  await can be followed by that one effect, as for in-flight work. Each
+  needs its decision taken again, or its ticket asked, after the await, as
+  the archive pages, the role list and the room's own messages now do.
+- An owner's configuration change asks its decision just before it asks
+  the room actor, not in the actor's turn. An `UpdateConfig` that asks the
+  ticket in that turn, as `ApplyAdminItemsIfAdmitted` does, would close the
+  step between them.
+- The admin commands (`admin/channels.rs`) and the configuration recovery
+  path still wait for a room's configuration lock without bound.
+
+### Evidence of the revocation fence
+
+The suites, under `crates/waddle-server/tests/`:
+
+- `host_grant_revocation_fence.rs` (PostgreSQL): two replicas' gates on one
+  database. A revoke is acknowledged once both installed it, and a decision
+  read before it then allows nothing; a replica that stops renewing is
+  waited for until its lease and the grace ran out, decides nothing by then
+  and returns under a new registration; a renewal whose answer is held
+  until after the lease it renews ran out here does not make a decision
+  read under that lease current again; a replica that stopped in order, or
+  holds no attachment, is not waited for; an acceptance that arrives behind
+  a waiting revoke does not overtake it (the case fails without the queue
+  lock); the operator subcommands list, revoke and replay through the fence,
+  a repeated `revoke-account` reports every room acknowledged at its scope's
+  current generation, and both report a revoke a replica has not installed
+  as not acknowledged.
+- `xep0045_host_grant_revocation.rs` (PostgreSQL), on one or two replicas
+  served over loopback sockets: removal with status 321 and 301 through the
+  room's administration and through a revoke recorded outside the room, and
+  of everyone when the scope is retired; a revoke made on one replica is
+  acknowledged by both before its reply, the other removes the seat it
+  hosts, and a join decided before the revoke seats nobody when it reaches
+  the actor afterwards; a demotion lowers the mirrored affiliation and role
+  and voids a role change decided before it; the sweep changes nothing while
+  the grants cannot be read; four requests held after their decision while
+  a revoke is recorded and acknowledged (`DecisionCheckpoint`): an owner's
+  configuration change that waited for the configuration lock an
+  administration request held across the acknowledgement is refused, a
+  role list read before a demotion is not sent, an extension's archive page
+  read before a revoke is not returned, and the room's own message archived
+  before a revoke is not delivered to the revoked member; and
+  `two_processes_…`, where the second replica
+  is another operating-system process that is stopped with `SIGSTOP` in the
+  middle of a revoke: the reply waits for its lease, and when it continues
+  it never tells the revoked member that it is joined and removes the seat
+  once it has registered again.
+- `xep0410_host_grant_self_ping.rs` (PostgreSQL): `not-acceptable` for a
+  revoked occupant on another replica, `remote-server-timeout` while the
+  replica holds no lease.
+- `xep0060_space_fanout_fence.rs` (PostgreSQL): the #2056 schedule, for a
+  ban and for an unsubscription.
+- `xep0045_host_grant_fence.rs`, its join and disco case extended: the
+  reserved-nick node of a managed room is answered `item-not-found` to an
+  account the grants do not admit to view the room.
+- `account_jid_retirement.rs` (SQLite and PostgreSQL): every provisioning
+  path after a retirement, the exclusion of retirement and registration in
+  both orders, a retirement that fails with nothing changed when it cannot
+  lock the account tables within its bound, and the operator subcommand on
+  both engines.
+- `host_grant_projection.rs`, one case added
+  (`live_spicedb_a_revoke_is_acknowledged_while_the_projection_still_holds_the_grant`,
+  PostgreSQL and SpiceDB): a revoke is acknowledged while SpiceDB still
+  answers for the projection before it, the replica admits nothing under
+  it, and the projection follows on the next pass.
+
+The acceptance-matrix rows marked W5d map to them as follows. "#2056
+captured Space fanout after a revoke ACK" is `xep0060_space_fanout_fence`,
+with the limit stated above for unenrolled Spaces. "Acknowledged revoke
+across two replicas with queued work" is `host_grant_revocation_fence`
+(decisions held across the revoke, the queue at room-manifest acceptance)
+and `xep0045_host_grant_revocation` (joins, protected reads, room
+administration and the audience of a later message, on two replicas and two
+processes); PubSub and stream-management fan-out from an enrolled Space
+deliver nothing, which the writer fence's suite covers. "Retired account JID
+on a Waddle home" is `account_jid_retirement`.
+
+Not covered by a test: the media paths (the fenced state configures no media
+server), a seat that completes after an installation and the sweep it asks
+for, the detached stream-management leg of the Space fan-out, the sweep's
+delivery through the room-effect outbox and under clustering, the pruning of
+old leases by the owner phase, the restricted runtime role's privileges on
+the new relations beyond the store's own check, the two counters, the order
+of a room's administration and a sweep on different processes, the operator
+subcommand's exit code when a retirement fails, `revoke-account`'s line and
+exit code for a room whose revoke or acknowledgement fails to be read, the
+configuration lock's 15 s bound, the re-seating's sweep after a failed ask,
+the boot-time clock across an actual suspend of the host, the clock-skew
+gauge and its warning, a renewal that is slow in PostgreSQL rather than in
+its answer, and a second replica that is a `waddle-server` process rather
+than a process of the test binary: a server process attaches only under the
+restricted runtime, which is verification step 4.
+
+#### Running the revocation slice's focused set
+
+With the environment of the
+[first slice's focused set](#running-the-first-slices-focused-set):
+
+```sh
+cargo nextest run -p waddle-server --features test-support --locked \
+    --run-ignored all \
+    -E 'binary(host_grant_revocation_fence) | binary(xep0045_host_grant_revocation) | binary(xep0410_host_grant_self_ping) | binary(xep0060_space_fanout_fence) | binary(account_jid_retirement)'
+```
+
+Each case creates and drops its own database. None of these binaries needs
+SpiceDB; the case added to `host_grant_projection` does, and runs with the
+first slice's set. Three cases run the server binary's operator subcommands,
+and one starts a second process of the test binary.
+
+The set was executed on 2026-11-16 at commit `e60eea4a1`, against
+PostgreSQL 17.11 and SpiceDB 1.56.1, with nextest's default parallelism and
+together with the first slice's, the writer fence's and the restore slice's
+sets, whose code it changes: two consecutive runs passed 239 of 239 cases in
+19 binaries, the 27 cases of the five binaries above among them. That SpiceDB
+ran on a PostgreSQL datastore, so the `live_spicedb_` cases of those runs,
+the one added here included, are evidence against a PostgreSQL-backed
+SpiceDB, unlike the earlier runs recorded above. The second replica of the
+two-process case is a process of the test binary, not a `waddle-server`
+process.
+
+After the attached-only gate was merged in and the late renewal, the
+repeated `revoke-account`, the surfaces decided again after an await and
+the batched Space fan-out read were fixed, the same 19 binaries ran once
+more on 2026-11-16 at commit `658db7c4e`, with the same versions, the same
+PostgreSQL-backed SpiceDB and nextest's default parallelism: 245 of 245
+cases passed, 32 of them in the five binaries above. No run recorded here
+shows that a new case fails without its fix.
+
 ## Blocking review ledger
 
 Slice names refer to [the federation plan](../../../docs/planning/federation-2047.md),
@@ -2445,10 +3064,10 @@ evidence.
 | ID | Unresolved decision/evidence | Work blocked | Under ADR-0020 |
 | --- | --- | --- | --- |
 | B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | D5 condition, gate G11; open. Decided by W5b (store capabilities, credential separation: [recorded](#b1-store-capabilities-and-credential-separation-g11)) and W5c (writer inventory and exclusion: [recorded](#b1-writer-and-reader-exclusion-g11)); old binaries and credentials are retired under the rollout runbook (G24) and the activation runbook (G22). |
-| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e. Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part), and W5c's [as well](#b2-policy-for-the-surfaces-this-slice-protects-g14-part). |
+| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e; W5d decides the actor's seats, roles and media after a revoke ([recorded](#seated-occupants-roles-and-media-g14)). Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part), and W5c's [as well](#b2-policy-for-the-surfaces-this-slice-protects-g14-part). |
 | B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences ([recorded](#b3-projection-of-the-writers-this-slice-fences-g15-part)), W5o decides the fenced schema transition and W5r bounded reconstruction ([recorded](#verified-reconstruction-g15-part)). Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
-| B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences ([recorded](#b4-lock-order-of-the-surfaces-g12)). |
-| B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c ([recorded](#b5-sink-contracts-g16)); W5d's #2056 control is its evidence. |
+| B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences ([recorded](#b4-lock-order-of-the-surfaces-g12)) and by W5d with the queue in front of the guard ([recorded](#the-queue-in-front-of-the-guard-g12)). |
+| B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c ([recorded](#b5-sink-contracts-g16)); W5d defines what a revoke's acknowledgement means at each sink ([recorded](#sink-contracts-under-the-fence-g16)), and its focused set with the #2056 control is the evidence ([run](#running-the-revocation-slices-focused-set)). A PubSub admission identity for a scope's Space is still not built. |
 | B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |
 | B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r ([recorded](#restore-incarnation-decisions), with the limits it leaves open); its evidence runs in verification step 4. |
 

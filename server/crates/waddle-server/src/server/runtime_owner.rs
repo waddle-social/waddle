@@ -337,6 +337,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("device_auth", READ_WRITE),
     ("pending_auth", READ_INSERT_DELETE),
     ("xmpp_auth_codes", READ_INSERT_DELETE),
+    // Retired account JIDs (ADR-0020 D8). Retirement is an owner act; the
+    // runtime reads the ledger where it provisions an account and can
+    // neither retire a JID nor make one available again.
+    ("retired_account_jids", READ),
     ("permission_tuples", READ_WRITE),
     // Host-grant authority (ADR-0020 D5). The owner phase alone enrolls a
     // scope, binds its rooms and retires it, so the incarnation, the
@@ -353,6 +357,11 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("host_grants", READ_INSERT_UPDATE),
     ("host_grant_operations", READ_INSERT),
     ("host_grant_operation_changes", READ_INSERT),
+    // The revocation fence: a replica inserts its lease and renews it, and
+    // inserts and advances its acknowledgement of each scope. It deletes
+    // neither; an expired lease is a row that no longer counts.
+    ("host_grant_fence_replicas", READ_INSERT_UPDATE),
+    ("host_grant_fence_acks", READ_INSERT_UPDATE),
     // S2S IQ correlation: a pending request is inserted when it is written
     // to a stream and deleted by the response, failure or expiry that ends
     // it; a row is never updated. Each replica replaces its own liveness
@@ -854,8 +863,22 @@ async fn prepare_host_grant_restore(
             "finished a host-grant restore transition an earlier owner phase did not finish"
         ),
     }
+    // Leases of the revocation fence that ran out long ago count for
+    // nothing; the runtime role may not delete them, so the owner phase
+    // does. A failure leaves rows that are ignored anyway.
+    match store.prune_fence_replicas(FENCE_REPLICA_RETENTION).await {
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            kind = error.kind(),
+            "expired host-grant revocation fence leases were not pruned"
+        ),
+    }
     Ok(())
 }
+
+/// How long the owner phase keeps the row of a revocation-fence lease that
+/// ran out.
+const FENCE_REPLICA_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Advance the ingress protocol epoch to the one this binary implements.
 ///

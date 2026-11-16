@@ -42,9 +42,12 @@ space_fanout_start_attempted=1
   -o "-k $PGHOST -p $PGPORT -c listen_addresses='' -c logging_collector=off -c log_statement=none -c log_min_error_statement=panic" start >/dev/null
 timeout --kill-after=5 30 "$SPACE_FANOUT_POSTGRES_BIN/createdb" "$PGDATABASE"
 export WADDLE_TEST_POSTGRES_URL="postgresql://$PGUSER@localhost/$PGDATABASE?host=$PGHOST&port=$PGPORT"
+# Each case creates and drops a database of its own on this cluster; a case
+# that finds no PostgreSQL fails instead of passing vacuously.
+export WADDLE_TEST_REQUIRE_POSTGRES=1
 # Compiling and test execution have independent bounded deadlines.
-timeout --kill-after=10 1800 cargo test -p waddle-server --lib --features test-support --locked \
-  --no-run --message-format=json-render-diagnostics > "$space_fanout_root/build.json"
+timeout --kill-after=10 1800 cargo test -p waddle-server --features test-support --locked \
+  --test xep0060_space_fanout_fence --no-run --message-format=json-render-diagnostics > "$space_fanout_root/build.json"
 space_fanout_binary=$(python3 - "$space_fanout_root/build.json" <<'PY'
 import json
 import sys
@@ -53,32 +56,34 @@ with open(sys.argv[1]) as source:
     for line in source:
         event = json.loads(line)
         if (event.get("reason") == "compiler-artifact"
-                and event["target"]["name"] == "waddle_server"
+                and event["target"]["name"] == "xep0060_space_fanout_fence"
                 and event["profile"]["test"] and event.get("executable")):
             binaries.append(event["executable"])
 if len(binaries) != 1:
-    raise SystemExit(f"expected exactly one server library test binary, got {len(binaries)}")
+    raise SystemExit(f"expected exactly one Space fan-out fence test binary, got {len(binaries)}")
 print(binaries[0])
 PY
 )
-timeout --kill-after=5 30 "$space_fanout_binary" space_fanout_postgres:: --ignored --list > "$space_fanout_root/tests.txt"
+timeout --kill-after=5 30 "$space_fanout_binary" --list > "$space_fanout_root/tests.txt"
 python3 - "$space_fanout_root/tests.txt" <<'PY'
 import sys
-prefix = "server::routes::websocket::tests::space_fanout_postgres::"
-expected = {prefix + "postgres_space_fanout_outcast_after_capture_negative_control"}
+expected = {
+    "a_subscriber_banned_after_the_capture_receives_nothing",
+    "a_subscription_removed_after_the_capture_receives_nothing",
+}
 with open(sys.argv[1]) as source:
     actual = {line.removesuffix(": test\n") for line in source if line.endswith(": test\n")}
 if actual != expected:
     raise SystemExit(f"test inventory mismatch: missing={expected - actual}, extra={actual - expected}")
-print("Native PostgreSQL 17.11: exact one-test inventory verified")
+print("Native PostgreSQL 17.11: exact two-test inventory verified")
 PY
-timeout --kill-after=10 180 "$space_fanout_binary" space_fanout_postgres:: --ignored --test-threads=1 \
+timeout --kill-after=10 180 "$space_fanout_binary" --test-threads=1 \
   | tee "$space_fanout_root/results.txt"
 python3 - "$space_fanout_root/results.txt" <<'PY'
 import re
 import sys
 with open(sys.argv[1]) as source:
     results = source.read()
-if not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", results, re.MULTILINE):
-    raise SystemExit("expected one executed passing PostgreSQL tests, none ignored")
+if not re.search(r"^test result: ok\. 2 passed; 0 failed; 0 ignored;", results, re.MULTILINE):
+    raise SystemExit("expected two executed passing PostgreSQL tests, none ignored")
 PY

@@ -22,10 +22,19 @@
 //! membership and the room actor's occupancy admit nothing. It answers
 //! [`RoomGate::Unavailable`] when the enrolled set has not loaded, when the
 //! address reaches a managed room in a form that is not canonical, when the
-//! grants cannot be read within the bounds, and on a replica whose
+//! grants cannot be read within the bounds, on a replica whose
 //! attachment gate is not attached (its runtime role's privileges or the
-//! restore fence not verified, or verified again and refused): a surface
-//! fails closed on it.
+//! restore fence not verified, or verified again and refused), and on a
+//! replica that holds no lease of the revocation fence: a surface fails
+//! closed on it.
+//!
+//! Every decision for a managed room carries the replica's revocation-fence
+//! ticket ([`FenceTicket`]): the registration and the scope generation it
+//! was read under. [`ManagedRoomGrants::allows`] and
+//! [`ManagedRoomGrants::standing`] answer nothing once the ticket is no
+//! longer current, so a decision the replica has acknowledged a newer
+//! generation over, or that outlived the replica's lease, admits nothing
+//! however long its caller held it (see `fence`).
 //!
 //! SQLite holds no canonical store, so every room is unmanaged there.
 
@@ -37,6 +46,7 @@ use std::time::Duration;
 use jid::BareJid;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
+use super::fence::{FenceTicket, ReplicaFence};
 use super::issuance::ServedAccountDomains;
 use super::policy::HostGrantAction;
 use super::rate_limited::RateLimitedWarning;
@@ -54,6 +64,13 @@ static UNREADABLE: RateLimitedWarning = RateLimitedWarning::new();
 /// At most one warning a minute that an object was refused because the
 /// enrolled set has not loaded or the address is not canonical.
 static UNDECIDED: RateLimitedWarning = RateLimitedWarning::new();
+/// At most one warning a minute that a managed room was refused on a replica
+/// without a lease of the revocation fence.
+static UNLEASED: RateLimitedWarning = RateLimitedWarning::new();
+
+/// How many times a managed room's grants are read for one decision: a read
+/// the replica installed a newer generation over is made again once.
+const ROOM_READS: usize = 2;
 
 /// Longest a managed room's decision waits for its grants, connection
 /// checkout included. Each statement is bounded by the interactive bounds
@@ -67,6 +84,8 @@ pub struct HostGrantGate {
     store: Option<HostGrantStore>,
     enrolled: EnrolledScopes,
     attachment: Arc<OnceLock<Arc<HostGrantAttachmentGate>>>,
+    /// The replica's part of the revocation fence, on PostgreSQL.
+    fence: Option<ReplicaFence>,
     /// Another attachment gate than the bound one was offered: which of
     /// them speaks for the replica cannot be told, so no managed room is
     /// decided.
@@ -92,19 +111,39 @@ pub enum RoomGate<T> {
 }
 
 /// A managed room's canonical grants together with the account domains the
-/// replica serves, which decide whose privileged grants are honoured.
+/// replica serves, which decide whose privileged grants are honoured, and
+/// the revocation-fence ticket the grants were read under.
 #[derive(Clone, Debug)]
 pub struct ManagedRoomGrants {
     pub grants: RoomGrants,
     pub served: ServedAccountDomains,
+    /// What the grants were read under. A decision is acted on only while
+    /// it is current.
+    pub fence: FenceTicket,
 }
 
 impl ManagedRoomGrants {
+    /// Whether `subject` may perform `action`, and the decision may still
+    /// be acted on: a decision whose ticket is no longer current allows
+    /// nothing.
     pub fn allows(&self, subject: &BareJid, action: HostGrantAction) -> bool {
-        self.grants.allows(subject, action, &self.served)
+        self.fence.is_current() && self.grants.allows(subject, action, &self.served)
     }
 
+    /// The standing `subject` is honoured with; `None` once the decision's
+    /// ticket is no longer current.
     pub fn standing(&self, subject: &BareJid) -> super::model::RoomAffiliation {
+        if !self.fence.is_current() {
+            return super::model::RoomAffiliation::None;
+        }
+        self.grants.standing(subject, &self.served)
+    }
+
+    /// The standing the grants as read honour `subject` with, whether or
+    /// not the decision may still be acted on. It is what the grants said,
+    /// for a caller that puts derived state back in line with them and
+    /// checks the ticket itself.
+    pub fn standing_as_read(&self, subject: &BareJid) -> super::model::RoomAffiliation {
         self.grants.standing(subject, &self.served)
     }
 
@@ -128,11 +167,20 @@ impl HostGrantGate {
     /// The gate of a replica whose canonical store is `store`, sharing the
     /// enrolled set `enrolled` with the permission actor.
     pub fn with_enrolled_scopes(store: HostGrantStore, enrolled: EnrolledScopes) -> Self {
+        let attachment = Arc::default();
+        let conflicting = Arc::default();
+        let fence = ReplicaFence::new(
+            store.clone(),
+            enrolled.clone(),
+            Arc::clone(&attachment),
+            Arc::clone(&conflicting),
+        );
         Self {
             store: Some(store),
             enrolled,
-            attachment: Arc::default(),
-            conflicting: Arc::default(),
+            attachment,
+            fence: Some(fence),
+            conflicting,
         }
     }
 
@@ -173,6 +221,11 @@ impl HostGrantGate {
     /// The replica's enrolled set.
     pub fn enrolled(&self) -> &EnrolledScopes {
         &self.enrolled
+    }
+
+    /// The replica's part of the revocation fence, on PostgreSQL.
+    pub fn fence(&self) -> Option<&ReplicaFence> {
+        self.fence.as_ref()
     }
 
     /// The verified attachment the bound attachment gate holds now, only
@@ -231,40 +284,131 @@ impl HostGrantGate {
             }
             return RoomGate::Unavailable;
         };
+        let Some(fence) = &self.fence else {
+            return RoomGate::Unavailable;
+        };
+        for _ in 0..ROOM_READS {
+            // The registration comes first: the grants are read by a
+            // replica that holds its lease.
+            let Some(registration) = fence.begin_decision().await else {
+                if UNLEASED.due() {
+                    tracing::warn!(
+                        kind = "fence_unleased",
+                        "A managed room was refused: this replica holds no lease of the \
+                         host-grant revocation fence"
+                    );
+                }
+                return RoomGate::Unavailable;
+            };
+            match tokio::time::timeout(ROOM_READ_DEADLINE, store.room_grants(binding)).await {
+                Ok(Ok(RoomLookup::Managed(grants))) => {
+                    let ticket = fence.ticket(registration, grants.lifecycle, grants.generation);
+                    // A read the replica installed a newer generation over
+                    // is not a decision; it is made again.
+                    if ticket.is_current() {
+                        return RoomGate::Managed(ManagedRoomGrants {
+                            grants,
+                            served: attachment.served().clone(),
+                            fence: ticket,
+                        });
+                    }
+                }
+                // Room bindings are immutable, so a binding the enrolled set
+                // holds and the store does not is not a decision either.
+                Ok(Ok(RoomLookup::Unmanaged | RoomLookup::NotCanonical)) => {
+                    if UNREADABLE.due() {
+                        tracing::warn!(
+                            kind = "binding_missing",
+                            "A managed room was refused: its binding could not be read"
+                        );
+                    }
+                    return RoomGate::Unavailable;
+                }
+                Ok(Err(error)) => {
+                    if UNREADABLE.due() {
+                        tracing::warn!(
+                            kind = error.kind(),
+                            "The host-grant store could not be read for a room decision"
+                        );
+                    }
+                    return RoomGate::Unavailable;
+                }
+                Err(_) => {
+                    if UNREADABLE.due() {
+                        tracing::warn!(
+                            kind = "deadline",
+                            "The host-grant store could not be read for a room decision"
+                        );
+                    }
+                    return RoomGate::Unavailable;
+                }
+            }
+        }
+        if UNREADABLE.due() {
+            tracing::warn!(
+                kind = "overtaken",
+                "A managed room was refused: its grants kept changing while they were read"
+            );
+        }
+        RoomGate::Unavailable
+    }
+
+    /// The canonical grants of the room `binding` names as the store holds
+    /// them now, read without the replica's lease and carrying no ticket of
+    /// its fence. It is for the caller that puts derived state back in line
+    /// with the grants: what such a caller does on a read that shows no
+    /// standing (it removes an occupant, lowers a role) needs no admission,
+    /// and it must keep working while the replica's lease is lapsed.
+    /// Nothing may be admitted from it.
+    pub async fn room_as_stored(&self, binding: RoomBinding<'_>) -> RoomGate<ManagedRoomGrants> {
+        let Some(store) = &self.store else {
+            return RoomGate::Unmanaged;
+        };
+        match self.room_enrollment(binding).await {
+            Enrollment::Unmanaged => return RoomGate::Unmanaged,
+            Enrollment::Undecided => return RoomGate::Unavailable,
+            Enrollment::Enrolled => {}
+        }
+        let Some(attachment) = self.attachment() else {
+            return RoomGate::Unavailable;
+        };
         match tokio::time::timeout(ROOM_READ_DEADLINE, store.room_grants(binding)).await {
-            Ok(Ok(RoomLookup::Managed(grants))) => RoomGate::Managed(ManagedRoomGrants {
-                grants,
-                served: attachment.served().clone(),
-            }),
-            // Room bindings are immutable, so a binding the enrolled set
-            // holds and the store does not is not a decision either.
-            Ok(Ok(RoomLookup::Unmanaged | RoomLookup::NotCanonical)) => {
-                if UNREADABLE.due() {
-                    tracing::warn!(
-                        kind = "binding_missing",
-                        "A managed room was refused: its binding could not be read"
-                    );
-                }
-                RoomGate::Unavailable
+            Ok(Ok(RoomLookup::Managed(grants))) => {
+                let fence = FenceTicket::unfenced(grants.lifecycle, grants.generation);
+                RoomGate::Managed(ManagedRoomGrants {
+                    grants,
+                    served: attachment.served().clone(),
+                    fence,
+                })
             }
-            Ok(Err(error)) => {
-                if UNREADABLE.due() {
-                    tracing::warn!(
-                        kind = error.kind(),
-                        "The host-grant store could not be read for a room decision"
-                    );
-                }
-                RoomGate::Unavailable
-            }
-            Err(_) => {
-                if UNREADABLE.due() {
-                    tracing::warn!(
-                        kind = "deadline",
-                        "The host-grant store could not be read for a room decision"
-                    );
-                }
-                RoomGate::Unavailable
-            }
+            _ => RoomGate::Unavailable,
+        }
+    }
+
+    /// Ask the replica's revocation sweep for the scope that manages
+    /// `room`, if one does: a caller that changed what a room actor holds
+    /// from a decision it made earlier (seats restored after a claim move)
+    /// has the result put in line with the grants as they stand now.
+    pub fn request_sweep_of(&self, room: &BareJid) {
+        let (Some(fence), Some(enrolled)) = (&self.fence, self.enrolled.snapshot()) else {
+            return;
+        };
+        if let Some(lifecycle) = enrolled.room(room.as_str()) {
+            fence.request_sweep(lifecycle);
+        }
+    }
+
+    /// This gate without its part of the revocation fence: the same store,
+    /// enrolled set and attachment. Its [`Self::room`] decides nothing; a
+    /// task the fence itself drives holds it, so that the task does not keep
+    /// the fence alive.
+    pub fn detached(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            enrolled: self.enrolled.clone(),
+            attachment: Arc::clone(&self.attachment),
+            fence: None,
+            conflicting: Arc::clone(&self.conflicting),
         }
     }
 
@@ -279,6 +423,26 @@ impl HostGrantGate {
             RoomGate::Unmanaged => RoomGate::Unmanaged,
             RoomGate::Unavailable => RoomGate::Unavailable,
             RoomGate::Managed(room) => RoomGate::Managed(room.allows(subject, action)),
+        }
+    }
+
+    /// Whether `subject` may still perform `action` in the room `decided`
+    /// was read for, asked once an await separated that decision from the
+    /// effect it guards: the decision itself while its ticket is current,
+    /// otherwise a decision read now. A room that cannot be decided now
+    /// allows nothing.
+    pub async fn still_allows(
+        &self,
+        decided: &ManagedRoomGrants,
+        subject: &BareJid,
+        action: HostGrantAction,
+    ) -> bool {
+        if decided.fence.is_current() {
+            return decided.allows(subject, action);
+        }
+        match self.room(RoomBinding::Room(&decided.grants.room)).await {
+            RoomGate::Managed(now) => now.allows(subject, action),
+            RoomGate::Unmanaged | RoomGate::Unavailable => false,
         }
     }
 

@@ -354,7 +354,7 @@ where
         Arc::clone(&extension_manager),
     );
 
-    Arc::new(WebSocketState {
+    let state = Arc::new(WebSocketState {
             #[cfg(feature = "test-support")]
             sasl2_test_capability,
             deps: WebSocketDeps {
@@ -499,7 +499,11 @@ where
                 provider_dispatch_tasks:
                     ProviderDispatchTracker::new(),
             },
-        })
+        });
+    // As `http.rs` does: the revocation fence drives the sweep of the rooms
+    // this state hosts. The sweep holds the state's parts, not the state.
+    crate::server::host_grant_revocation::install(&state);
+    state
 }
 
 /// Seed an OIDC-provisioned local account directly into the `users`

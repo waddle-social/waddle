@@ -30,8 +30,8 @@ use waddle_xmpp::identity::CanonicalBareJid;
 
 use super::issuance::ServedAccountDomains;
 use super::model::{
-    AuthorityIncarnation, GrantGeneration, GrantOperationId, RoomAffiliation, ScopeLifecycleId,
-    HOST_GRANT_POLICY_VERSION,
+    guard_queue_key, AuthorityIncarnation, GrantGeneration, GrantOperationId, RoomAffiliation,
+    ScopeLifecycleId, HOST_GRANT_POLICY_VERSION,
 };
 use super::policy::{grant_allows, HostGrantAction};
 use super::restore::AuthorityBinding;
@@ -160,6 +160,16 @@ pub(crate) async fn admit_room_acceptance(
     let Some(lifecycle) = ScopeLifecycleId::from_storage(lifecycle_text) else {
         return Ok(closed);
     };
+
+    // The queue in front of the guard, shared: an acceptance that arrives
+    // while a mutation waits for the guard waits behind that mutation
+    // instead of joining the acceptances that keep it waiting
+    // (`model::guard_queue_key`).
+    tx.execute(
+        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+        crate::db_params![guard_queue_key(lifecycle)],
+    )
+    .await?;
 
     // The guard: shared with other acceptances, exclusive with mutations.
     let mut rows = tx

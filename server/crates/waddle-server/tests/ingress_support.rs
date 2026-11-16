@@ -348,6 +348,16 @@ impl IngressFixture {
         .expect("restarted authority")
     }
 
+    /// The deployment the fixture's database is enrolled for: what another
+    /// ingress authority on the same database names as its lineage.
+    pub fn deployment_uuid(&self) -> Uuid {
+        self.lineage
+            .deployment_uuid
+            .as_ref()
+            .expect("the fixture enrolls a deployment")
+            .0
+    }
+
     pub async fn close(self) {
         drop(self.uow);
         drop(self.db);

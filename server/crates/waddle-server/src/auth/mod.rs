@@ -15,6 +15,7 @@ pub mod oauth2;
 pub mod oidc;
 pub mod providers;
 pub mod redirect;
+pub mod retirement;
 pub mod session;
 
 use thiserror::Error;
@@ -86,6 +87,11 @@ pub enum AuthError {
 
     #[error("Registration disabled")]
     RegistrationDisabled,
+
+    /// The JID belonged to an account that was retired. It is never issued
+    /// to a new holder (ADR-0020 D8).
+    #[error("The account JID is retired and is not issued again")]
+    JidRetired,
 }
 
 impl From<reqwest::Error> for AuthError {

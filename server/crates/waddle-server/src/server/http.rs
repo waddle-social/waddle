@@ -954,6 +954,12 @@ async fn attach_host_grant_store(
         );
         return;
     }
+    // The replica registers with the revocation fence once it holds an
+    // attachment and a scope is enrolled, and decides nothing for a managed
+    // room before that.
+    if let Some(fence) = state.host_grants.fence() {
+        fence.start();
+    }
     let permissions = state.permission_actor.clone();
     let served = ServedAccountDomains::new([account_domain]);
     let issuance = service_domains.host_grant_issuance_policy(&served);
@@ -1878,6 +1884,9 @@ async fn create_websocket_state(
         .bind_recovery_environment(Arc::downgrade(&websocket_state)
             as std::sync::Weak<dyn crate::ingress::RecoveryEnvironment>);
     room_effect_arm_supervisor.attach_drain_state(&websocket_state);
+    // The revocation fence drives this replica's sweep of the rooms it
+    // hosts: a seated occupant the grants no longer admit is removed.
+    crate::server::host_grant_revocation::install(&websocket_state);
     crate::admin::channels::register(
         &websocket_state.deps.protocol.command_registry,
         Arc::clone(&state),

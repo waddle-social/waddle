@@ -43,6 +43,10 @@
 //! - Whether an object is enrolled at all is answered from the replica's
 //!   in-memory enrolled set ([`EnrolledScopes`]), refreshed in the
 //!   background, so rooms no scope manages never wait on PostgreSQL.
+//! - A revoke is acknowledged once no replica can act on a decision read
+//!   before it: each replica holds a lease, installs every scope's new
+//!   generation and records it, and a decision is acted on only while its
+//!   [`FenceTicket`] is current ([`ReplicaFence`], `fence`).
 //!
 //! The decisions behind the lock order, the store capabilities and the
 //! marker protocol are recorded in
@@ -52,8 +56,11 @@
 
 mod admission;
 mod authority;
+mod boot_clock;
+mod checkpoint;
 mod enrolled;
 mod error;
+mod fence;
 mod gate;
 mod issuance;
 mod marker;
@@ -74,11 +81,20 @@ pub use admission::{AdmissionDenial, AdmissionWitness, RoomAcceptance, RoomAdmis
 pub use authority::{
     HostGrantAuthority, ProjectionContradiction, Reconciliation, VerifiedProjection,
 };
+pub(crate) use checkpoint::reached as reach_checkpoint;
+pub use checkpoint::DecisionCheckpoint;
+#[cfg(feature = "test-support")]
+pub use checkpoint::{pause_at as pause_at_checkpoint, CheckpointGate};
 pub use enrolled::{
     EnrolledScopes, EnrolledSet, Enrollment, ENROLLED_SET_REFRESH_INTERVAL,
     ENROLLED_SET_STALE_AFTER,
 };
 pub use error::HostGrantError;
+pub use fence::{
+    FenceAcknowledgement, FenceTicket, ReplicaFence, RevocationSweep,
+    FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_CLOCK_SKEW_WARNING, FENCE_EXPIRY_GRACE,
+    FENCE_LEASE_MARGIN, FENCE_LEASE_TTL, FENCE_TICK,
+};
 pub use gate::{HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate};
 pub use issuance::{
     IssuanceBasis, IssuancePolicy, IssuanceRefusal, ServedAccountDomains, SubjectHome,

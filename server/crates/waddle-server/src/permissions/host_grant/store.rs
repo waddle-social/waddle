@@ -39,11 +39,11 @@ use super::error::HostGrantError;
 use super::issuance::{IssuanceBasis, IssuancePolicy, ServedAccountDomains, SubjectHome};
 use super::marker::ProjectionMarker;
 use super::model::{
-    AdmissionState, AuthorityIncarnation, CandidateAdmission, ClosedReason, EnrollScope,
-    GrantGeneration, GrantOperationId, GrantRow, GrantSubject, ManagedRoom, MutationReceipt,
-    OperationKind, OperationOutcome, OperationRecord, ProjectionDigest, RetireScope,
-    RoomAffiliation, ScopeLifecycleId, ScopeState, SetAffiliation, HOST_GRANT_POLICY_VERSION,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
+    guard_queue_key, AdmissionState, AuthorityIncarnation, CandidateAdmission, ClosedReason,
+    EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject, ManagedRoom,
+    MutationReceipt, OperationKind, OperationOutcome, OperationRecord, ProjectionDigest,
+    RetireScope, RoomAffiliation, ScopeLifecycleId, ScopeState, SetAffiliation,
+    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 use super::policy::{grant_allows, honoured_affiliation, initiator_may_change, HostGrantAction};
 use super::projection::{projection_digest, ProjectedGrant, ProjectionIntent, ProjectionPlan};
@@ -246,6 +246,11 @@ impl HostGrantStore {
         };
         tx.rollback().await?;
         Ok(unretired)
+    }
+
+    /// The database the store reads and writes.
+    pub(super) fn database(&self) -> &Database {
+        &self.db
     }
 
     async fn begin_write(&self) -> Result<EnteredTransaction<'_>, HostGrantError> {
@@ -882,6 +887,53 @@ impl HostGrantStore {
     ) -> Result<Vec<GrantRow>, HostGrantError> {
         let mut tx = self.begin_read().await?;
         let grants = load_grants(&mut tx, lifecycle).await?;
+        tx.rollback().await?;
+        Ok(grants)
+    }
+
+    /// Every grant row an account holds, in every room of every scope, in
+    /// lifecycle and room order: what an operator revokes after a reported
+    /// reassignment of the account's JID (ADR-0020 D8). A revoked subject's
+    /// row is listed with the affiliation `none`.
+    pub async fn subject_grants(
+        &self,
+        subject: &GrantSubject,
+    ) -> Result<Vec<(ScopeLifecycleId, GrantRow)>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT lifecycle_id, {GRANT_COLUMNS} FROM host_grants \
+                     WHERE subject_jid = ? ORDER BY lifecycle_id, room_jid"
+                ),
+                crate::db_params![subject.as_str()],
+            )
+            .await?;
+        let mut grants = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                .ok_or(corrupt("lifecycle_id"))?;
+            grants.push((
+                lifecycle,
+                GrantRow {
+                    room: row
+                        .get::<String>(1)?
+                        .parse()
+                        .map_err(|_| corrupt("room_jid"))?,
+                    subject: GrantSubject::from_storage(&row.get::<String>(2)?)
+                        .ok_or(corrupt("subject_jid"))?,
+                    affiliation: affiliation_column(&row, 3, "affiliation")?,
+                    effective_affiliation: affiliation_column(&row, 4, "effective_affiliation")?,
+                    changed_generation: GrantGeneration::new(row.get::<i64>(5)?)
+                        .ok_or(corrupt("changed_generation"))?,
+                    operation: GrantOperationId::from_storage(&row.get::<String>(6)?)
+                        .ok_or(corrupt("operation_id"))?,
+                    issuance_basis: IssuanceBasis::from_storage(&row.get::<String>(7)?)
+                        .ok_or(corrupt("issuance_basis"))?,
+                },
+            ));
+        }
+        drop(rows);
         tx.rollback().await?;
         Ok(grants)
     }
@@ -2899,6 +2951,16 @@ pub(super) async fn load_scope(
     lifecycle: ScopeLifecycleId,
     lock: bool,
 ) -> Result<Option<ScopeState>, HostGrantError> {
+    if lock {
+        // The queue in front of the guard: a mutation waits its turn behind
+        // the acceptances that arrived before it, and those that arrive
+        // later wait behind it (`model::guard_queue_key`).
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+            crate::db_params![guard_queue_key(lifecycle)],
+        )
+        .await?;
+    }
     let suffix = if lock { " FOR UPDATE" } else { "" };
     let mut rows = tx
         .query(

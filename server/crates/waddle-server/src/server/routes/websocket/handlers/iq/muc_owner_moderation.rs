@@ -1620,6 +1620,11 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
         }
 
+        crate::permissions::host_grant::reach_checkpoint(
+            crate::permissions::host_grant::DecisionCheckpoint::OwnerConfigAuthorized,
+            &room_jid,
+        )
+        .await;
         let mut batch = match apply_muc_owner_config(
             state,
             &room_jid,
@@ -1630,6 +1635,26 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         .await
         {
             Ok(batch) => batch,
+            Err(super::muc_owner_config::OwnerConfigError::Forbidden) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    forbidden_iq_error("Operation not permitted."),
+                )]
+                .into();
+            }
+            Err(super::muc_owner_config::OwnerConfigError::Busy) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    super::errors::resource_constraint_iq_error(
+                        "The room is being administered; try again.",
+                    ),
+                )]
+                .into();
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,

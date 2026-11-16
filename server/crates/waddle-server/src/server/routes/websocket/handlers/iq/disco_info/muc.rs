@@ -278,11 +278,20 @@ pub(super) async fn handle_muc_disco_info<'a>(
     // nick they currently occupy the room under; with no occupancy
     // there is no registered nickname and the query element is empty
     // per XEP-0030.
+    //
+    // A room an enrolled host-grant scope manages answers only a principal
+    // its grants admit to view it, as its disco#info does, decided before
+    // the room actor is read and again once it has been.
     if req.node == Some(NODE_ROOMUSER_ITEM) {
         let MucDiscoTarget::Room(room_jid) =
             classify_muc_disco_target(req.target_to, req.muc_domain)
         else {
             return None;
+        };
+        let host_grant_room = match enrolled_room_view(state, &room_jid, req.requester).await {
+            EnrolledRoomView::Unmanaged => false,
+            EnrolledRoomView::Admitted => true,
+            hidden => return Some(hidden.refusal(req)),
         };
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             // A dormant channel-backed room exists but has no occupants,
@@ -291,12 +300,15 @@ pub(super) async fn handle_muc_disco_info<'a>(
             // does not exist (#1260); a catalog FAILURE is a server
             // error, never a definitive "no such room".
             return Some(match get_managed_channel_for_room(state, &room_jid).await {
-                Ok(Some(_)) => DiscoInfoResponse::iq(build_disco_info_response(
-                    req.request_iq,
-                    &[],
-                    &[],
-                    Some(NODE_ROOMUSER_ITEM),
-                )),
+                Ok(Some(_)) => {
+                    let response = build_disco_info_response(
+                        req.request_iq,
+                        &[],
+                        &[],
+                        Some(NODE_ROOMUSER_ITEM),
+                    );
+                    admitted_after_read(state, &room_jid, req, host_grant_room, response).await
+                }
                 Ok(None) => DiscoInfoResponse::error(
                     req.id,
                     req.response_from,
@@ -355,7 +367,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             .unwrap_or_default();
         let response =
             build_disco_info_response(req.request_iq, &identities, &[], Some(NODE_ROOMUSER_ITEM));
-        return Some(DiscoInfoResponse::iq(response));
+        return Some(admitted_after_read(state, &room_jid, req, host_grant_room, response).await);
     }
 
     if matches!(

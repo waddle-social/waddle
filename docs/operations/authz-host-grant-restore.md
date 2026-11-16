@@ -291,6 +291,14 @@ attached. A restore of PostgreSQL before then loses the act without trace.
   owner of the served domain, and takes effect when it commits. Generate the
   operation ID once and repeat the command with it after an unknown outcome
   (exit status 1). `--account-domain` defaults to `WADDLE_XMPP_DOMAIN`.
+  After the commit it waits (`--fence-wait`, 15 s by default) until the
+  revocation fence has acknowledged the revoke, and prints the answer: every
+  server that holds a lease has installed it. During a restore no server
+  runs, so it answers at once with no replica. Exit status 1 with
+  `"acknowledged": false` means recorded and not yet acknowledged; repeat
+  the command. The other acts of the subcommand (`grants`,
+  `revoke-account`, `fence`) are described in the
+  [reassignment runbook](authz-host-grant-reassignment.md).
 
 A scope's lifecycle is `host_grant_rooms.lifecycle_id` for the room.
 

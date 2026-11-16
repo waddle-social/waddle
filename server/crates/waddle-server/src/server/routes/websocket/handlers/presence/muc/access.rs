@@ -30,12 +30,45 @@ pub(crate) async fn resolve_managed_channel_affiliation(
     members_only: bool,
     allow_repairs: bool,
 ) -> Result<ManagedChannelAffiliation, ()> {
-    if let Some(affiliation) = host_grant_affiliation(state, user_jid, room_jid).await? {
-        return Ok(ManagedChannelAffiliation {
-            affiliation,
-            members_only: true,
-            host_grant_managed: true,
-        });
+    resolve_managed_channel_admission(
+        state,
+        user_jid,
+        room_jid,
+        channel_id,
+        members_only,
+        allow_repairs,
+    )
+    .await
+    .map(|(affiliation, _)| affiliation)
+}
+
+/// [`resolve_managed_channel_affiliation`] together with the
+/// revocation-fence ticket of the decision, for a room an enrolled
+/// host-grant scope manages: the caller that goes on to seat the account
+/// acts on the decision only while the ticket is current.
+pub(crate) async fn resolve_managed_channel_admission(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    room_jid: &BareJid,
+    channel_id: &str,
+    members_only: bool,
+    allow_repairs: bool,
+) -> Result<
+    (
+        ManagedChannelAffiliation,
+        Option<crate::permissions::host_grant::FenceTicket>,
+    ),
+    (),
+> {
+    if let Some((affiliation, ticket)) = host_grant_admission(state, user_jid, room_jid).await? {
+        return Ok((
+            ManagedChannelAffiliation {
+                affiliation,
+                members_only: true,
+                host_grant_managed: true,
+            },
+            Some(ticket),
+        ));
     }
     let affiliation = resolve_legacy_channel_affiliation(
         state,
@@ -46,11 +79,14 @@ pub(crate) async fn resolve_managed_channel_affiliation(
         allow_repairs,
     )
     .await?;
-    Ok(ManagedChannelAffiliation {
-        affiliation,
-        members_only,
-        host_grant_managed: false,
-    })
+    Ok((
+        ManagedChannelAffiliation {
+            affiliation,
+            members_only,
+            host_grant_managed: false,
+        },
+        None,
+    ))
 }
 
 /// The affiliation a room that an enrolled host-grant scope manages enters
@@ -68,6 +104,26 @@ pub(crate) async fn host_grant_affiliation(
     user_jid: &BareJid,
     room_jid: &BareJid,
 ) -> Result<Option<Option<Affiliation>>, ()> {
+    host_grant_admission(state, user_jid, room_jid)
+        .await
+        .map(|admission| admission.map(|(affiliation, _)| affiliation))
+}
+
+/// [`host_grant_affiliation`] together with the revocation-fence ticket the
+/// grants were read under. The standing is `None` once the ticket is no
+/// longer current, and a caller whose effect follows the decision later
+/// asks the ticket again where the effect happens.
+pub(crate) async fn host_grant_admission(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    room_jid: &BareJid,
+) -> Result<
+    Option<(
+        Option<Affiliation>,
+        crate::permissions::host_grant::FenceTicket,
+    )>,
+    (),
+> {
     use crate::permissions::host_grant::{RoomAffiliation, RoomBinding, RoomGate};
     match state
         .deps
@@ -78,13 +134,16 @@ pub(crate) async fn host_grant_affiliation(
     {
         RoomGate::Unmanaged => Ok(None),
         RoomGate::Unavailable => Err(()),
-        RoomGate::Managed(room) => Ok(Some(match room.standing(user_jid) {
-            RoomAffiliation::Outcast => Some(Affiliation::Outcast),
-            RoomAffiliation::None => None,
-            RoomAffiliation::Member => Some(Affiliation::Member),
-            RoomAffiliation::Admin => Some(Affiliation::Admin),
-            RoomAffiliation::Owner => Some(Affiliation::Owner),
-        })),
+        RoomGate::Managed(room) => Ok(Some((
+            match room.standing(user_jid) {
+                RoomAffiliation::Outcast => Some(Affiliation::Outcast),
+                RoomAffiliation::None => None,
+                RoomAffiliation::Member => Some(Affiliation::Member),
+                RoomAffiliation::Admin => Some(Affiliation::Admin),
+                RoomAffiliation::Owner => Some(Affiliation::Owner),
+            },
+            room.fence,
+        ))),
     }
 }
 

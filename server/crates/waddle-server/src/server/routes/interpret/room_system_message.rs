@@ -10,7 +10,8 @@
 //!    helper.
 //! 3. Routes a copy to every joined occupant (per-resource fan-out). In a
 //!    room an enrolled host-grant scope manages, only to the occupants
-//!    whose canonical grants allow reading the room.
+//!    whose canonical grants allow reading the room, decided again after
+//!    the archive write and asked again before each copy is routed.
 //!
 //! Bypasses the occupancy gate, rich-target validation, and extension
 //! enrichment — the sender is the room itself.
@@ -115,14 +116,14 @@ pub(super) async fn broadcast_room_system_message_with_identity(
     // grants allow reading the room: the actor's roster may still seat an
     // occupant whose grant was revoked. When that cannot be decided nothing
     // is archived or sent, and the caller's own retry applies.
-    let occupants = match system_message_audience(deps, &room, &snapshot.occupants).await {
-        Some(occupants) => occupants,
-        None => {
-            deps.effects
-                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
-            return None;
-        }
-    };
+    if system_message_audience(deps, &room, &snapshot.occupants)
+        .await
+        .is_none()
+    {
+        deps.effects
+            .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
+        return None;
+    }
 
     // Stamp a canonical XEP-0359 `<stanza-id by='room'/>` so the
     // message is uniquely addressable in MAM and from clients.
@@ -264,13 +265,31 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         }
     };
 
+    // The audience was decided before the archive write. A revoke
+    // acknowledged meanwhile must keep its occupant from receiving the
+    // message, so the audience is decided again for the delivery, and each
+    // occupant is asked again before its copy is routed. Grants that cannot
+    // be read now deliver nothing; the message stays archived.
+    crate::permissions::host_grant::reach_checkpoint(
+        crate::permissions::host_grant::DecisionCheckpoint::SystemMessageArchived,
+        &room,
+    )
+    .await;
+    let mut audience = system_message_audience(deps, &room, &snapshot.occupants)
+        .await
+        .unwrap_or_default();
+
     // Fan out to every joined occupant. One `RouteToConnection`
     // per occupant full JID with the message's `to` set to that
     // occupant's full JID, matching `ReflectorHandler`'s
     // per-recipient personalization. Without this, downstream
     // recipient-pass logic (incoming-blocking, archive, inbox) sees
     // a stanza addressed to the room bare JID and may misroute.
-    for occupant in &occupants {
+    let mut occupants = Vec::with_capacity(audience.occupants.len());
+    for occupant in std::mem::take(&mut audience.occupants) {
+        if !audience.still_reads(deps, &room, occupant).await {
+            continue;
+        }
         let mut copy = (*message).clone();
         copy.to = Some(Jid::from(occupant.full_jid.clone()));
         route_to_connection(
@@ -281,6 +300,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
             None,
         )
         .await;
+        occupants.push(occupant);
     }
     if !occupants.is_empty() {
         let room_generation = snapshot
@@ -308,6 +328,51 @@ pub(super) async fn broadcast_room_system_message_with_identity(
     Some(stanza_id)
 }
 
+/// The occupants a room's own message is delivered to, and the decision
+/// that named them in a managed room.
+#[derive(Default)]
+struct SystemMessageAudience<'o> {
+    occupants: Vec<&'o RoomChainOccupant>,
+    /// The managed room's decision, `None` for a room no scope manages.
+    decision: Option<crate::permissions::host_grant::ManagedRoomGrants>,
+}
+
+impl SystemMessageAudience<'_> {
+    /// Whether `occupant` still reads the room as its copy is about to be
+    /// routed: always in a room no scope manages; in a managed room, by the
+    /// audience's decision while its ticket is current, otherwise by a
+    /// decision read now, which then serves the remaining occupants.
+    async fn still_reads(
+        &mut self,
+        deps: &Deps<'_>,
+        room: &BareJid,
+        occupant: &RoomChainOccupant,
+    ) -> bool {
+        use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+        let Some(decision) = &self.decision else {
+            return true;
+        };
+        if !decision.fence.is_current() {
+            let Some(state) = deps.web_socket_state else {
+                return false;
+            };
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .room(RoomBinding::Room(room))
+                .await
+            {
+                RoomGate::Managed(now) => self.decision = Some(now),
+                RoomGate::Unmanaged | RoomGate::Unavailable => return false,
+            }
+        }
+        self.decision.as_ref().is_some_and(|decision| {
+            decision.allows(&occupant.full_jid.to_bare(), HostGrantAction::Read)
+        })
+    }
+}
+
 /// The occupants a room's own message is delivered to: every seated
 /// occupant of a room no enrolled scope manages; in a managed room, those
 /// whose canonical grants allow `read`. `None` when a managed room's grants
@@ -317,7 +382,7 @@ async fn system_message_audience<'o>(
     deps: &Deps<'_>,
     room: &BareJid,
     occupants: &'o [RoomChainOccupant],
-) -> Option<Vec<&'o RoomChainOccupant>> {
+) -> Option<SystemMessageAudience<'o>> {
     use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
     let state = deps.web_socket_state?;
     match state
@@ -327,15 +392,19 @@ async fn system_message_audience<'o>(
         .room(RoomBinding::Room(room))
         .await
     {
-        RoomGate::Unmanaged => Some(occupants.iter().collect()),
-        RoomGate::Managed(grants) => Some(
-            occupants
+        RoomGate::Unmanaged => Some(SystemMessageAudience {
+            occupants: occupants.iter().collect(),
+            decision: None,
+        }),
+        RoomGate::Managed(grants) => Some(SystemMessageAudience {
+            occupants: occupants
                 .iter()
                 .filter(|occupant| {
                     grants.allows(&occupant.full_jid.to_bare(), HostGrantAction::Read)
                 })
                 .collect(),
-        ),
+            decision: Some(grants),
+        }),
         RoomGate::Unavailable => None,
     }
 }

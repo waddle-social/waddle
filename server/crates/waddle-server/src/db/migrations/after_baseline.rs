@@ -27,6 +27,14 @@ pub const S2S_IQ_CORRELATIONS_VERSION: i64 = 2003;
 /// table and its room verdict cache.
 pub const S2S_REMOTE_ROOMS_VERSION: i64 = 2004;
 
+/// Version of the migration that creates the host-grant revocation fence's
+/// replica leases and acknowledgements.
+pub const HOST_GRANT_REVOCATION_FENCE_VERSION: i64 = 2005;
+
+/// Version of the migration that creates the ledger of retired account
+/// JIDs.
+pub const RETIRED_ACCOUNT_JIDS_VERSION: i64 = 2006;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -66,6 +74,26 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2004_s2s_remote_rooms.postgres.sql"
             ),
         },
+        Migration {
+            version: HOST_GRANT_REVOCATION_FENCE_VERSION,
+            description: "host-grant revocation fence".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2005_host_grant_revocation_fence.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2005_host_grant_revocation_fence.postgres.sql"
+            ),
+        },
+        Migration {
+            version: RETIRED_ACCOUNT_JIDS_VERSION,
+            description: "retired account jids".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2006_retired_account_jids.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2006_retired_account_jids.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -74,6 +102,7 @@ mod tests {
     use super::super::BASELINE_VERSION;
     use super::{
         all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
+        HOST_GRANT_REVOCATION_FENCE_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
         S2S_IQ_CORRELATIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
     };
 
@@ -88,7 +117,9 @@ mod tests {
                 HOST_GRANT_AUTHORITY_VERSION,
                 HOST_GRANT_RESTORE_INCARNATION_VERSION,
                 S2S_IQ_CORRELATIONS_VERSION,
-                S2S_REMOTE_ROOMS_VERSION
+                S2S_REMOTE_ROOMS_VERSION,
+                HOST_GRANT_REVOCATION_FENCE_VERSION,
+                RETIRED_ACCOUNT_JIDS_VERSION
             ]
         );
     }

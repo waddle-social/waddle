@@ -103,12 +103,15 @@ pub(super) fn host_grant_affiliation_list(
 }
 
 /// Record one affiliation change in the host-grant store before the room
-/// actor applies it. `Ok` means the change is recorded: a reduction is
-/// effective at once, and an increase once its projection has been verified
-/// and activated by the reconciliation this starts.
+/// actor applies it. `Ok` means the change is recorded and the revocation
+/// fence has acknowledged it: a reduction is effective at its commit and no
+/// replica acts on a decision read before it, and an increase is effective
+/// once its projection has been verified and activated by the
+/// reconciliation this starts.
 ///
 /// The refusal says whether the change may have been recorded anyway: its
-/// commit was not acknowledged and could not be read back.
+/// commit was not acknowledged and could not be read back, or it was
+/// recorded and the fence did not acknowledge it in time.
 pub(crate) async fn record_host_grant_affiliation(
     state: &WebSocketState,
     room: &ManagedRoomGrants,
@@ -149,16 +152,17 @@ pub(crate) async fn record_host_grant_affiliation(
             affiliation: room_affiliation(affiliation),
         };
         match authority.set_affiliation(&command).await {
-            Ok(_) => {
+            Ok(receipt) => {
+                let recorded = receipt.record().generation;
                 spawn_reconcile(gate.clone(), authority, command);
-                return Ok(());
+                return acknowledge(gate, store, room.grants.lifecycle, recorded).await;
             }
             Err(HostGrantError::StaleGeneration { current }) => generation = current,
             Err(HostGrantError::CommitOutcomeUnknown) => {
                 return match store.operation_outcome(command.operation).await {
-                    Ok(OperationOutcome::Committed(_)) => {
+                    Ok(OperationOutcome::Committed(record)) => {
                         spawn_reconcile(gate.clone(), authority, command);
-                        Ok(())
+                        acknowledge(gate, store, room.grants.lifecycle, record.generation).await
                     }
                     Ok(OperationOutcome::Absent) => Err(RecordRefusal::refused(
                         internal_server_error_iq_error("Internal server error."),
@@ -185,11 +189,55 @@ pub(crate) async fn record_host_grant_affiliation(
     )))
 }
 
+/// Wait until the revocation fence has acknowledged a recorded change: every
+/// replica that may still decide for the scope has installed the change's
+/// generation, so none acts on a decision read before it. This replica
+/// installs it at once; the others within one tick of their fence, and one
+/// that stopped is waited for until its lease has run out. The request's
+/// reply follows the acknowledgement, so a reply that reports a revoke
+/// reports one no replica admits under any more.
+///
+/// A change that was recorded stays recorded when the acknowledgement does
+/// not arrive in time or cannot be read; the reply then says the request
+/// should be made again, and the refusal says the store holds the change.
+async fn acknowledge(
+    gate: &crate::permissions::host_grant::HostGrantGate,
+    store: &crate::permissions::host_grant::HostGrantStore,
+    lifecycle: crate::permissions::host_grant::ScopeLifecycleId,
+    generation: crate::permissions::host_grant::GrantGeneration,
+) -> Result<(), RecordRefusal> {
+    use crate::permissions::host_grant::FENCE_ACKNOWLEDGEMENT_DEADLINE;
+    if let Some(fence) = gate.fence() {
+        fence.wake();
+    }
+    let unacknowledged = |kind: &'static str| {
+        warn!(
+            kind,
+            "A recorded room affiliation change was not acknowledged by the revocation fence"
+        );
+        RecordRefusal {
+            error: Box::new(resource_constraint_iq_error(
+                "The change is recorded and not yet acknowledged; try again.",
+            )),
+            maybe_recorded: true,
+        }
+    };
+    match store
+        .await_revocation_fence(lifecycle, generation, FENCE_ACKNOWLEDGEMENT_DEADLINE)
+        .await
+    {
+        Ok(reading) if reading.acknowledged() => Ok(()),
+        Ok(_) => Err(unacknowledged("pending")),
+        Err(error) => Err(unacknowledged(error.kind())),
+    }
+}
+
 /// Why an affiliation change was not recorded, as the request's reply.
 pub(crate) struct RecordRefusal {
     pub(crate) error: Box<StanzaError>,
-    /// The commit was not acknowledged and its outcome could not be read
-    /// back: the store may hold the change.
+    /// The store may hold the change: its commit was not acknowledged and
+    /// its outcome could not be read back, or it was recorded and the
+    /// revocation fence has not acknowledged it.
     pub(crate) maybe_recorded: bool,
 }
 

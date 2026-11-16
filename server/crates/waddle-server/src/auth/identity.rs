@@ -1,4 +1,5 @@
 use crate::auth::directory::canonical_localpart;
+use crate::auth::retirement::{retirement_key, JID_NOT_RETIRED_SQL};
 use crate::auth::{localpart_to_jid, username_to_localpart, AuthError, AuthProviderConfig};
 use kameo::actor::ActorRef;
 use waddle_xmpp::identity::AccountLocalpart;
@@ -250,16 +251,24 @@ impl IdentityService {
             let jid = localpart_to_jid(&xmpp_localpart, domain)?;
             let now = Utc::now().to_rfc3339();
 
-            let insert = r#"
-                INSERT INTO users (
-                    jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#;
+            // A name whose JID belonged to a retired account is not free:
+            // the account is created only where the ledger of retired JIDs
+            // does not hold the JID, in the statement that creates the row
+            // (`auth::retirement`). A JID without a canonical form is not a
+            // name an account can take either.
+            let Some(retirement_key) = retirement_key(&xmpp_localpart, domain) else {
+                continue;
+            };
+            let insert = format!(
+                "INSERT INTO users (jid, username, xmpp_localpart, localpart_key, display_name, \
+                 avatar_url, primary_email, created_at, updated_at) \
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE {JID_NOT_RETIRED_SQL}"
+            );
 
             let result = self
                 .actor
                 .ask(DbExecute {
-                    sql: insert.to_string(),
+                    sql: insert,
                     params: vec![
                         jid.clone().into(),
                         username.clone().into(),
@@ -273,11 +282,16 @@ impl IdentityService {
                         claims.email.clone().into(),
                         now.clone().into(),
                         now.clone().into(),
+                        retirement_key.into(),
                     ],
                 })
                 .await;
 
             match result {
+                // Nothing was inserted: the JID is retired. Like a name
+                // another account holds, it is passed over, so the account
+                // is given the next free name and never the retired JID.
+                Ok(0) => continue,
                 Ok(_) => {
                     return Ok(UserRecord {
                         jid,

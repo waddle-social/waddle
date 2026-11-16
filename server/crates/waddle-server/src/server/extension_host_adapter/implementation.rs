@@ -237,6 +237,42 @@ impl ExtensionHostAdapter {
         Err(ExtensionHostAdapterError::NotAuthorized)
     }
 
+    /// Decide again, after a protected read of `archive`, whether the
+    /// invoking account may still view it, for a room an enrolled
+    /// host-grant scope manages. [`Self::authorize_archive`] decided before
+    /// the read; a revoke acknowledged while the read ran must keep what was
+    /// read from being returned. The account's own archive and a room no
+    /// scope manages keep their single check.
+    pub(in crate::server::extension_host_adapter) async fn archive_still_authorized(
+        &self,
+        invocation: &ExtensionInvocation,
+        archive: &BareJid,
+    ) -> Result<(), ExtensionHostAdapterError> {
+        if archive == &invocation.actor_jid.to_bare()
+            || archive.domain().as_str() != self.state.deps.service_domains.muc
+        {
+            return Ok(());
+        }
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(archive) else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        let Some(session) = invocation.session.as_ref() else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        match crate::server::managed_channel_policy::host_grant_channel_permission(
+            &self.state.deps.app_state.host_grants,
+            &session.user_jid,
+            &channel_id,
+            &Permission::View,
+        )
+        .await
+        {
+            Ok(None | Some(true)) => Ok(()),
+            Ok(Some(false)) => Err(ExtensionHostAdapterError::NotAuthorized),
+            Err(error) => Err(ExtensionHostAdapterError::Storage(error)),
+        }
+    }
+
     pub(in crate::server::extension_host_adapter) async fn authorize_room(
         &self,
         invocation: &ExtensionInvocation,

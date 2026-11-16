@@ -106,7 +106,8 @@ const ACCOUNT_BINDING_RELATIONS: &[Relation] = &[
 /// ledger and the room bindings, which the owner phase alone writes. It
 /// row-locks and updates scope state, inserts and updates grant rows, and
 /// appends to the operation journal: an outcome is written once, and no
-/// host-grant row is ever deleted.
+/// host-grant row is ever deleted. A replica inserts and renews its
+/// revocation-fence lease and inserts and advances its acknowledgements.
 const HOST_GRANT_RELATIONS: &[Relation] = &[
     Relation {
         name: "host_grant_authority",
@@ -148,6 +149,18 @@ const HOST_GRANT_RELATIONS: &[Relation] = &[
         name: "host_grant_operation_changes",
         insert: true,
         update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_fence_replicas",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_fence_acks",
+        insert: true,
+        update: true,
         delete: false,
     },
 ];
