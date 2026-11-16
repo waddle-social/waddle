@@ -529,11 +529,17 @@ impl Inner {
 
     /// Find where one request for `room` is decided and hand it there: to
     /// this replica's room host, or to the replica that holds the room,
-    /// which then took it. The whole of it, waiting for a place among the
-    /// rooms being placed included, is bounded by the placement timeout; a
-    /// request whose holder does not answer within it is answered with
-    /// `resource-constraint`, and so is everything else that waits for the
-    /// room then.
+    /// which then took it.
+    ///
+    /// Waiting for a place among the rooms being placed and asking the
+    /// host are bounded apart, each by the placement timeout. Only the ask
+    /// says anything of the room's holder: a request that finds no place
+    /// in time is answered with `resource-constraint` alone, and its room
+    /// is not taken for one whose holder is silent. A holder the host
+    /// reports as silent ([`RoomPlacement::Silent`]), or that the ask
+    /// outlasts, is: the request and everything that waits for the room
+    /// then are answered with `resource-constraint`, and so is every
+    /// request for the room until the backoff has passed.
     async fn place_request(self: &Arc<Self>, room: &BareJid, waiting: Waiting) {
         let Some(hosting) = self.hosting.get() else {
             return;
@@ -548,66 +554,104 @@ impl Inner {
             self.refuse_unplaced(&request, self.busy(HOLDER_SILENT));
             return;
         }
-        let placing = async {
-            let _place = self.placements.place(&peer).await?;
-            Some(
-                hosting
-                    .host
-                    .place(&request.principal, &request.stanza)
-                    .await,
-            )
+        let place = tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => return,
+            place = tokio::time::timeout(
+                self.limits.room_placement_timeout,
+                self.placements.place(&peer),
+            ) => place,
         };
+        let place = match place {
+            Ok(Some(place)) => place,
+            // The stage is closed: the replica is stopping.
+            Ok(None) => return,
+            Err(_) => {
+                telemetry::room_placement_crowded();
+                self.refuse_unplaced(&request, self.busy(PLACES_TAKEN));
+                return;
+            }
+        };
+        // Another request may have found the holder silent meanwhile.
+        if self.placements.silent(room) {
+            telemetry::room_request_not_carried();
+            self.refuse_unplaced(&request, self.busy(HOLDER_SILENT));
+            return;
+        }
+        let placing = hosting.host.place(&request.principal, &request.stanza);
         let placed = tokio::select! {
             biased;
             () = self.shutdown.cancelled() => return,
             placed = tokio::time::timeout(self.limits.room_placement_timeout, placing) => placed,
         };
+        // The places are held for the ask only, not while the request
+        // waits for the room host's queue.
+        drop(place);
         match placed {
-            Ok(Some(RoomPlacement::Here)) => {
-                let refusal = replies::error_reply(
-                    &request.stanza,
-                    self.busy("The room is busy; try again later."),
-                );
-                let pair = Pair {
-                    local: request.local.clone(),
-                    remote: request.remote.clone(),
-                };
+            Ok(RoomPlacement::Here) => {
                 let deadline = arrived + self.limits.room_request_wait;
-                let work = RoomWork::Request(Box::new(request));
-                let queued = self
-                    .local_rooms
-                    .push_or_wait(room.clone(), work, &peer, deadline, &self.shutdown)
-                    .await;
-                // The stream that carried the stanza is not waiting for
-                // it any more, so a stanza that finds no place in time is
-                // answered rather than its stream closed.
-                if queued == Placed::TimedOut {
-                    telemetry::room_request_overloaded();
-                    if let Some(refusal) = refusal {
-                        self.offer_room_reply(&pair, refusal);
-                    }
-                }
+                self.queue_placed(room, request, &peer, deadline).await;
             }
-            Ok(Some(RoomPlacement::Carried)) => telemetry::room_request_carried(),
-            Ok(Some(RoomPlacement::Refused(error))) => {
+            Ok(RoomPlacement::Carried) => telemetry::room_request_carried(),
+            Ok(RoomPlacement::Refused(error)) => {
                 telemetry::room_request_not_carried();
                 self.refuse_unplaced(&request, *error);
             }
-            // The stage is closed: the replica is stopping.
-            Ok(None) => {}
+            Ok(RoomPlacement::Silent) => {
+                telemetry::room_placement_silent();
+                self.holder_silent(room, &request);
+            }
             Err(_) => {
                 telemetry::room_placement_timed_out();
-                self.placements.mark_silent(
-                    room,
-                    tokio::time::Instant::now() + self.limits.room_placement_backoff,
-                );
-                self.refuse_unplaced(&request, self.busy(HOLDER_SILENT));
-                // What waited behind it asked the same holder.
-                for behind in self.placements.drain(room) {
-                    telemetry::room_request_not_carried();
-                    self.refuse_unplaced(&behind.request, self.busy(HOLDER_SILENT));
-                }
+                self.holder_silent(room, &request);
             }
+        }
+    }
+
+    /// Queue a request placed on this replica for the room host, waiting
+    /// for a place until `deadline`. The stream that carried the stanza is
+    /// not waiting for it any more, so a stanza that finds no place in
+    /// time is answered rather than its stream closed.
+    async fn queue_placed(
+        self: &Arc<Self>,
+        room: &BareJid,
+        request: LocalRoomRequest,
+        peer: &str,
+        deadline: tokio::time::Instant,
+    ) {
+        let refusal = replies::error_reply(
+            &request.stanza,
+            self.busy("The room is busy; try again later."),
+        );
+        let pair = Pair {
+            local: request.local.clone(),
+            remote: request.remote.clone(),
+        };
+        let work = RoomWork::Request(Box::new(request));
+        let queued = self
+            .local_rooms
+            .push_or_wait(room.clone(), work, peer, deadline, &self.shutdown)
+            .await;
+        if queued == Placed::TimedOut {
+            telemetry::room_request_overloaded();
+            if let Some(refusal) = refusal {
+                self.offer_room_reply(&pair, refusal);
+            }
+        }
+    }
+
+    /// `room`'s holder did not answer `request`: answer it and everything
+    /// that waits for the room now, which asked the same holder, and answer
+    /// the room's requests without asking it until the backoff has passed.
+    fn holder_silent(self: &Arc<Self>, room: &BareJid, request: &LocalRoomRequest) {
+        self.placements.mark_silent(
+            room,
+            tokio::time::Instant::now() + self.limits.room_placement_backoff,
+        );
+        self.refuse_unplaced(request, self.busy(HOLDER_SILENT));
+        for behind in self.placements.drain(room) {
+            telemetry::room_request_not_carried();
+            self.refuse_unplaced(&behind.request, self.busy(HOLDER_SILENT));
         }
     }
 
@@ -1735,3 +1779,7 @@ impl Inner {
 /// The text of the error for a room whose holder did not answer.
 const HOLDER_SILENT: &str =
     "The room is held by another server node that did not answer; try again later.";
+
+/// The text of the error for a request that found no place among the rooms
+/// being placed.
+const PLACES_TAKEN: &str = "Too many rooms are being looked up now; try again later.";

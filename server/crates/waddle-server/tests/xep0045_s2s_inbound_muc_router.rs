@@ -43,7 +43,7 @@ use waddle_server::permissions::host_grant::StreamEvidence;
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::s2s::route::{
     CarriedPrincipal, CarriedRoomOutcome, CarriedRoomRequest, RouterLimits, Seat, SeatEnd,
-    SeatInsert, SeatLimits, SeatStore,
+    SeatInsert, SeatLimits, SeatStore, HOLDER_ASK_LIMIT,
 };
 use waddle_server::s2s::verify::TrustProfileKind;
 use waddle_xmpp::Stanza;
@@ -200,11 +200,14 @@ async fn a_join_replaces_the_seat_a_stopped_replica_left_whatever_the_bounds() {
 
 #[tokio::test]
 async fn a_room_whose_holder_does_not_answer_holds_back_no_other_room_or_domain() {
+    // The host reports the silent holder after its own bound on the ask,
+    // which is below the router's placement timeout: the backoff below
+    // engages on that report, not on the router's timer.
+    assert!(HOLDER_ASK_LIMIT < RouterLimits::default().room_placement_timeout);
     let limits = RouterLimits {
         // One worker hands every room's requests to the host: a request
         // that waited on it for a holder would hold back all of them.
         room_request_workers: 1,
-        room_placement_timeout: Duration::from_secs(4),
         room_placement_backoff: Duration::from_secs(60),
         ..RouterLimits::default()
     };

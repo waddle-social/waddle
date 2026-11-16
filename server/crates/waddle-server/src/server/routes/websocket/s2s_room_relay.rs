@@ -16,7 +16,10 @@
 //! The reply to the carrying replica says only whether the owner queued
 //! the stanza. A stanza the owner could not take is answered here with a
 //! retryable error; one whose hand-over has an unknown outcome is answered
-//! the same way, although the owner may still decide it.
+//! the same way, although the owner may still decide it. An owner that did
+//! not answer in time or could not be reached is reported as such
+//! ([`RoomPlacement::Silent`]), so that the router answers the room's next
+//! requests without asking it again for a while.
 
 use std::sync::Weak;
 use std::time::Duration;
@@ -30,13 +33,14 @@ use super::s2s_rooms::RoomCarrier;
 use super::WebSocketState;
 use crate::clustering::codec::RemoteStanza;
 use crate::clustering::relay::{
-    RelayAskError, RelayRemoteRoomRequest, RelayRemoteRoomRequestReply, RelayStreamStrength,
-    RelayTrustProfile,
+    RelayAskError, RelayRemoteRoomRequest, RelayRemoteRoomRequestReply, RelaySendFailure,
+    RelayStreamStrength, RelayTrustProfile,
 };
 use crate::clustering::NodeId;
 use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::route::{
     CarriedPrincipal, CarriedRoomOutcome, CarriedRoomRequest, RemotePrincipal, RoomPlacement,
+    HOLDER_ASK_LIMIT,
 };
 use crate::s2s::verify::TrustProfileKind;
 
@@ -44,10 +48,17 @@ use crate::s2s::verify::TrustProfileKind;
 /// owner. The owner only queues the stanza, so both are short.
 pub(crate) const REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const REMOTE_ROOM_REQUEST_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
-/// The origin's own bound on one ask, relay lookup included.
-const ASK_LIMIT: Duration = REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT
-    .saturating_add(REMOTE_ROOM_REQUEST_REPLY_TIMEOUT)
-    .saturating_add(Duration::from_millis(500));
+/// The origin's own bound on one ask, relay lookup included: the host's
+/// bound on placing a request, which leaves the owner's two windows and
+/// half a second for the lookup and the transport.
+const ASK_LIMIT: Duration = HOLDER_ASK_LIMIT;
+const _: () = assert!(
+    REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT
+        .saturating_add(REMOTE_ROOM_REQUEST_REPLY_TIMEOUT)
+        .saturating_add(Duration::from_millis(500))
+        .as_millis()
+        <= ASK_LIMIT.as_millis()
+);
 
 /// [`RoomCarrier`] over the cluster's room claims and relay.
 pub(super) struct ClusterRoomCarrier {
@@ -99,6 +110,30 @@ async fn catalogued(state: &WebSocketState, room: &BareJid) -> Catalogued {
         Ok(Some(_)) => Catalogued::NotOpen,
         Ok(None) if !state.deps.app_state.federates_new_rooms() => Catalogued::NotOpen,
         Ok(None) | Err(_) => Catalogued::Unknown,
+    }
+}
+
+/// Whether a failed ask says that the owner did not answer or could not be
+/// reached, rather than that it answered without taking the request.
+fn owner_silent(error: &RelayAskError) -> bool {
+    match error {
+        // The owner's relay is not in the swarm.
+        RelayAskError::NotFound { .. } => true,
+        RelayAskError::Send { failure, .. } => match failure {
+            // No answer within the owner's windows or this ask's bound, or
+            // no connection to the owner.
+            RelaySendFailure::ReplyTimeout | RelaySendFailure::Transport => true,
+            // The owner answered: its mailbox is full, its handler failed,
+            // or it predates the message.
+            RelaySendFailure::MailboxFull | RelaySendFailure::Handler | RelaySendFailure::Codec => {
+                false
+            }
+            // The cached address of the owner's relay is stale; the next
+            // ask looks it up again.
+            RelaySendFailure::StaleRef => false,
+        },
+        // This replica is stopping.
+        RelayAskError::Cancelled => false,
     }
 }
 
@@ -184,13 +219,17 @@ impl RoomCarrier for ClusterRoomCarrier {
                 }
                 // A node that predates this message answers `UnknownMessage`
                 // and ran nothing; any other failure may have queued the
-                // stanza, and is answered the same way.
+                // stanza, and is answered the same way. An owner that did
+                // not answer or could not be reached is reported as silent.
                 Err(error) => {
                     tracing::warn!(
                         owner = %owner.node_id,
                         %error,
                         "a remote principal's room request could not be carried to the room owner"
                     );
+                    if owner_silent(&error) {
+                        return RoomPlacement::Silent;
+                    }
                     return retry_later(
                         "The room is held by another server node that could not be reached; \
                          try again later.",

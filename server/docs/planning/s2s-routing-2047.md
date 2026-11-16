@@ -1333,13 +1333,22 @@ placed one at a time, so they reach the room's queue, or its holder, in
 the order they arrived. Lanes are placed concurrently: 64 rooms at once on
 a replica, and 8 for the requests of one remote domain, so a domain whose
 rooms are held by a replica that does not answer leaves the places of
-every other domain alone. Placing one request, waiting for one of those
-places included, takes at most 5 s. A request whose holder does not answer
-within that is answered with `resource-constraint` (type `wait`), and so
-is everything that waits for the same room then; for the next 5 s requests
-for that room are answered the same way without asking again, so a silent
-holder costs each of its rooms one wait and not one for every stanza. No
-stream is closed and no seat ends for a holder that does not answer. What
+every other domain alone. Waiting for one of those places and asking the
+holder are bounded apart, each at 5 s. A request that finds no place in
+time is answered with `resource-constraint` (type `wait`) alone: the wait
+says nothing of its room's holder. The ask does. The relay's own bound on
+it is 4.5 s (1 s for the holder to take the request, 3 s for its answer
+and half a second for the lookup), below the router's, so a holder that
+does not answer, or cannot be reached, is reported as such by the
+replica that asked (`RoomPlacement::Silent`), and the router's 5 s is a
+backstop. Either way the request is answered with `resource-constraint`
+(type `wait`), and so is everything that waits for the same room then;
+for the next 5 s requests for that room are answered the same way
+without asking again, so a silent holder costs each of its rooms one wait
+and not one for every stanza. A holder that answers without taking the
+request (its queues are full, it no longer holds the room) is not taken
+for silent: that one request is answered. No stream is closed and no
+seat ends for a holder that does not answer. What
 waits to be placed is bounded like the queues behind the stage (1,024 on a
 replica, 64 for one room, 64 from one remote domain); a stanza beyond a
 bound holds its stream until it fits, as there. Stanzas for the service
@@ -1389,7 +1398,9 @@ remote sender that some replica holds a room of that name.
 The relay's reply says only whether the holder queued the stanza. When it
 did not (its queues are full, it no longer holds the room, it hosts no
 rooms, it could not be reached, it did not answer in time), the carrying
-replica answers the sender with `resource-constraint` (type `wait`). The
+replica answers the sender with `resource-constraint` (type `wait`); the
+last two are the silent holder above, whose room is then answered without
+asking for the backoff. The
 carrying replica spends its domain's request rate, and the sender's
 account's share of it, on the stanza; the holder does not spend them
 again. The holder takes a carried stanza only for a room at its MUC
@@ -1488,7 +1499,7 @@ reached.
 | Of those, the stanzas of one remote account, on average and at once | 10 a second, 40 |
 | Refusals of an account's stanzas beyond its share that are answered, for one remote domain | 5 a second, 20 |
 | Rooms being placed at once on one replica, and for the requests of one remote domain | 64, 8 |
-| How long placing one request may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s |
+| How long a request may wait for a place among the rooms being placed, how long asking the holder may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s (4.5 s for the relay's own ask), 5 s |
 | Requests waiting for the room host on one replica (four workers of 256) | 1,024 |
 | Requests waiting for one room | 64 |
 | Requests waiting from one remote domain, of one worker's 256 | 64 |

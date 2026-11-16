@@ -206,9 +206,11 @@ pub struct RouterLimits {
     /// so that a domain whose rooms are held by a replica that does not
     /// answer leaves the places of every other domain alone.
     pub room_placements_per_peer: usize,
-    /// How long placing one request may take, waiting for one of those
-    /// places included, before its sender is answered with
-    /// `resource-constraint`.
+    /// How long a request may wait for one of those places, and then how
+    /// long asking the room host where it is decided may take, before its
+    /// sender is answered with `resource-constraint`. Only an ask that
+    /// outlasts it, or that the host reports as unanswered, marks the room
+    /// as one whose holder did not answer.
     pub room_placement_timeout: Duration,
     /// How long requests for a room whose holder did not answer are
     /// answered with `resource-constraint` without asking it again.

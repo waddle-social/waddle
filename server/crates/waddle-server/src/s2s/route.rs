@@ -51,7 +51,7 @@ pub use correlation::{
 pub use local::{LocalDelivery, LocalDeliveryOutcome, LocalOrigin};
 pub use local_rooms::{
     CarriedRoomOutcome, CarriedRoomRequest, LocalRooms, RoomPlacement, RoomReplies, RoomRequest,
-    SeatChange, SeatEnd,
+    SeatChange, SeatEnd, HOLDER_ASK_LIMIT,
 };
 pub use occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomStoreError,

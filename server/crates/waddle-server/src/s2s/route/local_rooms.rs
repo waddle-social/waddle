@@ -8,6 +8,8 @@
 //! decided for that principal on the evidence of its stream at each
 //! request ([`RoomRequest::principal`]). Reaching the host admits nothing.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use jid::{BareJid, FullJid};
 use waddle_xmpp::Stanza;
@@ -82,6 +84,14 @@ impl RoomReplies {
     }
 }
 
+/// How long a host's [`LocalRooms::place`] waits for the replica that holds
+/// a room before it answers [`RoomPlacement::Silent`]. It is below the
+/// router's own bound on placing one request
+/// ([`super::RouterLimits::room_placement_timeout`], 5 s by default), so a
+/// holder that does not answer is reported by the host and not only by the
+/// router's timer.
+pub const HOLDER_ASK_LIMIT: Duration = Duration::from_millis(4_500);
+
 /// Where a request for a room is decided.
 #[derive(Debug)]
 pub enum RoomPlacement {
@@ -91,8 +101,15 @@ pub enum RoomPlacement {
     /// sender's stream evidence. That replica seats the occupant and
     /// answers through its own router.
     Carried,
-    /// Nowhere now: the room's holder could not take the request. The
-    /// sender is answered with this error.
+    /// Nowhere now: the replica that holds the room did not answer within
+    /// [`HOLDER_ASK_LIMIT`] or could not be reached, so nothing says that
+    /// it took the request. The sender is answered with
+    /// `resource-constraint`, and so is every request for the room for a
+    /// while, without the holder being asked again.
+    Silent,
+    /// Nowhere now: the room's holder answered and did not take the
+    /// request, or no holder could be named. The sender is answered with
+    /// this error.
     Refused(Box<xmpp_parsers::stanza_error::StanzaError>),
 }
 
@@ -170,7 +187,9 @@ pub trait LocalRooms: Send + Sync {
     /// the replica a stream lands on never seats an occupant of a room it
     /// does not hold. A host of a single replica decides everything here.
     /// Asked only of a host that [`Self::carries`], within a bound of the
-    /// router's own: an answer that comes later is not waited for.
+    /// router's own: an answer that comes later is not waited for. A host
+    /// that waits for another replica answers [`RoomPlacement::Silent`]
+    /// once [`HOLDER_ASK_LIMIT`] has passed without an answer.
     async fn place(&self, _principal: &RemotePrincipal, _stanza: &Stanza) -> RoomPlacement {
         RoomPlacement::Here
     }

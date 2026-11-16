@@ -22,7 +22,7 @@ use waddle_server::db::Database;
 use waddle_server::s2s::conn::ServiceOptions;
 use waddle_server::s2s::route::{
     LocalRooms, RemotePrincipal, RoomOperation, RoomPlacement, RoomReplies, RoomRequest,
-    RouterLimits, S2sRouter, Seat, SeatChange, SeatEnd, SqlSeatStore,
+    RouterLimits, S2sRouter, Seat, SeatChange, SeatEnd, SqlSeatStore, HOLDER_ASK_LIMIT,
 };
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
@@ -66,7 +66,8 @@ pub struct ScriptedRooms {
     /// Whether requests are placed before they are decided, as by a host
     /// of a deployment of several replicas.
     carrying: AtomicBool,
-    /// Rooms held by a replica that never answers.
+    /// Rooms held by a replica that never answers: the host reports it as
+    /// the cluster's carrier does, after its bound on the ask.
     silent: Mutex<Vec<BareJid>>,
     /// Rooms that refuse every join.
     closed: Mutex<Vec<BareJid>>,
@@ -389,7 +390,11 @@ impl LocalRooms for ScriptedRooms {
             .map(|to| to.to_bare())
             .is_some_and(|room| lock(&self.silent).contains(&room));
         if silent {
-            std::future::pending::<()>().await;
+            // What the cluster's carrier answers for a holder that does not
+            // answer, once its own bound on the ask has passed: before the
+            // router's placement timeout does.
+            tokio::time::sleep(HOLDER_ASK_LIMIT).await;
+            return RoomPlacement::Silent;
         }
         RoomPlacement::Here
     }

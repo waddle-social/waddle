@@ -181,6 +181,30 @@ pub(super) fn room_placement_timed_out() {
     );
 }
 
+/// The replica that holds a room said through the room host that it did
+/// not answer, or could not be reached, within the host's bound on asking
+/// it, and the request's sender was answered with an error.
+pub(super) fn room_placement_silent() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.placement_silent",
+        "{stanza}",
+        "Stanzas from S2S streams for rooms another replica holds whose holder did not answer or could not be reached within the room host's bound on asking it.",
+        1,
+    );
+}
+
+/// A request for a room found no place among the rooms being placed within
+/// the placement timeout, and its sender was answered with an error. The
+/// room's holder was not asked.
+pub(super) fn room_placement_crowded() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.placement_crowded",
+        "{stanza}",
+        "Stanzas from S2S streams for rooms that found no place among the rooms being placed within the placement timeout, so that their sender was answered with an error.",
+        1,
+    );
+}
+
 /// A join was refused because no queue for the occupant's domain could be
 /// opened or it was full, so the room's stanzas for the seat could not
 /// leave.
