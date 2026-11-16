@@ -751,6 +751,23 @@ Outside the reviewed set, records of `pubsub_affiliations` in
 runs the startup reconciliation above them) moved lines. The raw scan holds
 1594 records, unchanged in content.
 
+The selected evidence was refreshed a nineteenth time, through
+`43e5a44329974d3ea1ee2ebcb47c7472a2a8391c`, on the same branch. In the
+reviewed set only `auth/retirement.rs` changed: `retire_in` also deletes,
+in the retirement's transaction, the retired account's rows of
+`s2s_pending_subscriptions`, `s2s_remote_pubsub_subscriptions` and
+`s2s_remote_offline_admissions`, which hold remote senders' subscription
+requests, the account's records of remote PubSub subscriptions and the
+offline admissions of strangers' messages. It writes no grant, projection
+or membership and reads no authority; the `account-retire` anchor moved
+from line 119 to 121. Outside the reviewed set, records of
+`JoinWithAffiliation` and `JoinAffiliationGrant` in
+`server/routes/websocket/cleanup.rs` (a check of remote senders' stored
+messages before a terminal redrive above them) and of `try_send_to` in
+`handlers/iq/roster/push.rs` (a new parameter of the removal side effects
+above them) moved lines. The raw scan holds 1594 records, unchanged in
+content.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

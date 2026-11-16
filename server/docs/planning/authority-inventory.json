@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "b3ec89bbe41ae4b2692f143120321de43c02c52c",
+  "baseline_commit": "43e5a44329974d3ea1ee2ebcb47c7472a2a8391c",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "sha256": "fdac25abf231c63eea66ca21d40889bba86f75bb5b3ee7b1aac8a190ea2f0f58"
+      "sha256": "9401d9f14084b124593d5974a9fbd6550075628f0f15c5a2b0067e0e7e8a12a0"
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
@@ -880,7 +880,7 @@
     },
     "account-retire": {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "line": 119,
+      "line": 121,
       "text": "pub async fn retire_account("
     },
     "account-retired-native": {
@@ -940,7 +940,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "af530b49699197715dd1ff6c54a7b1b85eea27b036289b1aebbef9cd895d04ca",
+    "sha256": "193d40c64986eb996a62a0b10854666e2123f6e0b575f30ddf603adbd1832a60",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,
