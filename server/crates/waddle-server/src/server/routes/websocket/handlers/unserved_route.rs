@@ -186,14 +186,10 @@ pub(crate) async fn route_unserved_presence(
         _ => Jid::from(sender.clone()),
     });
     // A denial of a remote sender's recorded request is the account's own:
-    // the record is forgotten even when the stanza is then refused, such as
-    // to an address the account blocks (gate G18).
-    if let (Type::Unsubscribed, UnservedDestination::Remote(remote)) =
-        (&presence.type_, &destination)
-    {
-        super::presence::forget_request(state, &sender.to_bare(), &remote.address().to_bare())
-            .await;
-    }
+    // the record is forgotten even when the stanza is refused, such as to
+    // an address the account blocks or with S2S off (gate G18). With S2S
+    // on, the subscription path forgets it as it decides what to route.
+    let denial = presence.type_ == Type::Unsubscribed;
     if let Some(reply) = blocked_reply(
         &Stanza::Presence(presence.clone()),
         &destination,
@@ -202,6 +198,9 @@ pub(crate) async fn route_unserved_presence(
     )
     .await
     {
+        if denial {
+            forget_denied_request(state, sender, &destination).await;
+        }
         return reply;
     }
     let subscription = matches!(
@@ -216,9 +215,25 @@ pub(crate) async fn route_unserved_presence(
         return super::presence::route_remote_subscription(state, sender, presence, remote.clone())
             .await;
     }
+    if denial {
+        forget_denied_request(state, sender, &destination).await;
+    }
     offer(Stanza::Presence(presence), destination, sender, state)
         .await
         .replies
+}
+
+/// Forget the subscription request the remote `destination` sent the
+/// sender's account, which the sender denies.
+async fn forget_denied_request(
+    state: &WebSocketState,
+    sender: &FullJid,
+    destination: &UnservedDestination,
+) {
+    if let UnservedDestination::Remote(remote) = destination {
+        super::presence::forget_request(state, &sender.to_bare(), &remote.address().to_bare())
+            .await;
+    }
 }
 
 /// XEP-0191 §3.3: with S2S enabled, a message or presence to a remote
