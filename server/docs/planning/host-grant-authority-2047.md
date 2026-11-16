@@ -2541,14 +2541,16 @@ exactly that (`permissions/host_grant/fence.rs`, migration 2005):
   ticket: the registration it was read under and the scope's generation.
   The registration is taken before the grants are read. A ticket is current
   while the replica holds the lease of that registration and has installed
-  no newer generation of the scope. `ManagedRoomGrants::allows` and
-  `standing` answer nothing for a decision whose ticket is not current,
-  however long its caller held it, and the room actor asks the ticket again
+  no newer generation of the scope. `ManagedRoomGrants::allows_as` and
+  `standing_as`, which every surface calls with the evidence of the
+  request it decides, answer nothing for a decision whose ticket is not
+  current, whatever that evidence and however long its caller held it, and the room actor asks the ticket again
   in the turn that seats an occupant or applies a role change (below). No
   check waits. A surface that holds a decision across an await (a read of
   the archive or the room actor, the room's configuration lock) asks it
   again after the await, and reads the grants again when its ticket is no
-  longer current (`HostGrantGate::still_allows`), before the effect.
+  longer current (`HostGrantGate::still_allows`, with the same evidence),
+  before the effect.
   `FenceTicket::admit` runs a synchronous effect under the lock an
   installation takes, or not at all; the surfaces fenced so far have no
   such effect (theirs are replies, actor asks and durable writes) and use
@@ -2702,9 +2704,24 @@ applies, per account the actor seats or lists:
 | --- | --- | --- |
 | Banned (recorded or effective outcast) | A seat | Sets the entry to outcast and removes every seat with status 301 (XEP-0045 §9.1). |
 | No membership recorded | A seat | Sets the entry to none and removes every seat with status 321 (§9.4). |
-| Membership recorded, and reading not admitted: the scope admits nobody (retired, restored, fenced), or the grant is a privileged one of an account the replica does not serve | A seat | Removes every seat with status 321 and leaves the entry. |
+| Membership recorded, and reading not admitted: the scope admits nobody (retired, restored, fenced), or, for an account of a served domain, the grant is not honoured | A seat | Removes every seat with status 321 and leaves the entry. |
 | No membership recorded, or banned | An entry above that, no seat | Sets the entry, which also refuses a join of that account the actor has not applied yet. |
 | An affiliation below the mirrored one | Any | Lowers the entry to the recorded one. The role is derived again (an admin that became a member is no moderator), with the affiliation presence. |
+
+The sweep holds no request of the account it decides for, so it decides
+without stream evidence. For an account of a domain the deployment does not
+serve that honours less than a request on the account's own stream would:
+no owner or admin standing, and with `require_pkix` nothing at all. Such an
+occupant is therefore removed only when the grants deny it whatever stream
+its requests arrive on: a ban, no membership recorded, or a scope that
+admits nobody (the first, second and third rows). A remote member whose
+membership the replica does not honour without a stream (S2S off, its
+domain not admitted, `require_pkix`, a privileged grant) keeps its seat;
+each of its own uses of the room is decided with the evidence of the request
+that makes it, and deciding its deliveries from the evidence its occupancy
+was established on belongs to the slice that seats remote occupants (W6a in
+the plan). Lowering a mirrored entry to the recorded one (the last row)
+applies to every account.
 
 A room's own administration request applies its change to the actor
 itself, with the administrator and the reason it names. The sweep does not
@@ -3106,7 +3123,7 @@ their evidence, and none of it has run.
   value.
 - Startup refuses an S2S snapshot whose trusted-home list names a domain of
   one of the deployment's services (upload, push, the community and
-  extension services). The S2S loader refuses the local domains it knows;
+  extension services, and the call mixer of the account domain). The S2S loader refuses the local domains it knows;
   issuance cannot grant to a service domain.
 - The snapshot is immutable for the life of the process: a replica applies
   a changed one when it restarts with it, as the connection-manager design
@@ -3179,15 +3196,25 @@ them.
   extension, a room's own result) submits without a stream, so the
   acceptance passes `NoStream`; the slice that admits remote senders to
   rooms (W6a) adds a producer that passes its stream's evidence.
-- The gate's surfaces: `ManagedRoomGrants::allows`, `standing` and
-  `admitted` decide without stream evidence, as for a local session's
-  request or a subject the surface names; `allows_as`, `standing_as` and
-  `HostGrantGate::allows_as` take the evidence of a remote request.
+- The gate's surfaces: each names the evidence it decides with, through
+  `ManagedRoomGrants::allows_as` and `standing_as`, `HostGrantGate::allows_as`
+  and `HostGrantGate::still_allows`; every surface built so far serves a
+  local session's request or a subject it names, and passes `NoStream`.
+  `ManagedRoomGrants::admitted` lists subjects without stream evidence.
+  Each of these asks the revocation fence's ticket of the decision too, so
+  a decision made with a stream's evidence is fenced like any other. The
+  stream-less forms `allows` and `standing` exist for suites only (test
+  support), so a surface that starts serving remote requests cannot decide
+  them as local ones by omission.
 - A mutation's initiator: `HostGrantStore::set_affiliation_as` (and
   `HostGrantAuthority::set_affiliation_as`) takes the initiator's evidence
   and decides its standing under the issuance policy's principal policy,
-  evaluated when the command is submitted; `set_affiliation` is a local
-  session's request. The evidence is not part of the operation's
+  evaluated when the command is submitted. Room administration passes
+  `NoStream` for its local session; the stream-less `set_affiliation`
+  exists for suites only. A `PrincipalPolicy` is built from served account
+  domains alone (S2S off) by name, `PrincipalPolicy::local`; the
+  conversion from `ServedAccountDomains` exists for suites only, so a
+  replica cannot lose its snapshot through a conversion. The evidence is not part of the operation's
   fingerprint: an exact retry returns the recorded outcome and authorizes
   nothing again, and a refused initiator records nothing.
 - The moderator role (an XEP-0045 role change): granted only to an occupant
@@ -3212,29 +3239,78 @@ request:
   that honours it at all. Lowering a remote admin to member, which some
   decisions would honour above the admin grant, is recorded at `none`.
 
+### An increase its initiator's home no longer backs
+
+An increase is recorded at its commit and effective only once its
+projection is verified and activated. The initiator's standing is decided
+when the command is submitted, under the snapshot the replica runs then. A
+remote initiator's standing to make an increase (owner or admin) rests on
+its home being admitted and listed as a trusted home, and the snapshot can
+change before the increase is activated: the home delisted, no longer
+trusted, or no longer admitted.
+
+Reconciliation therefore checks again, before it reads the scope's plan
+(`HostGrantStore::drop_unhonoured_increases`, called by
+`HostGrantAuthority::reconcile` under the replica's issuance policy). Under
+the scope's guard it finds every recorded increase that is not yet
+effective whose recording operation names an initiator of a domain the
+deployment does not serve, and evaluates that initiator's witness under the
+snapshot the reconciling replica runs. The stream that carried the request
+is gone, so only what does not depend on it is evaluated: the home is
+admitted, and it is on the trusted-home list. An increase whose initiator
+fails either is dropped: one operation at the next generation, recorded
+without an initiator, lowers each such row's recorded affiliation to its
+effective one and journals the change from the increase to it. The increase
+is never projected and never activated; the projection that follows holds
+the scope without it, and the scope converges as after any other operation.
+An increase by an account of a served domain, or recorded without an
+initiator (an owner act), is kept. A scope that admits no mutation (retired,
+exhausted, fenced, bound to another incarnation, or closed for a restore) is
+left to the paths that handle it. Each drop is counted
+(`waddle.host_grant.increases_dropped`) and logged with its kind, never with
+a JID.
+
+The journal records a drop as a `set_affiliation` operation without an
+initiator whose change lowers a recorded increase to the effective
+affiliation; it has no operation kind of its own, which would need a
+migration of the kind constraint. The snapshot is fixed for the life of a
+process, so a pass that finds nothing to drop is not overtaken by a change
+of its own replica's policy. A replica that still runs the earlier snapshot
+decides by it until it restarts, and can activate such an increase in that
+window; the change of snapshot is complete only when every replica runs it
+(ADR-0020 D1).
+
 ### Host policy requiring `pkix`
 
 `require_pkix` in the `[host_policy]` table of the S2S snapshot (off by
 default) makes every grant of a remote principal contribute nothing unless
 a `pkix` stream carried its request, member-level grants included. It is
-deployment-wide. ADR-0020 D2 allows host policy to require `pkix` for a
-community or a room; a per-scope requirement is not built. It would be a
+deployment-wide, and stays so for this slice: ADR-0020 D2 allows host policy
+to require `pkix` for a community or a room, and a per-scope requirement is
+a later change. It would be a
 policy input of the scope, recorded and fenced by the scope's generation
 like its grants, which needs a migration and an operation of its own.
 
 ### What stays open
 
 - A principal named without its request has no stream evidence. A trusted
-  home's admin is therefore not in an acceptance's audience, not listed as
-  a reader and not re-seated after a claim move; with `require_pkix`, no
-  remote member is. Deciding a remote occupant's deliveries on the evidence
-  of the stream its occupancy was established on is the decision of the
-  slice that seats remote occupants (W6a).
+  home's admin is therefore not counted as a reader: not in an
+  acceptance's audience, not listed as a reader and not re-seated after a
+  claim move; with `require_pkix`, no remote member is. This stands until
+  the slice that seats remote occupants (W6a) decides a remote occupant's
+  deliveries on the evidence of the stream its occupancy was established
+  on. Until then the revocation sweep removes a remote occupant only when
+  its grants deny it on every stream
+  ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)).
 - Rooms no scope manages keep their legacy checks, which evaluate neither
   D1 nor D8 at the effect. No surface serves remote principals there yet
   (D10 refuses MUC and the Spaces service to S2S senders until W6a and
   W7a); those slices decide each effect they open to remote principals with
-  `PrincipalPolicy::witness`.
+  `PrincipalPolicy::witness`. They also apply D8 issuance to the legacy
+  privileged writers of rooms and Spaces no scope manages
+  (`channel.manager` and `channel.moderator`, `space.moderator` and
+  `role.manager`), which today write those relations without asking whether
+  the subject's home is a trusted home.
 - Account bootstrap provisions deployment ownership for served accounts
   only, which is stricter than D8 requires.
 - A per-scope `pkix` requirement (above).
@@ -3246,7 +3322,15 @@ loaded through the production S2S loader from files, with a stream's
 evidence given in place of a live stream: no inbound stream reaches a
 managed room before W6a. The acceptance-matrix rows marked W5e map onto
 its cases; over live streams they are verification steps 6 and 7. It needs
-PostgreSQL only. `host_grant_authority.rs` and
+PostgreSQL only, except
+`live_spicedb_an_increase_whose_initiator_is_no_longer_trusted_is_dropped`,
+which reconciles through a disposable SpiceDB like the other `live_spicedb_`
+suites. `a_remote_ban_is_honoured_by_the_gate_and_acceptance_on_every_stream`
+decides a ban under a snapshot that admits and trusts the banned homes, on
+the strongest and every weaker stream, a `pkix` strength without a trust
+profile included. The sweep's rule for a seated remote occupant is
+`the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it` in
+`xep0045_host_grant_revocation.rs`. `host_grant_authority.rs` and
 `xep0045_host_grant_admission.rs` cover a replica with S2S off.
 
 ### Rollout part of the effect boundary (G24)
@@ -3258,7 +3342,12 @@ PostgreSQL only. `host_grant_authority.rs` and
   could not be delivered.
 - `[host_policy]` is a new table of the S2S snapshot. The loader refuses
   unknown keys, so a binary that predates the table refuses a snapshot that
-  holds it: replicas run the new image before the snapshot uses it.
+  holds it: replicas run the new image before the snapshot uses it, and a
+  rollback to such a binary removes the table from the snapshot first, or
+  the rolled-back replica does not start.
+- A replica whose snapshot no longer admits a home, or no longer lists it
+  as a trusted home, drops that home's initiators' recorded increases that
+  are not yet effective at its next reconciliation (above).
 - A snapshot whose trusted-home list names a service domain stops startup.
 - With S2S on, a trusted home's privileged grants and room moderation are
   honoured on its `pkix` streams and member-level grants of admitted
