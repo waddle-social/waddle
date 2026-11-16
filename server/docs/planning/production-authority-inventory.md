@@ -1155,6 +1155,28 @@ messages before a terminal redrive above them) and of `try_send_to` in
 above them) moved lines. The raw scan holds 1594 records, unchanged in
 content.
 
+The selected evidence was refreshed a twenty-third time, through
+`0afd0a567668c17a87acc63c3b836f2025a3bb16`, on the integration branch
+after the account-traffic branch was merged onto the twenty-second
+refresh. No grant writer, storage plane or producer of stream evidence
+was added by the merge, and no decision of standing moved.
+
+- `server/http.rs` (`startup-call` and `hg-recovery` moved) both hosts
+  the rooms remote occupants use and attaches the router's account side
+  at startup; each was reviewed on its own branch.
+- `s2s/route/router/hosting.rs` (`s2s-seat-egress`,
+  `s2s-carried-request`, `s2s-seat-adoption` and `s2s-adopted-seats`
+  moved) names the account side's queue work among what the workers
+  that hand requests to the room host ignore: that work is queued only
+  on the room traffic queues.
+- `auth/retirement.rs` keeps the account-traffic branch's fingerprint.
+- The raw scan holds 1633 records, unchanged in content. 22 records moved
+  because the merged files gained lines: in `s2s/route.rs`,
+  `s2s/route/router.rs`, `s2s/route/router/hosting.rs`,
+  `server/routes/websocket/cleanup.rs`, `handlers/iq/roster/push.rs`,
+  `handlers/presence/subscription/delivery.rs`, `server/runtime_owner.rs`
+  and `test_support.rs`.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

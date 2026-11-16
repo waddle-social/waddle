@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "468bc0fb99fce93441d7935f3b7ab71086ade73e",
+  "baseline_commit": "0afd0a567668c17a87acc63c3b836f2025a3bb16",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -113,7 +113,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "sha256": "4f9db1e2262ccca6d93695125f95f987c4812c08cf531dac3aaca3d8573d14f0"
+      "sha256": "e28484a8dc804105a7a6daed49de90fa75e036bf3028f162de3a085ab6fb1899"
     },
     {
       "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
@@ -145,7 +145,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "74eda88fef438358520e4f822964f64c470a4608f7dad00fc50c0e59c530c7d5"
+      "sha256": "3ea78b35d5f0574b015fe9f154fd863de8980ef32c7e0b8ce66a63c0862025f5"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -405,7 +405,7 @@
     },
     "startup-call": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1561,
+      "line": 1575,
       "text": "crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn("
     },
     "bootstrap": {
@@ -800,7 +800,7 @@
     },
     "hg-recovery": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1016,
+      "line": 1024,
       "text": "fn spawn_host_grant_recovery("
     },
     "placement": {
@@ -945,7 +945,7 @@
     },
     "s2s-seat-egress": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 1874,
+      "line": 1876,
       "text": "pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {"
     },
     "foreign-delivery": {
@@ -1000,7 +1000,7 @@
     },
     "s2s-carried-request": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 1101,
+      "line": 1103,
       "text": "pub(super) fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {"
     },
     "s2s-carried-principal": {
@@ -1045,7 +1045,7 @@
     },
     "s2s-adopted-seats": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2501,
+      "line": 2503,
       "text": "pub(super) fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {"
     },
     "hg-seats-honour-anywhere": {
@@ -1055,7 +1055,7 @@
     },
     "s2s-seat-adoption": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2434,
+      "line": 2436,
       "text": "pub(super) async fn adopt_seat("
     },
     "s2s-unseated-removal": {
@@ -1121,7 +1121,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "604bb7c9b53dca3ff93a1ab636db0d5e6a34e0aacd393bce3f3eb1f52aaa1586",
+    "sha256": "9abd6017ba7df77ae051159aa4fdff9482d4c733aecddf616922f6f6c6035b55",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,
