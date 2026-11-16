@@ -1,0 +1,42 @@
+[package]
+name = "waddle-federation-interop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+
+# Test-only harness for issue #2047: two native Waddle deployments, Prosody
+# and ejabberd. Deliberately separate from every production workspace and
+# release image; it depends on no Waddle crate, so it judges Waddle's wire
+# behavior with an independent XML stream implementation.
+[workspace]
+
+[dependencies]
+anyhow = "=1.0.104"
+base64 = "=0.22.1"
+futures-util = { version = "=0.3.32", default-features = false, features = ["sink", "std"] }
+hickory-proto = { version = "=0.26.3", default-features = false, features = ["std"] }
+hmac = "=0.12.1"
+libc = "=0.2.186"
+minidom = "=0.18.0"
+# minidom's own rxml, with the name macros.
+rxml = { version = "=0.13.3", default-features = false, features = ["macros"] }
+rcgen = { version = "=0.13.2", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+time = "=0.3.47"
+tokio = { version = "=1.54.1", features = ["full"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["handshake"] }
+toml = { version = "=0.9.12", default-features = false, features = ["display", "serde"] }
+uuid = { version = "=1.23.1", features = ["v4"] }
+
+[[bin]]
+name = "federation-interop"
+path = "src/main.rs"
+
+[lints.clippy]
+wildcard_imports = "warn"
+unwrap_used = "warn"
