@@ -6,8 +6,8 @@
 //! MUC and the Spaces PubSub service, which D10 enables, refuse until their
 //! handlers are reviewed for remote principals. The identity profile
 //! applies to every address a stanza carries (gate G10): a refused spelling
-//! is answered with `jid-malformed`, with the stanza's own id, and the
-//! stream stays open.
+//! is answered with `jid-malformed`, with the stanza's own id, except in
+//! presence, which is dropped unanswered, and the stream stays open.
 //!
 //! The inventory these cases follow is recorded in
 //! `server/docs/planning/s2s-routing-2047.md`. `home-a.test` runs the S2S
@@ -425,6 +425,25 @@ async fn a_refused_spelling_is_answered_with_jid_malformed_and_the_stream_stays_
         .await
         .expect("answered");
     assert_eq!(error_condition(&reply).as_deref(), Some("bad-request"));
+
+    // Presence in a refused spelling is dropped unanswered: an error
+    // presence to a room would reach it as the occupant's answer and
+    // remove the occupant.
+    let presence = Element::builder("presence", "jabber:server")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "j6")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "Bob@home-b.test/phone",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "alice@home-a.test/phone",
+        )
+        .build();
+    let bytes = peer.encode(&presence);
+    peer.write(&bytes).await.expect("written");
+    tokio::time::sleep(QUIET).await;
+    assert!(captured.with_id("j6").is_empty(), "presence is not answered");
 
     // The stream is still open.
     let (error, closed, _) = peer.read_until_closed(QUIET).await;

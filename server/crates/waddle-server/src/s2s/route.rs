@@ -28,6 +28,7 @@ mod reach;
 mod replies;
 mod rooms;
 mod router;
+mod telemetry;
 
 pub use correlation::{
     CorrelationDirection, CorrelationError, CorrelationKey, CorrelationOwner, IqCorrelations,

@@ -90,7 +90,8 @@ Which of these are recorded today:
 ## Server-to-server connection metrics
 
 Emitted by the S2S connection manager
-(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`) and S2S discovery
+(`server/crates/waddle-server/src/s2s/conn/telemetry.rs`), the S2S router
+(`server/crates/waddle-server/src/s2s/route/telemetry.rs`) and S2S discovery
 (`server/crates/waddle-server/src/s2s/discovery.rs`) only when S2S is
 enabled, which it is not by default. Attributes are the closed enums in
 `server/crates/waddle-xmpp/src/telemetry/attributes/s2s.rs`; no metric
@@ -105,6 +106,7 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `waddle.s2s.streams` | gauge | `{stream}` | `direction` | `waddle_s2s_streams` | Established streams. |
 | `waddle.s2s.dialback` | counter | `{exchange}` | `role`, `result` | `waddle_s2s_dialback_total` | Server Dialback exchanges, by this server's role (`initiating`, `receiving`, `authoritative`) and result (`valid`, `invalid`, `error`). |
 | `waddle.s2s.discovery` | counter | `{lookup}` | `source` | `waddle_s2s_discovery_total` | Endpoint resolutions, by where the endpoints came from (`configured`, `srv`, `fallback`) or why there were none (`no_service`, `lookup_failed`, `blocked`). |
+| `waddle.s2s.route.unusable_presence` | counter | `{stanza}` | none | `waddle_s2s_route_unusable_presence_total` | Presence from S2S streams dropped unanswered because an address it carries is outside the identity profile or it is not valid presence. |
 
 ## All other metrics
 

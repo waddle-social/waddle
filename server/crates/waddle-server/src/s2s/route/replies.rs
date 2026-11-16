@@ -105,8 +105,8 @@ pub(super) fn error_reply(stanza: &Stanza, error: StanzaError) -> Option<Stanza>
 
 /// The error answering a received element that is not a valid stanza of
 /// its kind, built from its name and attributes alone: its addresses are
-/// already canonical. `None` when the element is an error or an IQ result,
-/// or carries no usable address or IQ id.
+/// already canonical. `None` when the element is presence, an error or an
+/// IQ result, or carries no usable address or IQ id.
 pub(super) fn error_reply_to_element(element: &Element, error: StanzaError) -> Option<Stanza> {
     let address = |name: &str| {
         element
@@ -142,17 +142,7 @@ pub(super) fn error_reply_to_element(element: &Element, error: StanzaError) -> O
             reply.payloads.push(Element::from(error));
             Some(Stanza::Message(reply))
         }
-        "presence" => {
-            if type_ == Some("error") {
-                return None;
-            }
-            let mut reply = Presence::new(PresenceType::Error);
-            reply.from = Some(from);
-            reply.to = Some(to);
-            reply.id = element.attr("id").map(str::to_owned);
-            reply.payloads.push(Element::from(error));
-            Some(Stanza::Presence(reply))
-        }
+        // Presence the router cannot use is dropped unanswered.
         _ => None,
     }
 }

@@ -30,6 +30,7 @@ use super::principal::RemotePrincipal;
 use super::reach::{reach, InboundReach, LocalTarget};
 use super::replies;
 use super::rooms::{self, RemoteRooms, RoomBounds, RoomEgress, RoomRefusal};
+use super::telemetry;
 use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
     RemoteRouteOutcome, ServedDomains, UnroutableReason,
@@ -898,20 +899,12 @@ impl Inner {
         // Gate G10: every address the stanza carries, not only its own,
         // must be in the identity profile before anything reads it.
         if malformed || enforce_stanza_addresses(&mut element).is_err() {
-            if let Some(reply) =
-                replies::error_reply_to_element(&element, replies::jid_malformed(&home))
-            {
-                self.reply(stream, reply);
-            }
+            self.refuse_unusable(stream, &element, replies::jid_malformed(&home));
             self.fail_unusable_response(stream, &element, &home);
             return SinkVerdict::Accepted;
         }
         let Some(stanza) = replies::parse_stanza(element.clone()) else {
-            if let Some(reply) =
-                replies::error_reply_to_element(&element, replies::bad_request(&home))
-            {
-                self.reply(stream, reply);
-            }
+            self.refuse_unusable(stream, &element, replies::bad_request(&home));
             return SinkVerdict::Accepted;
         };
         let (Some(from), Some(to)) = replies::addresses(&stanza) else {
@@ -973,6 +966,25 @@ impl Inner {
             }
         }
         SinkVerdict::Accepted
+    }
+
+    /// Answer an element from `stream` that this server cannot use, with
+    /// `error`. Presence is dropped instead and counted: an error presence
+    /// that reaches a room as an occupant's answer tells the room the
+    /// occupant is gone, and rooms remove such occupants.
+    fn refuse_unusable(
+        self: &Arc<Self>,
+        stream: &VerifiedPeerStream,
+        element: &Element,
+        error: StanzaError,
+    ) {
+        if element.name() == "presence" {
+            telemetry::unusable_presence_dropped();
+            return;
+        }
+        if let Some(reply) = replies::error_reply_to_element(element, error) {
+            self.reply(stream, reply);
+        }
     }
 
     /// Queue a reply to a stanza that arrived on the inbound `stream`; it
