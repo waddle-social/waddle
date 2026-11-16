@@ -254,6 +254,7 @@ Every variant compiles from scratch. Variants are added as they finish.
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `32x64` (baseline) | pass | 72 min | 20.8 min | 5.9 min | 12.7 min | 665 | 10.1 / 26.9 | 1.6 / 11.0 | 19.6 GB |
 | `32x64-j16` | pass | 116 min | 20.8 min | 5.7 min | 13.2 min | 665 | 8.1 / 31.9 | 1.7 / 11.4 | 20.3 GB |
+| `16x32` | **fail** (one test) | 161 min | — | 6.1 min | — | — | 6.5 / 13.9 | 1.6 / 14.8 | 18.7 GB |
 
 Baseline observations:
 
@@ -271,3 +272,15 @@ compile (341 s against 353 s) and nothing on the lane. The compile briefly
 used all 32 cores and then averaged fewer than the baseline, so it is limited
 by a few large crates that build one after another, not by the job count.
 Option 2 is not worth pursuing on its own.
+
+`16x32`: one test failed, so this is not a result for the shape yet.
+
+- The failure was `xep0198_durable_ws`
+  `a_session_live_when_the_process_died_resumes_after_a_restart` in shard 4
+  ("no frame after m2: Timeout waiting for message"). The same test is being
+  fixed as a flake on `test/server-sm-restart-resume-flake`. One run cannot
+  tell whether four cores per shard make it fail more often.
+- Shard 1 was stopped when shard 4 failed, so there is no lane time.
+- What did complete was not slower: compile took 366 s against 353 s, and
+  shards 2 and 3 took 572 s and 588 s against 604 s and 609 s.
+- Peak memory was 18.7 GB of 32, set by the compile.
