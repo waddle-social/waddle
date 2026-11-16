@@ -84,7 +84,10 @@ It does not:
    The transaction is short, and it waits at most 2 s for the lock; if a
    long-running transaction holds the tables it exits with code 1 without
    having changed anything, and logins that queued behind it proceed. Run it
-   again.
+   again. No statement of it runs longer than 5 s: the delete of the account
+   row removes the account's identity-provider links and sessions with it,
+   and an account with so many of them that the delete does not finish is
+   reported with exit code 1 and nothing changed.
 
 3. **End the account's open streams** if it must stop at once: restart the
    servers, or wait for the client to disconnect. A retired account cannot

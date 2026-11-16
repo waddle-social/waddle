@@ -2439,6 +2439,16 @@ under [Running the revocation slice's focused set](#running-the-revocation-slice
 They restate the bounds of the earlier slices they rely on and change those
 slices' decisions only where stated.
 
+Gate G18 (remote traffic to local accounts) is not decided here. The plan's
+gate table gives it to W6c and to `s2s-account-traffic-2047.md`, and nothing
+in this section admits or refuses a stanza between a remote sender and a
+local account: the fence covers managed rooms and Spaces, and the ledger of
+retired JIDs only keeps a JID from being issued again. What G18 can rely on
+from here is that no account is provisioned for a retired JID from the
+retirement's commit on (streams the account had open are not ended, see
+[What stays open](#what-stays-open-1)), and that a revoked room grant admits
+nothing new once its revoke is acknowledged.
+
 ### What an acknowledgement means
 
 The linearisation point of a revoke, a ban, a demotion or the closing of a
@@ -2608,7 +2618,11 @@ takes the room's configuration lock, which the request holds from before it
 records the change until the actor applied it, and then finds the room in
 line. It waits at most 1 s for that lock in one pass and comes back to the
 room in the next, so a request that waits for its acknowledgement does not
-hold up the other rooms. A sweep that reaches the actor first, on another
+hold up the other rooms. While a pass looks at a room it holds the lock
+itself, so a request that administers or configures that room waits for the
+pass to finish with it; every ask of the pass is bounded at 5 s. The lock is
+held by one process: a request and a sweep on different processes are not
+ordered by it. A sweep that reaches the actor first, on another
 process or for a change that was not made through the room, removes without
 naming an actor or a reason.
 
@@ -2744,7 +2758,12 @@ A home never issues the JID of a retired account to a new holder
   provisioning, session creation at every login, and changes of native
   credentials. The retirement waits at most 2 s for the lock and runs no
   statement longer than 5 s; one that cannot get the lock in time fails
-  without having changed anything and is run again.
+  without having changed anything and is run again. Its statements are the
+  ledger insert, the deletes of the account's rows (the delete of its
+  `users` row cascades to its identity-provider links and its sessions) and
+  two reads of the account rows that carry no lookup key. An account whose
+  delete does not finish within the statement bound is not retired; nothing
+  splits that delete.
 - **Not done by retirement:** it does not end the account's open streams,
   and it does not revoke the account's grants in any room, here or on
   another deployment. The [retirement runbook](../../../docs/operations/account-retirement.md)
@@ -2841,7 +2860,9 @@ The suites, under `crates/waddle-server/tests/`:
   ban and for an unsubscription.
 - `account_jid_retirement.rs` (SQLite and PostgreSQL): every provisioning
   path after a retirement, the exclusion of retirement and registration in
-  both orders, and the operator subcommand on both engines.
+  both orders, a retirement that fails with nothing changed when it cannot
+  lock the account tables within its bound, and the operator subcommand on
+  both engines.
 - `host_grant_projection.rs`, one case added
   (`live_spicedb_a_revoke_is_acknowledged_while_the_projection_still_holds_the_grant`,
   PostgreSQL and SpiceDB): a revoke is acknowledged while SpiceDB still
@@ -2864,7 +2885,9 @@ server), a seat that completes after an installation and the sweep it asks
 for, the detached stream-management leg of the Space fan-out, the sweep's
 delivery through the room-effect outbox and under clustering, the pruning of
 old leases by the owner phase, the restricted runtime role's privileges on
-the new relations beyond the store's own check, the two counters, and a
+the new relations beyond the store's own check, the two counters, the order
+of a room's administration and a sweep on different processes, the operator
+subcommand's exit code when a retirement fails, and a
 second replica that is a `waddle-server` process rather than a process of
 the test binary: a server process attaches only under the restricted
 runtime, which is verification step 4.
@@ -2885,11 +2908,11 @@ SpiceDB; the case added to `host_grant_projection` does, and runs with the
 first slice's set. Three cases run the server binary's operator subcommands,
 and one starts a second process of the test binary.
 
-The set was executed on 2026-11-16 at commit `80c940af2`, against
+The set was executed on 2026-11-16 at commit `e60eea4a1`, against
 PostgreSQL 17.11 and SpiceDB 1.56.1, with nextest's default parallelism and
 together with the first slice's, the writer fence's and the restore slice's
-sets, whose code it changes: two consecutive runs passed 238 of 238 cases in
-19 binaries, the 26 cases of the five binaries above among them. That SpiceDB
+sets, whose code it changes: two consecutive runs passed 239 of 239 cases in
+19 binaries, the 27 cases of the five binaries above among them. That SpiceDB
 ran on a PostgreSQL datastore, so the `live_spicedb_` cases of those runs,
 the one added here included, are evidence against a PostgreSQL-backed
 SpiceDB, unlike the earlier runs recorded above. The second replica of the
