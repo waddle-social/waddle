@@ -677,12 +677,12 @@ async fn seat_member(state: &WebSocketState, room: &jid::BareJid, account: &str,
 }
 
 /// An S2S snapshot that admits the remote member's home, loaded through
-/// the production loader.
+/// the production loader. Both domains lie outside `.test`, so it names the
+/// public peer scope.
 async fn admitting_remote_home(pki: &s2s_transport::Pki) -> S2sConfig {
-    s2s_transport::Spec::new("example.com", "remote.example")
-        .load(pki)
-        .await
-        .expect("the S2S snapshot loads")
+    let mut spec = s2s_transport::Spec::new("example.com", "remote.example");
+    spec.top.push("peer_scope = \"public\"".to_owned());
+    spec.load(pki).await.expect("the S2S snapshot loads")
 }
 
 /// The removal of the occupant `nick` as `observer` sees it.
