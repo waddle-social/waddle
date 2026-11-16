@@ -295,13 +295,15 @@ fn public_pkix() -> PrincipalEvidence {
 }
 
 /// Every way a request can reach a decision that is not a trusted home's
-/// `pkix` stream on the public profile.
-fn weaker_evidence() -> [PrincipalEvidence; 4] {
+/// `pkix` stream on the public profile. A `pkix` strength without the trust
+/// profile its certificate verified under is not `pkix` evidence either.
+fn weaker_evidence() -> [PrincipalEvidence; 5] {
     [
         PrincipalEvidence::NoStream,
         dialback(None),
         dialback(Some(TrustProfileKind::PublicWebPki)),
         dialback(Some(TrustProfileKind::PrivateCa)),
+        PrincipalEvidence::Stream(StreamEvidence::for_test(AuthenticationStrength::Pkix, None)),
     ]
 }
 
@@ -744,6 +746,95 @@ async fn the_admission_witness_binds_the_remote_sender() {
         panic!("the served member is admitted");
     };
     assert_eq!(witness.sender, PrincipalWitness::Served);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_remote_ban_is_honoured_by_the_gate_and_acceptance_on_every_stream() {
+    let principals = Snapshot::trusting().principals().await;
+    let Some(fixture) = GrantFixture::active_under("hg_w5e_remote_ban", principals.clone()).await
+    else {
+        return;
+    };
+    grant(
+        &fixture,
+        TRUSTED_ADMIN,
+        RoomAffiliation::Admin,
+        &issuance_policy(&[TRUSTED_HOME]),
+    )
+    .await;
+    grant(
+        &fixture,
+        REMOTE_MEMBER,
+        RoomAffiliation::Member,
+        &issuance_policy(&[]),
+    )
+    .await;
+    // The owner bans both; a ban is effective at its commit.
+    for account in [TRUSTED_ADMIN, REMOTE_MEMBER] {
+        fixture
+            .set(OWNER, account, RoomAffiliation::Outcast)
+            .await
+            .expect("ban recorded");
+        assert_eq!(
+            fixture.affiliations(account).await,
+            Some((RoomAffiliation::Outcast, RoomAffiliation::Outcast))
+        );
+    }
+
+    // Under a snapshot that admits both homes and trusts one, on the
+    // strongest stream as on every weaker one, the gate honours the ban:
+    // nothing is allowed and the standing is outcast.
+    let room = gate_room(&fixture, &principals).await;
+    let every_stream = [public_pkix(), pkix(TrustProfileKind::PrivateCa)]
+        .into_iter()
+        .chain(weaker_evidence());
+    for evidence in every_stream {
+        for account in [TRUSTED_ADMIN, REMOTE_MEMBER] {
+            for action in HostGrantAction::ALL {
+                assert!(
+                    !room.allows_as(&bare(account), &evidence, action),
+                    "{account} {evidence:?} {action:?}"
+                );
+            }
+            assert_eq!(
+                room.standing_as(&bare(account), &evidence),
+                RoomAffiliation::Outcast,
+                "{account} {evidence:?}"
+            );
+        }
+    }
+
+    // Room-manifest acceptance refuses either as the sender, on its home's
+    // `pkix` stream, and leaves both out of a local sender's audience.
+    for account in [TRUSTED_ADMIN, REMOTE_MEMBER] {
+        assert_eq!(
+            decide_acceptance(
+                &fixture.store,
+                &fixture.scope.room,
+                &principals,
+                account,
+                public_pkix(),
+                &[],
+            )
+            .await,
+            RoomAdmission::Denied(AdmissionDenial::SenderNotAdmitted),
+            "{account}"
+        );
+    }
+    let RoomAdmission::Admitted { audience, .. } = decide_acceptance(
+        &fixture.store,
+        &fixture.scope.room,
+        &principals,
+        SENDER,
+        PrincipalEvidence::NoStream,
+        &[bare(PEER), bare(REMOTE_MEMBER), bare(TRUSTED_ADMIN)],
+    )
+    .await
+    else {
+        panic!("the served member is admitted");
+    };
+    assert_eq!(audience, vec![bare(PEER)]);
     fixture.close().await;
 }
 
