@@ -337,6 +337,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("device_auth", READ_WRITE),
     ("pending_auth", READ_INSERT_DELETE),
     ("xmpp_auth_codes", READ_INSERT_DELETE),
+    // Retired account JIDs (ADR-0020 D8). Retirement is an owner act; the
+    // runtime reads the ledger where it provisions an account and can
+    // neither retire a JID nor make one available again.
+    ("retired_account_jids", READ),
     ("permission_tuples", READ_WRITE),
     // Host-grant authority (ADR-0020 D5). The owner phase alone enrolls a
     // scope, binds its rooms and retires it, so the incarnation, the

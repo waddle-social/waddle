@@ -24,6 +24,7 @@ use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
 use super::directory::{canonical_account_jid, exact_account_jid};
+use super::retirement::JID_NOT_RETIRED_SQL;
 use super::AuthError;
 use waddle_xmpp::identity::{
     AccountLocalpart, CanonicalBareJid, CanonicalDomain, ACCOUNT_LOCALPART_MAX_BYTES,
@@ -100,12 +101,14 @@ impl NativeUserStore {
         let rows = self
             .actor
             .ask(DbQuery {
-                sql: r#"
-                    INSERT INTO native_users (username, domain, jid_key, password_hash, salt, iterations, stored_key, server_key, email)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    RETURNING id
-                "#
-                .to_string(),
+                // The account is created only where the ledger of retired
+                // JIDs does not hold its JID: the condition is part of the
+                // statement that creates the row (`auth::retirement`).
+                sql: format!(
+                    "INSERT INTO native_users (username, domain, jid_key, password_hash, salt, \
+                     iterations, stored_key, server_key, email) \
+                     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE {JID_NOT_RETIRED_SQL} RETURNING id"
+                ),
                 params: vec![
                     request.username.as_str().into(),
                     request.domain.as_str().into(),
@@ -116,15 +119,17 @@ impl NativeUserStore {
                     stored_key.into(),
                     server_key.into(),
                     email_str.into(),
+                    jid.as_str().into(),
                 ],
             })
             .await
             .map_err(db_err)?;
 
+        // No row: the JID is retired, and is never issued again.
         let user_id: i64 = rows
             .into_iter()
             .next()
-            .ok_or_else(|| AuthError::DatabaseError("insert did not return id".to_string()))?
+            .ok_or(AuthError::JidRetired)?
             .first()
             .cloned()
             .ok_or_else(|| AuthError::DatabaseError("insert did not return id".to_string()))
