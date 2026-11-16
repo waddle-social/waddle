@@ -1154,6 +1154,16 @@ pub async fn broadcast_room_system_message(
         .await
 }
 
+/// Sweep one managed room now, as the revocation fence's sweep does when
+/// this replica installs a new generation of the room's scope: occupants the
+/// grants no longer admit are removed and affiliations the room actor
+/// mirrors above the recorded ones are lowered. `true` when the room is in
+/// line with its grants or this state holds no actor for it.
+#[cfg(feature = "test-support")]
+pub async fn sweep_host_grant_room(state: &WebSocketState, room: &jid::BareJid) -> bool {
+    crate::server::host_grant_revocation::sweep_room_for_test(state, room).await
+}
+
 /// Whether `requester` may still read `room`, decided again after a
 /// protected read: `None` for a room no enrolled host-grant scope manages.
 #[cfg(feature = "test-support")]

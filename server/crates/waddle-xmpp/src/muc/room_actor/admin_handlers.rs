@@ -296,6 +296,99 @@ fn apply_affiliation_change_with_effects(
     actor: Option<&BareJid>,
     reason: Option<&str>,
 ) -> Result<AppliedAdminMutation, AdminApplyError> {
+    apply_affiliation_with_effects(
+        room,
+        occupant_id_secret,
+        server_hats,
+        AffiliationApplication {
+            target_jid,
+            new_affiliation,
+            actor,
+            reason,
+            remove_seated: false,
+        },
+    )
+}
+
+/// Remove `occupants` from a room they may no longer stay in for want of
+/// membership, with the status-321 presence of XEP-0045 §9.4 to each of them
+/// and to everyone who stays.
+fn remove_seats_with_effects(
+    room: &mut MucRoom,
+    occupant_id_secret: &OccupantIdSecret,
+    server_hats: &ServerHats,
+    occupants: Vec<Occupant>,
+    actor: Option<&BareJid>,
+) -> AppliedAdminMutation {
+    let mut updates = Vec::new();
+    let mut durable_updates = Vec::new();
+    for occupant in &occupants {
+        for built in removal_presence_updates(
+            room,
+            occupant_id_secret,
+            server_hats,
+            occupant,
+            STATUS_AFFILIATION_CHANGE_REMOVAL,
+            AdminPresenceKind::AffiliationRemoved,
+            actor,
+        ) {
+            updates.push((built.recipient, built.presence));
+            durable_updates.push(built.durable);
+        }
+    }
+    // Status-321 removal (affiliation loss in a members-only room)
+    // ends room membership just as surely as a kick or ban, so it
+    // must end SFU call participation too: occupancy is the
+    // precondition for being in the call at all, and leaving the
+    // removed user connected would let a non-occupant keep
+    // publishing to — and listening in on — a room they can no
+    // longer enter. #935 originally scoped eviction to 307/301;
+    // that exemption was a hole.
+    let removed_by_moderation: Vec<FullJid> = occupants
+        .iter()
+        .flat_map(|occupant| room.occupant_sessions(&occupant.nick))
+        .collect();
+    for occupant in occupants {
+        room.remove_occupant(&occupant.nick);
+    }
+    AppliedAdminMutation {
+        applied: AdminItemsApplied {
+            presence_updates: updates,
+            removed_by_moderation,
+            voice_changes: Vec::new(),
+            outbox_reservation: None,
+        },
+        durable_updates,
+    }
+}
+
+/// One affiliation to apply to a room.
+struct AffiliationApplication<'a> {
+    target_jid: BareJid,
+    new_affiliation: Affiliation,
+    actor: Option<&'a BareJid>,
+    reason: Option<&'a str>,
+    /// Remove an occupant the affiliation does not let stay (a ban, or no
+    /// membership in a members-only room) even when the room's list already
+    /// holds that affiliation: the list was written without the occupant's
+    /// seat.
+    remove_seated: bool,
+}
+
+/// Apply an affiliation and build its effects.
+fn apply_affiliation_with_effects(
+    room: &mut MucRoom,
+    occupant_id_secret: &OccupantIdSecret,
+    server_hats: &ServerHats,
+    application: AffiliationApplication<'_>,
+) -> Result<AppliedAdminMutation, AdminApplyError> {
+    let AffiliationApplication {
+        target_jid,
+        new_affiliation,
+        actor,
+        reason,
+        remove_seated,
+    } = application;
     if new_affiliation != Affiliation::Owner {
         let target_current_affiliation = room.affiliation(&target_jid);
         if target_current_affiliation == Affiliation::Owner {
@@ -316,7 +409,9 @@ fn apply_affiliation_change_with_effects(
     let voices_before = session_voices(room, &target_jid);
 
     let change = room.set_affiliation(target_jid.clone(), new_affiliation);
-    if change.is_none() {
+    let removes = new_affiliation == Affiliation::Outcast
+        || (room.config.members_only && new_affiliation < Affiliation::Member);
+    if change.is_none() && !(remove_seated && removes) {
         return Ok(AppliedAdminMutation::default());
     }
 
@@ -386,46 +481,13 @@ fn apply_affiliation_change_with_effects(
     }
 
     if room.config.members_only && new_affiliation < Affiliation::Member {
-        let mut updates = Vec::new();
-        let mut durable_updates = Vec::new();
-        for occupant in &affected_occupants {
-            for built in removal_presence_updates(
-                room,
-                occupant_id_secret,
-                server_hats,
-                occupant,
-                STATUS_AFFILIATION_CHANGE_REMOVAL,
-                AdminPresenceKind::AffiliationRemoved,
-                actor,
-            ) {
-                updates.push((built.recipient, built.presence));
-                durable_updates.push(built.durable);
-            }
-        }
-        // Status-321 removal (affiliation loss in a members-only room)
-        // ends room membership just as surely as a kick or ban, so it
-        // must end SFU call participation too: occupancy is the
-        // precondition for being in the call at all, and leaving the
-        // removed user connected would let a non-occupant keep
-        // publishing to — and listening in on — a room they can no
-        // longer enter. #935 originally scoped eviction to 307/301;
-        // that exemption was a hole.
-        let removed_by_moderation: Vec<FullJid> = affected_occupants
-            .iter()
-            .flat_map(|occupant| room.occupant_sessions(&occupant.nick))
-            .collect();
-        for occupant in affected_occupants {
-            room.remove_occupant(&occupant.nick);
-        }
-        return Ok(AppliedAdminMutation {
-            applied: AdminItemsApplied {
-                presence_updates: updates,
-                removed_by_moderation,
-                voice_changes: Vec::new(),
-                outbox_reservation: None,
-            },
-            durable_updates,
-        });
+        return Ok(remove_seats_with_effects(
+            room,
+            occupant_id_secret,
+            server_hats,
+            affected_occupants,
+            actor,
+        ));
     }
 
     let mut updates = Vec::new();
@@ -731,6 +793,30 @@ pub struct AdminItemsApplied {
     pub outbox_reservation: Option<RoomEffectReservation>,
 }
 
+/// [`ApplyAdminItems`] for a caller whose authority to administer the room
+/// can be overtaken: the actor asks `admission` when the turn begins and
+/// applies nothing, answering `None`, when the caller's decision no longer
+/// holds.
+pub struct ApplyAdminItemsIfAdmitted {
+    pub apply: ApplyAdminItems,
+    pub admission: super::AdmissionCheck,
+}
+
+impl kameo::message::Message<ApplyAdminItemsIfAdmitted> for RoomActor {
+    type Reply = Result<Option<AdminItemsApplied>, AdminApplyError>;
+
+    async fn handle(
+        &mut self,
+        msg: ApplyAdminItemsIfAdmitted,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !msg.admission.holds() {
+            return Ok(None);
+        }
+        self.apply_admin_items(msg.apply).await.map(Some)
+    }
+}
+
 impl kameo::message::Message<ApplyAdminItems> for RoomActor {
     type Reply = Result<AdminItemsApplied, AdminApplyError>;
 
@@ -739,7 +825,16 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         msg: ApplyAdminItems,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let reply: Self::Reply = async {
+        self.apply_admin_items(msg).await
+    }
+}
+
+impl RoomActor {
+    async fn apply_admin_items(
+        &mut self,
+        msg: ApplyAdminItems,
+    ) -> Result<AdminItemsApplied, AdminApplyError> {
+        let reply: Result<AdminItemsApplied, AdminApplyError> = async {
             if msg.items.iter().any(|item| {
                 item.affiliation.is_some()
                     && item
@@ -1182,6 +1277,105 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
             if previous_affiliation != msg.affiliation {
                 self.advance_member_admission_revision(&msg.jid);
             }
+            self.room = staged_room;
+            if needs_rehydration {
+                self.refresh_durable_recipients_from_source().await;
+            }
+            applied.outbox_reservation = outbox_reservation;
+            Ok(applied)
+        }
+        .await;
+        self.report_occupancy().await;
+        reply
+    }
+}
+
+/// Remove every seat of an account the room's grants no longer admit.
+///
+/// With an affiliation (`Outcast` or `None`) the room's list is set to it
+/// first: a ban removes the account's occupants with status 301, and the
+/// loss of membership in a members-only room with status 321, to every
+/// occupant. Unlike [`ApplyAffiliationChange`], an occupant is removed even
+/// when the list already holds the affiliation, which is how a list that was
+/// corrected without the occupant's seat leaves it. Without an affiliation
+/// the list is left as it is and the occupants are removed with status 321:
+/// the account keeps its entry and may not stay for now.
+///
+/// The account's admission revision advances either way, so a join of it
+/// that was decided before the removal is refused.
+pub struct RemoveUnadmittedOccupant {
+    pub jid: BareJid,
+    pub affiliation: Option<Affiliation>,
+}
+
+impl kameo::message::Message<RemoveUnadmittedOccupant> for RoomActor {
+    type Reply = Result<AdminItemsApplied, AdminApplyError>;
+
+    async fn handle(
+        &mut self,
+        msg: RemoveUnadmittedOccupant,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let reply: Self::Reply = async {
+            if self.invite_rollback_pending(&msg.jid) {
+                return Err(AdminApplyError::InviteRollbackPending);
+            }
+            let previous_affiliation = self.room.affiliation(&msg.jid);
+            let affiliation = msg.affiliation.unwrap_or(previous_affiliation);
+            let mut staged_room = self.room.clone();
+            let AppliedAdminMutation {
+                mut applied,
+                durable_updates,
+            } = match msg.affiliation {
+                Some(affiliation) => apply_affiliation_with_effects(
+                    &mut staged_room,
+                    &self.occupant_id_secret,
+                    &self.server_hats,
+                    AffiliationApplication {
+                        target_jid: msg.jid.clone(),
+                        new_affiliation: affiliation,
+                        actor: None,
+                        reason: None,
+                        remove_seated: true,
+                    },
+                )?,
+                None => {
+                    let occupants = occupants_for_bare(&staged_room, &msg.jid);
+                    remove_seats_with_effects(
+                        &mut staged_room,
+                        &self.occupant_id_secret,
+                        &self.server_hats,
+                        occupants,
+                        None,
+                    )
+                }
+            };
+            let changed = previous_affiliation != affiliation;
+            let outbox_reservation = if changed || !applied.removed_by_moderation.is_empty() {
+                let (_, reservation) = self
+                    .commit_durable(
+                        RoomDurableMutation::Affiliation(durable_affiliation_entry(
+                            msg.jid.clone(),
+                            affiliation,
+                        )),
+                        admin_effects_for_applied(
+                            self.room.room_jid.clone(),
+                            durable_updates,
+                            applied.removed_by_moderation.clone(),
+                            &applied.voice_changes,
+                        ),
+                    )
+                    .await?;
+                reservation
+            } else {
+                self.gate_pre_mutation_ownership()
+                    .await
+                    .map_err(super::RoomMutationError::from)?;
+                None
+            };
+            self.invalidate_invite_grant(&msg.jid);
+            let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, affiliation);
+            self.advance_member_admission_revision(&msg.jid);
             self.room = staged_room;
             if needs_rehydration {
                 self.refresh_durable_recipients_from_source().await;

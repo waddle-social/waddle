@@ -36,7 +36,7 @@ use super::{
     XmppChannelRecord,
 };
 use super::{get_managed_channel_for_room, parse_room_jid_context};
-use super::{resolve_managed_channel_affiliation, server_permission_allowed};
+use super::{resolve_managed_channel_admission, server_permission_allowed};
 
 #[cfg(any(test, feature = "clustering"))]
 pub async fn handle_muc_join(
@@ -1020,6 +1020,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         // Whether an enrolled host-grant scope manages the room: its actor
         // is then created members-only whatever its channel row says.
         let mut host_grant_managed = false;
+        // The revocation-fence ticket of the decision that admits the joiner
+        // to a managed room. The room actor asks it in the turn that seats
+        // the occupant.
+        let mut host_grant_ticket = None;
         let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
             let Some(session) = authenticated_session else {
                 return deny_join_admission(
@@ -1059,7 +1063,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     },
                 );
             };
-            let resolved = resolve_managed_channel_affiliation(
+            let resolved = resolve_managed_channel_admission(
                 state,
                 &session_bare,
                 room_jid,
@@ -1068,7 +1072,11 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 // Join admission repairs a stale Space→channel projection.
                 true,
             )
-            .await;
+            .await
+            .map(|(resolved, ticket)| {
+                host_grant_ticket = ticket;
+                resolved
+            });
             let admission_members_only = match &resolved {
                 Ok(resolved) => {
                     host_grant_managed = resolved.host_grant_managed;
@@ -1468,17 +1476,42 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             debug!(room = %room_jid, sender = %sender_jid, "MUC join abandoned: connection superseded before commit");
             return Vec::new();
         }
-        let join_outcome = match room_actor
-            .ask(JoinWithAffiliation {
-                sender_jid: sender_jid.clone(),
-                nick: nick.clone(),
-                affiliation_grant,
-                session: occupancy_session,
-                local_domain: domain.clone(),
-                admission_revision,
-            })
-            .await
-        {
+        let join = JoinWithAffiliation {
+            sender_jid: sender_jid.clone(),
+            nick: nick.clone(),
+            affiliation_grant,
+            session: occupancy_session,
+            local_domain: domain.clone(),
+            admission_revision,
+        };
+        // A managed room's joiner was admitted by a decision the revocation
+        // fence can overtake while the join waits for the actor: the actor
+        // asks the decision's ticket before it seats the occupant, and a
+        // decision that is no longer current is made again like a stale
+        // admission revision.
+        let joined = match host_grant_ticket.clone() {
+            Some(ticket) => room_actor
+                .ask(
+                    waddle_xmpp::muc::room_actor::JoinWithAffiliationIfAdmitted {
+                        join,
+                        admission: waddle_xmpp::muc::room_actor::AdmissionCheck::new(move || {
+                            ticket.is_current()
+                        }),
+                    },
+                )
+                .await
+                .map_err(|error| error.map_msg(|admitted| admitted.join)),
+            None => room_actor.ask(join).await,
+        };
+        // A seat that was admitted and then recorded while a newer
+        // generation was installed is one the sweep has not seen: it sweeps
+        // the scope again.
+        if let (Ok(_), Some(ticket)) = (&joined, &host_grant_ticket) {
+            if !ticket.is_current() {
+                ticket.request_sweep();
+            }
+        }
+        let join_outcome = match joined {
             Ok(outcome) => outcome,
             Err(error) => {
                 // #1108: sealed-for-destruction room actor, or an ask

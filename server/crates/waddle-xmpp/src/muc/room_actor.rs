@@ -42,8 +42,9 @@ mod snapshot_handlers;
 mod tests;
 
 pub use admin_handlers::{
-    enforce_members_only_from_room, AdminItemsApplied, ApplyAdminItems, ApplyAffiliationChange,
-    EnforceMembersOnly, EnforceMembersOnlyAffiliations, GetAdminContext, IsOwner,
+    enforce_members_only_from_room, AdminItemsApplied, ApplyAdminItems, ApplyAdminItemsIfAdmitted,
+    ApplyAffiliationChange, EnforceMembersOnly, EnforceMembersOnlyAffiliations, GetAdminContext,
+    IsOwner, RemoveUnadmittedOccupant,
 };
 use mediated_invites::MediatedInviteOperationRecord;
 pub use mediated_invites::{
@@ -55,12 +56,13 @@ pub use mediated_invites::{
     PrepareMediatedInviteGrantRollback,
 };
 pub use occupancy_handlers::{
-    next_occupancy_order, ClearMujiPresence, ClearMujiPresenceOutcome, GetActiveMujiSessions,
-    InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId,
-    LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome,
-    OccupancyOrder, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
-    RecoveredOccupant, RecoveredSeating, ResolverAffiliationSyncOutcome, SeedRecoveredOccupants,
-    SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
+    next_occupancy_order, AdmissionCheck, ClearMujiPresence, ClearMujiPresenceOutcome,
+    GetActiveMujiSessions, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
+    JoinWithAffiliationIfAdmitted, LeaveAttemptId, LeaveByRealJid, LeaveDisposition, LeaveOrigin,
+    LeaveSessionSelector, MujiPresenceUpdateOutcome, OccupancyOrder, PingSelfCheck,
+    PresenceUpdateData, ReconcileChannelBackedRoom, RecoveredOccupant, RecoveredSeating,
+    ResolverAffiliationSyncOutcome, SeedRecoveredOccupants, SyncResolverAffiliation,
+    UpsertInCallState, UpsertMujiPresence,
 };
 pub use occupancy_record::ReportOccupancy;
 pub use waddle_xmpp_core::OccupancySessionGeneration;

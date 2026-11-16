@@ -37,7 +37,7 @@ pub use access::{
     resolve_managed_channel_entry_access, resolve_muc_room_archive_access, RoomArchiveAccess,
 };
 
-use access::{resolve_managed_channel_affiliation, server_permission_allowed};
+use access::{resolve_managed_channel_admission, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::RoomRegistry;
 use xml::{

@@ -1656,17 +1656,59 @@ pub(super) async fn handle_muc_admin_iq(
     }
     let mut suppress_direct_admin_effects = false;
     let mutation_attempt = waddle_xmpp::muc::AdminMutationId::generate();
-    let applied = match room_actor
-        .ask(ApplyAdminItems {
-            attempt: mutation_attempt,
-            sender_jid: sender_jid.clone(),
-            sender_affiliation,
-            sender_role: context.role,
-            items,
-        })
-        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-        .await
-    {
+    let apply = ApplyAdminItems {
+        attempt: mutation_attempt,
+        sender_jid: sender_jid.clone(),
+        sender_affiliation,
+        sender_role: context.role,
+        items,
+    };
+    // A request that changes roles only records nothing in the store, so
+    // nothing has revalidated the sender since the grants were read: the
+    // room actor asks the decision's revocation-fence ticket in the turn
+    // that applies the request, and applies nothing once a newer generation
+    // of the scope is installed. A request that changes an affiliation was
+    // revalidated by the store under the scope's guard when it was recorded,
+    // and its own commit is what moved the generation.
+    let role_decision = host_grant_room
+        .as_ref()
+        .filter(|_| affiliation_updates.is_empty())
+        .map(|room| room.fence.clone());
+    let asked = match role_decision {
+        Some(ticket) => {
+            match room_actor
+                .ask(waddle_xmpp::muc::room_actor::ApplyAdminItemsIfAdmitted {
+                    apply,
+                    admission: waddle_xmpp::muc::room_actor::AdmissionCheck::new(move || {
+                        ticket.is_current()
+                    }),
+                })
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(Some(applied)) => Ok(applied),
+                Ok(None) => {
+                    return vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        super::errors::resource_constraint_iq_error(
+                            "The room's grants changed; try again.",
+                        ),
+                    )]
+                    .into();
+                }
+                Err(error) => Err(error.map_msg(|admitted| admitted.apply)),
+            }
+        }
+        None => {
+            room_actor
+                .ask(apply)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+        }
+    };
+    let applied = match asked {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,

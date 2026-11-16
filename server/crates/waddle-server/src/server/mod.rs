@@ -11,6 +11,7 @@ pub mod extension_host_adapter;
 mod extension_host_tools;
 mod fixed_account;
 mod health;
+pub(crate) mod host_grant_revocation;
 mod http;
 mod liveness;
 pub(crate) mod process_metrics;

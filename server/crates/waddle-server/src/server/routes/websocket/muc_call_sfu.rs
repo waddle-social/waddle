@@ -217,7 +217,8 @@ pub(crate) enum GrantEnforcement {
 pub(crate) enum VoiceDerivation {
     /// A local actor answered with the occupant's current voice.
     Occupant(Voice),
-    /// A local (authoritative) actor answered "not an occupant".
+    /// A local (authoritative) actor answered "not an occupant", or the
+    /// canonical grants of a managed room do not admit the account.
     NotOccupant,
     /// No room actor in this process — cannot determine anything.
     NoLocalRoomActor,
@@ -241,6 +242,37 @@ pub(crate) async fn derive_current_voice(
     room_jid: &BareJid,
     full_jid: &FullJid,
 ) -> VoiceDerivation {
+    // A room an enrolled host-grant scope manages is decided from its
+    // grants first, on any replica: a participant whose account the grants
+    // do not admit to the room's calls is no occupant for this purpose,
+    // whether or not a room actor still seats it and whether or not this
+    // process holds the actor. A token released before a revoke therefore
+    // does not keep or regain a media session after it. Grants that cannot
+    // be read are a failed lookup, which changes nothing.
+    {
+        use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .allows(
+                RoomBinding::Room(room_jid),
+                &full_jid.to_bare(),
+                HostGrantAction::SendMessage,
+            )
+            .await
+        {
+            RoomGate::Unmanaged | RoomGate::Managed(true) => {}
+            RoomGate::Managed(false) => return VoiceDerivation::NotOccupant,
+            RoomGate::Unavailable => {
+                tracing::warn!(
+                    kind = "host_grants_unavailable",
+                    "could not read a managed room's grants for a live call participant",
+                );
+                return VoiceDerivation::LookupFailed;
+            }
+        }
+    }
     let actor = match crate::server::routes::websocket::get_room_actor_result(state, room_jid).await
     {
         Ok(Some(actor)) => actor,
@@ -303,8 +335,9 @@ pub(crate) fn apply_derived_enforcement(
         }
         VoiceDerivation::NotOccupant => {
             // A LOCAL room actor answered, so it owns this room and its
-            // occupant set is authoritative: this participant is in the
-            // SFU room while not being an occupant of the MUC.
+            // occupant set is authoritative, or the canonical grants of a
+            // managed room do not admit the account: this participant is
+            // in the SFU room while not being an occupant of the MUC.
             // Occupancy is the precondition for call participation, so
             // this is a stale-token join and must end. (Contrast the
             // absent-actor case, which proves nothing.)
