@@ -568,7 +568,18 @@ async fn seat_room_occupancy_in(
                 seat: record.seat,
             })
             .collect();
+        let (occupants, adopted) = remote_reseating(state, room, occupants).await;
         let Some(occupants) = host_grant_reseating(state, room, occupants).await else {
+            // Nothing is seated: the seats taken over are ended all the
+            // same, so no row stays behind. An occupant is told that its
+            // seat ended only once the room removed its occupancy, which
+            // the room never seated here: it learns that it is not joined
+            // at its next request.
+            state
+                .deps
+                .remote_route
+                .end_adopted_seats(room, &adopted)
+                .await;
             return false;
         };
         match actor
@@ -586,6 +597,15 @@ async fn seat_room_occupancy_in(
                     discarded = seating.discarded,
                     "seated recovered room occupants"
                 );
+                // An occupant of another server was seated on a seat taken
+                // over from the replica that stopped. Its occupancy does
+                // not continue behind what that replica had queued for it:
+                // the room removes it again, in its own order.
+                state
+                    .deps
+                    .remote_route
+                    .end_adopted_seats(room, &adopted)
+                    .await;
                 // The seats were restored from a decision read before the
                 // actor applied them. A managed room is swept afterwards,
                 // so a seat a revoke overtook meanwhile is removed; that
@@ -597,6 +617,11 @@ async fn seat_room_occupancy_in(
             }
             Err(error) => {
                 tracing::warn!(%error, room = %room, "recovered room occupants not seated");
+                state
+                    .deps
+                    .remote_route
+                    .end_adopted_seats(room, &adopted)
+                    .await;
                 // An ask that timed out or lost its reply may have seated
                 // some of them: the sweep removes any the grants do not
                 // admit.
@@ -624,13 +649,72 @@ async fn seat_room_occupancy_in(
     true
 }
 
+/// The recovered occupants of `room` this replica can seat at all, and of
+/// them the occupants of other servers.
+///
+/// An occupant at a domain this deployment does not serve was seated over
+/// S2S. Its occupancy is restored only on a seat of the recorded
+/// generation that this replica holds: one it already held, when the
+/// room's actor was restored on the replica that seats the occupant, which
+/// goes on; or one it takes over from a replica that stopped. The seat
+/// carries the stream evidence the occupant was admitted under, and a
+/// room's stanzas leave for a remote JID only while this replica holds its
+/// seat. A remote occupant without one, whose seat a live replica still
+/// holds, or whose seat stands for another generation, is not restored, in
+/// any room.
+///
+/// A seat taken over is restored so that the room can end it in its own
+/// order, not so that the occupancy continues: the caller ends those seats
+/// once the room has seated its occupants
+/// ([`crate::destination::RemoteRoute::end_adopted_seats`]).
+async fn remote_reseating(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+    occupants: Vec<RecoveredOccupant>,
+) -> (Vec<RecoveredOccupant>, Vec<jid::FullJid>) {
+    let Some(served) = state
+        .deps
+        .service_domains
+        .served_domains(state.deps.auth_state.xmpp_domain.as_str())
+    else {
+        return (occupants, Vec::new());
+    };
+    let mut seated = Vec::with_capacity(occupants.len());
+    let mut adopted = Vec::new();
+    for occupant in occupants {
+        if served.serves(occupant.real_jid.domain()) {
+            seated.push(occupant);
+            continue;
+        }
+        let adoption = state
+            .deps
+            .remote_route
+            .adopt_seat(room, &occupant.real_jid, occupant.session)
+            .await;
+        match adoption {
+            crate::destination::SeatAdoption::Adopted => {
+                adopted.push(occupant.real_jid.clone());
+                seated.push(occupant);
+            }
+            // The room's actor was restored on the replica that seats the
+            // occupant: its seat goes on, and the room seats it again.
+            crate::destination::SeatAdoption::Held => seated.push(occupant),
+            crate::destination::SeatAdoption::NotHeld => {}
+        }
+    }
+    (seated, adopted)
+}
+
 /// The recovered occupants of `room` whose seats are restored.
 ///
 /// A room an enrolled host-grant scope manages seats an occupant again only
 /// while its canonical grants allow reading the room, with the standing
 /// they honour and the moderator role only with their `moderate`: the
 /// recorded role and affiliation are what the room's earlier actor
-/// mirrored, which a revoke since then has not changed. `None` when the
+/// mirrored, which a revoke since then has not changed. An occupant is
+/// decided on the evidence of the stream each seat it holds here was
+/// admitted under, and without stream evidence when it holds none. `None`
+/// when the
 /// grants cannot be read, so the room is not seated. Any other room seats
 /// every recovered occupant as recorded.
 async fn host_grant_reseating(
@@ -650,22 +734,35 @@ async fn host_grant_reseating(
         RoomGate::Unavailable => return None,
         RoomGate::Managed(grants) => grants,
     };
+    let gate = &state.deps.app_state.host_grants;
     Some(
         occupants
             .into_iter()
             .filter_map(|mut occupant| {
                 let account = occupant.real_jid.to_bare();
-                if !grants.allows_as(
-                    &account,
-                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                    HostGrantAction::Read,
-                ) {
+                let evidence = gate.named_evidence(room, &account);
+                let allows = |action| {
+                    evidence
+                        .iter()
+                        .all(|evidence| grants.allows_as(&account, evidence, action))
+                };
+                if !allows(HostGrantAction::Read) {
                     return None;
                 }
-                occupant.affiliation = match grants.standing_as(
-                    &account,
-                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                ) {
+                // The standing every one of its seats is honoured with: the
+                // least of them.
+                let standing = evidence
+                    .iter()
+                    .map(|evidence| grants.standing_as(&account, evidence))
+                    .min_by_key(|standing| match standing {
+                        RoomAffiliation::Outcast => 0,
+                        RoomAffiliation::None => 1,
+                        RoomAffiliation::Member => 2,
+                        RoomAffiliation::Admin => 3,
+                        RoomAffiliation::Owner => 4,
+                    })
+                    .unwrap_or(RoomAffiliation::None);
+                occupant.affiliation = match standing {
                     RoomAffiliation::Owner => waddle_xmpp::Affiliation::Owner,
                     RoomAffiliation::Admin => waddle_xmpp::Affiliation::Admin,
                     RoomAffiliation::Member => waddle_xmpp::Affiliation::Member,
@@ -673,11 +770,7 @@ async fn host_grant_reseating(
                     RoomAffiliation::Outcast => waddle_xmpp::Affiliation::Outcast,
                 };
                 if occupant.role == waddle_xmpp::Role::Moderator
-                    && !grants.allows_as(
-                        &account,
-                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                        HostGrantAction::Moderate,
-                    )
+                    && !allows(HostGrantAction::Moderate)
                 {
                     occupant.role = waddle_xmpp::Role::Participant;
                 }

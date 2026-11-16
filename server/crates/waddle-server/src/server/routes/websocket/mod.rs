@@ -82,6 +82,16 @@ pub(crate) mod replay;
 mod resource_binding;
 mod resume_replay;
 pub(crate) mod s2s_delivery;
+#[cfg(feature = "clustering")]
+mod s2s_room_relay;
+#[cfg(all(feature = "clustering", feature = "test-support"))]
+pub(crate) use s2s_room_relay::owner_silent;
+#[cfg(feature = "clustering")]
+pub(crate) use s2s_room_relay::{
+    relayed_remote_room_request, REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT,
+    REMOTE_ROOM_REQUEST_REPLY_TIMEOUT,
+};
+pub(crate) mod s2s_rooms;
 mod sasl;
 mod send;
 mod session_init;

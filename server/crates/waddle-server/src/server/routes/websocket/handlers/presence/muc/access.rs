@@ -3,11 +3,72 @@ use super::{
     GetSnapshot, Object, ObjectType, Permission, Subject, WebSocketState, XmppChannelRecord,
     DEPLOYMENT_SERVER_ID,
 };
+use crate::permissions::host_grant::{PrincipalEvidence, PrincipalWitness, RoomAffiliation};
 use crate::permissions::{
     DeleteTuple, ListRelations, ListSubjects, PermissionError, Relation, SubjectType, Tuple,
     WriteTuple,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
+
+/// What `account` is to a decision its request reaches with `evidence`,
+/// under the account domain this deployment serves and the S2S snapshot the
+/// replica runs (ADR-0020 D1 and D8). `None` when the deployment's account
+/// domain is not canonical, which decides nothing: callers fail closed.
+pub(crate) fn principal_witness(
+    state: &WebSocketState,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+) -> Option<PrincipalWitness> {
+    let domain = waddle_xmpp::identity::CanonicalDomain::parse_canonical(
+        state.deps.auth_state.xmpp_domain.as_str(),
+    )
+    .ok()?;
+    Some(
+        state
+            .deps
+            .app_state
+            .grant_principals(domain)
+            .witness(account, evidence),
+    )
+}
+
+/// The affiliation a room no enrolled scope manages gives `account`, as it
+/// is honoured for a request that reached the room with `evidence`: as
+/// stored for a session of this deployment, and for a remote principal as
+/// the effect boundary honours any stored standing (ADR-0020 D8). A ban
+/// always stands; an owner or admin standing counts only for a trusted home
+/// on a `pkix` stream and otherwise contributes nothing; nothing counts for
+/// a domain that is not admitted.
+pub(crate) fn honoured_legacy_affiliation(
+    state: &WebSocketState,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+    affiliation: Option<Affiliation>,
+) -> Option<Affiliation> {
+    if matches!(evidence, PrincipalEvidence::NoStream) {
+        return affiliation;
+    }
+    let stored = match affiliation? {
+        Affiliation::Owner => RoomAffiliation::Owner,
+        Affiliation::Admin => RoomAffiliation::Admin,
+        Affiliation::Member => RoomAffiliation::Member,
+        Affiliation::Outcast => RoomAffiliation::Outcast,
+        Affiliation::None => RoomAffiliation::None,
+    };
+    let honoured = principal_witness(state, account, evidence)
+        .map_or(RoomAffiliation::None, |witness| witness.honour(stored));
+    match honoured {
+        RoomAffiliation::Owner => Some(Affiliation::Owner),
+        RoomAffiliation::Admin => Some(Affiliation::Admin),
+        RoomAffiliation::Member => Some(Affiliation::Member),
+        RoomAffiliation::Outcast => Some(Affiliation::Outcast),
+        // What is not honoured contributes nothing, the unaffiliated
+        // entry an open room gives anybody included only when that is
+        // what was stored.
+        RoomAffiliation::None if stored == RoomAffiliation::None => Some(Affiliation::None),
+        RoomAffiliation::None => None,
+    }
+}
 
 /// A managed channel's entry decision for one account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,33 +83,20 @@ pub(crate) struct ManagedChannelAffiliation {
     pub(crate) host_grant_managed: bool,
 }
 
-pub(crate) async fn resolve_managed_channel_affiliation(
-    state: &WebSocketState,
-    user_jid: &BareJid,
-    room_jid: &BareJid,
-    channel_id: &str,
-    members_only: bool,
-    allow_repairs: bool,
-) -> Result<ManagedChannelAffiliation, ()> {
-    resolve_managed_channel_admission(
-        state,
-        user_jid,
-        room_jid,
-        channel_id,
-        members_only,
-        allow_repairs,
-    )
-    .await
-    .map(|(affiliation, _)| affiliation)
-}
-
-/// [`resolve_managed_channel_affiliation`] together with the
-/// revocation-fence ticket of the decision, for a room an enrolled
+/// A managed channel's entry decision for `user_jid`, together with the
+/// revocation-fence ticket of the decision for a room an enrolled
 /// host-grant scope manages: the caller that goes on to seat the account
 /// acts on the decision only while the ticket is current.
+///
+/// The account is decided on `evidence`, how its request reached the room:
+/// no stream for a session of this deployment, the inbound S2S stream for a
+/// remote principal. A remote principal's entry never repairs the
+/// permission graph, and a room no scope manages honours the affiliation
+/// its legacy stores give it as [`honoured_legacy_affiliation`] says.
 pub(crate) async fn resolve_managed_channel_admission(
     state: &WebSocketState,
     user_jid: &BareJid,
+    evidence: &PrincipalEvidence,
     room_jid: &BareJid,
     channel_id: &str,
     members_only: bool,
@@ -60,7 +108,9 @@ pub(crate) async fn resolve_managed_channel_admission(
     ),
     (),
 > {
-    if let Some((affiliation, ticket)) = host_grant_admission(state, user_jid, room_jid).await? {
+    if let Some((affiliation, ticket)) =
+        host_grant_admission(state, user_jid, evidence, room_jid).await?
+    {
         return Ok((
             ManagedChannelAffiliation {
                 affiliation,
@@ -70,15 +120,17 @@ pub(crate) async fn resolve_managed_channel_admission(
             Some(ticket),
         ));
     }
+    let remote = matches!(evidence, PrincipalEvidence::Stream(_));
     let affiliation = resolve_legacy_channel_affiliation(
         state,
         user_jid,
         room_jid,
         channel_id,
         members_only,
-        allow_repairs,
+        allow_repairs && !remote,
     )
     .await?;
+    let affiliation = honoured_legacy_affiliation(state, user_jid, evidence, affiliation);
     Ok((
         ManagedChannelAffiliation {
             affiliation,
@@ -102,9 +154,10 @@ pub(crate) async fn resolve_managed_channel_admission(
 pub(crate) async fn host_grant_affiliation(
     state: &WebSocketState,
     user_jid: &BareJid,
+    evidence: &PrincipalEvidence,
     room_jid: &BareJid,
 ) -> Result<Option<Option<Affiliation>>, ()> {
-    host_grant_admission(state, user_jid, room_jid)
+    host_grant_admission(state, user_jid, evidence, room_jid)
         .await
         .map(|admission| admission.map(|(affiliation, _)| affiliation))
 }
@@ -116,6 +169,7 @@ pub(crate) async fn host_grant_affiliation(
 pub(crate) async fn host_grant_admission(
     state: &WebSocketState,
     user_jid: &BareJid,
+    evidence: &PrincipalEvidence,
     room_jid: &BareJid,
 ) -> Result<
     Option<(
@@ -124,7 +178,7 @@ pub(crate) async fn host_grant_admission(
     )>,
     (),
 > {
-    use crate::permissions::host_grant::{RoomAffiliation, RoomBinding, RoomGate};
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
     match state
         .deps
         .app_state
@@ -135,10 +189,7 @@ pub(crate) async fn host_grant_admission(
         RoomGate::Unmanaged => Ok(None),
         RoomGate::Unavailable => Err(()),
         RoomGate::Managed(room) => Ok(Some((
-            match room.standing_as(
-                user_jid,
-                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-            ) {
+            match room.standing_as(user_jid, evidence) {
                 RoomAffiliation::Outcast => Some(Affiliation::Outcast),
                 RoomAffiliation::None => None,
                 RoomAffiliation::Member => Some(Affiliation::Member),
@@ -228,14 +279,43 @@ pub async fn resolve_muc_room_archive_access(
     requester: Option<&BareJid>,
     channel: Option<&XmppChannelRecord>,
 ) -> RoomArchiveAccess {
+    resolve_muc_room_archive_access_as(
+        state,
+        room_jid,
+        requester,
+        &PrincipalEvidence::NoStream,
+        channel,
+    )
+    .await
+}
+
+/// [`resolve_muc_room_archive_access`] for a requester whose query reached
+/// the room with `evidence`. A remote principal whose domain is not
+/// admitted is denied whatever the room holds for it, and an owner or admin
+/// standing a room no scope manages gives it counts only as the effect
+/// boundary honours it (ADR-0020 D1 and D8).
+pub async fn resolve_muc_room_archive_access_as(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+    evidence: &PrincipalEvidence,
+    channel: Option<&XmppChannelRecord>,
+) -> RoomArchiveAccess {
     let Some(requester) = requester else {
         return RoomArchiveAccess::Denied;
     };
+    let remote = matches!(evidence, PrincipalEvidence::Stream(_));
+    if remote
+        && !principal_witness(state, requester, evidence)
+            .is_some_and(|witness| witness.grants_honoured())
+    {
+        return RoomArchiveAccess::Denied;
+    }
 
     // A room an enrolled host-grant scope manages is decided from its
     // canonical grants alone, whether or not it has a channel row or a live
     // actor.
-    match host_grant_affiliation(state, requester, room_jid).await {
+    match host_grant_affiliation(state, requester, evidence, room_jid).await {
         Ok(None) => {}
         Ok(Some(affiliation)) => return host_grant_entry(affiliation),
         Err(()) => return RoomArchiveAccess::Error,
@@ -264,10 +344,11 @@ pub async fn resolve_muc_room_archive_access(
             .as_ref()
             .map(|snapshot| snapshot.room.config.members_only)
             .unwrap_or(channel.members_only);
-        return resolve_managed_channel_entry_access(
+        return managed_channel_entry_access(
             state,
             room_jid,
             requester,
+            evidence,
             channel,
             members_only,
         )
@@ -282,6 +363,18 @@ pub async fn resolve_muc_room_archive_access(
     // would otherwise leak its archive to non-members (the #1093 bypass).
     // Managed channels — the norm in Waddle — always resolve above via the
     // persisted channel row and are unaffected.
+    // A remote principal with an owner or admin entry the effect boundary
+    // does not honour is refused: the entry contributes nothing, and the
+    // actor's own check would count it.
+    if remote {
+        if let Some(snapshot) = &snapshot {
+            let stored = snapshot.room.affiliation(requester);
+            if honoured_legacy_affiliation(state, requester, evidence, Some(stored)) != Some(stored)
+            {
+                return RoomArchiveAccess::Denied;
+            }
+        }
+    }
     match snapshot {
         Some(snapshot) if snapshot.room.can_user_join(requester) => RoomArchiveAccess::Allowed,
         Some(_) => {
@@ -319,9 +412,29 @@ pub async fn resolve_managed_channel_entry_access(
     channel: &XmppChannelRecord,
     members_only: bool,
 ) -> RoomArchiveAccess {
-    match resolve_managed_channel_affiliation(
+    managed_channel_entry_access(
+        state,
+        room_jid,
+        requester,
+        &PrincipalEvidence::NoStream,
+        channel,
+        members_only,
+    )
+    .await
+}
+
+async fn managed_channel_entry_access(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: &BareJid,
+    evidence: &PrincipalEvidence,
+    channel: &XmppChannelRecord,
+    members_only: bool,
+) -> RoomArchiveAccess {
+    match resolve_managed_channel_admission(
         state,
         requester,
+        evidence,
         room_jid,
         &channel.id,
         members_only,
@@ -329,6 +442,7 @@ pub async fn resolve_managed_channel_entry_access(
         false,
     )
     .await
+    .map(|(affiliation, _)| affiliation)
     {
         Ok(ManagedChannelAffiliation {
             affiliation: Some(Affiliation::Outcast),
@@ -362,8 +476,20 @@ pub async fn host_grant_read_still_admitted(
     room_jid: &BareJid,
     requester: Option<&BareJid>,
 ) -> Option<bool> {
+    host_grant_read_still_admitted_as(state, room_jid, requester, &PrincipalEvidence::NoStream)
+        .await
+}
+
+/// [`host_grant_read_still_admitted`] for a requester whose read reached
+/// the room with `evidence`.
+pub async fn host_grant_read_still_admitted_as(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+    evidence: &PrincipalEvidence,
+) -> Option<bool> {
     let requester = requester?;
-    match host_grant_affiliation(state, requester, room_jid).await {
+    match host_grant_affiliation(state, requester, evidence, room_jid).await {
         Ok(None) => None,
         Ok(Some(affiliation)) => Some(matches!(
             host_grant_entry(affiliation),

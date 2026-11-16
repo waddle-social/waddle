@@ -38,6 +38,10 @@ mod host_grant_revocation_support;
 mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
+// The S2S configuration fixture: a snapshot loaded by the production loader.
+#[allow(dead_code, unused_imports)]
+#[path = "s2s_connection_manager/support.rs"]
+mod s2s_transport;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,6 +59,7 @@ use waddle_server::permissions::host_grant::{
     HostGrantAction, ManagedRoomGrants, OperatorRevoke, RetireScope, RoomAffiliation, RoomBinding,
     RoomGate, FENCE_LEASE_TTL,
 };
+use waddle_server::s2s::config::S2sConfig;
 use waddle_server::test_support::{
     broadcast_room_system_message, hold_room_config_lock, sweep_host_grant_room, WebSocketState,
 };
@@ -671,8 +676,32 @@ async fn seat_member(state: &WebSocketState, room: &jid::BareJid, account: &str,
     assert!(seated(state, room, account).await);
 }
 
+/// An S2S snapshot that admits the remote member's home, loaded through
+/// the production loader.
+async fn admitting_remote_home(pki: &s2s_transport::Pki) -> S2sConfig {
+    s2s_transport::Spec::new("example.com", "remote.example")
+        .load(pki)
+        .await
+        .expect("the S2S snapshot loads")
+}
+
+/// The removal of the occupant `nick` as `observer` sees it.
+async fn removal_seen(
+    observer: &mut waddle_ws_test_support::WsXmppClient,
+    room: &jid::BareJid,
+    nick: &str,
+) -> host_grant_revocation_support::RoomPresence {
+    let seen = presence_from(observer, room, nick, SWEEP_BUDGET)
+        .await
+        .expect("the occupant's removal as another occupant sees it");
+    let seen = room_presence(&seen);
+    assert!(seen.unavailable);
+    seen
+}
+
 #[tokio::test]
-async fn the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it() {
+async fn the_sweep_removes_a_remote_occupant_whose_domain_is_not_admitted() {
+    // The replica runs with S2S off, so no remote domain is admitted.
     let Some(deployment) = Deployment::start("hg_revoke_remote", 1).await else {
         return;
     };
@@ -692,48 +721,156 @@ async fn the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it(
     assert_eq!(error_condition(&joined), None, "{joined:?}");
     seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
 
-    // The sweep holds no request of the remote member, and without one its
-    // membership is not honoured on this replica (S2S is off). That is not
-    // a denial on every stream: its seat stays until its own requests are
-    // decided with their stream's evidence.
+    // The replica holds no stream evidence for the seat, and a domain that
+    // is not admitted is denied whatever stream its requests arrive on:
+    // the occupant is removed, and its recorded membership stays.
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(!seated(&server.state, &room, REMOTE_MEMBER).await);
+    let seen = removal_seen(&mut owner, &room, "guest").await;
+    assert!(
+        seen.statuses.contains(&"321".to_owned()),
+        "{:?}",
+        seen.statuses
+    );
+    assert_eq!(
+        deployment.grants.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::Member))
+    );
+    drop(owner);
+    deployment.close().await;
+}
+
+#[tokio::test]
+async fn the_sweep_decides_an_admitted_remote_occupant_on_its_effective_standing() {
+    let pki = s2s_transport::Pki::new();
+    let s2s = admitting_remote_home(&pki).await;
+    let Some(deployment) = Deployment::start_running("hg_revoke_remote_on", 1, &s2s).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    deployment
+        .grants
+        .set(OWNER, REMOTE_MEMBER, RoomAffiliation::Member)
+        .await
+        .expect("remote membership");
+    deployment
+        .grants
+        .activate_current(&deployment.grants.scope)
+        .await;
+    let mut owner = server.client("owner", "desk").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
+
+    // An effective membership of an admitted home is honoured on any
+    // stream, so the occupant stays although no seat evidence is held.
     assert!(sweep_host_grant_room(&server.state, &room).await);
     assert!(seated(&server.state, &room, REMOTE_MEMBER).await);
     assert!(
         presence_from(&mut owner, &room, "guest", QUIET)
             .await
             .is_none(),
-        "the remote member was removed on a decision without stream evidence"
+        "an admitted remote member was removed"
     );
 
-    // A recorded revoke denies it on every stream: the sweep removes it,
-    // with status 321.
+    // A recorded revoke denies it on every stream: removed with status 321.
     record_acknowledged(&deployment, REMOTE_MEMBER, RoomAffiliation::None).await;
     assert!(sweep_host_grant_room(&server.state, &room).await);
     assert!(!seated(&server.state, &room, REMOTE_MEMBER).await);
-    let seen = presence_from(&mut owner, &room, "guest", SWEEP_BUDGET)
-        .await
-        .expect("the remote member's removal as the owner sees it");
-    let seen = room_presence(&seen);
-    assert!(seen.unavailable);
+    let seen = removal_seen(&mut owner, &room, "guest").await;
     assert!(
         seen.statuses.contains(&"321".to_owned()),
         "{:?}",
         seen.statuses
     );
 
-    // A ban of a remote member seated again is honoured the same way, with
-    // status 301.
+    // A membership that is recorded again and not yet effective admits
+    // nothing: an occupant seated meanwhile is removed, although its
+    // recorded affiliation is membership.
     deployment
         .grants
         .set(OWNER, REMOTE_MEMBER, RoomAffiliation::Member)
         .await
-        .expect("membership again");
+        .expect("membership recorded again");
+    assert_eq!(
+        deployment.grants.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::None))
+    );
+    seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(
+        !seated(&server.state, &room, REMOTE_MEMBER).await,
+        "a remote occupant stayed on an increase that is not effective"
+    );
+    removal_seen(&mut owner, &room, "guest").await;
+
+    // Once the increase is effective the occupant may stay again, and a
+    // ban removes it with status 301.
     deployment
         .grants
         .activate_current(&deployment.grants.scope)
         .await;
     seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(seated(&server.state, &room, REMOTE_MEMBER).await);
     record_acknowledged(&deployment, REMOTE_MEMBER, RoomAffiliation::Outcast).await;
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(!seated(&server.state, &room, REMOTE_MEMBER).await);
+    let seen = removal_seen(&mut owner, &room, "guest").await;
+    assert!(
+        seen.statuses.contains(&"301".to_owned()),
+        "{:?}",
+        seen.statuses
+    );
+    drop(owner);
+    deployment.close().await;
+}
+
+#[tokio::test]
+async fn the_sweep_removes_an_admitted_remote_occupant_when_its_scope_closes() {
+    let pki = s2s_transport::Pki::new();
+    let s2s = admitting_remote_home(&pki).await;
+    let Some(deployment) = Deployment::start_running("hg_revoke_remote_closed", 1, &s2s).await
+    else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    deployment
+        .grants
+        .set(OWNER, REMOTE_MEMBER, RoomAffiliation::Member)
+        .await
+        .expect("remote membership");
+    deployment
+        .grants
+        .activate_current(&deployment.grants.scope)
+        .await;
+    let mut owner = server.client("owner", "desk").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(seated(&server.state, &room, REMOTE_MEMBER).await);
+
+    // A retired scope admits nobody on any stream: the remote occupant
+    // leaves with everybody else, and keeps its recorded membership.
+    deployment
+        .grants
+        .store
+        .retire_scope(&RetireScope {
+            operation: GrantOperationId::generate(),
+            lifecycle: deployment.grants.scope.lifecycle,
+            expected_generation: deployment.grants.generation().await,
+        })
+        .await
+        .expect("retirement");
+    let seen = removal_seen(&mut owner, &room, "guest").await;
+    assert!(
+        seen.statuses.contains(&"321".to_owned()),
+        "{:?}",
+        seen.statuses
+    );
     assert!(sweep_host_grant_room(&server.state, &room).await);
     assert!(!seated(&server.state, &room, REMOTE_MEMBER).await);
     drop(owner);

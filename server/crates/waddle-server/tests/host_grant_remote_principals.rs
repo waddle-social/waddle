@@ -62,7 +62,7 @@ use waddle_server::ingress::IngressDecisionClass;
 use waddle_server::permissions::host_grant::{
     affiliation_allows, Activation, AdmissionDenial, EnrolledScopes, FederationSnapshot,
     HostGrantAction, HostGrantAttachment, HostGrantAuthority, HostGrantError, HostGrantGate,
-    HostGrantStore, IssuanceBasis, IssuancePolicy, IssuanceRefusal, MutationReceipt,
+    HostGrantStore, IssuanceBasis, IssuancePolicy, IssuanceRefusal, MutationReceipt, NoSeats,
     PrincipalEvidence, PrincipalPolicy, PrincipalWitness, Reconciliation, RemoteRefusal,
     RoomAcceptance, RoomAdmission, RoomAffiliation, RoomBinding, RoomGate, StreamEvidence,
 };
@@ -147,6 +147,16 @@ impl Snapshot {
     fn without_trusted_home() -> Self {
         Self {
             trusted_homes: Vec::new(),
+            ..Self::trusting()
+        }
+    }
+
+    /// The same snapshot after the operator removed the trusted home from
+    /// the allowlist: it is still listed as a trusted home, and peer
+    /// admission no longer admits it (ADR-0020 D1).
+    fn without_admitted_home() -> Self {
+        Self {
+            allow: vec!["remote.example", "unlisted.example", "sub.trusted.example"],
             ..Self::trusting()
         }
     }
@@ -444,6 +454,7 @@ async fn decide_acceptance(
             sender_evidence: evidence,
             action: HostGrantAction::SendMessage,
             audience,
+            seats: &NoSeats,
             principals,
             binding: &binding,
         })
@@ -1558,6 +1569,135 @@ async fn live_spicedb_an_increase_whose_initiator_is_no_longer_trusted_is_droppe
     assert_eq!(
         delisted.reconcile(lifecycle).await.expect("later pass"),
         Reconciliation::AlreadyActive(dropped_at)
+    );
+    fixture.close().await;
+}
+
+/// A fresh scope in which the trusted home's admin holds an effective admin
+/// grant and has recorded, on its home's `pkix` stream, a membership for a
+/// remote account that is not effective yet. `reconciling` is the snapshot
+/// of the replica whose next pass decides the increase; the pass's outcome
+/// and the generation the increase was recorded at are returned with the
+/// fixture.
+async fn reconcile_a_remote_initiated_increase(
+    label: &str,
+    reconciling: Snapshot,
+) -> (
+    GrantFixture,
+    Reconciliation,
+    waddle_server::permissions::host_grant::GrantGeneration,
+) {
+    let fixture = GrantFixture::enrolled(label).await.expect(
+        "the live remote-principal case needs the PostgreSQL test cluster as well as SpiceDB; \
+         set the WADDLE_TEST_POSTGRES_URL variable",
+    );
+    let lifecycle = fixture.scope.lifecycle;
+    let actor = live_permission_actor(&fixture.store).await;
+    let services = [domain("muc.example.com"), domain("spaces.example.com")];
+    let authority_under = |principals: &PrincipalPolicy| {
+        HostGrantAuthority::new(
+            fixture.store.clone(),
+            actor.clone(),
+            IssuancePolicy::for_principals(principals, services.clone()).expect("issuance policy"),
+        )
+    };
+    let trusting = authority_under(&Snapshot::trusting().principals().await);
+    trusting.reconcile(lifecycle).await.expect("first pass");
+    let command = fixture
+        .command(OWNER, TRUSTED_ADMIN, RoomAffiliation::Admin)
+        .await;
+    trusting
+        .set_affiliation(&command)
+        .await
+        .expect("admin grant");
+    assert!(matches!(
+        trusting.reconcile(lifecycle).await.expect("admin pass"),
+        Reconciliation::Activated(_)
+    ));
+    let command = fixture
+        .command(TRUSTED_ADMIN, REMOTE_MEMBER, RoomAffiliation::Member)
+        .await;
+    trusting
+        .set_affiliation_as(&command, &public_pkix())
+        .await
+        .expect("membership recorded by the remote admin");
+    assert_eq!(
+        fixture.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::None))
+    );
+    let recorded = fixture.generation().await;
+    let decided = authority_under(&reconciling.principals().await)
+        .reconcile(lifecycle)
+        .await
+        .expect("the deciding pass");
+    (fixture, decided, recorded)
+}
+
+/// The positive control of the dropped increase: under a snapshot that
+/// still admits and trusts the initiator's home, the increase it recorded
+/// is projected and activated like any other, and nothing is journalled as
+/// dropped.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_a_remote_initiated_increase_activates_while_its_home_is_trusted() {
+    let (fixture, decided, recorded) =
+        reconcile_a_remote_initiated_increase("hg_w5e_keep_increase", Snapshot::trusting()).await;
+    assert_eq!(decided, Reconciliation::Activated(recorded));
+    assert_eq!(fixture.generation().await, recorded);
+    assert_eq!(
+        fixture.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::Member, RoomAffiliation::Member))
+    );
+    assert_eq!(
+        change_without_initiator(
+            &fixture,
+            REMOTE_MEMBER,
+            RoomAffiliation::Member,
+            RoomAffiliation::None
+        )
+        .await,
+        0
+    );
+    assert!(
+        admitted(
+            &fixture,
+            &Snapshot::trusting().principals().await,
+            REMOTE_MEMBER,
+            public_pkix(),
+            HostGrantAction::Read
+        )
+        .await
+    );
+    fixture.close().await;
+}
+
+/// An increase whose initiator's home is no longer admitted (ADR-0020 D1)
+/// is dropped although the home is still on the trusted-home list: the
+/// drop lowers the recorded affiliation to the effective one, so it fails
+/// closed.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_an_increase_whose_initiators_home_is_no_longer_admitted_is_dropped() {
+    let (fixture, decided, recorded) = reconcile_a_remote_initiated_increase(
+        "hg_w5e_drop_unadmitted",
+        Snapshot::without_admitted_home(),
+    )
+    .await;
+    let dropped_at = recorded.next().expect("a generation after the increase");
+    assert_eq!(decided, Reconciliation::Activated(dropped_at));
+    assert_eq!(
+        fixture.affiliations(REMOTE_MEMBER).await,
+        Some((RoomAffiliation::None, RoomAffiliation::None))
+    );
+    assert_eq!(
+        change_without_initiator(
+            &fixture,
+            REMOTE_MEMBER,
+            RoomAffiliation::Member,
+            RoomAffiliation::None
+        )
+        .await,
+        1
     );
     fixture.close().await;
 }

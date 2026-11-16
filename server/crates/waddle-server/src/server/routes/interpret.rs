@@ -220,7 +220,8 @@ pub(crate) use groupchat_inbox::reconcile_groupchat_notification_recovery;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
-    resource_constraint_error, validate_groupchat_rich_targets,
+    resource_constraint_error, validate_groupchat_rich_targets, validate_groupchat_rich_targets_of,
+    RichTargetSender,
 };
 #[cfg(all(test, feature = "clustering"))]
 pub use handoff::ORDERED_RELAY_HANDOFF_CAPACITY;
@@ -284,6 +285,8 @@ pub(crate) use notification_activity_ingest::{
 mod relay_plan;
 #[cfg(feature = "clustering")]
 pub(crate) use relay_plan::plan_muc_for_relay;
+mod remote_occupant_plan;
+pub(crate) use remote_occupant_plan::plan_remote_occupant_groupchat;
 
 #[cfg(test)]
 pub(crate) mod tests;

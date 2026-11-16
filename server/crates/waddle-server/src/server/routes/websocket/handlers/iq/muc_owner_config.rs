@@ -543,16 +543,18 @@ async fn rollback_config_or_arm_reservation(
     }
 }
 
-/// Whether the grants of a managed room let `initiator` configure it, with
-/// a decision that is still current.
+/// Whether the grants of a managed room let `initiator`, whose request
+/// reached the room with `evidence`, configure it, with a decision that is
+/// still current.
 fn owner_config_admitted(
     grants: &crate::permissions::host_grant::ManagedRoomGrants,
     initiator: Option<&FullJid>,
+    evidence: &crate::permissions::host_grant::PrincipalEvidence,
 ) -> bool {
     initiator.is_some_and(|initiator| {
         grants.allows_as(
             &initiator.to_bare(),
-            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            evidence,
             crate::permissions::host_grant::HostGrantAction::Manage,
         )
     })
@@ -587,6 +589,26 @@ impl std::fmt::Display for OwnerConfigError {
     }
 }
 
+/// [`apply_muc_owner_config_as`] for a session's request.
+#[cfg(test)]
+pub(super) async fn apply_muc_owner_config(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    iq: &xmpp_parsers::iq::Iq,
+    session: Option<&Session>,
+    initiator: Option<&FullJid>,
+) -> Result<ResponseBatch, OwnerConfigError> {
+    apply_muc_owner_config_as(
+        state,
+        room_jid,
+        iq,
+        session,
+        initiator,
+        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+    )
+    .await
+}
+
 /// Apply an owner's configuration change. The caller authorized the
 /// initiator; in a room an enrolled host-grant scope manages that decision
 /// was taken before this request waited for the room's configuration lock,
@@ -594,12 +616,19 @@ impl std::fmt::Display for OwnerConfigError {
 /// waits for its acknowledgement. The grants are therefore read again once
 /// the lock is held, and asked again (without waiting) just before the room
 /// actor applies the change: a demotion acknowledged meanwhile refuses it.
-pub(super) async fn apply_muc_owner_config(
+///
+/// The initiator's request reached the room with `evidence`: none for a
+/// session of this deployment, and for a remote principal the inbound S2S
+/// stream that carried the request. A remote principal is passed no
+/// session: it holds none here, and no authorization relationship is
+/// written for it.
+pub(super) async fn apply_muc_owner_config_as(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
     session: Option<&Session>,
     initiator: Option<&FullJid>,
+    evidence: &crate::permissions::host_grant::PrincipalEvidence,
 ) -> Result<ResponseBatch, OwnerConfigError> {
     let mut room_actor = get_room_actor(state, room_jid)
         .await
@@ -672,6 +701,11 @@ pub(super) async fn apply_muc_owner_config(
                     config.pin_permission = pin_permission;
                 }
             }
+            // Whether accounts at other servers may reach the room.
+            if let Some(federated) = data_form_bool(form, waddle_xmpp::muc::owner::FIELD_FEDERATED)
+            {
+                config.federated = federated;
+            }
             // #1265 item 7: honor muc#roomconfig_maxusers on submit.
             // The registrar value "none" and 0 both mean unlimited.
             if let Some(value) = data_form_value(form, "muc#roomconfig_maxusers") {
@@ -712,7 +746,7 @@ pub(super) async fn apply_muc_owner_config(
         {
             RoomGate::Unmanaged => None,
             RoomGate::Managed(grants) => {
-                if !owner_config_admitted(&grants, initiator) {
+                if !owner_config_admitted(&grants, initiator, evidence) {
                     return Err(OwnerConfigError::Forbidden);
                 }
                 Some(grants)
@@ -775,7 +809,7 @@ pub(super) async fn apply_muc_owner_config(
     // prepared applies nothing.
     if host_grant_decision
         .as_ref()
-        .is_some_and(|grants| !owner_config_admitted(grants, initiator))
+        .is_some_and(|grants| !owner_config_admitted(grants, initiator, evidence))
     {
         return Err(OwnerConfigError::Forbidden);
     }
@@ -907,6 +941,16 @@ pub(super) async fn apply_muc_owner_config(
         }
     };
     cancelled_commit_recovery.disarm();
+    // A room that stops being open to accounts at other servers keeps none
+    // of them: each remote occupant is removed and told (XEP-0045 §11.1,
+    // status 333), once the change is committed.
+    if previous_config.federated && !config.federated {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .close_foreign_room(room_jid);
+    }
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
     let mut config_reservation = CommittedConfigReservationGuard::new(state, config_reservation);
@@ -988,8 +1032,8 @@ pub(super) async fn apply_muc_owner_config(
     if let Err(error) = actor
         .ask(DbExecute {
             sql: r#"
-                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, members_only, public_room, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, members_only, public_room, federated, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
@@ -997,6 +1041,7 @@ pub(super) async fn apply_muc_owner_config(
                     pin_permission = excluded.pin_permission,
                     members_only = excluded.members_only,
                     public_room = excluded.public_room,
+                    federated = excluded.federated,
                     updated_at = excluded.updated_at
             "#
             .to_string(),
@@ -1008,6 +1053,7 @@ pub(super) async fn apply_muc_owner_config(
                 config.pin_permission.as_form_value().into(),
                 config.members_only.into(),
                 config.public_room.into(),
+                config.federated.into(),
                 now.clone().into(),
                 now.into(),
             ],
@@ -1034,7 +1080,14 @@ pub(super) async fn apply_muc_owner_config(
     // The channel#owner tuple was written before the config update/upsert so the
     // creator can always rejoin after restart, before a Space bookmark is
     // published. XEP-0045 §10 requires the room creator to be an owner.
-    if session.is_none() {
+    // A remote principal's request carries no session and writes no owner
+    // relationship: its standing is the one the room already holds for it.
+    if session.is_none()
+        && matches!(
+            evidence,
+            crate::permissions::host_grant::PrincipalEvidence::NoStream
+        )
+    {
         warn!(
             channel_id = %channel_id,
             "apply_muc_owner_config called without a session; \

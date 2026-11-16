@@ -59,6 +59,18 @@ boundary](#remote-principals-at-the-effect-boundary-g17); its suite has
 run against disposable stores (see
 [Evidence of the effect boundary](#evidence-of-the-effect-boundary)).
 
+The inbound MUC slice (W6a in the plan) is the first producer of stream
+evidence: remote principals reach a managed room's join, archive,
+discovery and self-ping, its acceptance and its administration
+(`muc#admin`, `muc#owner`, XEP-0425 moderation), on the evidence of their
+streams, and a seated remote occupant is decided on the evidence its seat
+was admitted under. A managed room is reached at all only while its
+`federated` setting is on. What that changes here is recorded under
+[Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)
+and [Where it is decided](#where-it-is-decided); the rest is in
+[the routing design](s2s-routing-2047.md#inbound-muc-w6a). Its cases are
+written and have not been run.
+
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
 for its scope, records the decision here and has it independently reviewed
@@ -1797,9 +1809,16 @@ yet uses two replicas; that is verification step 4.
   scope's Space is served; W7a depends on it), and with it what `view` of a
   scope's Space means: until then its node is described and listed to
   nobody.
-- Remote principals reaching these surfaces over S2S (W6a); the decision
+- Remote principals reaching these surfaces over S2S: the join, the
+  archive read, discovery, self-ping, the room's acceptance and room
+  administration (the `muc#admin` lists and changes, the `muc#owner`
+  configuration and XEP-0425 moderation) are reached through
+  [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a), and the decision
   they reach is recorded under [Remote principals at the effect
-  boundary](#remote-principals-at-the-effect-boundary-g17).
+  boundary](#remote-principals-at-the-effect-boundary-g17). The other
+  surfaces of this section (calls, pins, hats, voice requests,
+  invitations, the Space's nodes and commands) are not reachable over
+  S2S.
 - Recreation of a scope, a room or a node under a new lifecycle.
 - A deployment-wide policy guard; the first slice's community generation
   still does not fence a changed deployment override.
@@ -2698,31 +2717,62 @@ which affiliation and role. `server/host_grant_revocation.rs` puts that
 back in line. The fence asks for a sweep of a scope whenever the replica
 installs a new generation of it, and of every scope when the replica
 registers. For each room of the scope that this process holds an actor for,
-the sweep reads the grants (without the lease: it admits nothing) and
-applies, per account the actor seats or lists:
+the sweep reads the grants as stored and applies, per account the actor
+seats or lists:
 
 | The grants say | The actor holds | The sweep |
 | --- | --- | --- |
 | Banned (recorded or effective outcast) | A seat | Sets the entry to outcast and removes every seat with status 301 (XEP-0045 §9.1). |
 | No membership recorded | A seat | Sets the entry to none and removes every seat with status 321 (§9.4). |
-| Membership recorded, and reading not admitted: the scope admits nobody (retired, restored, fenced), or, for an account of a served domain, the grant is not honoured | A seat | Removes every seat with status 321 and leaves the entry. |
+| Membership recorded, and reading not admitted: the scope admits nobody (retired, restored, fenced), the grant is not honoured for the account (below), or the membership is a recorded increase that is not yet effective | A seat | Removes every seat with status 321 and leaves the entry. |
 | No membership recorded, or banned | An entry above that, no seat | Sets the entry, which also refuses a join of that account the actor has not applied yet. |
 | An affiliation below the mirrored one | Any | Lowers the entry to the recorded one. The role is derived again (an admin that became a member is no moderator), with the affiliation presence. |
 
-The sweep holds no request of the account it decides for, so it decides
-without stream evidence. For an account of a domain the deployment does not
-serve that honours less than a request on the account's own stream would:
-no owner or admin standing, and with `require_pkix` nothing at all. Such an
-occupant is therefore removed only when the grants deny it whatever stream
-its requests arrive on: a ban, no membership recorded, or a scope that
-admits nobody (the first, second and third rows). A remote member whose
-membership the replica does not honour without a stream (S2S off, its
-domain not admitted, `require_pkix`, a privileged grant) keeps its seat;
-each of its own uses of the room is decided with the evidence of the request
-that makes it, and deciding its deliveries from the evidence its occupancy
-was established on belongs to the slice that seats remote occupants (W6a in
-the plan). Lowering a mirrored entry to the recorded one (the last row)
-applies to every account.
+The sweep reads the grants through `HostGrantGate::room_as_stored`, which
+returns `StoredRoomGrants`: the recorded and effective affiliations and
+what a principal would be decided as, with no ticket of the revocation
+fence. It is a type of its own, so nothing that admits (a join, a read, an
+administration request, the room's acceptance) can be given it; those take
+`ManagedRoomGrants`, whose ticket is always the fence's.
+
+Whether a seated account may stay is decided as admission decides it: from
+the effective affiliation, for the principal the account is. A recorded
+increase that is not yet effective admits nothing, so an occupant seated
+while one is pending is removed although its recorded affiliation is a
+membership. The sweep holds no request of the account, so which evidence
+it decides with depends on what the replica knows of the seat:
+
+- An account of a served domain is decided without stream evidence, as its
+  own requests are.
+- A remote occupant this replica seated over S2S is decided on the
+  evidence of the stream each of its seats was admitted under, which the
+  router records with the seat (`SeatEvidence`, read through
+  `HostGrantGate::seat_evidence`; see
+  [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). It stays only if
+  every one of its seats' evidence admits it to read under the snapshot the
+  replica runs now. A trusted home's admin seated on a `pkix` stream
+  therefore keeps its seat, and loses it when its home leaves the
+  trusted-home list; with `require_pkix`, a member seated on a dialback
+  stream is removed.
+- A remote occupant for which the replica holds no seat evidence (one
+  seated through the room actor from a record, or by a replica that has
+  since stopped) is decided without stream evidence first, and kept if
+  that admits it. Deciding without a stream honours less than a request on
+  the account's own stream would: no owner or admin standing, and with
+  `require_pkix` nothing at all. So where that decision denies, the
+  occupant is removed only when the grants deny it whatever stream its
+  requests arrive on: it is banned, the scope admits nobody, its effective
+  affiliation is below membership, or its domain is not admitted. A domain
+  is not admitted when S2S is off or when the snapshot the replica runs
+  refuses the domain or a parent of it (ADR-0020 D1); no stream of such a
+  domain admits anything, so the denial holds on every stream. What is left
+  is the occupant whose only obstacle is the missing evidence: a trusted
+  home's admin, or under `require_pkix` any remote member. It keeps its
+  seat, and each of its own uses of the room is decided with the evidence
+  of the request that makes it.
+
+Lowering a mirrored entry to the recorded one (the last row) applies to
+every account.
 
 A room's own administration request applies its change to the actor
 itself, with the administrator and the reason it names. The sweep does not
@@ -2962,8 +3012,9 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
   reads it for a managed room, and other readers of it are not audited here.
 - A plain presence update of a seated, revoked occupant is still broadcast
   until the sweep removes the seat.
-- Remote principals at these surfaces (W5e, W6a) and the remaining items of
-  the writer fence's list.
+- Remote principals at these surfaces are decided under
+  [Remote principals at the effect boundary](#remote-principals-at-the-effect-boundary-g17);
+  the remaining items of the writer fence's list stay open.
 - Surfaces that decide before an await and act after it without deciding
   again, beyond those this section re-decides: XEP-0425 message moderation,
   channel-wide mention delivery, Muji call start and the release of a media
@@ -3157,7 +3208,17 @@ from its bare JID and the evidence of how its request arrived:
 - *Evidence.* `PrincipalEvidence::Stream` carries the authentication
   strength and the trust-profile kind of the inbound S2S stream that
   carried the request. Outside test support it is built only from a
-  `RemotePrincipal`, which only a verified inbound stream produces.
+  `RemotePrincipal`. A replica builds one from a stanza on an inbound
+  stream it verified, or, for a room it holds, from the facts of a stream
+  another replica of the deployment verified and carried to it over the
+  cluster relay with the stanza (`RemotePrincipal::carried`; see
+  [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). The carried facts
+  are the address, the strength, the trust-profile kind and the snapshot
+  generation, and nothing decided from them: the receiving replica
+  evaluates admission and trusted-home status itself. It takes the facts
+  on the relay's word, as it takes every relay message; only replicas of
+  the deployment reach the relay, and no peer server's input builds a
+  principal on any path but a verified stream.
   `PrincipalEvidence::NoStream` is a local session's own request, or a
   principal the decision names without its request (a recipient, a seated
   occupant, a listed subject).
@@ -3206,14 +3267,29 @@ them.
 - Room-manifest acceptance (`admit_room_acceptance`): the sender with the
   evidence of its request, every named recipient without stream evidence.
   The acceptance's witness (`AdmissionWitness::sender`) records what the
-  sender was decided as. Every ingress producer (a local session, an
-  extension, a room's own result) submits without a stream, so the
-  acceptance passes `NoStream`; the slice that admits remote senders to
-  rooms (W6a) adds a producer that passes its stream's evidence.
+  sender was decided as. A local session, an extension and a room's own
+  result submit without a stream, so the acceptance passes `NoStream` for
+  them. A remote occupant's message is submitted with a principal of its
+  own kind (`IngressPrincipal::Remote`), which carries the stream evidence
+  of its seat, and the acceptance decides the sender on it
+  (`RoomAcceptance::sender_evidence`). A named recipient that is a remote
+  occupant is decided on the evidence each of its seats on this replica
+  was admitted under (`RoomAcceptance::seats`), and is in the audience
+  only if all of them admit it to read; a recipient without a seat here is
+  decided without stream evidence.
 - The gate's surfaces: each names the evidence it decides with, through
   `ManagedRoomGrants::allows_as` and `standing_as`, `HostGrantGate::allows_as`
-  and `HostGrantGate::still_allows`; every surface built so far serves a
-  local session's request or a subject it names, and passes `NoStream`.
+  and `HostGrantGate::still_allows`. A surface that serves a local
+  session's request or a subject it names passes `NoStream`. The surfaces a
+  remote principal reaches (the join, the archive read before and after the
+  page is read, `disco#info` of the room, the self-ping, and the
+  administration requests: the `muc#admin` lists and changes, the
+  `muc#owner` configuration and XEP-0425 moderation; see
+  [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)) pass the evidence of
+  the stream that carried the request (`PrincipalEvidence::of`). The
+  administration handlers take the evidence as a parameter: a session's
+  dispatch and the cluster's forward of a session's list request pass
+  `NoStream`, and the room host passes the stream's.
   `ManagedRoomGrants::admitted` lists subjects without stream evidence.
   Each of these asks the revocation fence's ticket of the decision too, so
   a decision made with a stream's evidence is fenced like any other. The
@@ -3224,8 +3300,11 @@ them.
   `HostGrantAuthority::set_affiliation_as`) takes the initiator's evidence
   and decides its standing under the issuance policy's principal policy,
   evaluated when the command is submitted. Room administration passes
-  `NoStream` for its local session; the stream-less `set_affiliation`
-  exists for suites only. A `PrincipalPolicy` is built from served account
+  `NoStream` for a local session and the evidence of the request's stream
+  for a remote principal, so a remote owner's or admin's change is recorded
+  only while its home is a trusted home and a `pkix` stream carried the
+  request, and is acknowledged by the revocation fence like any other; the
+  stream-less `set_affiliation` exists for suites only. A `PrincipalPolicy` is built from served account
   domains alone (S2S off) by name, `PrincipalPolicy::local`; the
   conversion from `ServedAccountDomains` exists for suites only, so a
   replica cannot lose its snapshot through a conversion. The evidence is not part of the operation's
@@ -3233,8 +3312,35 @@ them.
   nothing again, and a refused initiator records nothing.
 - The moderator role (an XEP-0045 role change): granted only to an occupant
   whose witness honours room moderation. The occupant is not the
-  requester, so it is decided without stream evidence, and the role is
-  granted to served accounts only.
+  requester: an account of a served domain is decided without stream
+  evidence, and a remote occupant on the evidence its seats were admitted
+  under, so the role goes to a trusted home's occupant only while every
+  one of its seats is on a `pkix` stream. The same holds where a seat is
+  taken: a join that would seat a remote principal as owner, admin or
+  moderator without its witness honouring that is refused, and one the
+  room seated all the same is undone without anyone being told that an
+  occupancy ended, since nobody was told that it began.
+- An owner or admin affiliation (an XEP-0045 affiliation change) derives
+  the moderator role for every occupant of the account, in the room actor,
+  for the account and not for each seat. So the affiliation is not
+  recorded, in a managed room or any other, while one of the account's
+  seats on the replica that holds the room would not honour it
+  (`seats_honour_privilege`): the requester is answered `not-allowed`, and
+  grants it once that occupant has left or has entered over a stream that
+  honours it. An account that holds no seat there is decided by the
+  issuance policy alone, and each seat it takes later where the seat is
+  taken.
+- A room's own message (a system message) in a managed room: each
+  occupant is named without a request, so a remote occupant is decided on
+  the evidence each of its seats on this replica was admitted under and
+  receives its copy only if all of them admit it to read, when the
+  audience is chosen and again as each copy is routed.
+- Re-seating after a claim move: a recorded remote occupant is seated
+  again only when this replica takes over its seat, which it can once the
+  seat's owner is no longer alive, and is then decided on the evidence
+  that seat records. One whose seat cannot be taken over (none exists, or
+  a live replica holds it) is not seated again, in a managed room or any
+  other: a room's stanzas leave for a remote JID only through a seat.
 
 ### Decided without stream evidence
 
@@ -3278,7 +3384,20 @@ effective one and journals the change from the increase to it. The increase
 is never projected and never activated; the projection that follows holds
 the scope without it, and the scope converges as after any other operation.
 An increase by an account of a served domain, or recorded without an
-initiator (an owner act), is kept. A scope that admits no mutation (retired,
+initiator (an owner act), is kept.
+
+Dropping fails closed. The row returns to its effective affiliation, which
+is what every decision already honoured, and never to some value between
+the two: the store keeps one recorded and one effective affiliation for a
+row and the operation that last recorded it, not the history of what was
+recorded in between. Two consequences follow. An increase that another
+initiator recorded on the same row earlier, and that had not been
+activated when the dropped one replaced it, is lost with it and has to be
+issued again; the journal keeps both operations. And an initiator's
+increase that a later operation of an honoured initiator replaced is not
+looked at: the row names the later operation, whose initiator is the one
+checked. Nothing is ever raised by a drop, and a decrease is never
+dropped, since a decrease is effective at its commit. A scope that admits no mutation (retired,
 exhausted, fenced, bound to another incarnation, or closed for a restore) is
 not checked. A retired, exhausted or fenced scope activates nothing; the
 reconstruction of a scope closed for a restore activates what its restored
@@ -3311,24 +3430,36 @@ like its grants, which needs a migration and an operation of its own.
 
 ### What stays open
 
-- A principal named without its request has no stream evidence. A trusted
-  home's admin is therefore not counted as a reader: not in an
-  acceptance's audience, not listed as a reader and not re-seated after a
-  claim move; with `require_pkix`, no remote member is. This stands until
-  the slice that seats remote occupants (W6a) decides a remote occupant's
-  deliveries on the evidence of the stream its occupancy was established
-  on. Until then the revocation sweep removes a remote occupant only when
-  its grants deny it on every stream
+- A principal named without its request and without a seat on the
+  deciding replica has no stream evidence. A trusted home's admin that
+  holds no seat there is therefore not counted as a reader: not in an
+  acceptance's audience and not listed as a reader; with `require_pkix`,
+  no such remote member is. A remote occupant seated over S2S is decided
+  on its seat's evidence in the acceptance's audience, by the revocation
+  sweep and when it is re-seated
   ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)).
-- Rooms no scope manages keep their legacy checks, which evaluate neither
-  D1 nor D8 at the effect. No surface serves remote principals there yet
-  (D10 refuses MUC and the Spaces service to S2S senders until W6a and
-  W7a); those slices decide each effect they open to remote principals with
-  `PrincipalPolicy::witness`. They also apply D8 issuance to the legacy
-  privileged writers of rooms and Spaces no scope manages
-  (`channel.manager` and `channel.moderator`, `space.moderator` and
-  `role.manager`), which today write those relations without asking whether
-  the subject's home is a trusted home.
+  The evidence is held by the replica that seats the occupant; a decision
+  taken on another replica names it without one.
+- Rooms no scope manages keep their legacy checks. Where a remote
+  principal reaches one (the MUC service; the Spaces service is refused to
+  S2S senders until W7a), each effect is decided with
+  `PrincipalPolicy::witness`: D1 at every request, and D8 on whatever
+  standing the legacy checks give the principal
+  ([inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). D8 issuance is
+  applied by the `muc#admin` writer of such a room and by the admin
+  command that sets a room affiliation (`channels:set-affiliation`). The
+  Spaces relations (`channel.manager`, `channel.moderator`,
+  `space.moderator` and `role.manager`) are still written without asking
+  whether the subject's home is a trusted home, until the Spaces slice
+  (W7a) reviews them; a standing they write for a remote account is not
+  honoured at the effect unless its home is trusted and its stream is
+  `pkix`.
+- A remote principal's administration of a managed room has no fence check
+  beyond the ones a session's has: a moderation request (XEP-0425) and the
+  role list read are decided once, on the grants as read, and an
+  affiliation list is read from one generation of the grants. An
+  acknowledged revoke between such a read and its answer is not seen by
+  that answer, for a remote principal as for a session.
 - Account bootstrap provisions deployment ownership for served accounts
   only, which is stricter than D8 requires.
 - A per-scope `pkix` requirement (above).
@@ -3337,21 +3468,45 @@ like its grants, which needs a migration and an operation of its own.
 
 `tests/host_grant_remote_principals.rs` decides each case under snapshots
 loaded through the production S2S loader from files, with a stream's
-evidence given in place of a live stream: no inbound stream reaches a
-managed room before W6a. The acceptance-matrix rows marked W5e map onto
-its cases; over live streams they are verification steps 6 and 7. It needs
+evidence given in place of a live stream. The acceptance-matrix rows marked
+W5e map onto its cases; over live streams, which reach a managed room
+through inbound MUC, they are the cases listed at the end of this section
+and verification steps 6 and 7. It needs
 PostgreSQL only, except
 `live_spicedb_an_increase_whose_initiator_is_no_longer_trusted_is_dropped`,
 which reconciles through a disposable SpiceDB like the other `live_spicedb_`
 suites. `a_remote_ban_is_honoured_by_the_gate_and_acceptance_on_every_stream`
 decides a ban under a snapshot that admits and trusts the banned homes, on
 the strongest and every weaker stream, a `pkix` strength without a trust
-profile included. The sweep's rule for a seated remote occupant is
-`the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it` in
-`xep0045_host_grant_revocation.rs`. The suite ran on 2026-11-16 at
+profile included. The suite ran on 2026-11-16 at
 `c415ea213`, with the revocation fence's focused set (above): 14 of 14
 cases passed, the `live_spicedb_` case against a PostgreSQL-backed SpiceDB. `host_grant_authority.rs` and
 `xep0045_host_grant_admission.rs` cover a replica with S2S off.
+
+Written since that run and not executed:
+
+- in `host_grant_remote_principals.rs`,
+  `live_spicedb_a_remote_initiated_increase_activates_while_its_home_is_trusted`,
+  the control for the dropped increase, and
+  `live_spicedb_an_increase_whose_initiators_home_is_no_longer_admitted_is_dropped`;
+- in `xep0045_host_grant_revocation.rs`, the sweep's rule for a seated
+  remote occupant, which replaces
+  `the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it`:
+  `the_sweep_removes_a_remote_occupant_whose_domain_is_not_admitted` (S2S
+  off), `the_sweep_decides_an_admitted_remote_occupant_on_its_effective_standing`
+  (a pending increase admits nothing) and
+  `the_sweep_removes_an_admitted_remote_occupant_when_its_scope_closes`;
+- over live streams, in `xep0045_s2s_inbound_muc.rs` and
+  `xep0313_s2s_inbound_mam.rs`: a remote member entering a managed room on
+  its grant, a stranger refused, messages through the room's acceptance
+  both ways, a revoked member removed by the sweep on its seat's evidence
+  and told over S2S, the archive read decided on the grant, a managed room
+  whose `federated` setting is off answered as a room that does not exist
+  to its own remote member, a trusted home's admin recording a membership
+  through the store on its stream's evidence
+  (`a_remote_admin_of_a_managed_room_changes_its_affiliations_through_its_grants`),
+  and a remote member refused every administration request
+  (`a_remote_member_of_a_managed_room_administers_nothing`).
 
 ### Rollout part of the effect boundary (G24)
 
@@ -3371,8 +3526,21 @@ cases passed, the `live_spicedb_` case against a PostgreSQL-backed SpiceDB. `hos
 - A snapshot whose trusted-home list names a service domain stops startup.
 - With S2S on, a trusted home's privileged grants and room moderation are
   honoured on its `pkix` streams and member-level grants of admitted
-  domains on any stream. No surface serves remote principals yet (D10), so
-  nothing changes for a deployment until W6a.
+  domains on any stream. The MUC service serves remote principals on a
+  replica that runs S2S ([inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)),
+  so an enrolled scope's room admits the remote accounts its grants name
+  once their domain is admitted and the room's `federated` setting is on.
+  The setting is off for every room that exists, so enrolling a scope or
+  enabling S2S opens no managed room to another server by itself. A trusted
+  home's owner or admin then administers the room over S2S: its
+  affiliation changes are recorded through the store and acknowledged by
+  the revocation fence as a session's are.
+- The revocation sweep removes a seated occupant of a domain that is not
+  admitted, which with S2S off is every domain the deployment does not
+  serve. Before, such an occupant kept its seat while its recorded
+  affiliation was a membership. It also removes an occupant whose
+  membership is a recorded increase that is not yet effective, where it
+  read the recorded affiliation before.
 
 ## Blocking review ledger
 

@@ -20,6 +20,10 @@ use super::RoomConfig;
 /// permission policy (#415).
 pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
 
+/// XEP-0045 owner-config form field var for whether accounts at other
+/// servers may reach the room ([`super::RoomConfig::federated`]).
+pub const FIELD_FEDERATED: &str = "urn:waddle:roomconfig:federated";
+
 use crate::xep::xep0004::{self, DataForm, Field, FieldOption, FieldType, FormType, ToElement};
 use crate::xep::FIELD_FORUM_MODE;
 
@@ -117,6 +121,10 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                     "Anyone",
                     PinPermission::Anyone.as_form_value(),
                 )),
+        )
+        .add_field(
+            Field::boolean(FIELD_FEDERATED, room.config.federated)
+                .with_label("Open the Room to Accounts at Other Servers"),
         )
         .to_element()
 }

@@ -305,6 +305,15 @@ impl AppState {
         )
     }
 
+    /// Whether a room created now starts with its `federated` setting on:
+    /// the deployment default of the S2S snapshot this replica runs
+    /// (`host_policy.federate_new_rooms`), and off while S2S is off.
+    pub fn federates_new_rooms(&self) -> bool {
+        self.s2s_federation
+            .as_ref()
+            .is_some_and(crate::permissions::host_grant::FederationSnapshot::federates_new_rooms)
+    }
+
     #[cfg(feature = "test-support")]
     pub fn websocket_inventory_for_test(&self) -> &IoCustodianInventory {
         &self.websocket_inventory

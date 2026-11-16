@@ -75,6 +75,14 @@ impl ServedDomains {
         &self.local
     }
 
+    /// The domains `service` is served at.
+    pub fn domains_of(&self, service: ServedService) -> impl Iterator<Item = &DomainRef> {
+        self.services
+            .iter()
+            .filter(move |(_, served)| *served == service)
+            .map(|(domain, _)| &**domain)
+    }
+
     /// The service configured at exactly `domain`, if any.
     pub fn service(&self, domain: &DomainRef) -> Option<ServedService> {
         self.services
@@ -551,6 +559,23 @@ pub enum RemoteRouteOutcome {
 /// backstop so a slow route is reported as a routing failure.
 pub const REMOTE_ROUTE_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// What a restored local room may seat a recorded remote occupant on
+/// ([`RemoteRoute::adopt_seat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatAdoption {
+    /// This replica took the seat over from a replica that stopped. The
+    /// room seats the occupant as recorded, and the seat ends once it has:
+    /// what the stopped replica had queued for the occupant is lost.
+    Adopted,
+    /// This replica already holds the seat under the recorded generation:
+    /// the room's actor was restored on the replica that seats the
+    /// occupant. The room seats the occupant again and the seat goes on.
+    Held,
+    /// No seat this replica holds, or could take over, stands for the
+    /// recorded occupancy: the occupant is not seated again.
+    NotHeld,
+}
+
 /// Egress for stanzas from local entities addressed to remote domains.
 ///
 /// The caller has already classified the destination and stamped the sender.
@@ -593,6 +618,41 @@ pub trait RemoteRoute: Send + Sync {
     /// only queues and must not wait for a peer. By default nothing
     /// happens.
     async fn resource_ended(&self, _resource: &FullJid) {}
+
+    /// The seat the remote occupant `occupant`, recorded under `session`,
+    /// may be seated on again in the local room `room`, which was restored
+    /// on this replica: one this replica already holds under that
+    /// generation, or one it took over from a replica that stopped, for a
+    /// room whose claim moved here. A route that seats no remote occupant
+    /// holds none.
+    async fn adopt_seat(
+        &self,
+        _room: &jid::BareJid,
+        _occupant: &FullJid,
+        _session: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> SeatAdoption {
+        SeatAdoption::NotHeld
+    }
+
+    /// The local room `room`, whose claim moved to this replica, has
+    /// seated its recorded occupants again, `occupants` among them on
+    /// seats taken over with [`Self::adopt_seat`] ([`SeatAdoption::Adopted`]). What the replica that
+    /// stopped had queued for them is lost, so their occupancies do not
+    /// continue: the route ends each seat, the room removes its occupant,
+    /// and the occupant is told so and enters again (XEP-0045 §11.1). By
+    /// default nothing happens.
+    async fn end_adopted_seats(&self, _room: &jid::BareJid, _occupants: &[FullJid]) {}
+
+    /// Take a stanza a remote principal addressed to a local room this
+    /// replica holds, which another replica verified on an inbound stream
+    /// and carried here with what that stream proved of its sender. A
+    /// route that hosts no rooms for remote occupants refuses it.
+    async fn carried_room_request(
+        &self,
+        _request: crate::s2s::route::CarriedRoomRequest,
+    ) -> crate::s2s::route::CarriedRoomOutcome {
+        crate::s2s::route::CarriedRoomOutcome::Refused
+    }
 
     /// The local resource `resource` resumed its session on this replica,
     /// which may not be the one that held it before. A route that keeps

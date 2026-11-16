@@ -225,6 +225,10 @@ pub struct Routed {
     pub router: S2sRouter,
     pub delivery: Arc<RecordingDelivery>,
     pub served: ServedDomains,
+    /// The deployment's shared database: its correlation table, remote
+    /// room occupancies and, for a deployment that hosts rooms for remote
+    /// occupants, their seats.
+    pub database: Database,
 }
 
 impl Routed {
@@ -254,15 +258,31 @@ pub async fn start_routed(
     database: Database,
     limits: RouterLimits,
 ) -> Routed {
+    start_routed_stopping(pki, spec, listener, database, limits, None).await
+}
+
+/// [`start_routed`], wired to `stop` as the server's lifecycle wires a
+/// router and its connection manager to the process stop: the router stops
+/// when `stop` fires, and the connection manager drains on
+/// [`S2sRouter::service_stop`], once the router has told its remote
+/// occupants. Without `stop` neither is wired to a stop.
+pub async fn start_routed_stopping(
+    pki: &Pki,
+    spec: &Spec,
+    listener: TcpListener,
+    database: Database,
+    limits: RouterLimits,
+    stop: Option<tokio_util::sync::CancellationToken>,
+) -> Routed {
     let config = Arc::new(spec.load(pki).await.expect("a valid configuration"));
     let served = served(spec.local[0]);
     let router = S2sRouter::new(RouterOptions {
         config: Arc::clone(&config),
         served: served.clone(),
         correlations: Arc::new(SqlIqCorrelations::new(database.clone())),
-        rooms: Arc::new(SqlRemoteRoomStore::new(database)),
+        rooms: Arc::new(SqlRemoteRoomStore::new(database.clone())),
         limits,
-        stop: None,
+        stop: stop.clone(),
     });
     let delivery = Arc::new(RecordingDelivery::default());
     assert!(router.attach_local(delivery.clone()));
@@ -271,6 +291,7 @@ pub async fn start_routed(
         Some(listener),
         ServiceOptions {
             sink: Arc::new(router.clone()),
+            stop: stop.map(|stop| S2sRouter::service_stop(Some(&router), &stop)),
             ..Default::default()
         },
     );
@@ -286,6 +307,7 @@ pub async fn start_routed(
         router,
         delivery,
         served,
+        database,
     }
 }
 

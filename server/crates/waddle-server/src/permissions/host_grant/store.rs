@@ -1090,7 +1090,9 @@ impl HostGrantStore {
     /// acceptance transaction, honouring grants as admission does under
     /// `principals` for a subject that reaches it without stream evidence.
     /// The answer is a candidate: it holds no lock and acceptance decides
-    /// again.
+    /// again. For suites: a caller outside them names the evidence it
+    /// decides with ([`Self::candidate_admission_as`]).
+    #[cfg(feature = "test-support")]
     pub async fn candidate_admission(
         &self,
         room: &BareJid,

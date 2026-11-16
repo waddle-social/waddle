@@ -84,10 +84,50 @@ impl ImmediateSink {
                 Box::pin(super::delivery_immediate::execute(effect, deps))
             }
             Effect::External(ExternalEffect::Frame(stanza)) => {
+                offer_frame_to_seat(deps, &stanza);
                 Box::pin(async move { EffectOutcome::Frames(vec![*stanza]) })
             }
             Effect::Immediate(action) => Box::pin(execute_recovery(action, deps)),
         }
+    }
+}
+
+/// Hand a frame for the sender of a room message to server-to-server
+/// routing as well, when the sender is an occupant a local room seats from
+/// another server (ADR-0020 D10).
+///
+/// A session's own copy of its message (XEP-0045 §7.4) is a frame its
+/// connection writes. A remote occupant has no connection: its copy would
+/// reach it only as the answer to its request, after every other effect of
+/// the message, and so after the copies of later messages the room sent
+/// its seat meanwhile. Offered here, the copy is queued for the seat when
+/// the message's effects reach it, among the other occupants' copies of
+/// the same message.
+/// The frame is still returned and settled as before; routing sends a copy
+/// of one archived message to a seat once, so the answer does not repeat
+/// it. Any other frame is for a session and is left alone.
+fn offer_frame_to_seat(deps: &super::super::Deps<'_>, stanza: &waddle_xmpp::Stanza) {
+    let waddle_xmpp::Stanza::Message(message) = stanza else {
+        return;
+    };
+    if message.type_ != xmpp_parsers::message::MessageType::Groupchat {
+        return;
+    }
+    let Some(target) = message.to.as_ref().and_then(|to| to.try_as_full().ok()) else {
+        return;
+    };
+    // Routing tells a message it already sent a seat by the identifier the
+    // room's archive gave it; a frame without one is left to the answer.
+    let room = message.from.as_ref().map(jid::Jid::to_bare);
+    let archived = waddle_xmpp_core::xep0359::extract_stanza_ids(message)
+        .into_iter()
+        .any(|id| room.as_ref().is_some_and(|room| id.by == *room));
+    if archived && deps.connection_registry.foreign_takes(target, stanza) {
+        // A seat that ended meanwhile takes nothing; the frame stays the
+        // answer.
+        let _ = deps
+            .connection_registry
+            .offer_foreign(target, stanza.clone());
     }
 }
 

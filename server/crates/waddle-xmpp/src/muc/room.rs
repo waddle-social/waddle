@@ -119,12 +119,19 @@ pub struct RoomConfig {
     #[serde(default)]
     pub allow_pm: AllowPm,
     /// Federation permission policy retained for serialized room configs.
-    ///
-    /// Remote XMPP federation is not served by Waddle, so active joins must still be local
-    /// WebSocket C2S joins.
+    /// Nothing reads it: whether occupants at other servers reach the room
+    /// is [`Self::federated`].
     pub federation_policy: FederatedPermissionPolicy,
     /// Legacy federation-affiliation configuration retained for serialized room configs.
     pub federated_affiliation_config: FederatedAffiliationConfig,
+    /// Whether accounts at other servers may reach the room over
+    /// server-to-server streams: discover it, enter it and read its
+    /// archive, each still subject to the room's own admission. Off unless
+    /// an owner turns it on (the `urn:waddle:roomconfig:federated` field of
+    /// the owner-config form) or the deployment creates rooms with it on; a
+    /// configuration stored before the field existed reads as off.
+    #[serde(default)]
+    pub federated: bool,
 }
 
 impl RoomConfig {
@@ -136,10 +143,12 @@ impl RoomConfig {
         self.members_only || self.group_dm
     }
 
-    /// Restore the invariant that every group DM is members-only.
+    /// Restore the invariants of a group DM: it is members-only, and it is
+    /// a conversation of this deployment's accounts, never federated.
     pub fn normalized(mut self) -> Self {
         if self.group_dm {
             self.members_only = true;
+            self.federated = false;
         }
         self
     }
@@ -163,6 +172,7 @@ impl Default for RoomConfig {
             allow_pm: AllowPm::default(),
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),
+            federated: false,
         }
     }
 }
@@ -694,6 +704,18 @@ impl MucRoom {
         jid: &FullJid,
     ) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
         self.session_generations.get(jid).copied()
+    }
+
+    /// Every session the room seats that has a generation to pin, with
+    /// that generation.
+    pub fn seated_session_generations(
+        &self,
+    ) -> Vec<(FullJid, waddle_xmpp_core::OccupancySessionGeneration)> {
+        self.session_generations
+            .iter()
+            .filter(|(jid, _)| self.find_occupant_by_real_jid(jid).is_some())
+            .map(|(jid, generation)| (jid.clone(), *generation))
+            .collect()
     }
 
     /// Install an occupancy order captured BEFORE the join's durable

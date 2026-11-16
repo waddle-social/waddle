@@ -345,7 +345,7 @@ impl SystemMessageAudience<'_> {
         room: &BareJid,
         occupant: &RoomChainOccupant,
     ) -> bool {
-        use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
         let Some(decision) = &self.decision else {
             return true;
         };
@@ -364,14 +364,40 @@ impl SystemMessageAudience<'_> {
                 RoomGate::Unmanaged | RoomGate::Unavailable => return false,
             }
         }
-        self.decision.as_ref().is_some_and(|decision| {
-            decision.allows_as(
-                &occupant.full_jid.to_bare(),
-                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                HostGrantAction::Read,
+        let Some(state) = deps.web_socket_state else {
+            return false;
+        };
+        self.decision
+            .as_ref()
+            .is_some_and(|decision| occupant_reads(state, decision, room, occupant))
+    }
+}
+
+/// Whether the managed room's grants let `occupant` read `room`. The
+/// occupant is named without a request of its own, so it is decided on the
+/// evidence of each seat it holds on this replica, and without stream
+/// evidence when it holds none: an occupant at another server reads the
+/// room only while every stream its seats were admitted on would admit it.
+fn occupant_reads(
+    state: &crate::server::routes::websocket::WebSocketState,
+    grants: &crate::permissions::host_grant::ManagedRoomGrants,
+    room: &BareJid,
+    occupant: &RoomChainOccupant,
+) -> bool {
+    let account = occupant.full_jid.to_bare();
+    state
+        .deps
+        .app_state
+        .host_grants
+        .named_evidence(room, &account)
+        .iter()
+        .all(|evidence| {
+            grants.allows_as(
+                &account,
+                evidence,
+                crate::permissions::host_grant::HostGrantAction::Read,
             )
         })
-    }
 }
 
 /// At most one warning a minute that a room's own message, already
@@ -418,7 +444,7 @@ async fn system_message_audience<'o>(
     room: &BareJid,
     occupants: &'o [RoomChainOccupant],
 ) -> Option<SystemMessageAudience<'o>> {
-    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
     let state = deps.web_socket_state?;
     match state
         .deps
@@ -434,13 +460,7 @@ async fn system_message_audience<'o>(
         RoomGate::Managed(grants) => Some(SystemMessageAudience {
             occupants: occupants
                 .iter()
-                .filter(|occupant| {
-                    grants.allows_as(
-                        &occupant.full_jid.to_bare(),
-                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                        HostGrantAction::Read,
-                    )
-                })
+                .filter(|occupant| occupant_reads(state, &grants, room, occupant))
                 .collect(),
             decision: Some(grants),
         }),

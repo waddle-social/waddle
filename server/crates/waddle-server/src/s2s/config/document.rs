@@ -53,6 +53,12 @@ pub(super) struct HostPolicyDocument {
     /// (ADR-0020 D8).
     #[serde(default)]
     pub(super) require_pkix: bool,
+    /// Create new rooms with their `federated` setting on, so accounts at
+    /// admitted servers reach them unless an owner turns it off. Off by
+    /// default: a room is opened to other servers by its owner. Rooms that
+    /// exist already keep their setting whatever this says.
+    #[serde(default)]
+    pub(super) federate_new_rooms: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -190,6 +196,8 @@ pub(super) struct LimitsDocument {
     pub(super) max_streams: Option<usize>,
     pub(super) max_peers: Option<usize>,
     pub(super) max_negotiating_per_peer: Option<usize>,
+    /// Directional domain pairs the router keeps an outbound queue for.
+    pub(super) max_pair_queues: Option<usize>,
     pub(super) accept_per_second: Option<u32>,
     pub(super) accept_burst: Option<u32>,
     pub(super) accept_per_address_per_second: Option<u32>,

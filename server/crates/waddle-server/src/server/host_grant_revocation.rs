@@ -17,10 +17,12 @@
 //! - removes every occupant the grants do not admit to read the room, with
 //!   the presence XEP-0045 prescribes: status 301 for a ban (§9.1) and
 //!   status 321 for the loss of membership in a members-only room (§9.4),
-//!   to the occupant and to everyone who stays, and ends its media session;
-//!   an occupant of a domain this deployment does not serve only when the
-//!   grants deny it whatever stream its requests arrive on (see
-//!   `correction`);
+//!   to the occupant and to everyone who stays, and ends its media session.
+//!   An occupant this replica seated over an S2S stream is decided on the
+//!   evidence of the stream its seat was admitted under; one of a domain
+//!   this deployment does not serve for which no such evidence is held is
+//!   removed only when the grants deny it whatever stream its requests
+//!   arrive on (see `correction`);
 //! - lowers an affiliation the actor mirrors above the recorded one, which
 //!   re-derives the occupant's role, with the affiliation presence of the
 //!   change;
@@ -62,8 +64,8 @@ use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::{Affiliation, Stanza};
 
 use crate::permissions::host_grant::{
-    HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomAffiliation,
-    RoomBinding, RoomGate, ScopeLifecycleId, SubjectHome,
+    affiliation_allows, HostGrantAction, HostGrantGate, PrincipalEvidence, RoomAffiliation,
+    RoomBinding, RoomGate, ScopeLifecycleId, StoredRoomGrants, StreamEvidence,
 };
 use crate::room_effect_outbox::RoomEffectArmSupervisor;
 use crate::server::routes::websocket::WebSocketState;
@@ -238,7 +240,7 @@ impl Sweep {
         let mut finished = true;
 
         // The actor's own last-owner rule counts the owners its list holds.
-        for owner in grants.grants.recorded(RoomAffiliation::Owner) {
+        for owner in grants.recorded(RoomAffiliation::Owner) {
             if held.affiliation(&owner) != Affiliation::Owner {
                 finished &= ask(actor.ask(ChangeAffiliation {
                     jid: owner,
@@ -258,8 +260,13 @@ impl Sweep {
         let accounts: BTreeSet<BareJid> = seated.iter().cloned().chain(listed).collect();
         for account in accounts {
             let mirrored = held.affiliation(&account);
-            let Some(change) = correction(&grants, &account, mirrored, seated.contains(&account))
-            else {
+            // A seated occupant is decided on the evidence of the stream
+            // each of its seats was admitted under, where this replica
+            // holds one: only a remote occupant it seated over S2S does.
+            let seat = seated
+                .contains(&account)
+                .then(|| self.grants.seat_evidence(room, &account));
+            let Some(change) = correction(&grants, &account, mirrored, seat.as_deref()) else {
                 continue;
             };
             let applied = match change {
@@ -340,8 +347,10 @@ enum Correction {
 }
 
 /// The correction of one account, from the grants as stored, the affiliation
-/// the room actor mirrors for it and whether it holds a seat. `None` when
-/// the actor is in line with the grants for it.
+/// the room actor mirrors for it and, when it holds a seat, the stream
+/// evidence this replica recorded for each of its seats (`Some`, empty when
+/// it recorded none). `None` when the actor is in line with the grants for
+/// it.
 ///
 /// The actor's list mirrors the recorded affiliation, and an occupant keeps
 /// its seat only while the grants admit it to read the room. So:
@@ -349,39 +358,44 @@ enum Correction {
 /// - a seated account the grants do not admit is removed: as banned when its
 ///   standing is a ban, as no longer a member when no membership is
 ///   recorded for it, and otherwise without touching its entry (a scope
-///   that admits nobody, a privileged grant the replica does not honour);
+///   that admits nobody, a grant that is not honoured, a recorded increase
+///   that is not yet effective);
 /// - an account that is not seated and whose recorded affiliation is below
 ///   membership has its entry set to it, which also refuses a join of that
 ///   account the actor has not yet applied;
 /// - any other entry above the recorded affiliation is lowered to it.
 ///
-/// The sweep decides without stream evidence: no request of the account is
-/// in hand. For an account of a domain this deployment does not serve, that
-/// honours less than a request on its own stream would (no owner or admin
-/// standing, and nothing at all while host policy requires `pkix`), so such
-/// an occupant is removed only when the grants deny it whatever stream its
-/// requests arrive on: a ban, no membership recorded, or a scope that
-/// admits nobody. Its other uses of the room are each decided with the
-/// evidence of the request that makes them.
+/// Whether a seated account is admitted is decided as admission decides
+/// it, from the effective affiliation:
+///
+/// - an account of a served domain, without stream evidence;
+/// - a remote occupant this replica seated over S2S, on the evidence of
+///   the stream each of its seats was admitted under, and it stays only if
+///   every one of them admits it;
+/// - a remote occupant for which no seat evidence is held, without stream
+///   evidence, which honours less than a request on its own stream would
+///   (no owner or admin standing, and nothing at all while host policy
+///   requires `pkix`). It is removed only when the grants deny it whatever
+///   stream its requests arrive on ([`denied_on_every_stream`]).
 fn correction(
-    grants: &ManagedRoomGrants,
+    grants: &StoredRoomGrants,
     account: &BareJid,
     mirrored: Affiliation,
-    seated: bool,
+    seat: Option<&[StreamEvidence]>,
 ) -> Option<Correction> {
-    let recorded = muc_affiliation(grants.grants.recorded_affiliation(account));
-    let banned =
-        grants.standing_unfenced(account, &PrincipalEvidence::NoStream) == RoomAffiliation::Outcast;
-    let admitted = grants.grants.allows(
-        account,
-        &PrincipalEvidence::NoStream,
-        HostGrantAction::Read,
-        &grants.principals,
-    );
-    let served = grants.principals.served().home_of(account) == SubjectHome::Served;
-    let denied_on_every_stream =
-        banned || recorded < Affiliation::Member || !grants.grants.scope_admits;
-    if seated && !admitted && (served || denied_on_every_stream) {
+    let recorded = muc_affiliation(grants.recorded_affiliation(account));
+    let banned = grants.standing(account, &PrincipalEvidence::NoStream) == RoomAffiliation::Outcast;
+    let admitted = match seat {
+        None => true,
+        Some([]) => {
+            grants.reads(account, &PrincipalEvidence::NoStream)
+                || !denied_on_every_stream(grants, account, banned)
+        }
+        Some(evidence) => evidence
+            .iter()
+            .all(|evidence| grants.reads(account, &PrincipalEvidence::Stream(*evidence))),
+    };
+    if !admitted {
         return Some(Correction::Remove(if banned {
             Some(Affiliation::Outcast)
         } else if recorded < Affiliation::Member {
@@ -396,6 +410,25 @@ fn correction(
         return (mirrored != recorded).then_some(Correction::Remove(Some(recorded)));
     }
     (mirrored > recorded).then_some(Correction::Lower(recorded))
+}
+
+/// Whether the grants as stored deny `account` reading the room whatever
+/// stream its requests arrive on. An account of a served domain is decided
+/// without a stream, so any denial of it is one. A remote account is denied
+/// on every stream when it is banned, when the scope admits nobody, when
+/// its effective affiliation is below membership (a recorded increase that
+/// is not yet effective admits nothing), or when its domain is not
+/// admitted: S2S is off, or the snapshot this replica runs refuses the
+/// domain or a parent of it (ADR-0020 D1).
+fn denied_on_every_stream(grants: &StoredRoomGrants, account: &BareJid, banned: bool) -> bool {
+    let witness = grants.witness(account, &PrincipalEvidence::NoStream);
+    let Some(remote) = witness.remote() else {
+        return true;
+    };
+    banned
+        || !grants.scope_admits()
+        || !affiliation_allows(grants.effective_affiliation(account), HostGrantAction::Read)
+        || remote.admission().is_err()
 }
 
 fn muc_affiliation(affiliation: RoomAffiliation) -> Affiliation {

@@ -28,8 +28,8 @@ use super::{
 };
 use crate::permissions::host_grant::{
     GrantOperationId, GrantSubject, HostGrantAction, HostGrantAuthority, HostGrantError,
-    HostGrantGate, IssuancePolicy, ManagedRoomGrants, OperationOutcome, RoomAffiliation,
-    RoomBinding, RoomGate, SetAffiliation,
+    HostGrantGate, IssuancePolicy, ManagedRoomGrants, OperationOutcome, PrincipalEvidence,
+    RoomAffiliation, RoomBinding, RoomGate, SetAffiliation,
 };
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
@@ -57,24 +57,27 @@ pub(super) fn muc_affiliation(affiliation: RoomAffiliation) -> Affiliation {
     }
 }
 
-/// The standing the canonical grants honour for `sender`, as the MUC
-/// affiliation the room actor applies an administration request under.
-pub(super) fn sender_affiliation(room: &ManagedRoomGrants, sender: &FullJid) -> Affiliation {
-    muc_affiliation(room.standing_as(
-        &sender.to_bare(),
-        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-    ))
+/// The standing the canonical grants honour for `sender`, whose request
+/// reached the room with `evidence`, as the MUC affiliation the room actor
+/// applies an administration request under.
+pub(super) fn sender_affiliation(
+    room: &ManagedRoomGrants,
+    sender: &FullJid,
+    evidence: &PrincipalEvidence,
+) -> Affiliation {
+    muc_affiliation(room.standing_as(&sender.to_bare(), evidence))
 }
 
-/// Whether `sender` may moderate the room: change roles, read the role
-/// lists and see the room's administration lists. Only an owner or admin
-/// standing that admission honours confers it.
-pub(super) fn sender_moderates(room: &ManagedRoomGrants, sender: &FullJid) -> bool {
-    room.allows_as(
-        &sender.to_bare(),
-        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-        HostGrantAction::Moderate,
-    )
+/// Whether `sender`, whose request reached the room with `evidence`, may
+/// moderate the room: change roles, read the role lists and see the room's
+/// administration lists. Only an owner or admin standing that admission
+/// honours for that evidence confers it.
+pub(super) fn sender_moderates(
+    room: &ManagedRoomGrants,
+    sender: &FullJid,
+    evidence: &PrincipalEvidence,
+) -> bool {
+    room.allows_as(&sender.to_bare(), evidence, HostGrantAction::Moderate)
 }
 
 /// The affiliation list of a room an enrolled scope manages, from the
@@ -85,16 +88,13 @@ pub(super) fn sender_moderates(room: &ManagedRoomGrants, sender: &FullJid) -> bo
 pub(super) fn host_grant_affiliation_list(
     room: &ManagedRoomGrants,
     sender: &FullJid,
+    evidence: &PrincipalEvidence,
     filter: Option<Affiliation>,
 ) -> Result<Vec<(BareJid, Affiliation)>, Box<StanzaError>> {
     let sender_bare = sender.to_bare();
     let member_list = filter == Some(Affiliation::Member)
-        && room.allows_as(
-            &sender_bare,
-            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-            HostGrantAction::Read,
-        );
-    if !member_list && !sender_moderates(room, sender) {
+        && room.allows_as(&sender_bare, evidence, HostGrantAction::Read);
+    if !member_list && !sender_moderates(room, sender, evidence) {
         return Err(Box::new(forbidden_iq_error("Operation not permitted.")));
     }
     let affiliations = match filter {
@@ -123,10 +123,17 @@ pub(super) fn host_grant_affiliation_list(
 /// The refusal says whether the change may have been recorded anyway: its
 /// commit was not acknowledged and could not be read back, or it was
 /// recorded and the fence did not acknowledge it in time.
+///
+/// The store decides the initiator's standing under the scope's guard on
+/// `evidence`: none for a session of this deployment, and for a remote
+/// principal the stream that carried its request, so that its owner or
+/// admin standing counts only for a trusted home on a `pkix` stream
+/// (ADR-0020 D8).
 pub(crate) async fn record_host_grant_affiliation(
     state: &WebSocketState,
     room: &ManagedRoomGrants,
     initiator: &BareJid,
+    evidence: &PrincipalEvidence,
     target: &BareJid,
     affiliation: Affiliation,
 ) -> Result<(), RecordRefusal> {
@@ -162,13 +169,7 @@ pub(crate) async fn record_host_grant_affiliation(
             subject: subject.clone(),
             affiliation: room_affiliation(affiliation),
         };
-        match authority
-            .set_affiliation_as(
-                &command,
-                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-            )
-            .await
-        {
+        match authority.set_affiliation_as(&command, evidence).await {
             Ok(receipt) => {
                 let recorded = receipt.record().generation;
                 spawn_reconcile(gate.clone(), authority, command);
@@ -567,15 +568,16 @@ pub(super) async fn managed_room(
 /// Whether the occupants named by `nicks` may all hold the moderator role.
 /// The role is room moderation, which a principal holds only when its
 /// witness honours privilege (ADR-0020 D8): an account of a served domain,
-/// or a trusted home's account whose request a `pkix` stream carried. An
-/// occupant named here is not the requester, so it is decided without
-/// stream evidence and an occupant of a remote home is refused.
+/// or a trusted home's account on a `pkix` stream. An occupant named here
+/// is not the requester: a remote occupant this replica seated over S2S is
+/// decided on the evidence of the stream each of its seats was admitted
+/// under, and any other remote occupant is refused.
 pub(super) async fn occupants_may_moderate(
+    state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    room: &ManagedRoomGrants,
+    room_jid: &BareJid,
     nicks: &[&str],
 ) -> Result<bool, ()> {
-    use crate::permissions::host_grant::PrincipalEvidence;
     let snapshot = room_actor.ask(GetSnapshot).await.map_err(|_| ())?;
     Ok(nicks.iter().all(|nick| {
         snapshot
@@ -584,8 +586,121 @@ pub(super) async fn occupants_may_moderate(
             .values()
             .find(|occupant| occupant.nick == *nick)
             .is_some_and(|occupant| {
-                room.witness(&occupant.real_jid.to_bare(), &PrincipalEvidence::NoStream)
-                    .privilege_honoured()
+                privilege_honoured_for_named(state, room_jid, &occupant.real_jid.to_bare())
             })
     }))
+}
+
+/// Whether room moderation, or an owner or admin standing, would be
+/// honoured for `account`, named in `room_jid` without a request of its
+/// own (ADR-0020 D8): on the evidence of each seat it holds there, or
+/// without stream evidence when it holds none.
+pub(super) fn privilege_honoured_for_named(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    account: &BareJid,
+) -> bool {
+    // The trusted-home rule is about principals of other servers; what the
+    // room's own checks give an address of this deployment is unchanged.
+    if state.serves(account) {
+        return true;
+    }
+    state
+        .deps
+        .app_state
+        .host_grants
+        .named_evidence(room_jid, account)
+        .iter()
+        .all(|evidence| {
+            crate::server::routes::websocket::handlers::presence::principal_witness(
+                state, account, evidence,
+            )
+            .is_some_and(|witness| witness.privilege_honoured())
+        })
+}
+
+/// Whether every seat `account` holds in `room_jid` on this replica would
+/// honour an owner or admin standing (ADR-0020 D8): `true` for an account
+/// of a served domain, and for one that holds no seat here.
+///
+/// A room gives every occupant of an account the role its affiliation
+/// derives (XEP-0045 §5.1.3), the moderator role for an owner or admin,
+/// and decides that role for the account, not for each of its seats. A
+/// remote occupant holds the moderator role only on a seat whose stream's
+/// evidence honours privilege, so an owner or admin standing is not
+/// issued while one of the account's seats does not: it is issued once
+/// that occupant has left, or has entered over a stream that does. A seat
+/// taken later on a stream that does not honour the standing is refused
+/// where it is taken.
+pub(crate) fn seats_honour_privilege(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    account: &BareJid,
+) -> bool {
+    if state.serves(account) {
+        return true;
+    }
+    state
+        .deps
+        .app_state
+        .host_grants
+        .seat_evidence(room_jid, account)
+        .into_iter()
+        .all(|evidence| {
+            crate::server::routes::websocket::handlers::presence::principal_witness(
+                state,
+                account,
+                &crate::permissions::host_grant::PrincipalEvidence::Stream(evidence),
+            )
+            .is_some_and(|witness| witness.privilege_honoured())
+        })
+}
+
+/// [`seats_honour_privilege`] for a caller that may run on any replica: the
+/// seats `account` holds in `room_jid` on every replica, read from the
+/// shared seat table in `global`, as well as those this replica holds.
+/// `None` when the table cannot be read, which the caller refuses on.
+pub(crate) async fn seats_honour_privilege_anywhere(
+    state: &WebSocketState,
+    global: &crate::db::Database,
+    room_jid: &BareJid,
+    account: &BareJid,
+) -> Option<bool> {
+    if state.serves(account) {
+        return Some(true);
+    }
+    let seats = crate::s2s::route::SqlSeatStore::new(global.clone())
+        .of_account(room_jid, account)
+        .await
+        .ok()?;
+    let recorded = seats.into_iter().all(|seat| {
+        crate::server::routes::websocket::handlers::presence::principal_witness(
+            state,
+            account,
+            &crate::permissions::host_grant::PrincipalEvidence::Stream(seat.evidence),
+        )
+        .is_some_and(|witness| witness.privilege_honoured())
+    });
+    Some(recorded && seats_honour_privilege(state, room_jid, account))
+}
+
+/// Whether an owner or admin standing may be written for `account` in a
+/// room no enrolled scope manages (ADR-0020 D8 at issuance): an account of
+/// a served domain, or of a home on the trusted-home list of the S2S
+/// snapshot this replica runs. Fails closed when the issuance policy cannot
+/// be built.
+pub(crate) fn privileged_standing_may_be_issued(state: &WebSocketState, account: &BareJid) -> bool {
+    // The trusted-home rule is about principals of other servers; what the
+    // room's own checks give an address of this deployment is unchanged.
+    if state.serves(account) {
+        return true;
+    }
+    let Ok(domain) = waddle_xmpp::identity::CanonicalDomain::parse_canonical(
+        state.deps.auth_state.xmpp_domain.as_str(),
+    ) else {
+        return false;
+    };
+    let principals = state.deps.app_state.grant_principals(domain);
+    issuance_policy(state, &principals)
+        .is_some_and(|policy| policy.admits_privileged_subject(account))
 }

@@ -89,7 +89,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::error::HostGrantError;
 use super::issuance::ServedAccountDomains;
-use super::principal::PrincipalPolicy;
+use super::principal::{NoSeats, PrincipalPolicy, SeatEvidence};
 use super::restore::{
     refresh_refused_rooms, verify_restore_fence_with, AuthorityBinding, FenceMemory, RestoreEpoch,
     RestoreFenceRefusal, RestoreFenceReport,
@@ -436,6 +436,9 @@ pub struct HostGrantAttachmentGate {
     /// one failed.
     room_reads_paused_until_ms: AtomicI64,
     last_alert_ms: AtomicI64,
+    /// The stream evidence of the remote occupants this replica seats, once
+    /// its S2S router is attached.
+    seats: OnceLock<Arc<dyn SeatEvidence>>,
 }
 
 impl Default for HostGrantAttachmentGate {
@@ -457,6 +460,7 @@ impl Default for HostGrantAttachmentGate {
             room_reads: Mutex::new(HashMap::new()),
             room_reads_paused_until_ms: AtomicI64::new(i64::MIN),
             last_alert_ms: AtomicI64::new(i64::MIN),
+            seats: OnceLock::new(),
         }
     }
 }
@@ -471,6 +475,22 @@ impl std::fmt::Debug for HostGrantAttachmentGate {
 }
 
 impl HostGrantAttachmentGate {
+    /// Decide seated remote occupants on the evidence `seats` holds for
+    /// them. Only the first source attached is kept; the answer is whether
+    /// this call attached it. A replica without one seats no remote
+    /// occupant.
+    pub fn attach_seat_evidence(&self, seats: Arc<dyn SeatEvidence>) -> bool {
+        self.seats.set(seats).is_ok()
+    }
+
+    /// The stream evidence of the remote occupants this replica seats.
+    pub fn seat_evidence(&self) -> &dyn SeatEvidence {
+        match self.seats.get() {
+            Some(seats) => seats.as_ref(),
+            None => &NoSeats,
+        }
+    }
+
     /// Hold `attachment` if the gate holds none yet. The first attachment
     /// stays until a verification replaces or drops it; the answer is
     /// whether this call set it.

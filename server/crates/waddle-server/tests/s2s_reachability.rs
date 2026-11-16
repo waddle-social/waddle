@@ -3,8 +3,10 @@
 //! remote sender, a local resource's own pending request is completed, and
 //! every other local service refuses: IQ requests and messages receive
 //! `service-unavailable`, presence is ignored and no error is answered.
-//! MUC and the Spaces PubSub service, which D10 enables, refuse until their
-//! handlers are reviewed for remote principals. The identity profile
+//! The MUC service, which D10 enables, is reached only on a replica that
+//! hosts rooms for remote occupants, and only for the operations reviewed
+//! for a remote principal; the Spaces PubSub service refuses until its
+//! handlers are reviewed. The identity profile
 //! applies to every address a stanza carries (gate G10): a refused spelling
 //! is answered with `jid-malformed`, with the stanza's own id, except in
 //! presence, which is dropped unanswered, and the stream stays open.
@@ -27,7 +29,10 @@ use support::{
     HOME_A, HOME_B, QUIET,
 };
 use waddle_server::destination::ServedService;
-use waddle_server::s2s::route::{reach, InboundReach, LocalTarget, Refusal, RouterLimits};
+use waddle_server::s2s::route::{
+    reach as reach_with, InboundReach, LocalRooms, LocalTarget, Reachable, Refusal, RoomOperation,
+    RoomReplies, RoomRequest, RouterLimits, Seat, SeatEnd, SqlSeatStore,
+};
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::xep::xep0199::NS_PING;
 use waddle_xmpp::Stanza;
@@ -41,6 +46,12 @@ const MUC: &str = "muc.home-a.test";
 const SPACES: &str = "spaces.home-a.test";
 const UPLOAD: &str = "upload.home-a.test";
 const PUSH: &str = "push.home-a.test";
+
+/// What a stanza reaches on a replica that hosts no rooms for remote
+/// occupants.
+fn reach(target: LocalTarget, stanza: &Stanza) -> InboundReach {
+    reach_with(target, stanza, Reachable::default())
+}
 
 fn get(to: &str, id: &str, payload: Element) -> Iq {
     Iq::Get {
@@ -204,6 +215,186 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
     }
 }
 
+const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+const NS_MODERATE: &str = "urn:xmpp:message-moderate:1";
+
+#[test]
+fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_operations() {
+    let hosting = Reachable { rooms: true };
+    let muc = LocalTarget::Service(ServedService::Muc);
+    let request = |payload: Element| {
+        Stanza::Iq(Box::new(Iq::Get {
+            from: Some(jid(BOB)),
+            to: None,
+            id: "r".into(),
+            payload,
+        }))
+    };
+    let set = |payload: Element| {
+        Stanza::Iq(Box::new(Iq::Set {
+            from: Some(jid(BOB)),
+            to: None,
+            id: "r".into(),
+            payload,
+        }))
+    };
+    let room = |operation| InboundReach::Room(operation);
+    for (stanza, operation) in [
+        (request(query(DISCO_INFO_NS)), RoomOperation::DiscoInfo),
+        (request(query(DISCO_ITEMS_NS)), RoomOperation::DiscoItems),
+        (request(ping_payload()), RoomOperation::Ping),
+        (request(query("urn:xmpp:mam:2")), RoomOperation::Archive),
+        (set(query("urn:xmpp:mam:2")), RoomOperation::Archive),
+        (Stanza::Message(chat(MUC, "r")), RoomOperation::Message),
+        (
+            Stanza::Presence(available(MUC, "r")),
+            RoomOperation::Presence,
+        ),
+        // Room administration: the lists and changes of `muc#admin`, the
+        // configuration and destruction of `muc#owner`, and a moderator's
+        // retraction (XEP-0425). Reaching the host admits nothing: it
+        // decides the requester's standing on its stream's evidence.
+        (request(query(NS_MUC_ADMIN)), RoomOperation::Admin),
+        (set(query(NS_MUC_ADMIN)), RoomOperation::Admin),
+        (request(query(NS_MUC_OWNER)), RoomOperation::Owner),
+        (set(query(NS_MUC_OWNER)), RoomOperation::Owner),
+        (
+            set(Element::builder("moderate", NS_MODERATE).build()),
+            RoomOperation::Moderation,
+        ),
+    ] {
+        assert_eq!(reach_with(muc, &stanza, hosting), room(operation));
+        // Without a room host the whole service refuses.
+        assert_eq!(
+            reach(muc, &stanza),
+            InboundReach::Refused(Refusal::AwaitingReview(ServedService::Muc))
+        );
+    }
+    // Registration, vCards, pins, a moderation element that is not a
+    // request to moderate and every IQ response stay outside the reviewed
+    // operations.
+    let response = Stanza::Iq(Box::new(Iq::Result {
+        from: Some(jid(BOB)),
+        to: None,
+        id: "r".into(),
+        payload: None,
+    }));
+    for stanza in [
+        set(query("jabber:iq:register")),
+        request(query("vcard-temp")),
+        request(query("urn:waddle:pin:0")),
+        request(Element::builder("moderate", NS_MODERATE).build()),
+        response,
+    ] {
+        assert_eq!(
+            reach_with(muc, &stanza, hosting),
+            InboundReach::Refused(Refusal::RoomRequest)
+        );
+    }
+    // Hosting rooms opens nothing else.
+    assert_eq!(
+        reach_with(
+            LocalTarget::Service(ServedService::Spaces),
+            &request(query(DISCO_INFO_NS)),
+            hosting
+        ),
+        InboundReach::Refused(Refusal::AwaitingReview(ServedService::Spaces))
+    );
+    assert_eq!(
+        reach_with(LocalTarget::AccountBare, &request(ping_payload()), hosting),
+        InboundReach::Refused(Refusal::AccountTraffic)
+    );
+}
+
+/// A room host that answers every IQ request with an empty result and
+/// records what reached it.
+#[derive(Default)]
+struct RecordingRooms {
+    reached: std::sync::Mutex<Vec<RoomOperation>>,
+}
+
+#[async_trait::async_trait]
+impl LocalRooms for RecordingRooms {
+    async fn handle(&self, request: RoomRequest) -> RoomReplies {
+        if let Ok(mut reached) = self.reached.lock() {
+            reached.push(request.operation);
+        }
+        let Stanza::Iq(iq) = &request.stanza else {
+            return RoomReplies::none();
+        };
+        RoomReplies::of(vec![Stanza::Iq(Box::new(Iq::Result {
+            from: iq.to().cloned(),
+            to: iq.from().cloned(),
+            id: iq.id().to_owned(),
+            payload: None,
+        }))])
+    }
+
+    async fn unseat(&self, _seat: &Seat, _end: SeatEnd) -> bool {
+        false
+    }
+
+    async fn seats(&self, _seat: &Seat) -> Option<bool> {
+        Some(true)
+    }
+}
+
+#[tokio::test]
+async fn a_replica_that_hosts_rooms_lets_reviewed_muc_operations_reach_the_host() {
+    let (a, b, captured, _pki) = deployments(&[MUC]).await;
+    let rooms = std::sync::Arc::new(RecordingRooms::default());
+    assert!(a.router.attach_rooms(
+        rooms.clone(),
+        std::sync::Arc::new(SqlSeatStore::new(a.database.clone())),
+    ));
+    let room = ["room@", MUC].concat();
+    send(&b, HOME_B, MUC, get(MUC, "h1", query(DISCO_INFO_NS))).await;
+    send(&b, HOME_B, MUC, get(&room, "h2", ping_payload())).await;
+    for id in ["h1", "h2"] {
+        let reply = wait_for(ARRIVES, || captured.with_id(id).into_iter().next())
+            .await
+            .expect("the room host's answer");
+        assert_eq!(reply.attr("type"), Some("result"), "{id}");
+        assert_eq!(reply.attr("to"), Some(BOB), "{id}");
+    }
+    // An administration request reaches the host, which decides it.
+    send(&b, HOME_B, MUC, get(&room, "h5", query(NS_MUC_ADMIN))).await;
+    let reply = wait_for(ARRIVES, || captured.with_id("h5").into_iter().next())
+        .await
+        .expect("the room host's answer");
+    assert_eq!(reply.attr("type"), Some("result"));
+    // What is outside the reviewed operations never reaches the host.
+    let register = Iq::Get {
+        from: Some(jid(BOB)),
+        to: Some(jid(&room)),
+        id: "h3".into(),
+        payload: query("jabber:iq:register"),
+    };
+    send(&b, HOME_B, MUC, register).await;
+    refused_with(&captured, "h3", "service-unavailable").await;
+    let reached = rooms.reached.lock().expect("recorded operations").clone();
+    assert_eq!(
+        reached,
+        vec![
+            RoomOperation::DiscoInfo,
+            RoomOperation::Ping,
+            RoomOperation::Admin
+        ]
+    );
+    // The server domain lists the service it now lets remote askers reach.
+    send(&b, HOME_B, HOME_A, get(HOME_A, "h4", query(DISCO_ITEMS_NS))).await;
+    let items = wait_for(ARRIVES, || captured.with_id("h4").into_iter().next())
+        .await
+        .expect("the server's items");
+    let listed: Vec<String> = items
+        .children()
+        .flat_map(Element::children)
+        .filter_map(|item| item.attr("jid").map(str::to_owned))
+        .collect();
+    assert_eq!(listed, vec![MUC.to_owned()]);
+}
+
 /// `home-a.test` serving its account domain and the given service
 /// domains over S2S.
 async fn deployments(
@@ -284,7 +475,7 @@ async fn services_not_enabled_for_remote_senders_refuse_them() {
 }
 
 #[tokio::test]
-async fn muc_and_spaces_refuse_remote_senders_until_their_handlers_are_reviewed() {
+async fn muc_without_a_room_host_and_spaces_refuse_remote_senders() {
     let (_a, b, captured, _pki) = deployments(&[MUC, SPACES]).await;
     let (muc, spaces) = (MUC, SPACES);
     send(&b, HOME_B, muc, get(muc, "m1", query(DISCO_INFO_NS))).await;

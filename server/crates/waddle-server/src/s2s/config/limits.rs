@@ -6,8 +6,9 @@
 //! cannot weaken the bounds recorded in
 //! `server/docs/planning/s2s-connection-manager-2047.md`. Every rate and
 //! most caps default to their ceilings, so those can only be lowered; the
-//! unauthenticated sockets per source address and the negotiating streams
-//! per peer default below their ceilings and can also be raised. Six
+//! unauthenticated sockets per source address, the negotiating streams
+//! per peer and the router's pair queues default below their ceilings and
+//! can also be raised. Six
 //! deadlines default below their ceilings and can also be raised: the
 //! established-stream idle timeout, the maximum connection age, the
 //! eviction idle time, the replacement interval and the two backoff
@@ -156,14 +157,24 @@ pub struct ResourceLimits {
     pub input_rate_per_socket: RateLimit,
     /// Bytes read from all S2S sockets together per second, with its burst.
     pub input_rate_global: RateLimit,
+    /// Directional domain pairs for which the S2S router keeps a queue of
+    /// outbound stanzas at once (`max_pair_queues`). Half of them may be
+    /// opened by what remote senders ask for: replies to them and the
+    /// seats of their occupants in this deployment's rooms. A pair keeps
+    /// its queue while a replica seats an occupant of its remote domain, so
+    /// half of this is also the most remote domains one replica seats
+    /// occupants for. The default is below the ceiling and can be raised.
+    pub max_pair_queues: usize,
 }
 
 impl ResourceLimits {
     /// The defaults: every value at its ceiling except the unauthenticated
-    /// sockets per source address and the negotiating streams per peer.
+    /// sockets per source address, the negotiating streams per peer and the
+    /// router's pair queues.
     pub const DEFAULT: Self = Self {
         max_unauthenticated_per_address: 2,
         max_negotiating_per_peer: 3,
+        max_pair_queues: 64,
         ..Self::CEILING
     };
 
@@ -207,6 +218,7 @@ impl ResourceLimits {
             per_second: 512 * 1024,
             burst: 1024 * 1024,
         },
+        max_pair_queues: 256,
     };
 }
 

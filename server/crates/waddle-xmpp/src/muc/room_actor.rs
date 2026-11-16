@@ -128,6 +128,7 @@ pub use implementation::GetOccupantVoice;
 pub use implementation::GetPinList;
 pub use implementation::GetRoomJid;
 pub use implementation::GetRoomSealState;
+pub use implementation::GetSeatedSessionGenerations;
 pub use implementation::GetSnapshot;
 pub use implementation::GroupDmConfigMutationApplied;
 pub use implementation::HealthCheck;

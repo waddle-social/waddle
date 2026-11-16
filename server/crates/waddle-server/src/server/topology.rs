@@ -300,6 +300,7 @@ async fn seed_initial_xmpp_topology(
                     group_dm: channel_record.channel_type
                         == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
                     pin_permission: channel_record.pin_permission,
+                    federated: channel_record.federated,
                     ..Default::default()
                 },
             })

@@ -5,7 +5,7 @@
 use crate::pending_delivery::SmSessionId;
 use std::fmt;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -52,6 +52,28 @@ pub use sending::{
 pub use state::{LastActivityState, PresenceState};
 pub use write_interruption::SocketWriteInterruption;
 
+/// Delivery to full JIDs no connection of this deployment can hold: the
+/// occupants a local room seats from other servers.
+///
+/// The registry maps the full JIDs of local connections. A room's fan-out
+/// names every occupant by its real JID, and an occupant at a domain this
+/// deployment does not serve has no connection here. The deployment's
+/// server-to-server routing takes such a stanza when it is one it carries,
+/// and hands back every other, which is then undeliverable as before.
+pub trait ForeignDelivery: Send + Sync {
+    /// Whether [`Self::offer`] would take `stanza` for `recipient`.
+    fn takes(&self, recipient: &FullJid, stanza: &Stanza) -> bool;
+
+    /// Take `stanza` for `recipient` without waiting, or hand it back.
+    /// Taking it is custody for transport only, not delivery.
+    fn offer(&self, recipient: &FullJid, stanza: Stanza) -> Result<(), Box<Stanza>>;
+
+    /// `room` stopped being open to occupants from other servers: those it
+    /// seats are removed and told so, without waiting. By default nothing
+    /// happens.
+    fn close_room(&self, _room: &BareJid) {}
+}
+
 /// Registry for tracking active XMPP connections.
 ///
 /// Thread-safe registry that maps full JIDs to connection entries.
@@ -76,6 +98,9 @@ pub struct ConnectionRegistry {
     /// best-effort snapshots: the cross-node resume bridge must re-verify the
     /// connection's own SM id before requesting force-detach.
     sm_stream_owners: Arc<DashMap<SmSessionId, FullJid>>,
+    /// Where stanzas for full JIDs no connection here can hold are offered,
+    /// once the deployment routes to other servers.
+    foreign: OnceLock<Arc<dyn ForeignDelivery>>,
 }
 
 impl ConnectionRegistry {
@@ -92,6 +117,39 @@ impl ConnectionRegistry {
             last_activity: DashMap::new(),
             started_at: Instant::now(),
             sm_stream_owners: Arc::new(DashMap::new()),
+            foreign: OnceLock::new(),
+        }
+    }
+
+    /// Offer stanzas for full JIDs that hold no connection here to
+    /// `foreign`. Only the first delivery set is kept; the answer is
+    /// whether this call set it.
+    pub fn set_foreign_delivery(&self, foreign: Arc<dyn ForeignDelivery>) -> bool {
+        self.foreign.set(foreign).is_ok()
+    }
+
+    /// Whether `stanza` for `recipient` is one the foreign delivery takes:
+    /// `recipient` is then no local resource and never becomes one.
+    pub fn foreign_takes(&self, recipient: &FullJid, stanza: &Stanza) -> bool {
+        self.foreign
+            .get()
+            .is_some_and(|foreign| foreign.takes(recipient, stanza))
+    }
+
+    /// Offer `stanza` for `recipient` to the foreign delivery: `Ok` when
+    /// it took the stanza, which is custody for transport only.
+    pub fn offer_foreign(&self, recipient: &FullJid, stanza: Stanza) -> Result<(), Box<Stanza>> {
+        match self.foreign.get() {
+            Some(foreign) => foreign.offer(recipient, stanza),
+            None => Err(Box::new(stanza)),
+        }
+    }
+
+    /// Tell the foreign delivery that `room` stopped being open to
+    /// occupants from other servers.
+    pub fn close_foreign_room(&self, room: &BareJid) {
+        if let Some(foreign) = self.foreign.get() {
+            foreign.close_room(room);
         }
     }
 

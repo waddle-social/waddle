@@ -45,6 +45,12 @@ pub enum IngressStreamIdentity {
         #[cfg(feature = "clustering")]
         room_fence: RoomClaimFenceContext,
     },
+    /// A stanza an inbound S2S stream carried from an occupant at a domain
+    /// this deployment does not serve. Like an ephemeral stream it has no
+    /// stream-management session and no wire position to bind.
+    Remote {
+        account: BareJid,
+    },
 }
 
 /// Identity carried to the room owner; serialization is confined to the relay boundary.

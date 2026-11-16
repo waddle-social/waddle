@@ -329,6 +329,15 @@ pub struct Deps<'a> {
 }
 
 impl<'a> Deps<'a> {
+    /// Whether `address` is at a domain this deployment serves. An
+    /// occupant or member at another server is not: its inbox, its devices
+    /// and its read state are its own server's, so nothing is projected
+    /// for it here. Fixtures without a WebSocket state serve every address.
+    pub(crate) fn serves(&self, address: &jid::BareJid) -> bool {
+        self.web_socket_state
+            .is_none_or(|state| state.serves(address))
+    }
+
     pub(crate) fn owns_host_resource(&self, target: &FullJid) -> bool {
         self.host_sender
             .as_ref()

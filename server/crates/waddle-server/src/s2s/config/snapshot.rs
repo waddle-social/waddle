@@ -108,6 +108,7 @@ pub struct S2sConfig {
     blocked: Arc<BlockedAddresses>,
     dialback: DialbackSettings,
     grants_require_pkix: bool,
+    federate_new_rooms: bool,
 }
 
 impl fmt::Debug for S2sConfig {
@@ -125,6 +126,7 @@ impl fmt::Debug for S2sConfig {
             .field("blocked_prefixes", &self.blocked.extra().len())
             .field("dialback", &self.dialback)
             .field("grants_require_pkix", &self.grants_require_pkix)
+            .field("federate_new_rooms", &self.federate_new_rooms)
             .finish_non_exhaustive()
     }
 }
@@ -202,6 +204,7 @@ impl S2sConfig {
             blocked: Arc::new(blocked),
             dialback,
             grants_require_pkix: document.host_policy.require_pkix,
+            federate_new_rooms: document.host_policy.federate_new_rooms,
         })
     }
 
@@ -297,6 +300,13 @@ impl S2sConfig {
     /// need `pkix` whatever this says (ADR-0020 D8).
     pub fn grants_require_pkix(&self) -> bool {
         self.grants_require_pkix
+    }
+
+    /// Whether a room created while this snapshot runs starts with its
+    /// `federated` setting on (`host_policy.federate_new_rooms`). Off by
+    /// default; it never changes a room that exists.
+    pub fn federates_new_rooms(&self) -> bool {
+        self.federate_new_rooms
     }
 }
 
@@ -836,6 +846,9 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
         )?,
         max_verifications: cap("max_verifications", document.max_verifications, |l| {
             l.max_verifications
+        })?,
+        max_pair_queues: cap("max_pair_queues", document.max_pair_queues, |l| {
+            l.max_pair_queues
         })?,
         ..default
     };

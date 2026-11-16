@@ -46,7 +46,7 @@ pub(crate) use receipt_custody::receipt_operation as receipt_operation_for_test;
 #[cfg(feature = "test-support")]
 pub use receipt_custody::{ReceiptCustodyProbe, ReceiptCustodyUnresolved};
 pub(crate) mod room_manifest_replay;
-pub use principal::{ExtensionPrincipal, IngressPrincipal};
+pub use principal::{ExtensionPrincipal, IngressPrincipal, RemoteOccupantPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
 mod recovery;

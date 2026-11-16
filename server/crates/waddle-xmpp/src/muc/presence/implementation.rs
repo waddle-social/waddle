@@ -79,15 +79,27 @@ pub enum MucRemovalCause {
     /// deliberately NOT emitted alongside it: the XEP calls that "generally
     /// not advisable", since such removals are linked to no moderator action.
     TechnicalProblem,
+    /// The occupancy was never announced: the service seated the occupant
+    /// and gave the seat up again before it answered the join or told
+    /// anyone of it. Nobody saw the occupant enter (XEP-0045 §7.2.2), so
+    /// nobody is told that it left: no unavailable presence is sent for
+    /// it, to those who stay or to the occupant, whose join is answered
+    /// with its error instead.
+    Unannounced,
 }
 
 impl MucRemovalCause {
     /// The removal status code this cause contributes, if any.
     pub(in crate::muc::presence) const fn status_code(self) -> Option<&'static str> {
         match self {
-            Self::Voluntary => None,
+            Self::Voluntary | Self::Unannounced => None,
             Self::TechnicalProblem => Some("333"),
         }
+    }
+
+    /// Whether the room tells anyone of the removal.
+    pub const fn is_announced(self) -> bool {
+        !matches!(self, Self::Unannounced)
     }
 }
 

@@ -22,6 +22,15 @@
 //! shard keep moving. Work that ends an occupancy because a stream failed
 //! is exempt from every bound and counts towards none: there is at most one
 //! such item per occupancy, and the occupant must be told.
+//!
+//! A second set of these queues serves the rooms of this deployment: the
+//! stanzas remote principals address to the MUC service wait here for the
+//! room host, under the same bounds and in each room's order, and the end
+//! of a remote occupant's seat is queued exempt behind them. Its callers
+//! learn which bound refused a stanza ([`Full`]): a stanza that finds its
+//! room's share full is refused by itself, and only a shard or a remote
+//! domain's share that is full holds the stream. A stanza that ends a
+//! seat is not counted against its room's share.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -32,8 +41,13 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::Stanza;
 
+use super::local_rooms::SeatEnd;
 use super::occupancy::Occupancy;
+use super::principal::RemotePrincipal;
+use super::reach::RoomOperation;
+use super::seats::Seat;
 use crate::s2s::conn::VerifiedPeerStream;
+use waddle_xmpp::identity::CanonicalDomain;
 
 /// What a worker does for one room.
 #[derive(Debug)]
@@ -45,6 +59,29 @@ pub(super) enum RoomWork {
     /// An occupancy whose stream to the room's domain failed: ended, if it
     /// is still as read, and the occupant told (XEP-0045 §11.1).
     Ended(Box<Occupancy>),
+    /// A stanza a remote principal addressed to the MUC service, a local
+    /// room or one of its occupant JIDs: decided by the room host.
+    Request(Box<LocalRoomRequest>),
+    /// A remote occupant's seat in a local room that ended without the
+    /// room deciding it: the room removes the occupant.
+    Unseat(Box<(Seat, SeatEnd)>),
+    /// A room's own presence that tells the occupant of a seat that its
+    /// occupancy ended, which reached the router apart from the occupant's
+    /// own request: sent, and the seat ended, only if the room no longer
+    /// seats the occupant under the seat's generation.
+    Departure(Box<(Seat, Stanza)>),
+}
+
+/// A stanza for a local room, as it arrived.
+#[derive(Debug)]
+pub(super) struct LocalRoomRequest {
+    pub principal: RemotePrincipal,
+    pub operation: RoomOperation,
+    pub stanza: Stanza,
+    /// The local domain the stanza was addressed to and the remote domain
+    /// it came from, as its stream authenticated them.
+    pub local: CanonicalDomain,
+    pub remote: CanonicalDomain,
 }
 
 /// A stanza that may be a room's traffic, as it arrived.
@@ -68,12 +105,37 @@ fn end_key(occupancy: &Occupancy) -> EndKey {
     )
 }
 
-/// One queued item: the work, and the remote domain whose share it counts
-/// against, or `None` for exempt work.
+/// One queued item: the work, the remote domain whose share it counts
+/// against, or `None` for exempt work, and whether it counts against its
+/// room's share.
 #[derive(Debug)]
 struct Item {
     work: RoomWork,
     peer: Option<String>,
+    in_room: bool,
+}
+
+/// Which bound refused work offered to the queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Full {
+    /// The room's share: what already waits for the same room.
+    Room,
+    /// The shard's bound, or the remote domain's share of the shard.
+    Shared,
+}
+
+/// What became of work offered to the queues by a caller that tells a
+/// full room from full queues.
+#[derive(Debug)]
+pub(super) enum Admitted {
+    Queued,
+    /// The room's share is full: the work is handed back, at once.
+    RoomFull(RoomWork),
+    /// The deadline passed while the shard or the domain's share was full;
+    /// the work was not queued.
+    TimedOut,
+    /// The router is stopping; the work was not queued.
+    Stopped,
 }
 
 #[derive(Debug, Default)]
@@ -98,23 +160,28 @@ struct Shard {
 
 impl Shard {
     /// Queue `work` for `room`, counted against `peer`'s share (exempt when
-    /// `None`), or give it back when a bound refuses it.
+    /// `None`) and, when `in_room`, against the room's, or give it back
+    /// with the bound that refused it. The room's share is tested first, so
+    /// that a stanza for a full room is told so although its domain's
+    /// share may be full of that room's stanzas as well.
     fn push(
         &mut self,
         room: BareJid,
         work: RoomWork,
         peer: Option<String>,
+        in_room: bool,
         bounds: &Bounds,
-    ) -> Result<(), RoomWork> {
+    ) -> Result<(), (RoomWork, Full)> {
+        let in_room = in_room && peer.is_some();
         match &peer {
             Some(peer) => {
-                let in_room = self.rooms.get(&room).map_or(0, |queue| queue.bounded);
+                let of_room = self.rooms.get(&room).map_or(0, |queue| queue.bounded);
                 let of_peer = self.peers.get(peer).copied().unwrap_or(0);
-                if self.bounded >= bounds.per_shard
-                    || in_room >= bounds.per_room
-                    || of_peer >= bounds.per_peer
-                {
-                    return Err(work);
+                if in_room && of_room >= bounds.per_room {
+                    return Err((work, Full::Room));
+                }
+                if self.bounded >= bounds.per_shard || of_peer >= bounds.per_peer {
+                    return Err((work, Full::Shared));
                 }
                 self.bounded += 1;
                 *self.peers.entry(peer.clone()).or_insert(0) += 1;
@@ -132,10 +199,14 @@ impl Shard {
         if queue.items.is_empty() {
             self.turns.push_back(room);
         }
-        if peer.is_some() {
+        if in_room {
             queue.bounded += 1;
         }
-        queue.items.push_back(Item { work, peer });
+        queue.items.push_back(Item {
+            work,
+            peer,
+            in_room,
+        });
         Ok(())
     }
 
@@ -144,8 +215,12 @@ impl Shard {
     fn pop(&mut self) -> Option<(RoomWork, bool)> {
         let room = self.turns.pop_front()?;
         let queue = self.rooms.get_mut(&room)?;
-        let Item { work, peer } = queue.items.pop_front()?;
-        if peer.is_some() {
+        let Item {
+            work,
+            peer,
+            in_room,
+        } = queue.items.pop_front()?;
+        if in_room {
             queue.bounded = queue.bounded.saturating_sub(1);
         }
         if queue.items.is_empty() {
@@ -257,12 +332,70 @@ impl RoomQueues {
         work: RoomWork,
         peer: &str,
     ) -> Result<(), RoomWork> {
+        self.offer(room, work, peer, true).map_err(|(work, _)| work)
+    }
+
+    /// Queue `work` for `room` against `peer`'s share and, when `in_room`,
+    /// against the room's, or give it back with the bound that refused
+    /// it.
+    pub(super) fn offer(
+        &self,
+        room: BareJid,
+        work: RoomWork,
+        peer: &str,
+        in_room: bool,
+    ) -> Result<(), (RoomWork, Full)> {
         let Some(slot) = self.slot(&room) else {
-            return Err(work);
+            return Err((work, Full::Shared));
         };
-        lock(&slot.shard).push(room, work, Some(peer.to_owned()), &self.bounds)?;
+        lock(&slot.shard).push(room, work, Some(peer.to_owned()), in_room, &self.bounds)?;
         slot.work.notify_one();
         Ok(())
+    }
+
+    /// [`Self::offer`], waiting for a place while the shard or `peer`'s
+    /// share of it is full, until `deadline` or until `stop` is cancelled.
+    /// A full room is not waited for: the work is handed back at once.
+    pub(super) async fn offer_or_wait(
+        &self,
+        room: BareJid,
+        mut work: RoomWork,
+        peer: &str,
+        in_room: bool,
+        deadline: tokio::time::Instant,
+        stop: &CancellationToken,
+    ) -> Admitted {
+        let Some(slot) = self.slot(&room) else {
+            return Admitted::TimedOut;
+        };
+        loop {
+            // Registered before the attempt, so a place freed between the
+            // attempt and the wait is not missed.
+            let freed = slot.space.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            let pushed = lock(&slot.shard).push(
+                room.clone(),
+                work,
+                Some(peer.to_owned()),
+                in_room,
+                &self.bounds,
+            );
+            match pushed {
+                Ok(()) => {
+                    slot.work.notify_one();
+                    return Admitted::Queued;
+                }
+                Err((refused, Full::Room)) => return Admitted::RoomFull(refused),
+                Err((refused, Full::Shared)) => work = refused,
+            }
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => return Admitted::Stopped,
+                () = tokio::time::sleep_until(deadline) => return Admitted::TimedOut,
+                () = &mut freed => {}
+            }
+        }
     }
 
     /// Queue `work` for `room` against `peer`'s share, waiting for a place
@@ -284,14 +417,19 @@ impl RoomQueues {
             let freed = slot.space.notified();
             tokio::pin!(freed);
             freed.as_mut().enable();
-            let pushed =
-                lock(&slot.shard).push(room.clone(), work, Some(peer.to_owned()), &self.bounds);
+            let pushed = lock(&slot.shard).push(
+                room.clone(),
+                work,
+                Some(peer.to_owned()),
+                true,
+                &self.bounds,
+            );
             match pushed {
                 Ok(()) => {
                     slot.work.notify_one();
                     return Placed::Queued;
                 }
-                Err(refused) => work = refused,
+                Err((refused, _)) => work = refused,
             }
             tokio::select! {
                 biased;
@@ -309,7 +447,7 @@ impl RoomQueues {
             return;
         };
         if lock(&slot.shard)
-            .push(room, work, None, &self.bounds)
+            .push(room, work, None, false, &self.bounds)
             .is_ok()
         {
             slot.work.notify_one();

@@ -60,6 +60,7 @@ pub struct FederationSnapshot {
     generation: Uuid,
     admission: Arc<AdmissionPolicy>,
     require_pkix: bool,
+    federate_new_rooms: bool,
 }
 
 impl FederationSnapshot {
@@ -69,7 +70,13 @@ impl FederationSnapshot {
             generation: config.generation(),
             admission: Arc::clone(config.admission()),
             require_pkix: config.grants_require_pkix(),
+            federate_new_rooms: config.federates_new_rooms(),
         }
+    }
+
+    /// Whether a room created now starts with its `federated` setting on.
+    pub fn federates_new_rooms(&self) -> bool {
+        self.federate_new_rooms
     }
 
     /// The identifier of the snapshot.
@@ -247,6 +254,19 @@ impl StreamEvidence {
         }
     }
 
+    /// The evidence a seat recorded when its join was admitted: what the
+    /// seat's row holds, written from the [`RemotePrincipal`] whose join
+    /// established it. Only the seat store reads rows into evidence.
+    pub(crate) fn recorded(
+        strength: AuthenticationStrength,
+        trust_profile: Option<TrustProfileKind>,
+    ) -> Self {
+        Self {
+            strength,
+            trust_profile,
+        }
+    }
+
     /// Evidence as given, for suites that decide without a live stream.
     #[cfg(feature = "test-support")]
     pub fn for_test(
@@ -266,6 +286,56 @@ impl StreamEvidence {
     pub fn trust_profile(&self) -> Option<TrustProfileKind> {
         self.trust_profile
     }
+}
+
+/// The stream evidence the seats of remote occupants of local rooms were
+/// admitted under, as the replica that seats them holds it.
+///
+/// A remote occupant's seat is established by a join an inbound S2S stream
+/// carried, and records what that stream proved. A decision that names a
+/// seated remote occupant without a request of its own (the audience of a
+/// room acceptance, the revocation sweep, the seats restored after a room's
+/// claim moved) decides it on that evidence instead of on none. Admission
+/// and trusted-home status are still evaluated at each decision, from the
+/// snapshot the replica runs: a seat records only what its stream proved.
+pub trait SeatEvidence: Send + Sync {
+    /// The evidence of every seat `account` holds in `room` on this
+    /// replica; empty when it holds none here.
+    fn of_account(&self, room: &BareJid, account: &BareJid) -> Vec<StreamEvidence>;
+}
+
+impl std::fmt::Debug for dyn SeatEvidence + '_ {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SeatEvidence")
+    }
+}
+
+/// A replica that seats no remote occupant: S2S is off, or the decision is
+/// made where no seat is held.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoSeats;
+
+impl SeatEvidence for NoSeats {
+    fn of_account(&self, _room: &BareJid, _account: &BareJid) -> Vec<StreamEvidence> {
+        Vec::new()
+    }
+}
+
+/// The evidence a decision that names `account` in `room` without its
+/// request decides it on: that of each seat it holds there, or no stream
+/// when it holds none. The account is admitted only when every one of them
+/// admits it, so an occupant seated on streams of different strength is
+/// decided by the weakest.
+pub fn named_evidence(
+    seats: &dyn SeatEvidence,
+    room: &BareJid,
+    account: &BareJid,
+) -> Vec<PrincipalEvidence> {
+    let seated = seats.of_account(room, account);
+    if seated.is_empty() {
+        return vec![PrincipalEvidence::NoStream];
+    }
+    seated.into_iter().map(PrincipalEvidence::Stream).collect()
 }
 
 /// How the principal of a decision reached it.
@@ -418,6 +488,18 @@ impl PrincipalWitness {
         match self {
             Self::Served => true,
             Self::Remote(witness) => witness.privilege_honoured(),
+        }
+    }
+
+    /// Whether any grant, or any standing a room's own checks give, is
+    /// honoured for this principal: always for a served account, and for a
+    /// remote principal only while its domain is admitted and its stream
+    /// meets host policy's strength requirement
+    /// ([`RemoteWitness::grants_honoured`]).
+    pub fn grants_honoured(&self) -> bool {
+        match self {
+            Self::Served => true,
+            Self::Remote(witness) => witness.grants_honoured(),
         }
     }
 

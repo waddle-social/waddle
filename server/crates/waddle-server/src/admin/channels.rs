@@ -69,8 +69,8 @@ use crate::permissions::{
 };
 use crate::server::routes::websocket::WebSocketState;
 use crate::server::xmpp_state::{
-    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
-    XmppChannelRecord, XmppChannelUpsert,
+    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, set_xmpp_channel_federated,
+    upsert_xmpp_channel, XmppChannelRecord, XmppChannelUpsert,
 };
 use crate::server::AppState;
 use crate::space_identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
@@ -1937,7 +1937,12 @@ async fn upsert_channel_catalog(
         members_only: config.members_only,
         public_room: config.public_room,
     };
-    upsert_xmpp_channel(db_actor, &record)
+    upsert_xmpp_channel(db_actor.clone(), &record)
+        .await
+        .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))?;
+    // The catalog upsert leaves the federated setting as stored; the row
+    // follows the room's configuration here.
+    set_xmpp_channel_federated(db_actor, channel_id, config.federated)
         .await
         .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))
 }
@@ -1976,7 +1981,11 @@ pub(super) async fn restore_channel_catalog_record(state: &AppState, record: &Xm
         members_only: record.members_only,
         public_room: record.public_room,
     };
-    if let Err(error) = upsert_xmpp_channel(db_actor, &upsert).await {
+    let restored = match upsert_xmpp_channel(db_actor.clone(), &upsert).await {
+        Ok(()) => set_xmpp_channel_federated(db_actor, &record.id, record.federated).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = restored {
         tracing::warn!(
             channel = %record.id,
             error = %error,
@@ -2097,6 +2106,10 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     apply_channel_type(&mut config, args.channel_type);
     config.max_occupants = 0;
     config.enable_logging = true;
+    // A new channel starts with the deployment's federated setting; its
+    // owner changes it in the room's configuration.
+    config.federated = state.federates_new_rooms();
+    let config = config.normalized();
 
     state
         .room_registry
@@ -5151,6 +5164,63 @@ async fn run_set_affiliation(
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
     let next_affiliation = args.affiliation.to_muc();
+    // ADR-0020 D8 at issuance: this command writes the room's legacy
+    // affiliation stores for any JID, so an owner or admin standing is
+    // written only for an account of this deployment or of a trusted home
+    // of the S2S snapshot the replica runs, as the `muc#admin` writer
+    // does. A standing written for any other home would not be honoured
+    // at the effect either. A fixture that runs the command without a
+    // WebSocket state has no snapshot to ask, and the rule is not applied
+    // to it.
+    if matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin)
+        && websocket_state.is_some_and(|websocket_state| {
+            !crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::privileged_standing_may_be_issued(
+                websocket_state,
+                &args.member_jid,
+            )
+        })
+    {
+        return Err(Box::new(CommandResult::Error(XmppError::not_allowed(Some(
+            "owner and admin standing is granted to accounts of this deployment and of its \
+             trusted servers only"
+                .to_string(),
+        )))));
+    }
+    // The room makes every occupant of an owner or admin a moderator. A
+    // remote occupant holds that role only on a seat whose stream carries
+    // it, so the standing is not written while one of the account's seats
+    // in this room does not, as the `muc#admin` writer refuses it. This
+    // command may run on a replica other than the one that holds the
+    // room, so the seats are read from the table every replica shares.
+    if let Some(websocket_state) = websocket_state
+        .filter(|_| matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin))
+    {
+        let honoured = crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::seats_honour_privilege_anywhere(
+            websocket_state,
+            state.db_pool.global(),
+            &args.channel_jid,
+            &args.member_jid,
+        )
+        .await;
+        match honoured {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Box::new(CommandResult::Error(XmppError::not_allowed(
+                    Some(
+                        "this account is in the room over a stream that does not carry owner or \
+                     admin standing; grant it once that occupant has left or has entered over \
+                     a certificate-authenticated stream of a trusted server"
+                            .to_string(),
+                    ),
+                ))));
+            }
+            None => {
+                return Err(internal_err(
+                    "the seats of occupants from other servers could not be read",
+                ))
+            }
+        }
+    }
     if next_affiliation != Affiliation::Owner && previous_affiliation == Affiliation::Owner {
         let owners = actor
             .ask(ListAffiliations {
@@ -6036,6 +6106,7 @@ mod tests {
             pin_permission: PinPermission::Anyone,
             members_only: false,
             public_room: true,
+            federated: false,
             created_at: "2026-06-21T00:00:00Z".to_string(),
             updated_at: None,
         };

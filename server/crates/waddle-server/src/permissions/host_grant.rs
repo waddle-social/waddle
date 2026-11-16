@@ -102,7 +102,9 @@ pub use fence::{
     FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_CLOCK_SKEW_WARNING, FENCE_EXPIRY_GRACE,
     FENCE_LEASE_MARGIN, FENCE_LEASE_TTL, FENCE_TICK,
 };
-pub use gate::{HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate};
+pub use gate::{
+    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate, StoredRoomGrants,
+};
 pub use issuance::{
     IssuanceBasis, IssuancePolicy, IssuanceRefusal, ServedAccountDomains, SubjectHome,
 };
@@ -119,8 +121,8 @@ pub use model::{
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use principal::{
-    FederationSnapshot, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, RemoteRefusal,
-    RemoteWitness, StreamEvidence,
+    named_evidence, FederationSnapshot, NoSeats, PrincipalEvidence, PrincipalPolicy,
+    PrincipalWitness, RemoteRefusal, RemoteWitness, SeatEvidence, StreamEvidence,
 };
 pub use projection::{
     MarkerObservation, ProjectedGrant, ProjectedRelationship, ProjectionIntent,

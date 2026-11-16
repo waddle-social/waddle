@@ -33,9 +33,12 @@ mod access;
 mod xml;
 
 pub use access::{
-    get_managed_channel_for_room, host_grant_read_still_admitted, parse_room_jid_context,
-    resolve_managed_channel_entry_access, resolve_muc_room_archive_access, RoomArchiveAccess,
+    get_managed_channel_for_room, host_grant_read_still_admitted,
+    host_grant_read_still_admitted_as, parse_room_jid_context,
+    resolve_managed_channel_entry_access, resolve_muc_room_archive_access,
+    resolve_muc_room_archive_access_as, RoomArchiveAccess,
 };
+pub(crate) use access::{honoured_legacy_affiliation, principal_witness};
 
 use access::{resolve_managed_channel_admission, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
@@ -2559,6 +2562,8 @@ use implementation::run_resolver_affiliation_sync_worker;
 #[cfg(test)]
 use implementation::sync_resolver_affiliation_on_rejection_with_registry;
 pub(crate) use implementation::try_deliver_registered_remote_resource;
+#[cfg(feature = "test-support")]
+pub(crate) use implementation::undone_join_recipients;
 #[cfg(test)]
 use implementation::JoinAdmissionDenial;
 #[cfg(test)]

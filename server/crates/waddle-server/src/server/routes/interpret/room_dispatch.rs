@@ -11,11 +11,11 @@ use super::{
     extract_correction_from_message, extract_forum_action, extract_retraction_from_message,
     info_span, interpret_with_depth, item_not_found_error, message_has_framework_envelope,
     parse_managed_room_jid, remove_framework_envelopes, remove_stanza_ids_by, set_thread_id,
-    validate_groupchat_rich_targets, waddle_id_for_room_jid, warn, BareJid, CheckPermission, Deps,
-    ForumAction, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid, MamArchivedMessage,
-    Message, Object, ObjectType, OccupantSnapshot, OutboundEvent, Permission, RetractionKind,
-    RoomContext, Stanza, Subject, ToElementString, UuidV4Generator, WebSocketState,
-    Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
+    validate_groupchat_rich_targets_of, waddle_id_for_room_jid, warn, BareJid, CheckPermission,
+    Deps, ForumAction, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid,
+    MamArchivedMessage, Message, Object, ObjectType, OccupantSnapshot, OutboundEvent, Permission,
+    RetractionKind, RichTargetSender, RoomContext, Stanza, Subject, ToElementString,
+    UuidV4Generator, WebSocketState, Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
 };
 
 #[cfg(feature = "clustering")]
@@ -696,16 +696,24 @@ pub(super) async fn dispatch_to_room(
     if let Some(sender_room_nick_jid) = sender_room_nick_jid.as_ref() {
         prototype.from = Some(sender_room_nick_jid.clone());
     }
-    let _extension_outcome = state
-        .deps
-        .protocol
-        .extension_manager
-        .process_message_enrichments_for_waddle_with_requester(
-            &mut prototype,
-            waddle_id,
-            Some(sender_full.to_bare()),
-        )
-        .await;
+    // The enrichment hooks of this deployment's extensions run for the
+    // messages of its own accounts. A message of an occupant at another
+    // server reaches the room reduced to the standard payloads a room
+    // carries, and no extension is handed it as its requester: an
+    // extension decides for the accounts it knows, and its hooks have not
+    // been reviewed to act for a principal that holds none here.
+    if state.serves(&sender_full.to_bare()) {
+        let _extension_outcome = state
+            .deps
+            .protocol
+            .extension_manager
+            .process_message_enrichments_for_waddle_with_requester(
+                &mut prototype,
+                waddle_id,
+                Some(sender_full.to_bare()),
+            )
+            .await;
+    }
     // 6. Rich-target validation against the room archive. Runs only
     //    after the gate has admitted the sender, so non-occupants /
     //    managed-room-forbidden senders never see archive-derived
@@ -714,13 +722,16 @@ pub(super) async fn dispatch_to_room(
     //    validation), so derive that view here for the same-sender
     //    comparison rather than relying on `prototype.from` (alice's
     //    real full JID).
-    let correction_target = match validate_groupchat_rich_targets(
+    let correction_target = match validate_groupchat_rich_targets_of(
         deps,
         &room_jid,
         &prototype,
-        sender_room_nick_jid.as_ref(),
+        RichTargetSender {
+            room_nick_jid: sender_room_nick_jid.as_ref(),
+            real_jid: Some(&sender_full),
+            nickname_generation: snapshot.sender_nickname_generation,
+        },
         &room_actor,
-        snapshot.sender_nickname_generation,
     )
     .await
     {

@@ -14,16 +14,43 @@ pub(super) async fn validate_groupchat_rich_targets(
     room_actor: &ActorRef<RoomActor>,
     sender_nickname_generation: Option<u64>,
 ) -> Result<Option<waddle_xmpp_core::xep0359::StanzaId>, Box<StanzaError>> {
-    match validate_groupchat_rich_targets_inner(
+    validate_groupchat_rich_targets_of(
         deps,
         room,
         message,
-        sender_room_nick_jid,
+        RichTargetSender {
+            room_nick_jid: sender_room_nick_jid,
+            real_jid: None,
+            nickname_generation: sender_nickname_generation,
+        },
         room_actor,
-        sender_nickname_generation,
     )
     .await
-    {
+}
+
+/// The sender of a groupchat message that names an archived one.
+pub(super) struct RichTargetSender<'a> {
+    /// Its occupant address (`room/nick`), which archived rows carry as
+    /// their `from`.
+    pub room_nick_jid: Option<&'a Jid>,
+    /// Its real address, when the caller holds it: an occupant's own
+    /// stanza. A row that records its author (XEP-0313 §MUC Archives) is
+    /// then corrected or retracted only by that account, whatever
+    /// nickname either held.
+    pub real_jid: Option<&'a FullJid>,
+    pub nickname_generation: Option<u64>,
+}
+
+/// [`validate_groupchat_rich_targets`] for a sender whose real address is
+/// known.
+pub(super) async fn validate_groupchat_rich_targets_of(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    message: &Message,
+    sender: RichTargetSender<'_>,
+    room_actor: &ActorRef<RoomActor>,
+) -> Result<Option<waddle_xmpp_core::xep0359::StanzaId>, Box<StanzaError>> {
+    match validate_groupchat_rich_targets_inner(deps, room, message, &sender, room_actor).await {
         Ok(target) => Ok(target),
         Err(RichTargetValidationError::Semantic(error)) => Err(error),
         Err(error) => {
@@ -51,14 +78,42 @@ impl From<StanzaError> for RichTargetValidationError {
     }
 }
 
+/// Whether the archived `original` is the sender's own message by the
+/// author the row records (XEP-0308 §3, XEP-0424 §4: only the original
+/// sender corrects or retracts).
+///
+/// The occupant address alone does not say so for an occupant at another
+/// server, which chooses its nickname and so can hold one that somebody
+/// else's archived messages carry. Such a sender revises only a row that
+/// records its account as the author. A row without a recorded author
+/// keeps the address comparison for an address this deployment serves.
+fn recorded_author_admits(
+    deps: &Deps<'_>,
+    sender: &RichTargetSender<'_>,
+    original: &MamArchivedMessage,
+) -> bool {
+    let Some(real) = sender.real_jid else {
+        return true;
+    };
+    let recorded = original
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.muc_sender.as_ref());
+    match recorded {
+        Some(author) => author.jid.to_bare() == real.to_bare(),
+        None => deps.serves(&real.to_bare()),
+    }
+}
+
 async fn validate_groupchat_rich_targets_inner(
     deps: &Deps<'_>,
     room: &BareJid,
     message: &Message,
-    sender_room_nick_jid: Option<&Jid>,
+    sender: &RichTargetSender<'_>,
     room_actor: &ActorRef<RoomActor>,
-    sender_nickname_generation: Option<u64>,
 ) -> Result<Option<waddle_xmpp_core::xep0359::StanzaId>, RichTargetValidationError> {
+    let sender_room_nick_jid = sender.room_nick_jid;
+    let sender_nickname_generation = sender.nickname_generation;
     if message.from.is_none() {
         return Ok(None);
     }
@@ -109,7 +164,9 @@ async fn validate_groupchat_rich_targets_inner(
             Ok(None) => return Err(item_not_found_error("Correction target not found.").into()),
             Err(error) => return Err(RichTargetValidationError::Archive(error)),
         };
-        if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
+        if !sender_matches_groupchat_from(sender_archive_view, &original.from)
+            || !recorded_author_admits(deps, sender, &original)
+        {
             return Err(forbidden_error("Only the original sender may correct a message.").into());
         }
         verify_groupchat_occupancy_generation(
@@ -134,7 +191,9 @@ async fn validate_groupchat_rich_targets_inner(
                 Ok(None) => return Err(item_not_found_error("Retraction target not found.").into()),
                 Err(error) => return Err(RichTargetValidationError::Archive(error)),
             };
-        if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
+        if !sender_matches_groupchat_from(sender_archive_view, &original.from)
+            || !recorded_author_admits(deps, sender, &original)
+        {
             return Err(forbidden_error("Only the original sender may retract a message.").into());
         }
     }

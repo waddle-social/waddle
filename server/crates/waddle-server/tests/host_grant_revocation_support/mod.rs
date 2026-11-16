@@ -26,9 +26,13 @@ use waddle_server::db::actor::DbExecute;
 use waddle_server::db::lineage::DeploymentUuid;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool, PoolConfig};
 use waddle_server::ingress::IngressAuthority;
-use waddle_server::permissions::host_grant::{HostGrantAttachment, HostGrantStore, ReplicaFence};
+use waddle_server::permissions::host_grant::{
+    FederationSnapshot, HostGrantAttachment, HostGrantStore, PrincipalPolicy, ReplicaFence,
+};
+use waddle_server::s2s::config::S2sConfig;
 use waddle_server::test_support::{
-    router, seed_local_account, websocket_state_with_host_grant_fence, WebSocketState,
+    router, seed_local_account, websocket_state_with_host_grant_fence,
+    websocket_state_with_host_grant_fence_running_s2s, WebSocketState,
 };
 use waddle_ws_test_support::WsXmppClient;
 use xmpp_parsers::minidom::Element;
@@ -48,6 +52,12 @@ const PASSWORD: &str = "revocation-account-password";
 /// How long a case waits for something the revocation sweep sends: the
 /// sweep starts within a tick of the fence and retries every second.
 pub const SWEEP_BUDGET: Duration = Duration::from_secs(8);
+
+/// What a replica decides remote principals under: the account domains the
+/// fixture serves and the S2S snapshot the replica runs, if any.
+fn principals(s2s: Option<&S2sConfig>) -> PrincipalPolicy {
+    PrincipalPolicy::new(served(), s2s.map(FederationSnapshot::of))
+}
 
 /// One replica of a deployment: a WebSocket state on the deployment's
 /// database, served over a loopback socket.
@@ -69,6 +79,18 @@ impl Replica {
     /// lineage is `deployment`'s. Room-manifest acceptance and every other
     /// surface decide with one attachment, as on a server.
     pub async fn start(database_url: &str, deployment: Uuid) -> Self {
+        Self::build(database_url, deployment, None).await
+    }
+
+    /// [`Self::start`] for a replica that runs the S2S snapshot `s2s`: its
+    /// attachment and its state decide remote principals under that
+    /// snapshot, as startup arranges when S2S is enabled.
+    pub async fn start_running(database_url: &str, deployment: Uuid, s2s: &S2sConfig) -> Self {
+        Self::build(database_url, deployment, Some(s2s)).await
+    }
+
+    async fn build(database_url: &str, deployment: Uuid, s2s: Option<&S2sConfig>) -> Self {
+        let principals = principals(s2s);
         let config = DatabaseConfig::new(DatabaseDriver::Postgres, database_url);
         let database = Database::from_config("revocation-replica", &config)
             .await
@@ -89,7 +111,7 @@ impl Replica {
             .expect("replica ingress authority"),
         );
         assert!(authority.attach_host_grants(
-            HostGrantAttachment::unfenced_for_test(&store, served())
+            HostGrantAttachment::unfenced_for_test(&store, principals)
                 .await
                 .expect("attachment")
         ));
@@ -101,7 +123,13 @@ impl Replica {
         // The fenced state binds its host-grant gate to the authority's
         // attachment gate: offering that gate again binds nothing, and the
         // surfaces decide with the attachment acceptance holds.
-        let state = websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await;
+        let state = match s2s {
+            Some(s2s) => {
+                websocket_state_with_host_grant_fence_running_s2s(pool, Arc::clone(&authority), s2s)
+                    .await
+            }
+            None => websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await,
+        };
         let host_grants = &state.deps.app_state.host_grants;
         assert!(!host_grants.bind_attachment(authority.host_grant_gate()));
         assert!(host_grants.attachment().is_some());
@@ -164,6 +192,22 @@ impl Replica {
             .expect("channel catalog row");
     }
 
+    /// Record in the channel catalog whether the room of channel `id` is
+    /// open to accounts at other servers, as the room's configuration does.
+    pub async fn federate(&self, id: &str, federated: bool) {
+        self.state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "UPDATE channels SET federated = ? WHERE id = ?".to_owned(),
+                params: vec![federated.into(), id.into()],
+            })
+            .await
+            .expect("the channel's federated setting");
+    }
+
     /// An authenticated client of `localpart` on this replica, with
     /// `resource` bound.
     pub async fn client(&self, localpart: &str, resource: &str) -> WsXmppClient {
@@ -200,12 +244,22 @@ impl Deployment {
     /// The fixture's active scope served by `count` replicas, with the
     /// accounts `owner`, `romeo`, `alice` and `carol`.
     pub async fn start(label: &str, count: usize) -> Option<Self> {
-        let grants = GrantFixture::active(label).await?;
+        Self::build(label, count, None).await
+    }
+
+    /// [`Self::start`] for replicas that run the S2S snapshot `s2s`.
+    pub async fn start_running(label: &str, count: usize, s2s: &S2sConfig) -> Option<Self> {
+        Self::build(label, count, Some(s2s)).await
+    }
+
+    async fn build(label: &str, count: usize, s2s: Option<&S2sConfig>) -> Option<Self> {
+        let grants = GrantFixture::active_under(label, principals(s2s)).await?;
         let mut replicas = Vec::new();
         for index in 0..count {
-            let replica = Replica::start(
+            let replica = Replica::build(
                 grants.ingress.db.database_url(),
                 grants.ingress.deployment_uuid(),
+                s2s,
             )
             .await;
             if index == 0 {

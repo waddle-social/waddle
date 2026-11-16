@@ -10,7 +10,14 @@ S2S routing and the host-grant restore incarnation through
 through `9b2e2d57ebd13329ddc045b2d1343f03b9619089`, and the effect boundary for
 remote principals through `c9111c714cfb821e571cc7f3b63d4a9ef37d11ba`, merged
 with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
-`8f6088ba601528090ec1bc82294b1a12422f5519` (see the last refresh below); the original
+`8f6088ba601528090ec1bc82294b1a12422f5519`, and inbound S2S rooms through
+`31fd3f41591d0ff3072dc667e35207c522ae0dc6` and, with remote room
+administration, the federated setting and requests carried between
+replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
+placement of requests, the ends of a seat and the decisions that name a
+seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
+with the bounds on that work, the takeover of a restored room's seats and
+the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -61,7 +68,7 @@ revision. The [local test backend](../../crates/waddle-server/src/permissions/ac
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1550) invokes account reconciliation behind its
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1561) invokes account reconciliation behind its
 lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L143) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L183) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
@@ -90,7 +97,7 @@ capability cannot be reached again without a source change. The lexical token
 
 **W5 — MUC and channel administration (concrete).** The active MUC admin handler
 [persists managed-channel affiliation](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L106) through ReplaceExclusiveRelation
-before applying the room-actor batch. [Rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L204) uses expected
+before applying the room-actor batch. [Rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L248) uses expected
 family state via SwapExclusiveRelation to avoid overwriting a later writer;
 a failed/lost reply can still require reconciliation with actor/durable state.
 Administrative channel commands are additional callers. Graph persistence,
@@ -153,15 +160,15 @@ can execute [bookmark backfill](../../crates/waddle-server/src/server/routes/web
 and writes the channel's parent only when the channel has none or already has
 that Space, retracting the bookmark when the parent write fails; it runs no
 stale cleanup, and skips a room an enrolled scope manages or whose enrollment
-cannot be told. [Join affiliation resolution](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L25) can invoke
-[parent repair](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L428) after a denied channel check. Repair writes a graph
-parent only for a channel that has none, naming the Space of the [channel-space link](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L562)
+cannot be told. [Join affiliation resolution](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L96) can invoke
+[parent repair](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L554) after a denied channel check. Repair writes a graph
+parent only for a channel that has none, naming the Space of the [channel-space link](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L688)
 when that Space lists the channel's bookmark; a channel with a parent keeps it,
 since only a placement moves it. Repair rechecks the bookmark after writing and
 deletes its own write when the bookmark is gone. The
 post-write recheck matters: a captured read alone does not prove the stale parent
 survives. MAM explicitly disables graph repair. E5/E6. A room an enrolled
-scope manages is [resolved from its canonical grants](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L102)
+scope manages is [resolved from its canonical grants](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L154)
 before any of this runs, so no repair is attempted for it.
 
 **W10 — Room actor state, invitations and restoration (concrete, separate plane).**
@@ -176,7 +183,7 @@ writer inventory must include those paths, not just incoming IQ handlers. E3/E6.
 
 ## Readers and acceptance sinks
 
-**S1 — Join.** [The join handler](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs#L865) freezes an actor admission revision before
+**S1 — Join.** [The join handler](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs#L885) freezes an actor admission revision before
 external managed-channel resolution, checks connection ownership before its
 final ask and supplies an affiliation grant to [JoinWithAffiliation](../../crates/waddle-xmpp/src/muc/room_actor/occupancy_handlers.rs#L52).
 The actor checks ownership/restoration and its member admission revision, then
@@ -187,9 +194,14 @@ richer than a generic `direct OR (parent AND member)` model. Source evidence her
 does not establish that every graph writer advances the actor revision. E6. A
 room an enrolled host-grant scope manages is entered only with the standing
 its canonical grants honour (Outcast for a ban, nothing without a grant), as
-a members-only room, and only through its channel row.
+a members-only room, and only through its channel row. An occupant at
+another server enters through [the room host of the S2S router](../../crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs#L833):
+the same handler, given the evidence of the stream that carried the join,
+decides peer admission and the trusted-home rule for the joiner before the
+actor seats it and again on the seat the actor gave, and never creates a
+room.
 
-**S2 — Archive/discovery/extension reads.** The [MUC archive gate](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L225)
+**S2 — Archive/discovery/extension reads.** The [MUC archive gate](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L276)
 uses live room configuration when available, direct relations and managed-entry
 rules; unmanaged rooms without a live actor fail closed. It is followed by a
 separate [archive query](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/archive_inbox_upload.rs#L184). There is no shared authorization snapshot
@@ -199,12 +211,15 @@ authorizer](../../crates/waddle-server/src/server/extension_commands/pubsub.rs#L
 MAM sink. Rejection/error, returned archive rows and later network transmission
 are different boundaries. E6. For a room an enrolled scope manages, the gate
 and the room's disco#info decide from the canonical grants, and the archive
-page is sent only if [a decision taken after the read](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L360)
-still admits the requester.
+page is sent only if [a decision taken after the read](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L474)
+still admits the requester. An asker at another server is served by a
+second [archive reader](../../crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs#L486): the same gate and the
+same decision after the read, each given the evidence of the asker's
+stream, around an archive query of its own.
 
 **S3 — PubSub delivery.** The real database [subscriber query](../../crates/waddle-server/src/pubsub/implementation.rs#L376)
 filters subscribed rows and outcasts. [Fanout captures that vector](../../crates/waddle-server/src/server/routes/websocket/handlers/pubsub_fanout/implementation.rs#L176), builds
-a frozen event, expands resources and attempts the [live queue](../../crates/waddle-xmpp/src/registry/connection_registry/sending.rs#L519) or
+a frozen event, expands resources and attempts the [live queue](../../crates/waddle-xmpp/src/registry/connection_registry/sending.rs#L524) or
 [detached SM buffer](../../crates/waddle-xmpp/src/stream_management/session_registry/resources.rs#L398). Private PEP has additional entitlement checks; do not
 attribute those checks to generic Spaces fanout. Unsubscription/outcast/config
 changes after capture are not uniformly rechecked at each sink. Queue acceptance,
@@ -214,6 +229,13 @@ not the capture-to-custody race or a no-bytes-after-revoke guarantee. Fan-out
 from the Space node of an enrolled scope
 [delivers nothing](../../crates/waddle-server/src/server/routes/websocket/handlers/pubsub_fanout/implementation.rs#L116), and a room-bound
 extension node delivers only to subscribers who may still read the room.
+
+A full JID that holds no connection is offered to [a delivery hook](../../crates/waddle-xmpp/src/registry/connection_registry.rs#L63),
+unset unless the replica hosts rooms for occupants at other servers. The
+S2S router [takes a stanza only for a seat](../../crates/waddle-server/src/s2s/route/router/hosting.rs#L597) it holds in the room
+the stanza comes from, and only presence and groupchat messages; its queue
+taking the stanza is recorded as the delivery of the room's frozen child,
+which is transport custody and nothing more.
 
 **S4 — Durable room recipients.** [The membership source](../../crates/waddle-server/src/server/durable_membership.rs#L104) concurrently
 reads channel and Space owner/admin/member subjects and excludes channel outcasts.
@@ -225,7 +247,7 @@ inputs. E7. A room an enrolled scope manages is answered
 [from its canonical grants](../../crates/waddle-server/src/server/durable_membership.rs#L126) instead: its durable
 recipients are the subjects whose grants allow reading it.
 
-**S5 — Canonical acceptance and replay.** [Ingress claim checks](../../crates/waddle-server/src/ingress/commit_room.rs#L465) concern
+**S5 — Canonical acceptance and replay.** [Ingress claim checks](../../crates/waddle-server/src/ingress/commit_room.rs#L463) concern
 exact actor ownership. [Admission coordinates](../../crates/waddle-server/src/ingress/commit_room.rs#L40) fence a new room snapshot
 once: later revisions do **not** revoke children of an already accepted manifest.
 Replay additionally validates occupancy/lifecycle and current claim ownership.
@@ -241,7 +263,12 @@ without fanout or actor demotion. That is an exact room-ownership availability
 backstop, not a new grant writer, grant store or cross-store authorization
 revision. Authenticated planned groupchat continues to assert the room claim in
 the ingress transaction. Cluster manifest activation remains dark in this
-source. E8/E9.
+source. E8/E9. A message of an occupant at another server is
+[submitted by the room host](../../crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs#L714) with
+[a principal of its own kind](../../crates/waddle-server/src/ingress/principal.rs#L25) that carries the
+stream evidence of the sender's seat; acceptance decides the sender on that
+evidence, and a room an enrolled scope manages decides each named recipient
+at another server on [the evidence its seats were admitted under](../../crates/waddle-server/src/permissions/host_grant/principal.rs#L294).
 
 ## Existing evidence and its limits
 
@@ -253,7 +280,7 @@ backend, common snapshots, race ordering or production closure.
 | --- | --- | --- |
 | E1 | [write_and_delete_tuple_with_typed_payloads](../../crates/waddle-server/src/permissions/actor/tests.rs#L52) | Typed actor behavior; its helper uses an in-memory database/local backend, not SpiceDB. |
 | E2 | `owner_reseed_keeps_bans_skips_enrolled_spaces_and_refuses_remote_accounts` in `crates/waddle-server/tests/xep0045_host_grant_fence.rs` (outside the scan roots, so not anchored) | The seed keeps an Outcast on the in-memory and SQL stores, skips an enrolled Space node and refuses remote privileged seeds; executed in the writer fence's focused set (host-grant design, evidence of the writer fence). |
-| E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3599) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
+| E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3645) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
 | E4 | [database_deliverable_subscribers_excludes_outcast](../../crates/waddle-server/src/pubsub/tests.rs#L997) | Storage filtering; no post-capture fanout guarantee. |
 | E5 | [items authorization before backfill](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L3348), [repair only projected parent](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L4882) | Selected repair gates/selection; not all mutation interleavings or authority choice. |
 | E6 | [members-only join requires explicit affiliation](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L1145), [MAM denies non-member](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L5533) | Current action-specific entry semantics; test state uses local fixtures, not an inherited graph fence. |
@@ -720,6 +747,364 @@ The selected evidence was refreshed a sixteenth time, through
 reconciliation pass looks for increases to drop only while the scope's plan
 waits for its projection; that file's three records (`WriteHostGrantProjection`
 twice and `set_affiliation`) moved lines. The raw scan holds 1594 records, unchanged in content.
+
+The selected evidence was refreshed a seventeenth time, through
+`31fd3f41591d0ff3072dc667e35207c522ae0dc6`, after reviewing the delta of the reviewed
+files since the sixteenth refresh. This refresh covers inbound S2S rooms:
+occupants at other servers in rooms of this deployment.
+
+- A new reader, a new acceptance producer and a new delivery sink exist,
+  and are now part of the reviewed set:
+  - the room host of the S2S router (`s2s-room-host`, in
+    `server/routes/websocket/s2s_rooms.rs`) decides what a remote principal
+    asks of the MUC service, for that principal and the evidence of its
+    stream. It reads a room's archive (`s2s-room-archive`: the gate, the
+    query, and for a managed room the decision after the read) and submits
+    a remote occupant's message to the ingress authority
+    (`s2s-room-message`) with a principal that carries its seat's stream
+    evidence (`remote-acceptance-principal`, in `ingress/principal.rs`);
+  - a hook of the connection registry (`foreign-delivery`) offers a
+    stanza for a full JID that holds no connection, and the router takes it
+    only for a seat it holds (`s2s-seat-egress`, in
+    `s2s/route/router/hosting.rs`): presence and groupchat messages from
+    the room the seat is in, nothing else. `send_to` and
+    `try_send_to_matching`, which `try_send_to` (`queue`, moved) calls,
+    offer the hook a stanza for which they found no connection; recovery's
+    `try_send_outbound_to_locally_hosted` does not. The hook is unset
+    unless the replica hosts rooms for occupants at other servers.
+- It writes no grant. No grant writer, grant store or projection writer was
+  added, and the room host records no affiliation: room administration is
+  refused to remote principals before any handler.
+- The join (`join`, moved) carries the evidence it decides with. For a
+  remote principal it decides peer admission first, refuses a stored owner
+  or admin entry the trusted-home rule does not honour, never creates a
+  room, and gives up a seat the actor gave on a standing that is not
+  honoured. The wrapper `resolve_managed_channel_affiliation` is gone; the
+  `join-resolver` anchor names `resolve_managed_channel_admission`, which
+  it only delegated to. A remote principal's entry never runs the parent
+  repair (`join-repair`, `join-repair-link` moved). `hg-join`,
+  `archive-gate` and `hg-read-recheck` moved with the evidence-naming forms
+  beside them.
+- Room-manifest acceptance (`hg-admission`, `claim` moved) decides the
+  sender on the evidence its submission carries and a named recipient at
+  another server on the evidence its seats were admitted under
+  (`hg-seat-evidence`, in `permissions/host_grant/principal.rs`).
+- The revocation sweep (`hg-revocation-sweep`, moved) reads the grants as
+  a type that admits nothing (`hg-stored-grants`; `hg-gate` and
+  `hg-fence-ticket` moved, and the ticket that was always current is
+  gone). It decides a seated account on its effective affiliation; a
+  remote occupant on its seat's evidence, or, where the replica holds
+  none, removes it when the grants deny it on every stream, which now
+  includes a domain that is not admitted. It removes more than before in
+  those two cases and writes nothing else.
+- Claim-move re-seating (`hg-claim-move`, moved) seats a recorded occupant
+  at another server only when the replica takes over its seat, and decides
+  it on the seat's evidence.
+- The `muc#admin` writer of a room no scope manages refuses an owner or
+  admin affiliation for an account whose home is neither served nor
+  trusted, and the moderator role for an occupant whose seat does not
+  honour room moderation, before it persists anything (`room-admin` did
+  not move; `admin-rollback` and `e-rollback` moved). In
+  `muc_admin_host_grant.rs` the moderator check reads seat evidence;
+  `hg-room-admin` and `hg-mirror-repair` did not move.
+- Startup (`startup-call`, `hg-recovery` moved) attaches the room host to
+  the S2S router when S2S is enabled.
+- `standing.rs` gained the effective-affiliation accessor the sweep reads
+  (`hg-room-read` moved).
+- The raw scan holds 1597 records, three more: the room host's
+  `query_messages`, and two `WriteTuple` matches in a test-support helper
+  that makes an account a deployment owner. The two `host_grant_affiliation`
+  calls of the archive gate changed their arguments and count as before.
+  Two tokens were added to the scan, `offer_foreign` and
+  `RemoteOccupantPrincipal`, for the new sink and the new producer; they
+  match ten further records, in the files named above, the two call sites
+  of the hook (`route_to_connection/implementation.rs` and the room
+  presence router in the join handler's file) and the re-export in
+  `ingress/mod.rs`. The scan holds 1607 records in all.
+
+The selected evidence was refreshed an eighteenth time, through
+`f6eea18f3a360e216b33d689395af8a7d487b8eb`, after reviewing the delta of the reviewed
+files since the seventeenth refresh. This refresh covers what remote
+principals were given since: room administration, rooms opened to other
+servers by a setting of their own, the standard message extensions, and a
+request carried to the replica that holds its room.
+
+- Remote principals now reach writers. The room host
+  (`s2s-room-host`, moved) hands a `muc#admin` request (`s2s-room-admin`)
+  and a `muc#owner` or XEP-0425 request (`s2s-room-owner`) to the handlers
+  a session's requests reach, through two entry points that pass the
+  evidence of the request's stream and no session (`s2s-remote-admin`,
+  `s2s-remote-owner`, in `handlers/iq/muc_remote_admin.rs`, new in the
+  reviewed set). No writer was added: the handlers are the existing ones,
+  and every decision they take for the requester now names the evidence
+  it was passed.
+  - In a room an enrolled scope manages, `record_host_grant_affiliation`
+    (`hg-room-admin`, moved) passes that evidence to
+    `set_affiliation_as`, so the store decides a remote initiator under
+    the scope's guard on its stream; the owner request's decision
+    (`hg-owner-iq`, moved), the configuration's two re-reads
+    (`hg-owner-config`, moved) and the moderation decision
+    (`hg-moderation`, moved) name it too. `hg-mirror-repair` moved.
+  - In any other room the standing the room actor holds for the requester
+    is honoured for its evidence before it decides anything
+    (`admin-context-honoured`, in `muc_admin.rs`; `room-admin`,
+    `admin-rollback` and `e-rollback` moved), and the owner check and the
+    moderator check do the same. A remote principal's configuration
+    request is passed no session, so the owner relationship a session's
+    request writes is not written for it.
+  - The cluster's forward of a `muc#admin` list request names its
+    requester without evidence and is taken only for a session's request.
+- The admin command that sets a room affiliation (`admin-set-affiliation`,
+  in `admin/channels.rs`) refuses an owner or admin affiliation for an
+  account that is neither served nor of a trusted home before it persists
+  anything. `group-dm`, `group-dm-sql`, `group-dm-delete` and
+  `hg-group-dm` moved with it. The Spaces relations are still written
+  without that check.
+- A room is reached by a remote principal only while its `federated`
+  setting is on (`s2s-room-federated`), decided before its grants are
+  read; `s2s-room-archive` and `s2s-room-message` moved, and the archive
+  gate no longer decides a group conversation, which is never federated.
+  The setting is a field of the room configuration and a column of the
+  channel catalog (`topology.rs` and the join handler read it; the owner's
+  configuration writes it); it grants nothing by itself.
+- A new producer of stream evidence exists. A replica builds a
+  `RemotePrincipal` for a room it holds from the facts of a stream another
+  replica verified (`s2s-carried-principal`, in `s2s/route/principal.rs`,
+  new in the reviewed set), which arrive over the cluster relay
+  (`s2s-relayed-request`, in `server/routes/websocket/s2s_room_relay.rs`,
+  new in the reviewed set) and are queued by the router
+  (`s2s-carried-request`) after it checked the stanza against them. The
+  host asks where a request is decided before any seat is opened for it
+  (`s2s-room-placement`); a room the channel catalog says is not
+  federated is not carried and is answered where its request arrived. The
+  carried facts are the address, the
+  strength, the trust-profile kind and the snapshot generation; admission
+  and standing are decided by the receiving replica.
+  `hg-seat-evidence` moved.
+- The room effect outbox offers a recipient without a connection to the
+  delivery hook before it looks for a resource registered on another node
+  (`outbox-seat-delivery`, in `room_effect_outbox/drain.rs`, new in the
+  reviewed set), so a seat receives what a durable mutation caused. The
+  hook takes it only for a seat it holds (`s2s-seat-egress`, moved), and
+  gained the call that ends a room's seats when its setting is turned off
+  (`connection_registry.rs`).
+- A remote occupant's message is rebuilt from an allowlist before the room
+  plans it; a correction or retraction is the sender's own only when the
+  archived message records its account as the author
+  (`room_dispatch.rs`, and `groupchat_validation.rs` outside the reviewed
+  set). The inbox and activity projections write only for an address the
+  deployment serves. Neither is a grant writer.
+- `xmpp_state.rs` re-exports the catalog's setter for the setting.
+- The raw scan holds 1608 records of the tokens it held, one more: the
+  outbox's `offer_foreign`. Four tokens were added to the scan,
+  `carried_room_request`, `muc_admin_for_remote`,
+  `muc_owner_or_moderation_for_remote` and `CarriedPrincipal`, for the new
+  entry points and the new producer; they match 24 further records, in
+  the files named above, the router's public method, the carried
+  request's type in `s2s/route/local_rooms.rs`, the trait method of the
+  remote route in `destination.rs` and the re-exports in `s2s/route.rs`
+  and `handlers/iq/mod.rs`. The scan holds 1632 records in all.
+
+The selected evidence was refreshed a nineteenth time, through
+`ab055f27480da80b43e15087f17e699199cce190`, after reviewing the delta of the reviewed
+files since the eighteenth refresh. This refresh covers the changes to
+inbound S2S rooms that followed their review: where a request is placed,
+how a seat ends, and how decisions that name a seated remote occupant
+read its seats. No grant writer, storage plane or producer of stream
+evidence was added.
+
+- Issuance gained a refusal. `seats_honour_privilege` (`hg-seats-honour`,
+  new anchor, in `muc_admin_host_grant.rs`) reads the evidence of every
+  seat an account holds in a room on the replica; the `muc#admin` writer,
+  for a room an enrolled scope manages and for any other
+  (`check_privileged_seats`; `admin-rollback`, `e-rollback` and
+  `admin-context-honoured` moved), and the admin command that sets a room
+  affiliation (`admin-set-affiliation`, not moved) refuse an owner or
+  admin affiliation while one of those seats would not honour it, before
+  anything is persisted. An account without a seat there is decided as
+  before.
+- A room's own message decides each occupant of a managed room on the
+  evidence of its seats (`hg-system-message`, moved; `occupant_reads`),
+  where it passed no stream evidence: a remote occupant receives its copy
+  only if every one of its seats admits it to read. It reads grants and
+  writes nothing.
+- Claim-move re-seating (`hg-claim-move`, moved) still seats a recorded
+  occupant at another server only on a seat the replica took over, and
+  now has the router end each such seat once the room has seated its
+  occupants (`s2s-adopted-seats`, new anchor, in `router/hosting.rs`): the
+  room removes the occupant with status 333.
+- The join handler undoes a seat it gave on a standing that is not
+  honoured without announcing a departure (`MucRemovalCause::Unannounced`,
+  in `waddle-xmpp`'s presence module, outside the reviewed set; the
+  departure helpers in `cleanup.rs`, `local_departures.rs` and the session
+  janitors skip their broadcasts for it). The decision that undoes the
+  seat is unchanged.
+- `room_dispatch.rs` runs the extensions' enrichment hooks only for a
+  sender at a domain this deployment serves.
+- The room host (`s2s-room-host`, `s2s-room-archive`, `s2s-room-message`,
+  `s2s-room-admin` and `s2s-room-owner` moved) answers two further
+  questions of the router, both read-only: every occupant a room seats
+  with its generation, and whether it keeps rooms on other replicas. It
+  answers "cannot be told" where a room's actor cannot be reached. Where
+  a seated occupant's presence enters the room again it says so without
+  deciding, and the router asks again with a seat opened for the join.
+  `s2s-room-federated` moved: where the room's actor cannot be reached, an
+  address that cannot be open to other servers is not found, and only a
+  room that may be open is answered with a retryable error.
+- `s2s-room-placement` moved and is asked from a different place: the
+  router's placement stage, off the workers that hand requests to the
+  host, one request of a room at a time, within a bound in time. It is
+  still asked before any seat is opened for the request, and a host that
+  keeps every room itself is not asked. The cluster's carrier carries
+  only a room that may be open to other servers (`s2s-room-catalogued`,
+  new anchor, in `s2s_room_relay.rs`; `s2s-relayed-request` moved): one
+  whose catalog row says so, or one without a row while the deployment
+  opens its new rooms.
+- The router (`s2s-seat-egress` and `s2s-carried-request` moved) takes a
+  carried request only for a room at the MUC service's domain; opens a
+  seat only where a queue for the occupant's domain has a place; sends a
+  room's own presence that ends an occupancy, when it did not come as the
+  answer to the occupant's request, only once the room confirms that it
+  no longer seats that generation; and removes the occupant from its room
+  when the host refuses a seated occupant's request in a way that ends
+  its occupancy. Each narrows what leaves for a remote JID or what a room
+  keeps seated.
+- The delivery hook has one more caller. Executing the frame that is a
+  sender's own copy of its room message offers it to the hook
+  (`s2s-reflection-seat`, in `interpret/effects/immediate.rs`, new in the
+  reviewed set), which takes it only for a seat it holds in the room the
+  message comes from; the frame is still returned and settled as before,
+  and the router does not send the same archived message to a seat twice.
+- `server/lifecycle.rs` has the S2S connection manager drain once the
+  router has told the remote occupants of its rooms that it is stopping,
+  and reads the router's pair queues from the snapshot; `startup` and
+  `startup-schema` did not move. `actor-affiliation` and `actor-config`
+  moved for a read-only room actor message that lists the generations of
+  the seated sessions.
+- The raw scan holds 1633 records, one more: the `offer_foreign` of the
+  sender's own copy. 87 unchanged records moved because the files above
+  gained lines.
+
+The selected evidence was refreshed a twentieth time, through
+`99f30be6766e510672dbaa8c421a873ab758b9cd`, after reviewing the delta of the reviewed
+files since the nineteenth refresh. This refresh covers fixes to inbound
+S2S rooms: the bounds on the work that hands requests to the room host,
+how a seat ends, how a restored room's seats are taken over, and the
+issuance check of the admin command. No grant writer, storage plane or
+producer of stream evidence was added.
+
+- Issuance reads one more source. The admin command that sets a room
+  affiliation (`admin-set-affiliation`, not moved) may run on a replica
+  that does not hold the room, so it now refuses an owner or admin
+  affiliation on `seats_honour_privilege_anywhere` (`hg-seats-honour-anywhere`,
+  new anchor, in `muc_admin_host_grant.rs`): the evidence of every seat
+  the account holds in the room on any replica, read from the shared seat
+  table, as well as on this one; it refuses when the table cannot be
+  read. The `muc#admin` writer runs on the room's holder and is unchanged
+  but for its refusal text (`admin-rollback`, `e-rollback` and
+  `admin-context-honoured` moved).
+- The join handler (`join`, moved) still undoes a seat it gave on a
+  standing that is not honoured without announcing a departure, and now
+  reads the generations the room seats afterwards to send the joiner's
+  unavailable presence to the occupants that entered between the seat and
+  its undoing. The decision that undoes the seat is unchanged; nothing is
+  written.
+- Claim-move re-seating (`hg-claim-move`, moved) seats a recorded occupant
+  at another server only on a seat of the recorded generation: one this
+  replica already holds, when the room's actor was restored on the replica
+  that seats it, which goes on; or one it takes over from a replica that
+  stopped (`s2s-seat-adoption`, new anchor, in `router/hosting.rs`), which
+  ends once the room has seated its occupants (`s2s-adopted-seats`,
+  moved). A row taken over for another generation is removed, and its
+  occupant is not seated.
+- The room host (`s2s-room-host`, `s2s-room-archive`, `s2s-room-message`,
+  `s2s-room-federated`, `s2s-room-admin`, `s2s-room-owner` and
+  `s2s-room-placement` moved) answers a self-ping, and refuses a subject
+  change, with a retryable error where the room's actor or configuration
+  cannot be read, instead of the answers for "not joined" and "not
+  allowed"; a subject change is put to no room it could not decide. Its
+  removal of an occupant whose seat ended now says whether it removed that
+  generation, and it removes, pinned to its generation, an occupant of
+  another server the router holds no seat for (`s2s-unseated-removal`, new
+  anchor). Its own asks of a room actor wait 2 s instead of 5 s.
+- The router (`s2s-seat-egress` and `s2s-carried-request` moved) answers
+  that a JID at a served domain, or in a room without a seat, holds no
+  seat without reading the seat index; refuses a request for a room whose
+  share of the queues is full instead of holding its stream; removes a
+  room's occupant of another server that holds no seat; and refuses a join
+  decided while the replica stops. Each narrows what leaves for a remote
+  JID or what a room keeps seated.
+- The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`
+  moved) carries the same rooms, and reports an owner that did not answer
+  or could not be reached as such, so that the router answers that room's
+  requests without asking for a while.
+- `server/lifecycle.rs` chooses the token the S2S connection manager
+  drains on through `S2sRouter::service_stop`, the same choice as before;
+  `startup` and `startup-schema` did not move.
+- The raw scan holds 1633 records, as before. 74 unchanged records moved
+  because the files above gained lines.
+
+The selected evidence was refreshed a twenty-first time, through
+`0e81e9463d8b0621b24ffbdaf605edd9a28a19e4`, after reviewing the delta of the reviewed
+files since the twentieth refresh. This refresh covers fixes to inbound
+S2S rooms: the allowances that bound what one remote account may send,
+the answer to a join decided while the replica stops, the end of a seat
+taken over from a stopped replica, and the deadline on placing a carried
+request. No grant writer, storage plane or producer of stream evidence
+was added, and no decision of standing moved.
+
+- The join handler (`join`, moved) undoes a seat it gave on a standing
+  that is not honoured as before. The notice to the occupants that
+  entered while it was seated now reads the room once, within 2 s, on a
+  task of its own, and leaves out an occupant that now holds the joiner's
+  nickname; nothing is written.
+- The room host (`s2s-room-host`, `s2s-room-message`, `s2s-room-admin`,
+  `s2s-room-owner`, `s2s-room-placement` and `s2s-unseated-removal`
+  moved) answers no headline, and no message that carries only a chat
+  state or a marker, with an error, and passes the join handler the state
+  it may run that notice with.
+- The router (`s2s-seat-egress`, `s2s-carried-request`,
+  `s2s-seat-adoption` and `s2s-adopted-seats` moved) decides every
+  allowance of a remote account before its domain's rate and drops or
+  answers what is beyond one instead of holding the stream; decides under
+  the seat index's lock whether a join may be answered as entered once
+  the replica stops; holds a seat taken over from a stopped replica only
+  where no seat is held; keeps a taken-over seat's end over a removal of
+  the same occupancy as one without a seat; takes a seat's first leave
+  beyond its account's allowance on the replica that holds the seat;
+  keeps a leave that cannot be placed to place it again, and forgets it
+  once its sender's presence enters the room again; and ends a seat on a
+  `groupchat` bounce with
+  `service-unavailable`. Each narrows what reaches a room or a remote JID,
+  or what a room keeps seated.
+- The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`
+  moved) bounds its lookups and asks for one request by one deadline, and
+  reports an owner as silent only where an ask ran out of time.
+- The raw scan holds 1633 records, as before. 31 unchanged records moved
+  because the files above gained lines.
+
+The selected evidence was refreshed a twenty-second time, through
+`468bc0fb99fce93441d7935f3b7ab71086ade73e`, after reviewing the delta of the reviewed
+files since the twenty-first refresh. This refresh covers the end of a
+remote seat, the leaves kept to be placed again and the carrier's
+deadline. No grant writer, storage plane or producer of stream evidence
+was added, and no decision of standing moved.
+
+- The router (`s2s-seat-egress`, `s2s-carried-request`,
+  `s2s-seat-adoption` and `s2s-adopted-seats` moved) no longer ends a
+  seat on a `service-unavailable` bounce, only on the delivery-related
+  conditions XEP-0045 §17.1.2 lists; keeps a leave that cannot be placed
+  for 120 s from when it was first kept, within a bound for each remote
+  account as well; and forgets such a leave once a later presence of its
+  sender for the room is placed, taking it out of the room's lane if it
+  waits there again. Each narrows what a room keeps seated or what a
+  stale leave can end.
+- The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`
+  moved) reports an owner as silent only for an ask that began with the
+  owner's two windows ahead of it; an ask begun later that runs out is a
+  retryable refusal that says nothing of the owner.
+- The raw scan holds 1633 records, as before. 4 unchanged records moved
+  because the files above gained lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
