@@ -287,6 +287,26 @@ pub fn admin_item(affiliation: &str, jid: &str) -> Element {
         .build()
 }
 
+/// An affiliation change with the reason its administrator gives.
+pub fn admin_item_with_reason(affiliation: &str, jid: &str, reason: &str) -> Element {
+    Element::builder("query", NS_MUC_ADMIN)
+        .append(
+            Element::builder("item", NS_MUC_ADMIN)
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    affiliation,
+                )
+                .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid)
+                .append(
+                    Element::builder("reason", NS_MUC_ADMIN)
+                        .append(reason)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
 pub fn role_item(role: &str, nick: &str) -> Element {
     Element::builder("query", NS_MUC_ADMIN)
         .append(
@@ -310,6 +330,10 @@ pub struct RoomPresence {
     pub statuses: Vec<String>,
     pub affiliation: Option<String>,
     pub role: Option<String>,
+    /// Whether the item names who acted.
+    pub actor: bool,
+    /// The reason the item carries.
+    pub reason: Option<String>,
 }
 
 pub fn room_presence(presence: &Element) -> RoomPresence {
@@ -329,6 +353,12 @@ pub fn room_presence(presence: &Element) -> RoomPresence {
             .unwrap_or_default(),
         affiliation: item.and_then(|item| item.attr("affiliation").map(str::to_owned)),
         role: item.and_then(|item| item.attr("role").map(str::to_owned)),
+        actor: item.is_some_and(|item| item.children().any(|child| child.name() == "actor")),
+        reason: item.and_then(|item| {
+            item.children()
+                .find(|child| child.name() == "reason")
+                .map(Element::text)
+        }),
     }
 }
 
