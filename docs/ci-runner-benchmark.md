@@ -77,6 +77,81 @@ says jobs with any priority start before jobs with none once the limit is
 reached. Every profile job, including main's, therefore waits behind every
 pending `nixTest`.
 
+## Caching findings: 2026-11-16
+
+Source: step timings of every successful job in the same window (14,753
+steps), and the logs of one typical slow run of each major job.
+
+Transferring caches is not what costs time. Compilation that no cache covers
+is.
+
+| Where the time goes | Share of runner time | Note |
+| --- | ---: | --- |
+| The job's own work | 83% | mostly compiling, see below |
+| Install Nix | 7% | about 18 s per job, 1,130 jobs |
+| FlakeHub and Hestia setup and post steps | 5% | about 14 s per job |
+| cuenv, Bun and runner setup | 4% | `Install Bun dependencies` averages 35 s |
+| Checkout | 2% | |
+
+Inside the Nix lanes, substituting store paths takes 0.6 to 1.0 minutes per
+job and the dependency artifact unpacks in about 4 seconds. The earlier
+decision to stay on FlakeHub plus Hestia stands; a different cache provider
+has little left to win.
+
+### 1. Plain-cargo jobs rebuild every third-party crate on every run
+
+These jobs call cargo directly, outside Nix, and start from an empty target
+directory:
+
+| Job | Runner | Crates compiled | Compile time | Job time |
+| --- | --- | ---: | ---: | ---: |
+| `namespaceRustChecks` `test` | Namespace 8x16 | 660 | 7.9 min | 16.2 min |
+| `waddle-server-default` `mainClippy` | Namespace 8x16 | 733 | 7.8 min | 9.7 min |
+| `parentMoveNativeProof` | GitHub-hosted | 1,340 over five builds | 16.2 min | 19.7 min |
+| `spaceFanoutContractPostgres` | GitHub-hosted | 589 | 9.8 min | 11.8 min |
+
+Only 9 to 19 of those crates are workspace crates. `mainTest`, `mainDoctest`,
+`roomChildContractPostgres` and `federationGrantFenceProof` have the same
+shape but their logs were not read. The Nix lanes already avoid this through
+the shared `waddle-server-deps` artifact.
+
+Options, cheapest first:
+
+- Persist the cargo target directory for third-party crates on the Namespace
+  cache volume. The `linux-x86` profile already has a 50 GB volume, and the
+  Android jobs use `nscloud-cache-action` for Gradle. The cuenv sandbox path
+  changes between runs, which needs checking: cargo may treat path-dependent
+  outputs as stale.
+- Move the GitHub-hosted contract jobs onto the Nix dependency artifact.
+- sccache. `docs/ci-cache-benchmarks.md` lists it as untested for Waddle.
+
+Rough size: 3 to 6 minutes off each of these jobs. On Namespace that also
+returns capacity: `namespaceRustChecks` `test` alone is 7% of the pool.
+
+### 2. `waddle-server` is compiled again in about ten jobs
+
+Clippy, doctest, the CI build, the image build, the test archive, the XMPP
+lanes and the contract jobs each compile the `waddle-server` crate for 4 to 7
+minutes, in different configurations. Because the pull request changed that
+source, no cache can supply it. Two ways to shrink it, neither a cache change:
+run fewer configurations per pull request, or split the crate so an edit
+invalidates less.
+
+### 3. Fixed setup on very short jobs
+
+Nix, FlakeHub, Hestia and cuenv setup is about 40 seconds per job. For
+`checkCiDrift`, `checkAlertRules` and `checkSwitchableAlternativeProgram` that
+is half the job. Merging the one-minute checks into one job removes most of
+it and also eases the GitHub 20-job limit.
+
+### 4. Smaller leads, not verified
+
+- Android: the first Gradle build of a run executed 102 of 111 tasks with 9
+  from cache, and stored a new configuration cache entry every time, although
+  `~/.gradle` is on a Namespace cache volume. The cause was not investigated.
+- Chat: `Install Bun dependencies` runs 146 times at 35 seconds with no
+  package cache.
+
 ## Options
 
 | # | Change | Expected effect | Status |
