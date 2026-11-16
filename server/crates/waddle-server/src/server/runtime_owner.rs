@@ -380,6 +380,9 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // account's request leaves and deleted when its unsubscribe does.
     ("s2s_pending_subscriptions", READ_WRITE),
     ("s2s_remote_pubsub_subscriptions", READ_WRITE),
+    // A remote stranger's message admitted to an account's offline store
+    // is counted by an inserted row; rows older than a day are deleted.
+    ("s2s_remote_offline_admissions", READ_WRITE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

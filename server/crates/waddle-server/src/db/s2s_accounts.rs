@@ -1,31 +1,63 @@
 //! Stores of account traffic between remote senders and local accounts
-//! (ADR-0020 D7; gate G18; migration 2010):
+//! (ADR-0020 D7; gate G18; migrations 2010 and 2011):
 //!
 //! - the subscription requests remote senders sent that an account has
 //!   neither approved nor denied (RFC 6121 §3.1.3), delivered again on the
 //!   first available presence of each new session, one per sender and
-//!   account, bounded per account and per remote domain;
+//!   account, bounded per account and per remote parent domain, and
+//!   forgotten after [`PENDING_TTL_MS`];
 //! - the XEP-0060 nodes of remote services an account subscribed to, which
-//!   gate the event notifications those services send it.
+//!   gate the event notifications those services send it;
+//! - the messages from remote senders that are not the account's contacts
+//!   admitted to the account's offline store in the last
+//!   [`OFFLINE_WINDOW_MS`], which bound how many more each sender and each
+//!   remote parent domain may have stored.
 //!
-//! The decisions are recorded in
+//! The bounded writes count and insert in one transaction under a lock per
+//! account: an immediate transaction on SQLite, and on PostgreSQL a
+//! transaction-scoped advisory lock keyed by the account, so that
+//! concurrent writes for one account, on any replica, never exceed a
+//! bound. The decisions are recorded in
 //! `server/docs/planning/s2s-account-traffic-2047.md`.
 
 use jid::BareJid;
 use minidom::Element;
 use thiserror::Error;
 
-use super::Database;
+use super::{Database, DatabaseDriver, Transaction};
 
 /// The most subscription requests from remote senders one account holds.
 pub const MAX_PENDING_PER_ACCOUNT: usize = 256;
 
 /// The most subscription requests one account holds from one remote
-/// domain.
+/// parent domain ([`share_domain`]).
 pub const MAX_PENDING_PER_DOMAIN: usize = 16;
 
 /// The longest recorded subscription request, serialized, in bytes.
 pub const MAX_PENDING_STANZA_BYTES: usize = 16 * 1024;
+
+/// How long a recorded subscription request is kept, in milliseconds: 30
+/// days. An older one is neither delivered nor counted, and is deleted by
+/// the account's next recorded request.
+pub const PENDING_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// The window over which offline admissions of non-contacts' messages are
+/// counted, in milliseconds: one day.
+pub const OFFLINE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The most messages from one remote sender that is not the account's
+/// contact admitted to one account's offline store per window.
+pub const MAX_OFFLINE_PER_SENDER: usize = 32;
+
+/// The most messages from remote senders at one remote parent domain
+/// ([`share_domain`]) that are not the account's contacts admitted to one
+/// account's offline store per window.
+pub const MAX_OFFLINE_PER_DOMAIN: usize = 128;
+
+/// The most messages from remote senders that are not the account's
+/// contacts admitted to one account's offline store per window, whatever
+/// their domain.
+pub const MAX_OFFLINE_PER_ACCOUNT: usize = 512;
 
 /// The most remote PubSub subscriptions one account holds.
 pub const MAX_REMOTE_SUBSCRIPTIONS: usize = 1024;
@@ -58,6 +90,22 @@ pub enum PendingOutcome {
     Bounds,
 }
 
+/// The key under which a remote domain's senders share an account's
+/// bounds: the domain's last two labels, which name the registrable domain
+/// under every single-label public suffix. Subdomains of one parent
+/// therefore share one share, so that a peer cannot multiply its share by
+/// naming its senders at many subdomains. No public suffix list is
+/// consulted: under a public suffix of more labels (`example.co.uk`)
+/// unrelated registrants share one share, which only makes the bound
+/// stricter for them.
+pub fn share_domain(domain: &str) -> String {
+    let labels: Vec<&str> = domain.trim_end_matches('.').rsplitn(3, '.').collect();
+    match labels.as_slice() {
+        [last, parent, _] => [*parent, ".", *last].concat(),
+        _ => domain.trim_end_matches('.').to_owned(),
+    }
+}
+
 /// Count, up to `limit`, the rows `sql` selects.
 async fn count_up_to(
     db: &Database,
@@ -71,6 +119,40 @@ async fn count_up_to(
         count += 1;
     }
     Ok(count)
+}
+
+/// Count, up to `limit`, the rows `sql` selects inside `tx`.
+async fn count_in(
+    tx: &mut Transaction<'_>,
+    sql: &str,
+    params: Vec<super::Value>,
+) -> Result<usize, S2sAccountStoreError> {
+    let mut rows = tx.query(sql, params).await.map_err(storage)?;
+    let mut count = 0;
+    while rows.next().await.map_err(storage)?.is_some() {
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Begin a transaction that holds `account`'s lock for the bounded writes
+/// until it ends: SQLite's write lock, taken at once, or on PostgreSQL a
+/// transaction-scoped advisory lock keyed by the account.
+async fn begin_for_account<'a>(
+    db: &'a Database,
+    account: &BareJid,
+) -> Result<Transaction<'a>, S2sAccountStoreError> {
+    let mut tx = db.begin_immediate().await.map_err(storage)?;
+    if db.driver() == DatabaseDriver::Postgres {
+        let key = ["waddle.s2s.account_traffic:", account.as_str()].concat();
+        tx.query(
+            "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(?, 0))",
+            crate::db_params![key],
+        )
+        .await
+        .map_err(storage)?;
+    }
+    Ok(tx)
 }
 
 fn limit(value: usize) -> i64 {
@@ -91,6 +173,8 @@ impl PendingSubscriptions {
 
     /// Record `request`, the subscription request `contact` sent `account`,
     /// replacing an earlier one from the same contact, within the bounds.
+    /// The account's expired requests are deleted first, and the count and
+    /// the write are one transaction under the account's lock.
     pub async fn record(
         &self,
         account: &BareJid,
@@ -106,60 +190,82 @@ impl PendingSubscriptions {
         {
             return Ok(PendingOutcome::Bounds);
         }
-        if !self.holds(account, contact).await? {
-            let of_account = count_up_to(
-                &self.db,
+        let share = share_domain(contact.domain().as_str());
+        let mut tx = begin_for_account(&self.db, account).await?;
+        tx.execute(
+            "DELETE FROM s2s_pending_subscriptions WHERE account_jid = ? AND received_at_ms < ?",
+            crate::db_params![account.as_str(), now_ms.saturating_sub(PENDING_TTL_MS)],
+        )
+        .await
+        .map_err(storage)?;
+        let held = count_in(
+            &mut tx,
+            "SELECT 1 FROM s2s_pending_subscriptions \
+             WHERE account_jid = ? AND contact_jid = ? LIMIT 1",
+            crate::db_params![account.as_str(), contact.as_str()],
+        )
+        .await?;
+        if held == 0 {
+            let of_account = count_in(
+                &mut tx,
                 "SELECT 1 FROM s2s_pending_subscriptions WHERE account_jid = ? LIMIT ?",
                 crate::db_params![account.as_str(), limit(MAX_PENDING_PER_ACCOUNT)],
             )
             .await?;
-            let of_domain = count_up_to(
-                &self.db,
+            let of_domain = count_in(
+                &mut tx,
                 "SELECT 1 FROM s2s_pending_subscriptions \
                  WHERE account_jid = ? AND contact_domain = ? LIMIT ?",
                 crate::db_params![
                     account.as_str(),
-                    contact.domain().as_str(),
+                    share.as_str(),
                     limit(MAX_PENDING_PER_DOMAIN)
                 ],
             )
             .await?;
             if of_account >= MAX_PENDING_PER_ACCOUNT || of_domain >= MAX_PENDING_PER_DOMAIN {
+                tx.commit().await.map_err(storage)?;
                 return Ok(PendingOutcome::Bounds);
             }
         }
-        let guard = self.db.guard().await.map_err(storage)?;
-        guard
-            .execute(
-                "INSERT INTO s2s_pending_subscriptions \
-                 (account_jid, contact_jid, contact_domain, stanza, received_at_ms) \
-                 VALUES (?, ?, ?, ?, ?) \
-                 ON CONFLICT (account_jid, contact_jid) DO UPDATE \
-                 SET stanza = excluded.stanza, received_at_ms = excluded.received_at_ms",
-                crate::db_params![
-                    account.as_str(),
-                    contact.as_str(),
-                    contact.domain().as_str(),
-                    stanza,
-                    now_ms
-                ],
-            )
-            .await
-            .map_err(storage)?;
+        tx.execute(
+            "INSERT INTO s2s_pending_subscriptions \
+             (account_jid, contact_jid, contact_domain, stanza, received_at_ms) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (account_jid, contact_jid) DO UPDATE \
+             SET contact_domain = excluded.contact_domain, stanza = excluded.stanza, \
+             received_at_ms = excluded.received_at_ms",
+            crate::db_params![
+                account.as_str(),
+                contact.as_str(),
+                share.as_str(),
+                stanza,
+                now_ms
+            ],
+        )
+        .await
+        .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
         Ok(PendingOutcome::Recorded)
     }
 
-    /// Whether `account` holds a request from `contact`.
+    /// Whether `account` holds a request from `contact` that has not
+    /// expired at `now_ms`.
     pub async fn holds(
         &self,
         account: &BareJid,
         contact: &BareJid,
+        now_ms: i64,
     ) -> Result<bool, S2sAccountStoreError> {
         let count = count_up_to(
             &self.db,
             "SELECT 1 FROM s2s_pending_subscriptions \
-             WHERE account_jid = ? AND contact_jid = ? LIMIT 1",
-            crate::db_params![account.as_str(), contact.as_str()],
+             WHERE account_jid = ? AND contact_jid = ? AND received_at_ms >= ? LIMIT 1",
+            crate::db_params![
+                account.as_str(),
+                contact.as_str(),
+                now_ms.saturating_sub(PENDING_TTL_MS)
+            ],
         )
         .await?;
         Ok(count > 0)
@@ -183,19 +289,25 @@ impl PendingSubscriptions {
         Ok(removed > 0)
     }
 
-    /// Every request `account` holds, oldest first, as the contact that
-    /// sent it and the stanza. A stored stanza that no longer parses is
-    /// skipped.
+    /// Every request `account` holds that has not expired at `now_ms`,
+    /// oldest first, as the contact that sent it and the stanza. A stored
+    /// stanza that no longer parses is skipped.
     pub async fn list(
         &self,
         account: &BareJid,
+        now_ms: i64,
     ) -> Result<Vec<(BareJid, Element)>, S2sAccountStoreError> {
         let guard = self.db.guard().await.map_err(storage)?;
         let mut rows = guard
             .query(
                 "SELECT contact_jid, stanza FROM s2s_pending_subscriptions \
-                 WHERE account_jid = ? ORDER BY received_at_ms, contact_jid LIMIT ?",
-                crate::db_params![account.as_str(), limit(MAX_PENDING_PER_ACCOUNT)],
+                 WHERE account_jid = ? AND received_at_ms >= ? \
+                 ORDER BY received_at_ms, contact_jid LIMIT ?",
+                crate::db_params![
+                    account.as_str(),
+                    now_ms.saturating_sub(PENDING_TTL_MS),
+                    limit(MAX_PENDING_PER_ACCOUNT)
+                ],
             )
             .await
             .map_err(storage)?;
@@ -210,6 +322,105 @@ impl PendingSubscriptions {
             requests.push((contact, stanza));
         }
         Ok(requests)
+    }
+}
+
+/// What became of a message from a remote sender offered for offline
+/// admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineAdmission {
+    /// Admitted and counted.
+    Admitted,
+    /// Not admitted: the sender's, its parent domain's or the account's
+    /// bound for the window is reached.
+    Bounds,
+}
+
+/// The offline admissions of messages from remote senders that are not
+/// the account's contacts (`s2s_remote_offline_admissions`), which bound
+/// how many such messages reach one account's offline store per window.
+#[derive(Clone)]
+pub struct RemoteOfflineAdmissions {
+    db: Database,
+}
+
+impl RemoteOfflineAdmissions {
+    pub fn new(db: Database) -> Self {
+        Self { db }
+    }
+
+    /// Admit one message from `sender` to `account`'s offline store at
+    /// `now_ms`, within the bounds of the window. Admissions older than the
+    /// window are deleted first, and the count and the write are one
+    /// transaction under the account's lock.
+    pub async fn admit(
+        &self,
+        account: &BareJid,
+        sender: &BareJid,
+        now_ms: i64,
+    ) -> Result<OfflineAdmission, S2sAccountStoreError> {
+        if account.as_str().len() > MAX_ADDRESS_BYTES || sender.as_str().len() > MAX_ADDRESS_BYTES {
+            return Ok(OfflineAdmission::Bounds);
+        }
+        let share = share_domain(sender.domain().as_str());
+        let mut tx = begin_for_account(&self.db, account).await?;
+        tx.execute(
+            "DELETE FROM s2s_remote_offline_admissions \
+             WHERE account_jid = ? AND admitted_at_ms < ?",
+            crate::db_params![account.as_str(), now_ms.saturating_sub(OFFLINE_WINDOW_MS)],
+        )
+        .await
+        .map_err(storage)?;
+        let of_sender = count_in(
+            &mut tx,
+            "SELECT 1 FROM s2s_remote_offline_admissions \
+             WHERE account_jid = ? AND sender_jid = ? LIMIT ?",
+            crate::db_params![
+                account.as_str(),
+                sender.as_str(),
+                limit(MAX_OFFLINE_PER_SENDER)
+            ],
+        )
+        .await?;
+        let of_domain = count_in(
+            &mut tx,
+            "SELECT 1 FROM s2s_remote_offline_admissions \
+             WHERE account_jid = ? AND sender_share = ? LIMIT ?",
+            crate::db_params![
+                account.as_str(),
+                share.as_str(),
+                limit(MAX_OFFLINE_PER_DOMAIN)
+            ],
+        )
+        .await?;
+        let of_account = count_in(
+            &mut tx,
+            "SELECT 1 FROM s2s_remote_offline_admissions WHERE account_jid = ? LIMIT ?",
+            crate::db_params![account.as_str(), limit(MAX_OFFLINE_PER_ACCOUNT)],
+        )
+        .await?;
+        if of_sender >= MAX_OFFLINE_PER_SENDER
+            || of_domain >= MAX_OFFLINE_PER_DOMAIN
+            || of_account >= MAX_OFFLINE_PER_ACCOUNT
+        {
+            tx.commit().await.map_err(storage)?;
+            return Ok(OfflineAdmission::Bounds);
+        }
+        tx.execute(
+            "INSERT INTO s2s_remote_offline_admissions \
+             (id, account_jid, sender_jid, sender_share, admitted_at_ms) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                uuid::Uuid::new_v4().to_string(),
+                account.as_str(),
+                sender.as_str(),
+                share.as_str(),
+                now_ms
+            ],
+        )
+        .await
+        .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        Ok(OfflineAdmission::Admitted)
     }
 }
 

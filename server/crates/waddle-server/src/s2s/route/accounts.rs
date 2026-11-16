@@ -14,7 +14,8 @@
 //! `server/docs/planning/s2s-account-traffic-2047.md`.
 
 use async_trait::async_trait;
-use jid::{FullJid, Jid};
+use jid::{BareJid, FullJid, Jid};
+use tokio_util::sync::CancellationToken;
 use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType};
@@ -29,32 +30,81 @@ use super::principal::RemotePrincipal;
 /// this.
 pub const MAX_ACCOUNT_REPLIES: usize = 16;
 
+/// The work one received stanza causes on the account side.
+///
+/// The router waits a bounded time for it and then moves on to the
+/// sender's next stanza. When it stops waiting it abandons the work: from
+/// then on the account side applies nothing more for that stanza (no
+/// roster or store write, no delivery), so that an earlier stanza's effects
+/// never land after a later one's from the same sender.
+#[derive(Debug, Clone, Default)]
+pub struct AccountWork {
+    abandoned: CancellationToken,
+}
+
+impl AccountWork {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the router stopped waiting for this work. Checked before
+    /// every effect, under the account's lock where one is held.
+    pub fn abandoned(&self) -> bool {
+        self.abandoned.is_cancelled()
+    }
+
+    /// Abandon the work: nothing more is applied for it.
+    pub fn abandon(&self) {
+        self.abandoned.cancel();
+    }
+}
+
 /// The local account side of S2S traffic.
 ///
-/// Every method decides the sender's admission (ADR-0020 D1) from the
-/// principal's stream evidence and the S2S snapshot the replica runs,
-/// immediately before it applies anything, so that work queued before its
-/// domain stopped being admitted applies nothing.
+/// Every method that applies something decides the sender's admission
+/// (ADR-0020 D1) from the principal's stream evidence and the S2S snapshot
+/// the replica runs, immediately before it applies anything, so that work
+/// queued before its domain stopped being admitted applies nothing.
 #[async_trait]
 pub trait LocalAccounts: Send + Sync {
+    /// Whether `principal`'s domain is admitted now under the snapshot the
+    /// replica runs. A stanza from a domain that is not gets nothing
+    /// applied and nothing answered.
+    fn admits(&self, principal: &RemotePrincipal) -> bool;
+
     /// Apply a message or presence from `principal` to the local account
     /// address `to` (a bare or full JID of an account of a served domain),
     /// and return the stanzas that answer it, each from a local address to
     /// the sender's domain. The router sends at most
-    /// [`MAX_ACCOUNT_REPLIES`] of them.
-    async fn receive(&self, principal: &RemotePrincipal, to: &Jid, stanza: Stanza) -> Vec<Stanza>;
+    /// [`MAX_ACCOUNT_REPLIES`] of them, and none once it has abandoned
+    /// `work`.
+    async fn receive(
+        &self,
+        principal: &RemotePrincipal,
+        to: &Jid,
+        stanza: Stanza,
+        work: &AccountWork,
+    ) -> Vec<Stanza>;
 
-    /// Whether an IQ request from `principal` may reach the local resource
-    /// `to` (RFC 6121 §8.5.3.1): the sender's domain is admitted, the
-    /// account exists and does not block the sender, and the account
-    /// shares presence with the sender or, when `room_occupant` is set,
-    /// the sender is a remote room the resource occupies or is joining.
+    /// Whether an IQ request from `principal`, whose domain the router has
+    /// found admitted, may reach the local resource `to` (RFC 6121
+    /// §8.5.3.1): the account exists and does not block the sender, and
+    /// the account shares presence with the sender or, when
+    /// `room_occupant` is set, the sender is a remote room the resource
+    /// occupies or is joining.
     async fn admits_request(
         &self,
         principal: &RemotePrincipal,
         to: &FullJid,
         room_occupant: bool,
     ) -> bool;
+
+    /// Whether the local account `account` may send account traffic to
+    /// remote JIDs now: it exists and has not been retired. A retired
+    /// account's stream stays open until it ends; nothing it sends, and
+    /// nothing the server sends on its behalf, leaves. Any failure answers
+    /// `false`.
+    async fn may_send(&self, account: &BareJid) -> bool;
 }
 
 /// Whether `stanza`, a local account's message or presence for a remote

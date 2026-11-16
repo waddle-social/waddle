@@ -4,15 +4,17 @@
 //! messages and presence for remote JIDs that are not room traffic.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use jid::Jid;
+use jid::{BareJid, Jid};
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
-use super::super::accounts::{carries_dm_pin, is_outbound_account_traffic, MAX_ACCOUNT_REPLIES};
+use super::super::accounts::{
+    carries_dm_pin, is_outbound_account_traffic, AccountWork, MAX_ACCOUNT_REPLIES,
+};
 use super::super::correlation::{
     CorrelationDirection, CorrelationError, CorrelationKey, PendingRequest, RequestKind,
 };
@@ -37,7 +39,10 @@ struct InboundEntry {
 /// The remote requests to local resources this replica registered and has
 /// not yet seen answered or expire. A response that leaves from another
 /// replica, where the requested resource's session is, completes the row
-/// there; this replica forgets the entry at its expiry.
+/// there; this replica forgets the entry only at its expiry. For requests
+/// answered that way the bounds are therefore a rate: at most the bound's
+/// number of such requests per request lifetime
+/// ([`super::RouterLimits::account_request_ttl`], 60 s by default).
 #[derive(Debug, Default)]
 pub(super) struct InboundRequests {
     entries: HashMap<CorrelationKey, InboundEntry>,
@@ -119,15 +124,20 @@ impl Inner {
             // request or are dropped before they are queued.
             return;
         }
-        // The account side's work runs to its end in a task of its own, so
-        // that a worker that stops waiting for it never cuts it short
-        // between a roster write and the answer that goes with it; answers
-        // that come after the deadline are dropped.
-        let work = self
+        // The account side's work runs in a task of its own, so that a
+        // worker that stops waiting for it never drops it in the middle of
+        // a write. When the worker stops waiting it abandons the work: the
+        // account side then applies nothing more for this stanza, so the
+        // sender's next stanza, decided next, is never overtaken by it, and
+        // answers that come after the deadline are dropped.
+        let work = AccountWork::new();
+        let abandoned = work.clone();
+        let task = self
             .tasks
-            .spawn(async move { accounts.receive(&principal, &to, stanza).await });
-        let received = tokio::time::timeout(self.limits.account_timeout, work).await;
+            .spawn(async move { accounts.receive(&principal, &to, stanza, &work).await });
+        let received = tokio::time::timeout(self.limits.account_timeout, task).await;
         let Ok(Ok(answers)) = received else {
+            abandoned.abandon();
             telemetry::account_traffic_timed_out();
             return;
         };
@@ -176,10 +186,15 @@ impl Inner {
                 router.reply(stream, reply);
             }
         };
-        let Ok(resource) = to.clone().try_into_full() else {
+        let Some(accounts) = self.accounts.get().cloned() else {
             return refuse(self, &stanza);
         };
-        let Some(accounts) = self.accounts.get().cloned() else {
+        // D1 at the effect boundary: a domain the replica no longer admits
+        // gets nothing, not even a refusal, and nothing is read for it.
+        if !accounts.admits(principal) {
+            return;
+        }
+        let Ok(resource) = to.clone().try_into_full() else {
             return refuse(self, &stanza);
         };
         // A remote room the resource occupies or is joining may ask its
@@ -294,9 +309,10 @@ impl Inner {
 
     /// Route a local account's message or presence for a remote JID that
     /// is not room traffic (gate G18): account traffic, routed once an
-    /// account side is attached. A `groupchat` message is room traffic
-    /// only, and a message carrying the DM pin marker never leaves.
-    pub(super) fn route_account(
+    /// account side is attached, for an account that may send. A
+    /// `groupchat` message is room traffic only, and a message carrying the
+    /// DM pin marker never leaves.
+    pub(super) async fn route_account(
         self: &Arc<Self>,
         pair: Pair,
         sender: Jid,
@@ -310,15 +326,52 @@ impl Inner {
                 return Err(UnroutableReason::RefusedByPolicy);
             }
         }
-        let queued = Queued {
-            stanza,
-            purpose: Purpose::Account { sender },
-        };
-        if self.enqueue(pair, queued) {
+        let purpose = self.account_purpose(&sender)?;
+        if !self.account_may_send(&sender).await {
+            return Err(UnroutableReason::RefusedByPolicy);
+        }
+        if self.enqueue(pair, Queued { stanza, purpose }) {
             Ok(())
         } else {
             Err(UnroutableReason::EgressBusy)
         }
+    }
+
+    /// The purpose of an account stanza from `sender`, holding one place
+    /// of the sender's share of the pair queues: an account may hold at
+    /// most [`super::RouterLimits::account_queue_per_sender`] places, so
+    /// that one account's burst never fills a pair's queue for the others.
+    /// [`UnroutableReason::EgressBusy`] when its share is full.
+    pub(super) fn account_purpose(&self, sender: &Jid) -> Result<Purpose, UnroutableReason> {
+        let account = sender.to_bare();
+        let mut shares = lock(&self.account_shares);
+        let held = shares.get(&account).copied().unwrap_or(0);
+        if held >= self.limits.account_queue_per_sender {
+            telemetry::account_share_full();
+            return Err(UnroutableReason::EgressBusy);
+        }
+        shares.insert(account.clone(), held + 1);
+        Ok(Purpose::Account {
+            sender: sender.clone(),
+            _share: AccountShare {
+                shares: Arc::clone(&self.account_shares),
+                account,
+            },
+        })
+    }
+
+    /// Whether the local account that `sender` names may send account
+    /// traffic now (it exists and has not been retired), as the account
+    /// side decides; any failure, or no account side, refuses.
+    pub(super) async fn account_may_send(&self, sender: &Jid) -> bool {
+        let Some(accounts) = self.accounts.get().cloned() else {
+            return false;
+        };
+        let account = sender.to_bare();
+        matches!(
+            tokio::time::timeout(self.limits.account_timeout, accounts.may_send(&account)).await,
+            Ok(true)
+        )
     }
 
     /// An account stanza that could not be sent: a message's sender learns
@@ -340,5 +393,22 @@ impl Inner {
             self.deliver_local(&sender, reply, LocalOrigin::Server)
                 .await;
         }
+    }
+}
+
+/// The places each local account's stanzas hold on the pair queues.
+pub(super) type AccountShares = Arc<Mutex<HashMap<BareJid, usize>>>;
+
+/// One place of an account's share of the pair queues, given back when the
+/// stanza holding it is sent, answered or dropped.
+#[derive(Debug)]
+pub(super) struct AccountShare {
+    shares: AccountShares,
+    account: BareJid,
+}
+
+impl Drop for AccountShare {
+    fn drop(&mut self) {
+        super::decrement(&mut lock(&self.shares), &self.account);
     }
 }

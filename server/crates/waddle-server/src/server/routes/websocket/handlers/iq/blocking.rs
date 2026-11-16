@@ -103,6 +103,12 @@ pub(super) async fn handle_blocking_iq(
                 )];
             }
             send_blocking_presence_side_effects(state, &user_bare, &jids, true, None).await;
+            // A remote sender the account blocks is not presented its
+            // subscription request again (XEP-0191 §3.3; gate G18).
+            crate::server::routes::websocket::handlers::presence::forget_blocked_requests(
+                state, &user_bare, &jids,
+            )
+            .await;
             if !try_remote_owner_blocklist_push(state, sender_jid, &user_bare, true, &jids).await {
                 send_blocking_pushes(state, &user_bare, true, &jids).await;
             }

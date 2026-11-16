@@ -40,7 +40,7 @@ mod router;
 mod telemetry;
 
 pub use accounts::{
-    carries_dm_pin, is_account_presence, is_outbound_account_traffic, LocalAccounts,
+    carries_dm_pin, is_account_presence, is_outbound_account_traffic, AccountWork, LocalAccounts,
     MAX_ACCOUNT_REPLIES,
 };
 pub use correlation::{

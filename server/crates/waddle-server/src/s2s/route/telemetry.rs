@@ -92,3 +92,14 @@ pub(super) fn account_request_refused() {
         1,
     );
 }
+
+/// A local account's message or presence for a remote JID was refused
+/// because the account's share of the pair queues was full.
+pub(super) fn account_share_full() {
+    counter_add!(
+        "waddle.s2s.route.account_traffic.share_full",
+        "{stanza}",
+        "Messages and presence of local accounts for remote JIDs refused because the account's share of the pair queues was full.",
+        1,
+    );
+}

@@ -61,8 +61,9 @@ use probe::handle_presence_probe;
 use regular::handle_regular_presence_update;
 pub(in crate::server::routes::websocket::handlers) use regular::show_name;
 pub(crate) use remote::{
-    is_remote_contact, offer_presence, outgoing_block_reply, receive_remote_presence,
-    remove_remote_contact, route_remote_subscription, sender_blocks,
+    forget_blocked_requests, forget_request, is_remote_contact, offer_presence,
+    outgoing_block_reply, receive_remote_presence, remove_remote_contact,
+    route_remote_subscription, sender_blocks,
 };
 pub use subscription::{
     broadcast_unavailable_for_terminated_session, TerminatedPresenceBroadcastOutcome,

@@ -9,31 +9,43 @@
 //! (`s2s_accounts`), which has decided the sender's admission first; the
 //! rules and their reasons are recorded in
 //! `server/docs/planning/s2s-account-traffic-2047.md`.
+//!
+//! The read-modify-write of an item runs under the account's lock
+//! (`s2s_accounts::lock_account`), inbound and outbound alike, and an
+//! inbound stanza's work applies nothing once the router has abandoned it.
+//! A reply that announces a change (`subscribed`, current or unavailable
+//! presence) is sent only once the change is stored.
+
+use std::sync::Arc;
 
 use jid::{BareJid, FullJid, Jid};
-use tracing::warn;
+use tracing::{warn, Instrument};
 use waddle_xmpp::presence::subscription::{
     build_available_presence, build_subscription_presence, SubscriptionStateMachine,
     SubscriptionType,
 };
 use waddle_xmpp::roster::{AskType, RosterItem, Subscription};
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::roster::RosterVersion;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::subscription::{load_existing_roster_item, roster_item_to_row, roster_storage};
+use crate::db::actor::GetDatabase;
+use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{DatabaseRosterStorage, RosterRowChange};
 use crate::db::s2s_accounts::{PendingOutcome, PendingSubscriptions};
 use crate::destination::{
-    offer_stanza, unroutable_reply, RemoteDestination, StanzaOffer, UnservedDestination,
-    REMOTE_ROUTE_OFFER_TIMEOUT,
+    offer_stanza, unroutable_reply, RemoteDestination, RemoteRoute, ServedDomains, StanzaOffer,
+    UnservedDestination, REMOTE_ROUTE_OFFER_TIMEOUT,
 };
-use crate::s2s::route::{RemotePrincipal, MAX_ACCOUNT_REPLIES};
+use crate::s2s::route::{AccountWork, RemotePrincipal, MAX_ACCOUNT_REPLIES};
 use crate::server::routes::websocket::handlers::account_reads;
 use crate::server::routes::websocket::handlers::roster_fanout::send_roster_push_to_resources;
 use crate::server::routes::websocket::handlers::unserved_route::unserved_destination;
 use crate::server::routes::websocket::s2s_accounts::{
-    account_exists, admits_domain, blocks, database, deliver, s2s_enabled, telemetry,
+    account_exists, admits_domain, blocklist, blocks, database, deliver, lock_account, s2s_enabled,
+    telemetry,
 };
 use crate::server::routes::websocket::transport_xml::stanza_to_xml;
 use crate::server::routes::websocket::WebSocketState;
@@ -46,24 +58,39 @@ async fn pending_store(state: &WebSocketState) -> Option<PendingSubscriptions> {
     database(state).await.map(PendingSubscriptions::new)
 }
 
+/// Store `item` as `account`'s roster item. The version of the change when
+/// it was stored; `None` when it was not, and nothing may announce it.
+async fn store(
+    storage: &DatabaseRosterStorage,
+    account: &BareJid,
+    item: &RosterItem,
+) -> Option<RosterVersion> {
+    match storage
+        .apply_roster_change(account, RosterRowChange::Upsert(roster_item_to_row(item)))
+        .await
+    {
+        Ok((mutation, _lock)) => Some(mutation.version),
+        Err(error) => {
+            warn!(%error, "storing a roster item for a remote contact failed");
+            None
+        }
+    }
+}
+
 /// Store `item` as `account`'s roster item and push it to the account's
-/// interested resources (RFC 6121 §2.1.6), holding the account's roster
-/// lock until the push is queued.
+/// interested resources (RFC 6121 §2.1.6). `false` when it was not stored;
+/// nothing was pushed then.
 async fn store_and_push(
     state: &WebSocketState,
     storage: &DatabaseRosterStorage,
     account: &BareJid,
     item: &RosterItem,
-) {
-    match storage
-        .apply_roster_change(account, RosterRowChange::Upsert(roster_item_to_row(item)))
-        .await
-    {
-        Ok((mutation, _lock)) => {
-            send_roster_push_to_resources(state, account, item, &mutation.version, None).await;
-        }
-        Err(error) => warn!(%error, "storing a roster item for a remote contact failed"),
-    }
+) -> bool {
+    let Some(version) = store(storage, account, item).await else {
+        return false;
+    };
+    send_roster_push_to_resources(state, account, item, &version, None).await;
+    true
 }
 
 /// Deliver `stanza` to each of `resources`.
@@ -135,6 +162,22 @@ fn has(item: Option<&RosterItem>, states: &[Subscription]) -> bool {
     item.is_some_and(|item| states.contains(&item.subscription))
 }
 
+/// `account`'s roster item for `contact`: `Some(None)` when it has none,
+/// `None` when the roster cannot be read.
+async fn read_item(
+    storage: &DatabaseRosterStorage,
+    account: &BareJid,
+    contact: &BareJid,
+) -> Option<Option<RosterItem>> {
+    match load_existing_roster_item(storage, account, contact).await {
+        Ok(item) => Some(item),
+        Err(error) => {
+            warn!(%error, "reading a roster item for a remote contact failed");
+            None
+        }
+    }
+}
+
 // --- inbound ---------------------------------------------------------------
 
 /// A presence stanza from a remote principal to the local account address
@@ -144,6 +187,7 @@ pub(crate) async fn receive_remote_presence(
     principal: &RemotePrincipal,
     to: &Jid,
     mut presence: Presence,
+    work: &AccountWork,
 ) -> Vec<Stanza> {
     if presence.type_ == PresenceType::Error {
         return Vec::new();
@@ -157,25 +201,33 @@ pub(crate) async fn receive_remote_presence(
     let Some(storage) = roster_storage(state).await else {
         return Vec::new();
     };
-    let item = match load_existing_roster_item(&storage, &account, &contact).await {
-        Ok(item) => item,
-        Err(error) => {
-            warn!(%error, "reading a roster item for a remote contact failed");
-            return Vec::new();
-        }
-    };
     match presence.type_ {
         PresenceType::None | PresenceType::Unavailable => {
             if let Ok(full) = to.clone().try_into_full() {
                 // Directed presence to one resource (RFC 6121 §8.5.3.1).
-                let _ = deliver(state, &full, &Stanza::Presence(presence)).await;
-            } else if has(item.as_ref(), &[Subscription::To, Subscription::Both]) {
+                if !work.abandoned() {
+                    let _ = deliver(state, &full, &Stanza::Presence(presence)).await;
+                }
+                return Vec::new();
+            }
+            let Some(item) = read_item(&storage, &account, &contact).await else {
+                return Vec::new();
+            };
+            if has(item.as_ref(), &[Subscription::To, Subscription::Both]) && !work.abandoned() {
                 let stanza = Stanza::Presence(presence);
                 deliver_to(state, &available(state, &account).await, &stanza).await;
             }
             Vec::new()
         }
-        PresenceType::Probe => answer_probe(state, &account, to, &contact, item.as_ref()).await,
+        PresenceType::Probe => {
+            let Some(item) = read_item(&storage, &account, &contact).await else {
+                return Vec::new();
+            };
+            if work.abandoned() {
+                return Vec::new();
+            }
+            answer_probe(state, &account, to, &contact, item.as_ref()).await
+        }
         PresenceType::Subscribe
         | PresenceType::Subscribed
         | PresenceType::Unsubscribe
@@ -183,7 +235,14 @@ pub(crate) async fn receive_remote_presence(
             // RFC 6121 §3.1.3: a subscription stanza names the bare JIDs.
             presence.from = Some(Jid::from(contact.clone()));
             presence.to = Some(Jid::from(account.clone()));
-            receive_subscription(state, &storage, &account, &contact, item, presence).await
+            let _lock = lock_account(&account).await;
+            if work.abandoned() {
+                return Vec::new();
+            }
+            let Some(item) = read_item(&storage, &account, &contact).await else {
+                return Vec::new();
+            };
+            receive_subscription(state, &storage, &account, &contact, item, presence, work).await
         }
         PresenceType::Error => Vec::new(),
     }
@@ -225,7 +284,7 @@ async fn answer_probe(
 }
 
 /// An inbound subscription stanza from `contact` to `account` (RFC 6121
-/// §3.1.3, §3.1.6, §3.2.3, §3.3.3).
+/// §3.1.3, §3.1.6, §3.2.3, §3.3.3), decided under the account's lock.
 async fn receive_subscription(
     state: &WebSocketState,
     storage: &DatabaseRosterStorage,
@@ -233,6 +292,7 @@ async fn receive_subscription(
     contact: &BareJid,
     item: Option<RosterItem>,
     presence: Presence,
+    work: &AccountWork,
 ) -> Vec<Stanza> {
     let stanza = Stanza::Presence(presence.clone());
     match presence.type_ {
@@ -245,7 +305,9 @@ async fn receive_subscription(
                 // Pre-approved (§3.4): approved on the account's behalf.
                 SubscriptionStateMachine::apply_outbound_subscribed(&mut item);
                 item.approved = false;
-                store_and_push(state, storage, account, &item).await;
+                if work.abandoned() || !store_and_push(state, storage, account, &item).await {
+                    return Vec::new();
+                }
                 let mut replies = vec![subscribed(account, contact)];
                 replies.extend(current_presence(state, account, contact).await);
                 replies.truncate(MAX_ACCOUNT_REPLIES);
@@ -254,6 +316,9 @@ async fn receive_subscription(
             let Some(pending) = pending_store(state).await else {
                 return Vec::new();
             };
+            if work.abandoned() {
+                return Vec::new();
+            }
             match pending
                 .record(
                     account,
@@ -263,9 +328,10 @@ async fn receive_subscription(
                 )
                 .await
             {
-                Ok(PendingOutcome::Recorded) => {
+                Ok(PendingOutcome::Recorded) if !work.abandoned() => {
                     deliver_to(state, &available(state, account).await, &stanza).await;
                 }
+                Ok(PendingOutcome::Recorded) => {}
                 Ok(PendingOutcome::Bounds) => telemetry::pending_dropped(),
                 Err(error) => warn!(%error, "recording a remote subscription request failed"),
             }
@@ -277,16 +343,13 @@ async fn receive_subscription(
                 return Vec::new();
             };
             SubscriptionStateMachine::apply_inbound_subscribed(&mut item);
-            deliver_to(
-                state,
-                &account_reads::roster_interested(state, account).await,
-                &stanza,
-            )
-            .await;
-            store_and_push(state, storage, account, &item).await;
+            announce(state, storage, account, &item, &stanza, work).await;
             Vec::new()
         }
         PresenceType::Unsubscribe => {
+            if work.abandoned() {
+                return Vec::new();
+            }
             if let Some(pending) = pending_store(state).await {
                 let _ = pending.remove(account, contact).await;
             }
@@ -296,13 +359,9 @@ async fn receive_subscription(
                 return Vec::new();
             };
             SubscriptionStateMachine::apply_outbound_unsubscribed(&mut item);
-            deliver_to(
-                state,
-                &account_reads::roster_interested(state, account).await,
-                &stanza,
-            )
-            .await;
-            store_and_push(state, storage, account, &item).await;
+            if !announce(state, storage, account, &item, &stanza, work).await {
+                return Vec::new();
+            }
             unavailable_from_each(state, account, contact).await
         }
         PresenceType::Unsubscribed => {
@@ -313,13 +372,7 @@ async fn receive_subscription(
                 return Vec::new();
             };
             SubscriptionStateMachine::apply_inbound_unsubscribed(&mut item);
-            deliver_to(
-                state,
-                &account_reads::roster_interested(state, account).await,
-                &stanza,
-            )
-            .await;
-            store_and_push(state, storage, account, &item).await;
+            announce(state, storage, account, &item, &stanza, work).await;
             Vec::new()
         }
         PresenceType::None
@@ -327,6 +380,35 @@ async fn receive_subscription(
         | PresenceType::Probe
         | PresenceType::Error => Vec::new(),
     }
+}
+
+/// Store the changed `item`, then deliver the inbound subscription `stanza`
+/// that changed it to the account's interested resources and push the item
+/// (RFC 6121 §3.1.6, §3.2.3, §3.3.3: the stanza first, then the roster
+/// push). Nothing is stored, delivered or pushed once `work` is abandoned,
+/// and nothing is delivered or pushed when the item could not be stored.
+async fn announce(
+    state: &WebSocketState,
+    storage: &DatabaseRosterStorage,
+    account: &BareJid,
+    item: &RosterItem,
+    stanza: &Stanza,
+    work: &AccountWork,
+) -> bool {
+    if work.abandoned() {
+        return false;
+    }
+    let Some(version) = store(storage, account, item).await else {
+        return false;
+    };
+    deliver_to(
+        state,
+        &account_reads::roster_interested(state, account).await,
+        stanza,
+    )
+    .await;
+    send_roster_push_to_resources(state, account, item, &version, None).await;
+    true
 }
 
 fn subscribed(account: &BareJid, contact: &BareJid) -> Stanza {
@@ -342,7 +424,8 @@ fn subscribed(account: &BareJid, contact: &BareJid) -> Stanza {
 /// The subscription requests remote senders sent `account` that it has not
 /// answered, to deliver on the first available presence of a new session
 /// (RFC 6121 §3.1.3 rule 4). A request from a domain the replica no
-/// longer admits is not delivered.
+/// longer admits, or from a sender the account blocks (XEP-0191 §3.3), is
+/// not delivered; when the blocking list cannot be read, none is.
 pub(crate) async fn pending_remote_subscriptions(
     state: &WebSocketState,
     account: &BareJid,
@@ -353,18 +436,79 @@ pub(crate) async fn pending_remote_subscriptions(
     let Some(pending) = pending_store(state).await else {
         return Vec::new();
     };
-    let requests = match pending.list(account).await {
+    let requests = match pending.list(account, now_ms()).await {
         Ok(requests) => requests,
         Err(error) => {
             warn!(%error, "reading remote subscription requests failed");
             return Vec::new();
         }
     };
+    if requests.is_empty() {
+        return Vec::new();
+    }
+    let Some(blocked) = blocklist(state, account).await else {
+        return Vec::new();
+    };
     requests
         .into_iter()
-        .filter(|(contact, _)| admits_domain(state, contact.domain()))
+        .filter(|(contact, _)| {
+            admits_domain(state, contact.domain())
+                && !blocked.contains_jid(&Jid::from(contact.clone()))
+        })
         .filter_map(|(_, stanza)| Presence::try_from(stanza).ok().map(Stanza::Presence))
         .collect()
+}
+
+/// Forget the recorded requests of every sender `blocked` now covers: an
+/// account that blocks a sender is not presented its request again
+/// (XEP-0191 §3.3).
+pub(crate) async fn forget_blocked_requests(
+    state: &WebSocketState,
+    account: &BareJid,
+    blocked: &[Jid],
+) {
+    if blocked.is_empty() {
+        return;
+    }
+    let Some(pending) = pending_store(state).await else {
+        return;
+    };
+    let requests = match pending.list(account, now_ms()).await {
+        Ok(requests) => requests,
+        Err(error) => {
+            warn!(%error, "reading remote subscription requests to forget blocked senders failed");
+            return;
+        }
+    };
+    let blocked = waddle_xmpp::protocol::Blocklist::new(blocked.iter().cloned());
+    for (contact, _) in requests {
+        if blocked.contains_jid(&Jid::from(contact.clone())) {
+            if let Err(error) = pending.remove(account, &contact).await {
+                warn!(%error, "forgetting a blocked sender's subscription request failed");
+            }
+        }
+    }
+}
+
+/// Forget the request `contact` sent `account`, as the account denies it
+/// (RFC 6121 §3.1.4, §3.2.2), whatever then becomes of the `unsubscribed`
+/// that denies it: refused as blocked (XEP-0191 §3.3), refused by the
+/// route, or routed. `true` when one was recorded.
+pub(crate) async fn forget_request(
+    state: &WebSocketState,
+    account: &BareJid,
+    contact: &BareJid,
+) -> bool {
+    let Some(pending) = pending_store(state).await else {
+        return false;
+    };
+    match pending.remove(account, contact).await {
+        Ok(removed) => removed,
+        Err(error) => {
+            warn!(%error, "forgetting a remote subscription request failed");
+            false
+        }
+    }
 }
 
 // --- outbound --------------------------------------------------------------
@@ -392,12 +536,21 @@ pub(crate) async fn offer_presence(state: &WebSocketState, presence: Presence) -
     let Some(remote) = remote_destination(state, &to) else {
         return false;
     };
+    offer_presence_to(state.deps.remote_route.as_ref(), remote, presence).await
+}
+
+/// Offer `presence`, from a local account, to `remote` on `route`.
+async fn offer_presence_to(
+    route: &dyn RemoteRoute,
+    remote: RemoteDestination,
+    presence: Presence,
+) -> bool {
     let Some(home) = presence.from.as_ref().map(|from| from.domain().to_owned()) else {
         return false;
     };
     matches!(
         offer_stanza(
-            state.deps.remote_route.as_ref(),
+            route,
             remote,
             Stanza::Presence(presence),
             &home,
@@ -443,7 +596,9 @@ async fn route(
 /// A bound client's subscription stanza to a remote contact, with S2S
 /// enabled (RFC 6121 §3.1.2, §3.1.5, §3.2.2, §3.3.2, §3.4): stamped with
 /// the account's bare JID and addressed to the contact's, routed, and the
-/// account's half of the subscription changed only once the route took it.
+/// account's half of the subscription changed once the route took it. An
+/// `unsubscribed` takes effect locally whatever the route does: the account
+/// withdraws a subscription or denies a request on its own authority.
 /// Returns the frames for the client: the error answering a refused one.
 pub(crate) async fn route_remote_subscription(
     state: &WebSocketState,
@@ -457,17 +612,13 @@ pub(crate) async fn route_remote_subscription(
     let remote = remote_destination(state, &Jid::from(contact.clone())).unwrap_or(remote);
     presence.from = Some(Jid::from(account.clone()));
     presence.to = Some(Jid::from(contact.clone()));
+    let _lock = lock_account(&account).await;
     let Some(storage) = roster_storage(state).await else {
         return lookup_failed(&presence, sender);
     };
-    let item = match load_existing_roster_item(&storage, &account, &contact).await {
-        Ok(item) => item,
-        Err(error) => {
-            warn!(%error, "reading a roster item for a remote contact failed");
-            return lookup_failed(&presence, sender);
-        }
+    let Some(item) = read_item(&storage, &account, &contact).await else {
+        return lookup_failed(&presence, sender);
     };
-    let pending = pending_store(state).await;
     match presence.type_ {
         PresenceType::Subscribe => {
             match route(state, sender, remote, presence).await {
@@ -496,16 +647,26 @@ pub(crate) async fn route_remote_subscription(
             Vec::new()
         }
         PresenceType::Subscribed => {
-            let requested = match &pending {
-                Some(pending) => pending.holds(&account, &contact).await.unwrap_or(false),
-                None => false,
+            // Whether the contact asked decides between an approval and a
+            // pre-approval; when that cannot be read, neither is made.
+            let Some(pending) = pending_store(state).await else {
+                return lookup_failed(&presence, sender);
+            };
+            let requested = match pending.holds(&account, &contact, now_ms()).await {
+                Ok(requested) => requested,
+                Err(error) => {
+                    warn!(%error, "reading a remote subscription request failed");
+                    return lookup_failed(&presence, sender);
+                }
             };
             if !requested && !has(item.as_ref(), &[Subscription::From, Subscription::Both]) {
                 // No request to approve: a pre-approval (§3.4.2), which
                 // nothing leaves for.
                 let mut item = item.unwrap_or_else(|| RosterItem::new(contact.clone()));
                 item.approved = true;
-                store_and_push(state, &storage, &account, &item).await;
+                if !store_and_push(state, &storage, &account, &item).await {
+                    return lookup_failed(&presence, sender);
+                }
                 return Vec::new();
             }
             match route(state, sender, remote, presence).await {
@@ -516,10 +677,10 @@ pub(crate) async fn route_remote_subscription(
                 let mut item = item.unwrap_or_else(|| RosterItem::new(contact.clone()));
                 SubscriptionStateMachine::apply_outbound_subscribed(&mut item);
                 item.approved = false;
-                store_and_push(state, &storage, &account, &item).await;
-                if let Some(pending) = &pending {
-                    let _ = pending.remove(&account, &contact).await;
+                if !store_and_push(state, &storage, &account, &item).await {
+                    return Vec::new();
                 }
+                let _ = pending.remove(&account, &contact).await;
                 // §3.1.5: the contact receives the account's current presence.
                 for stanza in current_presence(state, &account, &contact).await {
                     if let Stanza::Presence(presence) = stanza {
@@ -530,10 +691,9 @@ pub(crate) async fn route_remote_subscription(
             Vec::new()
         }
         PresenceType::Unsubscribed => {
-            let requested = match &pending {
-                Some(pending) => pending.holds(&account, &contact).await.unwrap_or(false),
-                None => false,
-            };
+            // The denial of a recorded request is the account's own: the
+            // record is forgotten whatever becomes of the stanza.
+            let requested = forget_request(state, &account, &contact).await;
             if has(item.as_ref(), &[Subscription::From, Subscription::Both]) {
                 // §3.2.2: unavailable from every available resource first.
                 for stanza in unavailable_from_each(state, &account, &contact).await {
@@ -541,27 +701,29 @@ pub(crate) async fn route_remote_subscription(
                         let _ = offer_presence(state, presence).await;
                     }
                 }
-                match route(state, sender, remote, presence).await {
-                    Routed::Refused(frames) => return frames,
-                    Routed::Accepted => {}
-                }
+                let routed = route(state, sender, remote, presence).await;
+                // The contact no longer sees the account's presence, whether
+                // or not its server could be told.
                 if let Some(mut item) = item {
                     SubscriptionStateMachine::apply_outbound_unsubscribed(&mut item);
                     store_and_push(state, &storage, &account, &item).await;
                 }
-            } else if requested {
+                return match routed {
+                    Routed::Refused(frames) => frames,
+                    Routed::Accepted => Vec::new(),
+                };
+            }
+            if requested {
                 // Denying a request (§3.1.4).
-                match route(state, sender, remote, presence).await {
-                    Routed::Refused(frames) => return frames,
-                    Routed::Accepted => {}
-                }
-            } else if let Some(mut item) = item.filter(|item| item.approved) {
+                return match route(state, sender, remote, presence).await {
+                    Routed::Refused(frames) => frames,
+                    Routed::Accepted => Vec::new(),
+                };
+            }
+            if let Some(mut item) = item.filter(|item| item.approved) {
                 // Cancelling a pre-approval: nothing leaves (§3.2.2 rule 2).
                 item.approved = false;
                 store_and_push(state, &storage, &account, &item).await;
-            }
-            if let Some(pending) = &pending {
-                let _ = pending.remove(&account, &contact).await;
             }
             Vec::new()
         }
@@ -572,8 +734,8 @@ pub(crate) async fn route_remote_subscription(
     }
 }
 
-/// The retryable error answering a subscription stanza whose roster could
-/// not be read (RFC 6120 §8.3).
+/// The retryable error answering a subscription stanza whose roster or
+/// request record could not be read or written (RFC 6120 §8.3).
 fn lookup_failed(presence: &Presence, sender: &FullJid) -> Vec<String> {
     let mut reply = Presence::new(PresenceType::Error);
     reply.id = presence.id.clone();
@@ -589,16 +751,19 @@ fn lookup_failed(presence: &Presence, sender: &FullJid) -> Vec<String> {
 }
 
 /// RFC 6121 §2.5.2: `account` removed `item`, a remote contact, from its
-/// roster. The contact is sent `unsubscribe` if the account was subscribed
-/// to it or asked to be, and `unsubscribed` if it was subscribed to the
-/// account; a request it sent is forgotten.
+/// roster. A request the contact sent is forgotten. The contact is sent
+/// `unsubscribe` if the account was subscribed to it or asked to be, and
+/// `unsubscribed` if it was subscribed to the account; nothing is sent to a
+/// contact the account blocks (XEP-0191 §3.3).
 pub(crate) async fn remove_remote_contact(
     state: &WebSocketState,
     account: &BareJid,
     item: &RosterItem,
 ) {
-    if let Some(pending) = pending_store(state).await {
-        let _ = pending.remove(account, &item.jid).await;
+    let _lock = lock_account(account).await;
+    forget_request(state, account, &item.jid).await;
+    if blocks(state, account, &Jid::from(item.jid.clone())).await {
+        return;
     }
     let mut types = Vec::new();
     if item.ask == Some(AskType::Subscribe)
@@ -617,39 +782,98 @@ pub(crate) async fn remove_remote_contact(
 
 /// RFC 6121 §4.2.2 and §4.3.1: on the first available presence of a
 /// session, probe each remote contact whose presence `account` is
-/// subscribed to, from the account's bare JID.
-pub(crate) async fn probe_remote_contacts(state: &WebSocketState, account: &BareJid) {
+/// subscribed to, from the account's bare JID, off the connection's task.
+/// The account's blocking list is read once; nothing is sent to a contact
+/// it blocks (XEP-0191 §3.3), and nothing at all when it cannot be read.
+pub(crate) fn spawn_probe_remote_contacts(state: &WebSocketState, account: &BareJid) {
     if !s2s_enabled(state) {
         return;
     }
-    let Some(storage) = roster_storage(state).await else {
+    let Some(served) = state
+        .deps
+        .service_domains
+        .served_domains(state.deps.auth_state.xmpp_domain.as_str())
+    else {
         return;
     };
-    let roster = match storage.get_roster(account).await {
+    let app_state = Arc::clone(&state.deps.app_state);
+    let route = Arc::clone(&state.deps.remote_route);
+    let account = account.clone();
+    tokio::spawn(
+        async move { probe_remote_contacts(&app_state, route.as_ref(), &served, &account).await }
+            .instrument(tracing::Span::current()),
+    );
+}
+
+async fn probe_remote_contacts(
+    app_state: &crate::server::AppState,
+    route: &dyn RemoteRoute,
+    served: &ServedDomains,
+    account: &BareJid,
+) {
+    let db = match app_state
+        .db_pool
+        .global_actor()
+        .clone()
+        .ask(GetDatabase)
+        .await
+    {
+        Ok(db) => db,
+        Err(error) => {
+            warn!(%error, "the account database is unavailable to probe remote contacts");
+            return;
+        }
+    };
+    let roster = match DatabaseRosterStorage::new(db.clone())
+        .get_roster(account)
+        .await
+    {
         Ok(roster) => roster,
         Err(error) => {
             warn!(%error, "reading the roster to probe remote contacts failed");
             return;
         }
     };
-    for row in roster {
-        if !matches!(row.subscription.as_str(), "to" | "both") {
-            continue;
+    let contacts: Vec<(BareJid, RemoteDestination)> = roster
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.subscription.parse().unwrap_or_default(),
+                Subscription::To | Subscription::Both
+            )
+        })
+        .filter_map(|row| row.contact_jid.parse::<BareJid>().ok())
+        .filter_map(|contact| {
+            match served
+                .classify(Some(&Jid::from(contact.clone())))
+                .unserved()
+            {
+                Some(UnservedDestination::Remote(remote)) => Some((contact, remote)),
+                _ => None,
+            }
+        })
+        .collect();
+    if contacts.is_empty() {
+        return;
+    }
+    let blocked = match DatabaseBlockingStorage::new(db)
+        .list_blocked_jid_entries(account)
+        .await
+    {
+        Ok(entries) => waddle_xmpp::protocol::Blocklist::new(entries),
+        Err(error) => {
+            warn!(%error, "reading the blocking list to probe remote contacts failed");
+            return;
         }
-        let Ok(contact) = row.contact_jid.parse::<BareJid>() else {
-            continue;
-        };
-        if !is_remote_contact(state, &contact) {
-            continue;
-        }
-        // XEP-0191 §3.3: nothing is routed to a JID the account blocks.
-        if blocks(state, account, &Jid::from(contact.clone())).await {
+    };
+    for (contact, remote) in contacts {
+        if blocked.contains_jid(&Jid::from(contact.clone())) {
             continue;
         }
         let mut probe = Presence::new(PresenceType::Probe);
         probe.from = Some(Jid::from(account.clone()));
         probe.to = Some(Jid::from(contact));
-        let _ = offer_presence(state, probe).await;
+        let _ = offer_presence_to(route, remote, probe).await;
     }
 }
 

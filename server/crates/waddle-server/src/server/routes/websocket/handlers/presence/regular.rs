@@ -178,7 +178,7 @@ pub(super) async fn handle_regular_presence_update(
             // contacts whose presence the account is subscribed to; local
             // contacts' presence is known here already.
             if first_available {
-                super::remote::probe_remote_contacts(state, &sender_jid.to_bare()).await;
+                super::remote::spawn_probe_remote_contacts(state, &sender_jid.to_bare());
             }
         } else {
             debug!(

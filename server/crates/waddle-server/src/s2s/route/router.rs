@@ -55,8 +55,8 @@ mod accounts;
 /// The per-peer and per-resource bounds are shares of the global ones, so
 /// that one remote domain, one local resource or remote senders' traffic
 /// cannot take all of them: `pending_per_peer` is below
-/// `pending_requests`, `pending_per_resource` below `queue_per_peer`, and
-/// `reply_queues` below `peer_queues`.
+/// `pending_requests`, `pending_per_resource` and `account_queue_per_sender`
+/// below `queue_per_peer`, and `reply_queues` below `peer_queues`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterLimits {
     /// Stanzas waiting for one directional domain pair's stream. A full
@@ -158,6 +158,11 @@ pub struct RouterLimits {
     /// How long a remote IQ request to a local resource waits for the
     /// resource's response.
     pub account_request_ttl: Duration,
+    /// Places on the pair queues one local account's messages and
+    /// presence for remote JIDs, its own and those the server sends on its
+    /// behalf, may hold at once; a further one is refused as the full
+    /// queue would refuse it.
+    pub account_queue_per_sender: usize,
 }
 
 impl Default for RouterLimits {
@@ -194,6 +199,7 @@ impl Default for RouterLimits {
             account_requests: 1024,
             account_requests_per_peer: 256,
             account_request_ttl: Duration::from_secs(60),
+            account_queue_per_sender: 32,
         }
     }
 }
@@ -262,7 +268,12 @@ enum Purpose {
     /// A local account's message or presence for a remote JID that is not
     /// room traffic (gate G18). A message that cannot be sent is answered
     /// to its sender; presence is dropped.
-    Account { sender: Jid },
+    Account {
+        sender: Jid,
+        /// The place of the account's share of the pair queues it holds
+        /// until it is sent, answered or dropped.
+        _share: accounts::AccountShare,
+    },
     /// This server's `disco#info` to the domain of a remote room that a
     /// local resource joins, or then to the room, registered for
     /// correlation before it is written. If it cannot be sent, the joins it
@@ -437,6 +448,8 @@ struct Inner {
     accounts: OnceLock<Arc<dyn LocalAccounts>>,
     /// The remote requests to local resources this replica registered.
     inbound_requests: Mutex<accounts::InboundRequests>,
+    /// The places each local account's stanzas hold on the pair queues.
+    account_shares: accounts::AccountShares,
     queues: Mutex<HashMap<Pair, mpsc::Sender<Queued>>>,
     pending: Mutex<PendingRequests>,
     /// The remote room occupancies every replica shares.
@@ -505,6 +518,7 @@ impl S2sRouter {
             local: OnceLock::new(),
             accounts: OnceLock::new(),
             inbound_requests: Mutex::new(accounts::InboundRequests::default()),
+            account_shares: accounts::AccountShares::default(),
             queues: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingRequests::default()),
             rooms: options.rooms,
@@ -679,6 +693,12 @@ impl Inner {
                 Err(reason) => refuse(reason, outbound),
             };
         }
+        // A retired account sends nothing (gate G18).
+        if let Purpose::Account { sender, .. } = &purpose {
+            if !self.account_may_send(sender).await {
+                return refuse(UnroutableReason::RefusedByPolicy, outbound);
+            }
+        }
         let reserved = match &purpose {
             Purpose::Request {
                 pending,
@@ -716,7 +736,9 @@ impl Inner {
         stanza: Stanza,
     ) -> Result<(), UnroutableReason> {
         let Some((room, egress)) = rooms::egress(to, &stanza) else {
-            return self.route_account(pair, Jid::from(sender.clone()), stanza);
+            return self
+                .route_account(pair, Jid::from(sender.clone()), stanza)
+                .await;
         };
         match egress {
             RoomEgress::Join { nick, id } => self.join(pair, sender, room, nick, id, stanza).await,
@@ -731,7 +753,9 @@ impl Inner {
                         .map_err(|_| UnroutableReason::EgressBusy)?
                         .is_none()
                 {
-                    return self.route_account(pair, Jid::from(sender.clone()), stanza);
+                    return self
+                        .route_account(pair, Jid::from(sender.clone()), stanza)
+                        .await;
                 }
                 self.leave(pair, sender, room, stanza).await
             }
@@ -745,7 +769,9 @@ impl Inner {
                 // not occupy as a room are account traffic (ADR-0020 D7),
                 // routed once an account side is attached.
                 let Some(current) = current else {
-                    return self.route_account(pair, Jid::from(sender.clone()), stanza);
+                    return self
+                        .route_account(pair, Jid::from(sender.clone()), stanza)
+                        .await;
                 };
                 if !other.permitted_in(current.phase) {
                     return Err(UnroutableReason::RefusedByPolicy);
@@ -1850,9 +1876,7 @@ impl Inner {
                 if sender.node().is_none() || *sender.domain() != *self.served.local() {
                     return Err(UnroutableReason::RefusedByPolicy);
                 }
-                Purpose::Account {
-                    sender: Jid::from(sender.to_bare()),
-                }
+                self.account_purpose(&Jid::from(sender.to_bare()))?
             }
             // Other messages and presence leave from a bound resource of a
             // local account: room traffic for a room it occupies or is
@@ -2078,7 +2102,7 @@ impl Inner {
                     .await;
                 return;
             }
-            Purpose::Account { sender } => {
+            Purpose::Account { sender, .. } => {
                 self.answer_account(&sender, &queued.stanza, failure).await;
                 return;
             }

@@ -185,6 +185,15 @@ pub(crate) async fn route_unserved_presence(
         | Type::Probe => Jid::from(sender.to_bare()),
         _ => Jid::from(sender.clone()),
     });
+    // A denial of a remote sender's recorded request is the account's own:
+    // the record is forgotten even when the stanza is then refused, such as
+    // to an address the account blocks (gate G18).
+    if let (Type::Unsubscribed, UnservedDestination::Remote(remote)) =
+        (&presence.type_, &destination)
+    {
+        super::presence::forget_request(state, &sender.to_bare(), &remote.address().to_bare())
+            .await;
+    }
     if let Some(reply) = blocked_reply(
         &Stanza::Presence(presence.clone()),
         &destination,
