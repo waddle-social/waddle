@@ -48,7 +48,8 @@ use waddle_xmpp::mam::{
 };
 use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::muc::room_actor::{
-    GetConfig, GetOccupantSessionGeneration, LeaveSessionSelector, PingSelfCheck,
+    GetConfig, GetOccupantSessionGeneration, GetSeatedSessionGenerations, LeaveSessionSelector,
+    PingSelfCheck,
 };
 use waddle_xmpp::muc::MucRemovalCause;
 use waddle_xmpp::protocol::room::archive::is_archivable;
@@ -606,10 +607,25 @@ impl Asked<'_> {
     /// one, and otherwise from the channel catalog, which a room's
     /// configuration keeps in step. A room with neither is not found: no
     /// room is created for a remote principal.
+    ///
+    /// A room whose actor cannot be reached now (it is being restored, or
+    /// its claim is moving) is "cannot be told" only when it may be open:
+    /// its catalog row says so, or it has no row while this deployment
+    /// opens its new rooms to other servers. Any other address is not
+    /// found, as before the actor was unreachable, so the retryable answer
+    /// never tells a closed room from one that does not exist.
     async fn open_to_other_servers(&self, room: &BareJid) -> Option<bool> {
         if !is_muc_room_jid(self.state, room).await {
             return Some(false);
         }
+        let read_catalog = || async {
+            let channel = get_managed_channel_for_room(self.state, room).await.ok()?;
+            // `None` for an address without a row.
+            Some(channel.map(|channel| {
+                channel.federated
+                    && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+            }))
+        };
         match get_room_actor_result(self.state, room).await {
             Ok(Some(actor)) => {
                 let config = actor
@@ -619,14 +635,17 @@ impl Asked<'_> {
                     .ok()?;
                 Some(config.federated && !config.group_dm)
             }
-            Ok(None) => {
-                let channel = get_managed_channel_for_room(self.state, room).await.ok()?;
-                Some(channel.is_some_and(|channel| {
-                    channel.federated
-                        && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
-                }))
+            Ok(None) => Some(read_catalog().await?.unwrap_or(false)),
+            Err(_) => {
+                let may_be_open = read_catalog()
+                    .await?
+                    .unwrap_or_else(|| self.state.deps.app_state.federates_new_rooms());
+                if may_be_open {
+                    None
+                } else {
+                    Some(false)
+                }
             }
-            Err(_) => None,
         }
     }
 
@@ -921,8 +940,15 @@ impl Asked<'_> {
             if let Some(frames) = updated {
                 return RoomReplies::of(stanzas_of(frames).unwrap_or_default());
             }
-            // The room does not seat the occupant any more: the presence
-            // is a join again.
+            // The presence enters the room: the room does not seat the
+            // occupant any more, or the occupant asks to enter again. It
+            // is decided as a join, on a seat opened for it, so that the
+            // room's answer precedes its traffic for the occupant
+            // (XEP-0045 §7.1); the router asks again with that seat.
+            return RoomReplies {
+                stanzas: Vec::new(),
+                seat: SeatChange::Rejoin,
+            };
         }
         // The join handler reads the joiner's address from a session. This
         // one names the remote account and nothing else: it is no
@@ -1357,5 +1383,25 @@ impl LocalRooms for WebSocketLocalRooms {
             .await
             .ok()?;
         Some(seated == Some(seat.session))
+    }
+
+    fn carries(&self) -> bool {
+        self.carrier.is_some()
+    }
+
+    async fn occupancies(
+        &self,
+        room: &BareJid,
+    ) -> Option<Vec<(FullJid, waddle_xmpp_core::OccupancySessionGeneration)>> {
+        let state = self.state.upgrade()?;
+        // A room without an actor here seats nobody here.
+        let Some(actor) = get_room_actor(&state, room).await else {
+            return Some(Vec::new());
+        };
+        actor
+            .ask(GetSeatedSessionGenerations)
+            .reply_timeout(ROOM_ASK_TIMEOUT)
+            .await
+            .ok()
     }
 }

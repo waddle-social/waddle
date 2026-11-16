@@ -62,17 +62,44 @@ impl ClusterRoomCarrier {
     }
 }
 
-/// Whether the channel catalog, which every replica reads, says `room` is
-/// not open to other servers: its `federated` setting is off, or it is a
-/// group conversation of this deployment's accounts. A room without a
-/// catalog row, or one whose row cannot be read, is not known to be closed.
-async fn closed_in_catalog(state: &WebSocketState, room: &BareJid) -> bool {
-    matches!(
-        super::handlers::presence::get_managed_channel_for_room(state, room).await,
+/// What the channel catalog, which every replica reads, says of whether
+/// `room` is open to other servers.
+enum Catalogued {
+    /// Its row says so: its `federated` setting is on and it is no group
+    /// conversation of this deployment's accounts.
+    Open,
+    /// It has no row, or its row says otherwise, and nothing else could
+    /// have opened it: it is answered as a room that does not exist.
+    NotOpen,
+    /// It has no row while this deployment opens its new rooms to other
+    /// servers, or its row cannot be read: only the room's holder can
+    /// tell.
+    Unknown,
+}
+
+/// Read `room`'s row of the channel catalog.
+///
+/// A room without a row keeps its `federated` setting in its actor alone.
+/// While the deployment's default for new rooms is off
+/// (`[host_policy] federate_new_rooms`), such a room is open only if an
+/// owner turned the setting on by hand, and it is not carried: were every
+/// address without a row carried, a remote sender could tell a room that
+/// exists and is closed from one that does not exist by whether its
+/// holder answers, and could make this replica ask another one for any
+/// address it names. The cost is that a room without a row that an owner
+/// opened by hand is reached only through the replica that holds it.
+async fn catalogued(state: &WebSocketState, room: &BareJid) -> Catalogued {
+    match super::handlers::presence::get_managed_channel_for_room(state, room).await {
         Ok(Some(channel))
-            if !channel.federated
-                || channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
-    )
+            if channel.federated
+                && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM =>
+        {
+            Catalogued::Open
+        }
+        Ok(Some(_)) => Catalogued::NotOpen,
+        Ok(None) if !state.deps.app_state.federates_new_rooms() => Catalogued::NotOpen,
+        Ok(None) | Err(_) => Catalogued::Unknown,
+    }
 }
 
 fn retry_later(text: &str) -> RoomPlacement {
@@ -114,11 +141,13 @@ impl RoomCarrier for ClusterRoomCarrier {
         loop {
             let resolved =
                 crate::server::routes::interpret::extension_room_owner(&state, room).await;
-            // A room the catalog says is not open to other servers is
+            // A room the catalog does not say is open to other servers is
             // answered here, as a room that does not exist is: were it
             // carried, a holder that is busy, moving or out of reach would
             // answer otherwise and tell the two apart.
-            if !matches!(resolved, Ok(None)) && closed_in_catalog(&state, room).await {
+            if !matches!(resolved, Ok(None))
+                && matches!(catalogued(&state, room).await, Catalogued::NotOpen)
+            {
                 return RoomPlacement::Here;
             }
             let owner = match resolved {

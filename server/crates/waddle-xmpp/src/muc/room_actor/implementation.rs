@@ -2635,6 +2635,24 @@ impl kameo::message::Message<GetOccupantSessionGeneration> for RoomActor {
     }
 }
 
+/// Every session the room seats, with the connection generation each is
+/// seated under: what [`GetOccupantSessionGeneration`] answers for one
+/// session, read for all of them from one consistent state. A session
+/// without a generation to pin is not listed.
+pub struct GetSeatedSessionGenerations;
+
+impl kameo::message::Message<GetSeatedSessionGenerations> for RoomActor {
+    type Reply = Result<Vec<(FullJid, waddle_xmpp_core::OccupancySessionGeneration)>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetSeatedSessionGenerations,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.room.seated_session_generations())
+    }
+}
+
 /// Resolve the SFU media-grant inputs for `jid` in one round-trip:
 /// whether they are a current occupant, and if so their XEP-0045
 /// voice (which needs both the role and the room's moderation).

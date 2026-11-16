@@ -706,6 +706,18 @@ impl MucRoom {
         self.session_generations.get(jid).copied()
     }
 
+    /// Every session the room seats that has a generation to pin, with
+    /// that generation.
+    pub fn seated_session_generations(
+        &self,
+    ) -> Vec<(FullJid, waddle_xmpp_core::OccupancySessionGeneration)> {
+        self.session_generations
+            .iter()
+            .filter(|(jid, _)| self.find_occupant_by_real_jid(jid).is_some())
+            .map(|(jid, generation)| (jid.clone(), *generation))
+            .collect()
+    }
+
     /// Install an occupancy order captured BEFORE the join's durable
     /// projection awaited: a cleanup attempt minted while the projection was
     /// blocked must classify this session as its target, not as a newer
