@@ -2219,10 +2219,11 @@ When the scope's marker was written under another incarnation, the pass:
    at `none` otherwise; and, only when operations were lost, every canonical
    grant lowered to what the projection holds for its subject, `none` where
    it holds nothing. Nothing is raised, in the affiliation or in what
-   admission honours: lowering an owner or admin grant of an account this
-   deployment does not serve (honoured as none) to the projection's
-   `member` is recorded at `none`. An affiliation issuance refuses for its
-   subject is recorded no higher than `none`;
+   admission honours on any decision: lowering an owner or admin grant of
+   an account this deployment does not serve, which every decision but a
+   trusted home's `pkix` request honours as none (`policy::honoured_floor`),
+   to the projection's `member` is recorded at `none`. An affiliation
+   issuance refuses for its subject is recorded no higher than `none`;
 4. if operations were lost, the operation of step 3 also marks the scope as
    one a restore lost operations in (`host_grant_scopes.lost_operations`),
    and is recorded even when no grant changes, unless the scope holds the
