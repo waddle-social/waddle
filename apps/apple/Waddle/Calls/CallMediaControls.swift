@@ -7,6 +7,9 @@ protocol CallMediaControls: AnyObject, Observable {
     var phase: CallMediaPhase { get }
     /// When this call's media first connected; a reconnect keeps it.
     var connectedSince: Date? { get }
+    /// When media last came up: the first connect, or the end of a reconnect.
+    /// The microphone and camera start a moment after it.
+    var mediaUpSince: Date? { get }
     /// Actually publishing, not merely requested.
     var isMicrophoneOn: Bool { get }
     var isCameraOn: Bool { get }
@@ -17,6 +20,11 @@ protocol CallMediaControls: AnyObject, Observable {
     var remoteVideo: AnyView? { get }
     /// Our camera preview.
     var localVideo: AnyView? { get }
+    /// The SFU's participant identities (full JIDs), ours first, while
+    /// connected; empty otherwise, including while reconnecting.
+    var participantIdentities: [String] { get }
+    /// The identities the SFU hears speaking now, ours included.
+    var speakingIdentities: Set<String> { get }
     func setMicrophone(_ on: Bool) async
     func setCamera(_ on: Bool) async
 }

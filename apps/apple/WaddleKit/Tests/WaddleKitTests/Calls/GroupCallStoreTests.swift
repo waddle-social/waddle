@@ -148,7 +148,7 @@ extension GroupCallStoreTests {
         let f = GroupFixture(timeout: .milliseconds(30))
         let joining = await f.begin()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.store.lastError == "muc call preparation failed")
         #expect(f.port.callSends == [.groupPresence(groupRoom, "alice", .init(state: .preparing)), .groupPresence(groupRoom, "alice", .init(state: .left))])
     }
@@ -160,7 +160,7 @@ extension GroupCallStoreTests {
         f.port.callResults["groupInitiate"] = false
         let joining = await f.toInitiate()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.store.lastError == "muji session initiate failed")
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),
@@ -175,7 +175,7 @@ extension GroupCallStoreTests {
         let f = GroupFixture(acceptTimeout: .milliseconds(80))
         let joining = await f.toInitiate()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.store.lastError == "muji session initiate failed")
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),

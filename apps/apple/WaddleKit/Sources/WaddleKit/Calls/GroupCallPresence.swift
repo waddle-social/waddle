@@ -36,7 +36,9 @@ struct GroupCallPreparationKey: Hashable {
     public init() {}
 
     /// Preparation waiters fire after preparation changes, before the active view changes.
-    public func apply(_ presence: WirePresence) {
+    /// With `ignoringCallMarker` the sender is taken to be out of the call
+    /// whatever its presence says.
+    public func apply(_ presence: WirePresence, ignoringCallMarker: Bool = false) {
         guard let nick = presence.from.resource else { return }
         // An error from an occupant's address means they are not in the
         // room; subscription traffic says nothing about a call.
@@ -46,7 +48,7 @@ struct GroupCallPreparationKey: Hashable {
         }
         let room = presence.from.bare
         let identity = GroupCallParticipantKey(nick: nick, realJID: presence.occupant?.realJID)
-        let marker = presence.kind == .available ? presence.groupCall : nil
+        let marker = presence.kind == .available && !ignoringCallMarker ? presence.groupCall : nil
         if marker?.isPreparing == true {
             let key = GroupCallPreparationKey(room: room, participant: identity)
             if let waiter = echoes.removeValue(forKey: key) {
@@ -76,6 +78,11 @@ struct GroupCallPreparationKey: Hashable {
         } else if marker?.isPreparing != true {
             removeActive(in: room, identity: identity, includeAggregate: identity.realJID == nil)
         }
+    }
+
+    /// Someone in `room` is advertising a call.
+    public func hasCall(in room: BareJID) -> Bool {
+        participants[room]?.isEmpty == false
     }
 
     /// A local leave drops its exact resource and an identity-less aggregate entry.

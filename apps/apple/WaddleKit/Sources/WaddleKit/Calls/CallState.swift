@@ -95,6 +95,22 @@ extension CallState {
         case .idle, .incoming, .outgoing, .active, .ended: false
         }
     }
+    /// A device choice belongs to a session in progress: an accepted 1:1
+    /// session or a room's call the mixer accepted.
+    public var isEstablished: Bool {
+        switch self {
+        case .active, .inGroup: true
+        case .idle, .incoming, .outgoing, .joiningGroup, .ended: false
+        }
+    }
+    /// The slot holds `room`'s call, being joined or joined.
+    public func isInGroupCall(in room: BareJID) -> Bool {
+        switch self {
+        case .joiningGroup(let call): call.room == room
+        case .inGroup(let call): call.room == room
+        case .idle, .incoming, .outgoing, .active, .ended: false
+        }
+    }
     var isIncoming: Bool { if case .incoming = self { true } else { false } }
     var isOutgoing: Bool { if case .outgoing = self { true } else { false } }
 }

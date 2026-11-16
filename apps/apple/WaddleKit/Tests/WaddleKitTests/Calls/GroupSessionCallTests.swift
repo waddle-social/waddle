@@ -11,7 +11,7 @@ import Testing
         port.emit(.authenticationFailed)
         await eventually { coordinator.connection == .authenticationFailed }
         #expect(coordinator.calls.groupPresence.participants == [groupRoom: [
-            GroupCallParticipant(nick: "alice", realJID: callOwn, media: CallMedia(audio: true, video: true),
+            GroupCallParticipant(nick: "bob", realJID: callPeer, media: CallMedia(audio: true, video: true),
                 isHandRaised: true, isMuted: true)]])
         #expect(coordinator.calls.groupPresence.media == [groupRoom: CallMedia(audio: true, video: true)])
         await coordinator.stop()
@@ -29,6 +29,39 @@ import Testing
         #expect(coordinator.calls.groupPresence.participants.isEmpty)
         #expect(coordinator.calls.groupPresence.media.isEmpty)
         await coordinator.stop()
+    }
+
+    @Test func aRoomsCallCanOnlyBeJoinedFromInsideTheRoom() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        // The conversation can be open before the room has let us in.
+        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
+        #expect(await !coordinator.joinGroupCall(in: groupRoom, video: false))
+        #expect(port.callSends.isEmpty)
+        #expect(coordinator.calls.state == .idle)
+    }
+
+    @Test func aRoomsCallIsJoinedUnderTheNickWeHoldThere() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        coordinator.handle(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/ali")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        #expect(coordinator.canJoinGroupCall(in: groupRoom))
+        let joining = Task { await coordinator.joinGroupCall(in: groupRoom, video: true) }
+        await eventually { !port.callSends.isEmpty }
+        #expect(port.callSends == [.groupPresence(groupRoom, "ali", .init(state: .preparing))])
+        coordinator.calls.clear()
+        _ = await joining.value
+    }
+
+    @Test func aRoomsCallCannotBeJoinedWhileAnotherCallIsLive() async {
+        let (coordinator, _) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        coordinator.handle(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/ali")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
+        coordinator.calls.clear()
     }
 
     @Test func optedOutSessionIgnoresRoomCallPresence() async {
@@ -104,8 +137,9 @@ import Testing
     }
 
     private var activePresence: WirePresence {
-        WirePresence(from: JID(parsing: "room@muc.waddle.test/alice")!, kind: .available,
-            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]),
+        // Someone else's: our own device is in a call only while our slot says so.
+        WirePresence(from: JID(parsing: "room@muc.waddle.test/bob")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callPeer, statusCodes: []),
             groupCall: .init(isPreparing: false, media: CallMedia(audio: true, video: true), isHandRaised: true, isMuted: true))
     }
 

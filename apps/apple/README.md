@@ -120,6 +120,12 @@ ended. It derives what to show from the call slot and the media phase
 (`CallStage` in WaddleKit); `CallDockView` draws each stage without a session,
 so the snapshot tests cover them all.
 
+A room's call (XEP-0272) shows in the same dock as `GroupCallDockView`, staged
+by `GroupCallStage`: the room, the people in it from `GroupCallRoster` (the
+SFU's participants while connected, the room's Muji presence otherwise), and
+mute, camera, raise-hand and leave controls. A room with a call we are not in
+shows `RoomCallBanner` above its timeline, with a Join button.
+
 The SDK version is pinned in `project.yml`. To check a new SDK or SFU version,
 run the connect tests against that SFU version locally (they skip without the
 URL):

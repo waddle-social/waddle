@@ -14,7 +14,7 @@ import Testing
         f.port.heldCallVerbs = []
         f.port.releaseCallSends()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),
             .groupPresence(groupRoom, "alice", .init(state: .active(video: false))),
@@ -197,7 +197,7 @@ extension GroupCallRaceTests {
         let joining = await f.begin()
         f.echo()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.store.lastError == "muc call preparation failed")
         #expect(f.port.callSends == [.groupPresence(groupRoom, "alice", .init(state: .preparing)), .groupPresence(groupRoom, "alice", .init(state: .left))])
     }
@@ -210,7 +210,7 @@ extension GroupCallRaceTests {
         f.own = nil
         f.echo()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.store.lastError == "muji session initiate failed: no bound resource")
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),

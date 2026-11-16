@@ -51,6 +51,41 @@ final class LiveKitCallMediaTests: XCTestCase {
         XCTAssertEqual(media.phase, .idle)
     }
 
+    func testAloneInARoomTheParticipantsAreJustUs() async throws {
+        let media = LiveKitCallMediaController()
+        try await media.connect(
+            join: sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac"),
+            media: CallMedia(audio: false, video: false), iceServers: []
+        )
+        XCTAssertEqual(media.participantIdentities, ["alice@waddle.test/mac"])
+        await media.disconnect()
+        XCTAssertEqual(media.participantIdentities, [], "a forgotten room has no participants")
+    }
+
+    /// The SDK reports joins and leaves through optional delegate methods,
+    /// which a wrong signature would silently never receive.
+    func testSomeoneJoiningAndLeavingIsSeen() async throws {
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = LiveKitCallMediaController()
+        let bob = LiveKitCallMediaController()
+        let none = CallMedia(audio: false, video: false)
+        try await alice.connect(join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: none, iceServers: [])
+        try await bob.connect(join: sfu.join(room: room, identity: "bob@waddle.test/phone"), media: none, iceServers: [])
+
+        try await until { alice.participantIdentities == ["alice@waddle.test/mac", "bob@waddle.test/phone"] }
+        await bob.disconnect()
+        try await until { alice.participantIdentities == ["alice@waddle.test/mac"] }
+        await alice.disconnect()
+    }
+
+    private func until(timeout: Duration = .seconds(10), _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else { return XCTFail("timed out") }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     func testJoinsWithAdvertisedIceServers() async throws {
         let media = LiveKitCallMediaController()
         let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")

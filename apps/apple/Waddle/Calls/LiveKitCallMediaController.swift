@@ -15,10 +15,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     private(set) var phase: CallMediaPhase = .idle
     private(set) var connectedSince: Date?
+    private(set) var mediaUpSince: Date?
     private(set) var isMicrophoneOn = false
     private(set) var isCameraOn = false
     private(set) var isMicrophoneBlocked = false
     private(set) var isCameraBlocked = false
+    private(set) var participantIdentities: [String] = []
+    private(set) var speakingIdentities: Set<String> = []
     /// What the person last asked of each device in this call. It outlives
     /// the room, so a reconnect or a replacement session does not unmute
     /// them or turn their camera back on.
@@ -67,7 +70,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         if phase == .connecting { phase = .connected }
         connectedSince = .now
+        mediaUpSince = .now
         refreshTracks()
+        refreshParticipants()
         // Publishing is best effort and separate from joining: a missing
         // device or a denied permission leaves the user in the call,
         // receive-only, as on web and Android. It runs on its own so a
@@ -147,7 +152,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         observer = nil
         phase = .idle
         connectedSince = nil
+        mediaUpSince = nil
         refreshTracks()
+        refreshParticipants()
     }
 
     /// Only the room still in use changes the call. `disconnect()` forgets
@@ -157,14 +164,21 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard changed === room else { return }
         switch change {
         case .dropped: onFailure?()
-        case .reconnecting: phase = .reconnecting
+        case .reconnecting:
+            phase = .reconnecting
+            refreshParticipants()
         case .reconnected:
             // A reconnect that failed reports its end too, after the drop.
             guard changed.connectionState == .connected else { return }
             phase = .connected
+            mediaUpSince = .now
             reconcileTracks(in: changed)
+            refreshParticipants()
         case .tracks:
             reconcileTracks(in: changed)
+            refreshParticipants()
+        case .participants:
+            refreshParticipants()
         }
     }
 
@@ -229,6 +243,35 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if localTrack !== preview { localTrack = preview }
         if remoteTrack !== remote { remoteTrack = remote }
     }
+
+    /// Reads who is in the room, and who of them is speaking, as they are
+    /// now; like `refreshTracks`, never applied as deltas. Only a connected
+    /// room has a roster: a reconnect may replace every participant.
+    private func refreshParticipants() {
+        guard let room, phase == .connected else {
+            if !participantIdentities.isEmpty { participantIdentities = [] }
+            if !speakingIdentities.isEmpty { speakingIdentities = [] }
+            return
+        }
+        // Ours first, then everyone else in the order they joined, so the
+        // roster keeps its order from one report to the next.
+        let remotes = room.remoteParticipants.values.sorted { lhs, rhs in
+            switch (lhs.joinedAt, rhs.joinedAt) {
+            case let (left?, right?) where left != right: left < right
+            case (.some, nil): true
+            case (nil, .some): false
+            default: (lhs.identity?.stringValue ?? "") < (rhs.identity?.stringValue ?? "")
+            }
+        }
+        let everyone: [Participant] = [room.localParticipant] + remotes
+        let identities = everyone.compactMap { $0.identity?.stringValue }
+        // Each participant's own flag, not `room.activeSpeakers`: the SDK
+        // hears about speakers over two channels and keeps that list up to
+        // date for only one of them.
+        let speaking = Set(everyone.filter(\.isSpeaking).compactMap { $0.identity?.stringValue })
+        if participantIdentities != identities { participantIdentities = identities }
+        if speakingIdentities != speaking { speakingIdentities = speaking }
+    }
 }
 
 enum CallMediaError: Error {
@@ -243,6 +286,8 @@ private enum RoomChange {
     case reconnected
     /// A track was published, subscribed, muted or removed, on either side.
     case tracks
+    /// Someone joined, or the set of people speaking changed.
+    case participants
 }
 
 /// Hands room events to the controller as an ordered stream. The
@@ -302,5 +347,13 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
 
     func room(_ room: Room, participantDidDisconnect _: RemoteParticipant) {
         forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participantDidConnect _: RemoteParticipant) {
+        forward(.participants, from: room)
+    }
+
+    func room(_ room: Room, didUpdateSpeakingParticipants _: [Participant]) {
+        forward(.participants, from: room)
     }
 }

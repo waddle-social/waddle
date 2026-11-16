@@ -32,9 +32,6 @@ struct CallDockView: View {
     var announcesChanges = true
     let actions: CallDockActions
 
-    @Environment(\.horizontalSizeClass) private var sizeClass
-    /// An icon-only control's glyph box, so a toggle stays square as text grows.
-    @ScaledMetric(relativeTo: .body) private var iconWidth: CGFloat = 20
     @ScaledMetric(relativeTo: .body) private var endedGlyphSize: CGFloat = 17
 
     var body: some View {
@@ -111,19 +108,7 @@ struct CallDockView: View {
     }
 
     private var status: some View {
-        HStack(spacing: Theme.Spacing.xs) {
-            if case .inCall = stage {
-                Circle()
-                    .fill(Theme.Colors.live)
-                    .frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
-            }
-            Text(statusText)
-                .huddleText(Theme.Typography.label.weight(stage.isInSession ? 600 : 400))
-                .monospacedDigit()
-                .foregroundStyle(statusColor)
-                .accessibilityAddTraits(stageIsInCall ? .updatesFrequently : [])
-        }
+        CallStatusLine(text: statusText, isLive: stageIsInCall, isEmphasised: stage.isInSession, color: statusColor)
     }
 
     private var statusText: String {
@@ -214,11 +199,7 @@ struct CallDockView: View {
         _ title: String, symbol: String, _ variant: HuddleButtonStyle.Variant, _ stretched: Bool,
         _ action: @escaping @MainActor () -> Void
     ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol)
-                .frame(maxWidth: stretched ? .infinity : nil)
-        }
-        .buttonStyle(.huddle(variant))
+        CallLabelledButton(title: title, symbol: symbol, variant: variant, stretched: stretched, action: action)
     }
 
     private func endButton(stretched: Bool) -> some View {
@@ -228,28 +209,20 @@ struct CallDockView: View {
     }
 
     private func microphoneToggle(stretched: Bool) -> some View {
-        let title = isMicrophoneOn ? "Mute" : "Unmute"
-        return Button(action: actions.toggleMicrophone) {
-            Image(systemName: isMicrophoneOn ? "mic.fill" : "mic.slash.fill")
-                .foregroundStyle(isMicrophoneOn ? Theme.Colors.fg : Theme.Colors.dangerText)
-                .frame(minWidth: iconWidth, maxWidth: stretched ? .infinity : iconWidth)
-        }
-        .buttonStyle(.huddle())
+        CallIconToggle(
+            title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic.fill" : "mic.slash.fill",
+            tint: isMicrophoneOn ? Theme.Colors.fg : Theme.Colors.dangerText, stretched: stretched,
+            action: actions.toggleMicrophone
+        )
         .disabled(!hasMedia)
-        .accessibilityLabel(Text(title))
-        .help(title)
     }
 
     private func cameraToggle(stretched: Bool) -> some View {
-        let title = isCameraOn ? "Turn camera off" : "Turn camera on"
-        return Button(action: actions.toggleCamera) {
-            Image(systemName: isCameraOn ? "video.fill" : "video.slash.fill")
-                .frame(minWidth: iconWidth, maxWidth: stretched ? .infinity : iconWidth)
-        }
-        .buttonStyle(.huddle())
+        CallIconToggle(
+            title: isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video.fill" : "video.slash.fill",
+            stretched: stretched, action: actions.toggleCamera
+        )
         .disabled(!hasMedia)
-        .accessibilityLabel(Text(title))
-        .help(title)
     }
 
     /// While the media session is still connecting, the devices are about
@@ -267,56 +240,16 @@ struct CallDockView: View {
         stage.isInSession && (remoteVideo != nil || localVideo != nil)
     }
 
-    /// The peer's camera in a 16:9 frame, or their avatar while it is off,
-    /// with our own preview inset in the corner.
+    /// The peer's camera, or their avatar while it is off.
     private var videoStage: some View {
-        // Concentric with the card: its radius less its padding, floored.
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-        return ZStack {
-            Theme.Colors.surface2
-            if let remoteVideo {
-                remoteVideo
-            } else {
-                avatar(size: Theme.Size.callStageAvatar)
-            }
+        CallVideoStage(
+            remoteVideo: remoteVideo, localVideo: localVideo,
+            label: remoteVideo == nil ? "\(peerName)’s camera is off" : "\(peerName)’s video"
+        ) {
+            avatar(size: Theme.Size.callStageAvatar)
         }
-        .overlay {
-            if let localVideo {
-                GeometryReader { stage in
-                    localPreview(localVideo, width: stage.size.width * Metrics.previewShare)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                }
-            }
-        }
-        .aspectRatio(16 / 9, contentMode: .fit)
-        .clipShape(shape)
-        .frame(maxWidth: .infinity, maxHeight: sizeClass == .compact ? Metrics.compactStageHeight : Metrics.stageHeight)
-        .accessibilityElement()
-        .accessibilityLabel(Text(remoteVideo == nil ? "\(peerName)’s camera is off" : "\(peerName)’s video"))
-    }
-
-    private func localPreview(_ video: AnyView, width: CGFloat) -> some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-        return video
-            .frame(width: width, height: width / Metrics.previewAspect)
-            .clipShape(shape)
-            .overlay(shape.strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair))
-            .padding(Theme.Spacing.s)
     }
 
     /// The widest card: at this width a height-capped stage still fills it.
-    static let maxWidth = Metrics.stageHeight * 16 / 9 + 2 * Theme.Spacing.l
-
-    private enum Metrics {
-        static let stageHeight: CGFloat = 360
-        static let compactStageHeight: CGFloat = 240
-        /// Our preview's share of the stage's width.
-        static let previewShare: CGFloat = 0.25
-        /// Width over height: held upright on a phone, landscape on a Mac.
-        #if os(iOS)
-        static let previewAspect: CGFloat = 3 / 4
-        #else
-        static let previewAspect: CGFloat = 16 / 9
-        #endif
-    }
+    static let maxWidth = CallVideoMetrics.stageHeight * 16 / 9 + 2 * Theme.Spacing.l
 }

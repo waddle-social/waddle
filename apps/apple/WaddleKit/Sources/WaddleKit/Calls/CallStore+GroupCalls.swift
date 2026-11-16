@@ -14,7 +14,7 @@ extension CallStore {
         let epoch = generation
         cancelTimers()
         transition(.joiningGroup(attempt))
-        setGroupMarkers(hand: false, muted: !media.audio)
+        setGroupMarkers(hand: false, muted: !media.audio, confirmedMute: !media.audio)
         groupControl.advertisedHand = false
         let identity = ownJID()
         guard groupStillPending(attempt, epoch: epoch) else { return false }
@@ -22,8 +22,19 @@ extension CallStore {
     }
 
     /// Room presence is parsed at the bridge, including absence as a leave marker.
+    ///
+    /// This device is in a room's call only while the slot says so. The room
+    /// can echo a presence we sent just before leaving after we have left,
+    /// and that must not put us back in the call; another device of ours is
+    /// someone else as far as this goes.
     public func handleGroupPresence(_ presence: WirePresence) {
-        groupPresence.apply(presence)
+        groupPresence.apply(presence, ignoringCallMarker: isLateOwnEcho(presence))
+    }
+
+    private func isLateOwnEcho(_ presence: WirePresence) -> Bool {
+        guard presence.groupCall?.media != nil, !groupSlotHolds(presence.from.bare),
+            let occupant = presence.occupant else { return false }
+        return occupant.realJID.map { $0 == ownJID() } ?? occupant.statusCodes.contains(110)
     }
 
     private func runGroupSetup(_ attempt: GroupCallAttempt, identity: JID?, epoch: Int) async -> Bool {
@@ -115,7 +126,10 @@ extension CallStore {
 
     private func rollbackGroup(_ attempt: GroupCallAttempt, identity: JID?, message: String, epoch: Int) async -> Bool {
         guard groupStillPending(attempt, epoch: epoch), case .joiningGroup(let claimed) = state else { return false }
-        _ = claimHangUp()
+        // Nobody chose this ending, so it stays on show: tapping Join must
+        // not look like nothing happened.
+        cancelTimers()
+        transition(.ended(sid: attempt.sid, reason: .error))
         await teardownGroup(.joiningGroup(claimed), identity: identity, epoch: epoch)
         reportError(message, epoch: epoch)
         return false
@@ -145,7 +159,7 @@ extension CallStore {
         if !cleared { reportError("muji leave presence failed", epoch: epoch) }
         // A successor may have claimed the room while the leave was in flight.
         if !groupSlotHolds(room) { groupPresence.clearParticipant(in: room, nick: nick, realJID: identity) }
-        if !state.isGroupPhase { setGroupMarkers(hand: false, muted: false) }
+        if !state.isGroupPhase { setGroupMarkers(hand: false, muted: false, confirmedMute: false) }
     }
 
     func terminateGroup(in room: BareJID, sid: String, epoch: Int) async {
@@ -174,11 +188,20 @@ extension CallStore {
         case .idle, .incoming, .outgoing, .active, .ended: return
         }
         if cancelsWaits { cancelGroupWaits(for: claimed) }
+        forgetOwnGroupEntry(in: room, nick: nick, identity: identity, epoch: epoch)
         _ = await groupControl.serializePresence { [self] in
             await leaveGroupPresenceNow(in: room, nick: nick, identity: identity, epoch: epoch)
             if terminates { await terminateGroup(in: room, sid: sid, epoch: epoch) }
             return true
         }
+    }
+
+    /// We are out of the call as soon as the slot says so; the roster must
+    /// not show us in it while the leave is still on its way to the room.
+    /// Skipped when a newer attempt already holds the room.
+    func forgetOwnGroupEntry(in room: BareJID, nick: String, identity: JID?, epoch: Int) {
+        guard generation == epoch, !groupSlotHolds(room) else { return }
+        groupPresence.clearParticipant(in: room, nick: nick, realJID: identity)
     }
 
     /// A claimed attempt's waits end at once, whoever claimed it.
@@ -213,6 +236,11 @@ extension CallStore {
         let epoch = generation
         cancelGroupWaits(for: claimed)
         transition(.ended(sid: event.sid, reason: reason))
+        if case .inGroup(let call) = claimed {
+            forgetOwnGroupEntry(in: call.room, nick: call.nick, identity: ownJID(), epoch: epoch)
+        } else if case .joiningGroup(let call) = claimed {
+            forgetOwnGroupEntry(in: call.room, nick: call.nick, identity: ownJID(), epoch: epoch)
+        }
         Task { [weak self] in
             guard let self else { return }
             await self.teardownGroup(claimed, identity: self.ownJID(), epoch: epoch, cancelsWaits: false)

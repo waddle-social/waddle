@@ -161,13 +161,56 @@ import Testing
         f.store.clear()
     }
 
+    @Test func leavingRemovesUsFromTheRoomsRosterAtOnce() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        f.store.handleGroupPresence(groupWire(nick: "bob", media: callAudio, realJID: callPeer))
+        // The leave is still on its way to the room.
+        f.port.heldCallVerbs = ["groupPresence"]
+        let leaving = Task { await f.store.hangUp() }
+        await eventually { f.store.state == .idle }
+        #expect(f.store.groupPresence.participants[groupRoom]?.map(\.nick) == ["bob"])
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        await leaving.value
+        f.store.clear()
+    }
+
+    @Test func aLateEchoOfOurOwnPresenceDoesNotPutUsBackInACallWeLeft() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        await f.store.hangUp()
+        // The room echoes a hand raise we sent just before leaving.
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        #expect(f.store.groupPresence.participants[groupRoom] == nil)
+        // Another device of ours is a call we can still join.
+        let sibling = JID(parsing: "\(callOwn.bare)/other")!
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: sibling))
+        #expect(f.store.groupPresence.participants[groupRoom]?.count == 1)
+        f.store.clear()
+    }
+
+    @Test func aCallTheMixerEndedDropsUsFromItsRosterAtOnce() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.store.handleGroupPresence(groupWire(nick: "alice", media: callAudio, realJID: callOwn))
+        f.port.heldCallVerbs = ["groupPresence"]
+        f.store.handle(CallEvent(from: groupMixer, sid: "g1", kind: .sessionTerminate(reason: .success)))
+        #expect(f.store.groupPresence.participants[groupRoom] == nil)
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        f.store.clear()
+    }
+
     @Test func losingTheStreamWhileJoiningAbandonsTheJoin() async {
         let f = GroupFixture()
         let joining = await f.begin()
         // What the session coordinator does when the stream drops.
         f.store.groupPresence.clear()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),
             .groupPresence(groupRoom, "alice", .init(state: .left)),

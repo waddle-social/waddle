@@ -65,6 +65,9 @@ private struct ConversationContent: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     ConnectionBanner(status: session.connection)
+                    if conversation.isRoom {
+                        RoomCallBanner(room: conversation.jid)
+                    }
                     if newestFirst {
                         composerStack(placeholder: header.composerPlaceholder)
                     }
@@ -86,7 +89,10 @@ private struct ConversationContent: View {
             .toolbar {
                 ConversationToolbar(
                     conversation: conversation,
-                    canCall: !session.calls.state.isLive && session.connection == .online,
+                    canCall: conversation.isRoom
+                        ? session.canJoinGroupCall(in: conversation.jid)
+                        : !session.calls.state.isLive && session.connection == .online,
+                    roomHasCall: conversation.isRoom && session.calls.groupPresence.hasCall(in: conversation.jid),
                     onCall: startCall,
                     onSearch: { navigation.sheet = .search(conversation) },
                     onPins: showPins,
@@ -200,8 +206,14 @@ private struct ConversationContent: View {
         }
     }
 
-    /// The call shows in the dock above the shell, not in this screen.
+    /// The call shows in the dock above the shell, not in this screen. In
+    /// a room the buttons start the room's call, or join the one in progress.
     private func startCall(video: Bool) {
+        guard !conversation.isRoom else {
+            let room = conversation.jid
+            Task { await session.joinGroupCall(in: room, video: video) }
+            return
+        }
         let calls = session.calls
         let peer = conversation.jid
         Task { _ = await calls.startCall(to: peer, media: CallMedia(audio: true, video: video)) }
