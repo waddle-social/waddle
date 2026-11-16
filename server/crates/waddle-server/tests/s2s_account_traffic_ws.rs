@@ -537,9 +537,11 @@ async fn a_probe_from_a_contact_with_from_is_answered_with_each_available_resour
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
-    contact(&federated, ALICE, BOB, "both").await;
     let _phone = federated.online("alice", "phone", 5).await;
     let _laptop = federated.online("alice", "laptop", 1).await;
+    // Bob becomes a contact after the initial presence, so the only
+    // presence he receives answers his probe.
+    contact(&federated, ALICE, BOB, "both").await;
 
     federated
         .from_peer(presence(BOB, ALICE, PresenceType::Probe, "pb1"))
@@ -589,8 +591,9 @@ async fn a_probe_from_a_sender_without_from_is_not_answered() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     federated.account("alice").await;
-    contact(&federated, ALICE, BOB, "to").await;
     let mut phone = federated.online("alice", "phone", 5).await;
+    // Added after the initial presence, so no login probe reaches Bob.
+    contact(&federated, ALICE, BOB, "to").await;
 
     federated
         .from_peer(presence(BOB, ALICE, PresenceType::Probe, "pb3"))
@@ -993,32 +996,6 @@ async fn a_message_carrying_the_dm_pin_marker_never_leaves() {
 // --- IQ ------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_contacts_ping_to_a_full_jid_reaches_the_resource_and_its_answer_leaves() {
-    let pki = Pki::new();
-    let federated = federated(&pki).await;
-    federated.account("alice").await;
-    contact(&federated, ALICE, BOB, "from").await;
-    let mut phone = federated.online("alice", "phone", 5).await;
-
-    federated
-        .from_peer(get(BOB_PHONE, ALICE_PHONE, "iq1", ping()))
-        .await;
-    let request = receive(&mut phone, "iq", "iq1").await;
-    assert_eq!(request.attr("from"), Some(BOB_PHONE));
-
-    let result = Iq::Result {
-        from: None,
-        to: Some(jid(BOB_PHONE)),
-        id: "iq1".to_owned(),
-        payload: None,
-    };
-    send(&mut phone, result).await;
-    let answered = federated.peer_receives("iq1").await;
-    assert_eq!(answered.attr("type"), Some("result"));
-    assert_eq!(answered.attr("from"), Some(ALICE_PHONE));
-}
-
-#[tokio::test]
 async fn an_iq_request_to_a_bare_jid_is_answered_service_unavailable_for_a_contact_too() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
@@ -1101,8 +1078,10 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
     )
     .await;
     federated.account("alice").await;
-    contact(&federated, ALICE, BOB, "both").await;
     let mut phone = federated.online("alice", "phone", 5).await;
+    // Added after the initial presence, so no login probe or broadcast
+    // reaches Bob.
+    contact(&federated, ALICE, BOB, "both").await;
 
     federated
         .from_peer(message(

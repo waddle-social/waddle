@@ -228,9 +228,23 @@ impl Federated {
     }
 
     /// An authenticated client of `localpart` with `resource` bound, that
-    /// has sent its initial presence with `priority`.
+    /// has requested its roster, and so receives roster pushes and the
+    /// subscription stanzas sent to interested resources (RFC 6121
+    /// §2.1.6), and has then sent its initial presence with `priority`.
     pub async fn online(&self, localpart: &str, resource: &str, priority: i8) -> WsXmppClient {
         let mut client = self.loopback.client(localpart, resource).await;
+        let roster = waddle_ws_test_support::iq::round_trip(
+            &mut client,
+            Iq::from_get(
+                ["roster-", resource].concat(),
+                xmpp_parsers::roster::Roster {
+                    ver: None,
+                    items: Vec::new(),
+                },
+            ),
+        )
+        .await;
+        assert!(matches!(roster, Iq::Result { .. }), "{roster:?}");
         let mut presence = Presence::new(PresenceType::None).with_priority(priority);
         presence.id = Some(["initial-", resource].concat());
         send(&mut client, presence).await;
