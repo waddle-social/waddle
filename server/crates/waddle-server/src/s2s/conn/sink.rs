@@ -23,7 +23,12 @@ pub enum SinkVerdict {
     /// nothing more from its peer, and offers nothing more, until the wait
     /// ends: the peer's further stanzas wait in the transport, and the peer
     /// sees its writes slow down. The wait takes the stanza when room frees
-    /// and must end within a deadline of the sink's own.
+    /// and must end within a deadline of the sink's own; that deadline
+    /// bounds one stanza's wait, and a stream may wait again for each later
+    /// stanza. A stream that ends for its idle timeout, its maximum age,
+    /// eviction or replacement after a wait and before reading again ends
+    /// as [`StreamEnd::Lost`], since what the peer wrote meanwhile is
+    /// unread.
     Wait(SinkWait),
 }
 
@@ -36,6 +41,10 @@ pub enum Waited {
     /// is lost, and the stream closes with `resource-constraint` and ends
     /// as [`StreamEnd::Lost`].
     Overloaded,
+    /// The sink is stopping and took nothing more. The stanza is lost, and
+    /// the stream closes with `system-shutdown` and ends as
+    /// [`StreamEnd::Lost`].
+    Stopping,
 }
 
 /// A stanza the sink takes once it has room for it.

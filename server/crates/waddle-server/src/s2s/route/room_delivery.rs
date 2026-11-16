@@ -14,7 +14,8 @@
 //! A room's queue, each shard, and each remote domain's share of a shard
 //! are bounded. A stanza beyond a bound is not dropped: the stream that
 //! carried it waits, reading nothing more from its peer, until the stanza
-//! fits ([`RoomQueues::push_or_wait`]), so a room's burst, such as the
+//! fits ([`RoomQueues::push_or_wait`]), up to a deadline for each stanza,
+//! so a room's burst, such as the
 //! presence of every occupant before the joining occupant's own (XEP-0045
 //! §7.2.3), arrives in full and in order. One remote domain cannot hold
 //! more than its share of a shard, so the rooms of other domains on that
@@ -207,9 +208,10 @@ fn lock(shard: &Mutex<Shard>) -> std::sync::MutexGuard<'_, Shard> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Placed {
     Queued,
-    /// The deadline passed or the router is stopping; the stanza was not
-    /// queued.
+    /// The deadline passed; the stanza was not queued.
     TimedOut,
+    /// The router is stopping; the stanza was not queued.
+    Stopped,
 }
 
 impl RoomQueues {
@@ -293,7 +295,7 @@ impl RoomQueues {
             }
             tokio::select! {
                 biased;
-                () = stop.cancelled() => return Placed::TimedOut,
+                () = stop.cancelled() => return Placed::Stopped,
                 () = tokio::time::sleep_until(deadline) => return Placed::TimedOut,
                 () = &mut freed => {}
             }

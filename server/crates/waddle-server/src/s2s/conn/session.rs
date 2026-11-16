@@ -193,9 +193,16 @@ pub(super) struct Session {
     /// in flight: the transport reached end of file, the idle timeout or
     /// the maximum age while the peer had a first-level element unfinished,
     /// a write did not complete within its deadline, the peer left a
-    /// first-level element unfinished past its deadline, or the stanza sink
-    /// could not take a stanza within its deadline.
+    /// first-level element unfinished past its deadline, the stanza sink
+    /// could not take a stanza within its deadline, or the stream ended for
+    /// a deadline, eviction or replacement before reading again after a
+    /// wait for the sink.
     lost: bool,
+    /// The connection waited for the stanza sink and has not read from the
+    /// peer since. The peer may have written stanzas meanwhile that are
+    /// still unread in the transport, so ending the stream now for a
+    /// deadline, eviction or replacement may lose them.
+    waited_since_read: bool,
     /// The peer ended the stream with `connection-timeout`: it closed an
     /// idle stream, as this server does, and nothing is known to be lost.
     peer_idle_close: bool,
@@ -241,6 +248,7 @@ impl Session {
             admission_refused: false,
             capacity_refusal: None,
             lost: false,
+            waited_since_read: false,
             peer_idle_close: false,
         }
     }
@@ -311,11 +319,13 @@ impl Session {
                     self.stream.signal(Signal::Shutdown)
                 }
                 Event::Evicted => {
+                    self.lose_unread();
                     self.evicted = true;
                     self.stream.signal(Signal::ResourceExhausted)
                 }
                 // A newer stream for the same pair took over.
                 Event::Replaced => {
+                    self.lose_unread();
                     self.replaced = true;
                     self.stream.signal(Signal::Conflict)
                 }
@@ -325,8 +335,11 @@ impl Session {
                 Event::Deadline(_) if self.deadline().0 > Instant::now() => continue,
                 // The idle timeout and the maximum age end the stream in an
                 // orderly way unless the peer was in the middle of an
-                // element, which is then lost.
+                // element, which is then lost, or the connection has not
+                // read since it waited for the sink, so that what the peer
+                // wrote meanwhile is lost unread.
                 Event::Deadline(DeadlineKind::Timeout) => {
+                    self.lose_unread();
                     self.lose_unfinished();
                     self.stream.signal(Signal::Timeout)
                 }
@@ -335,6 +348,7 @@ impl Session {
                     self.stream.signal(Signal::Timeout)
                 }
                 Event::Deadline(DeadlineKind::Expired) => {
+                    self.lose_unread();
                     self.lose_unfinished();
                     self.stream.signal(Signal::Expired)
                 }
@@ -342,12 +356,15 @@ impl Session {
                 // the codec reports it, so end of file here arrived before
                 // any close: the peer dropped the connection. Peers drop
                 // idle connections this way, so it loses something only
-                // when the peer was in the middle of an element.
+                // when the peer was in the middle of an element. Nothing
+                // the peer wrote is left unread behind an end of file,
+                // whether or not the connection waited for the sink before.
                 Event::Read(Ok(0)) => {
                     self.lose_unfinished();
                     return S2sOutcome::PeerClosed;
                 }
                 Event::Read(Ok(read)) => {
+                    self.waited_since_read = false;
                     let outputs = self.stream.receive(&buffer[..read]);
                     self.after_receive(!outputs.is_empty());
                     outputs
@@ -442,6 +459,17 @@ impl Session {
     /// has a first-level element unfinished.
     fn lose_unfinished(&mut self) {
         if self.incomplete.is_some() {
+            self.lost = true;
+        }
+    }
+
+    /// Record that the stream may have lost stanzas if it ends now without
+    /// having read since it waited for the sink: the peer may have written
+    /// more while the connection read nothing, and those stanzas would be
+    /// dropped unread. A peer that wrote nothing more is reported the same
+    /// way, since nothing tells the two apart without reading.
+    fn lose_unread(&mut self) {
+        if self.waited_since_read {
             self.lost = true;
         }
     }
@@ -597,9 +625,12 @@ impl Session {
     /// Wait for the sink to take a stanza. The stream's own ends still
     /// apply meanwhile: shutdown, eviction and replacement end the wait and
     /// the stream, and the stanza is lost. A wait the sink gives up on ends
-    /// the stream with `resource-constraint` and loses the stanza. Time
+    /// the stream with `resource-constraint`, and one the sink ends because
+    /// it is stopping with `system-shutdown`; either loses the stanza. Time
     /// spent waiting is not counted against the element the peer may have
-    /// left unfinished behind the stanza, since nothing was read.
+    /// left unfinished behind the stanza, since nothing was read. A stanza
+    /// the sink takes counts as traffic, so a stream that waited is neither
+    /// idle nor a candidate for eviction because of the wait.
     async fn wait_for_sink(&mut self, wait: SinkWait) -> Vec<Output> {
         /// What ended a wait before the sink did.
         enum Interrupted {
@@ -607,6 +638,7 @@ impl Session {
             Evicted,
             Replaced,
         }
+        self.waited_since_read = true;
         let started = Instant::now();
         let shutdown = self.shared.shutdown.clone();
         let evict = self.tokens.evict.clone();
@@ -617,11 +649,15 @@ impl Session {
             () = evict.cancelled(), if !self.evicted => Some(Interrupted::Evicted),
             () = replace.cancelled(), if !self.replaced => Some(Interrupted::Replaced),
             waited = wait => match waited {
-                Waited::Taken => None,
+                Waited::Taken => {
+                    self.activity.traffic();
+                    None
+                }
                 Waited::Overloaded => {
                     self.lost = true;
                     return self.stream.signal(Signal::ResourceExhausted);
                 }
+                Waited::Stopping => Some(Interrupted::Shutdown),
             },
         };
         if let Some(unfinished) = &mut self.incomplete {
@@ -1125,9 +1161,11 @@ impl Session {
 /// How an established stream that ended with `outcome` ended, for the
 /// sink. `lost` is whether it ended without an orderly close (end of file,
 /// the idle timeout or the maximum age with an element unfinished, a write
-/// past its deadline, an element left unfinished past its deadline, or a
-/// stanza the sink could not take in time), which may have lost stanzas in
-/// flight whatever the outcome. `peer_idle_close` is whether the peer
+/// past its deadline, an element left unfinished past its deadline, a
+/// stanza the sink could not take in time or took while stopping, or the
+/// idle timeout, the maximum age, eviction or replacement before the
+/// connection read again after waiting for the sink), which may have lost
+/// stanzas in flight whatever the outcome. `peer_idle_close` is whether the peer
 /// closed the stream with `connection-timeout`, which is orderly. Otherwise
 /// the idle timeout, the maximum age, end of file and either side's close
 /// are orderly, and a stream error, a transport failure or a withdrawn

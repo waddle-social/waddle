@@ -131,8 +131,10 @@ pub struct RouterLimits {
     /// Of one worker's share, the stanzas from one remote domain, so that
     /// one peer cannot fill a worker's queue for the rooms of others.
     pub room_deliveries_per_peer: usize,
-    /// How long a stream waits for its stanza to fit before the stanza is
-    /// given up and the stream closed with `resource-constraint`.
+    /// How long a stream waits for one stanza to fit before the stanza is
+    /// given up and the stream closed with `resource-constraint`. The bound
+    /// is per stanza: a stream whose next stanza also finds the queues full
+    /// waits again, so a stream may spend longer than this waiting in all.
     pub room_delivery_wait: Duration,
     /// Workers deciding and delivering room traffic; each serves its own
     /// share of rooms in order.
@@ -2105,6 +2107,7 @@ impl Inner {
                             telemetry::room_traffic_overloaded();
                             Waited::Overloaded
                         }
+                        Placed::Stopped => Waited::Stopping,
                     }
                 }));
             }
