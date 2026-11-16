@@ -113,6 +113,11 @@ extension FFIXmppPort {
         do {
             try await client.sendMujiSessionTerminate(roomJid: room.description, sid: sid)
             return true
+        } catch WaddleError.Stanza(condition: "item-not-found", text: _) {
+            // XEP-0166 unknown-session: the mixer has already dropped the
+            // session. The leave presence that precedes a terminate does
+            // exactly that, so this is the usual answer, not a failure.
+            return true
         } catch {
             BridgeLog.debug("muji session terminate failed: \(error)")
             return false

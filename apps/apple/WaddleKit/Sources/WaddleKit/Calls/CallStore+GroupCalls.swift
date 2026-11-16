@@ -158,7 +158,11 @@ extension CallStore {
     /// go through the presence queue as one unit, leave first: a rejoin of
     /// the same room queues behind both, so the old session's terminate can
     /// never reach the mixer after the new attempt's advertisement.
-    func teardownGroup(_ claimed: CallState, identity: JID?, epoch: Int) async {
+    ///
+    /// `cancelsWaits` is false for a cleanup that runs later than its claim:
+    /// waits are found by room and nick, and by then they may belong to the
+    /// next attempt in the same room.
+    func teardownGroup(_ claimed: CallState, identity: JID?, epoch: Int, cancelsWaits: Bool = true) async {
         let room: BareJID
         let nick: String
         let sid: String
@@ -168,7 +172,7 @@ extension CallStore {
         case .inGroup(let call): (room, nick, sid, terminates) = (call.room, call.nick, call.sid, true)
         case .idle, .incoming, .outgoing, .active, .ended: return
         }
-        cancelGroupWaits(for: claimed)
+        if cancelsWaits { cancelGroupWaits(for: claimed) }
         _ = await groupControl.serializePresence { [self] in
             await leaveGroupPresenceNow(in: room, nick: nick, identity: identity, epoch: epoch)
             if terminates { await terminateGroup(in: room, sid: sid, epoch: epoch) }
@@ -192,8 +196,9 @@ extension CallStore {
 extension CallStore {
     /// Only the account's mixer can end a group sid; peer and sibling ends
     /// cannot. The slot ends as the event is handled, so a join in flight
-    /// stops and media disconnects at once; only the wire cleanup waits its
-    /// turn behind earlier sends.
+    /// stops and media disconnects at once. The wire cleanup runs on its
+    /// own, ordered by the presence queue, so it neither waits behind
+    /// unrelated 1:1 sends nor holds them up.
     func endGroupFromRemote(_ event: CallEvent) -> Bool {
         guard state.isGroupPhase, state.sid == event.sid, event.from.bare == groupControl.mixer else { return false }
         let reason: CallEndReason
@@ -207,9 +212,9 @@ extension CallStore {
         let epoch = generation
         cancelGroupWaits(for: claimed)
         transition(.ended(sid: event.sid, reason: reason))
-        enqueue { [weak self] in
+        Task { [weak self] in
             guard let self else { return }
-            await self.teardownGroup(claimed, identity: self.ownJID(), epoch: epoch)
+            await self.teardownGroup(claimed, identity: self.ownJID(), epoch: epoch, cancelsWaits: false)
         }
         return true
     }

@@ -36,6 +36,31 @@ import Testing
         f.store.clear()
     }
 
+    @Test func rejoiningRightAfterTheMixerEndedAJoinIsNotCancelledByItsCleanup() async {
+        var number = 0
+        let f = GroupFixture(sid: {
+            number += 1
+            return "g\(number)"
+        })
+        let first = await f.begin()
+        f.port.heldCallVerbs = ["reject"]
+        f.store.handle(CallEvent(from: carol, sid: "c9", kind: .propose(callAudio)))
+        await eventually { f.port.callSends.contains(.reject(carol, "c9", false)) }
+        f.store.handle(CallEvent(from: groupMixer, sid: "g1", kind: .sessionTerminate(reason: .success)))
+        let second = Task { await f.store.joinGroupCall(in: groupRoom, media: callAudio, nick: "alice") }
+        await eventually { f.store.state.sid == "g2" }
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        try? await Task.sleep(for: .milliseconds(50))
+        // The room echoes the second attempt's preparing presence.
+        f.echo()
+        await eventually { f.port.callSends.contains(.groupInitiate(groupRoom, callOwn, "g2", false)) }
+        #expect(f.store.state.sid == "g2")
+        #expect(await !first.value)
+        f.store.clear()
+        _ = await second.value
+    }
+
     @Test func rejoiningARoomWaitsForTheLastCallsLeaveAndTerminate() async {
         var number = 0
         let f = GroupFixture(sid: {
