@@ -300,7 +300,7 @@ not the machine. Both stopped shards 1 and 4 after about 30 seconds with
 
 The three smaller variants are re-run as pass 2 below.
 
-### Pass 2, 2026-11-16 (in progress)
+### Pass 2, 2026-11-16
 
 [Run 43809236991](https://github.com/waddle-social/waddle/actions/runs/43809236991):
 the three smaller variants with test threads equal to cores per shard.
@@ -309,6 +309,8 @@ the three smaller variants with test threads equal to cores per shard.
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `32x64` (baseline, pass 1) | pass | 72 min | 20.8 min | 5.9 min | 12.7 min | 665 | 10.1 / 26.9 | 1.6 / 11.0 | 19.6 GB |
 | `16x32` | pass | 13 min | 24.0 min | 7.5 min | 13.4 min | 384 | 6.5 / 14.0 | 1.8 / 8.1 | 18.5 GB |
+| `16x32-j8` | **fail** (one test) | 38 min | 22.5 min | 6.2 min | 14.4 min | 360 | 7.0 / 15.8 | 1.8 / 7.6 | 19.2 GB |
+| `8x32` | **fail** (one test) | 61 min | 24.1 min | 6.2 min | 16.4 min | 193 | 5.0 / 7.7 | 1.7 / 5.3 | 18.6 GB |
 
 `16x32` passes all tests on half the machine: 3.2 minutes slower (15%) for
 42% fewer vCPU-minutes, and two fit where one 32x64 does.
@@ -319,3 +321,29 @@ the three smaller variants with test threads equal to cores per shard.
   on the same shape and settings. That 80 s spread is run-to-run noise, so
   the compile penalty of 16 vCPUs is somewhere between 15 s and 95 s.
 - Peak memory was 18.5 GB of 32.
+
+`16x32-j8` and `8x32` each ran every test and failed one. Lane times are
+still comparable because nothing stopped early.
+
+- `16x32-j8` failed `clustering_cluster_e2e`
+  `failure_matrix::same_full_jid_bound_concurrently_on_two_nodes_leaves_one_binding`.
+  The production 32x64 lane failed the same test the same night
+  ([run 43797636635](https://github.com/waddle-social/waddle/actions/runs/43797636635)),
+  so this is an existing flake, not evidence against the shape.
+- `8x32` failed
+  `ledger_preflight::tests::postgres17_ledger_preflight_v1030_read_only_locks_in_order`
+  ("database is being accessed by other users" on teardown). That test did
+  not fail in any other run here. With two cores per shard it may be a timing
+  failure the smaller machine provokes; one run cannot tell.
+- `8x32` compiles as fast as the others (373 s) but its tests are slower: the
+  slowest shard took 982 s against 761 s on the baseline.
+- Raising cargo jobs to 8 on 16 vCPUs made no measurable difference, as on
+  32 vCPUs.
+
+### Flakiness limits what one run shows
+
+The production lane failed twice out of three attempts on this pull request
+during the benchmark, on two different cluster tests
+(`live_session_resumes_on_the_other_node` and the `failure_matrix` test
+above). A single failure on a smaller shape therefore cannot be blamed on the
+shape. Pass 3 repeats the three smaller variants.
