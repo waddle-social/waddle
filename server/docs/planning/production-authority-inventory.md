@@ -17,7 +17,8 @@ replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
 placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
-the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd` (see the last refresh below); the original
+the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
+through `1b6d8a5cb129719d8ff0fbf8b3aed1a86a3ef189` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1197,6 +1198,78 @@ was added, and no decision of standing moved.
   decides which rooms are managed.
 - The raw scan holds 1633 records, unchanged in content. 4 records in
   that file moved because it gained lines.
+
+The selected evidence was refreshed a twenty-fifth time, through
+`1b6d8a5cb129719d8ff0fbf8b3aed1a86a3ef189`, after reviewing the delta of the reviewed files since the
+twenty-fourth refresh. Eight reviewed files changed, four files were added
+to the reviewed set, and seventeen anchors moved without a change to their
+text.
+
+- The permission actor's write messages (`WriteTuple`,
+  `ReplaceExclusiveRelation`, `SwapExclusiveRelation`) gained a refusal
+  (`d8-actor-privileged-issuance`): the channel `manager` and `moderator`,
+  the Space `moderator` and the role `manager` relations are written for a
+  user subject only when its home is a served domain or a trusted home
+  (ADR-0020 D8). No production call site names those relations; the actor
+  is the one place every writer passes. The policy is attached at startup
+  from the account domain and the S2S snapshot the replica runs
+  (`d8-actor-policy`); an actor without one, as suites build, asks nothing.
+  `local`, `hg-writer-fence` and `hg-reader-fence` moved. No read path
+  changed.
+- Two writers of a Space's PubSub affiliations decide D8 issuance:
+  `spaces:set-role` for the owner and admin roles (`d8-space-set-role`),
+  and the `<affiliations/>` change on the Spaces service for the owner,
+  publisher and publish-only affiliations (`d8-space-affiliations`), before
+  any change of a request is applied. `space-admin`, `space-delete`,
+  `hg-admin-space-listing` and `pubsub-admin` moved.
+- The Spaces PubSub service is reachable by remote principals
+  (`s2s-space-host`), so the PubSub writers of the Spaces service
+  (configuration, purge, deletion, affiliations, subscriptions, and publish
+  and retract with their channel placement) are reachable from an S2S
+  stream through one entry (`s2s-space-remote-change`). They are reached
+  only after peer admission, after the node was found open to the asker
+  (`s2s-space-open`) and only for a principal whose privilege the effect
+  boundary honours (`s2s-space-change`): a trusted home on a `pkix` stream.
+  The handlers then decide as for a session, with the remote account as
+  their subject: the node's Owner affiliation for the `pubsub#owner`
+  requests, and the Space `owner` relationship and authority over the room
+  for a placement. No writer issues the Space `owner` relationship to a
+  remote account. A remote principal's PubSub affiliation is honoured by
+  `s2s-space-honoured`: a ban always, a membership on any admitted stream,
+  and the privileged affiliations only with honoured privilege, otherwise
+  as nothing.
+- Two storage planes were added in the global database (migrations 2012
+  and 2013): `s2s_federated_spaces`, the Spaces whose `federated` setting
+  is on, written by a Space owner's configuration form through a session
+  (`s2s-space-federated-setting`) and removed when the Space is deleted;
+  and `s2s_space_subscriptions`, the subscriptions remote accounts made
+  themselves (`s2s-space-subscription-record`), each with the stream
+  evidence of its request. Neither is a grant store: the first only opens
+  a Space to requests that are then decided, and the second only admits
+  notifications. Rows of the second are a second source of recorded stream
+  evidence beside the seat table (`hg-seat-evidence` moved; the
+  constructor is unchanged and its comment names both).
+- The PubSub fan-out (`fanout` and `hg-fanout-recheck` moved) skips a
+  Space's subscribers at other servers in its local loop and hands the
+  event to `s2s-space-notify`, which decides each on the evidence its
+  subscription recorded, reads the deliverable subscriptions again for the
+  publication, tells a subscriber only of a room it may be told of
+  (`s2s-space-room-visible`, the catalog's `federated` column and
+  `HostGrantGate::allows_as` for a managed room) and queues one stanza for
+  each on the router (`s2s-space-event-egress`), which checks peer
+  admission again at the write. Fan-out from an enrolled scope's Space
+  still returns before any of it.
+- `server/http.rs` attaches the Spaces host where S2S is enabled
+  (`startup-call` and `hg-recovery` moved), and the router's hosting module
+  reports the Spaces service as reachable where a host is attached and
+  shares two rate helpers (`s2s-seat-egress`, `s2s-carried-request`,
+  `s2s-adopted-seats` and `s2s-seat-adoption` moved). `startup-schema`
+  moved with the lines added to `server/lifecycle.rs`.
+- The raw scan holds 1635 records, two more than before, both in
+  `server/routes/websocket/s2s_spaces.rs`: the Spaces host's `space_enrolled`
+  check and the notification pass's `list_deliverable_subscribers` read.
+  The other records are unchanged in content; those in the changed files
+  moved with the lines added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
