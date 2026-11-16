@@ -571,7 +571,10 @@ async fn seat_room_occupancy_in(
         let (occupants, adopted) = remote_reseating(state, room, occupants).await;
         let Some(occupants) = host_grant_reseating(state, room, occupants).await else {
             // Nothing is seated: the seats taken over are ended all the
-            // same, so their occupants are told and no row stays behind.
+            // same, so no row stays behind. An occupant is told that its
+            // seat ended only once the room removed its occupancy, which
+            // the room never seated here: it learns that it is not joined
+            // at its next request.
             state
                 .deps
                 .remote_route

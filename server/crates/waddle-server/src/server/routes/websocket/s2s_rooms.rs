@@ -99,8 +99,11 @@ use crate::server::routes::interpret::plan_remote_occupant_groupchat;
 /// XEP-0045 status code 110: the presence is the occupant's own.
 const STATUS_SELF: &str = "110";
 
-/// Longest one ask of a room actor waits.
-const ROOM_ASK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest one ask of a room actor waits: below the router's budget for
+/// one request (5 s by default), so that a room that does not answer in
+/// time is answered for, as "cannot be told", before the router gives the
+/// request up.
+const ROOM_ASK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Longest the effects of one accepted room message may take.
 const MESSAGE_EFFECTS_TIMEOUT: Duration = Duration::from_secs(5);

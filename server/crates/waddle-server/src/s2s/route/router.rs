@@ -168,10 +168,12 @@ pub struct RouterLimits {
     /// workers. A stream whose stanza finds no place beyond this, or beyond
     /// its remote domain's share below, stops reading until it fits.
     pub room_requests: usize,
-    /// Of those, the stanzas for one room. A stanza beyond it is answered
-    /// as its kind is answered when refused, or dropped, and holds no
-    /// stream: one room cannot stop a stream that carries the stanzas of
-    /// other rooms. A leave and a delivery error do not count against it.
+    /// Of those, the stanzas for one room, never above half of a remote
+    /// domain's share below. A stanza beyond it is answered as its kind is
+    /// answered when refused, or dropped, and holds no stream: one room
+    /// cannot stop a stream that carries the stanzas of other rooms, nor
+    /// fill what the domain's stanzas for its other rooms need. A leave and
+    /// a delivery error do not count against it.
     pub room_requests_per_room: usize,
     /// Of one worker's share, the stanzas from one remote domain.
     pub room_requests_per_peer: usize,
@@ -199,10 +201,11 @@ pub struct RouterLimits {
     pub room_request_burst: u32,
     /// Of its domain's rate, the stanzas one remote account may address to
     /// the MUC service a second, on average: requests, messages, chat
-    /// states and markers alike. A stanza beyond it is not taken, and the
-    /// domain's rate is not spent on it, so one account cannot spend what
-    /// the other accounts of its domain may send. Never above the domain's
-    /// rate.
+    /// states, markers and changes of presence alike, joins aside, which
+    /// count against the account's share of presence alone. A stanza
+    /// beyond it is not taken, and the domain's rate is not spent on it, so
+    /// one account cannot spend what the other accounts of its domain may
+    /// send. Never above the domain's rate.
     pub room_request_rate_per_account: u32,
     /// How many such stanzas one remote account may send at once before
     /// its rate applies. Never above the domain's burst.
@@ -301,7 +304,7 @@ impl Default for RouterLimits {
             seats_per_account: 64,
             seats: 65_536,
             room_requests: 1024,
-            room_requests_per_room: 64,
+            room_requests_per_room: 32,
             room_requests_per_peer: 64,
             room_request_workers: 4,
             room_request_wait: Duration::from_secs(30),
@@ -710,6 +713,15 @@ impl S2sRouter {
             options.limits.room_deliveries_per_room,
             options.limits.room_deliveries_per_peer,
         );
+        // A room's share of the request queues and of the placement stage
+        // is at most half of a remote domain's, so that the stanzas one
+        // room holds never fill what the domain's stanzas for its other
+        // rooms need.
+        let room_requests_per_room = options
+            .limits
+            .room_requests_per_room
+            .min(options.limits.room_requests_per_peer / 2)
+            .max(1);
         let inner = Arc::new(Inner {
             config: options.config,
             served: options.served,
@@ -726,7 +738,7 @@ impl S2sRouter {
             local_rooms: RoomQueues::new(
                 options.limits.room_request_workers,
                 options.limits.room_requests,
-                options.limits.room_requests_per_room,
+                room_requests_per_room,
                 options.limits.room_requests_per_peer,
             ),
             allowances: Mutex::new(HashMap::new()),
@@ -734,7 +746,7 @@ impl S2sRouter {
             presence_allowances: Mutex::new(HashMap::new()),
             placements: Placements::new(PlacementBounds {
                 waiting: options.limits.room_requests,
-                waiting_per_room: options.limits.room_requests_per_room,
+                waiting_per_room: room_requests_per_room,
                 waiting_per_peer: options.limits.room_requests_per_peer,
                 placing: options.limits.room_placements,
                 placing_per_peer: options.limits.room_placements_per_peer,

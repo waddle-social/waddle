@@ -23,6 +23,11 @@
 //! delivery error, when the room no longer seats the occupant, when this
 //! replica takes it over from one that stopped, and when this replica
 //! stops, which tells the occupant so.
+//!
+//! The workers that hand requests to the room host spend a bounded time on
+//! each request, and hand a seat's end to workers of their own, so a slow
+//! room holds back neither its shard nor a stream; a stanza for a room
+//! whose share of the queues is full is answered by itself.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
@@ -812,9 +817,15 @@ impl Inner {
         }
     }
 
-    /// Answer a request that was not placed with `error`, if a place for
-    /// the answer is free.
+    /// Answer a request that was not placed with `error`, as its kind is
+    /// answered when refused, if a place for the answer is free. Whether
+    /// presence without the `muc` element enters the room cannot be told
+    /// where the room is not held, so it is taken for a change and
+    /// dropped.
     fn refuse_unplaced(self: &Arc<Self>, request: &LocalRoomRequest, error: StanzaError) {
+        if !kind_of(&request.stanza, || false).answered() {
+            return;
+        }
         let Some(reply) = replies::error_reply(&request.stanza, error) else {
             return;
         };
@@ -2013,9 +2024,13 @@ impl Inner {
                 self.close_seat(&seat);
             }
         }
+        // An occupant that holds a seat here under another generation is
+        // left to the loop above: the room may name the occupancy a join
+        // that is entering again is replacing, and a seat the room does
+        // not name ends there, after which its occupancy is removed here.
         for (occupant, session) in seated {
             if self.served.serves(occupant.domain())
-                || self.seats.holds_under(room, &occupant, session)
+                || self.seats.holds(room, &occupant)
                 || self.seat_ends.ending(room, &occupant, session)
             {
                 continue;

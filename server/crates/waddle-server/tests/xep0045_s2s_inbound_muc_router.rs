@@ -878,6 +878,11 @@ async fn an_occupant_of_another_server_without_a_seat_is_removed_from_its_room()
 
 #[tokio::test]
 async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
+    // By default one room's share is at most half of its domain's, so the
+    // requests one slow room holds never fill what the domain's requests
+    // for its other rooms need.
+    let defaults = RouterLimits::default();
+    assert!(2 * defaults.room_requests_per_room <= defaults.room_requests_per_peer);
     let limits = RouterLimits {
         // One worker for every room, two places for one room, and a short
         // budget for each item.
