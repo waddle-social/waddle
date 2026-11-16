@@ -1856,12 +1856,14 @@ async fn restricted_runtime_role_serves_without_ddl() {
         return;
     };
     let prepared = Prepared::new(&url).await;
-    // An upgraded database can hold a roster item whose contact is not a
-    // local account. Startup prunes it together with the owner's version.
+    // An upgraded database can hold a roster item whose contact is no
+    // account of a domain the deployment serves. Startup prunes it together
+    // with the owner's version; a contact at a domain the deployment does
+    // not serve is a remote contact and stays.
     for statement in [
         format!(
             "INSERT INTO {SCHEMA}.roster_items (user_jid, contact_jid) \
-             VALUES ('alice@localhost', 'ghost@elsewhere.example')"
+             VALUES ('alice@localhost', 'ghost@localhost')"
         ),
         format!(
             "INSERT INTO {SCHEMA}.roster_versions (user_jid, version) \
@@ -1897,7 +1899,7 @@ async fn restricted_runtime_role_serves_without_ddl() {
     );
     let dangling: i64 = sqlx::query_scalar(&format!(
         "SELECT (SELECT pg_catalog.count(*) FROM {SCHEMA}.roster_items \
-                  WHERE contact_jid = 'ghost@elsewhere.example') \
+                  WHERE contact_jid = 'ghost@localhost') \
               + (SELECT pg_catalog.count(*) FROM {SCHEMA}.roster_versions \
                   WHERE version = 'stale')"
     ))
