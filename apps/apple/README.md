@@ -120,6 +120,14 @@ ended. It derives what to show from the call slot and the media phase
 (`CallStage` in WaddleKit); `CallDockView` draws each stage without a session,
 so the snapshot tests cover them all.
 
+Outside the dock a 1:1 call is heard and, when Waddle is not in front, seen.
+`CallAlert` in WaddleKit says what the call slot asks for: a ring for a call
+coming in (silenced by Do Not Disturb), ringback for a placed call while the
+other side is ringing. `Calls/CallRinger.swift` plays the tones, which
+`CallTone` synthesises, and posts a notification with Accept and Decline while
+the app is not active. This only works while the app is running; CallKit and
+VoIP push are not there yet.
+
 A room's call (XEP-0272) shows in the same dock as `GroupCallDockView`, staged
 by `GroupCallStage`: the room, the people in it from `GroupCallRoster` (the
 SFU's participants while connected, the room's Muji presence otherwise), and

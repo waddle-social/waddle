@@ -3,13 +3,17 @@ import UserNotifications
 import WaddleKit
 
 /// Local notifications for incoming messages, with inline reply and
-/// mark-read actions, grouped per conversation.
+/// mark-read actions, grouped per conversation; and for a call that rings
+/// while Waddle is not in front, with Accept and Decline.
 @MainActor
 final class NotificationController: NSObject {
     /// Each callback names the account the notification was posted for.
     var onOpenConversation: ((BareJID, ConversationID) -> Void)?
     var onReply: ((BareJID, ConversationID, String) async -> Void)?
     var onMarkRead: ((BareJID, ConversationID) async -> Void)?
+    /// Accept or Decline on a call notification, with the call's session id.
+    var onAnswerCall: ((BareJID, String) async -> Void)?
+    var onDeclineCall: ((BareJID, String) async -> Void)?
     var showsPreviews = true
 
     /// Whether the app is frontmost. Set by the scene phase.
@@ -29,6 +33,10 @@ final class NotificationController: NSObject {
         static let conversationKey = "conversation"
         static let kindKey = "kind"
         static let accountKey = "account"
+        static let callCategory = "waddle.call"
+        static let acceptCall = "waddle.call.accept"
+        static let declineCall = "waddle.call.decline"
+        static let callKey = "call"
         /// The object the Push Service adds next to `aps`.
         static let pushRoutingKey = "waddle"
     }
@@ -46,10 +54,40 @@ final class NotificationController: NSObject {
             textInputPlaceholder: "Message"
         )
         let markRead = UNNotificationAction(identifier: Identifier.markRead, title: "Mark as Read", options: [])
+        // Accept brings Waddle forward: the call needs the microphone and
+        // somewhere to be seen. Decline is done from where the person is.
+        let accept = UNNotificationAction(identifier: Identifier.acceptCall, title: "Accept", options: [.foreground])
+        let decline = UNNotificationAction(identifier: Identifier.declineCall, title: "Decline", options: [.destructive])
         center.setNotificationCategories([
-            UNNotificationCategory(identifier: Identifier.category, actions: [reply, markRead], intentIdentifiers: [], options: [])
+            UNNotificationCategory(identifier: Identifier.category, actions: [reply, markRead], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: Identifier.callCategory, actions: [accept, decline], intentIdentifiers: [], options: []),
         ])
     }
+
+    /// Posts the ring for a call. `playsSound` is for a device whose app
+    /// cannot ring by itself in the background.
+    func postIncomingCall(sid: String, callerName: String, isVideo: Bool, for account: BareJID, playsSound: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = callerName
+        content.body = isVideo ? "Incoming video call" : "Incoming voice call"
+        content.categoryIdentifier = Identifier.callCategory
+        content.userInfo = [Identifier.accountKey: account.description, Identifier.callKey: sid]
+        content.interruptionLevel = .timeSensitive
+        #if os(iOS)
+        if playsSound { content.sound = .defaultRingtone }
+        #else
+        if playsSound { content.sound = .default }
+        #endif
+        center.add(UNNotificationRequest(identifier: Self.callIdentifier(sid), content: content, trigger: nil))
+    }
+
+    /// The call was answered, declined or is gone: its ring goes with it.
+    func clearIncomingCall(sid: String) {
+        center.removePendingNotificationRequests(withIdentifiers: [Self.callIdentifier(sid)])
+        center.removeDeliveredNotifications(withIdentifiers: [Self.callIdentifier(sid)])
+    }
+
+    private static func callIdentifier(_ sid: String) -> String { "call#\(sid)" }
 
     func requestAuthorizationIfNeeded() {
         guard !hasRequestedAuthorization else { return }
@@ -181,6 +219,20 @@ extension NotificationController: UNUserNotificationCenterDelegate {
     ) async {
         // Parse before hopping: the userInfo dictionary is not Sendable.
         let userInfo = response.notification.request.content.userInfo
+        if let sid = userInfo[Identifier.callKey] as? String {
+            guard let account = Self.account(from: userInfo) else { return }
+            // A tap on the ring itself only brings Waddle forward, where
+            // the dock shows the call.
+            let action = response.actionIdentifier
+            await MainActor.run {
+                switch action {
+                case Identifier.acceptCall: Task { await self.onAnswerCall?(account, sid) }
+                case Identifier.declineCall: Task { await self.onDeclineCall?(account, sid) }
+                default: break
+                }
+            }
+            return
+        }
         guard let target = Self.target(from: userInfo) else { return }
         let (account, conversation) = target
         let action = response.actionIdentifier
