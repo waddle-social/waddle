@@ -53,6 +53,8 @@ public struct ActiveCall: Hashable, Sendable {
     }
 }
 
+/// Why the slot ended. `expired` is a lost XEP-0353 tie-break; `finished`
+/// carries the Jingle condition of a `<finish/>` or session-terminate.
 public enum CallEndReason: Hashable, Sendable {
     case rejected, retracted, expired, timeout, error
     case finished(JingleReason?)

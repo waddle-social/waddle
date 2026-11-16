@@ -3,7 +3,7 @@ import Testing
 @testable import WaddleKit
 @testable import WaddleKitTestSupport
 
-@MainActor @Suite struct CallStoreTieBreakTests {
+@MainActor @Suite("Call tie-breaks and migration") struct CallStoreTieBreakTests {
     @Test func unrelatedCallerIsBusyRejected() async {
         let f = CallFixture()
         f.store.handle(f.event(.propose(callAudio)))

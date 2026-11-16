@@ -1,10 +1,51 @@
+import Foundation
 import Testing
 
 @testable import WaddleKit
 @testable import WaddleKitTestSupport
 
 @MainActor
-@Suite struct CallStoreTests {
+@Suite("Call store") struct CallStoreTests {
+    @Test func proceedBeatsARingTimeoutThatIsAlreadyDue() async {
+        let f = CallFixture(ringTimeout: .milliseconds(50))
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        // The deadline passes while the main actor is busy, so the timer
+        // and the peer's proceed are both due; the proceed is handled first.
+        holdMainActor(for: 0.2)
+        f.store.handle(f.event(.proceed))
+        await eventually { f.port.callSends.count == 2 }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .initiate(callPeer, callOwn, "c1", callAudio)])
+        #expect(f.store.state == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn)))
+        f.store.clear()
+    }
+
+    @Test func declinedInvitationIsNotRungAfterwards() async {
+        let f = CallFixture()
+        let dave = JID(parsing: "dave@waddle.test/tab")!
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        #expect(await f.store.acceptIncoming())
+        // The session-accept send is held, so later effects queue behind it.
+        f.port.heldCallVerbs = ["accept"]
+        f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio)))
+        await eventually { f.port.callSends.count == 3 }
+        f.store.handle(f.event(.sessionTerminate(reason: .success)))
+        f.store.handle(f.event(.propose(callAudio), sid: "c3", from: dave))
+        #expect(await f.store.declineIncoming())
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        await eventually { f.port.completedCallSends.count == 4 }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(
+            f.port.callSends == [
+                .ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
+                .reject(dave, "c3", false),
+            ])
+        #expect(f.store.state == .idle)
+        f.store.clear()
+    }
+
     @Test func incomingProposeRingsTheCallersBareJID() async {
         let f = CallFixture()
         f.store.handle(f.event(.propose(callVideo)))
@@ -103,7 +144,7 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             ringTimeout: .seconds(10), sessionTimeout: .milliseconds(30), newSid: { "c-out" })
         #expect(await store.startCall(to: callPeer.bare, media: callVideo))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-out", kind: .proceed))
+        store.handle(CallEvent(from: callPeer, sid: "c-out", kind: .proceed))
         await eventually { port.callSends.count == 3 }
         #expect(
             port.callSends == [
@@ -331,4 +372,9 @@ import Testing
         f.store.clear()
     }
 
+}
+
+/// Blocks the calling thread, so main-actor work that falls due meanwhile queues up.
+private func holdMainActor(for seconds: TimeInterval) {
+    Thread.sleep(forTimeInterval: seconds)
 }

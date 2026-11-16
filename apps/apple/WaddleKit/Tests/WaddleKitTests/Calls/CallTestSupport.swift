@@ -23,6 +23,6 @@ let callJoin = CallJoin(url: "wss://livekit.waddle.test", room: "dm-room", ident
         port: port, ownJID: { [weak self] in self?.own }, ownBareJID: callOwn.bare, ringTimeout: ringTimeout,
         sessionTimeout: sessionTimeout, newSid: sid)
     func event(_ kind: CallEvent.Kind, sid: String = "c1", from: JID = callPeer) -> CallEvent {
-        CallEvent(from: from, to: nil, sid: sid, kind: kind)
+        CallEvent(from: from, sid: sid, kind: kind)
     }
 }

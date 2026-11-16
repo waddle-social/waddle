@@ -8,5 +8,6 @@
     /// partially opened media session.
     func connect(join: CallJoin, media: CallMedia) async throws
 
+    /// Releases the microphone, camera and SFU connection. Safe to call when not connected.
     func disconnect() async
 }

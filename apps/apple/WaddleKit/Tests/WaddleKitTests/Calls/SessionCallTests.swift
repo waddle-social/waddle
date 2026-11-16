@@ -9,8 +9,8 @@ struct SessionCallTests {
     @Test func streamLossPreservesTheActiveCallSlot() async {
         let (coordinator, port) = session()
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         await eventually { port.callSends.contains(.accept(callPeer, callOwn, "c1", callAudio)) }
         port.callSends = []
         port.emit(.disconnected)
@@ -41,8 +41,8 @@ struct SessionCallTests {
     @Test func stopBoundsHeldTerminateAndIgnoresNewInvitations() async {
         let (coordinator, port) = session()
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         await eventually { port.callSends.contains(.accept(callPeer, callOwn, "c1", callAudio)) }
         port.callSends = []
         port.completedCallSends = []
@@ -54,7 +54,7 @@ struct SessionCallTests {
         }
         await eventually { port.callSends == [.terminate(callPeer, "c1", .success)] }
         #expect(port.disconnectCount == 0)
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c2", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c2", kind: .propose(callAudio))))
         port.emit(.authenticationFailed)
         await eventually { coordinator.connection == .authenticationFailed }
         #expect(coordinator.calls.state == .idle)
@@ -74,7 +74,7 @@ struct SessionCallTests {
     @Test(arguments: [false, true]) func stopAnswersIncomingCallBeforeDisconnecting(accepting: Bool) async {
         let (coordinator, port) = session()
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
         await eventually { port.callSends == [.ringing(callPeer.bare, "c1")] }
         if accepting { #expect(await coordinator.calls.acceptIncoming()) }
         port.callSends = []
@@ -91,8 +91,8 @@ struct SessionCallTests {
     @Test func stopTerminatesActiveCallAndSendsFinishBeforeDisconnecting() async {
         let (coordinator, port) = session()
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         await eventually { port.callSends.contains(.accept(callPeer, callOwn, "c1", callAudio)) }
         port.callSends = []
         await coordinator.stop()
@@ -113,7 +113,7 @@ struct SessionCallTests {
         let coordinator = SessionCoordinator(
             account: AccountIdentity(jid: callOwn.bare, nick: "alice", resource: callOwn.resource), port: port, handlesCalls: true)
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
         await eventually { port.callSends == [.ringing(callPeer.bare, "c1")] }
         #expect(coordinator.calls.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
         #expect(port.callSends == [.ringing(callPeer.bare, "c1")])
@@ -125,7 +125,7 @@ struct SessionCallTests {
         let coordinator = SessionCoordinator(
             account: AccountIdentity(jid: callOwn.bare, nick: "alice", resource: callOwn.resource), port: port)
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
         // A later event is an arrival-order barrier for the ignored call.
         port.emit(.authenticationFailed)
         await eventually { coordinator.connection == .authenticationFailed }
@@ -140,9 +140,9 @@ struct SessionCallTests {
         let coordinator = SessionCoordinator(
             account: AccountIdentity(jid: callOwn.bare, nick: "alice", resource: resource), port: port, handlesCalls: true)
         coordinator.start()
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .propose(callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
         await eventually { port.callSends.count == 1 }
-        port.emit(.call(CallEvent(from: callPeer, to: nil, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
+        port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callAudio))))
         if resource == "waddle-apple-1" {
             await eventually { port.callSends.count == 2 }
             #expect(port.callSends == [.ringing(callPeer.bare, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])

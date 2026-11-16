@@ -49,8 +49,7 @@ import Observation
         let before = state
         switch event.kind {
         case .reject where before.sid != event.sid, .retract where before.sid != event.sid:
-            recentlyAbortedSids.removeAll { $0 == event.sid }
-            recentlyAbortedSids.append(event.sid)
+            if !recentlyAbortedSids.contains(event.sid) { recentlyAbortedSids.append(event.sid) }
             if recentlyAbortedSids.count > 256 { recentlyAbortedSids.removeFirst() }
         default: break
         }
@@ -67,7 +66,8 @@ import Observation
             !(before.isIncoming && before.sid == event.sid)
         {
             enqueue { [weak self] in
-                guard let self else { return }
+                // A decline that ran while this effect was queued already answered the proposer.
+                guard let self, self.state.isIncoming, self.state.sid == event.sid else { return }
                 _ = await self.send(epoch: epoch, error: "call ringing failed") {
                     await self.port.sendCallRinging(to: event.from.bare, sid: event.sid)
                 }
@@ -120,16 +120,7 @@ import Observation
         guard case .incoming(let target) = state else { return false }
         cancelTimers()
         state = .idle
-        let epoch = generation
-        let sent: Bool
-        if target.isAccepting {
-            sent = await port.sendCallFinish(to: target.from, sid: target.sid, reason: .cancel)
-        } else {
-            sent = await port.sendCallReject(to: target.from, sid: target.sid, tieBreak: false)
-        }
-        guard generation == epoch else { return false }
-        if !sent { lastError = target.isAccepting ? "call finish failed" : "call reject failed" }
-        return sent
+        return await answerDeclined(target)
     }
 
     /// Clearing a session fences all suspended sends as well as queued effects.
@@ -199,7 +190,8 @@ import Observation
         let epoch = generation
         ringTimer = Task { [weak self, ringTimeout] in
             do { try await Task.sleep(for: ringTimeout) } catch { return }
-            guard let self, self.generation == epoch,
+            // A sleep whose deadline already passed returns normally even when cancelled.
+            guard !Task.isCancelled, let self, self.generation == epoch,
                 case .outgoing(let current) = self.state, current.sid == sid
             else { return }
             self.state = .ended(sid: sid, reason: .timeout)
@@ -215,7 +207,7 @@ import Observation
         let epoch = generation
         sessionTimer = Task { [weak self, sessionTimeout] in
             do { try await Task.sleep(for: sessionTimeout) } catch { return }
-            guard let self, self.generation == epoch,
+            guard !Task.isCancelled, let self, self.generation == epoch,
                 case .outgoing(let current) = self.state, current.sid == sid
             else { return }
             self.state = .ended(sid: sid, reason: .timeout)
@@ -231,7 +223,7 @@ import Observation
         let epoch = generation
         sessionTimer = Task { [weak self, sessionTimeout] in
             do { try await Task.sleep(for: sessionTimeout) } catch { return }
-            guard let self, self.generation == epoch, self.state.isIncoming, self.state.sid == sid else { return }
+            guard !Task.isCancelled, let self, self.generation == epoch, self.state.isIncoming, self.state.sid == sid else { return }
             self.state = .ended(sid: sid, reason: .timeout)
             _ = await self.send(epoch: epoch, error: "call finish failed") {
                 await self.port.sendCallFinish(to: peer, sid: sid, reason: .timeout)

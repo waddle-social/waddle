@@ -30,6 +30,7 @@
 		0996D2FE659F4260C27E24C1 /* FFILocked.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */; };
 		09DBCB9ED5A10E02EA3E54A7 /* MessageRichBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE2907041A875E132FBDE57 /* MessageRichBody.swift */; };
 		0A0C91106F1C0C2AD2B170F9 /* FFILocked.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */; };
+		0B2C93D2ACE9FFCFA3A5A18C /* FFIOutbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */; };
 		0B6AB9FA4BD443A5B30BDB18 /* FFIXmppPort+Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDE7DDBFAF9910770EE38879 /* FFIXmppPort+Profile.swift */; };
 		0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A68A7084A9D1741E90F3447B /* HuddleSnapshot.swift */; };
 		0BDD82A8F0290DEBD9239EBE /* SnapshotTesting in Frameworks */ = {isa = PBXBuildFile; productRef = 9CBDF87FE630CD70063DE484 /* SnapshotTesting */; };
@@ -312,6 +313,7 @@
 		A2E330E99263C2025436BD8D /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3BBDDB0DC99803D3EEC777E /* EmojiCatalog.swift */; };
 		A40A369E2EB4DE78F3AB3F80 /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47CB426A26582C047EB9477 /* ConversationComposer.swift */; };
 		A4DC77BF3BFA5D27E6EF6783 /* MentionHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */; };
+		A5514123D2A2BE0352BB77F8 /* FFIOutbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */; };
 		A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
 		A98D9A45A461088AB8FF4E15 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082EE4552E0588E35D76D98 /* SearchSheet.swift */; };
 		AA7275AC30C39DDF1E59095A /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
@@ -508,6 +510,7 @@
 		1AE36378C327949710DA48E9 /* FFIInbound+SafetyScores.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+SafetyScores.swift"; sourceTree = "<group>"; };
 		1B0C820EA40536B55023B88C /* ConversationHeaderText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHeaderText.swift; sourceTree = "<group>"; };
 		1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedAttachmentModel.swift; sourceTree = "<group>"; };
+		2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIOutbound+Call.swift"; sourceTree = "<group>"; };
 		23892C2B3A078BA52981F443 /* SplitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitShell.swift; sourceTree = "<group>"; };
 		24FC01964BF3C9A444AC8C8C /* MemberRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberRows.swift; sourceTree = "<group>"; };
 		27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentLoader.swift; sourceTree = "<group>"; };
@@ -834,6 +837,7 @@
 				1AE36378C327949710DA48E9 /* FFIInbound+SafetyScores.swift */,
 				19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */,
 				FC140B908325AEC014CE3D7E /* FFIOutbound.swift */,
+				2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */,
 				883F76BB4172D356990947A1 /* FFIOutbound+Values.swift */,
 				62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */,
 				BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */,
@@ -1728,6 +1732,7 @@
 				8EC1ABA94053BAFEBBEBE55E /* FFIInbound+SafetyScores.swift in Sources */,
 				32E1AE53B5B835EF28107EB6 /* FFIInbound.swift in Sources */,
 				0A0C91106F1C0C2AD2B170F9 /* FFILocked.swift in Sources */,
+				0B2C93D2ACE9FFCFA3A5A18C /* FFIOutbound+Call.swift in Sources */,
 				38AE4281C3EEF348D3AEA4B2 /* FFIOutbound+Values.swift in Sources */,
 				09836B94B95F7A6A3009EDE7 /* FFIOutbound.swift in Sources */,
 				237686D6632D2EF5CCC21266 /* FFIRFC3339.swift in Sources */,
@@ -1957,6 +1962,7 @@
 				66497F2BBD161FEAF3309C55 /* FFIInbound+SafetyScores.swift in Sources */,
 				4C2A848898D5C57370AF4EB9 /* FFIInbound.swift in Sources */,
 				0996D2FE659F4260C27E24C1 /* FFILocked.swift in Sources */,
+				A5514123D2A2BE0352BB77F8 /* FFIOutbound+Call.swift in Sources */,
 				DD98F748713969B37298A3A0 /* FFIOutbound+Values.swift in Sources */,
 				6E28C165381D38973ED24039 /* FFIOutbound.swift in Sources */,
 				A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */,

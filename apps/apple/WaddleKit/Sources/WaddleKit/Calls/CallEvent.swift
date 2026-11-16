@@ -32,12 +32,10 @@ public enum JingleReason: Hashable, Sendable, CaseIterable {
 /// A parsed live XEP-0353 invitation or XEP-0166 session event.
 public struct CallEvent: Hashable, Sendable {
     public let from: JID
-    public let to: JID?
     public let sid: String
     public let kind: Kind
-    public init(from: JID, to: JID?, sid: String, kind: Kind) {
+    public init(from: JID, sid: String, kind: Kind) {
         self.from = from
-        self.to = to
         self.sid = sid
         self.kind = kind
     }
@@ -53,4 +51,11 @@ public struct CallEvent: Hashable, Sendable {
     }
 }
 
-public enum CallTerminateOutcome: Hashable, Sendable { case ok, orphaned, error }
+/// How the server answered a XEP-0166 session-terminate.
+public enum CallTerminateOutcome: Hashable, Sendable {
+    case ok
+    /// The server no longer knows the session (crashed peer, recovered
+    /// session); the `<finish/>` bookend still goes out.
+    case orphaned
+    case error
+}

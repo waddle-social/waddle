@@ -8,7 +8,7 @@ extension FFIInbound {
             BridgeLog.debug("dropped call event: invalid sender JID")
             return nil
         }
-        return CallEvent(from: from, to: jid(event.to), sid: event.sid, kind: callKind(event.kind))
+        return CallEvent(from: from, sid: event.sid, kind: callKind(event.kind))
     }
 
     private static func callKind(_ kind: WaddleCallEventKind) -> CallEvent.Kind {
@@ -60,30 +60,6 @@ extension FFIInbound {
         case .ok: return .ok
         case .orphaned: return .orphaned
         case .error: return .error
-        }
-    }
-}
-
-extension FFIOutbound {
-    static func jingleReason(_ reason: JingleReason) -> WaddleJingleReason {
-        switch reason {
-        case .alternativeSession: return .alternativeSession
-        case .busy: return .busy
-        case .cancel: return .cancel
-        case .connectivityError: return .connectivityError
-        case .decline: return .decline
-        case .expired: return .expired
-        case .failedApplication: return .failedApplication
-        case .failedTransport: return .failedTransport
-        case .generalError: return .generalError
-        case .gone: return .gone
-        case .incompatibleParameters: return .incompatibleParameters
-        case .mediaError: return .mediaError
-        case .securityError: return .securityError
-        case .success: return .success
-        case .timeout: return .timeout
-        case .unsupportedApplications: return .unsupportedApplications
-        case .unsupportedTransports: return .unsupportedTransports
         }
     }
 }

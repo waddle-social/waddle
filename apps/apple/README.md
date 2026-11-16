@@ -21,6 +21,7 @@ WaddleKit/                   UI-free core (Swift package; depends on swift-crypt
   Identity/ Model/           typed JIDs and parsed stanzas
   Files/                     XEP-0448 decryption and XEP-0300 digest checks
   Timeline/                  the conversation reducer
+  Calls/                     the 1:1 call slot: XEP-0353 invitations, Jingle sessions
   Stores/                    presence, unread, inbox, typing, delivery, pins…
   Session/                   SessionCoordinator: event routing and actions
   Compose/                   markdown → XEP-0394, mentions → XEP-0372

@@ -16,15 +16,7 @@ extension CallStore {
     public func hangUp(reason: JingleReason = .success) async {
         let claimed = claimHangUp()
         let epoch = generation
-        if case .incoming(let call) = claimed {
-            let sent: Bool
-            if call.isAccepting {
-                sent = await port.sendCallFinish(to: call.from, sid: call.sid, reason: .cancel)
-            } else {
-                sent = await port.sendCallReject(to: call.from, sid: call.sid, tieBreak: false)
-            }
-            if !sent { reportError(call.isAccepting ? "call finish failed" : "call reject failed", epoch: epoch) }
-        }
+        if case .incoming(let call) = claimed { _ = await answerDeclined(call) }
         if case .outgoing(let call) = claimed {
             let sent = await port.sendCallRetract(to: call.to, sid: call.sid)
             if !sent { reportError("call retract failed", epoch: epoch) }
@@ -39,5 +31,20 @@ extension CallStore {
             let sent = await port.sendCallFinish(to: call.peer, sid: call.sid, reason: nil)
             if !sent { reportError("call finish failed", epoch: epoch) }
         }
+    }
+
+    /// Once our `<proceed/>` is out, the abandon verb is `<finish/>` with
+    /// `<cancel/>`; a reject would contradict the proceed.
+    func answerDeclined(_ call: IncomingCall) async -> Bool {
+        let epoch = generation
+        let sent: Bool
+        if call.isAccepting {
+            sent = await port.sendCallFinish(to: call.from, sid: call.sid, reason: .cancel)
+        } else {
+            sent = await port.sendCallReject(to: call.from, sid: call.sid, tieBreak: false)
+        }
+        guard generation == epoch else { return false }
+        if !sent { reportError(call.isAccepting ? "call finish failed" : "call reject failed", epoch: epoch) }
+        return sent
     }
 }

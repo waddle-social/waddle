@@ -4,7 +4,7 @@ import Testing
 @testable import WaddleKitTestSupport
 
 @MainActor
-@Suite struct CallMediaTests {
+@Suite("Call media") struct CallMediaTests {
     @Test func oldConnectFailureAndCallbackCannotEndReusedSIDAfterClear() async throws {
         let port = FakePort()
         let media = RecordingCallMedia()
@@ -14,19 +14,19 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-reused" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
         let oldFailure = try #require(media.onFailure)
         store.clear()
         await eventually { media.calls.count == 2 }
         media.connectThrows = false
         #expect(await store.startCall(to: callPeer.bare, media: callVideo))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callVideo)))
+        store.handle(CallEvent(from: callPeer, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callVideo)))
         media.releaseConnect()
         await eventually { media.calls.count == 4 }
         oldFailure()
         let carol = JID(parsing: "carol@waddle.test/tab")!
-        store.handle(CallEvent(from: carol, to: nil, sid: "c-barrier", kind: .propose(callAudio)))
+        store.handle(CallEvent(from: carol, sid: "c-barrier", kind: .propose(callAudio)))
         await eventually { port.callSends.last == .reject(carol, "c-barrier", false) }
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect, .disconnect, .connect(callJoin, callVideo)])
         #expect(store.state == .active(ActiveCall(peer: callPeer, sid: "c-reused", media: callVideo, join: callJoin, initiator: callOwn)))
@@ -46,15 +46,15 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-old" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-old", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-old", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-new", kind: .propose(callVideo)))
+        store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .propose(callVideo)))
         await eventually { media.calls.count == 2 }
         #expect(store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callVideo, isAccepting: true)))
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
         let migratedJoin = CallJoin(
             url: "wss://livekit.waddle.test", room: "migrated-room", identity: "alice@waddle.test/waddle-apple-1", token: "new-jwt")
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-new", kind: .sessionInitiate(join: migratedJoin, media: callVideo)))
+        store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .sessionInitiate(join: migratedJoin, media: callVideo)))
         await eventually { media.calls.count == 3 }
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect, .connect(migratedJoin, callVideo)])
         #expect(store.state == .active(ActiveCall(peer: callPeer, sid: "c-new", media: callVideo, join: migratedJoin, initiator: callPeer)))
@@ -69,12 +69,12 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-reused" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
         store.clear()
         await eventually { media.calls.count == 2 }
         #expect(await store.startCall(to: callPeer.bare, media: callVideo))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callVideo)))
+        store.handle(CallEvent(from: callPeer, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callVideo)))
         media.releaseConnect()
         await eventually { media.calls.count == 4 }
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect, .disconnect, .connect(callJoin, callVideo)])
@@ -91,7 +91,7 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-slow" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-slow", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-slow", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
         await store.hangUp()
         await eventually { media.calls.count == 2 }
@@ -119,7 +119,7 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-media" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
         media.onFailure?()
         await eventually { port.callSends.count == 3 && media.calls.count == 2 }
@@ -141,7 +141,7 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-media" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { port.callSends.count == 3 }
         #expect(store.state == .idle)
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
@@ -159,9 +159,9 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-media" })
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        store.handle(CallEvent(from: callPeer, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { media.calls.count == 1 }
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-media", kind: .sessionTerminate(reason: .success)))
+        store.handle(CallEvent(from: callPeer, sid: "c-media", kind: .sessionTerminate(reason: .success)))
         await eventually { media.calls.count == 2 }
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
         #expect(store.state == .ended(sid: "c-media", reason: .finished(.success)))
@@ -175,7 +175,7 @@ import Testing
             port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
             media: media, newSid: { "c-media" })
         #expect(await store.startCall(to: callPeer.bare, media: callVideo))
-        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callVideo)))
+        store.handle(CallEvent(from: callPeer, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callVideo)))
         await eventually { media.calls == [.connect(callJoin, callVideo)] }
         #expect(media.calls == [.connect(callJoin, callVideo)])
         store.clear()

@@ -3,7 +3,7 @@ import Testing
 @testable import WaddleKit
 @testable import WaddleKitTestSupport
 
-@MainActor @Suite struct CallGenerationTests {
+@MainActor @Suite("Call store after clear") struct CallGenerationTests {
     @Test(arguments: ["propose", "proceed", "reject", "finish"])
     func clearFencesSuspendedLocalActions(verb: String) async {
         let f = CallFixture()
