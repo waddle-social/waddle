@@ -567,15 +567,16 @@ pub(super) async fn managed_room(
 /// Whether the occupants named by `nicks` may all hold the moderator role.
 /// The role is room moderation, which a principal holds only when its
 /// witness honours privilege (ADR-0020 D8): an account of a served domain,
-/// or a trusted home's account whose request a `pkix` stream carried. An
-/// occupant named here is not the requester, so it is decided without
-/// stream evidence and an occupant of a remote home is refused.
+/// or a trusted home's account on a `pkix` stream. An occupant named here
+/// is not the requester: a remote occupant this replica seated over S2S is
+/// decided on the evidence of the stream each of its seats was admitted
+/// under, and any other remote occupant is refused.
 pub(super) async fn occupants_may_moderate(
+    state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    room: &ManagedRoomGrants,
+    room_jid: &BareJid,
     nicks: &[&str],
 ) -> Result<bool, ()> {
-    use crate::permissions::host_grant::PrincipalEvidence;
     let snapshot = room_actor.ask(GetSnapshot).await.map_err(|_| ())?;
     Ok(nicks.iter().all(|nick| {
         snapshot
@@ -584,8 +585,59 @@ pub(super) async fn occupants_may_moderate(
             .values()
             .find(|occupant| occupant.nick == *nick)
             .is_some_and(|occupant| {
-                room.witness(&occupant.real_jid.to_bare(), &PrincipalEvidence::NoStream)
-                    .privilege_honoured()
+                privilege_honoured_for_named(state, room_jid, &occupant.real_jid.to_bare())
             })
     }))
+}
+
+/// Whether room moderation, or an owner or admin standing, would be
+/// honoured for `account`, named in `room_jid` without a request of its
+/// own (ADR-0020 D8): on the evidence of each seat it holds there, or
+/// without stream evidence when it holds none.
+pub(super) fn privilege_honoured_for_named(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    account: &BareJid,
+) -> bool {
+    if is_local_account(state, account) {
+        return true;
+    }
+    state
+        .deps
+        .app_state
+        .host_grants
+        .named_evidence(room_jid, account)
+        .iter()
+        .all(|evidence| {
+            crate::server::routes::websocket::handlers::presence::principal_witness(
+                state, account, evidence,
+            )
+            .is_some_and(|witness| witness.privilege_honoured())
+        })
+}
+
+/// Whether an owner or admin standing may be written for `account` in a
+/// room no enrolled scope manages (ADR-0020 D8 at issuance): an account of
+/// a served domain, or of a home on the trusted-home list of the S2S
+/// snapshot this replica runs. Fails closed when the issuance policy cannot
+/// be built.
+pub(super) fn privileged_standing_may_be_issued(state: &WebSocketState, account: &BareJid) -> bool {
+    if is_local_account(state, account) {
+        return true;
+    }
+    let Ok(domain) = waddle_xmpp::identity::CanonicalDomain::parse_canonical(
+        state.deps.auth_state.xmpp_domain.as_str(),
+    ) else {
+        return false;
+    };
+    let principals = state.deps.app_state.grant_principals(domain);
+    issuance_policy(state, &principals)
+        .is_some_and(|policy| policy.admits_privileged_subject(account))
+}
+
+/// Whether `account` is an account of the domain this deployment serves:
+/// its standing is honoured as stored and needs no policy to be read.
+fn is_local_account(state: &WebSocketState, account: &BareJid) -> bool {
+    account.node().is_some()
+        && account.domain().as_str() == state.deps.auth_state.xmpp_domain.as_str()
 }

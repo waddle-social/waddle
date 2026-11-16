@@ -568,6 +568,7 @@ async fn seat_room_occupancy_in(
                 seat: record.seat,
             })
             .collect();
+        let occupants = remote_reseating(state, room, occupants).await;
         let Some(occupants) = host_grant_reseating(state, room, occupants).await else {
             return false;
         };
@@ -624,13 +625,52 @@ async fn seat_room_occupancy_in(
     true
 }
 
+/// The recovered occupants of `room` this replica can seat at all.
+///
+/// An occupant at a domain this deployment does not serve was seated over
+/// S2S by the replica that held the room before. Its seat is restored only
+/// if this replica takes that seat over: the seat carries the stream
+/// evidence the occupant was admitted under, and a room's stanzas leave
+/// for a remote JID only while this replica holds its seat. A remote
+/// occupant without one, or whose seat a live replica still holds, is not
+/// restored, in any room.
+async fn remote_reseating(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+    occupants: Vec<RecoveredOccupant>,
+) -> Vec<RecoveredOccupant> {
+    let Some(served) = state
+        .deps
+        .service_domains
+        .served_domains(state.deps.auth_state.xmpp_domain.as_str())
+    else {
+        return occupants;
+    };
+    let mut seated = Vec::with_capacity(occupants.len());
+    for occupant in occupants {
+        if served.serves(occupant.real_jid.domain())
+            || state
+                .deps
+                .remote_route
+                .adopt_seat(room, &occupant.real_jid)
+                .await
+        {
+            seated.push(occupant);
+        }
+    }
+    seated
+}
+
 /// The recovered occupants of `room` whose seats are restored.
 ///
 /// A room an enrolled host-grant scope manages seats an occupant again only
 /// while its canonical grants allow reading the room, with the standing
 /// they honour and the moderator role only with their `moderate`: the
 /// recorded role and affiliation are what the room's earlier actor
-/// mirrored, which a revoke since then has not changed. `None` when the
+/// mirrored, which a revoke since then has not changed. An occupant is
+/// decided on the evidence of the stream each seat it holds here was
+/// admitted under, and without stream evidence when it holds none. `None`
+/// when the
 /// grants cannot be read, so the room is not seated. Any other room seats
 /// every recovered occupant as recorded.
 async fn host_grant_reseating(
@@ -650,22 +690,35 @@ async fn host_grant_reseating(
         RoomGate::Unavailable => return None,
         RoomGate::Managed(grants) => grants,
     };
+    let gate = &state.deps.app_state.host_grants;
     Some(
         occupants
             .into_iter()
             .filter_map(|mut occupant| {
                 let account = occupant.real_jid.to_bare();
-                if !grants.allows_as(
-                    &account,
-                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                    HostGrantAction::Read,
-                ) {
+                let evidence = gate.named_evidence(room, &account);
+                let allows = |action| {
+                    evidence
+                        .iter()
+                        .all(|evidence| grants.allows_as(&account, evidence, action))
+                };
+                if !allows(HostGrantAction::Read) {
                     return None;
                 }
-                occupant.affiliation = match grants.standing_as(
-                    &account,
-                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                ) {
+                // The standing every one of its seats is honoured with: the
+                // least of them.
+                let standing = evidence
+                    .iter()
+                    .map(|evidence| grants.standing_as(&account, evidence))
+                    .min_by_key(|standing| match standing {
+                        RoomAffiliation::Outcast => 0,
+                        RoomAffiliation::None => 1,
+                        RoomAffiliation::Member => 2,
+                        RoomAffiliation::Admin => 3,
+                        RoomAffiliation::Owner => 4,
+                    })
+                    .unwrap_or(RoomAffiliation::None);
+                occupant.affiliation = match standing {
                     RoomAffiliation::Owner => waddle_xmpp::Affiliation::Owner,
                     RoomAffiliation::Admin => waddle_xmpp::Affiliation::Admin,
                     RoomAffiliation::Member => waddle_xmpp::Affiliation::Member,
@@ -673,11 +726,7 @@ async fn host_grant_reseating(
                     RoomAffiliation::Outcast => waddle_xmpp::Affiliation::Outcast,
                 };
                 if occupant.role == waddle_xmpp::Role::Moderator
-                    && !grants.allows_as(
-                        &account,
-                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                        HostGrantAction::Moderate,
-                    )
+                    && !allows(HostGrantAction::Moderate)
                 {
                     occupant.role = waddle_xmpp::Role::Participant;
                 }

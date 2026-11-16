@@ -130,10 +130,12 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
 /// administration set, before anything is recorded: one affiliation change
 /// per request, so that what is recorded is what the room actor applies,
 /// and the moderator role only for occupants whose witness honours room
-/// moderation (accounts of a served domain).
+/// moderation (accounts of a served domain, and remote occupants seated on
+/// a trusted home's `pkix` stream).
 async fn check_host_grant_admin_items(
+    state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    room: &crate::permissions::host_grant::ManagedRoomGrants,
+    room_jid: &BareJid,
     items: &[AdminItem],
     affiliation_updates: &[(BareJid, Affiliation)],
 ) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
@@ -142,6 +144,42 @@ async fn check_host_grant_admin_items(
             "This room takes one affiliation change per request.",
         )));
     }
+    check_moderator_role_items(state, room_actor, room_jid, items).await
+}
+
+/// What a room no enrolled scope manages accepts of an administration set
+/// under ADR-0020 D8, before its own checks: an owner or admin standing
+/// only for an account of this deployment or of a trusted home, and the
+/// moderator role only for occupants whose witness honours room
+/// moderation. The room's legacy stores are written without asking either.
+async fn check_legacy_admin_items(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    items: &[AdminItem],
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
+    let privileged_refused = affiliation_updates.iter().any(|(jid, affiliation)| {
+        matches!(affiliation, Affiliation::Owner | Affiliation::Admin)
+            && !super::muc_admin_host_grant::privileged_standing_may_be_issued(state, jid)
+    });
+    if privileged_refused {
+        return Err(Box::new(not_allowed_iq_error(
+            "Owner and admin standing is granted to accounts of this deployment and of its \
+             trusted servers only.",
+        )));
+    }
+    check_moderator_role_items(state, room_actor, room_jid, items).await
+}
+
+/// Refuse a set that grants the moderator role to an occupant whose
+/// witness does not honour room moderation (ADR-0020 D8).
+async fn check_moderator_role_items(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    items: &[AdminItem],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
     let moderator_nicks: Vec<&str> = items
         .iter()
         .filter(|item| item.role == Some(waddle_xmpp::Role::Moderator))
@@ -150,12 +188,18 @@ async fn check_host_grant_admin_items(
     if moderator_nicks.is_empty() {
         return Ok(());
     }
-    match super::muc_admin_host_grant::occupants_may_moderate(room_actor, room, &moderator_nicks)
-        .await
+    match super::muc_admin_host_grant::occupants_may_moderate(
+        state,
+        room_actor,
+        room_jid,
+        &moderator_nicks,
+    )
+    .await
     {
         Ok(true) => Ok(()),
         Ok(false) => Err(Box::new(not_allowed_iq_error(
-            "The moderator role is granted to this deployment's accounts only.",
+            "The moderator role is granted to accounts of this deployment and, over a \
+             certificate-authenticated stream, of its trusted servers only.",
         ))),
         Err(()) => Err(Box::new(internal_server_error_iq_error(
             "Internal server error.",
@@ -1434,18 +1478,20 @@ pub(super) async fn handle_muc_admin_iq(
             .filter_map(|item| item.jid.clone().zip(item.affiliation))
             .collect()
     };
-    if let Some(room) = host_grant_room.as_ref() {
-        if let Err(error) =
-            check_host_grant_admin_items(&room_actor, room, &items, &affiliation_updates).await
-        {
-            return vec![build_iq_error_xml_typed(
-                iq.id(),
-                response_from,
-                response_to,
-                *error,
-            )]
-            .into();
-        }
+    let checked = if host_grant_room.is_some() {
+        check_host_grant_admin_items(state, &room_actor, &room_jid, &items, &affiliation_updates)
+            .await
+    } else {
+        check_legacy_admin_items(state, &room_actor, &room_jid, &items, &affiliation_updates).await
+    };
+    if let Err(error) = checked {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            *error,
+        )]
+        .into();
     }
     if !managed_affiliation_targets_are_accounts(&room_jid, &affiliation_updates) {
         return vec![build_iq_error_xml_typed(
