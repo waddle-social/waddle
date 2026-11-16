@@ -539,13 +539,14 @@ fn fail_attempt(shared: &Shared, attempt: Attempt, outcome: S2sOutcome) {
         sender,
         ..
     } = attempt;
-    // The pair is free to dial again before the dialler learns of the
-    // failure, so a dialler that retries at once is not refused as in
-    // progress by its own finished attempt.
-    drop(dial);
     if is_peer_failure(outcome) {
         shared.registry.record_failure(&remote);
     }
+    // The pair is free to dial again before the dialler learns of the
+    // failure, so a dialler that retries at once is not refused as in
+    // progress by its own finished attempt. The failure is recorded first,
+    // so no other dialler finds the pair neither dialling nor backing off.
+    drop(dial);
     telemetry::ended(StreamDirection::Outbound, outcome);
     let _ = sender.send(Err(outcome));
 }

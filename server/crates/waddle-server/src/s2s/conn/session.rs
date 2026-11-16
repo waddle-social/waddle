@@ -629,8 +629,9 @@ impl Session {
     /// it is stopping with `system-shutdown`; either loses the stanza. Time
     /// spent waiting is not counted against the element the peer may have
     /// left unfinished behind the stanza, since nothing was read. A stanza
-    /// the sink takes counts as traffic, so a stream that waited is neither
-    /// idle nor a candidate for eviction because of the wait.
+    /// the sink takes counts as traffic, so once it is taken the stream is
+    /// neither idle nor first in line for eviction because of the wait;
+    /// during the wait it can still be evicted.
     async fn wait_for_sink(&mut self, wait: SinkWait) -> Vec<Output> {
         /// What ended a wait before the sink did.
         enum Interrupted {
@@ -1127,16 +1128,16 @@ impl Session {
             ..
         } = &mut self.role
         {
-            // The pair is free to dial again before the dialler learns of
-            // the failure, as it is when the attempt succeeds.
-            *dial = None;
             // An attempt that never established backs off when the peer or
             // the path to it failed; one that did was recorded as a
-            // success.
+            // success. The pair is free to dial again before the dialler
+            // learns of the failure, as it is when the attempt succeeds,
+            // and only once the failure is recorded.
             if let Some(sender) = established.take() {
                 if is_peer_failure(outcome) {
                     self.shared.registry.record_failure(remote);
                 }
+                *dial = None;
                 let _ = sender.send(Err(outcome));
             }
         }

@@ -671,8 +671,9 @@ loses that stanza and ends as *lost* (see below): with
 `waddle.s2s.route.room_traffic.overloaded`), and with `system-shutdown`
 when the router stops during the wait. The occupants of rooms behind it are
 then told and join again rather than miss a stanza unaware. A stanza that
-fits after waiting counts as the stream's traffic, so the wait itself never
-makes the stream idle or a candidate for eviction. A delivery that takes
+fits after waiting counts as the stream's traffic once it is taken, so a
+stream does not end idle for the time it waited; during the wait itself
+the stream can still be evicted as one without recent traffic. A delivery that takes
 more than five seconds is abandoned and counted
 (`waddle.s2s.route.room_traffic.delivery_timeouts`). A stanza whose
 occupancy cannot be read because the shared store failed is dropped
