@@ -51,7 +51,7 @@ use super::registry::{
     Activity, DialSlot, NegotiationSlot, RegisterRefusal, Registration, StreamSlot, StreamTokens,
 };
 use super::service::Shared;
-use super::sink::SinkVerdict;
+use super::sink::{SinkVerdict, StreamEnd};
 use super::telemetry;
 use super::transport::{Transport, TransportError};
 use super::verification;
@@ -995,6 +995,35 @@ impl Session {
         // Unregister before reporting the new stream count.
         self.registered = None;
         telemetry::stream_counts(&self.shared.registry);
+        if let Some(stream) = self.peer_stream.take() {
+            self.shared.sink.stream_ended(&stream, stream_end(outcome));
+        }
+    }
+}
+
+/// How an established stream that ended with `outcome` ended, for the
+/// sink. A deadline is the idle timeout on an established stream, an
+/// orderly close; a stream error, a transport failure or a withdrawn
+/// admission may have lost stanzas in flight.
+fn stream_end(outcome: S2sOutcome) -> StreamEnd {
+    match outcome {
+        S2sOutcome::Io
+        | S2sOutcome::Tls
+        | S2sOutcome::Protocol
+        | S2sOutcome::PeerError
+        | S2sOutcome::Admission
+        | S2sOutcome::Certificate
+        | S2sOutcome::Dialback => StreamEnd::Lost,
+        S2sOutcome::Established
+        | S2sOutcome::Capacity
+        | S2sOutcome::Redirected
+        | S2sOutcome::PeerClosed
+        | S2sOutcome::Timeout
+        | S2sOutcome::Expired
+        | S2sOutcome::Evicted
+        | S2sOutcome::Conflict
+        | S2sOutcome::Shutdown
+        | S2sOutcome::Verified => StreamEnd::Closed,
     }
 }
 

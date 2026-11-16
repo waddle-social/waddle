@@ -17,6 +17,21 @@ pub enum SinkVerdict {
     Refuse,
 }
 
+/// How an established stream ended, as a sink learns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// The stream ended in an orderly way: either side closed it, it was
+    /// idle, a newer stream for the same pair replaced it, it was evicted
+    /// or aged out, or this server is shutting down. A new stream carries
+    /// the pair's next stanza and nothing is known to be lost.
+    Closed,
+    /// The stream failed: a transport or TLS error, a stream error either
+    /// side sent other than `conflict`, or a domain peer admission no
+    /// longer admits. Stanzas in flight on it may be lost in either
+    /// direction.
+    Lost,
+}
+
 /// Receives each stanza an established inbound stream carries, after the
 /// codec has checked that its `to` is the stream's local domain and its
 /// `from` the stream's authenticated remote domain (RFC 6120 §4.9.3).
@@ -36,6 +51,11 @@ pub trait StanzaSink: Send + Sync {
     fn offer_malformed(&self, _stream: &VerifiedPeerStream, _stanza: Element) -> SinkVerdict {
         SinkVerdict::Refuse
     }
+
+    /// An established stream, inbound or outbound, ended as `end` says.
+    /// Called once per stream, on its connection's task, after it has left
+    /// the registry; it must not wait. By default nothing happens.
+    fn stream_ended(&self, _stream: &VerifiedPeerStream, _end: StreamEnd) {}
 }
 
 /// The sink of this release: no stanza is routed, stored or answered, so
