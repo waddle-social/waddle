@@ -9,8 +9,10 @@
 //! stranger's message to one, by full JID or bare JID, is held only within
 //! the same bounds, and what the store would not keep (a chat state alone,
 //! a `headline`, an `error`, directed presence) reaches it only from a
-//! contact. Through the production `/ws` router, the real S2S router and a
-//! loopback peer, `home-b.test`.
+//! contact. A stored message whose sender's domain is no longer admitted
+//! (ADR-0020 D1) is deleted before the store is flushed. Through the
+//! production `/ws` router, the real S2S router and a loopback peer,
+//! `home-b.test`.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -193,4 +195,62 @@ async fn a_contacts_stanzas_reach_a_detached_full_jid_beyond_a_strangers_bound()
     assert!(held
         .iter()
         .all(|stanza| stanza.attr("to") == Some(to.as_str())));
+}
+
+#[tokio::test]
+async fn a_stored_message_whose_senders_domain_is_no_longer_admitted_is_never_delivered() {
+    use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
+
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    let alice = federated.account("alice").await;
+    // Mallory's message is stored the way the account side stores it.
+    federated
+        .from_peer(message(MALLORY, ALICE, MessageType::Chat, "kept", "hi"))
+        .await;
+    federated.peer_barrier(MALLORY, ALICE).await;
+    assert_eq!(support::offline_count(&federated, ALICE).await, 1);
+    // A message stored while its sender's domain was admitted, which the
+    // snapshot the replica runs no longer admits.
+    let stale = message(
+        "eve@unlisted.test/desk",
+        ALICE,
+        MessageType::Chat,
+        "stale",
+        "hi",
+    );
+    let inserted = federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: alice,
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(stale)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("the offline store is writable");
+    assert_eq!(inserted, InsertOutcome::Inserted);
+    assert_eq!(support::offline_count(&federated, ALICE).await, 2);
+
+    let mut phone = federated.online("alice", "phone", 5).await;
+    let frames = support::receive_messages(&mut phone, &["kept"]).await;
+    let settled = federated.client_settle(&mut phone).await;
+
+    assert!(!holds(&frames, "message", "stale"), "{frames:?}");
+    assert!(!holds(&settled, "message", "stale"), "{settled:?}");
+    // Neither row is left: one was delivered, the other deleted.
+    assert!(
+        support::routing::wait_for_async(support::ARRIVES, || async {
+            (support::offline_count(&federated, ALICE).await == 0).then_some(())
+        })
+        .await
+        .is_some(),
+        "the offline store is empty"
+    );
 }
