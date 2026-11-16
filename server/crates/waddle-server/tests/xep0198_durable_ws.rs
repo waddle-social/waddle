@@ -597,6 +597,30 @@ async fn a_session_live_when_the_process_died_resumes_after_a_restart() {
     })
     .await;
 
+    // A direct delivery is recorded as complete a few commits after the
+    // frame reaches the socket. Killing the process inside that window leaves
+    // the delivery unrecorded, and the per-recipient order gate then holds
+    // later messages until ingress recovery runs (over a minute). That
+    // recovery is not what this test covers, so let both deliveries settle.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let unrecorded: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM ingress_effect_intents i WHERE i.kind = 1 AND NOT EXISTS \
+                 (SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key \
+                  AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash)",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("read direct deliveries");
+            if unrecorded == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both direct deliveries are recorded before the process dies");
+
     // The process dies with the session live; the transport goes with it.
     drop(server);
     drop(alice);
