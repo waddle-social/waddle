@@ -10,8 +10,9 @@
 //! the account's state, and the answers observed in the states are
 //! compared with each other. A case that asserts that nothing arrived ends
 //! with a barrier that does arrive on the same path after it (a stanza on
-//! the sender's own queue, then a ping on the same pair, then a marker
-//! delivered to the client through its user actor and connection queue),
+//! the sender's own queue, then a ping on the same pair, then a ping of the
+//! client's own server and a marker delivered to the client through its
+//! user actor and connection queue),
 //! and checks every stanza received since, so that
 //! "nothing arrived" is neither a slow delivery nor a stanza discarded
 //! while waiting for another.
@@ -1372,6 +1373,14 @@ async fn a_retired_accounts_open_stream_sends_nothing_to_remote_jids() {
     request.to = Some(jid("carol@home-b.test"));
     request.id = Some("retired-subscribe".to_owned());
     send(&mut phone, request).await;
+    // Nor an IQ request: the client is answered, nothing leaves.
+    send(
+        &mut phone,
+        get(ALICE_PHONE, BOB_PHONE, "retired-ping", ping()),
+    )
+    .await;
+    let refusal = receive(&mut phone, "iq", "retired-ping").await;
+    assert_eq!(refusal.attr("type"), Some("error"), "{refusal:?}");
     // The client's stanzas were handled once its own ping is answered; a
     // ping on the pair then follows anything they queued.
     federated.client_settle(&mut phone).await;

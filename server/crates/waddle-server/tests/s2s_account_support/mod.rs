@@ -338,16 +338,31 @@ impl Federated {
         id
     }
 
-    /// Every stanza that reached `client` before a marker this server then
-    /// delivers to it, the marker excluded. The marker takes the path the
-    /// account side delivers a remote sender's stanza by (the recipient's
-    /// user actor, then its connection's outbound queue, both in order),
-    /// so once it arrives every stanza the account side handed to
-    /// `client`'s connection before it has arrived too. After a
-    /// [`Federated::peer_barrier`], which returns only once the account
-    /// side has finished with every earlier stanza of its sender, this is
-    /// everything those stanzas delivered to `client`.
+    /// Every stanza that reached `client` before a ping of its own server
+    /// was answered and then before a marker this server delivers to it,
+    /// both answers excluded.
+    ///
+    /// The ping is answered once the connection has handled every stanza
+    /// `client` sent before it, which it reads in order. The marker takes
+    /// the path the account side delivers a remote sender's stanza by (the
+    /// recipient's user actor, then its connection's outbound queue, both
+    /// in order), so once it arrives every stanza the account side handed
+    /// to `client`'s connection before it has arrived too; the ping's
+    /// answer alone would not show that, since the connection writes the
+    /// answer to a stanza it reads before a delivery waiting on its queue.
+    /// After a [`Federated::peer_barrier`], which returns only once the
+    /// account side has finished with every earlier stanza of its sender,
+    /// this is everything those stanzas delivered to `client`.
     pub async fn client_settle(&self, client: &mut WsXmppClient) -> Vec<Element> {
+        let ping_id = unique("settle-ping");
+        let mut request = Iq::from_get(ping_id.clone(), xmpp_parsers::ping::Ping);
+        *request.to_mut() = Some(jid(LOCAL));
+        send(client, request).await;
+        let mut frames = receive_until(client, |element| {
+            element.name() == "iq" && element.attr("id") == Some(ping_id.as_str())
+        })
+        .await;
+        frames.pop();
         let id = unique("settle");
         let resource = full_jid(client);
         let mut marker =
@@ -362,10 +377,12 @@ impl Federated {
             LocalDeliveryOutcome::Delivered,
             "the settle marker reaches {resource}"
         );
-        let mut frames = receive_until(client, |element| {
-            element.name() == "message" && element.attr("id") == Some(id.as_str())
-        })
-        .await;
+        frames.extend(
+            receive_until(client, |element| {
+                element.name() == "message" && element.attr("id") == Some(id.as_str())
+            })
+            .await,
+        );
         frames.pop();
         frames
     }
