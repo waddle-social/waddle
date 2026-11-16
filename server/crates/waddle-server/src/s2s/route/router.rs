@@ -22,6 +22,7 @@ use xmpp_parsers::disco::{DiscoInfoResult, DiscoItemsResult, Feature, Identity};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
+use super::accounts::{is_account_presence, LocalAccounts};
 use super::correlation::{
     CorrelationDirection, CorrelationError, CorrelationKey, CorrelationOwner, IqCorrelations,
     PendingRequest, RequestKind,
@@ -34,7 +35,7 @@ use super::occupancy::{
 use super::principal::RemotePrincipal;
 use super::reach::{reach, InboundReach, LocalTarget, Refusal};
 use super::replies;
-use super::room_delivery::{InboundTraffic, Placed, RoomQueues, RoomWork};
+use super::room_delivery::{AccountTraffic, InboundTraffic, Placed, RoomQueues, RoomWork};
 use super::rooms::{self, Asked, Change, RoomEgress, VerificationAnswer};
 use super::telemetry;
 use crate::destination::{
@@ -46,6 +47,8 @@ use crate::s2s::conn::{
     ConnectError, S2sHandle, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd,
     TransmitError, VerifiedPeerStream, Waited,
 };
+
+mod accounts;
 
 /// Bounds on the router's queues and pending requests.
 ///
@@ -144,6 +147,17 @@ pub struct RouterLimits {
     /// How long delivering one stanza of room traffic to its occupant may
     /// take before the worker moves on.
     pub room_delivery_timeout: Duration,
+    /// How long the account side may take to decide one stanza for a local
+    /// account before the worker moves on without answering it.
+    pub account_timeout: Duration,
+    /// Remote IQ requests to local resources pending on this replica; a
+    /// further one is refused with `resource-constraint`.
+    pub account_requests: usize,
+    /// Of those, the requests from one remote domain.
+    pub account_requests_per_peer: usize,
+    /// How long a remote IQ request to a local resource waits for the
+    /// resource's response.
+    pub account_request_ttl: Duration,
 }
 
 impl Default for RouterLimits {
@@ -176,6 +190,10 @@ impl Default for RouterLimits {
             room_delivery_wait: Duration::from_secs(30),
             room_delivery_workers: 4,
             room_delivery_timeout: Duration::from_secs(5),
+            account_timeout: Duration::from_secs(10),
+            account_requests: 1024,
+            account_requests_per_peer: 256,
+            account_request_ttl: Duration::from_secs(60),
         }
     }
 }
@@ -241,6 +259,10 @@ enum Purpose {
     /// The presence leaving a remote room for a local resource that ended:
     /// nothing is left to answer if it cannot be sent.
     Departure,
+    /// A local account's message or presence for a remote JID that is not
+    /// room traffic (gate G18). A message that cannot be sent is answered
+    /// to its sender; presence is dropped.
+    Account { sender: Jid },
     /// This server's `disco#info` to the domain of a remote room that a
     /// local resource joins, or then to the room, registered for
     /// correlation before it is written. If it cannot be sent, the joins it
@@ -410,6 +432,11 @@ struct Inner {
     limits: RouterLimits,
     transport: OnceLock<S2sHandle>,
     local: OnceLock<Arc<dyn LocalDelivery>>,
+    /// The account side; while it is not attached, account traffic is
+    /// refused in both directions (ADR-0020 D7).
+    accounts: OnceLock<Arc<dyn LocalAccounts>>,
+    /// The remote requests to local resources this replica registered.
+    inbound_requests: Mutex<accounts::InboundRequests>,
     queues: Mutex<HashMap<Pair, mpsc::Sender<Queued>>>,
     pending: Mutex<PendingRequests>,
     /// The remote room occupancies every replica shares.
@@ -433,11 +460,14 @@ struct Inner {
 ///   it carries, and decides what it reaches ([`reach`]): the server
 ///   domain's service discovery and ping are answered, a response that
 ///   completes a local resource's pending request is delivered to that
-///   resource, and everything else is refused (ADR-0020 D7 and D10).
+///   resource, a remote room's traffic reaches its occupant, account
+///   traffic goes to the attached [`LocalAccounts`] side (gate G18), and
+///   everything else is refused (ADR-0020 D7 and D10).
 /// - As the [`RemoteRoute`] of local entities it takes a stanza for a
-///   remote domain, refuses what D7 refuses and what peer admission (D1)
-///   refuses, and queues the rest on a bounded queue per directional
-///   domain pair, without waiting for anything.
+///   remote domain, refuses what D7 refuses (account traffic while no
+///   account side is attached) and what peer admission (D1) refuses, and
+///   queues the rest on a bounded queue per directional domain pair,
+///   without waiting for anything.
 /// - One worker per queue dials the pair's stream on demand, records a
 ///   request for correlation before writing it, and answers a request that
 ///   cannot be sent with `remote-server-not-found` or
@@ -473,6 +503,8 @@ impl S2sRouter {
             limits: options.limits,
             transport: OnceLock::new(),
             local: OnceLock::new(),
+            accounts: OnceLock::new(),
+            inbound_requests: Mutex::new(accounts::InboundRequests::default()),
             queues: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingRequests::default()),
             rooms: options.rooms,
@@ -501,6 +533,12 @@ impl S2sRouter {
     /// one was already attached.
     pub fn attach_local(&self, local: Arc<dyn LocalDelivery>) -> bool {
         self.inner.local.set(local).is_ok()
+    }
+
+    /// Give the router the account side, which enables account traffic in
+    /// both directions (gate G18). `false` when one was already attached.
+    pub fn attach_accounts(&self, accounts: Arc<dyn LocalAccounts>) -> bool {
+        self.inner.accounts.set(accounts).is_ok()
     }
 
     /// Requests to remote entities pending on this replica.
@@ -651,6 +689,7 @@ impl Inner {
             | Purpose::Reply
             | Purpose::Room { .. }
             | Purpose::Departure
+            | Purpose::Account { .. }
             | Purpose::Verify { .. } => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
@@ -676,21 +715,36 @@ impl Inner {
         stanza: Stanza,
     ) -> Result<(), UnroutableReason> {
         let Some((room, egress)) = rooms::egress(to, &stanza) else {
-            return Err(UnroutableReason::RefusedByPolicy);
+            return self.route_account(pair, Jid::from(sender.clone()), stanza);
         };
         match egress {
             RoomEgress::Join { nick, id } => self.join(pair, sender, room, nick, id, stanza).await,
-            RoomEgress::Leave => self.leave(pair, sender, room, stanza).await,
+            RoomEgress::Leave => {
+                // Unavailable presence to a JID the resource does not
+                // occupy as a room is directed presence: account traffic.
+                if self.accounts_attached()
+                    && self
+                        .rooms
+                        .get(sender, &room)
+                        .await
+                        .map_err(|_| UnroutableReason::EgressBusy)?
+                        .is_none()
+                {
+                    return self.route_account(pair, Jid::from(sender.clone()), stanza);
+                }
+                self.leave(pair, sender, room, stanza).await
+            }
             other => {
                 let current = self
                     .rooms
                     .get(sender, &room)
                     .await
                     .map_err(|_| UnroutableReason::EgressBusy)?;
-                // ADR-0020 D7: messages and presence for a remote JID the
-                // resource does not occupy as a room are account traffic.
+                // Messages and presence for a remote JID the resource does
+                // not occupy as a room are account traffic (ADR-0020 D7),
+                // routed once an account side is attached.
                 let Some(current) = current else {
-                    return Err(UnroutableReason::RefusedByPolicy);
+                    return self.route_account(pair, Jid::from(sender.clone()), stanza);
                 };
                 if !other.permitted_in(current.phase) {
                     return Err(UnroutableReason::RefusedByPolicy);
@@ -1632,6 +1686,18 @@ impl Inner {
                 }
             };
             let Some(current) = current else {
+                // Not a room the occupant is in: account traffic (gate G18).
+                if self.accounts_attached() {
+                    if let Ok(principal) = RemotePrincipal::from_stream(stream, from) {
+                        let traffic = AccountTraffic {
+                            stream: stream.clone(),
+                            principal,
+                            to: Jid::from(occupant.clone()),
+                            stanza,
+                        };
+                        return self.account_traffic(traffic).await;
+                    }
+                }
                 admitted = Some(false);
                 break;
             };
@@ -1775,6 +1841,20 @@ impl Inner {
             // for a remote room the account's resource occupies or is
             // joining ([`Self::route_room`]). Only a bound resource of a
             // local account joins rooms.
+            // Subscription presence and probes leave from the account's bare
+            // JID (RFC 6121 §3.1.2, §4.3.1) once an account side is
+            // attached: account traffic, never room traffic.
+            Stanza::Presence(presence)
+                if self.accounts_attached() && is_account_presence(presence) =>
+            {
+                let sender = outbound.sender();
+                if sender.node().is_none() || *sender.domain() != *self.served.local() {
+                    return Err(UnroutableReason::RefusedByPolicy);
+                }
+                Purpose::Account {
+                    sender: Jid::from(sender.to_bare()),
+                }
+            }
             Stanza::Message(_) | Stanza::Presence(_) => {
                 let Ok(sender) = outbound.sender().clone().try_into_full() else {
                     return Err(UnroutableReason::RefusedByPolicy);
@@ -1995,6 +2075,10 @@ impl Inner {
                     .await;
                 return;
             }
+            Purpose::Account { sender } => {
+                self.answer_account(&sender, &queued.stanza, failure).await;
+                return;
+            }
             Purpose::Response { .. } | Purpose::Reply | Purpose::Departure => return,
         };
         if registered {
@@ -2093,26 +2177,7 @@ impl Inner {
                     occupant,
                     stanza,
                 }));
-                let Err(work) = self.room_queues.try_push(room.clone(), work, &peer) else {
-                    return SinkVerdict::Accepted;
-                };
-                telemetry::room_traffic_waited();
-                let router = Arc::clone(self);
-                let deadline = tokio::time::Instant::now() + self.limits.room_delivery_wait;
-                return SinkVerdict::Wait(SinkWait::new(async move {
-                    let placed = router
-                        .room_queues
-                        .push_or_wait(room, work, &peer, deadline, &router.shutdown)
-                        .await;
-                    match placed {
-                        Placed::Queued => Waited::Taken,
-                        Placed::TimedOut => {
-                            telemetry::room_traffic_overloaded();
-                            Waited::Overloaded
-                        }
-                        Placed::Stopped => Waited::Stopping,
-                    }
-                }));
+                return self.queue_inbound(room, work, peer);
             }
         }
         match reach(target, &stanza) {
@@ -2131,6 +2196,20 @@ impl Inner {
                 let payload_namespace = response_namespace(&stanza);
                 self.complete_response(&principal, stanza, payload_namespace, LocalOrigin::Remote);
             }
+            // Account traffic is decided off the stream's task, in its
+            // sender's order and under the room queues' bounds (gate G18).
+            InboundReach::Account if self.accounts_attached() => {
+                let sender = principal.address().to_bare();
+                let peer = stream.remote().as_domain_ref().as_str().to_owned();
+                let work = RoomWork::Account(Box::new(AccountTraffic {
+                    stream: stream.clone(),
+                    principal,
+                    to: to.clone(),
+                    stanza,
+                }));
+                return self.queue_inbound(sender, work, peer);
+            }
+            InboundReach::Account => self.refuse_account_traffic(stream, &stanza),
             InboundReach::Refused(refusal) => {
                 tracing::debug!(?refusal, "refusing a stanza from an s2s stream");
                 // RFC 6121 §8.5.1 and ADR-0020 D10: refused presence is
@@ -2145,6 +2224,33 @@ impl Inner {
             }
         }
         SinkVerdict::Accepted
+    }
+
+    /// Queue `work` for the worker serving `key` (a room's or a sender's
+    /// bare JID), counted against `peer`'s share. A stanza that finds the
+    /// queues full holds its stream until it fits: a room's presence burst
+    /// is never cut short.
+    fn queue_inbound(self: &Arc<Self>, key: BareJid, work: RoomWork, peer: String) -> SinkVerdict {
+        let Err(work) = self.room_queues.try_push(key.clone(), work, &peer) else {
+            return SinkVerdict::Accepted;
+        };
+        telemetry::room_traffic_waited();
+        let router = Arc::clone(self);
+        let deadline = tokio::time::Instant::now() + self.limits.room_delivery_wait;
+        SinkVerdict::Wait(SinkWait::new(async move {
+            let placed = router
+                .room_queues
+                .push_or_wait(key, work, &peer, deadline, &router.shutdown)
+                .await;
+            match placed {
+                Placed::Queued => Waited::Taken,
+                Placed::TimedOut => {
+                    telemetry::room_traffic_overloaded();
+                    Waited::Overloaded
+                }
+                Placed::Stopped => Waited::Stopping,
+            }
+        }))
     }
 
     /// Answer an element from `stream` that this server cannot use, with
@@ -2503,6 +2609,7 @@ async fn sweep(router: Arc<Inner>) {
             tracing::warn!("recording the s2s router's liveness failed");
         }
         router.sweep_expired().await;
+        router.expire_inbound();
         router.sweep_completed_elsewhere().await;
         router.sweep_verifications().await;
         router.sweep_due_rooms().await;
@@ -2549,6 +2656,7 @@ async fn deliver_room_traffic(router: Arc<Inner>, shard: usize) {
                 router.room_traffic(&stream, &from, &occupant, stanza).await
             }
             RoomWork::Ended(occupancy) => router.end_lost(*occupancy).await,
+            RoomWork::Account(traffic) => router.account_traffic(*traffic).await,
         }
     }
 }
@@ -2637,6 +2745,7 @@ impl PairWorker {
                 // never forwarded.
                 return;
             }
+            self.router.release_inbound(key);
         }
         let mut stream = match self.stream(&transport).await {
             Ok(stream) => stream,
@@ -2695,6 +2804,7 @@ impl PairWorker {
             Purpose::Response { .. }
             | Purpose::Reply
             | Purpose::Room { .. }
+            | Purpose::Account { .. }
             | Purpose::Departure => false,
         };
         let mut element = stanza_element(&queued.stanza);

@@ -81,6 +81,7 @@ mod remote_muc_retry;
 pub(crate) mod replay;
 mod resource_binding;
 mod resume_replay;
+pub(crate) mod s2s_accounts;
 pub(crate) mod s2s_delivery;
 mod sasl;
 mod send;

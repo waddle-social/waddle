@@ -19,6 +19,20 @@ pub(super) async fn send_roster_remove_subscription_side_effects(
     user_jid: &BareJid,
     removed_item: &RosterItem,
 ) {
+    // A remote contact's roster is on its own server: it is told through
+    // the remote route (RFC 6121 §2.5.2; gate G18).
+    if crate::server::routes::websocket::handlers::presence::is_remote_contact(
+        state,
+        &removed_item.jid,
+    ) {
+        crate::server::routes::websocket::handlers::presence::remove_remote_contact(
+            state,
+            user_jid,
+            removed_item,
+        )
+        .await;
+        return;
+    }
     if matches!(
         removed_item.subscription,
         Subscription::To | Subscription::Both

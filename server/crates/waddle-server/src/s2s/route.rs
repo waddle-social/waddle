@@ -19,10 +19,15 @@
 //!   directions (XEP-0045), shared by every replica through the
 //!   deployment's database ([`SqlRemoteRoomStore`]), with the cached
 //!   answers on which remote JIDs are rooms.
+//! - [`LocalAccounts`]: the account side of traffic between remote senders
+//!   and local accounts (D7, gate G18); attaching it enables that traffic
+//!   in both directions.
 //!
 //! The decisions, the handoff contract and the reachability inventory are
-//! recorded in `server/docs/planning/s2s-routing-2047.md`.
+//! recorded in `server/docs/planning/s2s-routing-2047.md`, and those of
+//! account traffic in `server/docs/planning/s2s-account-traffic-2047.md`.
 
+mod accounts;
 mod correlation;
 mod local;
 mod occupancy;
@@ -34,6 +39,10 @@ mod rooms;
 mod router;
 mod telemetry;
 
+pub use accounts::{
+    carries_dm_pin, is_account_presence, is_outbound_account_traffic, LocalAccounts,
+    MAX_ACCOUNT_REPLIES,
+};
 pub use correlation::{
     CorrelationDirection, CorrelationError, CorrelationKey, CorrelationOwner, IqCorrelations,
     PendingRequest, RequestKind, SqlIqCorrelations, MAX_CORRELATED_ADDRESS_BYTES,

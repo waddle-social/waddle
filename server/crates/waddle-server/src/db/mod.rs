@@ -18,6 +18,7 @@ pub(crate) mod read_only_timeout;
 pub mod roster;
 pub mod runtime_startup;
 pub(crate) mod runtime_store_acl;
+pub mod s2s_accounts;
 mod schema;
 mod value;
 

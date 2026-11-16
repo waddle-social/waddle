@@ -24,6 +24,7 @@ use crate::destination::{
     UnservedDestination, REMOTE_ROUTE_OFFER_TIMEOUT,
 };
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use crate::server::routes::websocket::s2s_accounts;
 
 /// Classify the IQ's `to` against this deployment's served domains.
 ///
@@ -141,8 +142,30 @@ pub(super) async fn route_unserved_request(
     }
     let reply = match destination {
         UnservedDestination::Remote(remote) => {
+            // An XEP-0060 `<subscribe/>` beyond the account's bound on
+            // remote subscriptions never leaves; one that leaves, or an
+            // `<unsubscribe/>`, is recorded as the gate of the service's
+            // event notifications (gate G18).
+            if s2s_accounts::exceeds_subscription_bound(state, sender, &iq).await {
+                return unroutable_iq_reply(
+                    &iq,
+                    &Jid::from(sender.clone()),
+                    sender.domain(),
+                    UnroutableReason::EgressBusy,
+                )
+                .map(|reply| vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))])
+                .unwrap_or_default()
+                .into();
+            }
+            let service = remote.address().clone();
+            let request = iq.clone();
             match offer_remote(state, sender, remote, iq).await {
-                IqOffer::Accepted | IqOffer::Unattributed => None,
+                IqOffer::Accepted => {
+                    s2s_accounts::record_subscription_request(state, sender, &service, &request)
+                        .await;
+                    None
+                }
+                IqOffer::Unattributed => None,
                 IqOffer::Refused { reason, reply } => {
                     debug!(?reason, "Refusing IQ request to an unserved domain");
                     reply

@@ -149,11 +149,17 @@ pub(super) async fn handle_regular_presence_update(
                 None => false,
             };
             let subscribe_stanzas = if first_available {
-                state
+                let mut stanzas = state
                     .deps
                     .protocol
                     .connection_registry
-                    .pending_subscription_stanzas(&sender_jid.to_bare())
+                    .pending_subscription_stanzas(&sender_jid.to_bare());
+                // Requests from remote senders are recorded durably and
+                // delivered on every new session until answered (gate G18).
+                stanzas.extend(
+                    super::remote::pending_remote_subscriptions(state, &sender_jid.to_bare()).await,
+                );
+                stanzas
             } else {
                 Vec::new()
             };
@@ -168,6 +174,12 @@ pub(super) async fn handle_regular_presence_update(
                 flush_plan,
                 subscribe_stanzas,
             );
+            // RFC 6121 §4.2.2: a new presence session probes the remote
+            // contacts whose presence the account is subscribed to; local
+            // contacts' presence is known here already.
+            if first_available {
+                super::remote::probe_remote_contacts(state, &sender_jid.to_bare()).await;
+            }
         } else {
             debug!(
                 jid = %sender_jid,
@@ -468,6 +480,13 @@ async fn broadcast_presence_to_subscribers(
         let mut relayed = presence.clone();
         relayed.from = Some(Jid::from(sender_jid.clone()));
         relayed.to = Some(Jid::from(subscriber_bare.clone()));
+        // A remote contact's server receives the presence through the
+        // remote route (RFC 6121 §4.2.2, §4.4.2; gate G18). A refusal, such
+        // as a full queue for the contact's domain, drops it.
+        if super::remote::is_remote_contact(state, &subscriber_bare) {
+            let _ = super::remote::offer_presence(state, relayed).await;
+            continue;
+        }
         let stanza = Stanza::Presence(relayed);
         if super::subscription::try_route_presence_to_bare_remote(
             state,

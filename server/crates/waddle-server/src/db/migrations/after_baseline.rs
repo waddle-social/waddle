@@ -35,6 +35,11 @@ pub const HOST_GRANT_REVOCATION_FENCE_VERSION: i64 = 2005;
 /// JIDs.
 pub const RETIRED_ACCOUNT_JIDS_VERSION: i64 = 2006;
 
+/// Version of the migration that creates the stores of S2S account
+/// traffic: pending subscription requests from remote senders and the
+/// remote PubSub nodes local accounts subscribed to.
+pub const S2S_ACCOUNT_TRAFFIC_VERSION: i64 = 2010;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -94,6 +99,14 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2006_retired_account_jids.postgres.sql"
             ),
         },
+        Migration {
+            version: S2S_ACCOUNT_TRAFFIC_VERSION,
+            description: "s2s account traffic".to_string(),
+            sql_sqlite: include_str!("../../../sql/migrations/2010_s2s_account_traffic.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2010_s2s_account_traffic.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -103,7 +116,7 @@ mod tests {
     use super::{
         all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
         HOST_GRANT_REVOCATION_FENCE_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+        S2S_ACCOUNT_TRAFFIC_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
     };
 
     #[test]
@@ -119,7 +132,8 @@ mod tests {
                 S2S_IQ_CORRELATIONS_VERSION,
                 S2S_REMOTE_ROOMS_VERSION,
                 HOST_GRANT_REVOCATION_FENCE_VERSION,
-                RETIRED_ACCOUNT_JIDS_VERSION
+                RETIRED_ACCOUNT_JIDS_VERSION,
+                S2S_ACCOUNT_TRAFFIC_VERSION
             ]
         );
     }

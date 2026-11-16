@@ -266,6 +266,7 @@ pub use crate::server::durable_membership::PermissionDurableMembershipSource;
 /// The production `/ws` RFC 7395 router, so suites can serve a test state
 /// over a real loopback WebSocket and drive the live connection loop.
 pub use crate::server::routes::websocket::router;
+pub use crate::server::routes::websocket::s2s_accounts::WebSocketLocalAccounts;
 pub use crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery;
 pub use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
 pub use crate::server::routes::websocket::test_state::{
@@ -285,6 +286,38 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides::default(),
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// The default in-memory WebSocket state whose app state runs the S2S
+/// snapshot of `config`, as a replica with S2S enabled does
+/// (`AppState::s2s_federation`), so that the account side of S2S traffic
+/// decides admission, and the client paths treat remote contacts, as in
+/// production.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_federation(
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::try_new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
+            .await
+            .expect("db pool"),
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    app_state.s2s_federation = Some(crate::permissions::host_grant::FederationSnapshot::of(
+        config,
+    ));
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            ..TestStateOverrides::default()
+        },
         || std::future::ready(None),
     )
     .await

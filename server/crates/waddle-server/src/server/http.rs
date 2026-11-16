@@ -691,10 +691,18 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     )
     .await?;
     // The router delivers correlated responses and their errors to local
-    // resources through the state it is part of.
+    // resources, and account traffic to local accounts, through the state
+    // it is part of.
     if let Some(router) = &s2s_router {
         router.attach_local(Arc::new(
             crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery::new(
+                &websocket_state,
+            ),
+        ));
+        // The account side enables traffic between remote senders and
+        // local accounts in both directions (gate G18).
+        router.attach_accounts(Arc::new(
+            crate::server::routes::websocket::s2s_accounts::WebSocketLocalAccounts::new(
                 &websocket_state,
             ),
         ));
@@ -1524,9 +1532,19 @@ async fn create_websocket_state(
         // Account lookups match canonical keys only, so every account row
         // needs its key before the node serves; the roster prune that
         // follows uses them.
-        crate::auth::directory::reconcile_local_accounts(state.db_pool.global_actor())
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
+        // With S2S enabled, contacts at domains this deployment does not
+        // serve are remote contacts and stay (gate G18).
+        let remote_contacts = state
+            .s2s_federation
+            .is_some()
+            .then(|| service_domains.served_domains(&xmpp_domain))
+            .flatten();
+        crate::auth::directory::reconcile_local_accounts(
+            state.db_pool.global_actor(),
+            remote_contacts.as_ref(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
         // Report, without identifiers, the accounts the identity profile
         // treats differently from before; nothing is changed.
         match crate::auth::identity_profile::reconcile_identity_profile(

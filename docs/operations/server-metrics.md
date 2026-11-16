@@ -111,6 +111,11 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `waddle.s2s.route.room_traffic.overloaded` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_overloaded_total` | Stanzas from S2S streams to local full JIDs that found no place on the room delivery queues within the wait's deadline; the stanza is lost and its stream closed with `resource-constraint`. |
 | `waddle.s2s.route.room_traffic.delivery_timeouts` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_delivery_timeouts_total` | Deliveries of remote room traffic to a local occupant abandoned after the delivery timeout. |
 | `waddle.s2s.route.room_traffic.store_failures` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_store_failures_total` | Stanzas from S2S streams to local full JIDs dropped unanswered because the remote room occupancy store failed while deciding whether they are room traffic. |
+| `waddle.s2s.route.account_traffic.timeouts` | counter | `{stanza}` | none | `waddle_s2s_route_account_traffic_timeouts_total` | Stanzas from S2S streams to local accounts abandoned because the account side did not decide them before the deadline. |
+| `waddle.s2s.route.account_traffic.replies_dropped` | counter | `{stanza}` | none | `waddle_s2s_route_account_traffic_replies_dropped_total` | Replies to remote senders the account side produced beyond the bound for one received stanza, dropped unsent. |
+| `waddle.s2s.route.account_requests.refused` | counter | `{stanza}` | none | `waddle_s2s_route_account_requests_refused_total` | IQ requests from S2S streams to local resources refused with `resource-constraint` because too many were pending from their domain or on the replica. |
+| `waddle.s2s.account_traffic.not_admitted` | counter | `{stanza}` | none | `waddle_s2s_account_traffic_not_admitted_total` | Stanzas from S2S streams that reached the account side from a domain the replica's S2S snapshot no longer admits (ADR-0020 D1), applied and answered with nothing. |
+| `waddle.s2s.account_traffic.pending_dropped` | counter | `{stanza}` | none | `waddle_s2s_account_traffic_pending_dropped_total` | Subscription requests from remote senders dropped unanswered because the account's record of pending requests, or its share for the sender's domain, was full, or the request was too large to record. |
 
 ## All other metrics
 

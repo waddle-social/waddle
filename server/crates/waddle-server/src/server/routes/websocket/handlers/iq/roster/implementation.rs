@@ -174,12 +174,20 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         .first()
         .expect("parse_roster_set guarantees one item");
 
-    // A roster contact is an existing local account; removal stays open for
-    // any JID so junk items can be deleted. RFC 6121 §2.3.3 names no
+    // A roster contact is an existing local account, or with S2S enabled an
+    // address at a domain this deployment does not serve; removal stays
+    // open for any JID so junk items can be deleted. RFC 6121 §2.3.3 names no
     // condition for a contact that does not exist: `not-acceptable` there is
     // for item data the client can fix (type modify), while `item-not-found`
     // (RFC 6120 §8.3.3.7, type cancel) says the addressed JID cannot be found.
-    if !requested.subscription.is_remove() {
+    // With S2S enabled a contact may also be at a domain this deployment
+    // does not serve; its server answers for it (gate G18).
+    let remote_contact = crate::server::routes::websocket::s2s_accounts::s2s_enabled(state)
+        && crate::server::routes::websocket::handlers::presence::is_remote_contact(
+            state,
+            &requested.jid,
+        );
+    if !requested.subscription.is_remove() && !remote_contact {
         match local_account_jid_exists(
             state.deps.app_state.db_pool.global_actor(),
             &requested.jid,
