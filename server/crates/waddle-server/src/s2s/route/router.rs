@@ -803,7 +803,7 @@ impl Inner {
                         if let Err(reason) =
                             self.hold(&pair, sender, &room, &attempt, stanza.clone())
                         {
-                            let _ = self.rooms.remove(sender, &room, occupancy.revision).await;
+                            self.discard(&occupancy).await;
                             return Err(reason);
                         }
                         self.settle_if_verified(&room, &attempt).await;
@@ -827,19 +827,26 @@ impl Inner {
                     return Ok(());
                 }
                 OccupancyPhase::Verifying => {
-                    // A newer join replaces the one held.
+                    // A newer join replaces the one held, with a deadline
+                    // of its own.
                     let mut next = current.clone();
                     next.nick = nick.clone();
                     next.attempt = attempt.clone();
                     next.join_id = join_id.clone();
                     next.owner = self.owner.as_str().to_owned();
+                    next.deadline_ms =
+                        Some(now + 2 * duration_ms(self.limits.verification_timeout));
                     next.updated_at_ms = now;
                     if !self.rooms.replace(&next).await.map_err(busy)? {
                         continue;
                     }
-                    // The row now waits on this join; if it cannot be held,
-                    // the row's deadline ends it.
-                    self.hold(&pair, sender, &room, &attempt, stanza.clone())?;
+                    next.revision = next.revision.saturating_add(1);
+                    // The row now waits on this join; one that cannot be
+                    // held is forgotten and refused, as a new join is.
+                    if let Err(reason) = self.hold(&pair, sender, &room, &attempt, stanza.clone()) {
+                        self.discard(&next).await;
+                        return Err(reason);
+                    }
                     self.settle_if_verified(&room, &attempt).await;
                     return Ok(());
                 }
@@ -908,12 +915,7 @@ impl Inner {
                 return Err(UnroutableReason::RefusedByPolicy);
             };
             if current.phase == OccupancyPhase::Verifying {
-                if self
-                    .rooms
-                    .remove(sender, &room, current.revision)
-                    .await
-                    .map_err(busy)?
-                {
+                if self.rooms.remove(&current).await.map_err(busy)? {
                     self.unhold(&room, &current.attempt);
                     return Ok(());
                 }
@@ -1071,8 +1073,14 @@ impl Inner {
         let home = self.home().to_owned();
         let room = &held.room;
         for _ in 0..EDIT_ATTEMPTS {
-            let Ok(Some(current)) = self.rooms.get(&held.occupant, room).await else {
-                return;
+            let current = match self.rooms.get(&held.occupant, room).await {
+                Ok(Some(current)) => current,
+                Ok(None) => return,
+                Err(_) => {
+                    // The row's deadline ends the join.
+                    tracing::warn!("reading a held remote room join failed");
+                    return;
+                }
             };
             if current.phase != OccupancyPhase::Verifying || current.attempt != held.attempt {
                 // Left, ended, or replaced by a later join.
@@ -1081,12 +1089,7 @@ impl Inner {
             let error = match conclusion {
                 Conclusion::Verdict(RoomVerdict::Room) => {
                     let Some(permit) = self.reserve(held.pair.clone(), false) else {
-                        if matches!(
-                            self.rooms
-                                .remove(&held.occupant, room, current.revision)
-                                .await,
-                            Ok(true)
-                        ) {
+                        if self.discard(&current).await {
                             self.answer_join(&current, Failure::Timeout.error(&home))
                                 .await;
                         }
@@ -1109,32 +1112,48 @@ impl Inner {
                             return;
                         }
                         Ok(false) => continue,
-                        Err(_) => return,
+                        Err(_) => {
+                            tracing::warn!("sending a held remote room join failed");
+                            return;
+                        }
                     }
                 }
                 Conclusion::Verdict(RoomVerdict::NotRoom) => rooms::not_a_room(&home),
                 Conclusion::Failed(error) => (**error).clone(),
             };
-            match self
-                .rooms
-                .remove(&held.occupant, room, current.revision)
-                .await
-            {
+            match self.rooms.remove(&current).await {
                 Ok(true) => {
                     self.answer_join(&current, error).await;
                     return;
                 }
                 Ok(false) => continue,
-                Err(_) => return,
+                Err(_) => {
+                    tracing::warn!("ending a refused remote room join failed");
+                    return;
+                }
             }
         }
     }
 
-    /// Answer the join `occupancy` waited on with `error`.
+    /// Answer the join `occupancy` waited on with `error`, waiting at most
+    /// the delivery timeout.
     async fn answer_join(&self, occupancy: &Occupancy, error: StanzaError) {
         if let Some(reply) = rooms::join_error(occupancy, error) {
-            self.deliver_local(&occupancy.occupant, reply, LocalOrigin::Server)
+            self.deliver_within(&occupancy.occupant, reply, LocalOrigin::Server)
                 .await;
+        }
+    }
+
+    /// Remove the row of a join that is refused or cannot go on, at the
+    /// revision and attempt read: `true` when this call removed it. A
+    /// failure is logged and the row's deadline ends it.
+    async fn discard(&self, occupancy: &Occupancy) -> bool {
+        match self.rooms.remove(occupancy).await {
+            Ok(removed) => removed,
+            Err(_) => {
+                tracing::warn!("forgetting a remote room join failed");
+                false
+            }
         }
     }
 
@@ -1267,6 +1286,9 @@ impl Inner {
             }
             let conclusion = match self.rooms.verdict(&room, now).await {
                 Ok(Some(verdict)) => Conclusion::Verdict(verdict),
+                // The replica that completed it may not have recorded its
+                // verdict yet: wait for it until the verification expires.
+                Ok(None) | Err(_) if expires_at_ms > now => continue,
                 Ok(None) | Err(_) => Conclusion::Failed(Box::new(rooms::unanswered(self.home()))),
             };
             self.conclude(&room, &key, conclusion).await;
@@ -1295,8 +1317,15 @@ impl Inner {
         };
         for occupancy in occupancies {
             // Whatever the room's traffic changed since the read, the
-            // occupancy ends.
-            let Some(occupancy) = self.remove_current(&occupancy, |_| true).await else {
+            // occupancy ends, unless a later join replaced it or a session
+            // that resumed elsewhere adopted it since: those belong to a
+            // session that lives on.
+            let Some(occupancy) = self
+                .remove_current(&occupancy, |current| {
+                    current.attempt == occupancy.attempt && current.owner == occupancy.owner
+                })
+                .await
+            else {
                 continue;
             };
             match occupancy.phase {
@@ -1371,6 +1400,7 @@ impl Inner {
     async fn sweep_due_rooms(self: &Arc<Self>) {
         let now = now_ms();
         let Ok(due) = self.rooms.due(now, SWEEP_BATCH).await else {
+            tracing::warn!("reading the remote room occupancies past their deadline failed");
             return;
         };
         for occupancy in due {
@@ -1387,12 +1417,7 @@ impl Inner {
             {
                 continue;
             }
-            if !matches!(
-                self.rooms
-                    .remove(&occupancy.occupant, &occupancy.room, occupancy.revision)
-                    .await,
-                Ok(true)
-            ) {
+            if !self.discard(&occupancy).await {
                 continue;
             }
             match occupancy.phase {
@@ -1410,22 +1435,18 @@ impl Inner {
     /// lives on elsewhere.
     async fn sweep_orphaned_rooms(self: &Arc<Self>, before_ms: i64) {
         let Ok(orphaned) = self.rooms.orphaned(before_ms, SWEEP_BATCH).await else {
+            tracing::warn!("reading the remote room occupancies stopped replicas left failed");
             return;
         };
         for occupancy in orphaned {
-            if !matches!(
-                self.rooms
-                    .remove(&occupancy.occupant, &occupancy.room, occupancy.revision)
-                    .await,
-                Ok(true)
-            ) {
+            if !self.discard(&occupancy).await {
                 continue;
             }
             match occupancy.phase {
                 OccupancyPhase::Joining | OccupancyPhase::Joined => {
                     self.depart(&occupancy);
                     if let Some(presence) = rooms::removed_by_error(&occupancy) {
-                        self.deliver_local(&occupancy.occupant, presence, LocalOrigin::Server)
+                        self.deliver_within(&occupancy.occupant, presence, LocalOrigin::Server)
                             .await;
                     }
                 }
@@ -1458,7 +1479,10 @@ impl Inner {
             let current = match self.rooms.get(occupant, &room).await {
                 Ok(current) => current,
                 // Unknown: dropped unanswered rather than refused.
-                Err(_) => return,
+                Err(_) => {
+                    tracing::warn!("dropping a remote room's stanza: the occupancy store failed");
+                    return;
+                }
             };
             let Some(current) = current else {
                 admitted = Some(false);
@@ -1468,12 +1492,16 @@ impl Inner {
             admitted = Some(admits);
             let applied = match change {
                 None => Ok(true),
-                Some(Change::Remove) => self.rooms.remove(occupant, &room, current.revision).await,
+                Some(Change::Remove) => self.rooms.remove(&current).await,
                 Some(Change::Update(next)) => self.rooms.replace(&next).await,
             };
             match applied {
                 Ok(false) => continue,
-                Ok(true) | Err(_) => break,
+                Ok(true) => break,
+                Err(_) => {
+                    tracing::warn!("recording what a remote room's stanza changed failed");
+                    break;
+                }
             }
         }
         if admitted == Some(true) {
@@ -1528,11 +1556,7 @@ impl Inner {
             if !still(&current) {
                 return None;
             }
-            if let Ok(true) = self
-                .rooms
-                .remove(&current.occupant, &current.room, current.revision)
-                .await
-            {
+            if let Ok(true) = self.rooms.remove(&current).await {
                 return Some(current);
             }
         }
@@ -1544,13 +1568,19 @@ impl Inner {
     /// timeout so that one slow delivery does not hold back the rooms
     /// behind it.
     async fn deliver_room(&self, to: &FullJid, stanza: Stanza, origin: LocalOrigin) {
-        let delivery = self.deliver_local(to, stanza, origin);
-        if tokio::time::timeout(self.limits.room_delivery_timeout, delivery)
-            .await
-            .is_err()
-        {
+        if !self.deliver_within(to, stanza, origin).await {
             telemetry::room_delivery_timed_out();
         }
+    }
+
+    /// Deliver `stanza` to a local resource, waiting at most the delivery
+    /// timeout, so that a slow delivery holds back neither a room's worker
+    /// nor the sweep: `false` when it was abandoned.
+    async fn deliver_within(&self, to: &FullJid, stanza: Stanza, origin: LocalOrigin) -> bool {
+        let delivery = self.deliver_local(to, stanza, origin);
+        tokio::time::timeout(self.limits.room_delivery_timeout, delivery)
+            .await
+            .is_ok()
     }
 
     /// Decide whether a local entity's stanza may go to its remote
@@ -1847,13 +1877,13 @@ impl Inner {
             if current.phase != OccupancyPhase::Joining || current.attempt != join.attempt {
                 return;
             }
-            match self
-                .rooms
-                .remove(sender, &join.room, current.revision)
-                .await
-            {
+            match self.rooms.remove(&current).await {
                 Ok(false) => continue,
-                Ok(true) | Err(_) => return,
+                Ok(true) => return,
+                Err(_) => {
+                    tracing::warn!("forgetting a remote room join that never left failed");
+                    return;
+                }
             }
         }
     }
@@ -2184,7 +2214,7 @@ impl Inner {
                         payload: None,
                         error: Failure::Expired.error(self.home()),
                     };
-                    self.deliver_local(&sender, Stanza::Iq(Box::new(reply)), LocalOrigin::Server)
+                    self.deliver_within(&sender, Stanza::Iq(Box::new(reply)), LocalOrigin::Server)
                         .await;
                 }
                 // Completed, withdrawn or never registered.
@@ -2294,10 +2324,9 @@ async fn sweep(router: Arc<Inner>) {
             () = router.shutdown.cancelled() => return,
             _ = interval.tick() => {}
         }
-        router.sweep_expired().await;
-        router.sweep_completed_elsewhere().await;
-        router.sweep_verifications().await;
-        router.sweep_due_rooms().await;
+        // Liveness first: the sweeps below deliver to local resources and
+        // may take a while, and another replica takes this one's room
+        // occupancies for a stopped replica's once it stops recording it.
         if router
             .correlations
             .heartbeat(&router.owner, now_ms())
@@ -2306,6 +2335,10 @@ async fn sweep(router: Arc<Inner>) {
         {
             tracing::warn!("recording the s2s router's liveness failed");
         }
+        router.sweep_expired().await;
+        router.sweep_completed_elsewhere().await;
+        router.sweep_verifications().await;
+        router.sweep_due_rooms().await;
         if last_prune.elapsed() >= router.limits.prune_after {
             last_prune = Instant::now();
             let before = now_ms().saturating_sub(duration_ms(router.limits.prune_after));

@@ -198,14 +198,13 @@ pub trait RemoteRoomStore: Send + Sync {
     /// when it was replaced.
     async fn replace(&self, occupancy: &Occupancy) -> Result<bool, RoomStoreError>;
 
-    /// Remove the row if it is still at `revision`. `true` when this call
-    /// removed it; only that caller acts on its end.
-    async fn remove(
-        &self,
-        occupant: &FullJid,
-        room: &BareJid,
-        revision: i64,
-    ) -> Result<bool, RoomStoreError>;
+    /// Remove `occupancy`'s row if it is still at `occupancy.revision` and
+    /// still names `occupancy.attempt`. `true` when this call removed it;
+    /// only that caller acts on its end. A row removed and inserted again
+    /// for the same occupant and room starts its revisions again, but a new
+    /// row always names a new attempt, so a removal decided on the old row
+    /// never removes the new one.
+    async fn remove(&self, occupancy: &Occupancy) -> Result<bool, RoomStoreError>;
 
     /// Record that `owner` now routes the occupant's stanzas for `room`.
     async fn adopt(
@@ -497,20 +496,16 @@ impl RemoteRoomStore for SqlRemoteRoomStore {
         Ok(replaced == 1)
     }
 
-    async fn remove(
-        &self,
-        occupant: &FullJid,
-        room: &BareJid,
-        revision: i64,
-    ) -> Result<bool, RoomStoreError> {
-        let mut params = key_params(occupant, room);
-        params.push(revision.into());
+    async fn remove(&self, occupancy: &Occupancy) -> Result<bool, RoomStoreError> {
+        let mut params = key_params(&occupancy.occupant, &occupancy.room);
+        params.push(occupancy.revision.into());
+        params.push(occupancy.attempt.as_str().into());
         let removed = self
             .execute(
                 &[
                     "DELETE FROM s2s_remote_room_occupancies WHERE ",
                     KEY_CLAUSE,
-                    " AND revision = ?",
+                    " AND revision = ? AND attempt = ?",
                 ]
                 .concat(),
                 params,

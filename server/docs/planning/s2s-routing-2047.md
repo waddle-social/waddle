@@ -554,7 +554,9 @@ presence id, leaves whose answer is still to come, the replica whose
 router last routed the resource's room stanzas (`owner_id`, the router's
 correlation owner), a deadline, and a revision. Every write after the
 insert is a compare-and-set on the revision, retried a few times against
-concurrent writers. Any replica admits a room's traffic from the table,
+concurrent writers; a removal also names the join attempt the row was
+read with, since a row removed and inserted again starts its revisions
+again but always names a new attempt. Any replica admits a room's traffic from the table,
 whichever replica the room's server dials, and delivers it through the
 local delivery path, which reaches the occupant's session on another
 replica through the cluster's registered-remote delivery. A session that
@@ -744,9 +746,16 @@ occupancies, and a leave sent for the old session could reach the room
 after the replacement's own join and remove it. A detached session that
 may still resume keeps its rooms. A client's own broadcast unavailable
 presence does not leave rooms, as it does not leave local rooms either.
+Each occupancy is removed only while it still names the join and the
+replica it named when the leave began: one that a later join replaced,
+or that a session resumed elsewhere adopted, in the meantime belongs to a
+session that lives on and is kept.
 
 **When a replica stops.** Each router records that it is alive in
-`s2s_iq_correlation_owners` at every sweep. An occupancy not written for
+`s2s_iq_correlation_owners` at the start of every sweep, before the sweep
+answers anything, and every delivery a sweep makes waits at most the
+delivery timeout, so a slow local delivery does not let other replicas
+take this one for stopped. An occupancy not written for
 ten minutes whose owner has not recorded that it is alive for as long is
 ended by another replica's sweep: the room is sent the resource's leave
 and the resource, if its session lives on elsewhere, receives the status
