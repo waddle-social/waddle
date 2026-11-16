@@ -100,8 +100,7 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
     let presence = Stanza::Presence(available(HOME_A, "r"));
 
     use InboundReach::{
-        CorrelatedResponse, Refused, ServerDiscoInfo, ServerDiscoItems, ServerPing,
-        ServerResponse,
+        CorrelatedResponse, Refused, ServerDiscoInfo, ServerDiscoItems, ServerPing, ServerResponse,
     };
     let server = LocalTarget::ServerDomain;
     assert_eq!(
@@ -451,7 +450,10 @@ async fn a_refused_spelling_is_answered_with_jid_malformed_and_the_stream_stays_
     let bytes = peer.encode(&presence);
     peer.write(&bytes).await.expect("written");
     tokio::time::sleep(QUIET).await;
-    assert!(captured.with_id("j6").is_empty(), "presence is not answered");
+    assert!(
+        captured.with_id("j6").is_empty(),
+        "presence is not answered"
+    );
 
     // The stream is still open.
     let (error, closed, _) = peer.read_until_closed(QUIET).await;

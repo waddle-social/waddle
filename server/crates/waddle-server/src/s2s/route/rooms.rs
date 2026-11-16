@@ -172,7 +172,9 @@ pub(super) fn inbound(
     now_ms: i64,
 ) -> (bool, Option<Change>) {
     if occupancy.phase == OccupancyPhase::Leaving
-        && occupancy.deadline_ms.is_some_and(|deadline| deadline <= now_ms)
+        && occupancy
+            .deadline_ms
+            .is_some_and(|deadline| deadline <= now_ms)
     {
         return (false, Some(Change::Remove));
     }
@@ -232,9 +234,7 @@ pub(super) fn inbound(
                 .then(|| item(user).and_then(|item| item.attr("nick")))
                 .flatten();
             let answers_earlier_leave = occupancy.leaves_pending > 0
-                && occupancy
-                    .leave_until_ms
-                    .is_some_and(|until| until > now_ms);
+                && occupancy.leave_until_ms.is_some_and(|until| until > now_ms);
             match new_nick {
                 Some(nick) if occupancy.phase.occupies() => {
                     next.nick = nick.to_owned();
@@ -384,8 +384,7 @@ pub(super) fn verification_answer(stanza: &Stanza, usable: bool) -> Verification
             let transient = error.type_ == ErrorType::Wait
                 || matches!(
                     error.defined_condition,
-                    DefinedCondition::RemoteServerNotFound
-                        | DefinedCondition::RemoteServerTimeout
+                    DefinedCondition::RemoteServerNotFound | DefinedCondition::RemoteServerTimeout
                 );
             if transient {
                 VerificationAnswer::Unavailable

@@ -592,6 +592,12 @@ pub trait RemoteRoute: Send + Sync {
     /// only queues and must not wait for a peer. By default nothing
     /// happens.
     async fn resource_ended(&self, _resource: &FullJid) {}
+
+    /// The local resource `resource` resumed its session on this replica,
+    /// which may not be the one that held it before. A route that keeps
+    /// state for it, such as the remote rooms it joined, records that this
+    /// replica now holds it. By default nothing happens.
+    async fn resource_resumed(&self, _resource: &FullJid) {}
 }
 
 /// The remote route used while server-to-server transport is not enabled:

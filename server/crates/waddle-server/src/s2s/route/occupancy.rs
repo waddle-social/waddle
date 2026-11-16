@@ -214,6 +214,15 @@ pub trait RemoteRoomStore: Send + Sync {
         now_ms: i64,
     ) -> Result<(), RoomStoreError>;
 
+    /// Record that `owner` now routes every stanza of `occupant`, whose
+    /// session resumed there.
+    async fn adopt_resource(
+        &self,
+        occupant: &FullJid,
+        owner: &str,
+        now_ms: i64,
+    ) -> Result<(), RoomStoreError>;
+
     /// Every occupancy of `occupant`.
     async fn of_resource(&self, occupant: &FullJid) -> Result<Vec<Occupancy>, RoomStoreError>;
 
@@ -527,6 +536,21 @@ impl RemoteRoomStore for SqlRemoteRoomStore {
             ]
             .concat(),
             params,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn adopt_resource(
+        &self,
+        occupant: &FullJid,
+        owner: &str,
+        now_ms: i64,
+    ) -> Result<(), RoomStoreError> {
+        self.execute(
+            "UPDATE s2s_remote_room_occupancies SET owner_id = ?, updated_at_ms = ?, \
+             revision = revision + 1 WHERE occupant_jid = ? AND owner_id <> ?",
+            crate::db_params![owner, now_ms, occupant.as_str(), owner],
         )
         .await
         .map(|_| ())

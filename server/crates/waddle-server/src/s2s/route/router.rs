@@ -27,13 +27,13 @@ use super::correlation::{
     PendingRequest, RequestKind,
 };
 use super::local::{LocalDelivery, LocalOrigin};
-use super::principal::RemotePrincipal;
-use super::reach::{reach, InboundReach, LocalTarget, Refusal};
-use super::replies;
 use super::occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomVerdict,
     MAX_JOIN_ID_BYTES,
 };
+use super::principal::RemotePrincipal;
+use super::reach::{reach, InboundReach, LocalTarget, Refusal};
+use super::replies;
 use super::room_delivery::{InboundTraffic, RoomQueues, RoomWork};
 use super::rooms::{self, Change, RoomEgress, VerificationAnswer};
 use super::telemetry;
@@ -155,7 +155,7 @@ impl Default for RouterLimits {
             room_verdict_ttl: Duration::from_secs(3600),
             not_room_verdict_ttl: Duration::from_secs(300),
             room_deliveries: 1024,
-            room_deliveries_per_room: 256,
+            room_deliveries_per_room: 64,
             room_delivery_workers: 4,
             room_delivery_timeout: Duration::from_secs(5),
         }
@@ -227,7 +227,10 @@ enum Purpose {
     /// resource joins, registered for correlation before it is written.
     /// If it cannot be sent, the joins it holds are answered with the
     /// error.
-    Verify { room: BareJid, pending: PendingRequest },
+    Verify {
+        room: BareJid,
+        pending: PendingRequest,
+    },
 }
 
 /// The join a queued join presence is.
@@ -509,6 +512,20 @@ impl RemoteRoute for S2sRouter {
     async fn resource_ended(&self, resource: &FullJid) {
         self.inner.leave_rooms(resource).await;
     }
+
+    async fn resource_resumed(&self, resource: &FullJid) {
+        if self
+            .inner
+            .rooms
+            .adopt_resource(resource, self.inner.owner.as_str(), now_ms())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "recording the replica routing a resumed resource's remote rooms failed"
+            );
+        }
+    }
 }
 
 impl StanzaSink for S2sRouter {
@@ -639,9 +656,7 @@ impl Inner {
             return Err(UnroutableReason::RefusedByPolicy);
         };
         match egress {
-            RoomEgress::Join { nick, id } => {
-                self.join(pair, sender, room, nick, id, stanza).await
-            }
+            RoomEgress::Join { nick, id } => self.join(pair, sender, room, nick, id, stanza).await,
             RoomEgress::Leave => self.leave(pair, sender, room, stanza).await,
             other => {
                 let current = self
@@ -947,7 +962,8 @@ impl Inner {
             if !key.fits() {
                 return Err(UnroutableReason::InvalidRequest);
             }
-            let expires_at_ms = now_ms().saturating_add(duration_ms(self.limits.verification_timeout));
+            let expires_at_ms =
+                now_ms().saturating_add(duration_ms(self.limits.verification_timeout));
             let queued = Queued {
                 stanza: rooms::disco_request(local, room, key.id.clone()),
                 purpose: Purpose::Verify {
@@ -975,9 +991,7 @@ impl Inner {
             );
         }
         if let Some(verification) = verifications.get_mut(room) {
-            verification
-                .held
-                .retain(|held| held.occupant != *occupant);
+            verification.held.retain(|held| held.occupant != *occupant);
             verification.held.push(HeldJoin {
                 occupant: occupant.clone(),
                 attempt: attempt.to_owned(),
@@ -1017,7 +1031,12 @@ impl Inner {
 
     /// End this replica's verification of `room` named by `key`, and settle
     /// every join it held.
-    async fn conclude(self: &Arc<Self>, room: &BareJid, key: &CorrelationKey, conclusion: Conclusion) {
+    async fn conclude(
+        self: &Arc<Self>,
+        room: &BareJid,
+        key: &CorrelationKey,
+        conclusion: Conclusion,
+    ) {
         let held = {
             let mut verifications = self.verifications();
             match verifications.get(room) {
@@ -1215,7 +1234,7 @@ impl Inner {
                             &key,
                             Conclusion::Failed(Box::new(rooms::unanswered(self.home()))),
                         )
-                            .await;
+                        .await;
                         continue;
                     }
                     // Answered elsewhere, or never registered.
@@ -1234,9 +1253,7 @@ impl Inner {
             }
             let conclusion = match self.rooms.verdict(&room, now).await {
                 Ok(Some(verdict)) => Conclusion::Verdict(verdict),
-                Ok(None) | Err(_) => {
-                    Conclusion::Failed(Box::new(rooms::unanswered(self.home())))
-                }
+                Ok(None) | Err(_) => Conclusion::Failed(Box::new(rooms::unanswered(self.home()))),
             };
             self.conclude(&room, &key, conclusion).await;
         }
@@ -1263,14 +1280,11 @@ impl Inner {
             return;
         };
         for occupancy in occupancies {
-            if !matches!(
-                self.rooms
-                    .remove(resource, &occupancy.room, occupancy.revision)
-                    .await,
-                Ok(true)
-            ) {
+            // Whatever the room's traffic changed since the read, the
+            // occupancy ends.
+            let Some(occupancy) = self.remove_current(&occupancy, |_| true).await else {
                 continue;
-            }
+            };
             match occupancy.phase {
                 OccupancyPhase::Joining | OccupancyPhase::Joined => self.depart(&occupancy),
                 OccupancyPhase::Verifying => {
@@ -1310,8 +1324,9 @@ impl Inner {
     /// queued, exempt from the queue's bounds.
     fn lose_rooms(self: &Arc<Self>, stream: &VerifiedPeerStream) {
         let router = Arc::clone(self);
-        let local = stream.local().as_str().to_owned();
-        let remote = stream.remote().as_str().to_owned();
+        // The table holds the domains as the JIDs spell them.
+        let local = stream.local().as_domain_ref().as_str().to_owned();
+        let remote = stream.remote().as_domain_ref().as_str().to_owned();
         let only_ours = stream.direction() == StreamDirection::Outbound;
         self.tasks.spawn(async move {
             let owner = only_ours.then(|| router.owner.as_str().to_owned());
@@ -1439,11 +1454,7 @@ impl Inner {
             admitted = Some(admits);
             let applied = match change {
                 None => Ok(true),
-                Some(Change::Remove) => {
-                    self.rooms
-                        .remove(occupant, &room, current.revision)
-                        .await
-                }
+                Some(Change::Remove) => self.rooms.remove(occupant, &room, current.revision).await,
                 Some(Change::Update(next)) => self.rooms.replace(&next).await,
             };
             match applied {
@@ -1471,17 +1482,48 @@ impl Inner {
     /// End `occupancy` after its stream failed, if it is still as read,
     /// and tell the occupant (XEP-0045 §11.1).
     async fn end_lost(&self, occupancy: Occupancy) {
-        if matches!(
-            self.rooms
-                .remove(&occupancy.occupant, &occupancy.room, occupancy.revision)
-                .await,
-            Ok(true)
-        ) {
-            if let Some(presence) = rooms::removed_by_error(&occupancy) {
-                self.deliver_room(&occupancy.occupant, presence, LocalOrigin::Server)
+        // The room's traffic queued before this may have moved the
+        // occupancy on; it still ends unless a later join replaced the one
+        // the stream carried, or the occupancy no longer occupies the room.
+        let ended = self
+            .remove_current(&occupancy, |current| {
+                current.attempt == occupancy.attempt && current.phase.occupies()
+            })
+            .await;
+        if let Some(ended) = ended {
+            if let Some(presence) = rooms::removed_by_error(&ended) {
+                self.deliver_room(&ended.occupant, presence, LocalOrigin::Server)
                     .await;
             }
         }
+    }
+
+    /// Remove `occupancy`'s row at whatever revision it now has, while
+    /// `still` holds for it, and return the row removed.
+    async fn remove_current(
+        &self,
+        occupancy: &Occupancy,
+        still: impl Fn(&Occupancy) -> bool,
+    ) -> Option<Occupancy> {
+        for _ in 0..EDIT_ATTEMPTS {
+            let current = match self.rooms.get(&occupancy.occupant, &occupancy.room).await {
+                Ok(Some(current)) => current,
+                Ok(None) => return None,
+                Err(_) => continue,
+            };
+            if !still(&current) {
+                return None;
+            }
+            if let Ok(true) = self
+                .rooms
+                .remove(&current.occupant, &current.room, current.revision)
+                .await
+            {
+                return Some(current);
+            }
+        }
+        tracing::warn!("ending a remote room occupancy lost to concurrent changes");
+        None
     }
 
     /// Deliver room traffic to its occupant, waiting at most the delivery
@@ -2284,9 +2326,7 @@ async fn deliver_room_traffic(router: Arc<Inner>, shard: usize) {
                     occupant,
                     stanza,
                 } = *traffic;
-                router
-                    .room_traffic(&stream, &from, &occupant, stanza)
-                    .await
+                router.room_traffic(&stream, &from, &occupant, stanza).await
             }
             RoomWork::Ended(occupancy) => router.end_lost(*occupancy).await,
         }
