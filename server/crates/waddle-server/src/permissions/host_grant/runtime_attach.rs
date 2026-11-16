@@ -822,13 +822,21 @@ impl HostGrantGate {
     /// Count a verification that could not complete, and report this
     /// replica's failure once [`MAX_INCOMPLETE_PASSES`] in a row span at
     /// least [`INCOMPLETE_READINESS_GRACE`]. The answer is the count.
+    ///
+    /// A configured epoch that predates the declared restore stays the
+    /// failure: a verification that does not complete cannot show that the
+    /// configuration was corrected, which takes a restart, and naming an
+    /// outage instead would report the replica ready again.
     fn count_incomplete(&self, error: &HostGrantError) -> u32 {
         let now = chrono::Utc::now().timestamp_millis();
         let grace = i64::try_from(INCOMPLETE_READINESS_GRACE.as_millis()).unwrap_or(i64::MAX);
         let mut inner = self.write();
         inner.incomplete = inner.incomplete.saturating_add(1);
         let since = *inner.incomplete_since_ms.get_or_insert(now);
-        if inner.incomplete >= MAX_INCOMPLETE_PASSES && now.saturating_sub(since) >= grace {
+        if inner.incomplete >= MAX_INCOMPLETE_PASSES
+            && now.saturating_sub(since) >= grace
+            && inner.failure != Some(ReplicaFailure::ConfigurationPredatesRestore)
+        {
             inner.failure = Some(match error {
                 HostGrantError::ProjectionStore(_) => ReplicaFailure::SpiceDbUnreachable,
                 _ => ReplicaFailure::FenceIncomplete,

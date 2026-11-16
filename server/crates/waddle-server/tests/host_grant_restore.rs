@@ -1615,6 +1615,71 @@ async fn the_periodic_pass_keeps_or_drops_the_attachment() {
     fixture.close().await;
 }
 
+/// A replica configured with an epoch that predates the declared restore
+/// stays not ready through verifications that cannot complete, however
+/// long they fail: only a verification that reaches the epoch can show the
+/// configuration changed, and an outage must not report the replica ready.
+#[tokio::test]
+async fn incomplete_verifications_keep_a_configuration_that_predates_the_restore() {
+    let Some(fixture) = GrantFixture::active("hg_restore_predates_incomplete").await else {
+        return;
+    };
+    declare(&fixture, 1).await;
+    let replica = Arc::new(fixture.ingress.authority().await);
+    let gate = replica.host_grant_gate();
+    gate.install_verifier_for_test(
+        fixture.store.clone(),
+        local_permissions(&fixture),
+        served(),
+        RestoreEpoch::INITIAL,
+    );
+    assert_eq!(
+        epoch_mismatch(gate.verify_once().await.expect_err("an older epoch")),
+        (RestoreEpoch::INITIAL, RestoreEpoch::new(1))
+    );
+    let not_ready = GateReadiness::NotReady(ReplicaFailure::ConfigurationPredatesRestore);
+    assert_eq!(gate.readiness(), not_ready);
+
+    // The authority relation is locked away from every verification: each
+    // one waits for its lock bound and does not complete. They are repeated
+    // until more than the bound in a row have failed over more than the
+    // grace, which names an outage on a replica configured correctly.
+    let pool = owner_pool(&fixture).await;
+    let mut blocker = pool.begin().await.expect("blocking transaction");
+    sqlx::query("LOCK TABLE host_grant_authority IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("lock the authority");
+    let started = tokio::time::Instant::now();
+    let mut incomplete = 0;
+    while incomplete < waddle_server::permissions::host_grant::MAX_INCOMPLETE_PASSES
+        || started.elapsed()
+            < waddle_server::permissions::host_grant::INCOMPLETE_READINESS_GRACE
+                + Duration::from_secs(1)
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "verifications kept completing or failing too slowly"
+        );
+        let error = gate.verify_once().await.expect_err("a locked authority");
+        assert!(
+            !matches!(error, HostGrantError::RestoreFence(_))
+                && waddle_server::permissions::host_grant::verification_retried(&error),
+            "expected a verification that does not complete, got {error:?}"
+        );
+        incomplete += 1;
+        assert_eq!(gate.readiness(), not_ready);
+    }
+    assert!(!gate.ready());
+    let (status, body) = host_grant_readiness_response(&gate);
+    assert_eq!(status, 503);
+    assert_eq!(body["host_grants"], "configuration_predates_restore");
+    blocker.rollback().await.expect("release the lock");
+    pool.close().await;
+    assert!(replica.drain_and_join(Duration::from_secs(5)).await);
+    fixture.close().await;
+}
+
 /// A replica whose runtime role does not match the profile stays ready,
 /// refuses managed rooms and verifies again at each periodic pass: once the
 /// owner phase corrects the role's grants, it attaches without a restart.
