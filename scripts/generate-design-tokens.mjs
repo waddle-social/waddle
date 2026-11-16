@@ -525,8 +525,13 @@ const swiftName = (dotted) => SWIFT_KEYWORD_NAMES[kotlinName(dotted)] ?? kotlinN
 const literalRgb = (literal) =>
   [2, 4, 6].map((i) => Number.parseInt(literal.slice(2 + i, 4 + i), 16) / 255);
 
-// Spacing steps are numbers on the web (`2`, `0.5`); Swift names them `s2`, `s0_5`.
-const swiftSpacingName = (step) => `s${String(step).replace(".", "_")}`;
+// Spacing steps are numbers on the web (`2`, `0.5`); Swift names them `s2`,
+// `s0Half`: the step plus a half.
+const swiftSpacingName = (step) => {
+  const match = /^(\d+)(\.5)?$/.exec(String(step));
+  if (!match) throw new Error(`spacing.${step}: expected a whole or half step`);
+  return `s${match[1]}${match[2] ? "Half" : ""}`;
+};
 
 function appleTokensSwift() {
   const swiftColor = (n) =>
@@ -540,7 +545,10 @@ function appleTokensSwift() {
     huddle
       .tokenNames(category)
       .filter((n) => isPx(huddleValue(category, n)))
-      .map((n) => `static let ${swiftName(n)}: CGFloat = ${px(`${category}.${n}`, huddleValue(category, n))}`);
+      .map((n) => {
+        const value = px(category + "." + n, huddleValue(category, n));
+        return `static let ${swiftName(n)}: CGFloat = ${value}`;
+      });
   // JS lists integer-like keys first (`1`, `2`, … then `0.5`): order the grid by size.
   const spacing = huddle
     .tokenNames("spacing")

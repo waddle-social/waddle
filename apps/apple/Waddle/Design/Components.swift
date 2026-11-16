@@ -159,7 +159,7 @@ struct UnreadBadge: View {
                 .huddleText(Theme.Typography.badge)
                 .monospacedDigit()
                 .foregroundStyle(isMention ? Theme.Colors.goldFg : Theme.Colors.fgMuted)
-                .padding(.horizontal, WaddleTokens.Spacing.s1_5)
+                .padding(.horizontal, WaddleTokens.Spacing.s1Half)
                 .frame(minWidth: Self.height, minHeight: Self.height)
                 .background(Capsule().fill(isMention ? Theme.Colors.gold : Theme.Colors.surface2))
                 .overlay {

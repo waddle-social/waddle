@@ -174,7 +174,7 @@ private struct HuddleChipBody: View {
             .monospacedDigit()
             .lineLimit(1)
             .foregroundStyle(isSelected ? Theme.Colors.fg : Theme.Colors.fgMuted)
-            .padding(.horizontal, WaddleTokens.Spacing.s2_5)
+            .padding(.horizontal, WaddleTokens.Spacing.s2Half)
             .frame(minHeight: WaddleTokens.ControlHeight.sm)
             .background(Capsule().fill(isSelected ? Theme.Colors.actionSubtle : Theme.Colors.surface))
             .overlay(Capsule().fill(Theme.Colors.fg.opacity(configuration.isPressed ? 0.1 : 0)))
@@ -315,7 +315,7 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
     }
 
     var body: some View {
-        HStack(spacing: WaddleTokens.Spacing.s0_5) {
+        HStack(spacing: WaddleTokens.Spacing.s0Half) {
             ForEach(segments) { segment in
                 segmentButton(segment)
             }
@@ -331,7 +331,7 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
         return Button {
             selection = segment.value
         } label: {
-            HStack(spacing: WaddleTokens.Spacing.s1_5) {
+            HStack(spacing: WaddleTokens.Spacing.s1Half) {
                 if let systemImage = segment.systemImage {
                     Image(systemName: systemImage)
                 }

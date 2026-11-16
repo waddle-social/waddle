@@ -11,7 +11,7 @@ enum Theme {
     typealias Typography = WaddleTokens.TextStyles
 
     enum Spacing {
-        static let xxs = WaddleTokens.Spacing.s0_5
+        static let xxs = WaddleTokens.Spacing.s0Half
         static let xs = WaddleTokens.Spacing.s1
         static let s = WaddleTokens.Spacing.s2
         static let m = WaddleTokens.Spacing.s3

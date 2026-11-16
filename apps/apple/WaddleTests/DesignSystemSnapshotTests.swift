@@ -10,6 +10,9 @@ import XCTest
 /// missing golden is written and the test fails; the next run compares.
 @MainActor
 final class DesignSystemSnapshotTests: XCTestCase {
+    /// Buttons in a snapshot are only drawn, never pressed.
+    private static let noAction: () -> Void = { /* nothing to do */ }
+
     func testColors() {
         typealias Colors = Theme.Colors
         let swatches: [(String, Color)] = [
@@ -63,20 +66,20 @@ final class DesignSystemSnapshotTests: XCTestCase {
     func testButtons() {
         assertHuddleSnapshot(of: VStack(alignment: .leading, spacing: Theme.Spacing.m) {
             HStack(spacing: Theme.Spacing.s) {
-                Button("Join huddle") {}.buttonStyle(.huddle(.primary))
-                Button("Invite") {}.buttonStyle(.huddle())
-                Button("Live now") {}.buttonStyle(.huddle(.live))
+                Button("Join huddle", action: Self.noAction).buttonStyle(.huddle(.primary))
+                Button("Invite", action: Self.noAction).buttonStyle(.huddle())
+                Button("Live now", action: Self.noAction).buttonStyle(.huddle(.live))
             }
             HStack(spacing: Theme.Spacing.s) {
-                Button("Leave room") {}.buttonStyle(.huddle(.danger))
-                Button("Not now") {}.buttonStyle(.huddle()).disabled(true)
+                Button("Leave room", action: Self.noAction).buttonStyle(.huddle(.danger))
+                Button("Not now", action: Self.noAction).buttonStyle(.huddle()).disabled(true)
             }
             HStack(spacing: Theme.Spacing.s) {
-                Button("Small") {}.buttonStyle(.huddle(.primary, size: .small))
-                Button("Regular") {}.buttonStyle(.huddle(.primary))
-                Button("Large") {}.buttonStyle(.huddle(.primary, size: .large))
+                Button("Small", action: Self.noAction).buttonStyle(.huddle(.primary, size: .small))
+                Button("Regular", action: Self.noAction).buttonStyle(.huddle(.primary))
+                Button("Large", action: Self.noAction).buttonStyle(.huddle(.primary, size: .large))
             }
-            Button {} label: {
+            Button(action: Self.noAction) {
                 Label("New room", systemImage: "plus")
             }
             .buttonStyle(.huddle())
@@ -86,9 +89,9 @@ final class DesignSystemSnapshotTests: XCTestCase {
     func testChipsTagsAndBadges() {
         assertHuddleSnapshot(of: VStack(alignment: .leading, spacing: Theme.Spacing.m) {
             HStack(spacing: Theme.Spacing.s) {
-                Button("🎉 4") {}.buttonStyle(.huddleChip(isSelected: true))
-                Button("👀 2") {}.buttonStyle(.huddleChip())
-                Button("Following") {}.buttonStyle(.huddleChip())
+                Button("🎉 4", action: Self.noAction).buttonStyle(.huddleChip(isSelected: true))
+                Button("👀 2", action: Self.noAction).buttonStyle(.huddleChip())
+                Button("Following", action: Self.noAction).buttonStyle(.huddleChip())
             }
             HStack(spacing: Theme.Spacing.s) {
                 HuddleTag("Owner")
