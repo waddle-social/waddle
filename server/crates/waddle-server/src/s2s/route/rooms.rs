@@ -79,7 +79,8 @@ impl Occupancy {
 /// once the stanza is on its way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RoomEgress {
-    /// A join presence: the resource is now joining `room` as `nick`.
+    /// A join presence: the resource is now joining `room` as `nick`,
+    /// unless the room already seats it.
     Join { room: BareJid, nick: String },
     /// Unavailable presence: the resource is leaving `room`.
     Leave { room: BareJid },
@@ -237,19 +238,28 @@ impl RemoteRooms {
         match egress {
             RoomEgress::Join { room, nick } => {
                 let rooms = self.by_resource.entry(sender.clone()).or_default();
-                let affiliation = rooms
-                    .get(&room)
-                    .map_or(Affiliation::None, |occupancy| occupancy.affiliation.clone());
-                let previous = rooms.insert(
-                    room,
-                    Occupancy {
-                        nick,
-                        phase: Phase::Joining,
-                        affiliation,
-                    },
-                );
-                if previous.is_none() {
-                    self.total += 1;
+                match rooms.get_mut(&room) {
+                    // A client joins again to resynchronise, such as after
+                    // reconnecting under the same full JID. The room still
+                    // seats it, so the occupancy stays joined: its traffic
+                    // keeps arriving, and the room's own presence updates
+                    // the nickname.
+                    Some(occupancy) if occupancy.phase == Phase::Joined => {}
+                    Some(occupancy) => {
+                        occupancy.nick = nick;
+                        occupancy.phase = Phase::Joining;
+                    }
+                    None => {
+                        rooms.insert(
+                            room,
+                            Occupancy {
+                                nick,
+                                phase: Phase::Joining,
+                                affiliation: Affiliation::None,
+                            },
+                        );
+                        self.total += 1;
+                    }
                 }
             }
             RoomEgress::Leave { room } => {
