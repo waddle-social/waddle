@@ -38,7 +38,8 @@ extension CallStore {
                 failCall(sid: event.sid, message: "call session accept failed: no bound resource", epoch: epoch)
                 return
             }
-            let sent = await port.sendCallSessionAccept(to: event.from, responder: own, sid: event.sid, media: media)
+            let sent = await port.sendCallSessionAccept(
+                to: event.from, responder: own, sid: event.sid, media: media.bounded(by: call.media))
             guard generation == epoch else { return }
             if !sent { failCall(sid: event.sid, message: "call session accept failed", epoch: epoch) }
         default: break

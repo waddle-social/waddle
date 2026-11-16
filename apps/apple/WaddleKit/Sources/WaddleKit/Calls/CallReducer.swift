@@ -22,11 +22,14 @@ func reduceCallState(_ current: CallState, _ event: CallEvent) -> CallState {
     case .sessionInitiate(let join, let media):
         // Media starts only for an invitation this device accepted.
         if case .incoming(let call) = current, call.sid == event.sid, call.isAccepting {
-            return .active(ActiveCall(peer: event.from, sid: event.sid, media: media, join: join, initiator: event.from))
+            return .active(
+                ActiveCall(peer: event.from, sid: event.sid, media: media.bounded(by: call.media), join: join, initiator: event.from))
         }
     case .sessionAccept(let join, let media):
         if case .outgoing(let call) = current, call.sid == event.sid, call.responder == nil || call.responder == event.from {
-            return .active(ActiveCall(peer: event.from, sid: event.sid, media: media, join: join, initiator: call.initiator))
+            return .active(
+                ActiveCall(
+                    peer: event.from, sid: event.sid, media: media.bounded(by: call.media), join: join, initiator: call.initiator))
         }
     case .finish(let reason, _), .sessionTerminate(let reason):
         if current.sid == event.sid { return .ended(sid: event.sid, reason: .finished(reason)) }
@@ -42,7 +45,12 @@ func selfOriginatedEventShouldTouchCurrentCall(_ current: CallState, _ event: Ca
     case .proceed: return true
     case .reject, .sessionInitiate: return current.isIncoming
     case .sessionAccept: return current.isOutgoing
-    case .finish, .sessionTerminate:
+    case .finish:
+        // A sibling that answered and hung up ends a ring this device still
+        // shows, e.g. after it missed the sibling's proceed while offline.
+        if case .active = current { return true }
+        return current.isIncoming
+    case .sessionTerminate:
         if case .active = current { return true }
         return false
     }

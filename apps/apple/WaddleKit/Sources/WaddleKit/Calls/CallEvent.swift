@@ -6,6 +6,12 @@ public struct CallMedia: Hashable, Sendable {
         self.audio = audio
         self.video = video
     }
+
+    /// The tracks both sides named. A session never publishes a track the
+    /// local user did not agree to when placing or accepting the call.
+    func bounded(by agreed: CallMedia) -> CallMedia {
+        CallMedia(audio: audio && agreed.audio, video: video && agreed.video)
+    }
 }
 
 /// Server-issued SFU credentials from the Jingle transport.

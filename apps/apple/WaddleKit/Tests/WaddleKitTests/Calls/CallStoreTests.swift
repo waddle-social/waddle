@@ -70,6 +70,41 @@ import Testing
         f.store.clear()
     }
 
+    @Test func callerCannotAddVideoToAnAcceptedAudioInvitation() async {
+        let media = RecordingCallMedia()
+        let port = FakePort()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media)
+        store.handle(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio)))
+        await eventually { port.callSends.count == 1 }
+        #expect(await store.acceptIncoming())
+        store.handle(CallEvent(from: callPeer, sid: "c1", kind: .sessionInitiate(join: callJoin, media: callVideo)))
+        await eventually { port.callSends.count == 3 && media.calls.count == 1 }
+        #expect(store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
+        #expect(port.callSends.last == .accept(callPeer, callOwn, "c1", callAudio))
+        #expect(media.calls == [.connect(callJoin, callAudio)])
+        store.clear()
+    }
+
+    @Test func responderCannotAddVideoToAnAudioCallWePlaced() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.proceed))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callVideo)))
+        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callOwn)))
+        f.store.clear()
+    }
+
+    @Test func anotherOfOurDevicesFinishingTheCallStopsThisOneRinging() async {
+        let f = CallFixture()
+        let ownTablet = JID(parsing: "alice@waddle.test/tablet")!
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        f.store.handle(f.event(.finish(reason: .success, migratedTo: nil), from: ownTablet))
+        #expect(f.store.state == .ended(sid: "c1", reason: .finished(.success)))
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        f.store.clear()
+    }
+
     @Test func declinedInvitationIsNotRungAfterwards() async {
         let f = CallFixture()
         let dave = JID(parsing: "dave@waddle.test/tab")!
