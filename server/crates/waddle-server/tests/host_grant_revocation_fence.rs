@@ -8,12 +8,14 @@
 //! current. These cases drive two replicas' gates on one database: the
 //! acknowledgement of a live pair, the wait for a replica that stopped
 //! renewing and what that replica may still do, the return of a lapsed
-//! replica under a new registration, and the queue in front of the scope's
-//! guard that keeps overlapping acceptances from holding a revoke back.
+//! replica under a new registration, a renewal answered after the lease it
+//! renews ran out, and the queue in front of the scope's guard that keeps
+//! overlapping acceptances from holding a revoke back.
 //!
 //! The operator subcommands (`waddle-server host-grant`) run as the server
 //! binary against the same database: an account's grants are listed and
-//! revoked in every room, and the command reports the fence's answer.
+//! revoked in every room, and the command reports the fence's answer for
+//! every room, the first time and when it is repeated.
 //!
 //! They need PostgreSQL only, and no SpiceDB runs beside them: the
 //! acknowledgement never consults the projection. A lane that sets
@@ -39,7 +41,7 @@ use waddle_server::ingress::IngressDecisionClass;
 use waddle_server::permissions::host_grant::{
     EnrolledScopes, FenceAcknowledgement, GrantGeneration, HostGrantAction, HostGrantAttachment,
     HostGrantGate, HostGrantStore, ManagedRoomGrants, MutationReceipt, RoomAffiliation,
-    RoomBinding, RoomGate, FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_LEASE_TTL,
+    RoomBinding, RoomGate, FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_LEASE_TTL, FENCE_TICK,
 };
 use waddle_server::test_support::with_host_grant_admission_gate;
 
@@ -261,6 +263,66 @@ async fn a_replica_that_stops_renewing_is_waited_for_until_it_can_no_longer_deci
         .expect("fence reading");
     assert_eq!(reading, FenceAcknowledgement::Acknowledged { replicas: 2 });
     drop((live, stalled));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_renewal_answered_after_the_lease_ran_out_does_not_revive_it() {
+    let Some(fixture) = GrantFixture::active("hg_fence_late_renewal").await else {
+        return;
+    };
+    let room = fixture.scope.room.clone();
+    let replica = Replica::attach(&fixture, "fence-late").await;
+    let fence = replica.gate.fence().expect("fence").clone();
+    let peer = bare(PEER);
+    let before = replica.decide(&room).await;
+    assert!(before.allows(&peer, HostGrantAction::Read));
+
+    // The replica stops renewing for most of its lease. Its next renewal is
+    // sent while the lease still holds, and PostgreSQL commits it, but its
+    // answer is held until the lease has run out here.
+    fence.suspend_for_test(true);
+    tokio::time::sleep(FENCE_TICK * 2).await;
+    let release = fence.hold_next_renewal_for_test();
+    tokio::time::sleep(Duration::from_millis(2800)).await;
+    assert!(
+        before.fence.is_current(),
+        "the lease ran out before the renewal was sent"
+    );
+    fence.suspend_for_test(false);
+    let deadline = Instant::now() + FENCE_LEASE_TTL;
+    while fence.leased() {
+        assert!(
+            Instant::now() < deadline,
+            "the lease outlived its deadline while its renewal was held"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!before.fence.is_current());
+    assert!(!before.allows(&peer, HostGrantAction::Read));
+
+    // The answer arrives. The renewal it carries would cover the lease for
+    // seconds more, but the replica lapsed meanwhile: it registers again,
+    // and the decision it read before stays void.
+    let _ = release.send(());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fence.leased() {
+        assert!(
+            Instant::now() < deadline,
+            "the replica did not register again"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for _ in 0..4 {
+        assert!(!before.fence.is_current());
+        assert!(!before.allows(&peer, HostGrantAction::Read));
+        assert_eq!(before.fence.admit(|| ()), None);
+        tokio::time::sleep(FENCE_TICK).await;
+    }
+    let after = replica.decide(&room).await;
+    assert!(after.fence.is_current());
+    assert!(after.allows(&peer, HostGrantAction::Read));
+    drop((replica, fence));
     fixture.close().await;
 }
 
@@ -532,11 +594,67 @@ async fn the_operator_subcommands_revoke_an_accounts_grants_through_the_fence() 
             .await
             .allows(&peer, HostGrantAction::Read));
     }
-    // Repeating the act finds nothing left to revoke.
-    let (code, repeated, _) =
+    // Repeating the act records nothing new and reports every room again,
+    // with the fence's answer at its scope's current generation, which
+    // covers the revoke the first run recorded there.
+    let (code, repeated, stderr) =
         host_grant_cli(&fixture, &[&revoke_account[..], &domain[..]].concat()).await;
-    assert_eq!(code, 0);
-    assert!(repeated.is_empty(), "{repeated:?}");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(repeated.len(), 2, "{repeated:?}");
+    for line in &repeated {
+        assert_eq!(line["recorded"], false, "{line}");
+        assert_eq!(line["unchanged"], true, "{line}");
+        assert_eq!(line["previous_affiliation"], "none", "{line}");
+        assert_eq!(line["fence"]["acknowledged"], true, "{line}");
+        assert_eq!(line["fence"]["replicas"], 1, "{line}");
+        let first = revoked
+            .iter()
+            .find(|first| first["scope"] == line["scope"])
+            .expect("the first run reported the scope");
+        assert!(
+            line["generation"].as_i64() >= first["generation"].as_i64(),
+            "{line} waits on a generation before {first}"
+        );
+    }
+
+    // A repeated act waits for the replica as the first does. While the
+    // replica has not installed a later change of one scope, that scope's
+    // room is reported as not acknowledged and the command fails; the other
+    // scope's room is acknowledged.
+    replica.suspend(true);
+    let later = fixture
+        .set(OWNER, "juliet@example.com", RoomAffiliation::Member)
+        .await
+        .expect("a later change of the scope")
+        .record()
+        .generation;
+    let (code, waiting, stderr) = host_grant_cli(
+        &fixture,
+        &[&revoke_account[..], &domain[..], &["--fence-wait", "1"][..]].concat(),
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(waiting.len(), 2, "{waiting:?}");
+    let lifecycle = fixture.scope.lifecycle.to_storage();
+    for line in &waiting {
+        if line["scope"] == lifecycle.as_str() {
+            assert_eq!(line["generation"], later.value(), "{line}");
+            assert_eq!(line["fence"]["acknowledged"], false, "{line}");
+            assert_eq!(line["fence"]["lagging"], 1, "{line}");
+        } else {
+            assert_eq!(line["fence"]["acknowledged"], true, "{line}");
+        }
+    }
+    replica.suspend(false);
+    let (code, confirmed, stderr) =
+        host_grant_cli(&fixture, &[&revoke_account[..], &domain[..]].concat()).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        confirmed
+            .iter()
+            .all(|line| line["fence"]["acknowledged"] == true),
+        "{confirmed:?}"
+    );
 
     // A room's last owner is refused there; the command says so and exits
     // as refused.
@@ -562,7 +680,6 @@ async fn the_operator_subcommands_revoke_an_accounts_grants_through_the_fence() 
     // the replica has.
     replica.suspend(true);
     let operation = uuid::Uuid::new_v4().to_string();
-    let lifecycle = fixture.scope.lifecycle.to_storage();
     let room = fixture.scope.room.to_string();
     let revoke = [
         "revoke",
