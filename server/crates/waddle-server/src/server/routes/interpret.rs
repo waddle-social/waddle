@@ -220,7 +220,8 @@ pub(crate) use groupchat_inbox::reconcile_groupchat_notification_recovery;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
-    resource_constraint_error, validate_groupchat_rich_targets,
+    resource_constraint_error, validate_groupchat_rich_targets, validate_groupchat_rich_targets_of,
+    RichTargetSender,
 };
 #[cfg(all(test, feature = "clustering"))]
 pub use handoff::ORDERED_RELAY_HANDOFF_CAPACITY;

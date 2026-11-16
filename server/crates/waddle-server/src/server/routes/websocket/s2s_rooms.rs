@@ -19,16 +19,21 @@
 //!   `pkix` stream carried the request.
 //!
 //! What a remote principal may ask is narrower than what a session may:
-//! joining, changing nickname and availability, leaving, sending text to
-//! the room, reading its archive, `disco#info`, `disco#items` and ping.
-//! Private messages, invitations, voice requests, room administration and
-//! configuration, and every extension of this deployment (calls, pins,
-//! hats, commands) are refused or dropped: presence from a remote occupant
-//! is reduced to its availability, and a message to its text, before the
-//! room sees it.
+//! joining, changing nickname and availability, leaving, sending to the
+//! room, reading its archive, `disco#info`, `disco#items` and ping.
+//! Private messages, invitations, voice requests and every extension of
+//! this deployment (calls, pins, hats, commands, forum actions, mentions)
+//! are refused or dropped. Presence and messages from a remote occupant
+//! are rebuilt from an allowlist before the room sees them
+//! ([`reduced_presence`], [`reduced_message`]): what is not named there
+//! does not reach the room's pipeline, whose handlers act on payloads.
+//!
+//! A room is reached at all only while its `federated` setting is on; any
+//! other room answers as one that does not exist ([`no_such_room`]).
 
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
@@ -44,6 +49,15 @@ use waddle_xmpp::muc::room_actor::{
     GetConfig, GetOccupantSessionGeneration, LeaveSessionSelector, PingSelfCheck,
 };
 use waddle_xmpp::muc::MucRemovalCause;
+use waddle_xmpp::protocol::room::archive::is_archivable;
+use waddle_xmpp::xep::xep0085::NS_CHATSTATES;
+use waddle_xmpp::xep::xep0115::NS_CAPS;
+use waddle_xmpp::xep::xep0308::NS_MESSAGE_CORRECT;
+use waddle_xmpp::xep::xep0333::NS_CHAT_MARKERS;
+use waddle_xmpp::xep::xep0424::NS_MESSAGE_RETRACT;
+use waddle_xmpp::xep::xep0428::NS_FALLBACK;
+use waddle_xmpp::xep::xep0444::NS_REACTIONS;
+use waddle_xmpp::xep::xep0461::NS_REPLY;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::disco::{DiscoInfoResult, DiscoItemsResult};
 use xmpp_parsers::iq::Iq;
@@ -86,11 +100,82 @@ const ROOM_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest the effects of one accepted room message may take.
 const MESSAGE_EFFECTS_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Messages one remote account may have archived, on average each second.
+const ARCHIVE_WRITE_RATE: f64 = 5.0;
+
+/// Messages one remote account may have archived at once.
+const ARCHIVE_WRITE_BURST: f64 = 30.0;
+
+/// Remote accounts whose archive allowance is kept. An account that finds
+/// the table full of accounts still spending theirs is refused, so the
+/// table never grows with the accounts a domain mints.
+const ARCHIVE_WRITERS: usize = 65_536;
+
+/// What one remote account may still have archived.
+struct ArchiveAllowance {
+    tokens: f64,
+    refilled: Instant,
+}
+
+/// The archive allowances of remote accounts on this replica, which is the
+/// one that writes what they send to its rooms' archives.
+#[derive(Default)]
+struct ArchiveAllowances(Mutex<HashMap<BareJid, ArchiveAllowance>>);
+
+impl ArchiveAllowances {
+    /// Take one archived message of `account`'s allowance: `false` when it
+    /// is spent, or when the table holds no place for the account.
+    fn take(&self, account: &BareJid) -> bool {
+        let now = Instant::now();
+        let mut allowances = self
+            .0
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if allowances.len() >= ARCHIVE_WRITERS && !allowances.contains_key(account) {
+            // An account whose allowance has refilled needs no entry.
+            allowances.retain(|_, allowance| {
+                now.duration_since(allowance.refilled).as_secs_f64() * ARCHIVE_WRITE_RATE
+                    < ARCHIVE_WRITE_BURST - allowance.tokens
+            });
+            if allowances.len() >= ARCHIVE_WRITERS {
+                return false;
+            }
+        }
+        let allowance = allowances
+            .entry(account.clone())
+            .or_insert(ArchiveAllowance {
+                tokens: ARCHIVE_WRITE_BURST,
+                refilled: now,
+            });
+        let refill = now.duration_since(allowance.refilled).as_secs_f64() * ARCHIVE_WRITE_RATE;
+        allowance.tokens = (allowance.tokens + refill).min(ARCHIVE_WRITE_BURST);
+        allowance.refilled = now;
+        if allowance.tokens >= 1.0 {
+            allowance.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A remote occupant's message was refused because its account had spent
+/// its archive allowance.
+fn archive_write_limited() {
+    waddle_xmpp::counter_add!(
+        "waddle.s2s.rooms.archive_writes.limited",
+        "{stanza}",
+        "Messages of remote occupants refused with resource-constraint because their account had spent its allowance of archived room messages.",
+        1,
+    );
+}
+
 /// [`LocalRooms`] over the WebSocket state's rooms, grants and archive.
 ///
 /// It holds the state weakly: the state holds the router, which holds this.
 pub struct WebSocketLocalRooms {
     state: Weak<WebSocketState>,
+    archive_writes: ArchiveAllowances,
 }
 
 impl WebSocketLocalRooms {
@@ -98,6 +183,7 @@ impl WebSocketLocalRooms {
     pub fn new(state: &Arc<WebSocketState>) -> Self {
         Self {
             state: Arc::downgrade(state),
+            archive_writes: ArchiveAllowances::default(),
         }
     }
 }
@@ -149,6 +235,7 @@ impl waddle_xmpp::registry::ForeignDelivery for SeatDelivery {
 /// One request, as its handlers read it.
 struct Asked<'a> {
     state: &'a WebSocketState,
+    archive_writes: &'a ArchiveAllowances,
     request: &'a RoomRequest,
     /// The address the stanza was sent to.
     to: &'a Jid,
@@ -262,10 +349,16 @@ fn stanzas_of(frames: Vec<String>) -> Option<Vec<Stanza>> {
 }
 
 /// A remote occupant's presence as the room sees it: its availability
-/// (`show`, `status`, `priority`) and, for an attempt to enter, the bare
-/// `muc` element. Every other payload is dropped, as XEP-0045 §17.1.1 lets
-/// a service do: the presence extensions of this deployment (calls, hats)
-/// carry meaning only for its own sessions.
+/// (`show`, `status`, `priority`), its entity capabilities (XEP-0115) and,
+/// for an attempt to enter, the bare `muc` element. Every other payload is
+/// dropped, as XEP-0045 §17.1.1 lets a service do: the presence extensions
+/// of this deployment (calls, hats) carry meaning only for its own
+/// sessions, and a history request is not honoured.
+///
+/// A `muc#user` element is not carried inbound. XEP-0045 has the room, not
+/// the occupant, author it (§7.2.2), the room strips one from a session's
+/// presence before it adds its own, and the router reads the status codes
+/// of the room's presence to follow a seat.
 fn reduced_presence(presence: &Presence) -> Presence {
     let mut reduced = Presence::new(presence.type_.clone());
     reduced.from = presence.from.clone();
@@ -280,6 +373,25 @@ fn reduced_presence(presence: &Presence) -> Presence {
         .any(|payload| payload.is("x", NS_MUC))
     {
         reduced.payloads.push(Element::builder("x", NS_MUC).build());
+    }
+    if let Some(caps) = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("c", NS_CAPS))
+    {
+        // The element as XEP-0115 §4 defines it: its attributes, no child.
+        let mut carried = Element::builder("c", NS_CAPS);
+        for (name, value) in [
+            (minidom::rxml::xml_ncname!("hash"), caps.attr("hash")),
+            (minidom::rxml::xml_ncname!("node"), caps.attr("node")),
+            (minidom::rxml::xml_ncname!("ver"), caps.attr("ver")),
+            (minidom::rxml::xml_ncname!("ext"), caps.attr("ext")),
+        ] {
+            if let Some(value) = value {
+                carried = carried.attr(name.to_owned(), value);
+            }
+        }
+        reduced.payloads.push(carried.build());
     }
     reduced
 }
@@ -302,29 +414,65 @@ fn with_request_id(mut replies: Vec<Stanza>, id: Option<&str>) -> Vec<Stanza> {
     replies
 }
 
-/// A remote occupant's message as the room sees it: its text, its thread
-/// and the identifier its client gave it (XEP-0359 `origin-id`). Every
-/// other payload is dropped before the room plans the message. The room's
-/// pipeline acts on several of them (a subject change, a pin, a forum
-/// action, a displayed marker, a correction, retraction or reaction naming
-/// an archived message), and none of those has been reviewed for a remote
-/// principal. `None` when the message carries no text.
+/// Whether `payload` of a remote occupant's message reaches the room: the
+/// payloads of the standard extensions a room carries between occupants.
+///
+/// - XEP-0359 `origin-id`, the identifier the sender's client gave the
+///   message. A `stanza-id` is the room's to assign and is not carried.
+/// - XEP-0308 `replace` and XEP-0424 `retract`: the room lets an occupant
+///   correct or retract only its own archived message.
+/// - XEP-0444 `reactions`, XEP-0461 `reply` and the XEP-0428 `fallback`
+///   that marks the part of a body standing in for either.
+/// - XEP-0333 markers and XEP-0085 chat states.
+///
+/// Everything else is dropped before the room plans the message: this
+/// deployment's own payloads (pins, forum actions, framework envelopes),
+/// mentions and references, which notify accounts, processing hints, and
+/// any payload the room's pipeline has not been reviewed to act on for a
+/// remote principal.
+fn carried_in_message(payload: &Element) -> bool {
+    payload.is("origin-id", waddle_xmpp_core::xep0359::NS_SID)
+        || payload.is("replace", NS_MESSAGE_CORRECT)
+        || payload.is("retract", NS_MESSAGE_RETRACT)
+        || payload.is("reactions", NS_REACTIONS)
+        || payload.is("reply", NS_REPLY)
+        || payload.is("fallback", NS_FALLBACK)
+        || (payload.ns() == NS_CHAT_MARKERS
+            && matches!(
+                payload.name(),
+                "markable" | "received" | "displayed" | "acknowledged"
+            ))
+        || (payload.ns() == NS_CHATSTATES
+            && matches!(
+                payload.name(),
+                "active" | "composing" | "paused" | "inactive" | "gone"
+            ))
+}
+
+/// A remote occupant's message as the room sees it: its text, its subject,
+/// its thread and the payloads [`carried_in_message`] names, each kind once
+/// except `fallback`, which a message may carry for several extensions.
+/// `None` when nothing of the message is carried.
 fn reduced_message(message: &Message) -> Option<Message> {
-    if message.bodies.is_empty() {
-        return None;
-    }
     let mut reduced = Message::new_with_type(MessageType::Groupchat, message.to.clone());
     reduced.from = message.from.clone();
     reduced.id = message.id.clone();
     reduced.bodies = message.bodies.clone();
+    reduced.subjects = message.subjects.clone();
     reduced.thread = message.thread.clone();
-    reduced.payloads = message
-        .payloads
-        .iter()
-        .filter(|payload| payload.is("origin-id", waddle_xmpp_core::xep0359::NS_SID))
-        .cloned()
-        .collect();
-    Some(reduced)
+    for payload in message.payloads.iter().filter(|p| carried_in_message(p)) {
+        let repeated = !payload.is("fallback", NS_FALLBACK)
+            && reduced
+                .payloads
+                .iter()
+                .any(|kept| kept.name() == payload.name() && kept.ns() == payload.ns());
+        if !repeated {
+            reduced.payloads.push(payload.clone());
+        }
+    }
+    let carried =
+        !reduced.bodies.is_empty() || !reduced.subjects.is_empty() || !reduced.payloads.is_empty();
+    carried.then_some(reduced)
 }
 
 /// Whether `replies` hold the room's own available presence for the
@@ -739,6 +887,27 @@ impl Asked<'_> {
         RoomReplies { stanzas, seat }
     }
 
+    /// Whether a subject change of the sender may be put to `room`: the
+    /// room lets every occupant change its subject, or the sender's
+    /// privileged standing is honoured on the stream that carried the
+    /// request (ADR-0020 D8). A room whose configuration cannot be read
+    /// is asked nothing.
+    async fn may_ask_subject_change(&self, room: &BareJid) -> bool {
+        if principal_witness(self.state, &self.account, &self.evidence)
+            .is_some_and(|witness| witness.privilege_honoured())
+        {
+            return true;
+        }
+        let Some(actor) = get_room_actor(self.state, room).await else {
+            return false;
+        };
+        actor
+            .ask(GetConfig)
+            .reply_timeout(ROOM_ASK_TIMEOUT)
+            .await
+            .is_ok_and(|config| config.occupants_may_change_subject)
+    }
+
     // --- messages -------------------------------------------------------------
 
     async fn message(&self, message: &Message) -> RoomReplies {
@@ -770,17 +939,34 @@ impl Asked<'_> {
             ));
         };
         let Some(mut message) = reduced_message(message) else {
-            // XEP-0045 §8.1: a subject change by an occupant that may not
-            // make one is `forbidden`. Anything else without text (a chat
-            // state, a marker, a reaction) is not relayed and not answered.
-            return if message.subjects.is_empty() {
-                RoomReplies::none()
-            } else {
-                self.refuse(forbidden(
-                    "Occupants from other servers cannot change the room subject.",
-                ))
-            };
+            // Nothing a room carries between occupants: not relayed and
+            // not answered.
+            return RoomReplies::none();
         };
+        // XEP-0045 §8.1: a room lets its moderators change the subject,
+        // and its other occupants when its configuration says so. A
+        // moderator's standing counts for a remote occupant only as D8
+        // honours it for the stream that carried this request; the room
+        // then applies its own check to the occupant's role.
+        if waddle_xmpp::muc::is_groupchat_subject_change_message(&message)
+            && !self.may_ask_subject_change(&room).await
+        {
+            return self.refuse(forbidden(
+                "Occupants from other servers may change the subject only where the room lets \
+                 every occupant, or as a moderator over a certificate-authenticated stream from \
+                 a trusted server.",
+            ));
+        }
+        // What an admitted domain can make this deployment store is
+        // bounded for each of its accounts as well as for the domain.
+        if is_archivable(&message) && !self.archive_writes.take(&self.account) {
+            archive_write_limited();
+            return self.refuse(error(
+                ErrorType::Wait,
+                DefinedCondition::ResourceConstraint,
+                "Too many messages; try again later.",
+            ));
+        }
         message.from = Some(Jid::from(occupant.clone()));
         message.to = Some(Jid::from(room.clone()));
         let target = NormalizedTarget::Bare(room.clone());
@@ -875,6 +1061,7 @@ impl LocalRooms for WebSocketLocalRooms {
         };
         let asked = Asked {
             state: &state,
+            archive_writes: &self.archive_writes,
             request: &request,
             to: &to,
             account: request.principal.account().as_bare_jid().clone(),

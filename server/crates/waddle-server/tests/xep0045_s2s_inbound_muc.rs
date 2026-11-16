@@ -49,9 +49,10 @@ use managed::{Managed, GUEST, GUEST_PHONE, STRANGER_PHONE};
 use minidom::Element;
 use s2s_inbound_muc_support::{
     body, error_condition, error_of, federated_form, full, item, jid, local_groupchat, local_join,
-    local_receives, local_set, not_federating, presence_between, remote_get, remote_groupchat,
-    remote_join, remote_leave, room_with_remote_occupant, statuses, Hosted, Wiring, ARRIVES, BOB,
-    HOME_B, MUC, QUIET, ROOM,
+    local_receives, local_receives_payload, local_set, naming, not_federating, owner_form,
+    presence_between, remote_get, remote_groupchat, remote_join, remote_leave, remote_payload,
+    room_with_remote_occupant, stanza_id, statuses, Hosted, Wiring, ARRIVES, BOB, HOME_B, MUC,
+    QUIET, ROOM,
 };
 use waddle_server::db::{Database, MigrationRunner};
 use waddle_server::permissions::host_grant::{RoomAffiliation, SeatEvidence, StreamEvidence};
@@ -70,6 +71,10 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 const BOB_OCCUPANT: &str = "lounge@muc.example.com/bob";
 const ALICE_OCCUPANT: &str = "lounge@muc.example.com/alice";
 const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+const NS_SID: &str = "urn:xmpp:sid:0";
+const NS_REPLY: &str = "urn:xmpp:reply:0";
+const NS_MARKERS: &str = "urn:xmpp:chat-markers:0";
+const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
 
 fn no_change(_: &mut s2s_inbound_muc_support::Spec) {}
 
@@ -164,62 +169,217 @@ async fn messages_fan_out_to_and_from_a_remote_occupant() {
     assert_eq!(body(&reflection).as_deref(), Some("hello from there"));
 }
 
+/// A subject change of the remote occupant (XEP-0045 §8.1).
+fn remote_subject(id: &str, subject: &str) -> Message {
+    let mut message = Message::new_with_type(MessageType::Groupchat, Some(jid(ROOM)));
+    message.from = Some(jid(BOB));
+    message.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+    message.subjects.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        subject.to_owned(),
+    );
+    message
+}
+
 #[tokio::test]
-async fn only_the_text_of_a_remote_occupants_message_reaches_the_room() {
+async fn a_remote_occupants_message_carries_standard_payloads_and_none_of_this_deployments() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
-    // A payload the room's pipeline has not reviewed for a remote
-    // principal rides along with the text.
     let mut carried = remote_groupchat(BOB, ROOM, "carried-1", "text with baggage");
+    // XEP-0359, XEP-0461 with its XEP-0428 fallback, XEP-0333.
+    carried
+        .payloads
+        .push(naming("origin-id", NS_SID, "client-origin-1"));
+    carried
+        .payloads
+        .push(naming("reply", NS_REPLY, "earlier-1"));
+    carried.payloads.push(
+        Element::builder("fallback", "urn:xmpp:fallback:0")
+            .attr(minidom::rxml::xml_ncname!("for").to_owned(), NS_REPLY)
+            .build(),
+    );
+    carried
+        .payloads
+        .push(Element::builder("markable", NS_MARKERS).build());
+    // What the room does not carry from another server: this deployment's
+    // own payloads, a mention, a processing hint and an identifier only
+    // the room assigns.
     carried
         .payloads
         .push(Element::builder("pinned", "urn:waddle:pin:0").build());
-    carried.subjects.insert(
-        xmpp_parsers::message::Lang(String::new()),
-        "not a subject change".to_owned(),
+    carried.payloads.push(
+        Element::builder("mention", "urn:xmpp:mentions:0")
+            .attr(minidom::rxml::xml_ncname!("mentions").to_owned(), "channel")
+            .build(),
+    );
+    carried
+        .payloads
+        .push(Element::builder("store", "urn:xmpp:hints").build());
+    carried.payloads.push(
+        Element::builder("stanza-id", NS_SID)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "forged-1")
+            .attr(minidom::rxml::xml_ncname!("by").to_owned(), ROOM)
+            .build(),
     );
     hosted.from_peer(carried).await;
     let received = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("text with baggage")
     })
     .await
-    .expect("the text for the local occupant");
+    .expect("the message for the local occupant");
+    let has = |name: &str, ns: &str| received.children().any(|child| child.is(name, ns));
+    assert!(has("origin-id", NS_SID), "{received:?}");
+    assert!(has("reply", NS_REPLY), "{received:?}");
+    assert!(has("fallback", "urn:xmpp:fallback:0"), "{received:?}");
+    assert!(has("markable", NS_MARKERS), "{received:?}");
     assert!(
-        received
-            .children()
-            .all(|child| child.ns() != "urn:waddle:pin:0" && child.name() != "subject"),
+        received.children().all(|child| {
+            !child.ns().starts_with("urn:waddle:")
+                && child.ns() != "urn:xmpp:mentions:0"
+                && child.ns() != "urn:xmpp:hints"
+        }),
         "{received:?}"
     );
+    // The identifier the room's archive gave the message is its own.
+    let assigned = stanza_id(&received, ROOM).expect("the room's stanza-id");
+    assert_ne!(assigned, "forged-1");
+    assert!(hosted.seat(ROOM, BOB).is_some());
+}
 
-    // XEP-0045 §8.1: a subject change is refused.
-    let mut subject = Message::new_with_type(MessageType::Groupchat, Some(jid(ROOM)));
-    subject.from = Some(jid(BOB));
-    subject.id = Some(xmpp_parsers::message::Id("subject-1".to_owned()));
-    subject.subjects.insert(
-        xmpp_parsers::message::Lang(String::new()),
-        "taken over".to_owned(),
+#[tokio::test]
+async fn a_remote_occupant_leaves_no_inbox_or_activity_rows() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    let bob = "bob@home-b.test";
+    hosted
+        .from_peer(remote_groupchat(BOB, ROOM, "row-1", "nothing to keep"))
+        .await;
+    local_receives(&mut alice, ARRIVES, |stanza| {
+        body(stanza).as_deref() == Some("nothing to keep")
+    })
+    .await
+    .expect("the message for the local occupant");
+    hosted
+        .from_peer(remote_payload(
+            BOB,
+            ROOM,
+            "row-2",
+            Element::builder("composing", NS_CHATSTATES).build(),
+        ))
+        .await;
+    local_receives_payload(&mut alice, BOB_OCCUPANT, "composing", NS_CHATSTATES)
+        .await
+        .expect("the chat state for the local occupant");
+    hosted
+        .from_peer(remote_leave(BOB, ROOM, "bob", "row-3"))
+        .await;
+    assert!(hosted.unseated(ROOM, BOB).await);
+    // The sender's own inbox row and its activity in the room belong to
+    // an account of this deployment; a remote occupant has neither here.
+    assert_eq!(
+        hosted.rows_naming("inbox_entries", "user_jid", bob).await,
+        0
     );
-    hosted.from_peer(subject).await;
+    assert_eq!(
+        hosted
+            .rows_naming("notification_activity", "owner_bare_jid", bob)
+            .await,
+        0
+    );
+    // A local sender's own row is written as before.
+    local_groupchat(&mut alice, ROOM, "row-4", "mine to keep").await;
+    local_receives(&mut alice, ARRIVES, |stanza| {
+        stanza.name() == "message" && stanza.attr("id") == Some("row-4")
+    })
+    .await
+    .expect("the sender's reflection");
+    assert!(
+        hosted
+            .rows_naming("inbox_entries", "user_jid", "alice@example.com")
+            .await
+            > 0
+    );
+}
+
+#[tokio::test]
+async fn a_remote_occupant_changes_the_subject_only_where_the_room_lets_occupants() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // XEP-0045 §8.1: by default only a moderator changes the subject.
+    hosted
+        .from_peer(remote_subject("subject-1", "taken over"))
+        .await;
     let refused = hosted.answered("subject-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
-
-    // A message without text is neither relayed nor answered.
-    let mut state = Message::new_with_type(MessageType::Groupchat, Some(jid(ROOM)));
-    state.from = Some(jid(BOB));
-    state.id = Some(xmpp_parsers::message::Id("state-1".to_owned()));
-    state
-        .payloads
-        .push(Element::builder("composing", "http://jabber.org/protocol/chatstates").build());
-    hosted.from_peer(state).await;
+    // `muc#roomconfig_changesubject` lets every occupant.
+    let set = local_set(
+        &mut alice,
+        ROOM,
+        "config-1",
+        owner_form(&[("muc#roomconfig_changesubject", "1")]),
+    )
+    .await;
+    assert_eq!(set.attr("type"), Some("result"), "{set:?}");
+    hosted
+        .from_peer(remote_subject("subject-2", "agreed on"))
+        .await;
+    let changed = local_receives(&mut alice, ARRIVES, |stanza| {
+        stanza.name() == "message"
+            && stanza.attr("from") == Some(BOB_OCCUPANT)
+            && stanza
+                .children()
+                .any(|child| child.name() == "subject" && child.text() == "agreed on")
+    })
+    .await;
     assert!(
-        local_receives(&mut alice, QUIET, |stanza| {
-            stanza.name() == "message" && stanza.attr("id") == Some("state-1")
+        changed.is_some(),
+        "the subject change for the local occupant"
+    );
+}
+
+#[tokio::test]
+async fn a_remote_accounts_archived_messages_are_bounded() {
+    let (hosted, _alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // The account may have 30 messages archived at once; a burst beyond
+    // that is refused with `resource-constraint` and archives nothing.
+    for index in 0..40 {
+        let id = format!("burst-{index}");
+        hosted
+            .from_peer(remote_groupchat(BOB, ROOM, &id, "again"))
+            .await;
+    }
+    let limited = hosted
+        .at_peer(|stanza| {
+            stanza.name() == "message"
+                && stanza.attr("type") == Some("error")
+                && error_condition(stanza).as_deref() == Some("resource-constraint")
         })
         .await
-        .is_none(),
-        "a message without text reached the room"
-    );
-    assert!(hosted.captured.with_id("state-1").is_empty());
+        .expect("a refusal once the allowance is spent");
+    assert_eq!(limited.attr("to"), Some(BOB));
+    tokio::time::sleep(QUIET).await;
+    let reflected = hosted.count_at_peer(|stanza| {
+        stanza.name() == "message"
+            && stanza.attr("from") == Some(BOB_OCCUPANT)
+            && body(stanza).as_deref() == Some("again")
+    });
+    assert!((30..40).contains(&reflected), "{reflected}");
+    // A chat state is not archived and is not counted.
+    hosted
+        .from_peer(remote_payload(
+            BOB,
+            ROOM,
+            "state-after",
+            Element::builder("composing", NS_CHATSTATES).build(),
+        ))
+        .await;
+    tokio::time::sleep(QUIET).await;
+    assert!(hosted
+        .captured
+        .with_id("state-after")
+        .iter()
+        .all(|stanza| stanza.attr("type") != Some("error")));
     assert!(hosted.seat(ROOM, BOB).is_some());
 }
 

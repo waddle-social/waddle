@@ -46,6 +46,9 @@ pub const ROOM: &str = "lounge@muc.example.com";
 /// The remote occupant of these suites.
 pub const BOB: &str = "bob@home-b.test/phone";
 
+/// Its occupant JID in [`ROOM`] under the nickname the suites give it.
+pub const BOB_OCCUPANT: &str = "lounge@muc.example.com/bob";
+
 pub const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 
@@ -311,6 +314,28 @@ impl Hosted {
             .count()
     }
 
+    /// How many rows of `table` name `account` in `column`: what this
+    /// deployment stores for an account, in the state's global database.
+    pub async fn rows_naming(&self, table: &str, column: &str, account: &str) -> i64 {
+        let row = self
+            .state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(waddle_server::db::actor::DbQueryOne {
+                sql: format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?"),
+                params: vec![account.into()],
+            })
+            .await
+            .expect("count query")
+            .expect("count row");
+        match row.first() {
+            Some(waddle_server::db::Value::Integer(count)) => *count,
+            other => panic!("unexpected count {other:?}"),
+        }
+    }
+
     /// The seat `occupant` holds in `room` on `example.com`.
     pub fn seat(&self, room: &str, occupant: &str) -> Option<Seat> {
         let room: BareJid = room.parse().expect("a room JID");
@@ -412,6 +437,15 @@ pub fn not_federating(spec: &mut Spec) {
 /// An owner's configuration submission (XEP-0045 §10.2) that sets the
 /// room's `urn:waddle:roomconfig:federated` field.
 pub fn federated_form(federated: bool) -> Element {
+    owner_form(&[(
+        "urn:waddle:roomconfig:federated",
+        if federated { "1" } else { "0" },
+    )])
+}
+
+/// An owner's configuration submission (XEP-0045 §10.2) of `fields`, each
+/// a form variable and its value.
+pub fn owner_form(fields: &[(&str, &str)]) -> Element {
     let field = |var: &str, type_: Option<&str>, value: &str| {
         let mut field = Element::builder("field", "jabber:x:data")
             .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
@@ -426,22 +460,59 @@ pub fn federated_form(federated: bool) -> Element {
             )
             .build()
     };
+    let mut form = Element::builder("x", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(field(
+            "FORM_TYPE",
+            Some("hidden"),
+            "http://jabber.org/protocol/muc#roomconfig",
+        ));
+    for (var, value) in fields {
+        form = form.append(field(var, None, value));
+    }
     Element::builder("query", "http://jabber.org/protocol/muc#owner")
-        .append(
-            Element::builder("x", "jabber:x:data")
-                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
-                .append(field(
-                    "FORM_TYPE",
-                    Some("hidden"),
-                    "http://jabber.org/protocol/muc#roomconfig",
-                ))
-                .append(field(
-                    "urn:waddle:roomconfig:federated",
-                    None,
-                    if federated { "1" } else { "0" },
-                ))
-                .build(),
-        )
+        .append(form.build())
+        .build()
+}
+
+/// The identifier `by` gave a message (XEP-0359 `stanza-id`).
+pub fn stanza_id(message: &Element, by: &str) -> Option<String> {
+    message
+        .children()
+        .find(|child| child.is("stanza-id", "urn:xmpp:sid:0") && child.attr("by") == Some(by))
+        .and_then(|child| child.attr("id").map(str::to_owned))
+}
+
+/// A remote occupant's message to `room` that carries `payload` and no
+/// text.
+pub fn remote_payload(from: &str, room: &str, id: &str, payload: Element) -> Message {
+    let mut message = Message::new_with_type(MessageType::Groupchat, Some(jid(room)));
+    message.from = Some(jid(from));
+    message.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+    message.payloads.push(payload);
+    message
+}
+
+/// The next message `client` receives from the occupant `from` that has a
+/// child `name` in `ns`.
+pub async fn local_receives_payload(
+    client: &mut WsXmppClient,
+    from: &str,
+    name: &str,
+    ns: &str,
+) -> Option<Element> {
+    local_receives(client, ARRIVES, |stanza| {
+        stanza.name() == "message"
+            && stanza.attr("from") == Some(from)
+            && stanza.children().any(|child| child.is(name, ns))
+    })
+    .await
+}
+
+/// A payload element `name` in `ns` with the attribute `id`.
+pub fn naming(name: &str, ns: &str, id: &str) -> Element {
+    Element::builder(name, ns)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .build()
 }
 
