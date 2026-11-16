@@ -1,120 +1,74 @@
-//! Remote rooms that local resources occupy or are joining (XEP-0045,
-//! ADR-0020 D7's room exception).
+//! What a remote room's traffic does to an occupancy, and the stanzas the
+//! router sends for one (ADR-0020 D7's room exception; XEP-0045).
 //!
 //! D7 refuses account traffic across S2S in both directions, with one
 //! exception each way for multi-user chat: a local account's presence and
-//! messages for a remote room it occupies or is joining leave, and traffic
-//! from such a room to the occupant's full JID arrives. A remote room is
-//! known only because a local resource joined it: the join presence (a
-//! presence without a type, to an occupant JID, carrying the XEP-0045 §7.2
-//! `<x xmlns='http://jabber.org/protocol/muc'/>` element) is what makes the
-//! room's bare JID a room for that resource. Nothing else does.
+//! messages for a remote room it occupies leave, and traffic from such a
+//! room to the occupant's full JID arrives. A remote JID is a room for a
+//! local resource only once two things hold: the resource sent it a join
+//! (presence without a type, to an occupant JID, carrying the XEP-0045
+//! §7.2 `<x xmlns='http://jabber.org/protocol/muc'/>` element), and the
+//! room's bare JID answered this server's XEP-0030 `disco#info` with the
+//! `conference/text` identity or the MUC feature (XEP-0045 §6.4). Until it
+//! has answered, the join is held and nothing reaches the JID.
 //!
-//! [`RemoteRooms`] keeps, per local full JID, the remote rooms it joined or
-//! is joining, with its nickname and the phase of its occupancy. It is
-//! bounded, held in memory on the replica whose router routed the join, and
-//! rebuilt by the clients themselves: a client that reconnects joins its
-//! rooms again (XEP-0045 §7.2). The decisions are recorded in
-//! `server/docs/planning/s2s-routing-2047.md` (outbound MUC).
+//! The occupancies live in a table every replica shares
+//! ([`super::occupancy`]); this module decides, for one occupancy and one
+//! stanza, what is admitted and how the occupancy changes. The decisions
+//! are recorded in `server/docs/planning/s2s-routing-2047.md` (outbound
+//! MUC).
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-use jid::{BareJid, DomainRef, FullJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
+use waddle_xmpp::disco::DISCO_INFO_NS;
 use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::Stanza;
+use xmpp_parsers::disco::{DiscoInfoQuery, DiscoInfoResult};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::muc::user::{Affiliation, Item, MucUser, Role, Status};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+use super::occupancy::{Occupancy, OccupancyPhase, RoomVerdict};
 
 /// XEP-0045 status codes (§12) the occupancy reads.
 const STATUS_SELF: &str = "110";
 const STATUS_NEW_NICK: &str = "303";
 
-/// Bounds on the remote rooms local resources occupy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RoomBounds {
-    /// Rooms one local full JID may occupy or be joining at once.
-    pub per_resource: usize,
-    /// Rooms every local full JID on this replica may occupy or be joining
-    /// at once.
-    pub total: usize,
-    /// How long a room a resource left keeps admitting the room's answer
-    /// to the leave and whatever it sent before it.
-    pub leave_grace: Duration,
-}
+/// The identity a room names in `disco#info` (XEP-0045 §6.4).
+const ROOM_CATEGORY: &str = "conference";
+const ROOM_TYPE: &str = "text";
 
-/// Where an occupancy stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// The join presence was sent; the room has not yet sent the
-    /// occupant's own presence.
-    Joining,
-    /// The room sent the occupant's own available presence.
-    Joined,
-    /// The occupant sent unavailable presence. The room's answer and the
-    /// traffic it sent before reading the leave are still admitted until
-    /// `until`.
-    Leaving { until: Instant },
-}
-
-#[derive(Debug, Clone)]
-struct Occupancy {
-    /// The occupant's nickname: the one requested while joining, then the
-    /// one the room's own presence names (XEP-0045 §7.2.2 lets it assign
-    /// another).
-    nick: String,
-    phase: Phase,
-    /// The affiliation the room last stated in the occupant's own presence.
-    affiliation: Affiliation,
-}
-
-impl Occupancy {
-    fn occupies(&self) -> bool {
-        matches!(self.phase, Phase::Joining | Phase::Joined)
-    }
-}
-
-/// What a local resource's stanza for a remote room does to its occupancy,
-/// once the stanza is on its way.
+/// What a local resource's message or presence for a remote JID asks of
+/// the occupancy of its bare JID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RoomEgress {
-    /// A join presence: the resource is now joining `room` as `nick`,
-    /// unless the room already seats it.
-    Join { room: BareJid, nick: String },
-    /// Unavailable presence: the resource is leaving `room`.
-    Leave { room: BareJid },
-    /// A presence update, a nickname change, a message, or an error the
-    /// resource returns to the room: the occupancy does not change.
-    Traffic,
+    /// A join presence for `nick`, with the presence's id.
+    Join { nick: String, id: Option<String> },
+    /// Unavailable presence: leaving the room (XEP-0045 §7.14), also a
+    /// second time.
+    Leave,
+    /// A presence update or a nickname change (XEP-0045 §7.6, §7.7): only
+    /// while joining or joined.
+    PresenceUpdate,
+    /// An error presence the resource returns to the room: while the room
+    /// seats it or is answering its leave.
+    ErrorPresence,
+    /// A message to the room or one of its occupants: only once joined.
+    Message,
 }
 
-/// Why a local resource's message or presence for a remote JID is
-/// refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RoomRefusal {
-    /// Not a room the resource occupies or is joining, or a stanza no
-    /// occupant sends a room: account traffic, refused by D7.
-    NotOccupied,
-    /// Joining it would exceed the bounds on occupied rooms.
-    Bounds,
-}
-
-/// An occupancy the router ended without the room: what the occupant is
-/// told.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct EndedOccupancy {
-    pub resource: FullJid,
-    pub room: BareJid,
-    pub nick: String,
-    pub affiliation: Affiliation,
-}
-
-/// The remote rooms each local full JID occupies or is joining.
-#[derive(Debug, Default)]
-pub(super) struct RemoteRooms {
-    by_resource: HashMap<FullJid, HashMap<BareJid, Occupancy>>,
-    total: usize,
+impl RoomEgress {
+    /// Whether this stanza may leave for a room whose occupancy is in
+    /// `phase`. Joins and leaves are decided by the router, not here.
+    pub(super) fn permitted_in(&self, phase: OccupancyPhase) -> bool {
+        match self {
+            Self::Join { .. } | Self::Leave => true,
+            Self::PresenceUpdate => phase.occupies(),
+            Self::ErrorPresence => phase != OccupancyPhase::Verifying,
+            Self::Message => phase == OccupancyPhase::Joined,
+        }
+    }
 }
 
 /// Whether `presence` is a XEP-0045 §7.2 join: no type and a `muc` child.
@@ -126,6 +80,40 @@ fn is_join(presence: &Presence) -> bool {
             .any(|payload| payload.is("x", NS_MUC))
 }
 
+/// The room bare JID `stanza`, which a local resource addresses to the
+/// remote JID `to`, is for, and what it asks of the occupancy; `None` for
+/// a stanza no occupant sends a room, which is account traffic (D7).
+pub(super) fn egress(to: &Jid, stanza: &Stanza) -> Option<(BareJid, RoomEgress)> {
+    // A room has a localpart (XEP-0045 §4: room@service).
+    to.node()?;
+    let room = to.to_bare();
+    let egress = match stanza {
+        Stanza::Message(_) => RoomEgress::Message,
+        Stanza::Presence(presence) => {
+            // Presence goes to an occupant JID, never to the room's bare
+            // JID (XEP-0045 §7.2.1).
+            let nick = to.resource()?;
+            match presence.type_ {
+                PresenceType::None if is_join(presence) => RoomEgress::Join {
+                    nick: nick.as_str().to_owned(),
+                    id: presence.id.clone(),
+                },
+                PresenceType::None => RoomEgress::PresenceUpdate,
+                PresenceType::Unavailable => RoomEgress::Leave,
+                PresenceType::Error => RoomEgress::ErrorPresence,
+                // Subscriptions and probes are account traffic.
+                PresenceType::Subscribe
+                | PresenceType::Subscribed
+                | PresenceType::Unsubscribe
+                | PresenceType::Unsubscribed
+                | PresenceType::Probe => return None,
+            }
+        }
+        Stanza::Iq(_) => return None,
+    };
+    Some((room, egress))
+}
+
 /// The `muc#user` element of a room's presence, if any.
 fn muc_user(presence: &Presence) -> Option<&Element> {
     presence
@@ -134,7 +122,7 @@ fn muc_user(presence: &Presence) -> Option<&Element> {
         .find(|payload| payload.is("x", NS_MUC_USER))
 }
 
-/// The status codes of a `muc#user` element.
+/// Whether a `muc#user` element carries the status `code`.
 fn has_status(user: Option<&Element>, code: &str) -> bool {
     user.is_some_and(|user| {
         user.children()
@@ -147,322 +135,132 @@ fn item(user: Option<&Element>) -> Option<&Element> {
     user?.children().find(|child| child.is("item", NS_MUC_USER))
 }
 
-impl RemoteRooms {
-    /// Rooms occupied or being joined, by every resource.
-    pub(super) fn len(&self) -> usize {
-        self.total
-    }
+/// How a stanza from a room changes the occupancy it was admitted for.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Change {
+    /// Store the occupancy as given.
+    Update(Box<Occupancy>),
+    /// The occupancy ended.
+    Remove,
+}
 
-    fn occupancy(&self, resource: &FullJid, room: &BareJid) -> Option<&Occupancy> {
-        self.by_resource.get(resource)?.get(room)
+/// Whether `stanza`, from `from` to the occupancy's local resource, is
+/// traffic from a room the resource occupies, is joining or has just left,
+/// and so is admitted (ADR-0020 D7), and how it changes the occupancy.
+///
+/// - Nothing is admitted while the join is held for verification: the JID
+///   has been sent nothing.
+/// - A message from the room's bare JID, such as a challenge the room
+///   sends a joining occupant, is admitted once the join left. A message
+///   from one of its occupants only once the room has sent the occupant's
+///   own presence (XEP-0045 §7.1 sends it before history and subject).
+/// - Presence carrying `muc#user`, or an error, is admitted. The room's own
+///   presence for the occupant (status 110, or the occupant JID with the
+///   current nickname) moves the occupancy on: available presence
+///   completes the join and records the nickname and affiliation the room
+///   states (§7.2.2); unavailable presence with status 303 records the new
+///   nickname (§7.6); any other own unavailable presence answers a leave
+///   still pending from before a rejoin, or else ends the occupancy (left,
+///   kicked, banned, removed or destroyed: §7.14, §8.2, §9.1, §10.9); an
+///   error ends a join in progress (§7.2.5 to §7.2.11).
+/// - IQs are never room traffic here: responses are correlated, requests
+///   refused.
+pub(super) fn inbound(
+    occupancy: &Occupancy,
+    from: &Jid,
+    stanza: &Stanza,
+    now_ms: i64,
+) -> (bool, Option<Change>) {
+    if occupancy.phase == OccupancyPhase::Leaving
+        && occupancy.deadline_ms.is_some_and(|deadline| deadline <= now_ms)
+    {
+        return (false, Some(Change::Remove));
     }
-
-    /// Decide whether `stanza`, which the local resource `sender` addresses
-    /// to the remote JID `to`, is room traffic D7 lets leave, and what it
-    /// does to the occupancy. Nothing changes until [`Self::record`].
-    pub(super) fn outbound(
-        &self,
-        bounds: &RoomBounds,
-        sender: &FullJid,
-        to: &Jid,
-        stanza: &Stanza,
-    ) -> Result<RoomEgress, RoomRefusal> {
-        // A room has a localpart (XEP-0045 §4: room@service).
-        if to.node().is_none() {
-            return Err(RoomRefusal::NotOccupied);
+    if occupancy.phase == OccupancyPhase::Verifying {
+        return (false, None);
+    }
+    let presence = match stanza {
+        Stanza::Message(_) if from.resource().is_none() => return (true, None),
+        Stanza::Message(_) => {
+            return (
+                matches!(
+                    occupancy.phase,
+                    OccupancyPhase::Joined | OccupancyPhase::Leaving
+                ),
+                None,
+            )
         }
-        let room = to.to_bare();
-        let current = self.occupancy(sender, &room);
-        match stanza {
-            // A message to the room or to one of its occupants, while the
-            // resource occupies or is joining the room (ADR-0020 D7).
-            Stanza::Message(_) => match current {
-                Some(occupancy) if occupancy.occupies() => Ok(RoomEgress::Traffic),
-                _ => Err(RoomRefusal::NotOccupied),
-            },
-            Stanza::Presence(presence) => {
-                // Presence goes to an occupant JID, never to the room's bare
-                // JID (XEP-0045 §7.2.1).
-                let Some(nick) = to.resource() else {
-                    return Err(RoomRefusal::NotOccupied);
-                };
-                match presence.type_ {
-                    PresenceType::None if is_join(presence) => {
-                        if current.is_none() {
-                            let held = self.by_resource.get(sender).map_or(0, HashMap::len);
-                            if held >= bounds.per_resource || self.total >= bounds.total {
-                                return Err(RoomRefusal::Bounds);
-                            }
-                        }
-                        Ok(RoomEgress::Join {
-                            room,
-                            nick: nick.as_str().to_owned(),
-                        })
+        Stanza::Iq(_) => return (false, None),
+        Stanza::Presence(presence) => presence,
+    };
+    let user = muc_user(presence);
+    // Occupant presence from a room carries `muc#user` (XEP-0045 §7.2.2);
+    // an error answers a join or a nickname change.
+    if user.is_none() && presence.type_ != PresenceType::Error {
+        return (false, None);
+    }
+    // XEP-0045 §7.2.2: the occupant's own presence carries status 110; a
+    // service that omits it still sends it from the occupant JID.
+    let own = has_status(user, STATUS_SELF)
+        || from
+            .resource()
+            .is_some_and(|nick| nick.as_str() == occupancy.nick);
+    let mut next = occupancy.clone();
+    next.updated_at_ms = now_ms;
+    let change = match presence.type_ {
+        PresenceType::Error if occupancy.phase == OccupancyPhase::Joining => Some(Change::Remove),
+        PresenceType::Error => None,
+        PresenceType::None if own => {
+            if let Some(nick) = from.resource() {
+                next.nick = nick.as_str().to_owned();
+            }
+            if let Some(affiliation) = item(user)
+                .and_then(|item| item.attr("affiliation"))
+                .and_then(|affiliation| affiliation.parse::<Affiliation>().ok())
+            {
+                next.affiliation = affiliation;
+            }
+            if next.phase == OccupancyPhase::Joining {
+                next.phase = OccupancyPhase::Joined;
+                next.deadline_ms = None;
+            }
+            Some(Change::Update(Box::new(next)))
+        }
+        PresenceType::None => None,
+        PresenceType::Unavailable if own => {
+            let new_nick = has_status(user, STATUS_NEW_NICK)
+                .then(|| item(user).and_then(|item| item.attr("nick")))
+                .flatten();
+            let answers_earlier_leave = occupancy.leaves_pending > 0
+                && occupancy
+                    .leave_until_ms
+                    .is_some_and(|until| until > now_ms);
+            match new_nick {
+                Some(nick) if occupancy.phase.occupies() => {
+                    next.nick = nick.to_owned();
+                    Some(Change::Update(Box::new(next)))
+                }
+                // The answer to a leave sent before the resource joined
+                // again: the room processes the join after it.
+                _ if answers_earlier_leave => {
+                    next.leaves_pending -= 1;
+                    if next.leaves_pending == 0 {
+                        next.leave_until_ms = None;
                     }
-                    // A presence update or a nickname change (XEP-0045
-                    // §7.6, §7.7) from an occupant.
-                    PresenceType::None => match current {
-                        Some(occupancy) if occupancy.occupies() => Ok(RoomEgress::Traffic),
-                        _ => Err(RoomRefusal::NotOccupied),
-                    },
-                    // Leaving (XEP-0045 §7.14), also a second time.
-                    PresenceType::Unavailable => match current {
-                        Some(_) => Ok(RoomEgress::Leave { room }),
-                        None => Err(RoomRefusal::NotOccupied),
-                    },
-                    PresenceType::Error => match current {
-                        Some(_) => Ok(RoomEgress::Traffic),
-                        None => Err(RoomRefusal::NotOccupied),
-                    },
-                    // Subscriptions and probes are account traffic.
-                    PresenceType::Subscribe
-                    | PresenceType::Subscribed
-                    | PresenceType::Unsubscribe
-                    | PresenceType::Unsubscribed
-                    | PresenceType::Probe => Err(RoomRefusal::NotOccupied),
+                    Some(Change::Update(Box::new(next)))
                 }
-            }
-            Stanza::Iq(_) => Err(RoomRefusal::NotOccupied),
-        }
-    }
-
-    /// Apply `egress`, decided by [`Self::outbound`] for `sender`, once its
-    /// stanza is queued.
-    pub(super) fn record(
-        &mut self,
-        sender: &FullJid,
-        egress: RoomEgress,
-        now: Instant,
-        grace: Duration,
-    ) {
-        match egress {
-            RoomEgress::Join { room, nick } => {
-                let rooms = self.by_resource.entry(sender.clone()).or_default();
-                match rooms.get_mut(&room) {
-                    // A client joins again to resynchronise, such as after
-                    // reconnecting under the same full JID. The room still
-                    // seats it, so the occupancy stays joined: its traffic
-                    // keeps arriving, and the room's own presence updates
-                    // the nickname.
-                    Some(occupancy) if occupancy.phase == Phase::Joined => {}
-                    Some(occupancy) => {
-                        occupancy.nick = nick;
-                        occupancy.phase = Phase::Joining;
-                    }
-                    None => {
-                        rooms.insert(
-                            room,
-                            Occupancy {
-                                nick,
-                                phase: Phase::Joining,
-                                affiliation: Affiliation::None,
-                            },
-                        );
-                        self.total += 1;
-                    }
-                }
-            }
-            RoomEgress::Leave { room } => {
-                if let Some(occupancy) = self
-                    .by_resource
-                    .get_mut(sender)
-                    .and_then(|rooms| rooms.get_mut(&room))
-                {
-                    occupancy.phase = Phase::Leaving { until: now + grace };
-                }
-            }
-            RoomEgress::Traffic => {}
-        }
-    }
-
-    /// Forget `room` for `resource`.
-    pub(super) fn forget(&mut self, resource: &FullJid, room: &BareJid) {
-        let Some(rooms) = self.by_resource.get_mut(resource) else {
-            return;
-        };
-        if rooms.remove(room).is_some() {
-            self.total = self.total.saturating_sub(1);
-        }
-        if rooms.is_empty() {
-            self.by_resource.remove(resource);
-        }
-    }
-
-    /// Forget `room` for `resource` if the resource is still joining it as
-    /// `nick`: the join never reached the room.
-    pub(super) fn forget_join(&mut self, resource: &FullJid, room: &BareJid, nick: &str) {
-        let unanswered = self
-            .occupancy(resource, room)
-            .is_some_and(|occupancy| occupancy.phase == Phase::Joining && occupancy.nick == nick);
-        if unanswered {
-            self.forget(resource, room);
-        }
-    }
-
-    /// Whether `stanza`, from `from` to the local resource `to`, is traffic
-    /// from a room the resource occupies, is joining or has just left, and
-    /// so is admitted (ADR-0020 D7): presence carrying `muc#user` or an
-    /// error, and, once the room has sent the occupant's own presence,
-    /// messages of every type. IQs are never room traffic here: responses
-    /// are correlated, requests refused. The room's presence moves the
-    /// occupancy on: its own presence for the occupant completes a join or
-    /// a nickname change, its own unavailable presence or an error for a
-    /// join ends it.
-    pub(super) fn inbound(
-        &mut self,
-        to: &FullJid,
-        from: &Jid,
-        stanza: &Stanza,
-        now: Instant,
-    ) -> bool {
-        let room = from.to_bare();
-        let Some(occupancy) = self
-            .by_resource
-            .get_mut(to)
-            .and_then(|rooms| rooms.get_mut(&room))
-        else {
-            return false;
-        };
-        if let Phase::Leaving { until } = occupancy.phase {
-            if until <= now {
-                self.forget(to, &room);
-                return false;
+                _ => Some(Change::Remove),
             }
         }
-        let presence = match stanza {
-            // XEP-0045 §7.1: a room sends the occupant's own presence
-            // before history and subject. Until it has, nothing but room
-            // presence shows that the joined JID is a room at all, so a
-            // client cannot open a conversation with an account by
-            // "joining" it.
-            Stanza::Message(_) => return occupancy.phase != Phase::Joining,
-            Stanza::Iq(_) => return false,
-            Stanza::Presence(presence) => presence,
-        };
-        let user = muc_user(presence);
-        // Occupant presence from a room carries `muc#user` (XEP-0045
-        // §7.2.2); an error answers a join or a nickname change.
-        if user.is_none() && presence.type_ != PresenceType::Error {
-            return false;
-        }
-        // XEP-0045 §7.2.2: the occupant's own presence carries status 110;
-        // a service that omits it still sends it from the occupant JID.
-        let own = has_status(user, STATUS_SELF)
-            || from
-                .resource()
-                .is_some_and(|nick| nick.as_str() == occupancy.nick);
-        match presence.type_ {
-            // XEP-0045 §7.2.5–§7.2.11: the room refused the join.
-            PresenceType::Error => {
-                if occupancy.phase == Phase::Joining {
-                    self.forget(to, &room);
-                }
-                true
-            }
-            PresenceType::None => {
-                if own {
-                    if let Some(nick) = from.resource() {
-                        occupancy.nick = nick.as_str().to_owned();
-                    }
-                    if let Some(affiliation) = item(user)
-                        .and_then(|item| item.attr("affiliation"))
-                        .and_then(|affiliation| affiliation.parse::<Affiliation>().ok())
-                    {
-                        occupancy.affiliation = affiliation;
-                    }
-                    if occupancy.phase == Phase::Joining {
-                        occupancy.phase = Phase::Joined;
-                    }
-                }
-                true
-            }
-            PresenceType::Unavailable => {
-                if own {
-                    // XEP-0045 §7.6: a nickname change is the old
-                    // nickname's unavailable presence with status 303 and
-                    // the new nickname.
-                    let new_nick = has_status(user, STATUS_NEW_NICK)
-                        .then(|| item(user).and_then(|item| item.attr("nick")))
-                        .flatten();
-                    match new_nick {
-                        Some(nick) if occupancy.occupies() => occupancy.nick = nick.to_owned(),
-                        // Left, kicked, banned, removed, or the room was
-                        // destroyed (XEP-0045 §7.14, §8.2, §9.1, §10.9).
-                        _ => self.forget(to, &room),
-                    }
-                }
-                true
-            }
-            // Subscriptions and probes are account traffic, not room traffic.
-            PresenceType::Subscribe
-            | PresenceType::Subscribed
-            | PresenceType::Unsubscribe
-            | PresenceType::Unsubscribed
-            | PresenceType::Probe => false,
-        }
-    }
-
-    /// End every occupancy of `resource` and return the rooms it occupies
-    /// or is joining, with its nickname in each, to tell them it left.
-    pub(super) fn take_resource(&mut self, resource: &FullJid) -> Vec<(BareJid, String)> {
-        let Some(rooms) = self.by_resource.remove(resource) else {
-            return Vec::new();
-        };
-        self.total = self.total.saturating_sub(rooms.len());
-        rooms
-            .into_iter()
-            .filter(|(_, occupancy)| occupancy.occupies())
-            .map(|(room, occupancy)| (room, occupancy.nick))
-            .collect()
-    }
-
-    /// End every occupancy of a local resource at `local` in a room at
-    /// `remote`, and return those the occupant must be told about.
-    pub(super) fn take_lost(
-        &mut self,
-        local: &DomainRef,
-        remote: &DomainRef,
-    ) -> Vec<EndedOccupancy> {
-        let mut ended = Vec::new();
-        let total = &mut self.total;
-        self.by_resource.retain(|resource, rooms| {
-            if resource.domain() != local {
-                return true;
-            }
-            rooms.retain(|room, occupancy| {
-                if room.domain() != remote {
-                    return true;
-                }
-                *total = total.saturating_sub(1);
-                if occupancy.occupies() {
-                    ended.push(EndedOccupancy {
-                        resource: resource.clone(),
-                        room: room.clone(),
-                        nick: occupancy.nick.clone(),
-                        affiliation: occupancy.affiliation.clone(),
-                    });
-                }
-                false
-            });
-            !rooms.is_empty()
-        });
-        ended
-    }
-
-    /// Forget rooms whose leave grace has passed.
-    pub(super) fn sweep(&mut self, now: Instant) {
-        let total = &mut self.total;
-        self.by_resource.retain(|_, rooms| {
-            rooms.retain(|_, occupancy| {
-                let expired = matches!(occupancy.phase, Phase::Leaving { until } if until <= now);
-                if expired {
-                    *total = total.saturating_sub(1);
-                }
-                !expired
-            });
-            !rooms.is_empty()
-        });
-    }
+        PresenceType::Unavailable => None,
+        // Subscriptions and probes are account traffic, not room traffic.
+        PresenceType::Subscribe
+        | PresenceType::Subscribed
+        | PresenceType::Unsubscribe
+        | PresenceType::Unsubscribed
+        | PresenceType::Probe => return (false, None),
+    };
+    (true, change)
 }
 
 /// XEP-0045 §7.14: the unavailable presence that leaves `room`, from
@@ -476,17 +274,125 @@ pub(super) fn leave_presence(resource: &FullJid, room: &BareJid, nick: &str) -> 
 }
 
 /// XEP-0045 §11.1 (status 333): the occupant's own unavailable presence,
-/// from the room, after the stream to the room's domain failed. The
-/// occupant may no longer be in the room, and the room can no longer reach
-/// it; the client joins again when it wants the room back.
-pub(super) fn removed_by_error(ended: &EndedOccupancy) -> Option<Stanza> {
-    let occupant = ended.room.with_resource_str(&ended.nick).ok()?;
+/// from the room, after the stream to the room's domain failed or the
+/// replica that routed its stanzas stopped. The occupant may no longer be
+/// in the room, and the room may no longer reach it; the client joins
+/// again when it wants the room back.
+pub(super) fn removed_by_error(occupancy: &Occupancy) -> Option<Stanza> {
+    let occupant = occupancy.room.with_resource_str(&occupancy.nick).ok()?;
     let mut presence = Presence::new(PresenceType::Unavailable);
     presence.from = Some(Jid::from(occupant));
-    presence.to = Some(Jid::from(ended.resource.clone()));
+    presence.to = Some(Jid::from(occupancy.occupant.clone()));
     let user = MucUser::new()
-        .with_items(vec![Item::new(ended.affiliation.clone(), Role::None)])
+        .with_items(vec![Item::new(occupancy.affiliation.clone(), Role::None)])
         .with_statuses(vec![Status::SelfPresence, Status::ServiceErrorKick]);
     presence.payloads.push(Element::from(user));
     Some(Stanza::Presence(presence))
+}
+
+/// The error presence answering a join that never reached the room, or
+/// that the room never answered, from the occupant JID it was sent to,
+/// with the join's id and the `muc` child, as a room answers a join it
+/// refuses (XEP-0045 §7.2.5 onwards).
+pub(super) fn join_error(occupancy: &Occupancy, error: StanzaError) -> Option<Stanza> {
+    let occupant = occupancy.room.with_resource_str(&occupancy.nick).ok()?;
+    let mut presence = Presence::new(PresenceType::Error);
+    presence.from = Some(Jid::from(occupant));
+    presence.to = Some(Jid::from(occupancy.occupant.clone()));
+    presence.id = occupancy.join_id.clone();
+    presence
+        .payloads
+        .push(Element::builder("x", NS_MUC).build());
+    presence.payloads.push(Element::from(error));
+    Some(Stanza::Presence(presence))
+}
+
+/// The `item-not-found` a join to a JID that is not a room receives.
+pub(super) fn not_a_room(home: &jid::DomainRef) -> StanzaError {
+    super::replies::error(
+        home,
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "The address is not a multi-user chat room.",
+    )
+}
+
+/// The `remote-server-timeout` a join receives when the JID did not say
+/// whether it is a room, or the room did not answer the join, in time.
+pub(super) fn unanswered(home: &jid::DomainRef) -> StanzaError {
+    super::replies::error(
+        home,
+        ErrorType::Wait,
+        DefinedCondition::RemoteServerTimeout,
+        "The remote room did not answer in time.",
+    )
+}
+
+/// The XEP-0030 `disco#info` request this server sends from its own
+/// domain `from` to the bare JID `room`, to learn whether it is a room.
+/// It goes to the bare JID, never to an occupant JID, which a client
+/// could answer.
+pub(super) fn disco_request(from: Jid, room: &BareJid, id: String) -> Stanza {
+    Stanza::Iq(Box::new(Iq::Get {
+        from: Some(from),
+        to: Some(Jid::from(room.clone())),
+        id,
+        payload: Element::from(DiscoInfoQuery { node: None }),
+    }))
+}
+
+/// What a remote bare JID's answer to [`disco_request`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerificationAnswer {
+    /// A verdict to act on and to cache.
+    Verdict(RoomVerdict),
+    /// No verdict: the answer said the JID could not be reached for now,
+    /// or this server could not use it. Not cached.
+    Unavailable,
+}
+
+/// Read a response that completed a [`disco_request`]. `usable` is
+/// `false` for an error this server generated because the response
+/// carried an address outside the identity profile.
+pub(super) fn verification_answer(stanza: &Stanza, usable: bool) -> VerificationAnswer {
+    if !usable {
+        return VerificationAnswer::Unavailable;
+    }
+    let Stanza::Iq(iq) = stanza else {
+        return VerificationAnswer::Unavailable;
+    };
+    match iq.as_ref() {
+        Iq::Result {
+            payload: Some(payload),
+            ..
+        } if payload.is("query", DISCO_INFO_NS) => {
+            let room = DiscoInfoResult::try_from(payload.clone()).is_ok_and(|info| {
+                info.identities.iter().any(|identity| {
+                    identity.category == ROOM_CATEGORY && identity.type_ == ROOM_TYPE
+                }) || info.features.iter().any(|feature| feature.var == NS_MUC)
+            });
+            VerificationAnswer::Verdict(if room {
+                RoomVerdict::Room
+            } else {
+                RoomVerdict::NotRoom
+            })
+        }
+        Iq::Result { .. } => VerificationAnswer::Verdict(RoomVerdict::NotRoom),
+        Iq::Error { error, .. } => {
+            // RFC 6120 §8.3.2: `wait` is temporary; the remote-server
+            // conditions are about the route, not the JID.
+            let transient = error.type_ == ErrorType::Wait
+                || matches!(
+                    error.defined_condition,
+                    DefinedCondition::RemoteServerNotFound
+                        | DefinedCondition::RemoteServerTimeout
+                );
+            if transient {
+                VerificationAnswer::Unavailable
+            } else {
+                VerificationAnswer::Verdict(RoomVerdict::NotRoom)
+            }
+        }
+        Iq::Get { .. } | Iq::Set { .. } => VerificationAnswer::Unavailable,
+    }
 }

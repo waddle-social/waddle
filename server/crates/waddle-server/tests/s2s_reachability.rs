@@ -101,6 +101,7 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
 
     use InboundReach::{
         CorrelatedResponse, Refused, ServerDiscoInfo, ServerDiscoItems, ServerPing,
+        ServerResponse,
     };
     let server = LocalTarget::ServerDomain;
     assert_eq!(
@@ -112,11 +113,18 @@ fn the_reach_of_every_served_destination_follows_d10_and_d7() {
         ServerDiscoItems
     );
     assert_eq!(reach(server, &request(ping_payload())), ServerPing);
+    // A response to the server domain completes only a room verification
+    // this server sent; the router decides that against the correlation
+    // table.
+    assert_eq!(reach(server, &response), ServerResponse);
+    assert_eq!(
+        reach(LocalTarget::ServerResource, &response),
+        Refused(Refusal::ServerRequest)
+    );
     for stanza in [
         request(query("jabber:iq:version")),
         request(query("vcard-temp")),
         set.clone(),
-        response.clone(),
         message.clone(),
         presence.clone(),
     ] {

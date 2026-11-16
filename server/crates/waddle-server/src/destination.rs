@@ -309,6 +309,9 @@ pub enum UnroutableReason {
     /// The request cannot be correlated: its id is empty, too long, or
     /// already pending for the same sender and recipient.
     InvalidRequest,
+    /// A join presence for a remote JID whose service discovery recently
+    /// answered that it is not a multi-user chat room (XEP-0045 §6.4).
+    NotARoom,
 }
 
 impl UnroutableReason {
@@ -379,6 +382,11 @@ impl UnroutableReason {
                 ErrorType::Modify,
                 DefinedCondition::BadRequest,
                 "The request id is empty, too long or already pending.",
+            ),
+            Self::NotARoom => (
+                ErrorType::Cancel,
+                DefinedCondition::ItemNotFound,
+                "The address is not a multi-user chat room.",
             ),
         };
         let mut error = StanzaError::new(type_, condition, "en", text);

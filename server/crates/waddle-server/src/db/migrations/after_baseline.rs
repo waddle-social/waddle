@@ -19,6 +19,10 @@ pub const HOST_GRANT_AUTHORITY_VERSION: i64 = 2001;
 /// Version of the migration that creates the S2S IQ correlation table.
 pub const S2S_IQ_CORRELATIONS_VERSION: i64 = 2003;
 
+/// Version of the migration that creates the S2S remote room occupancy
+/// table and its room verdict cache.
+pub const S2S_REMOTE_ROOMS_VERSION: i64 = 2004;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -40,13 +44,23 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2003_s2s_iq_correlations.postgres.sql"
             ),
         },
+        Migration {
+            version: S2S_REMOTE_ROOMS_VERSION,
+            description: "s2s remote rooms".to_string(),
+            sql_sqlite: include_str!("../../../sql/migrations/2004_s2s_remote_rooms.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2004_s2s_remote_rooms.postgres.sql"
+            ),
+        },
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::BASELINE_VERSION;
-    use super::{all, HOST_GRANT_AUTHORITY_VERSION, S2S_IQ_CORRELATIONS_VERSION};
+    use super::{
+        all, HOST_GRANT_AUTHORITY_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+    };
 
     #[test]
     fn later_migrations_follow_the_baseline_in_order() {
@@ -55,7 +69,11 @@ mod tests {
         assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             versions,
-            vec![HOST_GRANT_AUTHORITY_VERSION, S2S_IQ_CORRELATIONS_VERSION]
+            vec![
+                HOST_GRANT_AUTHORITY_VERSION,
+                S2S_IQ_CORRELATIONS_VERSION,
+                S2S_REMOTE_ROOMS_VERSION
+            ]
         );
     }
 }

@@ -352,6 +352,12 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // row on every expiry sweep, and a stopped replica's row is deleted.
     ("s2s_iq_correlations", READ_INSERT_DELETE),
     ("s2s_iq_correlation_owners", READ_WRITE),
+    // S2S remote room occupancy: a join inserts its row, every later change
+    // is an update conditional on the row's revision, and the end of the
+    // occupancy deletes it. The verdict cache is upserted and its expired
+    // rows deleted.
+    ("s2s_remote_room_occupancies", READ_WRITE),
+    ("s2s_remote_room_verdicts", READ_WRITE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),
