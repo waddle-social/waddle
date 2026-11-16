@@ -6,6 +6,25 @@ import Testing
 @MainActor
 @Suite("Session calls")
 struct SessionCallTests {
+    @Test func injectedMediaFollowsTheSessionCallStore() async {
+        let port = FakePort()
+        let media = RecordingCallMedia()
+        let coordinator = SessionCoordinator(
+            account: AccountIdentity(jid: callOwn.bare, nick: "alice", resource: callOwn.resource),
+            port: port, handlesCalls: true, callMedia: media)
+        coordinator.start()
+        port.emit(.call(CallEvent(from: callPeer, sid: "c-media", kind: .propose(callAudio))))
+        await eventually { coordinator.calls.state != .idle }
+        #expect(await coordinator.calls.acceptIncoming())
+        port.emit(.call(CallEvent(from: callPeer, sid: "c-media", kind: .sessionInitiate(join: callJoin, media: callAudio))))
+        await eventually { media.calls == [.connect(callJoin, callAudio)] }
+        #expect(media.calls == [.connect(callJoin, callAudio)])
+        #expect(port.externalServicesFetchCount == 1)
+        await coordinator.stop()
+        await eventually { media.calls.last == .disconnect }
+        #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
+    }
+
     @Test func streamLossPreservesTheActiveCallSlot() async {
         let (coordinator, port) = session()
         coordinator.start()

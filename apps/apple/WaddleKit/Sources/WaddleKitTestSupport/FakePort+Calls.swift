@@ -32,6 +32,21 @@ enum CallSend: Hashable {
 }
 
 extension FakePort {
+    func fetchExternalServices() async -> [ExternalService] {
+        externalServicesFetchCount += 1
+        let result = externalServices
+        if holdExternalServicesFetch {
+            await withCheckedContinuation { heldExternalServicesFetches.append($0) }
+        }
+        return result
+    }
+
+    func releaseExternalServicesFetches() {
+        let held = heldExternalServicesFetches
+        heldExternalServicesFetches = []
+        for continuation in held { continuation.resume() }
+    }
+
     private func recordCall(_ send: CallSend) async -> Bool {
         callSends.append(send)
         let result = callResults[send.verb] ?? true

@@ -367,7 +367,10 @@ final class ActiveSession {
             outbox = InMemoryOutboxStore()
         }
         self.auth = auth
-        self.coordinator = SessionCoordinator(account: account, port: FFIXmppPort(config: config), outboxStore: outbox)
+        self.coordinator = SessionCoordinator(
+            account: account, port: FFIXmppPort(config: config), outboxStore: outbox,
+            callMedia: LiveKitCallMediaController()
+        )
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
     }
 }

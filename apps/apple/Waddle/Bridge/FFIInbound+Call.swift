@@ -1,6 +1,24 @@
 import WaddleKit
 
 extension FFIInbound {
+    /// Keep XEP-0215 service fields typed across the FFI boundary.
+    static func externalService(_ service: WaddleExternalService) -> ExternalService {
+        let kind: ExternalService.Kind = switch service.serviceType {
+        case .stun: .stun
+        case .turn: .turn
+        case .turns: .turns
+        }
+        let transport: ExternalService.Transport? = service.transport.map {
+            switch $0 {
+            case .udp: .udp
+            case .tcp: .tcp
+            }
+        }
+        return ExternalService(
+            kind: kind, host: service.host, port: service.port, transport: transport,
+            username: service.username, password: service.password)
+    }
+
     /// Call routing requires a valid sender; malformed addresses never
     /// cross the bridge into the single-slot call store.
     static func callEvent(_ event: WaddleCallEvent) -> CallEvent? {

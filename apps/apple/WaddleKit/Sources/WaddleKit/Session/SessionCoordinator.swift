@@ -130,12 +130,13 @@ public final class SessionCoordinator {
         connectBudget: TimeInterval = 15,
         outboxStore: any OutboxStore = InMemoryOutboxStore(),
         timelineCapacity: Int = 500,
-        handlesCalls: Bool = false
+        handlesCalls: Bool = false,
+        callMedia: (any CallMediaController)? = nil
     ) {
         self.account = account
         self.port = port
         self.handlesCalls = handlesCalls
-        self.calls = CallStore(port: port, ownJID: { account.fullJID }, ownBareJID: account.jid)
+        self.calls = CallStore(port: port, ownJID: { account.fullJID }, ownBareJID: account.jid, media: callMedia)
         self.outboxStore = outboxStore
         self.reconnectPolicy = reconnectPolicy
         self.connectBudget = connectBudget

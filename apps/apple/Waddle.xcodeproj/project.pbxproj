@@ -227,6 +227,7 @@
 		78922B2D1F7F4E27662D5E6A /* SignInCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC2B3686BB5095FCFF4D16F /* SignInCard.swift */; };
 		7963CE39E2EB3651F155BBFD /* DesignSystemSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */; };
 		79EBA043FC1C5A46F5F8980D /* ProfileAvatarControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904925AEBAB6740443CAC7F3 /* ProfileAvatarControls.swift */; };
+		7A2C5BD78E6B4170ACC647DE /* LiveKitCallMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */; };
 		7A400BB4AAE331AC458C9CF0 /* ScreenSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56272EFA683B51640DA6142 /* ScreenSnapshot.swift */; };
 		7AC5E0FDAB7C6748BC962CFA /* DirectDetailsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAA209A6DBE12965CCB98D6 /* DirectDetailsForm.swift */; };
 		7B00E826F1342A57982FCD3C /* AttachmentImageInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14B65E512A4E0390FEC7C4E /* AttachmentImageInfo.swift */; };
@@ -266,6 +267,7 @@
 		8AC1D9BC64BFCCD6AED35DC8 /* FFIXmppPort+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */; };
 		8C46B344AE4EC22E08DFF82F /* MessageAccessibilityText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85879D67EF49761A46A414D /* MessageAccessibilityText.swift */; };
 		8C9500416C6FB08A34147C29 /* ChannelListSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C263CBFD1C9D605E59E4AC17 /* ChannelListSection.swift */; };
+		8CC1DDAD38CF5F42168066FC /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = C4849BBFE057BDA8B8D24220 /* LiveKit */; };
 		8D3A3E505088B0C30793A1B8 /* OFL-atkinson-hyperlegible-mono.txt in Resources */ = {isa = PBXBuildFile; fileRef = AD72F7A7D24219C643093BB7 /* OFL-atkinson-hyperlegible-mono.txt */; };
 		8DF8571D8E8B1AF8FD2D95B6 /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E556D95DAF8FB92C14A348 /* Motion.swift */; };
 		8E21B8BF6A5F09855BFC02C8 /* ConversationToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424F4321DD2A384763B772FD /* ConversationToolbar.swift */; };
@@ -314,6 +316,7 @@
 		A40A369E2EB4DE78F3AB3F80 /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47CB426A26582C047EB9477 /* ConversationComposer.swift */; };
 		A4DC77BF3BFA5D27E6EF6783 /* MentionHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */; };
 		A5514123D2A2BE0352BB77F8 /* FFIOutbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */; };
+		A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */; };
 		A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
 		A98D9A45A461088AB8FF4E15 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082EE4552E0588E35D76D98 /* SearchSheet.swift */; };
 		AA7275AC30C39DDF1E59095A /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
@@ -396,6 +399,7 @@
 		D14092D809BD9D97C48F43EB /* HuddleAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA8595D2DD6CCC3566D4CD27 /* HuddleAppearance.swift */; };
 		D2C6165DBD4F7B6F4124D7DF /* ComposerPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAD81D3A717D8B0CDCA66A0C /* ComposerPasteboard.swift */; };
 		D39E3DCCA5E5950B512ABFF8 /* AnimatedImageRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86500C54A13B8720EADEB1D7 /* AnimatedImageRepresentable.swift */; };
+		D3B865E7071ED2E7DAB727A5 /* LiveKitCallMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */; };
 		D3E09F62D9ABCC10A6B46C6F /* SampleSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E21403421F45AB27FBEED9FA /* SampleSession.swift */; };
 		D4EF484C6BD57E36552D9EFD /* BricolageGrotesque.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 5EEC783B635229A72D9E9111 /* BricolageGrotesque.ttf */; };
 		D55216DC65358E269B76CE88 /* ComposerTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B99FD1B0198C109A209467 /* ComposerTextView.swift */; };
@@ -449,6 +453,7 @@
 		F119FB09C57B373CAF809F60 /* ProfileHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A859364D0F895078570C5D3 /* ProfileHeader.swift */; };
 		F1B2AF7A6916B85F91A7413A /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */; };
 		F1DF87FDD51F3048D6878FE8 /* ComposerTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB21941A20189E780D173236 /* ComposerTextSelection.swift */; };
+		F285A3B0C90E08845DB991B6 /* LiveKitCallMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */; };
 		F360FF646064644F875C77AE /* ConversationNameFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE81F851C3F1438978561562 /* ConversationNameFilter.swift */; };
 		F4A7FB6D5EB66394DEBB4018 /* ComposerActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */; };
 		F4C5E65E09955F507235D9F1 /* NavigationSectionHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0DC7EF989C84CD50FE8B750 /* NavigationSectionHeader.swift */; };
@@ -463,6 +468,7 @@
 		FA92CF2F3D8F0AAB189CE0E8 /* AttachmentUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EDD2090A6B7D1DACB814ECC /* AttachmentUploader.swift */; };
 		FBEE73188DCB2A05B1429910 /* FakePort.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81704B7DBD86ABF17B4778B /* FakePort.swift */; };
 		FC475A28440AF24D1E9848B7 /* ComposerAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C114E8607FE4BC5DC460FB /* ComposerAttachment.swift */; };
+		FC4B511BD40011A8BED09184 /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = 6E22E2D97ECD7B6E6B4D8F0E /* LiveKit */; };
 		FC6F1956D1AC2EA8B891F5AF /* ServerSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4C5589906A2053A7CA1626 /* ServerSettings.swift */; };
 /* End PBXBuildFile section */
 
@@ -494,6 +500,7 @@
 		08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomDetailsForm.swift; sourceTree = "<group>"; };
 		097A7976BC4F84384A7159AB /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		098B60096BCF101EAAEE5F7F /* ConversationRowActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRowActions.swift; sourceTree = "<group>"; };
+		0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveKitCallMediaTests.swift; sourceTree = "<group>"; };
 		0CE4092CC362E23E8DD915E7 /* MentionCandidates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionCandidates.swift; sourceTree = "<group>"; };
 		0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTimelineList.swift; sourceTree = "<group>"; };
 		106BC605E0ED1F5B177FF414 /* RichTextSegmenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTextSegmenter.swift; sourceTree = "<group>"; };
@@ -581,6 +588,7 @@
 		73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
 		745E4D7A386971E4AA451053 /* BridgeLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeLog.swift; sourceTree = "<group>"; };
 		74DC91F2EF32ECBD7BC25238 /* FFIXmppPort+Notify.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Notify.swift"; sourceTree = "<group>"; };
+		75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveKitCallMediaController.swift; sourceTree = "<group>"; };
 		763C66AFC397A7466126D6EC /* SignInServerRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInServerRow.swift; sourceTree = "<group>"; };
 		76ACA60CC9A88E920924472E /* MessageRowHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRowHeader.swift; sourceTree = "<group>"; };
 		776055A920EB7EA45F8E929E /* ComposerSendButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerSendButton.swift; sourceTree = "<group>"; };
@@ -739,6 +747,7 @@
 			files = (
 				271EE65F526E62C618FF2ED5 /* WaddleXmppClientFFI.xcframework in Frameworks */,
 				6FDE37B1FB175445C025AFA3 /* WaddleKit in Frameworks */,
+				8CC1DDAD38CF5F42168066FC /* LiveKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -756,6 +765,7 @@
 			files = (
 				CEEC3D09EF4B485C76B73465 /* WaddleXmppClientFFI.xcframework in Frameworks */,
 				FA79F94C66C9D98E063881D1 /* WaddleKit in Frameworks */,
+				FC4B511BD40011A8BED09184 /* LiveKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -891,6 +901,14 @@
 			path = Message;
 			sourceTree = "<group>";
 		};
+		4866D020EF3746489583E1C1 /* Calls */ = {
+			isa = PBXGroup;
+			children = (
+				75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */,
+			);
+			path = Calls;
+			sourceTree = "<group>";
+		};
 		4B3D37577052D24975FC11C1 /* SignIn */ = {
 			isa = PBXGroup;
 			children = (
@@ -944,6 +962,7 @@
 			children = (
 				FB6BECE38DDA80483C9BBADC /* DesignFoundationTests.swift */,
 				05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */,
+				0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */,
 				2A24803E67A2932C18014F56 /* NavigationModelTests.swift */,
 				4CE564FF3A2D80291A80B47B /* ShellScreenSnapshotTests.swift */,
 				5AB5113E85D0143B7DFE70D7 /* Support */,
@@ -1138,6 +1157,7 @@
 				4DDC350C0234224B5EECE505 /* App */,
 				AF079606215589849BBED2D9 /* Auth */,
 				3DEB39D5F81442A8E3104713 /* Bridge */,
+				4866D020EF3746489583E1C1 /* Calls */,
 				7CD22813851A6A8729ADD71B /* Design */,
 				EC9AF84419A3F13296FBEF7F /* Features */,
 				BC57272670658BD2403BA4E3 /* Localizable.strings */,
@@ -1469,6 +1489,7 @@
 			name = "Waddle-iOS";
 			packageProductDependencies = (
 				882FE050F8DDDDE5844EC095 /* WaddleKit */,
+				C4849BBFE057BDA8B8D24220 /* LiveKit */,
 			);
 			productName = "Waddle-iOS";
 			productReference = CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */;
@@ -1510,6 +1531,7 @@
 			name = "Waddle-macOS";
 			packageProductDependencies = (
 				32D767ED41763E739625FA09 /* WaddleKit */,
+				6E22E2D97ECD7B6E6B4D8F0E /* LiveKit */,
 			);
 			productName = "Waddle-macOS";
 			productReference = C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */;
@@ -1552,6 +1574,7 @@
 			mainGroup = 3652C6085313F6318FE4E995;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				9EED99169FDC8CD0A91E0A50 /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
 				414D3E4F9BE6CE4F307A9A5D /* XCRemoteSwiftPackageReference "swift-snapshot-testing" */,
 				52C69033BDA6AF4A6F25BB6F /* XCLocalSwiftPackageReference "WaddleKit" */,
 			);
@@ -1759,6 +1782,7 @@
 				4D9CC7EDE4F38A7AD0F9C9E8 /* InboxFeed.swift in Sources */,
 				85221B3DD2E3642577AF64E2 /* InboxRows.swift in Sources */,
 				7D6901D3604D40F229A5A5FE /* InboxView.swift in Sources */,
+				F285A3B0C90E08845DB991B6 /* LiveKitCallMediaController.swift in Sources */,
 				8E48B1656CF58F68F1AF0047 /* MeActionLine.swift in Sources */,
 				917B8C026963CF0131FC91B2 /* MemberActions.swift in Sources */,
 				55652EB16569A153C8412189 /* MemberPermissions.swift in Sources */,
@@ -1867,6 +1891,7 @@
 				FBEE73188DCB2A05B1429910 /* FakePort.swift in Sources */,
 				C05ED8BD121D90686CA6D6A8 /* Fixtures.swift in Sources */,
 				61E55FA367FF60432DFA19A7 /* HuddleSnapshot.swift in Sources */,
+				A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */,
 				054EB87288E33AD493C3840A /* NavigationModelTests.swift in Sources */,
 				AABB11E2A7BC89B16C49C3CA /* SampleSession.swift in Sources */,
 				7A400BB4AAE331AC458C9CF0 /* ScreenSnapshot.swift in Sources */,
@@ -1989,6 +2014,7 @@
 				E68A5B8CCDE1DAEDBBD98259 /* InboxFeed.swift in Sources */,
 				F5835B9A761EFA3E995EE8A8 /* InboxRows.swift in Sources */,
 				BC91F3B709D0C72D81BC004C /* InboxView.swift in Sources */,
+				7A2C5BD78E6B4170ACC647DE /* LiveKitCallMediaController.swift in Sources */,
 				B015B33E71B1EF7790E575F1 /* MeActionLine.swift in Sources */,
 				50B701DC04CAFEF288D88ED3 /* MemberActions.swift in Sources */,
 				41924BAAF097F3AEDE675306 /* MemberPermissions.swift in Sources */,
@@ -2097,6 +2123,7 @@
 				D787293529B4CFF84AC00F21 /* FakePort.swift in Sources */,
 				66E38053AACC4ABA2CC45EB4 /* Fixtures.swift in Sources */,
 				0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */,
+				D3B865E7071ED2E7DAB727A5 /* LiveKitCallMediaTests.swift in Sources */,
 				80B556D4C7F2A380A208E707 /* NavigationModelTests.swift in Sources */,
 				D3E09F62D9ABCC10A6B46C6F /* SampleSession.swift in Sources */,
 				8A79AD8FC309A56A1CCD2B76 /* ScreenSnapshot.swift in Sources */,
@@ -2234,6 +2261,8 @@
 				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient";
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Waddle uses the camera so people on a video call can see you.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Waddle uses the microphone so people on a call can hear you.";
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				"INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -2286,6 +2315,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Waddle uses the camera so people on a video call can see you.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Waddle uses the microphone so people on a call can hear you.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -2313,6 +2344,8 @@
 				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient";
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Waddle uses the camera so people on a video call can see you.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Waddle uses the microphone so people on a call can hear you.";
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				"INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -2346,6 +2379,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Waddle uses the camera so people on a video call can see you.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Waddle uses the microphone so people on a call can hear you.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -2528,12 +2563,25 @@
 				minimumVersion = 1.18.0;
 			};
 		};
+		9EED99169FDC8CD0A91E0A50 /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 2.19.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		32D767ED41763E739625FA09 /* WaddleKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = WaddleKit;
+		};
+		6E22E2D97ECD7B6E6B4D8F0E /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9EED99169FDC8CD0A91E0A50 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
 		};
 		882FE050F8DDDDE5844EC095 /* WaddleKit */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -2543,6 +2591,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 414D3E4F9BE6CE4F307A9A5D /* XCRemoteSwiftPackageReference "swift-snapshot-testing" */;
 			productName = SnapshotTesting;
+		};
+		C4849BBFE057BDA8B8D24220 /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9EED99169FDC8CD0A91E0A50 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
 		};
 		F6A4760C917A6FCBFFA403FC /* SnapshotTesting */ = {
 			isa = XCSwiftPackageProductDependency;

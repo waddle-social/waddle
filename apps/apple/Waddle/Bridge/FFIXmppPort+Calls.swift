@@ -3,6 +3,15 @@ import WaddleKit
 /// XEP-0353 invitations use bare or full JIDs according to each verb;
 /// XEP-0166 session verbs preserve both bound resource identities.
 extension FFIXmppPort {
+    func fetchExternalServices() async -> [ExternalService] {
+        do {
+            return try await client.fetchExternalServices().map(FFIInbound.externalService)
+        } catch {
+            BridgeLog.debug("external services lookup failed: \(error)")
+            return []
+        }
+    }
+
     func sendCallPropose(to peer: BareJID, sid: String, media: CallMedia) async -> Bool {
         await client.sendCallPropose(peerBareJid: peer.description, sid: sid, audio: media.audio, video: media.video)
     }

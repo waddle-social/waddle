@@ -1,6 +1,8 @@
 /// Media follows the call slot; it never owns signaling state.
 @MainActor final class CallSessionController {
+    private enum Failure: Error { case invalidGrant }
     private let media: any CallMediaController
+    private let fetchExternalServices: @MainActor () async -> [ExternalService]
     private let hangUp: @MainActor (String, JingleReason) async -> Void
     private var targetSid: String?
     private var connectedSid: String?
@@ -8,8 +10,13 @@
     private var connectionTask: Task<Void, Never>?
     private var disconnectTask: Task<Void, Never>?
 
-    init(media: any CallMediaController, hangUp: @escaping @MainActor (String, JingleReason) async -> Void) {
+    init(
+        media: any CallMediaController,
+        fetchExternalServices: @escaping @MainActor () async -> [ExternalService],
+        hangUp: @escaping @MainActor (String, JingleReason) async -> Void
+    ) {
         self.media = media
+        self.fetchExternalServices = fetchExternalServices
         self.hangUp = hangUp
     }
 
@@ -46,7 +53,11 @@
                 self?.endCall(call.sid, reason: .connectivityError, revision: expectedRevision)
             }
             do {
-                try await media.connect(join: call.join, media: call.media)
+                guard call.join.grantDefect == nil else { throw Failure.invalidGrant }
+                let services = await fetchExternalServices()
+                // Hang-up or replacement can supersede a suspended fetch.
+                guard revision == expectedRevision, !Task.isCancelled else { return }
+                try await media.connect(join: call.join, media: call.media, iceServers: IceServer.servers(from: services))
                 if revision != expectedRevision || Task.isCancelled {
                     await media.disconnect()
                 }
