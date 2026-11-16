@@ -28,13 +28,40 @@ pub struct Supervised {
     child: Child,
     pid: i32,
     stop: StopSignal,
+    /// Set once the leader has been reaped; its pid and group id may then
+    /// name another process and are never signalled again.
+    reaped: Option<ExitStatus>,
 }
 
 fn signal(target: i32, signal: libc::c_int) {
-    // SAFETY: `target` is a process or process group this harness spawned
-    // and has not reaped, so it cannot name a recycled process.
+    // SAFETY: `kill` takes no pointers. Callers name a process this harness
+    // spawned and has not reaped, or that process's group while its leader
+    // is unreaped (running or a zombie), so the id cannot have been reused.
     unsafe {
         libc::kill(target, signal);
+    }
+}
+
+/// Whether the process `pid` has exited, observed without reaping it: an
+/// exited child stays a zombie, so its pid and process group id are not
+/// reused until [`Child::wait`] reaps it.
+fn exited_unreaped(pid: i32) -> bool {
+    let Ok(pid) = libc::id_t::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: `info` is a zeroed `siginfo_t` that `waitid` writes into, and
+    // `WNOWAIT` leaves the child unreaped for `Child::wait`.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let status = libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        // With WNOHANG, a child that has not exited leaves `si_pid` zero;
+        // an error means there is no such unreaped child.
+        status != 0 || info.si_pid() != 0
     }
 }
 
@@ -64,40 +91,46 @@ impl Supervised {
             child,
             pid,
             stop,
+            reaped: None,
         })
     }
 
+    /// Whether the service is still running. An exited service is not
+    /// reaped here, so its process group can still be signalled safely.
     pub fn running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        self.reaped.is_none() && !exited_unreaped(self.pid)
     }
 
     /// Stop the service: the configured signal, then SIGKILL to the group
-    /// after `grace`.
+    /// after `grace`. The leader is reaped only after the group has been
+    /// killed, so the group id still names this service's group.
     pub async fn stop(&mut self, grace: Duration) -> Result<Option<ExitStatus>> {
-        if !self.running() {
-            return Ok(self.child.try_wait()?);
+        if let Some(status) = self.reaped {
+            return Ok(Some(status));
         }
-        match self.stop {
-            StopSignal::TermGroup => signal(-self.pid, libc::SIGTERM),
-            StopSignal::InterruptProcess => signal(self.pid, libc::SIGINT),
-        }
-        match tokio::time::timeout(grace, self.child.wait()).await {
-            Ok(status) => {
-                // Descendants that stayed in the group do not outlive it.
-                signal(-self.pid, libc::SIGKILL);
-                Ok(Some(status?))
+        if self.running() {
+            match self.stop {
+                StopSignal::TermGroup => signal(-self.pid, libc::SIGTERM),
+                StopSignal::InterruptProcess => signal(self.pid, libc::SIGINT),
             }
-            Err(_) => {
-                signal(-self.pid, libc::SIGKILL);
-                Ok(Some(self.child.wait().await?))
+            let deadline = Instant::now() + grace;
+            while self.running() && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
+        // Descendants that stayed in the group do not outlive it.
+        signal(-self.pid, libc::SIGKILL);
+        let status = self.child.wait().await?;
+        self.reaped = Some(status);
+        Ok(Some(status))
     }
 
     /// Kill the whole group at once, as a crash would.
     pub async fn kill(&mut self) -> Result<()> {
-        signal(-self.pid, libc::SIGKILL);
-        let _ = self.child.wait().await?;
+        if self.reaped.is_none() {
+            signal(-self.pid, libc::SIGKILL);
+            self.reaped = Some(self.child.wait().await?);
+        }
         Ok(())
     }
 
@@ -113,10 +146,30 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        if self.running() {
+        // Unreaped until here, so the group is still this service's; the
+        // runtime reaps the dropped child afterwards.
+        if self.reaped.is_none() {
             signal(-self.pid, libc::SIGKILL);
         }
     }
+}
+
+/// Write `contents` to a new file only its owner can read, for keys,
+/// secrets and passwords.
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    // `mode` applies only to a file this call creates.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(contents)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Run a one-shot command to completion within `timeout`.

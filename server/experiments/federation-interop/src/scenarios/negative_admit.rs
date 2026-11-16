@@ -7,13 +7,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::evidence::Outcome;
+use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
+use crate::pki::LeafSpec;
+use crate::process;
 use crate::s2s::initiator::{self, Attempt, Plan, Stage};
 use crate::scenarios::harness::{Component, Harness, ANSWER, QUIET};
 use crate::scenarios::support::{self, describe, is_result};
 use crate::services::waddle_config::{Mode, Profile};
-use crate::topology::{Home, DENIED, DENIED_ALABEL, DENIED_ULABEL, FLOOD_PEERS, HOME_A, RAW_PEER};
+use crate::topology::{
+    self, Home, Server, DENIED, DENIED_ALABEL, DENIED_ULABEL, FLOOD_PEERS, HOME_A, RAW_PEER,
+};
 use crate::xml::{ns, stanza};
 
 async fn restart_a(h: &mut Harness, profile: &Profile) -> Result<()> {
@@ -267,37 +271,117 @@ pub async fn listed_subdomain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
+/// Wait until `mark` has counted at least `at_least` new lines, and
+/// return the count.
+async fn logged(h: &Harness, mark: &support::LogMark, at_least: usize) -> usize {
+    process::eventually(Duration::from_secs(3), || async {
+        mark.added(h) >= at_least
+    })
+    .await;
+    mark.added(h)
+}
+
 pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
-    let mut outcome =
-        Outcome::new("harness raw peers from six domains; home-a in open mode with max_peers 2");
+    let mut outcome = Outcome::new(
+        "harness raw peers flood-1 to flood-4.test, admitted by open mode alone (outside the reserve); home-a in open mode with max_peers 2, eviction after 5 s without traffic and a 30 s first outbound backoff; every relay into home-a cut so no other peer holds a slot",
+    );
     let profile = h
         .profile(Home::A, true)
         .with_mode(Mode::Open)
-        .admitting(&FLOOD_PEERS)
-        .with_limit("max_peers", 2);
+        .on_test_ca(&FLOOD_PEERS)
+        .with_limit("max_peers", 2)
+        .with_limit("eviction_idle_ms", 5_000)
+        .with_limit("backoff_initial_ms", 30_000);
     restart_a(h, &profile).await?;
-    let mut streams = Vec::new();
-    let mut refused = Vec::new();
-    for domain in FLOOD_PEERS {
-        let attempt = claim(h, domain, domain).await?;
-        match attempt.stream {
-            Some(stream) => streams.push((domain, stream)),
-            None => refused.push([domain, ": ", &attempt.describe()].concat()),
+    // The runner restores every relay after the row.
+    for link in topology::RELAYS {
+        if link.to == Server::Waddle(Home::A) {
+            if let Some(relay) = h.relays.get(&link) {
+                relay.cut();
+            }
         }
     }
-    outcome.check(
-        "peers beyond the cap are refused",
-        streams.len() <= 2 && !refused.is_empty(),
-        format!("{} established, refused: {refused:?}", streams.len()),
-    );
-    let mut alive = 0;
-    for (_, stream) in &mut streams {
-        let ending = stream.watch(Duration::from_secs(1)).await;
-        alive += usize::from(!ending.closed);
+    let [first, second, third, fourth, ..] = FLOOD_PEERS;
+
+    // The global peer cap: two peers are admitted, the third is refused
+    // for capacity.
+    let established = support::LogMark::new(h, Home::A, &["s2s stream established", "inbound"]);
+    let mut admitted = Vec::new();
+    for domain in [first, second] {
+        let attempt = claim(h, domain, domain).await?;
+        let detail = attempt.describe();
+        match attempt.stream {
+            Some(stream) => admitted.push((domain, stream)),
+            None => {
+                return Err(Unverifiable(format!(
+                    "control: {domain} was not admitted below the cap: {detail}"
+                ))
+                .into())
+            }
+        }
     }
-    outcome.note(format!(
-        "{alive} admitted streams still open after the refusals"
-    ));
+    let streams = logged(h, &established, 2).await;
+    outcome.check(
+        "control: exactly two peers admitted below the cap",
+        admitted.len() == 2 && streams == 2,
+        format!("home-a logged {streams} inbound streams established"),
+    );
+    let capacity = support::LogMark::new(h, Home::A, &["s2s connection ended", "\"capacity\""]);
+    let refused = claim(h, third, third).await?;
+    let refusals = logged(h, &capacity, 1).await;
+    outcome.check(
+        "a third peer is refused for capacity",
+        refused.stream.is_none()
+            && refused.stream_error.as_deref() == Some("resource-constraint")
+            && refusals > 0,
+        format!(
+            "{}; home-a logged {refusals} connections ended for capacity",
+            refused.describe()
+        ),
+    );
+    for (domain, stream) in &mut admitted {
+        let ending = stream.watch(Duration::from_millis(500)).await;
+        outcome.check(
+            [domain, "'s admitted stream survives the refusal"].concat(),
+            !ending.closed,
+            format!("stream error {:?}", ending.stream_error),
+        );
+    }
+
+    // Eviction: once both admitted streams have carried nothing for the
+    // eviction idle time, a new peer evicts exactly one of them.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let evictions = support::LogMark::new(h, Home::A, &["s2s connection ended", "\"evicted\""]);
+    let newcomer = claim(h, fourth, fourth).await?;
+    let mut ended = Vec::new();
+    for (domain, stream) in &mut admitted {
+        let ending = stream.watch(Duration::from_secs(2)).await;
+        if ending.closed {
+            ended.push(format!("{domain}: {:?}", ending.stream_error));
+        }
+    }
+    let evicted = logged(h, &evictions, 1).await;
+    outcome.check(
+        "after the eviction idle time a new peer evicts exactly one idle peer",
+        newcomer.stage == Stage::Established
+            && ended.len() == 1
+            && ended
+                .iter()
+                .all(|ending| ending.contains("resource-constraint"))
+            && evicted == 1,
+        format!(
+            "newcomer {}; ended {ended:?}; home-a logged {evicted} connections ended as evicted",
+            newcomer.describe()
+        ),
+    );
+    if let Some(stream) = newcomer.stream {
+        stream.close().await;
+    }
+    for (_, stream) in admitted {
+        stream.close().await;
+    }
+    tokio::time::sleep(support::PAIR_RELEASE).await;
+
     let local = support::ping_from_waddle(h, Home::A, "alice", HOME_A).await;
     outcome.check(
         "home-a keeps serving local traffic",
@@ -306,8 +390,46 @@ pub async fn open_mode_exhaustion(h: &mut Harness, _peer: Peer) -> Result<Outcom
             .map(|answer| describe(&answer))
             .unwrap_or_else(|error| error.to_string()),
     );
-    for (_, stream) in streams {
-        stream.close().await;
+
+    // Backoff: a destination whose attempt failed is not dialled again
+    // within the first backoff; queued work towards it is refused.
+    h.receiver.set_leaf(
+        RAW_PEER,
+        h.issue(&LeafSpec::new(
+            "backoff-wrong-name",
+            &["unrelated-name.test"],
+        ))?,
+    );
+    h.receiver.disconnect();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.receiver.clear();
+    let failed = support::ping_from_waddle(h, Home::A, "alice", RAW_PEER).await;
+    let first_dials = h.receiver.inbound().len();
+    h.receiver.clear();
+    let held = support::ping_from_waddle(h, Home::A, "alice", RAW_PEER).await;
+    tokio::time::sleep(QUIET).await;
+    let second_dials = h.receiver.inbound().len();
+    let detail = format!(
+        "first attempt: {first_dials} dials, answer {}; within the backoff: {second_dials} dials, answer {}",
+        failed
+            .map(|answer| describe(&answer))
+            .unwrap_or_else(|error| error.to_string()),
+        held.as_ref()
+            .map(describe)
+            .unwrap_or_else(|error| error.to_string())
+    );
+    if first_dials == 0 {
+        outcome.unverified(
+            "a failed destination is not dialled again within the backoff",
+            ["control: the failing attempt never dialled: ", &detail].concat(),
+        );
+    } else {
+        outcome.check(
+            "a failed destination is not dialled again within the backoff",
+            second_dials == 0 && held.as_ref().is_ok_and(|answer| !is_result(answer)),
+            detail,
+        );
     }
+    h.receiver.set_leaf(RAW_PEER, h.leaf(RAW_PEER)?);
     Ok(outcome)
 }

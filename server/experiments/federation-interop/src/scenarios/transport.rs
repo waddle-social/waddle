@@ -173,6 +173,9 @@ async fn dialback_with_raw_peer(h: &mut Harness) -> Result<Outcome> {
     let mut outcome =
         Outcome::new("harness raw peer for peer-raw.test, which is on home-a's dialback list");
     // Inbound: Waddle as Receiving Server, the harness as Authoritative.
+    // Earlier rows' connections are cleared so only this row's
+    // verification requests are counted.
+    h.receiver.clear();
     let key = uuid::Uuid::new_v4().simple().to_string();
     h.receiver.issue_key(&key);
     let before = established(h, Home::A, "inbound", "dialback").await;

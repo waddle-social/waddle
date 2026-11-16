@@ -18,4 +18,5 @@ pub mod s2s;
 pub mod scenarios;
 pub mod services;
 pub mod topology;
+pub mod watch;
 pub mod xml;

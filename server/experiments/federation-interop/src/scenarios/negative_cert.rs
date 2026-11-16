@@ -4,28 +4,37 @@
 //! peer-raw.test (outbound). In the Prosody and ejabberd columns (G20) the
 //! stock server is restarted presenting the bad certificate, and traffic
 //! in both directions must fail.
+//!
+//! Every refusal is tied to home-a's own record of it: its log line `s2s
+//! peer certificate refused` with the verifier's code. Each row first shows
+//! the same path working with the good certificate, and after a restart
+//! that the stock server is serving again, so a refusal cannot be a path
+//! that never worked.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
+use crate::net::relay::Relay;
 use crate::pki::{Issuer, Leaf, LeafSpec};
+use crate::process;
 use crate::s2s::initiator::{self, Attempt, Auth, Plan, Stage};
 use crate::scenarios::harness::{Component, Harness, ANSWER};
-use crate::scenarios::support::{self, describe, is_result};
+use crate::scenarios::support::{self, ask, describe, is_result};
 use crate::scenarios::transport;
 use crate::topology::{
-    self, Home, EJABBERD, EJABBERD_MUC, HOME_A, HOME_B, PROSODY, PROSODY_MUC, PUBLIC_PROFILE,
-    RAW_PEER,
+    self, Home, Server, EJABBERD, EJABBERD_MUC, HOME_A, HOME_B, PROSODY, PROSODY_MUC,
+    PUBLIC_PROFILE, RAW_PEER,
 };
 use crate::xml::framer::{Framer, Item};
 use crate::xml::header::{self, StreamOpen};
-use crate::xml::ns;
+use crate::xml::{ns, stanza};
 
 /// Which bad certificate a row uses.
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +43,21 @@ pub enum Bad {
     UnknownIssuer,
     Expired,
 }
+
+impl Bad {
+    /// The code home-a's verifier logs for the refusal: a name that does
+    /// not match the reference identity is `identity_mismatch`; an
+    /// untrusted issuer and an expired certificate fail path building,
+    /// `path`.
+    fn code(self) -> &'static str {
+        match self {
+            Self::WrongName => IDENTITY_MISMATCH,
+            Self::UnknownIssuer | Self::Expired => "path",
+        }
+    }
+}
+
+const IDENTITY_MISMATCH: &str = "identity_mismatch";
 
 fn bad_leaf(h: &Harness, bad: Bad, domain: &str) -> Result<Leaf> {
     let stem = |kind: &str| [kind, "-", domain].concat();
@@ -53,63 +77,305 @@ async fn raw(h: &Harness, plan: &Plan) -> Result<Attempt> {
     initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), plan).await
 }
 
-/// Refused after admission: the pair was admitted before TLS, and the
-/// certificate, not the pair, was refused.
-fn refused_after_admission(attempt: &Attempt) -> bool {
+/// Refused at the TLS handshake after admission: the pair was admitted
+/// before TLS, and no post-TLS features were sent. Under TLS 1.3 the
+/// client learns of a refused client certificate only when it reads after
+/// the handshake, so the stage may be `Authentication`.
+fn refused_at_tls(attempt: &Attempt) -> bool {
     matches!(attempt.stage, Stage::Tls | Stage::Authentication)
+        && attempt.features_after_tls.is_none()
+}
+
+/// An inbound attempt by the raw peer, which must be refused at TLS with
+/// `code` in home-a's log.
+async fn inbound_refused(
+    h: &Harness,
+    plan: &Plan,
+    code: Option<&str>,
+    outcome: &mut Outcome,
+    name: &str,
+) -> Result<()> {
+    let refusals = refusal_mark(h, code);
+    let attempt = raw(h, plan).await?;
+    let logged = refusals.added(h);
+    outcome.check(
+        name,
+        refused_at_tls(&attempt) && logged > 0,
+        format!(
+            "{}; home-a logged {logged} certificate refusals{}",
+            attempt.describe(),
+            code.map(|code| [" with code ", code].concat())
+                .unwrap_or_default()
+        ),
+    );
+    if let Some(stream) = attempt.stream {
+        stream.close().await;
+    }
+    Ok(())
+}
+
+fn refusal_mark(h: &Harness, code: Option<&str>) -> support::LogMark {
+    match code {
+        Some(code) => {
+            let quoted = ["\"", code, "\""].concat();
+            support::LogMark::new(
+                h,
+                Home::A,
+                &["s2s peer certificate refused", quoted.as_str()],
+            )
+        }
+        None => support::LogMark::new(h, Home::A, &["s2s peer certificate refused"]),
+    }
+}
+
+/// Send a ping from a home-a client to the harness receiving server and
+/// report whether it arrived.
+async fn ping_raw_receiver(h: &Harness) -> Result<(bool, String)> {
+    let mut session = h
+        .login_waddle(Home::A, "alice", &support::id("cert-out"))
+        .await?;
+    let ping_id = support::id("cert-out");
+    session.send(&stanza::ping(&ping_id, RAW_PEER)).await?;
+    let received = h
+        .receiver
+        .wait_stanza(ANSWER, |element| {
+            element.attr("id") == Some(ping_id.as_str())
+        })
+        .await;
+    session.close().await;
+    Ok((received.is_some(), ping_id))
+}
+
+/// Close home-a's streams to the harness receiving server and give home-a
+/// a moment to notice, so its next stanza for peer-raw.test dials anew.
+async fn fresh_receiver_stream(h: &Harness) {
+    h.receiver.disconnect();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.receiver.clear();
+}
+
+/// The outbound control of the Waddle column: with the good certificate,
+/// home-a dials the harness receiving server and delivers. A destination
+/// still in backoff from an earlier row is retried.
+async fn outbound_control(h: &Harness, outcome: &mut Outcome) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        fresh_receiver_stream(h).await;
+        let (delivered, _) = ping_raw_receiver(h).await?;
+        let dialled = !h.receiver.inbound().is_empty();
+        if delivered && dialled {
+            outcome.check(
+                "control: home-a dials and delivers to peer-raw.test with the good certificate",
+                true,
+                "the receiving server got the ping on a new stream",
+            );
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Unverifiable(format!(
+                "outbound control failed: home-a dialled {dialled}, delivered {delivered} with the good certificate"
+            ))
+            .into());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Outbound with a bad certificate on the harness receiving server: home-a
+/// must dial, send nothing and log the refusal with `code`.
+async fn outbound_refused(
+    h: &Harness,
+    leaf: Leaf,
+    code: &str,
+    outcome: &mut Outcome,
+) -> Result<()> {
+    h.receiver.set_leaf(RAW_PEER, leaf);
+    fresh_receiver_stream(h).await;
+    let refusals = refusal_mark(h, Some(code));
+    let (delivered, _) = ping_raw_receiver(h).await?;
+    let dialled = !h.receiver.inbound().is_empty();
+    let logged = refusals.added(h);
+    let detail = format!(
+        "dialled: {dialled}; stanzas delivered: {delivered}; home-a logged {logged} certificate refusals with code {code}"
+    );
+    if dialled {
+        outcome.check(
+            "outbound: refused for the receiving server's certificate, nothing sent",
+            !delivered && h.receiver.stanzas().is_empty() && logged > 0,
+            detail,
+        );
+    } else {
+        outcome.unverified("outbound", ["home-a did not dial: ", &detail].concat());
+    }
+    h.receiver.set_leaf(RAW_PEER, h.leaf(RAW_PEER)?);
+    Ok(())
+}
+
+/// Ask `to` for disco#info from a home-a client, retrying until a result
+/// or `timeout`; one attempt when `timeout` is zero. Disco#info is
+/// answered by a server domain and a MUC host alike, so the control and
+/// the probe ask the same question.
+async fn disco_from_home_a(h: &Harness, to: &str, timeout: Duration) -> Result<Element> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let mut session = h
+            .login_waddle(Home::A, "alice", &support::id("cert"))
+            .await?;
+        let answer = ask(&mut session, stanza::disco_info(&support::id("cert"), to)).await;
+        session.close().await;
+        let late = tokio::time::Instant::now() >= deadline;
+        match answer {
+            Ok(element) if is_result(&element) || late => return Ok(element),
+            Err(error) if late => return Err(error),
+            _ => tokio::time::sleep(Duration::from_secs(2)).await,
+        }
+    }
+}
+
+/// Every relay home-a may use towards the peer: both ejabberd nodes are
+/// endpoints of the ejabberd domains.
+fn outbound_relays(h: &Harness, peer: Peer) -> Vec<&Relay> {
+    let targets = match peer {
+        Peer::Ejabberd => vec![Server::Ejabberd(1), Server::Ejabberd(2)],
+        other => vec![Harness::peer_server(other)],
+    };
+    targets
+        .into_iter()
+        .filter_map(|to| h.relay(Server::Waddle(Home::A), to).ok())
+        .collect()
+}
+
+fn dials(relays: &[&Relay]) -> usize {
+    relays.iter().map(|relay| relay.connection_count()).sum()
+}
+
+/// Before the swap: the same paths work with the good certificate.
+async fn stock_control(h: &Harness, peer: Peer, host: &str, outcome: &mut Outcome) -> Result<()> {
+    fresh_streams(h, peer);
+    let out = disco_from_home_a(h, host, Duration::from_secs(60)).await?;
+    if !is_result(&out) {
+        return Err(Unverifiable(format!(
+            "control: home-a -> {host} with the good certificate was not answered: {}",
+            describe(&out)
+        ))
+        .into());
+    }
+    outcome.check(
+        ["control: home-a -> ", host, " with the good certificate"].concat(),
+        true,
+        describe(&out),
+    );
+    if host == Harness::peer_domain(peer) {
+        let back =
+            support::ping_until_result(h, peer, false, HOME_A, Duration::from_secs(60)).await?;
+        if !is_result(&back) {
+            return Err(Unverifiable(format!(
+                "control: {} -> home-a with the good certificate was not answered: {}",
+                peer.label(),
+                describe(&back)
+            ))
+            .into());
+        }
+        outcome.check(
+            [
+                "control: ",
+                peer.label(),
+                " -> home-a with the good certificate",
+            ]
+            .concat(),
+            true,
+            describe(&back),
+        );
+    }
+    Ok(())
+}
+
+/// After the swap: the stock server listens for S2S and serves its own
+/// clients, so a failure across S2S is not a server that did not come up.
+async fn stock_serving(h: &Harness, peer: Peer, outcome: &mut Outcome) -> Result<()> {
+    let port = match peer {
+        Peer::Ejabberd => h.ports.ejabberd_s2s(1),
+        _ => h.ports.prosody_s2s(),
+    };
+    process::wait_tcp(peer.label(), port, Duration::from_secs(30))
+        .await
+        .map_err(|error| Unverifiable(format!("after the swap: {error:#}")))?;
+    let local = support::ping_from_peer(h, peer, "alice", Harness::peer_domain(peer)).await;
+    match local {
+        Ok(answer) if is_result(&answer) => {
+            outcome.check(
+                "control: after the swap the peer listens for S2S and answers its own client",
+                true,
+                describe(&answer),
+            );
+            Ok(())
+        }
+        other => Err(Unverifiable(format!(
+            "after the swap the peer does not serve its own client: {}",
+            other
+                .map(|answer| describe(&answer))
+                .unwrap_or_else(|error| error.to_string())
+        ))
+        .into()),
+    }
 }
 
 /// Traffic between home-a and the stock peer must fail in each direction
-/// in which the peer's relay shows that an S2S connection was attempted.
+/// in which the peer's relay shows that an S2S connection was attempted,
+/// with home-a logging the certificate refusal with `code`.
 async fn both_directions_fail(
     h: &Harness,
     peer: Peer,
     outcome: &mut Outcome,
     peer_host: &str,
+    code: &str,
 ) -> Result<()> {
-    let outbound = h.relay(
-        topology::Server::Waddle(Home::A),
-        Harness::peer_server(peer),
-    )?;
-    let before = outbound.connection_count();
-    let out = support::ping_from_waddle(h, Home::A, "alice", peer_host).await;
-    let dialled = outbound.connection_count() > before;
-    let name = ["home-a -> ", peer_host, " refused"].concat();
-    let detail = out
-        .as_ref()
-        .map(describe)
-        .unwrap_or_else(|error| error.to_string());
+    let outbound = outbound_relays(h, peer);
+    let before = dials(&outbound);
+    let refusals = refusal_mark(h, Some(code));
+    let out = disco_from_home_a(h, peer_host, Duration::ZERO).await;
+    let dialled = dials(&outbound) > before;
+    let logged = refusals.added(h);
+    let name = ["home-a -> ", peer_host, " refused for the certificate"].concat();
+    let detail = [
+        out.as_ref()
+            .map(describe)
+            .unwrap_or_else(|error| error.to_string()),
+        format!("; home-a logged {logged} certificate refusals with code {code}"),
+    ]
+    .concat();
     if dialled {
         outcome.check(
             name,
-            out.as_ref().is_ok_and(|answer| !is_result(answer)),
+            out.as_ref().is_ok_and(|answer| !is_result(answer)) && logged > 0,
             detail,
         );
     } else {
         outcome.unverified(name, ["home-a did not dial the peer: ", &detail].concat());
     }
     if peer_host == Harness::peer_domain(peer) {
-        let inbound = h.relay(
-            Harness::peer_server(peer),
-            topology::Server::Waddle(Home::A),
-        )?;
+        let inbound = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A))?;
         let before = inbound.connection_count();
         let streams = support::established(h, Home::A, "inbound", "").await;
+        let refusals = refusal_mark(h, Some(code));
         let back = support::ping_from_peer(h, peer, "alice", HOME_A).await;
         let attempted = inbound.connection_count() > before;
         let opened = support::established(h, Home::A, "inbound", "").await > streams;
-        let name = [peer.label(), " -> home-a refused"].concat();
+        let logged = refusals.added(h);
+        let name = [peer.label(), " -> home-a refused for the certificate"].concat();
         let detail = [
             back.as_ref()
                 .map(describe)
                 .unwrap_or_else(|error| error.to_string()),
-            format!("; inbound streams established: {opened}"),
+            format!(
+                "; inbound streams established: {opened}; home-a logged {logged} certificate refusals with code {code}"
+            ),
         ]
         .concat();
         if attempted {
             outcome.check(
                 name,
-                !opened && back.as_ref().is_ok_and(|answer| !is_result(answer)),
+                !opened && back.as_ref().is_ok_and(|answer| !is_result(answer)) && logged > 0,
                 detail,
             );
         } else {
@@ -140,23 +406,34 @@ async fn swap_stock_certificate(h: &mut Harness, peer: Peer, host: &str, leaf: L
     }
 }
 
-/// Cut both relays of the pair, so the next traffic opens new streams.
+/// Cut both relays of the pair (both ejabberd nodes' relays from home-a),
+/// so the next traffic opens new streams.
 fn fresh_streams(h: &Harness, peer: Peer) {
-    for (from, to) in [
-        (
-            topology::Server::Waddle(Home::A),
-            Harness::peer_server(peer),
-        ),
-        (
-            Harness::peer_server(peer),
-            topology::Server::Waddle(Home::A),
-        ),
-    ] {
-        if let Ok(relay) = h.relay(from, to) {
-            relay.cut();
-            relay.restore();
-        }
+    let mut relays = outbound_relays(h, peer);
+    if let Ok(relay) = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A)) {
+        relays.push(relay);
     }
+    for relay in relays {
+        relay.cut();
+        relay.restore();
+    }
+}
+
+/// The stock-peer column: control with the good certificate, swap, check
+/// the peer is serving, then both directions must fail with `code`.
+async fn stock_bad_certificate(
+    h: &mut Harness,
+    peer: Peer,
+    host: &str,
+    leaf: Leaf,
+    code: &str,
+    outcome: &mut Outcome,
+) -> Result<()> {
+    stock_control(h, peer, host, outcome).await?;
+    swap_stock_certificate(h, peer, host, leaf).await?;
+    stock_serving(h, peer, outcome).await?;
+    fresh_streams(h, peer);
+    both_directions_fail(h, peer, outcome, host, code).await
 }
 
 pub async fn bad_certificate(h: &mut Harness, peer: Peer, bad: Bad) -> Result<Outcome> {
@@ -167,33 +444,17 @@ pub async fn bad_certificate(h: &mut Harness, peer: Peer, bad: Bad) -> Result<Ou
             );
             support::raw_control(h).await?;
             let plan = Plan::external(HOME_B, HOME_A, &bad_leaf(h, bad, HOME_B)?);
-            let attempt = raw(h, &plan).await?;
-            outcome.check(
-                "inbound refused after admission",
-                refused_after_admission(&attempt),
-                attempt.describe(),
-            );
-            h.receiver.set_leaf(RAW_PEER, bad_leaf(h, bad, RAW_PEER)?);
-            h.receiver.clear();
-            let answer = support::ping_from_waddle(h, Home::A, "alice", RAW_PEER).await;
-            let dialled = !h.receiver.inbound().is_empty();
-            let delivered = !h.receiver.stanzas().is_empty();
-            let detail = format!(
-                "dialled: {dialled}; stanzas delivered: {delivered}; client answer: {}",
-                answer
-                    .map(|answer| describe(&answer))
-                    .unwrap_or_else(|error| error.to_string())
-            );
-            if dialled {
-                outcome.check(
-                    "outbound: nothing sent to a receiving server with the bad certificate",
-                    !delivered,
-                    detail,
-                );
-            } else {
-                outcome.unverified("outbound", ["home-a did not dial: ", &detail].concat());
-            }
-            h.receiver.set_leaf(RAW_PEER, h.leaf(RAW_PEER)?);
+            inbound_refused(
+                h,
+                &plan,
+                Some(bad.code()),
+                &mut outcome,
+                "inbound refused at TLS for the certificate",
+            )
+            .await?;
+            outbound_control(h, &mut outcome).await?;
+            let leaf = bad_leaf(h, bad, RAW_PEER)?;
+            outbound_refused(h, leaf, bad.code(), &mut outcome).await?;
             Ok(outcome)
         }
         Peer::Prosody | Peer::Ejabberd => {
@@ -207,9 +468,8 @@ pub async fn bad_certificate(h: &mut Harness, peer: Peer, bad: Bad) -> Result<Ou
                 ]
                 .concat(),
             );
-            swap_stock_certificate(h, peer, host, bad_leaf(h, bad, host)?).await?;
-            fresh_streams(h, peer);
-            both_directions_fail(h, peer, &mut outcome, host).await?;
+            let leaf = bad_leaf(h, bad, host)?;
+            stock_bad_certificate(h, peer, host, leaf, bad.code(), &mut outcome).await?;
             Ok(outcome)
         }
     }
@@ -224,12 +484,14 @@ pub async fn parent_domain(h: &mut Harness, peer: Peer) -> Result<Outcome> {
             support::raw_control(h).await?;
             let muc = topology::muc_domain(HOME_B);
             let plan = Plan::external(&muc, HOME_A, &h.leaf(HOME_B)?);
-            let attempt = raw(h, &plan).await?;
-            outcome.check(
-                "inbound refused after admission",
-                refused_after_admission(&attempt),
-                attempt.describe(),
-            );
+            inbound_refused(
+                h,
+                &plan,
+                Some(IDENTITY_MISMATCH),
+                &mut outcome,
+                "inbound refused at TLS for the certificate",
+            )
+            .await?;
             Ok(outcome)
         }
         Peer::Prosody | Peer::Ejabberd => {
@@ -252,9 +514,15 @@ pub async fn parent_domain(h: &mut Harness, peer: Peer) -> Result<Outcome> {
                 &["parent-for-", component].concat(),
                 &[parent],
             ))?;
-            swap_stock_certificate(h, peer, component, parent_leaf).await?;
-            fresh_streams(h, peer);
-            both_directions_fail(h, peer, &mut outcome, component).await?;
+            stock_bad_certificate(
+                h,
+                peer,
+                component,
+                parent_leaf,
+                IDENTITY_MISMATCH,
+                &mut outcome,
+            )
+            .await?;
             Ok(outcome)
         }
     }
@@ -315,12 +583,14 @@ pub async fn private_ca_for_public_profile(h: &mut Harness, _peer: Peer) -> Resu
         Outcome::new("harness raw peer claiming public-profile.test with a .test CA leaf");
     support::raw_control(h).await?;
     let plan = Plan::external(PUBLIC_PROFILE, HOME_A, &h.leaf(PUBLIC_PROFILE)?);
-    let attempt = raw(h, &plan).await?;
-    outcome.check(
-        "refused after admission",
-        refused_after_admission(&attempt),
-        attempt.describe(),
-    );
+    inbound_refused(
+        h,
+        &plan,
+        None,
+        &mut outcome,
+        "refused at TLS for the certificate",
+    )
+    .await?;
     Ok(outcome)
 }
 
@@ -352,12 +622,19 @@ pub async fn inbound_direct_tls(h: &mut Harness, _peer: Peer) -> Result<Outcome>
 }
 
 /// Negotiate STARTTLS in clear, then hand the socket to `openssl
-/// s_client` restricted to an old TLS version through a loopback bridge.
+/// s_client` restricted to one TLS version through a loopback bridge. TLS
+/// 1.2 through the same bridge is the control: without it a refusal of
+/// 1.1 or 1.0 could be the bridge's failure.
 pub async fn tls_version_outside_profile(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
-        "OpenSSL s_client offering only TLS 1.1, then only TLS 1.0, after the harness's STARTTLS",
+        "OpenSSL s_client offering only TLS 1.2 (control), then only TLS 1.1, then only TLS 1.0, after the harness's STARTTLS",
     );
-    for (name, flag) in [("TLS 1.1", "-tls1_1"), ("TLS 1.0", "-tls1")] {
+    let mut control_negotiated = false;
+    for (name, flag, control) in [
+        ("TLS 1.2", "-tls1_2", true),
+        ("TLS 1.1", "-tls1_1", false),
+        ("TLS 1.0", "-tls1", false),
+    ] {
         let mut socket = TcpStream::connect(("127.0.0.1", h.ports.waddle_s2s(Home::A))).await?;
         socket
             .write_all(&StreamOpen::server(Some(RAW_PEER), HOME_A).encode()?)
@@ -374,7 +651,7 @@ pub async fn tls_version_outside_profile(h: &mut Harness, _peer: Peer) -> Result
                         saw_features = true;
                         socket
                             .write_all(&header::element_bytes(
-                                &minidom::Element::builder("starttls", ns::TLS).build(),
+                                &Element::builder("starttls", ns::TLS).build(),
                             ))
                             .await?;
                     }
@@ -427,21 +704,36 @@ pub async fn tls_version_outside_profile(h: &mut Harness, _peer: Peer) -> Result
             String::from_utf8_lossy(&output.stderr),
         ]
         .concat();
-        match spliced {
-            Ok((0, _)) | Err(_) => outcome.unverified(
+        let summary = text.lines().take(6).collect::<Vec<_>>().join(" | ");
+        let sent_hello = matches!(spliced, Ok((read, _)) if read > 0);
+        if control {
+            control_negotiated = sent_hello && text.contains("Protocol version: TLSv1.2");
+            outcome.check(
+                "control: TLS 1.2 through the same bridge is negotiated",
+                control_negotiated,
+                summary,
+            );
+        } else if !control_negotiated {
+            outcome.unverified(
+                [name, " refused"].concat(),
+                "the TLS 1.2 control through the bridge did not negotiate",
+            );
+        } else if !sent_hello {
+            outcome.unverified(
                 name,
                 format!(
                     "OpenSSL sent no ClientHello for {name}; it may not support the version: {}",
                     text.trim()
                 ),
-            ),
-            Ok(_) => outcome.check(
+            );
+        } else {
+            outcome.check(
                 [name, " refused"].concat(),
                 !output.status.success()
                     && !text.contains("Protocol version: TLSv1.1")
                     && !text.contains("Protocol version: TLSv1\n"),
-                text.lines().take(6).collect::<Vec<_>>().join(" | "),
-            ),
+                summary,
+            );
         }
     }
     Ok(outcome)

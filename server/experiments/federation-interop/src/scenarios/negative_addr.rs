@@ -2,15 +2,19 @@
 //! refuses, in stream headers, as outbound destinations and in stanza
 //! addresses, and `see-other-host`, which is never followed.
 
-use anyhow::Result;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use crate::evidence::Outcome;
+use anyhow::Result;
+use tokio::net::TcpListener;
+
+use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
 use crate::s2s::initiator::{self, Plan, Stage};
 use crate::s2s::receiver::Behaviour;
 use crate::scenarios::harness::{Component, Harness, QUIET};
 use crate::scenarios::support::{self, ask, describe, is_result};
-use crate::topology::{Home, HOME_A, RAW_PEER, REDIRECT};
+use crate::topology::{Home, Server, HOME_A, RAW_PEER, REDIRECT};
 use crate::xml::{ns, stanza};
 
 /// The refused forms: a bracketed IP-literal, an IPv4address, the
@@ -42,21 +46,118 @@ pub async fn header_forms(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
+/// Counts TCP connections to the default XMPP server port on loopback,
+/// where a dial to any of the refused forms would land when no SRV record
+/// or endpoint applies.
+struct DefaultPortListener {
+    accepted: Arc<AtomicUsize>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    bound: Vec<String>,
+}
+
+impl DefaultPortListener {
+    async fn start() -> Self {
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        let mut bound = Vec::new();
+        for address in ["127.0.0.1:5269", "[::1]:5269"] {
+            let Ok(listener) = TcpListener::bind(address).await else {
+                continue;
+            };
+            bound.push(address.to_owned());
+            let accepted = Arc::clone(&accepted);
+            tasks.push(tokio::spawn(async move {
+                while listener.accept().await.is_ok() {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        Self {
+            accepted,
+            tasks,
+            bound,
+        }
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for DefaultPortListener {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+/// Connections home-a made to anything the harness listens on.
+fn harness_dials(h: &Harness, default_port: &DefaultPortListener) -> usize {
+    h.relays
+        .iter()
+        .filter(|(link, _)| link.from == Server::Waddle(Home::A))
+        .map(|(_, relay)| relay.connection_count())
+        .sum::<usize>()
+        + h.receiver.inbound().len()
+        + h.redirect.inbound().len()
+        + default_port.accepted()
+}
+
 pub async fn outbound_destinations(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
-    let mut outcome = Outcome::new("a home-a client sending a ping to each refused form");
+    let mut outcome = Outcome::new(
+        "a home-a client sending a ping to peer-raw.test (control), then to each refused form; dials counted on every harness listener and on loopback port 5269",
+    );
+    let default_port = DefaultPortListener::start().await;
     let mut session = h
         .login_waddle(Home::A, "alice", &support::id("forms"))
         .await?;
+    // Control: a good destination is dialled and seen by the counters.
+    h.receiver.disconnect();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    h.receiver.clear();
+    let control_id = support::id("form-control");
+    session.send(&stanza::ping(&control_id, RAW_PEER)).await?;
+    let delivered = h
+        .receiver
+        .wait_stanza(crate::scenarios::harness::ANSWER, |element| {
+            element.attr("id") == Some(control_id.as_str())
+        })
+        .await
+        .is_some();
+    let control_dials = h.receiver.inbound().len();
+    if !(delivered && control_dials > 0) {
+        session.close().await;
+        return Err(Unverifiable(format!(
+            "control: home-a did not dial peer-raw.test (dials {control_dials}, delivered {delivered})"
+        ))
+        .into());
+    }
+    outcome.check(
+        "control: a good destination is dialled and delivered",
+        true,
+        format!("{control_dials} dials to the harness receiving server"),
+    );
+    if default_port.bound.is_empty() {
+        outcome.note("loopback port 5269 was in use; dials there are not counted");
+    }
     for form in REFUSED_FORMS {
+        let before = harness_dials(h, &default_port);
         let answer = ask(&mut session, stanza::ping(&support::id("form"), form)).await;
+        tokio::time::sleep(QUIET).await;
+        let dials = harness_dials(h, &default_port) - before;
         outcome.check(
-            ["destination ", form, " refused"].concat(),
-            answer
-                .as_ref()
-                .is_ok_and(|answer| answer.attr("type") == Some("error")),
-            answer
-                .map(|answer| describe(&answer))
-                .unwrap_or_else(|error| error.to_string()),
+            ["destination ", form, " refused without dialling"].concat(),
+            dials == 0
+                && answer
+                    .as_ref()
+                    .is_ok_and(|answer| answer.attr("type") == Some("error")),
+            format!(
+                "{}; dials {dials}",
+                answer
+                    .map(|answer| describe(&answer))
+                    .unwrap_or_else(|error| error.to_string())
+            ),
         );
     }
     session.close().await;
@@ -132,7 +233,8 @@ pub async fn see_other_host(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
         ("after TLS", Behaviour::RedirectAfterTls(target.clone())),
     ] {
         h.redirect.set_behaviour(behaviour);
-        let mut dialled = false;
+        let mut emitted = false;
+        let mut logged = 0;
         let mut detail = String::new();
         // A failed attempt puts redirect.test in backoff; restarting home-a
         // clears it, so each case gets a dial of its own.
@@ -144,28 +246,39 @@ pub async fn see_other_host(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
             }
             h.redirect.clear();
             h.redirect_target.reset_records();
+            let redirected =
+                support::LogMark::new(h, Home::A, &["s2s connection ended", "\"redirected\""]);
             let answer = support::ping_from_waddle(h, Home::A, "alice", REDIRECT).await;
             tokio::time::sleep(QUIET).await;
-            dialled = !h.redirect.inbound().is_empty();
+            emitted = h
+                .redirect
+                .inbound()
+                .iter()
+                .any(|inbound| inbound.redirected);
+            logged = redirected.added(h);
             detail = format!(
-                "dials to redirect.test: {}; connections to the redirect target: {}; client answer: {}",
+                "dials to redirect.test: {}; see-other-host sent: {emitted}; home-a logged {logged} connections ended as redirected; connections to the redirect target: {}; client answer: {}",
                 h.redirect.inbound().len(),
                 h.redirect_target.connection_count(),
                 answer
                     .map(|answer| describe(&answer))
                     .unwrap_or_else(|error| error.to_string())
             );
-            if dialled {
+            if emitted {
                 break;
             }
         }
         let name = ["see-other-host ", name, " not followed"].concat();
-        if dialled {
-            outcome.check(name, h.redirect_target.connection_count() == 0, detail);
+        if emitted {
+            outcome.check(
+                name,
+                h.redirect_target.connection_count() == 0 && logged > 0,
+                detail,
+            );
         } else {
             outcome.unverified(
                 name,
-                ["home-a never dialled redirect.test: ", &detail].concat(),
+                ["the harness never sent see-other-host to home-a: ", &detail].concat(),
             );
         }
     }

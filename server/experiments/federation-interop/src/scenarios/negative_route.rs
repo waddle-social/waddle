@@ -15,7 +15,7 @@ use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::evidence::Outcome;
+use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
 use crate::process;
 use crate::s2s::initiator::{self, Plan, RawStream};
@@ -91,6 +91,7 @@ pub async fn spoofed_from(h: &mut Harness, peer: Peer) -> Result<Outcome> {
 pub async fn forged_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(tap_driven(peer));
     let relay = support::tap_peer_stream(h, peer).await?;
+    let connections = relay.connection_count();
     let mut session = h
         .login_waddle(Home::A, "alice", &support::id("forged"))
         .await?;
@@ -115,12 +116,20 @@ pub async fn forged_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         "watched the addressed resource",
     );
     session.close().await;
+    support::follow_up_on_tap(h, peer, relay, connections, &forged_id, &mut outcome).await?;
     Ok(outcome)
 }
 
 pub async fn replayed_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
-    let mut outcome = Outcome::new(tap_driven(peer));
+    let mut outcome = Outcome::new(
+        [
+            &tap_driven(peer),
+            ": the genuine result and its replay on the same tapped stream",
+        ]
+        .concat(),
+    );
     let relay = support::tap_peer_stream(h, peer).await?;
+    let connections = relay.connection_count();
     let mut session = h
         .login_waddle(Home::A, "alice", &support::id("replay"))
         .await?;
@@ -135,6 +144,21 @@ pub async fn replayed_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> 
         is_result(&first),
         describe(&first),
     );
+    // The replay is meaningful only on the stream that carried the
+    // genuine result.
+    let carried = relay.connection_count() == connections
+        && !support::newest_closed(relay)
+        && relay.connections().last().is_some_and(|connection| {
+            String::from_utf8_lossy(&connection.initiator_tls).contains(ping_id.as_str())
+        });
+    if !carried {
+        outcome.unverified(
+            "the replayed result is not delivered again",
+            "the genuine result did not arrive on the tapped stream, so a replay there would not be a replay on its stream",
+        );
+        session.close().await;
+        return Ok(outcome);
+    }
     let replay = stanza::iq(
         ns::SERVER,
         "result",
@@ -155,21 +179,66 @@ pub async fn replayed_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> 
         "watched the requesting resource",
     );
     session.close().await;
+    support::follow_up_on_tap(h, peer, relay, connections, &ping_id, &mut outcome).await?;
     Ok(outcome)
 }
 
 pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(tap_driven(peer));
-    let relay = support::tap_peer_stream(h, peer).await?;
     let third = support::unserved_for(peer);
     let target_peer = match third {
         crate::topology::PROSODY => Peer::Prosody,
         _ => Peer::Ejabberd,
     };
-    let mut watcher = h
+    let Ok(mut watcher) = h
         .login_peer(target_peer, "alice", &support::id("relay"))
         .await
-        .ok();
+    else {
+        outcome.unverified(
+            ["nothing relayed to ", third].concat(),
+            "the third server is not running",
+        );
+        return Ok(outcome);
+    };
+    // Control: the watcher sees a message for it by id, sent by another
+    // account of its own server.
+    let control_id = support::id("relay-control");
+    let mut sender = h
+        .login_peer(target_peer, "bob", &support::id("relay"))
+        .await?;
+    sender
+        .send(&stanza::chat(
+            &control_id,
+            &["alice@", third].concat(),
+            "control",
+        ))
+        .await?;
+    let seen = watcher
+        .wait_for(ANSWER, |element| {
+            element.attr("id") == Some(control_id.as_str())
+        })
+        .await
+        .is_ok();
+    sender.close().await;
+    if !seen {
+        watcher.close().await;
+        return Err(Unverifiable(
+            [
+                "control: the watcher on ",
+                third,
+                " did not see a local message",
+            ]
+            .concat(),
+        )
+        .into());
+    }
+    outcome.check(
+        ["control: the watcher on ", third, " sees a message for it"].concat(),
+        true,
+        "a message from another account of its server",
+    );
+    let relay = support::tap_peer_stream(h, peer).await?;
+    let connections = relay.connection_count();
     let message_id = support::id("relay");
     let message = stanza::message(
         ns::SERVER,
@@ -180,36 +249,26 @@ pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         Some("relay through home-a"),
     );
     relay.inject(header::element_bytes(&message))?;
+    let absent = watcher
+        .absent(QUIET, |element| {
+            element.attr("id") == Some(message_id.as_str())
+        })
+        .await?;
+    // home-a either refuses the stream with a stream error, its own
+    // record of the refusal, or drops the stanza; for a dropped stanza the
+    // follow-up on the same stream shows home-a read past it.
     let (refused, detail) = stream_refused(relay).await;
-    match watcher.as_mut() {
-        Some(watcher) => {
-            let absent = watcher
-                .absent(QUIET, |element| {
-                    element.attr("id") == Some(message_id.as_str())
-                })
-                .await?;
-            outcome.check(
-                ["nothing relayed to ", third].concat(),
-                absent,
-                detail.clone(),
-            );
-        }
-        None => outcome.unverified(
-            ["nothing relayed to ", third].concat(),
-            "the third server is not running",
-        ),
-    }
-    outcome.note(
-        [
-            "home-a's handling: ",
-            &detail,
-            if refused { "" } else { " (stanza dropped)" },
-        ]
-        .concat(),
+    outcome.check(
+        ["nothing relayed to ", third].concat(),
+        absent,
+        detail.clone(),
     );
-    if let Some(watcher) = watcher {
-        watcher.close().await;
+    if refused {
+        outcome.note(["home-a refused the stream: ", &detail].concat());
+    } else {
+        support::follow_up_on_tap(h, peer, relay, connections, &message_id, &mut outcome).await?;
     }
+    watcher.close().await;
     Ok(outcome)
 }
 
@@ -525,9 +584,9 @@ pub async fn preauth_large_element(h: &mut Harness, _peer: Peer) -> Result<Outco
 pub async fn queue_exhaustion(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
         [
-            "home-a's outbound path to ",
+            "a home-a client flooding pings to ",
             peer.label(),
-            " hanging while a client floods it",
+            " while home-a's outbound relay to it accepts connections and never answers (a stalled socket standing in for a hanging peer; the stock server takes no part), measuring Waddle's per-peer queue",
         ]
         .concat(),
     );

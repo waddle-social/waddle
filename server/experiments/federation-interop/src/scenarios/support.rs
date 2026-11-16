@@ -91,26 +91,35 @@ pub async fn ping_until_result(
     }
 }
 
-/// How many lines of the deployment's current log contain every needle,
-/// compared without case. Waddle's `/metrics` endpoint is a liveness stub
-/// (its metrics leave by OTLP), so the S2S debug log is the harness's
-/// record of what each stream did: `s2s stream established` with its
-/// direction and strength, `s2s peer certificate refused`, `s2s peer not
-/// admitted`, `s2s service started`.
-pub fn log_count(h: &Harness, home: Home, needles: &[&str]) -> usize {
-    let Some(path) = h.waddle.get(&home).and_then(|waddle| waddle.log_path()) else {
-        return 0;
-    };
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+/// How many lines of `text` contain every needle, compared without case.
+/// Waddle writes its log as JSON lines (`"target"`, `"fields"` with
+/// `"message"` and each field), so a needle is a message, a field's
+/// rendered value or a target prefix.
+pub fn count_matching(text: &str, needles: &[&str]) -> usize {
     let needles: Vec<String> = needles
         .iter()
         .map(|needle| needle.to_ascii_lowercase())
         .collect();
     text.lines()
-        .filter(|line| needles.iter().all(|needle| line.contains(needle.as_str())))
+        .filter(|line| {
+            let line = line.to_ascii_lowercase();
+            needles.iter().all(|needle| line.contains(needle.as_str()))
+        })
         .count()
+}
+
+/// How many lines of the deployment's current log contain every needle.
+/// Waddle's `/metrics` endpoint is a liveness stub (its metrics leave by
+/// OTLP), so the S2S debug log is the harness's record of what each stream
+/// did: `s2s stream established` with its direction and strength, `s2s
+/// connection ended` with its outcome, `s2s peer certificate refused` with
+/// the verifier's code, `s2s peer not admitted`, `s2s service started`.
+/// The count is per process: take a "before" count after any restart.
+pub fn log_count(h: &Harness, home: Home, needles: &[&str]) -> usize {
+    let Some(path) = h.waddle.get(&home).and_then(|waddle| waddle.log_path()) else {
+        return 0;
+    };
+    count_matching(&std::fs::read_to_string(path).unwrap_or_default(), needles)
 }
 
 /// Streams the deployment established, by direction (`inbound` or
@@ -122,6 +131,45 @@ pub async fn established(h: &Harness, home: Home, direction: &str, strength: &st
 /// Peer certificates the deployment refused, from its log.
 pub fn certificate_refusals(h: &Harness, home: Home) -> usize {
     log_count(h, home, &["s2s peer certificate refused"])
+}
+
+/// Peer certificates the deployment refused with the verifier's `code`
+/// (`identity_mismatch` for a name that does not match, `path` for an
+/// untrusted issuer or an expired certificate).
+pub fn certificate_refusals_coded(h: &Harness, home: Home, code: &str) -> usize {
+    let quoted = ["\"", code, "\""].concat();
+    log_count(h, home, &["s2s peer certificate refused", &quoted])
+}
+
+/// Connections the deployment ended with `outcome` (the lowercase name of
+/// an `S2sOutcome`, such as `capacity`, `evicted`, `admission`,
+/// `redirected`), from its log.
+pub fn ended_with(h: &Harness, home: Home, outcome: &str) -> usize {
+    let quoted = ["\"", outcome, "\""].concat();
+    log_count(h, home, &["s2s connection ended", &quoted])
+}
+
+/// A count of log lines before an action, to compare after it.
+pub struct LogMark {
+    home: Home,
+    needles: Vec<String>,
+    before: usize,
+}
+
+impl LogMark {
+    pub fn new(h: &Harness, home: Home, needles: &[&str]) -> Self {
+        Self {
+            home,
+            needles: needles.iter().map(|needle| (*needle).to_owned()).collect(),
+            before: log_count(h, home, needles),
+        }
+    }
+
+    /// Lines added since the mark.
+    pub fn added(&self, h: &Harness) -> usize {
+        let needles: Vec<&str> = self.needles.iter().map(String::as_str).collect();
+        log_count(h, self.home, &needles).saturating_sub(self.before)
+    }
 }
 
 /// Check the newest relayed connection's negotiated TLS version: one the
@@ -153,6 +201,11 @@ pub fn check_tls(outcome: &mut Outcome, relay: &Relay, expected: Option<u16>) {
 /// `policy-violation` (s2s-connection-manager-2047.md, Admission).
 pub const PRE_TLS_REFUSAL: &str = "policy-violation";
 
+/// How long the harness waits after closing a raw stream before opening
+/// another for the same pair: home-a refuses a second stream for a pair
+/// with `conflict` while the first is still registered.
+pub const PAIR_RELEASE: Duration = Duration::from_millis(500);
+
 /// A known-good stream from the harness peer must establish first, so a
 /// refusal the row then sees is Waddle's and not a harness defect.
 pub async fn raw_control(h: &Harness) -> Result<()> {
@@ -162,6 +215,8 @@ pub async fn raw_control(h: &Harness) -> Result<()> {
     match attempt.stream {
         Some(stream) => {
             stream.close().await;
+            // The row's probe is often for the same pair.
+            tokio::time::sleep(PAIR_RELEASE).await;
             Ok(())
         }
         None => Err(Unverifiable(
@@ -197,6 +252,49 @@ pub async fn tap_peer_stream(h: &Harness, peer: Peer) -> Result<&Relay> {
     let tapped = process::eventually(Duration::from_secs(10), || async { relay.tapped() }).await;
     anyhow::ensure!(tapped, "no tapped stream on {}", relay.label);
     Ok(relay)
+}
+
+/// After bytes were injected into the tapped stream: a client of the peer
+/// pings home-a, so the peer writes the ping into the same stream after
+/// the injected bytes. Its answer shows home-a read past them in order on
+/// that stream. `marker` is a string from the injected bytes (its last
+/// occurrence counts, so a replay of earlier bytes is found); the check
+/// requires it before the ping in the tapped stream, no new connection on
+/// the relay and the tapped connection still open.
+pub async fn follow_up_on_tap(
+    h: &Harness,
+    peer: Peer,
+    relay: &Relay,
+    connections: usize,
+    marker: &str,
+    outcome: &mut Outcome,
+) -> Result<()> {
+    let mut session = h.login_peer(peer, "alice", &id("follow")).await?;
+    let ping_id = id("follow");
+    let answer = ask(&mut session, stanza::ping(&ping_id, HOME_A)).await;
+    session.close().await;
+    let tapped = relay
+        .connections()
+        .last()
+        .map(|connection| String::from_utf8_lossy(&connection.initiator_tls).into_owned())
+        .unwrap_or_default();
+    let injected_at = tapped.rfind(marker);
+    let ping_at = tapped.find(ping_id.as_str());
+    let same_stream = relay.connection_count() == connections && !newest_closed(relay);
+    let in_order =
+        matches!((injected_at, ping_at), (Some(injected), Some(ping)) if injected < ping);
+    outcome.check(
+        "follow-up ping on the same tapped stream is answered after the injected bytes",
+        answer.as_ref().is_ok_and(is_result) && same_stream && in_order,
+        format!(
+            "answer {}; same connection and open: {same_stream}; injected bytes at {injected_at:?}, follow-up ping at {ping_at:?}",
+            answer
+                .as_ref()
+                .map(describe)
+                .unwrap_or_else(|error| error.to_string())
+        ),
+    );
+    Ok(())
 }
 
 /// The newest tapped connection's decrypted bytes from Waddle.

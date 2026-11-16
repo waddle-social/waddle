@@ -211,3 +211,26 @@ pub fn record_all_unverified(
         }
     }
 }
+
+/// Record every included row of `sections` that has no record yet as
+/// UNVERIFIED with `reason`, for a run that stopped part way.
+pub fn record_unrun(log: &mut EvidenceLog, filter: &Filter, sections: &[Section], reason: &str) {
+    for row in manifest::ROWS {
+        if !sections.contains(&row.section) || !filter.includes(row) {
+            continue;
+        }
+        for peer in row.peers {
+            if log.has(row.id, peer.label()) {
+                continue;
+            }
+            log.record(Record {
+                id: row.id.to_owned(),
+                section: row.section,
+                title: row.title.to_owned(),
+                peer: peer.label().to_owned(),
+                g20: row.g20 && *peer != Peer::Waddle,
+                outcome: Outcome::not_driven(reason),
+            });
+        }
+    }
+}

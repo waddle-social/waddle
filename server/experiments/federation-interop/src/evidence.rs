@@ -4,6 +4,10 @@
 //! A row is PASS only when every check it ran passed and it ran at least
 //! one. A row that was not driven, or that hit a missing prerequisite, is
 //! UNVERIFIED with the reason, never PASS.
+//!
+//! Every text that enters a record passes through [`scrub`]: log tails and
+//! error chains carry absolute paths, connection strings and secrets of the
+//! run, which the evidence must not keep.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -53,7 +57,7 @@ impl Outcome {
     pub fn new(driven_by: impl Into<String>) -> Self {
         Self {
             status: Status::Unverified,
-            driven_by: driven_by.into(),
+            driven_by: scrub(&driven_by.into()),
             checks: Vec::new(),
             notes: Vec::new(),
         }
@@ -69,23 +73,23 @@ impl Outcome {
     /// Record an assertion that executed.
     pub fn check(&mut self, name: impl Into<String>, passed: bool, detail: impl Into<String>) {
         self.checks.push(Check {
-            name: name.into(),
+            name: scrub(&name.into()),
             status: if passed { Status::Pass } else { Status::Fail },
-            detail: detail.into(),
+            detail: scrub(&detail.into()),
         });
     }
 
     /// Record a part of the row that could not be established.
     pub fn unverified(&mut self, name: impl Into<String>, reason: impl Into<String>) {
         self.checks.push(Check {
-            name: name.into(),
+            name: scrub(&name.into()),
             status: Status::Unverified,
-            detail: reason.into(),
+            detail: scrub(&reason.into()),
         });
     }
 
     pub fn note(&mut self, note: impl Into<String>) {
-        self.notes.push(note.into());
+        self.notes.push(scrub(&note.into()));
     }
 
     /// Settle the row's status from its checks.
@@ -192,6 +196,13 @@ impl EvidenceLog {
         self.records.push(record);
     }
 
+    /// Whether a record exists for `id` against `peer`.
+    pub fn has(&self, id: &str, peer: &str) -> bool {
+        self.records
+            .iter()
+            .any(|record| record.id == id && record.peer == peer)
+    }
+
     pub fn counts(&self) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for record in &self.records {
@@ -291,4 +302,158 @@ fn section_title(section: Section) -> &'static str {
 
 fn cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
+}
+
+/// The most characters of one detail, reason or note the evidence keeps.
+pub const DETAIL_LIMIT: usize = 1500;
+
+/// Words that mark the value after them (`key=value`, `"key":"value"`) as a
+/// credential.
+const CREDENTIAL_KEYS: [&str; 10] = [
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "preshared",
+    "private_key",
+    "privatekey",
+    "api_key",
+    "apikey",
+    "session_key",
+];
+
+/// Make `text` fit for the evidence: connection strings and URLs with user
+/// information are replaced, credential values after a credential key are
+/// redacted, absolute paths keep only their last component, runs of 32 or
+/// more hexadecimal digits (the run's generated passwords and secrets) are
+/// redacted, and the result is cut at [`DETAIL_LIMIT`] characters.
+pub fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(DETAIL_LIMIT + 16));
+    let mut token = String::new();
+    for character in text.chars() {
+        if character.is_whitespace() {
+            out.push_str(&scrub_token(&token));
+            token.clear();
+            out.push(character);
+        } else {
+            token.push(character);
+        }
+    }
+    out.push_str(&scrub_token(&token));
+    if out.chars().count() > DETAIL_LIMIT {
+        let mut cut: String = out.chars().take(DETAIL_LIMIT).collect();
+        cut.push_str(" [truncated]");
+        return cut;
+    }
+    out
+}
+
+fn scrub_token(token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+    if let Some(redacted) = redact_url(token) {
+        return redacted;
+    }
+    if let Some(redacted) = redact_credential(token) {
+        return redacted;
+    }
+    redact_hex(&shorten_paths(token))
+}
+
+/// A URL with user information, or any PostgreSQL connection string.
+fn redact_url(token: &str) -> Option<String> {
+    let marker = token.find("://")?;
+    let head = token.get(..marker)?;
+    let scheme_start = head
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
+        .last()
+        .map_or(marker, |(index, _)| index);
+    let scheme = head.get(scheme_start..)?.to_ascii_lowercase();
+    let rest = token.get(marker + 3..)?;
+    if rest.contains('@') || scheme.starts_with("postgres") {
+        Some([head.get(..scheme_start)?, "[connection string]"].concat())
+    } else {
+        None
+    }
+}
+
+fn redact_credential(token: &str) -> Option<String> {
+    let lower = token.to_ascii_lowercase();
+    CREDENTIAL_KEYS.iter().find_map(|key| {
+        let at = lower.find(key)?;
+        let after = at + key.len();
+        let separator = lower
+            .get(after..)?
+            .char_indices()
+            .find(|(_, character)| !matches!(character, '"' | '\'' | '_' | '-'))
+            .filter(|(_, character)| matches!(character, '=' | ':'))
+            .map(|(offset, _)| after + offset + 1)?;
+        Some([token.get(..separator)?, "[redacted]"].concat())
+    })
+}
+
+/// Replace every absolute path in `token` by its last component.
+fn shorten_paths(token: &str) -> String {
+    let characters: Vec<char> = token.chars().collect();
+    let mut out = String::with_capacity(token.len());
+    let mut index = 0;
+    while let Some(&character) = characters.get(index) {
+        let previous = index.checked_sub(1).and_then(|at| characters.get(at));
+        let starts_path = character == '/'
+            && previous.is_none_or(|previous| "=:\"'([<,".contains(*previous))
+            && characters.get(index + 1).is_some_and(|next| *next != '/');
+        if !starts_path {
+            out.push(character);
+            index += 1;
+            continue;
+        }
+        let end = characters
+            .iter()
+            .skip(index)
+            .position(|character| "\"'),;]>:".contains(*character))
+            .map_or(characters.len(), |offset| index + offset);
+        let path: String = characters
+            .get(index..end)
+            .unwrap_or_default()
+            .iter()
+            .collect();
+        if path.matches('/').count() >= 2 {
+            let last = path.rsplit('/').next().unwrap_or_default();
+            out.push_str("[path]/");
+            out.push_str(last);
+        } else {
+            out.push_str(&path);
+        }
+        index = end;
+    }
+    out
+}
+
+/// Redact runs of 32 or more hexadecimal digits.
+fn redact_hex(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.len() >= 32 {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for character in token.chars() {
+        if character.is_ascii_hexdigit() {
+            run.push(character);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(character);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }

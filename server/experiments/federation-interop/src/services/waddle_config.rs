@@ -203,13 +203,11 @@ impl Profile {
         self
     }
 
-    /// Admit and trust extra domains on the `.test` CA's profile (the
-    /// admission cases' peers).
-    pub fn admitting(mut self, domains: &[&str]) -> Self {
+    /// Put extra domains on the `.test` CA's private-CA profile without
+    /// listing them anywhere, so only `open` mode admits them and they are
+    /// outside the reserve that allowlisted and trusted peers keep.
+    pub fn on_test_ca(mut self, domains: &[&str]) -> Self {
         for domain in domains {
-            if !self.allow.iter().any(|entry| entry == domain) {
-                self.allow.push((*domain).to_owned());
-            }
             if !self.private_ca.iter().any(|entry| entry == domain) {
                 self.private_ca.push((*domain).to_owned());
             }

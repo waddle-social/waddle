@@ -5,9 +5,11 @@
 
 use std::collections::BTreeSet;
 
-use waddle_federation_interop::evidence::{settle, Outcome, Status, Unverifiable};
+use waddle_federation_interop::evidence::{scrub, settle, Outcome, Status, Unverifiable};
 use waddle_federation_interop::manifest::{self, Drive, Slice};
 use waddle_federation_interop::net::tls_hello::parse_server_hello;
+use waddle_federation_interop::scenarios::support::count_matching;
+use waddle_federation_interop::watch::OpenWatch;
 use waddle_federation_interop::xml::framer::{Framer, Item};
 use waddle_federation_interop::xml::header::{self, StreamOpen};
 use waddle_federation_interop::xml::{ns, stanza};
@@ -113,4 +115,88 @@ fn manifest_ids_are_unique_and_unlanded_slices_gate_rows() {
         }
     }
     assert!(!manifest::landed(Slice::W6c) || std::env::var("INTEROP_LANDED").is_ok());
+}
+
+#[test]
+fn evidence_text_loses_paths_connection_strings_and_secrets() {
+    let tail = "error: open /tmp/waddle-federation-interop-1/pki/home-a.test.key: denied\n\
+        WADDLE_DATABASE_URL=postgres://waddle:hunter2@127.0.0.1:47111/waddle\n\
+        dialing wss://home-a.test:47112/ws as user@host failed\n\
+        {\"password\":\"0123456789abcdef0123456789abcdef\"} config=/home/someone/s2s.toml\n\
+        relay 127.0.0.1:47150/x kept";
+    let scrubbed = scrub(tail);
+    for leaked in [
+        "/tmp/",
+        "/home/someone",
+        "hunter2",
+        "postgres://",
+        "0123456789abcdef0123456789abcdef",
+    ] {
+        assert!(!scrubbed.contains(leaked), "{leaked} kept in {scrubbed}");
+    }
+    assert!(scrubbed.contains("[path]/home-a.test.key"));
+    assert!(scrubbed.contains("[path]/s2s.toml"));
+    assert!(scrubbed.contains("relay 127.0.0.1:47150/x kept"));
+    assert!(scrubbed.contains("wss://home-a.test:47112/ws"));
+    let long = "x".repeat(10_000);
+    assert!(scrub(&long).chars().count() < 2_000);
+    let mut outcome = Outcome::new("driver at /var/lib/harness/run");
+    outcome.note("session_key=abcdef");
+    assert!(!outcome.driven_by.contains("/var/lib"));
+    assert_eq!(outcome.notes, vec!["session_key=[redacted]".to_owned()]);
+}
+
+#[test]
+fn log_needles_match_waddle_json_lines() {
+    // The shape of Waddle's JSON log lines (tracing-subscriber `json()`
+    // with targets) for the events the rows count.
+    let log = [
+        r#"{"timestamp":"t","level":"DEBUG","fields":{"message":"s2s connection ended","connection":4,"direction":"Inbound","outcome":"Capacity"},"target":"waddle_server::s2s::conn::session"}"#,
+        r#"{"timestamp":"t","level":"DEBUG","fields":{"message":"s2s peer certificate refused","code":"identity_mismatch"},"target":"waddle_server::s2s::conn::session"}"#,
+        r#"{"timestamp":"t","level":"DEBUG","fields":{"message":"s2s stream established","connection":5,"direction":"Inbound","strength":"pkix"},"target":"waddle_server::s2s::conn::session"}"#,
+        r#"{"timestamp":"t","level":"INFO","fields":{"message":"listening"},"target":"waddle_server::server"}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        count_matching(&log, &["s2s connection ended", "\"capacity\""]),
+        1
+    );
+    assert_eq!(
+        count_matching(&log, &["s2s connection ended", "\"evicted\""]),
+        0
+    );
+    assert_eq!(
+        count_matching(
+            &log,
+            &["s2s peer certificate refused", "\"identity_mismatch\""]
+        ),
+        1
+    );
+    assert_eq!(
+        count_matching(&log, &["s2s peer certificate refused", "\"path\""]),
+        0
+    );
+    assert_eq!(
+        count_matching(&log, &["s2s stream established", "inbound", "pkix"]),
+        1
+    );
+    assert_eq!(count_matching(&log, &["\"waddle_server::s2s"]), 3);
+}
+
+#[test]
+fn an_open_watch_sees_reads_of_watched_files_only() {
+    let directory =
+        std::env::temp_dir().join(format!("federation-interop-watch-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let watched = directory.join("watched");
+    let other = directory.join("other");
+    std::fs::write(&watched, b"x").expect("a file");
+    std::fs::write(&other, b"y").expect("a file");
+    let mut watch = OpenWatch::new(std::slice::from_ref(&watched)).expect("inotify");
+    assert!(watch.touched().expect("events").is_empty());
+    std::fs::read(&other).expect("read");
+    assert!(watch.touched().expect("events").is_empty());
+    std::fs::read(&watched).expect("read");
+    assert_eq!(watch.touched().expect("events"), vec!["watched".to_owned()]);
+    std::fs::remove_dir_all(&directory).ok();
 }

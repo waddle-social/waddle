@@ -38,7 +38,7 @@ impl Postgres {
         std::fs::create_dir_all(&socket)?;
         let password = uuid::Uuid::new_v4().simple().to_string();
         let password_file = root.join(label).join("initdb-password");
-        std::fs::write(&password_file, &password)?;
+        crate::process::write_private(&password_file, password.as_bytes())?;
         let mut initdb = Command::new(bin.join("initdb"));
         initdb
             .arg("-D")

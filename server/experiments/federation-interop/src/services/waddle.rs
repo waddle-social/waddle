@@ -22,10 +22,11 @@ pub const ACCOUNTS: [&str; 5] = ["admin", "alice", "bob", "carol", "caseprobe"];
 /// How S2S is configured for one start.
 #[derive(Debug, Clone)]
 pub enum S2s {
-    /// `WADDLE_S2S_ENABLED` unset; `WADDLE_S2S_CONFIG_FILE` points at
-    /// `unread`, a path that does not exist, so a read would fail startup.
+    /// `WADDLE_S2S_ENABLED` unset; `WADDLE_S2S_CONFIG_FILE` still names
+    /// `config`, so a deployment that read it anyway would be seen doing
+    /// so. An empty path sets no configuration file.
     Disabled {
-        unread: PathBuf,
+        config: PathBuf,
     },
     Enabled {
         config: PathBuf,
@@ -67,7 +68,7 @@ impl Waddle {
         Self {
             spec,
             s2s: S2s::Disabled {
-                unread: PathBuf::new(),
+                config: PathBuf::new(),
             },
             process: None,
             logs: logs.to_owned(),
@@ -124,8 +125,10 @@ impl Waddle {
             .env("WADDLE_UPLOAD_DIR", &spec.upload_dir)
             .env("WADDLE_GIT_SHA", &spec.git_sha);
         match &self.s2s {
-            S2s::Disabled { unread } => {
-                command.env("WADDLE_S2S_CONFIG_FILE", unread);
+            S2s::Disabled { config } => {
+                if !config.as_os_str().is_empty() {
+                    command.env("WADDLE_S2S_CONFIG_FILE", config);
+                }
             }
             S2s::Enabled { config } => {
                 command

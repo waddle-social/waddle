@@ -15,6 +15,7 @@ use minidom::Element;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -46,6 +47,8 @@ pub struct Inbound {
     pub client_certificate: bool,
     pub authenticated: Option<String>,
     pub verification_requests: usize,
+    /// The harness answered `see-other-host` on this connection.
+    pub redirected: bool,
     pub stanzas: Vec<Element>,
     pub error: Option<String>,
 }
@@ -66,6 +69,8 @@ struct Shared {
     /// Dialback keys the harness sent as an initiating server; a
     /// verification request for one of them is valid.
     issued_keys: Mutex<BTreeSet<String>>,
+    /// Bumped to end every open connection.
+    disconnect: watch::Sender<u64>,
 }
 
 pub struct Receiver {
@@ -92,6 +97,7 @@ impl Receiver {
             settings: Mutex::new(settings),
             inbound: Mutex::new(Vec::new()),
             issued_keys: Mutex::new(BTreeSet::new()),
+            disconnect: watch::channel(0u64).0,
         });
         let accept_shared = Arc::clone(&shared);
         let accept_pki = Arc::clone(&pki);
@@ -108,7 +114,13 @@ impl Receiver {
                         inbound.push(Inbound::default());
                         inbound.len() - 1
                     };
-                    if let Err(error) = serve(&shared, &pki, socket, index).await {
+                    let mut disconnect = shared.disconnect.subscribe();
+                    let served = tokio::select! {
+                        served = serve(&shared, &pki, socket, index) => served,
+                        // Dropping `serve` closes the socket.
+                        _ = disconnect.changed() => Ok(()),
+                    };
+                    if let Err(error) = served {
                         if let Some(record) = lock(&shared.inbound).get_mut(index) {
                             record.error = Some(format!("{error:#}"));
                         }
@@ -141,6 +153,14 @@ impl Receiver {
 
     pub fn inbound(&self) -> Vec<Inbound> {
         lock(&self.shared.inbound).clone()
+    }
+
+    /// Close every open connection, so Waddle's next stanza for a harness
+    /// domain needs a new stream.
+    pub fn disconnect(&self) {
+        self.shared
+            .disconnect
+            .send_modify(|generation| *generation += 1);
     }
 
     pub fn clear(&self) {
@@ -244,6 +264,12 @@ fn response_header(local: &str, remote: Option<&str>, id: &str) -> Result<Vec<u8
     Ok(open.with_id(id).encode()?)
 }
 
+fn mark_redirected(shared: &Shared, index: usize) {
+    if let Some(record) = lock(&shared.inbound).get_mut(index) {
+        record.redirected = true;
+    }
+}
+
 async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: usize) -> Result<()> {
     let mut framer = Framer::new();
     let Read::Item(Item::Header(opening)) = next(&mut socket, &mut framer).await? else {
@@ -272,6 +298,7 @@ async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: us
             &header::element_bytes(&see_other_host(address)),
         )
         .await?;
+        mark_redirected(shared, index);
         write(&mut socket, header::STREAM_CLOSE).await?;
         return Ok(());
     }
@@ -309,6 +336,7 @@ async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: us
     write(&mut tls, &response_header(&to, from.as_deref(), &id)?).await?;
     if let Behaviour::RedirectAfterTls(address) = &behaviour {
         write(&mut tls, &header::element_bytes(&see_other_host(address))).await?;
+        mark_redirected(shared, index);
         write(&mut tls, header::STREAM_CLOSE).await?;
         return Ok(());
     }

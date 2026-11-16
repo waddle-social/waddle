@@ -54,6 +54,8 @@ harness_target="${CARGO_TARGET_DIR:-$INTEROP_EXPERIMENT_ROOT/target}"
 server_target="${CARGO_TARGET_DIR:-$server_root/target}"
 
 export INTEROP_WADDLE_BIN="$server_target/debug/waddle-server"
+# The evidence names the binary relative to the repository.
+export INTEROP_REPOSITORY_ROOT="$repository_root"
 INTEROP_GIT_SHA="$(git -C "$repository_root" rev-parse HEAD)"
 export INTEROP_GIT_SHA
 exec "$harness_target/debug/federation-interop" \

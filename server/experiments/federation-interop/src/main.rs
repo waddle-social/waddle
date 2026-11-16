@@ -3,10 +3,13 @@
 //! the pinned binaries; see the README for the options.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
+use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use waddle_federation_interop::evidence::{EvidenceLog, Section};
 use waddle_federation_interop::scenarios::harness::{Binaries, Harness};
@@ -64,6 +67,33 @@ fn options() -> Result<Options> {
     })
 }
 
+/// The server binary as the evidence names it: its path relative to the
+/// repository when it lies inside it, otherwise its file name and a hash of
+/// the path, so no absolute path of the machine that ran it is recorded.
+fn binary_name(path: &Path) -> String {
+    if let Some(relative) = std::env::var_os("INTEROP_REPOSITORY_ROOT")
+        .and_then(|root| path.strip_prefix(root).ok().map(Path::to_path_buf))
+    {
+        return relative.display().to_string();
+    }
+    let digest = Sha256::digest(path.as_os_str().as_bytes());
+    let hash: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    [
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .as_str(),
+        " (path sha256 ",
+        &hash,
+        ")",
+    ]
+    .concat()
+}
+
 fn environment(bins: &Binaries, git_sha: &str) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
     for key in [
@@ -77,12 +107,22 @@ fn environment(bins: &Binaries, git_sha: &str) -> BTreeMap<String, String> {
             environment.insert(key.to_owned(), value);
         }
     }
-    environment.insert(
-        "waddle_server".to_owned(),
-        bins.waddle.display().to_string(),
-    );
+    environment.insert("waddle_server".to_owned(), binary_name(&bins.waddle));
     environment.insert("git_sha".to_owned(), git_sha.to_owned());
     environment
+}
+
+/// The work directory, readable by its owner only: it holds the run's
+/// private keys, secrets and passwords.
+fn create_private_dir(root: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(root)
+        .with_context(|| format!("create {}", root.display()))?;
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restrict {}", root.display()))
 }
 
 /// Step 6's S2S-off row, then the deployments with S2S, the third
@@ -103,24 +143,36 @@ async fn run_all(harness: &mut Harness, log: &mut EvidenceLog, filter: &Filter, 
     }
 }
 
-/// SIGINT or SIGTERM.
-async fn interrupt() {
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
+/// SIGINT, SIGTERM and SIGHUP, caught from before the first service starts
+/// so that none of them ends the harness without its cleanup: the default
+/// action would leave every service's process group running.
+struct Interrupts {
+    interrupt: Signal,
+    terminate: Signal,
+    hangup: Signal,
+}
+
+impl Interrupts {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt()).context("catch SIGINT")?,
+            terminate: signal(SignalKind::terminate()).context("catch SIGTERM")?,
+            hangup: signal(SignalKind::hangup()).context("catch SIGHUP")?,
+        })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+            _ = self.hangup.recv() => {}
         }
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        () = terminate => {}
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut interrupts = Interrupts::new()?;
     let options = options()?;
     let bins = Binaries::from_env()?;
     let git_sha = std::env::var("INTEROP_GIT_SHA").unwrap_or_else(|_| "unknown".to_owned());
@@ -135,7 +187,7 @@ async fn main() -> Result<()> {
         Some(root) => root.clone(),
         None => std::env::temp_dir().join(["waddle-federation-interop-", &run_id].concat()),
     };
-    std::fs::create_dir_all(&root)?;
+    create_private_dir(&root)?;
     let mut log = EvidenceLog::new(run_id, started, environment(&bins, &git_sha));
     let later = [
         Section::Flow,
@@ -143,31 +195,44 @@ async fn main() -> Result<()> {
         Section::Negative,
         Section::Restart,
     ];
+    let every = [
+        Section::S2sDisabled,
+        Section::Flow,
+        Section::Observation,
+        Section::Negative,
+        Section::Restart,
+    ];
 
-    match Harness::prepare(&root, options.ports, bins, git_sha).await {
-        Ok(mut harness) => {
-            // An interrupted run still stops every service it started: the
-            // run is abandoned at its next await and the harness shuts down.
+    // An interrupt abandons the work at its next await. During `prepare`
+    // the services started so far are dropped, which kills their process
+    // groups; afterwards the harness shuts every service down.
+    let prepared = tokio::select! {
+        prepared = Harness::prepare(&root, options.ports, bins, git_sha) => Some(prepared),
+        () = interrupts.recv() => None,
+    };
+    let interrupted = match prepared {
+        None => true,
+        Some(Ok(mut harness)) => {
             let interrupted = tokio::select! {
                 () = run_all(&mut harness, &mut log, &options.filter, &later) => false,
-                () = interrupt() => true,
+                () = interrupts.recv() => true,
             };
             harness.shutdown().await;
-            if interrupted {
-                log.write(&options.evidence)?;
-                anyhow::bail!("interrupted; partial evidence written");
-            }
+            interrupted
         }
-        Err(error) => {
+        Some(Err(error)) => {
             let reason = format!("the environment did not start: {error:#}");
-            runner::record_all_unverified(
-                &mut log,
-                &options.filter,
-                &[Section::S2sDisabled],
-                &reason,
-            );
-            runner::record_all_unverified(&mut log, &options.filter, &later, &reason);
+            runner::record_all_unverified(&mut log, &options.filter, &every, &reason);
+            false
         }
+    };
+    if interrupted {
+        runner::record_unrun(
+            &mut log,
+            &options.filter,
+            &every,
+            "the run was interrupted before this row finished",
+        );
     }
     let (json, markdown) = log.write(&options.evidence)?;
     println!("evidence: {} and {}", json.display(), markdown.display());
@@ -177,5 +242,6 @@ async fn main() -> Result<()> {
     } else {
         std::fs::remove_dir_all(&root).ok();
     }
+    anyhow::ensure!(!interrupted, "interrupted; partial evidence written");
     Ok(())
 }

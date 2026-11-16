@@ -205,12 +205,12 @@ impl Pki {
             &[spec.stem.as_str(), "crt"].join("."),
             &certificate_pem,
         )?;
-        let key_path = write(
+        let key_path = write_private(
             &self.directory,
             &[spec.stem.as_str(), "key"].join("."),
             &key_pem,
         )?;
-        let combined_path = write(
+        let combined_path = write_private(
             &self.directory,
             &[spec.stem.as_str(), "pem"].join("."),
             &[certificate_pem.as_str(), key_pem.as_str()].concat(),
@@ -368,6 +368,13 @@ fn common_name(name: &str) -> DistinguishedName {
     let mut distinguished_name = DistinguishedName::new();
     distinguished_name.push(DnType::CommonName, name);
     distinguished_name
+}
+
+/// Write a file holding a private key, readable by its owner only.
+fn write_private(directory: &Path, file: &str, contents: &str) -> Result<PathBuf> {
+    let path = directory.join(file);
+    crate::process::write_private(&path, contents.as_bytes())?;
+    Ok(path)
 }
 
 fn write(directory: &Path, file: &str, contents: &str) -> Result<PathBuf> {

@@ -137,7 +137,14 @@ impl Harness {
         let mut material = BTreeMap::new();
         for home in [Home::A, Home::B] {
             let secret = root.join([home.label(), "-dialback-secret"].concat());
-            std::fs::write(&secret, uuid::Uuid::new_v4().simple().to_string().repeat(2))?;
+            crate::process::write_private(
+                &secret,
+                uuid::Uuid::new_v4()
+                    .simple()
+                    .to_string()
+                    .repeat(2)
+                    .as_bytes(),
+            )?;
             let mut credentials = BTreeMap::new();
             for domain in topology::waddle_domains(home.domain()) {
                 let leaf = leaves.get(&domain).context("a Waddle leaf")?;
@@ -449,6 +456,9 @@ impl Harness {
         }
         self.receiver.set_behaviour(Behaviour::External);
         self.receiver.set_versions(crate::pki::all_versions());
+        self.redirect.set_behaviour(Behaviour::RedirectBeforeTls(
+            ["127.0.0.1:", &self.ports.redirect_target().to_string()].concat(),
+        ));
         for (domain, leaf) in self.leaves.clone() {
             self.receiver.set_leaf(&domain, leaf);
         }
