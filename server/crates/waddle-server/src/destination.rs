@@ -309,8 +309,9 @@ pub enum UnroutableReason {
     /// The request cannot be correlated: its id is empty, too long, or
     /// already pending for the same sender and recipient.
     InvalidRequest,
-    /// A join presence for a remote JID whose service discovery recently
-    /// answered that it is not a multi-user chat room (XEP-0045 §6.4).
+    /// A join presence for a remote JID whose domain's service discovery
+    /// recently answered that it is not a multi-user chat service
+    /// (XEP-0045 §6.1).
     NotARoom,
 }
 

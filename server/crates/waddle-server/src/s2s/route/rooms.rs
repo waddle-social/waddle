@@ -8,9 +8,12 @@
 //! local resource only once two things hold: the resource sent it a join
 //! (presence without a type, to an occupant JID, carrying the XEP-0045
 //! §7.2 `<x xmlns='http://jabber.org/protocol/muc'/>` element), and the
-//! room's bare JID answered this server's XEP-0030 `disco#info` with the
-//! `conference/text` identity or the MUC feature (XEP-0045 §6.4). Until it
-//! has answered, the join is held and nothing reaches the JID.
+//! JID's domain answered this server's XEP-0030 `disco#info` as a
+//! multi-user chat service, with the `conference/text` identity or the MUC
+//! feature (XEP-0045 §6.1). Every bare JID with a localpart at such a
+//! service is a room or, when it does not exist yet, one a join creates
+//! (§10.1). Until the domain has answered, the join is held and nothing
+//! reaches the JID.
 //!
 //! The occupancies live in a table every replica shares
 //! ([`super::occupancy`]); this module decides, for one occupancy and one
@@ -35,7 +38,8 @@ use super::occupancy::{Occupancy, OccupancyPhase, RoomVerdict};
 const STATUS_SELF: &str = "110";
 const STATUS_NEW_NICK: &str = "303";
 
-/// The identity a room names in `disco#info` (XEP-0045 §6.4).
+/// The identity a multi-user chat service names in `disco#info` (XEP-0045
+/// §6.1).
 const ROOM_CATEGORY: &str = "conference";
 const ROOM_TYPE: &str = "text";
 
@@ -307,7 +311,8 @@ pub(super) fn join_error(occupancy: &Occupancy, error: StanzaError) -> Option<St
     Some(Stanza::Presence(presence))
 }
 
-/// The `item-not-found` a join to a JID that is not a room receives.
+/// The `item-not-found` a join receives when the JID's domain is not a
+/// multi-user chat service.
 pub(super) fn not_a_room(home: &jid::DomainRef) -> StanzaError {
     super::replies::error(
         home,
@@ -317,8 +322,9 @@ pub(super) fn not_a_room(home: &jid::DomainRef) -> StanzaError {
     )
 }
 
-/// The `remote-server-timeout` a join receives when the JID did not say
-/// whether it is a room, or the room did not answer the join, in time.
+/// The `remote-server-timeout` a join receives when the JID's domain did
+/// not say whether it is a multi-user chat service, or the room did not
+/// answer the join, in time.
 pub(super) fn unanswered(home: &jid::DomainRef) -> StanzaError {
     super::replies::error(
         home,
@@ -329,19 +335,21 @@ pub(super) fn unanswered(home: &jid::DomainRef) -> StanzaError {
 }
 
 /// The XEP-0030 `disco#info` request this server sends from its own
-/// domain `from` to the bare JID `room`, to learn whether it is a room.
-/// It goes to the bare JID, never to an occupant JID, which a client
-/// could answer.
-pub(super) fn disco_request(from: Jid, room: &BareJid, id: String) -> Stanza {
+/// domain `from` to the domain JID `service`, to learn whether it is a
+/// multi-user chat service (XEP-0045 §6.1). It goes to the domain, which
+/// no client can answer, never to a room or an occupant JID. Asking the
+/// service rather than the room lets a join create a room that does not
+/// exist yet, whose own `disco#info` would answer `item-not-found`.
+pub(super) fn disco_request(from: Jid, service: &BareJid, id: String) -> Stanza {
     Stanza::Iq(Box::new(Iq::Get {
         from: Some(from),
-        to: Some(Jid::from(room.clone())),
+        to: Some(Jid::from(service.clone())),
         id,
         payload: Element::from(DiscoInfoQuery { node: None }),
     }))
 }
 
-/// What a remote bare JID's answer to [`disco_request`] says.
+/// What a remote domain's answer to [`disco_request`] says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VerificationAnswer {
     /// A verdict to act on and to cache.

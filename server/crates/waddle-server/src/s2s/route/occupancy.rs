@@ -11,8 +11,9 @@
 //! compare-and-set on the row's revision, so concurrent writers on
 //! different replicas never overwrite each other's change unseen.
 //!
-//! The table also caches whether a remote bare JID is a room, as its
-//! XEP-0030 `disco#info` answered ([`RoomVerdict`]).
+//! The table also caches whether a remote domain is a multi-user chat
+//! service, as its XEP-0030 `disco#info` answered ([`RoomVerdict`]), keyed
+//! by the domain's JID.
 //!
 //! The decisions are recorded in `server/docs/planning/s2s-routing-2047.md`
 //! (outbound MUC).
@@ -36,8 +37,8 @@ pub const MAX_JOIN_ID_BYTES: usize = 256;
 /// Where an occupancy stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OccupancyPhase {
-    /// The join is held while this server asks the remote JID whether it
-    /// is a room; nothing was sent to it.
+    /// The join is held while this server asks the room's domain whether
+    /// it is a multi-user chat service; nothing was sent to the room.
     Verifying,
     /// The join presence was sent; the room has not yet sent the
     /// occupant's own presence.
@@ -140,12 +141,13 @@ pub enum InsertOutcome {
     Bounds,
 }
 
-/// Whether a remote bare JID is a room, as its `disco#info` answered.
+/// Whether a remote domain is a multi-user chat service, whose bare JIDs
+/// with a localpart are rooms, as its `disco#info` answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomVerdict {
     /// It names the `conference/text` identity or the MUC feature.
     Room,
-    /// It answered, and is not a room.
+    /// It answered, and is not a multi-user chat service.
     NotRoom,
 }
 

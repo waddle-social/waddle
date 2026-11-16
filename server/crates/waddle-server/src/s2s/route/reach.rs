@@ -72,7 +72,8 @@ pub enum InboundReach {
     ServerPing,
     /// An IQ result or error for the server domain, delivered only when it
     /// completes a request this server sent: the `disco#info` that learns
-    /// whether a remote JID a local resource joins is a room.
+    /// whether the domain of a remote room a local resource joins is a
+    /// multi-user chat service.
     ServerResponse,
     /// An IQ result or error for a local resource, delivered only when it
     /// completes a request that resource sent (D7's first exception).

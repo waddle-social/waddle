@@ -16,9 +16,10 @@
 -- stays below PostgreSQL's B-tree limit, 2704 bytes with the default 8 kB
 -- page.
 --
--- `s2s_remote_room_verdicts` caches, per remote bare JID, whether its
--- XEP-0030 disco#info named it a room, until `expires_at_ms`. A join to a
--- JID that is not known to be a room is held until it answers.
+-- `s2s_remote_room_verdicts` caches, per remote domain (its JID in
+-- `room_jid`), whether its XEP-0030 disco#info named it a multi-user chat
+-- service, until `expires_at_ms`. A join to a room at a domain not known to
+-- be one is held until the domain answers.
 -- See server/docs/planning/s2s-routing-2047.md.
 CREATE TABLE s2s_remote_room_occupancies (
     occupant_jid TEXT NOT NULL,
