@@ -11,6 +11,10 @@ struct WaddleApp: App {
 
     private static let isHostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+    init() {
+        HuddleAppearance.apply()
+    }
+
     var body: some Scene {
         WindowGroup {
             if Self.isHostingTests {

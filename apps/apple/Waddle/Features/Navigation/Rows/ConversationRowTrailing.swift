@@ -10,32 +10,15 @@ struct ConversationRowTrailing: View {
             if attention.isMuted {
                 Image(systemName: "bell.slash")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.Colors.fgSoft)
             }
             if attention.isMention && attention.unread == 0 {
                 Image(systemName: "at")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.Colors.goldText)
             }
             UnreadBadge(count: attention.unread, isMention: attention.isMention)
         }
         .accessibilityHidden(true)
-    }
-}
-
-/// The row title: bold while unread, dimmed while muted and read.
-struct ConversationRowTitle: View {
-    let title: String
-    let attention: ConversationAttention
-
-    var body: some View {
-        Text(title)
-            .fontWeight(attention.isUnread ? .semibold : .regular)
-            .foregroundStyle(isDimmed ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.primary)
-            .lineLimit(1)
-    }
-
-    private var isDimmed: Bool {
-        attention.isMuted && !attention.isUnread
     }
 }

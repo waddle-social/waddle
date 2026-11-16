@@ -1,5 +1,19 @@
 import SwiftUI
 
+private struct HuddleGroundKey: EnvironmentKey {
+    static let defaultValue = Theme.Colors.bg
+}
+
+extension EnvironmentValues {
+    /// The colour of the ground this view sits on, so marks that cut into
+    /// it (a presence dot's ring) can match. Set it where the ground
+    /// changes: the sidebar, a card.
+    var huddleGround: Color {
+        get { self[HuddleGroundKey.self] }
+        set { self[HuddleGroundKey.self] = newValue }
+    }
+}
+
 /// How far a surface sits above the page. Night shows depth with a light
 /// top edge and a border; Daylight with a soft shadow.
 enum HuddleElevation: CaseIterable {

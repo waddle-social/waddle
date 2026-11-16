@@ -52,7 +52,7 @@ name the issue that tracks them.
 | Nick colors | 0392 | ❌ | ✅ | Shared Rust hue, HSL 55%/45% like web |
 | Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
 | Inbox / unread counts | 0430 | ❌ | ✅ | Server-authoritative with read-clear barrier; mention badges; app badge. Baseline: unread counts were hardcoded to 0 |
-| Unread overview (Activity) | 0430, 0313 | ❌ | 🟡 | iPhone Activity tab matches web `/unread`: rooms with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. iPad/Mac have no Activity surface yet |
+| Unread overview (Inbox) | 0430, 0313 | ❌ | ✅ | Matches web `/unread`: one card per room with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. A tab on iPhone, a sidebar destination on iPad and Mac |
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |
 | Slash commands | 0050, 0004 | ❌ | ✅ | Built-ins (`/me`, `/shrug`, `/giphy`, `/away`, `/active`, `/dnd`) plus server extension commands discovered over XEP-0050 at session start; popover completion, inline single-field execution, XEP-0004 form sheet for multi-step commands |
 | Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send. Hardware keyboard on iPad and iPhone: Return sends, Shift/Option-Return adds a line, Tab accepts a suggestion, Escape cancels, as on Mac |
@@ -118,4 +118,4 @@ name the issue that tracks them.
 | Reconnect | — | 🟡 | ✅ | Jittered exponential backoff, 15 s connect budget, resume on foreground. Baseline: fixed 1.5 s retry, no backoff, no network awareness |
 | XMPP-native data plane | — | ❌ | ✅ | All HTTP data-plane calls removed. Baseline: called `/v1/space`, `/v1/channels`, `/v1/space/members`, `/api/users/search` over HTTP; none exist on the server |
 | Automated tests | — | ❌ | ✅ | WaddleKit Swift Testing suite and design-system snapshot tests (Night and Daylight, iOS and macOS) in CI. Baseline: no test target |
-| Design system | — | — | 🟡 | Polar Huddle tokens generated from `design/src/preset.ts`, bundled fonts, Night and Daylight themes, shared components (#2454). Existing screens keep their layouts and system text styles until the restyle (#2455) |
+| Design system | — | — | 🟡 | Polar Huddle tokens generated from `design/src/preset.ts`, bundled fonts, Night and Daylight themes, shared components (#2454). Restyled so far: the shell, sidebar, Home, DMs list and Inbox. Conversation, details and account screens keep their layouts and system text styles until the rest of #2455 |

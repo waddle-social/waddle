@@ -1,5 +1,5 @@
 import Foundation
-@testable import WaddleKit
+import WaddleKit
 
 func jid(_ raw: String) -> JID {
     JID(parsing: raw)!

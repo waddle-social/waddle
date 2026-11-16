@@ -1,21 +1,23 @@
 import SwiftUI
 import WaddleKit
 
-/// A 1:1 conversation row: compact in the sidebar, two lines on iPhone.
+/// A 1:1 conversation row. One line in the sidebar and on the phone's
+/// Home; two lines, with a preview, in the phone's DMs tab.
 struct DirectNavigationRow: View {
     @Environment(SessionCoordinator.self) private var session
     let direct: DirectConversation
     let style: ConversationLinkStyle
+    /// One line even on the phone.
+    var isCompact = false
 
     var body: some View {
         let attention = ConversationAttention(session: session, conversation: direct.conversation)
         let title = session.directory.title(for: direct.conversation)
         let availability = session.presence.availability(of: direct.peer)
         ConversationLink(conversation: direct.conversation, style: style) {
-            switch style {
-            case .sidebar:
-                SidebarDirectRowLabel(direct: direct, title: title, availability: availability, attention: attention)
-            case .phone:
+            if style == .sidebar || isCompact {
+                CompactDirectRowLabel(direct: direct, title: title, availability: availability, attention: attention)
+            } else {
                 PhoneDirectRowLabel(direct: direct, title: title, availability: availability, attention: attention)
             }
         }
@@ -23,22 +25,18 @@ struct DirectNavigationRow: View {
     }
 }
 
-/// Mail/Slack-density DM row for the sidebar.
-struct SidebarDirectRowLabel: View {
+/// One-line DM row: avatar with presence, name, unread.
+struct CompactDirectRowLabel: View {
     let direct: DirectConversation
     let title: String
     let availability: Availability
     let attention: ConversationAttention
 
     var body: some View {
-        Label {
-            HStack(spacing: Theme.Spacing.s) {
-                ConversationRowTitle(title: title, attention: attention)
-                Spacer(minLength: Theme.Spacing.xs)
-                ConversationRowTrailing(attention: attention)
-            }
-        } icon: {
+        NavigationRowLabel(title: title, isUnread: attention.isUnread, isDimmed: attention.isDimmed) {
             PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 20)
+        } trailing: {
+            ConversationRowTrailing(attention: attention)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(accessibilityText))
@@ -49,7 +47,7 @@ struct SidebarDirectRowLabel: View {
     }
 }
 
-/// Two-line DM row for iPhone lists: name and time, preview and badge.
+/// Two-line DM row for the phone's DMs tab: name and time, preview and badge.
 struct PhoneDirectRowLabel: View {
     let direct: DirectConversation
     let title: String
@@ -58,26 +56,26 @@ struct PhoneDirectRowLabel: View {
 
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
-            PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 44)
+            PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 40)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
-                    ConversationRowTitle(title: title, attention: attention)
+                    NavigationRowTitle(title: title, isUnread: attention.isUnread, isDimmed: attention.isDimmed)
                     Spacer(minLength: Theme.Spacing.xs)
                     Text(ListTimestamp.string(for: direct.lastActivity))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.timestamp)
+                        .foregroundStyle(Theme.Colors.fgSoft)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
                     Text(direct.preview ?? " ")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                         .lineLimit(1)
                     Spacer(minLength: Theme.Spacing.xs)
                     ConversationRowTrailing(attention: attention)
                 }
             }
         }
-        .padding(.vertical, Theme.Spacing.xs)
+        .padding(.vertical, Theme.Spacing.s)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(accessibilityText))
     }

@@ -11,7 +11,6 @@ struct RoomHeaderSection: View {
             VStack(spacing: Theme.Spacing.s) {
                 RoomSymbolTile(
                     symbol: channel.map { ChannelSymbol.name(for: $0) } ?? "number",
-                    colorKey: room.description,
                     size: 64
                 )
                 Text(title)

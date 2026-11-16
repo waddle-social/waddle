@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// A channel or group DM row in the sidebar or the phone home list.
+/// A room or group DM row in the sidebar or the phone home list.
 struct ChannelNavigationRow: View {
     @Environment(SessionCoordinator.self) private var session
     let channel: Channel
@@ -22,15 +22,12 @@ struct ChannelRowLabel: View {
     let attention: ConversationAttention
 
     var body: some View {
-        Label {
-            HStack(spacing: Theme.Spacing.s) {
-                ConversationRowTitle(title: channel.name, attention: attention)
-                Spacer(minLength: Theme.Spacing.xs)
-                ConversationRowTrailing(attention: attention)
-            }
-        } icon: {
+        NavigationRowLabel(title: channel.name, isUnread: attention.isUnread, isDimmed: attention.isDimmed) {
             Image(systemName: ChannelSymbol.name(for: channel))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(attention.isUnread ? Theme.Colors.fgMuted : Theme.Colors.fgSoft)
+        } trailing: {
+            ConversationRowTrailing(attention: attention)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(attention.accessibilityLabel(title: channel.name)))

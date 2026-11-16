@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// Delivery settling (XEP-0198), sender-less 1:1 routing (RFC 6120) and
 /// cursor authority (XEP-0490).

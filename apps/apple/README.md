@@ -92,6 +92,12 @@ xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination 
 and compares it with the goldens in `WaddleTests/__Snapshots__`, one set per
 platform. After an intended visual change, delete the affected goldens and
 run the tests once to record new ones (that run fails), then commit them.
+Screen tests (`ShellScreenSnapshotTests`) host a whole screen in a window,
+fed by `SampleSession`: a signed-in session over the scripted `FakePort`,
+with no network. Whole screens draw system chrome that changes between OS
+releases, so they are compared only on the release the goldens were recorded
+on and skipped elsewhere (`screenGoldenOSVersion`).
+
 The goldens were recorded on iOS 27 and macOS 27. The bundled fonts render
 alike on older releases; SF Symbols do not, so a snapshot with detailed
 symbols passes a lower `precision`.

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// XEP-0308 corrections re-send the whole message, so the XEP-0372
 /// mentions (and XEP-0394 markup) of the original must survive an edit.

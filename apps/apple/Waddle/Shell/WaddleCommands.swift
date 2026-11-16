@@ -10,7 +10,7 @@ struct WaddleCommands: Commands {
             Button("New Message") { navigation?.sheet = .newMessage }
                 .keyboardShortcut("n", modifiers: .command)
                 .disabled(navigation == nil)
-            Button("New Channel") { navigation?.sheet = .newChannel }
+            Button("New Room") { navigation?.sheet = .newChannel }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(navigation == nil)
         }

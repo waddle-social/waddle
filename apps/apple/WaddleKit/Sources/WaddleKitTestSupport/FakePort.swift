@@ -1,5 +1,5 @@
 import Foundation
-@testable import WaddleKit
+import WaddleKit
 
 /// Records every port call and answers with scripted values.
 @MainActor

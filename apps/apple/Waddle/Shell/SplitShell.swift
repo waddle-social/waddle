@@ -11,13 +11,15 @@ struct SplitShell: View {
     var body: some View {
         @Bindable var navigation = navigation
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            Sidebar(selection: $navigation.selection)
+            Sidebar()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
             NavigationStack {
                 detail
+                    .background(Theme.Colors.bg)
             }
         }
+        .tint(Theme.Colors.action)
         .inspector(isPresented: inspectorBinding) {
             inspectorContent
                 .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
@@ -40,11 +42,16 @@ struct SplitShell: View {
             ConversationScreen(conversation: conversation)
                 .id(conversation)
         } else {
-            EmptyStateView(
-                title: "No conversation selected",
-                message: "Pick a channel or direct message from the sidebar.",
-                symbol: "bubble.left.and.bubble.right"
-            )
+            switch navigation.splitSection {
+            case .home:
+                EmptyStateView(
+                    title: "Pick a conversation",
+                    message: "Choose a room or a direct message to start reading.",
+                    symbol: "bubble.left.and.bubble.right"
+                )
+            case .inbox:
+                InboxView(style: .sidebar)
+            }
         }
     }
 

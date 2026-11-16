@@ -3,14 +3,15 @@ import WaddleKit
 
 /// Where a conversation row lives, which decides how it navigates.
 enum ConversationLinkStyle {
-    /// iPad/Mac sidebar: the link value drives `List(selection:)`.
+    /// iPad/Mac sidebar: the row selects the conversation.
     case sidebar
-    /// iPhone stacks: the link pushes a `Route`.
+    /// iPhone stacks: the row pushes a `Route`.
     case phone
 }
 
 /// A row that opens `conversation` the way its list navigates.
 struct ConversationLink<Content: View>: View {
+    @Environment(NavigationModel.self) private var navigation
     let conversation: ConversationID
     let style: ConversationLinkStyle
     @ViewBuilder let label: () -> Content
@@ -18,13 +19,23 @@ struct ConversationLink<Content: View>: View {
     var body: some View {
         switch style {
         case .sidebar:
-            NavigationLink(value: conversation) {
-                label()
+            let isSelected = navigation.selection == conversation
+            Button {
+                navigation.selection = conversation
+            } label: {
+                NavigationRowChrome(isSelected: isSelected) { label() }
             }
+            .buttonStyle(.plain)
+            .navigationListRow()
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
         case .phone:
-            NavigationLink(value: Route.conversation(conversation)) {
-                label()
-            }
+            NavigationRowChrome { label() }
+                // The link sits behind the row so the list draws no chevron.
+                .background {
+                    NavigationLink(value: Route.conversation(conversation)) { EmptyView() }
+                        .opacity(0)
+                }
+                .navigationListRow()
         }
     }
 }
@@ -36,6 +47,9 @@ struct ConversationAttention: Equatable {
     let isMuted: Bool
 
     var isUnread: Bool { unread > 0 || isMention }
+
+    /// Muted and read: the row steps back.
+    var isDimmed: Bool { isMuted && !isUnread }
 
     init(unread: Int, isMention: Bool, isMuted: Bool) {
         self.unread = unread

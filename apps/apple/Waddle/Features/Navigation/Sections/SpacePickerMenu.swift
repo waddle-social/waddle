@@ -18,15 +18,13 @@ struct SpacePickerMenu: View {
             .pickerStyle(.inline)
         } label: {
             HStack(spacing: Theme.Spacing.s) {
-                Image(systemName: "square.grid.2x2")
-                    .foregroundStyle(.secondary)
                 Text(SpaceScope.title(for: SpaceScope.resolved(selection, in: spaces), in: spaces))
-                    .font(.headline)
-                    .foregroundStyle(.primary)
+                    .huddleText(Theme.Typography.channel)
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
+                Image(systemName: "chevron.down")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Colors.fgSoft)
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())

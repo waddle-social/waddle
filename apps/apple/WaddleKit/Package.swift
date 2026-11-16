@@ -24,10 +24,14 @@ let package = Package(
                 .product(name: "CryptoExtras", package: "swift-crypto"),
             ]
         ),
+        // Test-only: the scripted port and fixtures. The apps' screen tests
+        // compile these sources into their own bundle (see project.yml).
+        .target(name: "WaddleKitTestSupport", dependencies: ["WaddleKit"]),
         .testTarget(
             name: "WaddleKitTests",
             dependencies: [
                 "WaddleKit",
+                "WaddleKitTestSupport",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "CryptoExtras", package: "swift-crypto"),
             ]

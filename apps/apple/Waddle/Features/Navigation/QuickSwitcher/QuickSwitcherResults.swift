@@ -49,7 +49,7 @@ struct QuickSwitcherResults: View {
             ContentUnavailableView(
                 "No conversations yet",
                 systemImage: "bubble.left.and.bubble.right",
-                description: Text("Channels and messages you join show up here.")
+                description: Text("Rooms and messages you join show up here.")
             )
         } else {
             ContentUnavailableView.search(text: query)
@@ -121,9 +121,9 @@ struct QuickSwitcherIcon: View {
     var body: some View {
         switch entry.kind {
         case let .channel(kind):
-            RoomSymbolTile(symbol: ChannelSymbol.name(for: kind), colorKey: entry.conversation.jid.description, size: 28)
+            RoomSymbolTile(symbol: ChannelSymbol.name(for: kind), size: 28)
         case .groupDM:
-            RoomSymbolTile(symbol: "person.2", colorKey: entry.conversation.jid.description, size: 28)
+            RoomSymbolTile(symbol: "person.2", size: 28)
         case .direct:
             PeerPresenceAvatar(
                 jid: entry.conversation.jid,

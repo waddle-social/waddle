@@ -112,6 +112,9 @@ targets:
       - path: WaddleTests
         excludes:
           - "**/__Snapshots__/**"
+      # The scripted port and fixtures, compiled into the test bundle: it
+      # must use the host app's copy of WaddleKit, not link a second one.
+      - path: WaddleKit/Sources/WaddleKitTestSupport
     dependencies:
       - target: Waddle-iOS
       - package: SnapshotTesting
@@ -129,6 +132,9 @@ targets:
       - path: WaddleTests
         excludes:
           - "**/__Snapshots__/**"
+      # The scripted port and fixtures, compiled into the test bundle: it
+      # must use the host app's copy of WaddleKit, not link a second one.
+      - path: WaddleKit/Sources/WaddleKitTestSupport
     dependencies:
       - target: Waddle-macOS
       - package: SnapshotTesting

@@ -3,6 +3,7 @@ import CryptoExtras
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 @Suite("XEP-0448 encrypted files")
 struct EncryptedFileTests {

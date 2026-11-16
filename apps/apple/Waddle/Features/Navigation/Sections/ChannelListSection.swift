@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// The "Channels" section: loading, empty and populated states.
+/// The "Rooms" section: loading, empty and populated states.
 struct ChannelListSection: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -10,57 +10,53 @@ struct ChannelListSection: View {
     let isSearching: Bool
 
     var body: some View {
-        Section {
-            if channels.isEmpty && !isSearching {
-                emptyContent
-            }
-            ForEach(channels) { channel in
-                ChannelNavigationRow(channel: channel, style: style)
-            }
-        } header: {
-            NavigationSectionHeader(title: "Channels", addLabel: "Create a channel") {
-                navigation.sheet = .newChannel
-            }
+        NavigationSectionHeader(title: "Rooms", addLabel: "New room") {
+            navigation.sheet = .newChannel
+        }
+        if channels.isEmpty && !isSearching {
+            emptyContent
+        }
+        ForEach(channels) { channel in
+            ChannelNavigationRow(channel: channel, style: style)
         }
     }
 
     @ViewBuilder
     private var emptyContent: some View {
         if !session.directory.hasLoadedTopology {
-            NavigationLoadingRow(title: "Loading channels…")
+            NavigationLoadingRow(title: "Loading rooms…")
         } else {
             switch style {
             case .sidebar:
-                Button {
+                NavigationEmptyAction(title: "New room", symbol: "plus") {
                     navigation.sheet = .newChannel
-                } label: {
-                    Label("Create a channel", systemImage: "plus")
                 }
-                .foregroundStyle(.secondary)
             case .phone:
-                NoChannelsView {
+                NoRoomsView {
                     navigation.sheet = .newChannel
                 }
-                .listRowBackground(Color.clear)
+                .navigationListRow()
             }
         }
     }
 }
 
-/// Empty state for a directory without channels.
-struct NoChannelsView: View {
+/// Empty state for a community without rooms.
+struct NoRoomsView: View {
     let onCreate: () -> Void
 
     var body: some View {
-        ContentUnavailableView {
-            Label("No channels yet", systemImage: "number")
-        } description: {
-            Text("Channels keep conversations organized by topic.")
-        } actions: {
-            Button("Create a channel", action: onCreate)
+        VStack(spacing: Theme.Spacing.m) {
+            EmptyStateView(
+                title: "No rooms yet",
+                message: "Rooms keep conversations together by topic. Start the first one.",
+                symbol: "number"
+            )
+            Button("New room", action: onCreate)
                 .buttonStyle(.huddle(.primary))
         }
         .frame(maxWidth: .infinity)
+        .padding(.vertical, Theme.Spacing.l)
     }
 }
 
@@ -72,14 +68,11 @@ struct GroupChatListSection: View {
 
     var body: some View {
         if !groups.isEmpty {
-            Section {
-                ForEach(groups) { group in
-                    ChannelNavigationRow(channel: group, style: style)
-                }
-            } header: {
-                NavigationSectionHeader(title: "Group chats", addLabel: "New group chat") {
-                    navigation.sheet = .newMessage
-                }
+            NavigationSectionHeader(title: "Group chats", addLabel: "New group chat") {
+                navigation.sheet = .newMessage
+            }
+            ForEach(groups) { group in
+                ChannelNavigationRow(channel: group, style: style)
             }
         }
     }

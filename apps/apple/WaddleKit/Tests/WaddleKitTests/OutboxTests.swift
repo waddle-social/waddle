@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// A message with every outbound option populated.
 private func fullMessage() -> OutboundMessage {

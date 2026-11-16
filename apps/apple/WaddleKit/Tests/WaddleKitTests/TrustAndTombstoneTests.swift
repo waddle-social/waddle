@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// Room identity trust (XEP-0359), groupchat routing and archived
 /// XEP-0424 tombstones.
