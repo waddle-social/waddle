@@ -348,7 +348,7 @@ final class ActiveSession {
         guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
               let webSocket = AuthClient.xmppWebSocketURL(auth.xmppWebsocketURL, server: server)
         else { return nil }
-        let account = AccountIdentity(jid: jid, nick: auth.username)
+        let account = AccountIdentity(jid: jid, nick: auth.username, resource: ServerSettings.resource)
         let config = WaddleConfig(
             serverUrl: webSocket.absoluteString,
             jid: jid.description,

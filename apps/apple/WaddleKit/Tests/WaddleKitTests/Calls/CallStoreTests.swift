@@ -1,0 +1,334 @@
+import Testing
+
+@testable import WaddleKit
+@testable import WaddleKitTestSupport
+
+@MainActor
+@Suite struct CallStoreTests {
+    @Test func incomingProposeRingsTheCallersBareJID() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callVideo)))
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callVideo)))
+        await eventually { f.port.callSends.count == 1 }
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        f.store.clear()
+    }
+    @Test func duplicateProposeDoesNotRingTwice() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 2 }
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .reject(callPeer, "c1", false)])
+        f.store.clear()
+    }
+
+    @Test func acceptingSendsProceedToFullJID() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        #expect(await f.store.acceptIncoming())
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)))
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1")])
+        f.store.clear()
+    }
+
+    @Test func decliningRejectsAndClears() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        #expect(await f.store.declineIncoming())
+        #expect(f.store.state == .idle)
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .reject(callPeer, "c1", false)])
+    }
+
+    @Test func sessionInitiateEstablishesAndConfirmsAsOurResource() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        #expect(await f.store.acceptIncoming())
+        f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio)))
+        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
+        await eventually { f.port.callSends.count == 3 }
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+        f.store.clear()
+    }
+
+    @Test func staleSessionInitiateIsIgnored() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio), sid: "other-sid"))
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        f.store.clear()
+    }
+
+    @Test func startProposesToBarePeerAndRecordsInitiator() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        #expect(f.store.state == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn)))
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio)])
+        f.store.clear()
+    }
+
+    @Test func startIsRefusedWhenAnotherCallIsLive() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        #expect(await !f.store.startCall(to: callPeer.bare, media: callAudio))
+        await eventually { f.port.callSends.count == 1 }
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        f.store.clear()
+    }
+
+    @Test func failedProposeReturnsIdleAndReportsError() async {
+        let f = CallFixture()
+        f.port.callResults["propose"] = false
+        #expect(await !f.store.startCall(to: callPeer.bare, media: callAudio))
+        #expect(f.store.state == .idle)
+        #expect(f.store.lastError == "call propose failed")
+    }
+
+    @Test func ringingFromCalleeMarksOutgoingSlot() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.ringing))
+        #expect(
+            f.store.state == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callAudio, initiator: callOwn, isRinging: true)))
+        f.store.clear()
+    }
+
+    @Test func proceedInitiatesAsOurResourceAndTimesOutWaitingForAccept() async {
+        let port = FakePort()
+        let store = CallStore(
+            port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
+            ringTimeout: .seconds(10), sessionTimeout: .milliseconds(30), newSid: { "c-out" })
+        #expect(await store.startCall(to: callPeer.bare, media: callVideo))
+        store.handle(CallEvent(from: callPeer, to: nil, sid: "c-out", kind: .proceed))
+        await eventually { port.callSends.count == 3 }
+        #expect(
+            port.callSends == [
+                .propose(callPeer.bare, "c-out", callVideo), .initiate(callPeer, callOwn, "c-out", callVideo),
+                .terminate(callPeer, "c-out", .timeout),
+            ])
+        #expect(store.state == .ended(sid: "c-out", reason: .timeout))
+        store.clear()
+    }
+
+    @Test func sessionAcceptActivatesWithOurInitiatorAndRetiresTimeout() async {
+        let f = CallFixture(sessionTimeout: .milliseconds(100))
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.proceed))
+        await eventually { f.port.callSends.count == 2 }
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        let clock = CallFixture(ringTimeout: .milliseconds(200))
+        #expect(await clock.store.startCall(to: callPeer.bare, media: callAudio))
+        await eventually { clock.port.callSends.count == 2 }
+        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callOwn)))
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .initiate(callPeer, callOwn, "c1", callAudio)])
+        f.store.clear()
+        clock.store.clear()
+    }
+
+    @Test func unansweredOutgoingAutomaticallyRetracts() async {
+        let port = FakePort()
+        let store = CallStore(
+            port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare,
+            ringTimeout: .milliseconds(30), newSid: { "c-out" })
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        await eventually { port.callSends.count == 2 }
+        #expect(store.state == .ended(sid: "c-out", reason: .timeout))
+        #expect(port.callSends == [.propose(callPeer.bare, "c-out", callAudio), .retract(callPeer.bare, "c-out")])
+        store.clear()
+    }
+
+    @Test func peerRejectEndsOutgoingAndCancelsRing() async {
+        let f = CallFixture(ringTimeout: .milliseconds(30))
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.reject(reason: nil, tieBreak: false)))
+        let clock = CallFixture(ringTimeout: .milliseconds(60))
+        #expect(await clock.store.startCall(to: callPeer.bare, media: callAudio))
+        await eventually { clock.port.callSends.count == 2 }
+        #expect(f.store.state == .ended(sid: "c1", reason: .rejected))
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio)])
+        f.store.clear()
+        clock.store.clear()
+    }
+
+    @Test func remoteTerminateEndsActiveWithReason() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        f.store.handle(f.event(.sessionTerminate(reason: .success)))
+        #expect(f.store.state == .ended(sid: "c1", reason: .finished(.success)))
+        f.store.clear()
+    }
+
+    @Test func remoteFinishEndsIncomingWithReason() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.store.handle(f.event(.finish(reason: .success, migratedTo: nil)))
+        #expect(f.store.state == .ended(sid: "c1", reason: .finished(.success)))
+        f.store.clear()
+    }
+
+    @Test func activeHangUpTerminatesThenFinishes() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        f.port.callSends = []
+        await f.store.hangUp()
+        #expect(f.store.state == .idle)
+        #expect(f.port.callSends == [.terminate(callPeer, "c1", .success), .finish(callPeer, "c1", nil)])
+    }
+
+    @Test func orphanedTerminateStillGetsFinish() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        f.port.callSends = []
+        f.port.callTerminateOutcome = .orphaned
+        await f.store.hangUp()
+        #expect(f.port.callSends == [.terminate(callPeer, "c1", .success), .finish(callPeer, "c1", nil)])
+    }
+
+    @Test func failedTerminateSkipsFinish() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
+        f.port.callSends = []
+        f.port.callTerminateOutcome = .error
+        await f.store.hangUp()
+        #expect(f.port.callSends == [.terminate(callPeer, "c1", .success)])
+        #expect(f.store.lastError == "call session terminate failed")
+    }
+
+    @Test func ownProposeCarbonNeverRings() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio), from: callOwn))
+        #expect(f.store.state == .idle)
+        #expect(f.port.callSends.isEmpty)
+        f.store.clear()
+    }
+
+    @Test func outgoingHangUpRetracts() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.port.callSends = []
+        await f.store.hangUp()
+        #expect(f.store.state == .idle)
+        #expect(f.port.callSends == [.retract(callPeer.bare, "c1")])
+    }
+
+    @Test func ownProceedCarbonStopsLocalRingWithoutReply() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        f.port.callSends = []
+        f.store.handle(f.event(.proceed, from: callOwn))
+        #expect(f.store.state == .idle)
+        #expect(f.port.callSends.isEmpty)
+        f.store.clear()
+    }
+
+    @Test func ownRejectCarbonStopsIncomingWithoutReply() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        f.port.callSends = []
+        f.store.handle(f.event(.reject(reason: nil, tieBreak: false), from: callOwn))
+        #expect(f.store.state == .ended(sid: "c1", reason: .rejected))
+        #expect(f.port.callSends.isEmpty)
+        f.store.clear()
+    }
+
+    @Test func unrelatedOwnCarbonIsIgnored() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.store.handle(f.event(.proceed, sid: "unrelated", from: callOwn))
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        f.store.clear()
+    }
+
+    @Test func dismissClearsOnlyEndedSlot() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.store.handle(f.event(.retract(reason: nil, tieBreak: false)))
+        f.store.dismiss()
+        #expect(f.store.state == .idle)
+        f.store.clear()
+    }
+
+    @Test func dismissCannotKillAcceptingIncoming() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        #expect(await f.store.acceptIncoming())
+        f.store.dismiss()
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)))
+        f.store.clear()
+    }
+
+    @Test func aFreshProposeCanReplaceEnded() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.store.handle(f.event(.retract(reason: nil, tieBreak: false)))
+        f.store.handle(f.event(.propose(callAudio), sid: "c2"))
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c2", media: callAudio)))
+        f.store.clear()
+    }
+
+    @Test func startCanReplaceEnded() async {
+        let f = CallFixture()
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.reject(reason: nil, tieBreak: false)))
+        #expect(await f.store.startCall(to: callPeer.bare, media: callVideo))
+        #expect(f.store.state == .outgoing(OutgoingCall(to: callPeer.bare, sid: "c1", media: callVideo, initiator: callOwn)))
+        #expect(f.store.lastError == nil)
+        f.store.clear()
+    }
+
+    @Test func callerRetractEndsIncomingWithRetractedReason() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.store.handle(f.event(.retract(reason: nil, tieBreak: false)))
+        #expect(f.store.state == .ended(sid: "c1", reason: .retracted))
+        f.store.clear()
+    }
+
+    @Test func successfulHangUpPreservesLastWireFailure() async {
+        let f = CallFixture()
+        f.port.callResults["ringing"] = false
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.store.lastError != nil }
+        await f.store.hangUp()
+        #expect(f.store.state == .idle)
+        #expect(f.store.lastError == "call ringing failed")
+        f.store.clear()
+    }
+
+    @Test func responderTimeoutPreservesEarlierWireFailure() async {
+        let f = CallFixture(sessionTimeout: .milliseconds(30))
+        f.port.callResults["ringing"] = false
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.store.lastError != nil }
+        #expect(await f.store.acceptIncoming())
+        await eventually { f.port.callSends.count == 3 }
+        #expect(f.store.state == .ended(sid: "c1", reason: .timeout))
+        #expect(f.store.lastError == "call ringing failed")
+        f.store.clear()
+    }
+
+    @Test func mediaHangUpCannotClaimIncomingOrAnotherActiveSID() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        await eventually { f.port.callSends.count == 1 }
+        await f.store.hangUpActive(ifSid: "c1", reason: .gone)
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio)))
+        await eventually { f.port.callSends.count == 2 }
+        await f.store.hangUpActive(ifSid: "other-sid", reason: .gone)
+        #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
+        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+        f.store.clear()
+    }
+
+}
