@@ -1045,7 +1045,7 @@ producer of stream evidence was added.
   because the files above gained lines.
 
 The selected evidence was refreshed a twenty-first time, through
-`1f8434050c9bc4bc84568cd0994b0fb6afcfd24b`, after reviewing the delta of the reviewed
+`0e81e9463d8b0621b24ffbdaf605edd9a28a19e4`, after reviewing the delta of the reviewed
 files since the twentieth refresh. This refresh covers fixes to inbound
 S2S rooms: the allowances that bound what one remote account may send,
 the answer to a join decided while the replica stops, the end of a seat
@@ -1070,8 +1070,11 @@ was added, and no decision of standing moved.
   the seat index's lock whether a join may be answered as entered once
   the replica stops; holds a seat taken over from a stopped replica only
   where no seat is held; keeps a taken-over seat's end over a removal of
-  the same occupancy as one without a seat; keeps a leave that cannot be
-  placed to place it again; and ends a seat on a `groupchat` bounce with
+  the same occupancy as one without a seat; takes a seat's first leave
+  beyond its account's allowance on the replica that holds the seat;
+  keeps a leave that cannot be placed to place it again, and forgets it
+  once its sender's presence enters the room again; and ends a seat on a
+  `groupchat` bounce with
   `service-unavailable`. Each narrows what reaches a room or a remote JID,
   or what a room keeps seated.
 - The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`

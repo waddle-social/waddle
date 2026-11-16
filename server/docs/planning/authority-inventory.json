@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "1f8434050c9bc4bc84568cd0994b0fb6afcfd24b",
+  "baseline_commit": "0e81e9463d8b0621b24ffbdaf605edd9a28a19e4",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -113,7 +113,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "sha256": "3ce6bdcfd6c3a8971f3015391da9a18015b464cc42cf640a9e798817a55c6fe6"
+      "sha256": "b2cab734c58d810ff9560ce9b8afce35b9212453fb395e1f7c5b894f7fd1ef8a"
     },
     {
       "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
@@ -945,7 +945,7 @@
     },
     "s2s-seat-egress": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 1798,
+      "line": 1807,
       "text": "pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {"
     },
     "foreign-delivery": {
@@ -1000,7 +1000,7 @@
     },
     "s2s-carried-request": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 1025,
+      "line": 1034,
       "text": "pub(super) fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {"
     },
     "s2s-carried-principal": {
@@ -1045,7 +1045,7 @@
     },
     "s2s-adopted-seats": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2425,
+      "line": 2434,
       "text": "pub(super) fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {"
     },
     "hg-seats-honour-anywhere": {
@@ -1055,7 +1055,7 @@
     },
     "s2s-seat-adoption": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2358,
+      "line": 2367,
       "text": "pub(super) async fn adopt_seat("
     },
     "s2s-unseated-removal": {
@@ -1121,7 +1121,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "598b26fb5f3a88951e07be04a67435d28e92af68b01edc832cb76956824e16a2",
+    "sha256": "23ae396123da23f7d1ad5f7709be08b6ba860046e1e933459971a7f6adab27de",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,
