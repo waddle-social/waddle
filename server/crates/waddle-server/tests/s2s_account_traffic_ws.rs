@@ -865,6 +865,30 @@ async fn approving_a_remote_request_routes_subscribed_and_current_presence() {
 }
 
 #[tokio::test]
+async fn denying_a_remote_request_routes_unsubscribed_and_forgets_it() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let mut phone = federated.online("alice", "phone", 5).await;
+    federated
+        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "s-deny"))
+        .await;
+    receive(&mut phone, "presence", "s-deny").await;
+    assert!(support::pending_request(&federated, ALICE, BOB).await);
+
+    let mut denial = Presence::new(PresenceType::Unsubscribed);
+    denial.to = Some(jid(BOB));
+    denial.id = Some("s-deny-no".to_owned());
+    send(&mut phone, denial).await;
+
+    let routed = federated.peer_receives("s-deny-no").await;
+    assert_eq!(routed.attr("type"), Some("unsubscribed"));
+    assert_eq!(routed.attr("from"), Some(ALICE));
+    assert!(!support::pending_request(&federated, ALICE, BOB).await);
+    assert_eq!(roster_item(&federated, ALICE, BOB).await, None);
+}
+
+#[tokio::test]
 async fn a_request_from_a_contact_already_approved_is_answered_on_the_accounts_behalf() {
     let pki = Pki::new();
     let federated = federated(&pki).await;

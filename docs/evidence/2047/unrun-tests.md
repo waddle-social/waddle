@@ -116,7 +116,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
 | `s2s_account_router` (13) | W6c | loopback; in-memory SQLite | Not run |
-| `s2s_account_traffic_ws` (40), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
+| `s2s_account_traffic_ws` (41), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
 | `s2s_account_sm_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
 | `xep0280_s2s_account_carbons_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0191_s2s_account_blocking_ws` (8) | W6c | as `s2s_account_traffic_ws` | Not run |
