@@ -1635,3 +1635,140 @@ async fn a_room_with_more_occupants_than_its_queue_holds_delivers_every_presence
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
     assert_eq!(a.router.remote_rooms().await, 1);
 }
+
+#[tokio::test]
+async fn joins_beyond_the_bound_per_account_are_refused_whichever_resource_sends_them() {
+    let pki = support::Pki::new();
+    let limits = RouterLimits {
+        rooms_per_account: 2,
+        ..RouterLimits::default()
+    };
+    let (a, _b, _muc) = outbound_muc(&pki, limits).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+    join(&a, ALICE_LAPTOP, "second@muc.home-b.test/alice2").await;
+    // Each resource is within its own bound; the account is at its own.
+    for (from, occupant, id) in [
+        (ALICE_PHONE, "third@muc.home-b.test/alice", "over-phone"),
+        (ALICE_LAPTOP, "third@muc.home-b.test/alice2", "over-laptop"),
+    ] {
+        let (reason, reply) =
+            refused(offer(&a, Stanza::Presence(join_presence(from, occupant, id))).await);
+        assert_eq!(reason, UnroutableReason::EgressBusy);
+        assert_eq!(reply.attr("id"), Some(id));
+        assert_eq!(
+            error_condition(&reply).as_deref(),
+            Some("resource-constraint")
+        );
+    }
+    assert_eq!(a.router.remote_rooms().await, 2);
+    // Another account has its own bound.
+    join(&a, "carol@home-a.test/desk", "third@muc.home-b.test/carol").await;
+    assert_eq!(a.router.remote_rooms().await, 3);
+    // Leaving a room frees a place for the account.
+    let offered = offer(
+        &a,
+        Stanza::Presence(presence(
+            ALICE_PHONE,
+            ROOM_ALICE,
+            PresenceType::Unavailable,
+            "leave",
+        )),
+    )
+    .await;
+    assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
+    assert!(wait_for_rooms(&a.router, 2).await, "the leave is answered");
+    join(&a, ALICE_LAPTOP, "third@muc.home-b.test/alice2").await;
+    assert_eq!(a.router.remote_rooms().await, 3);
+}
+
+/// Limits under which a replica that stops recording that it is alive is
+/// taken for stopped after one second.
+fn stopping() -> RouterLimits {
+    RouterLimits {
+        prune_after: Duration::from_secs(1),
+        ..swept()
+    }
+}
+
+#[tokio::test]
+async fn occupancies_a_stopped_replica_left_are_ended_by_another_replica() {
+    let pki = support::Pki::new();
+    let (a1, a2, _b, muc) = outbound_muc_replicas(&pki, stopping()).await;
+    join_through(&a1, &a2, ALICE_PHONE, ROOM_ALICE).await;
+    // The replica that routed the join stops, and with it its sweep and
+    // its liveness record.
+    assert!(a1.router.shutdown(Duration::from_secs(5)).await);
+
+    // The other replica ends the occupancy: the room receives the
+    // resource's leave and the resource, whose session may live on, its
+    // own unavailable presence with status 333.
+    let removed = wait_for(ARRIVES, || {
+        delivered_presence(&a2, ALICE_PHONE, ROOM_ALICE)
+            .into_iter()
+            .find(|presence| presence.type_ == PresenceType::Unavailable)
+    })
+    .await
+    .expect("the occupant is told it left the room");
+    let codes = statuses(&removed);
+    assert!(codes.contains(&"110".to_owned()), "{codes:?}");
+    assert!(codes.contains(&"333".to_owned()), "{codes:?}");
+    let left = wait_for(ARRIVES, || {
+        muc.received().into_iter().find(|stanza| {
+            stanza.name() == "presence" && stanza.attr("type") == Some("unavailable")
+        })
+    })
+    .await
+    .expect("the room receives the leave");
+    assert_eq!(left.attr("from"), Some(ALICE_PHONE));
+    assert_eq!(left.attr("to"), Some(ROOM_ALICE));
+    assert!(wait_for_rooms(&a2.router, 0).await);
+}
+
+#[tokio::test]
+async fn a_session_resumed_on_another_replica_keeps_its_rooms_when_the_first_stops() {
+    let pki = support::Pki::new();
+    let (a1, a2, _b, muc) = outbound_muc_replicas(&pki, stopping()).await;
+    join_through(&a1, &a2, ALICE_PHONE, ROOM_ALICE).await;
+    // The session resumes on the second replica, which adopts its rooms;
+    // then the first stops.
+    a2.router.resource_resumed(&full(ALICE_PHONE)).await;
+    assert!(a1.router.shutdown(Duration::from_secs(5)).await);
+    // Well past the time after which the first replica's own occupancies
+    // would be taken for a stopped replica's.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(a2.router.remote_rooms().await, 1);
+    assert!(
+        delivered_presence(&a2, ALICE_PHONE, ROOM_ALICE)
+            .iter()
+            .all(|presence| presence.type_ != PresenceType::Unavailable),
+        "the occupant was not removed"
+    );
+    assert!(
+        muc.received().iter().all(|stanza| {
+            stanza.name() != "presence" || stanza.attr("type") != Some("unavailable")
+        }),
+        "no leave reached the room"
+    );
+    assert_eq!(muc.nick_of(ROOM, ALICE_PHONE).as_deref(), Some("alice"));
+    // The second replica routes the occupant's messages.
+    let offered = offer(
+        &a2,
+        Stanza::Message(message(
+            ALICE_PHONE,
+            ROOM,
+            MessageType::Groupchat,
+            "resumed",
+            "still here",
+        )),
+    )
+    .await;
+    assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
+    assert!(
+        wait_for(ARRIVES, || delivered_messages(&a2, ALICE_PHONE, "resumed")
+            .into_iter()
+            .next())
+        .await
+        .is_some(),
+        "the room's reflection arrives"
+    );
+}

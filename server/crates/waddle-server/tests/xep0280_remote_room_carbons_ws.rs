@@ -340,3 +340,30 @@ async fn a_private_message_from_a_remote_room_occupant_is_not_copied_as_a_receiv
     assert_eq!(id_of(&copy), Some("sentinel"));
     assert_eq!(copy.from, Some(jid(REMOTE_CONTACT)));
 }
+
+#[tokio::test]
+async fn a_private_message_from_a_remote_room_occupant_without_the_muc_user_element_is_copied() {
+    // XEP-0045 §7.5 only recommends the `muc#user` element on a private
+    // message; without it the server cannot tell the message from a chat
+    // message from a remote full JID, and copies it as one.
+    let route = Arc::new(AcceptingRoute::default());
+    let (loopback, mut phone, mut laptop) = alice_with_two_resources(route).await;
+    let delivery = WebSocketLocalDelivery::new(&loopback.state);
+    let phone_jid = full_jid(&phone);
+
+    let mut private = chat(
+        phone_jid.as_str(),
+        "pm-unmarked",
+        "a private word, unmarked",
+    );
+    private.from = Some(jid(OCCUPANT));
+    let outcome = delivery
+        .deliver(&phone_jid, Stanza::Message(private), LocalOrigin::Remote)
+        .await;
+    assert!(matches!(outcome, LocalDeliveryOutcome::Delivered));
+    receive_message(&mut phone, "pm-unmarked").await;
+
+    let copy = first_carbon(&mut laptop, "received").await;
+    assert_eq!(id_of(&copy), Some("pm-unmarked"));
+    assert_eq!(copy.from, Some(jid(OCCUPANT)));
+}
