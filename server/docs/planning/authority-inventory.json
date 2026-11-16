@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "7e24c46002b2e3e8e8415f99fbab5fa6d3cb0727",
+  "baseline_commit": "f6eea18f3a360e216b33d689395af8a7d487b8eb",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -321,7 +321,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_room_relay.rs",
-      "sha256": "5745cf28829bcfad333689fa710c5ab0e822a66dea3dcc4701d3209a9f3b7359"
+      "sha256": "1466c493f8db9eafef71ff5443a360a41e85c883edb006a211c9706b7124f231"
     },
     {
       "path": "server/crates/waddle-server/src/room_effect_outbox/drain.rs",
@@ -1006,7 +1006,7 @@
     },
     "s2s-relayed-request": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_room_relay.rs",
-      "line": 185,
+      "line": 205,
       "text": "pub(crate) async fn relayed_remote_room_request("
     },
     "admin-context-honoured": {
@@ -1082,7 +1082,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "047c43da89d06c7ca10775049a147ff132d77ea59858fbe17e2601895031cc7e",
+    "sha256": "c2690eaff934704638e2e05572adbeeda00cd70be318e7204ffac250cdfa256e",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,

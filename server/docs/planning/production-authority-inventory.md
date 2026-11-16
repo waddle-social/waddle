@@ -13,7 +13,7 @@ with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
 `8f6088ba601528090ec1bc82294b1a12422f5519`, and inbound S2S rooms through
 `31fd3f41591d0ff3072dc667e35207c522ae0dc6` and, with remote room
 administration, the federated setting and requests carried between
-replicas, through `7e24c46002b2e3e8e8415f99fbab5fa6d3cb0727` (see the last refresh below); the original
+replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -819,7 +819,7 @@ occupants at other servers in rooms of this deployment.
   `ingress/mod.rs`. The scan holds 1607 records in all.
 
 The selected evidence was refreshed an eighteenth time, through
-`7e24c46002b2e3e8e8415f99fbab5fa6d3cb0727`, after reviewing the delta of the reviewed
+`f6eea18f3a360e216b33d689395af8a7d487b8eb`, after reviewing the delta of the reviewed
 files since the seventeenth refresh. This refresh covers what remote
 principals were given since: room administration, rooms opened to other
 servers by a setting of their own, the standard message extensions, and a
@@ -871,7 +871,9 @@ request carried to the replica that holds its room.
   new in the reviewed set) and are queued by the router
   (`s2s-carried-request`) after it checked the stanza against them. The
   host asks where a request is decided before any seat is opened for it
-  (`s2s-room-placement`). The carried facts are the address, the
+  (`s2s-room-placement`); a room the channel catalog says is not
+  federated is not carried and is answered where its request arrived. The
+  carried facts are the address, the
   strength, the trust-profile kind and the snapshot generation; admission
   and standing are decided by the receiving replica.
   `hg-seat-evidence` moved.
