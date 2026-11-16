@@ -123,6 +123,13 @@ pub(super) async fn insert_pending(
                 waddle_xmpp::telemetry::reliability::increment_sm_promotion_not_promotable();
                 return PromotedOutcome::NotPromotable;
             }
+            if is_remote_sender(original_message, delivery.server_domain) {
+                // A message that arrived over S2S is never answered, so that
+                // its sender cannot tell an offline account from any other
+                // (gate G18): beyond the quota it is dropped, as the account
+                // side drops one it cannot store.
+                return PromotedOutcome::Dropped;
+            }
             // A return error is a replacement custody sink only once a live
             // sender accepted it or its local offline queue committed it.
             // Count the completed rejection once, not every failed retry.
@@ -256,4 +263,26 @@ async fn return_quota_bounce(
         }
         Err(_) => PromotedOutcome::StorageFailure(PromotionFailureReason::PendingStorage),
     }
+}
+
+/// Whether `message` came from a remote sender over S2S, as far as its
+/// `from` tells: an address at a domain that is neither `server_domain`
+/// nor below it. The S2S router admits only a `from` at the stream's
+/// authenticated remote domain, which is never a served one, and the
+/// deployment's own services are named below its domain unless an operator
+/// moves the MUC or Spaces service elsewhere; such a service's message is
+/// then treated as a remote sender's here and is dropped, not retained,
+/// beyond the offline quota.
+pub(crate) fn is_remote_sender(
+    message: &xmpp_parsers::message::Message,
+    server_domain: &str,
+) -> bool {
+    let Some(from) = message.from.as_ref() else {
+        return false;
+    };
+    let domain = from.domain().as_str();
+    domain != server_domain
+        && !domain
+            .strip_suffix(server_domain)
+            .is_some_and(|parent| parent.ends_with('.'))
 }
