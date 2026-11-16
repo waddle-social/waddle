@@ -311,7 +311,7 @@ pub enum UnroutableReason {
     InvalidRequest,
     /// A join presence for a remote JID whose domain's service discovery
     /// recently answered that it is not a multi-user chat service
-    /// (XEP-0045 §6.1).
+    /// (XEP-0045 §6.2).
     NotARoom,
 }
 

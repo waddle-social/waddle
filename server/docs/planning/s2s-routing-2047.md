@@ -511,7 +511,7 @@ resource only when two things hold:
   `<x xmlns='http://jabber.org/protocol/muc'/>` element (XEP-0045 §7.2.1);
 - the JID's domain answered this server's XEP-0030 `disco#info` as a
   multi-user chat service, with the `conference`/`text` identity or the
-  `http://jabber.org/protocol/muc` feature (XEP-0045 §6.1).
+  `http://jabber.org/protocol/muc` feature (XEP-0045 §6.2).
 
 Every bare JID with a localpart at such a service is a room, or one that a
 join creates (§10.1). The service is asked rather than the room because a

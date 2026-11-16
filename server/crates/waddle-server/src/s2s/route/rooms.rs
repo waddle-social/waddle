@@ -10,7 +10,7 @@
 //! §7.2 `<x xmlns='http://jabber.org/protocol/muc'/>` element), and the
 //! JID's domain answered this server's XEP-0030 `disco#info` as a
 //! multi-user chat service, with the `conference/text` identity or the MUC
-//! feature (XEP-0045 §6.1). Every bare JID with a localpart at such a
+//! feature (XEP-0045 §6.2). Every bare JID with a localpart at such a
 //! service is a room or, when it does not exist yet, one a join creates
 //! (§10.1). Until the domain has answered, the join is held and nothing
 //! reaches the JID.
@@ -39,7 +39,7 @@ const STATUS_SELF: &str = "110";
 const STATUS_NEW_NICK: &str = "303";
 
 /// The identity a multi-user chat service names in `disco#info` (XEP-0045
-/// §6.1).
+/// §6.2).
 const ROOM_CATEGORY: &str = "conference";
 const ROOM_TYPE: &str = "text";
 
@@ -336,7 +336,7 @@ pub(super) fn unanswered(home: &jid::DomainRef) -> StanzaError {
 
 /// The XEP-0030 `disco#info` request this server sends from its own
 /// domain `from` to the domain JID `service`, to learn whether it is a
-/// multi-user chat service (XEP-0045 §6.1). It goes to the domain, which
+/// multi-user chat service (XEP-0045 §6.2). It goes to the domain, which
 /// no client can answer, never to a room or an occupant JID. Asking the
 /// service rather than the room lets a join create a room that does not
 /// exist yet, whose own `disco#info` would answer `item-not-found`.

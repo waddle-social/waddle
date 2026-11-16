@@ -2225,7 +2225,7 @@ impl Inner {
 }
 
 /// The multi-user chat service that hosts `room`: its domain, which this
-/// server asks whether it is one (XEP-0045 §6.1).
+/// server asks whether it is one (XEP-0045 §6.2).
 fn service_of(room: &BareJid) -> BareJid {
     BareJid::from_parts(None, room.domain())
 }
