@@ -11,7 +11,8 @@
 //! to its own sessions. `disco#items` lists neither rooms nor occupants.
 //! Ping is answered for the service and a room; a self-ping (XEP-0410) is
 //! answered from the occupant's seat: a result while joined,
-//! `not-acceptable` otherwise.
+//! `not-acceptable` otherwise, and `remote-server-timeout`, which a client
+//! takes no decision from, while the room cannot say.
 //!
 //! The deployments are those of `s2s_inbound_muc_support`: no PostgreSQL,
 //! SpiceDB or second process is involved.
@@ -24,7 +25,7 @@ mod s2s_inbound_muc_support;
 use minidom::Element;
 use s2s_inbound_muc_support::{
     error_condition, error_of, local_join, not_federating, remote_get, remote_leave,
-    room_with_remote_occupant, Hosted, BOB, HOME_B, MUC, ROOM,
+    room_with_remote_occupant, wait_for, Hosted, ARRIVES, BOB, HOME_B, MUC, ROOM,
 };
 use waddle_server::s2s::route::RouterLimits;
 
@@ -235,4 +236,30 @@ async fn a_self_ping_tells_a_remote_occupant_whether_it_is_joined() {
     let left = hosted.answered("s3").await;
     assert_eq!(left.attr("type"), Some("error"));
     assert_eq!(error_condition(&left).as_deref(), Some("not-acceptable"));
+}
+
+#[tokio::test]
+async fn a_self_ping_the_room_cannot_decide_is_answered_as_undecided() {
+    let (hosted, _alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    let own = "lounge@muc.example.com/bob";
+    // The room registry stops: whether the room seats the occupant cannot
+    // be told on this replica.
+    let registry = hosted.state.deps.protocol.room_registry.clone();
+    registry.kill();
+    wait_for(ARRIVES, || (!registry.is_alive()).then_some(()))
+        .await
+        .expect("the room registry stops");
+    hosted
+        .from_peer(remote_get(BOB, own, "s-undecided", ping()))
+        .await;
+    let answer = hosted.answered("s-undecided").await;
+    assert_eq!(answer.attr("type"), Some("error"), "{answer:?}");
+    // XEP-0410 §4: the one error a client takes no decision from, so it
+    // neither gives the room up nor enters it again on this answer.
+    assert_eq!(
+        error_condition(&answer).as_deref(),
+        Some("remote-server-timeout")
+    );
+    assert!(hosted.seat(ROOM, BOB).is_some());
 }

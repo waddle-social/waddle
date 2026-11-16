@@ -13,7 +13,13 @@
 //! later seat; an occupant that enters again is answered before the room's
 //! traffic reaches it (§7.1); the sender's own copy of its message reaches
 //! it once (§7.4); one account cannot spend its domain's request rate; and
-//! chat states are dropped before a seat ends.
+//! chat states are dropped before a seat ends. A room whose actor is slow
+//! holds no stream and ends no seat: what its share of the queues does not
+//! hold is answered at once. A join is never dropped for its account's
+//! share. A room restored on the replica that seats its occupants keeps
+//! their seats, a seat whose join is still answered gets no notice when the
+//! replica stops, and an occupant of another server the room seats without
+//! a seat is removed.
 //!
 //! `example.com` runs the production router and connection manager with a
 //! scripted host (`s2s_inbound_muc_support/scripted.rs`); `home-b.test` and
@@ -38,12 +44,12 @@ use s2s_inbound_muc_support::{
     statuses, wait_for, ARRIVES, BOB, BOB_OCCUPANT, DOMAIN, HOME_B, MUC, QUIET, ROOM,
 };
 use scripted::{bare, full, own_unavailable, Scripted, ScriptedRooms, CAROL, GREETING};
-use waddle_server::destination::RemoteRoute;
+use waddle_server::destination::{RemoteRoute, SeatAdoption};
 use waddle_server::permissions::host_grant::StreamEvidence;
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::s2s::route::{
-    CarriedPrincipal, CarriedRoomOutcome, CarriedRoomRequest, RouterLimits, Seat, SeatEnd,
-    SeatInsert, SeatLimits, SeatStore, HOLDER_ASK_LIMIT,
+    CarriedPrincipal, CarriedRoomOutcome, CarriedRoomRequest, RouterLimits, S2sRouter, Seat,
+    SeatEnd, SeatInsert, SeatLimits, SeatStore, HOLDER_ASK_LIMIT,
 };
 use waddle_server::s2s::verify::TrustProfileKind;
 use waddle_xmpp::Stanza;
@@ -57,6 +63,8 @@ const ALICE_OCCUPANT: &str = "lounge@muc.example.com/alice";
 const SILENT_ROOM: &str = "attic@muc.example.com";
 /// A second account of `home-b.test`.
 const DAVE: &str = "dave@home-b.test/tablet";
+/// A second room.
+const STUDY: &str = "study@muc.example.com";
 
 /// A replica name no router records as alive.
 const STOPPED: &str = "a-replica-that-stopped";
@@ -697,7 +705,10 @@ async fn a_seat_taken_over_from_a_stopped_replica_ends_with_status_333() {
     );
     // The room's claim moved here: its recorded occupant is seated again
     // on the seat taken over, with the evidence that seat recorded.
-    assert!(RemoteRoute::adopt_seat(&hosted.router, &room, &bob).await);
+    assert_eq!(
+        RemoteRoute::adopt_seat(&hosted.router, &room, &bob, left.session).await,
+        SeatAdoption::Adopted
+    );
     let seat = hosted.seat(ROOM, BOB).expect("the seat taken over");
     assert_eq!(seat.session, left.session);
     assert_eq!(seat.evidence, left.evidence);
@@ -772,4 +783,263 @@ async fn a_carried_request_is_taken_only_for_a_room_of_the_muc_service() {
     );
     hosted.seated(ROOM, BOB).await;
     assert_eq!(hosted.host.handled_with("carried-1").len(), 1);
+}
+
+#[tokio::test]
+async fn a_seat_left_for_another_occupancy_is_not_taken_over() {
+    let hosted = Scripted::start("inbound-router-adopt-other", RouterLimits::default()).await;
+    let (room, bob) = (bare(ROOM), full(BOB));
+    let left = row(STOPPED, ROOM, BOB, 1_000);
+    assert_eq!(
+        hosted.store.insert(&left, &wide()).await.expect("insert"),
+        SeatInsert::Inserted
+    );
+    // The room recorded the occupant under another generation than the
+    // row the stopped replica left: the row stands for another occupancy,
+    // which the room would not remove when the seat ended.
+    let recorded = OccupancySessionGeneration::mint();
+    assert_eq!(
+        RemoteRoute::adopt_seat(&hosted.router, &room, &bob, recorded).await,
+        SeatAdoption::NotHeld
+    );
+    assert!(hosted.seat(ROOM, BOB).is_none());
+    assert!(row_removed(&hosted, ROOM, BOB).await);
+}
+
+#[tokio::test]
+async fn a_room_restored_on_the_replica_that_seats_its_occupants_keeps_their_seats() {
+    let hosted = Scripted::start("inbound-router-restore-here", RouterLimits::default()).await;
+    let seat = with_bob(&hosted).await;
+    let (room, bob) = (bare(ROOM), full(BOB));
+    // The room's actor was restored on this replica, which holds the
+    // recorded occupant's seat under the recorded generation: the seat
+    // goes on, and nothing is taken over.
+    assert_eq!(
+        RemoteRoute::adopt_seat(&hosted.router, &room, &bob, seat.session).await,
+        SeatAdoption::Held
+    );
+    RemoteRoute::end_adopted_seats(&hosted.router, &room, &[]).await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
+    assert!(hosted.host.ends_of(BOB).is_empty());
+    assert_eq!(hosted.home_b.count(is_own_departure), 0);
+    assert!(has_row(&hosted, ROOM, BOB).await);
+    // A record of another generation is not seated on that seat.
+    assert_eq!(
+        RemoteRoute::adopt_seat(
+            &hosted.router,
+            &room,
+            &bob,
+            OccupancySessionGeneration::mint()
+        )
+        .await,
+        SeatAdoption::NotHeld
+    );
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
+}
+
+#[tokio::test]
+async fn an_occupant_of_another_server_without_a_seat_is_removed_from_its_room() {
+    let limits = RouterLimits {
+        sweep_interval: Duration::from_millis(50),
+        seat_reconcile_interval: Duration::from_millis(200),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-ghost", limits).await;
+    let seat = with_bob(&hosted).await;
+    // The room seats carol, and an account of this deployment, without a
+    // seat held here: what a removal that timed out, or a room restored
+    // with an occupant whose seat no replica took over, leaves.
+    let local = ["alice@", DOMAIN, "/desk"].concat();
+    hosted.host.seat_unseated(ROOM, CAROL, "carol");
+    hosted.host.seat_unseated(ROOM, &local, "alice");
+    wait_for(ARRIVES, || {
+        hosted.host.ghosts().contains(&full(CAROL)).then_some(())
+    })
+    .await
+    .expect("the occupant nothing reaches is removed");
+    assert_eq!(hosted.host.seats_under(ROOM, CAROL), None);
+    // An account of this deployment holds no seat and needs none.
+    assert!(hosted.host.seats_under(ROOM, &local).is_some());
+    assert!(!hosted.host.ghosts().contains(&full(&local)));
+    // The seated occupant keeps its seat.
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
+    assert!(hosted.host.ends_of(BOB).is_empty());
+}
+
+#[tokio::test]
+async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
+    let limits = RouterLimits {
+        // One worker for every room, two places for one room, and a short
+        // budget for each item.
+        room_request_workers: 1,
+        room_requests_per_room: 2,
+        room_request_timeout: Duration::from_secs(1),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-slow-room", limits).await;
+    let seat = with_bob(&hosted).await;
+    // The room's actor answers nothing from now on.
+    hosted.host.hold().await;
+    let ids: Vec<String> = (0..6).map(|index| format!("slow-{index}")).collect();
+    for id in &ids {
+        hosted.home_b.send(remote_get(BOB, ROOM, id, ping())).await;
+    }
+    // What the room's share of the queues does not hold is answered at
+    // once, while the room still answers nothing: the stream that carried
+    // it was not held for the room.
+    let refused = wait_for(ARRIVES, || {
+        let refused: Vec<Element> = ids
+            .iter()
+            .filter_map(|id| hosted.home_b.captured.with_id(id).into_iter().next())
+            .filter(|stanza| stanza.attr("type") == Some("error"))
+            .collect();
+        (refused.len() >= 3).then_some(refused)
+    })
+    .await
+    .expect("the requests beyond the room's share are answered");
+    for stanza in &refused {
+        assert_eq!(
+            error_condition(stanza).as_deref(),
+            Some("resource-constraint"),
+            "{stanza:?}"
+        );
+    }
+    // Each request the room does not answer costs the worker its budget
+    // and no more: the ones the room's share held reach the host in turn.
+    wait_for(ARRIVES, || {
+        ids.iter()
+            .all(|id| {
+                !hosted.host.handled_with(id).is_empty()
+                    || hosted
+                        .home_b
+                        .captured
+                        .with_id(id)
+                        .iter()
+                        .any(|stanza| stanza.attr("type") == Some("error"))
+            })
+            .then_some(())
+    })
+    .await
+    .expect("every request the room's share held reaches the host");
+    hosted.host.release();
+    // The stream still carries, no seat of the pair was lost, and the
+    // seat stands.
+    hosted
+        .home_b
+        .send(remote_get(BOB, ROOM, "after-slow", ping()))
+        .await;
+    let answered = hosted.home_b.answered("after-slow").await;
+    assert_eq!(answered.attr("type"), Some("result"), "{answered:?}");
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
+    assert!(hosted.host.ends_of(BOB).is_empty());
+}
+
+#[tokio::test]
+async fn a_join_is_answered_and_not_dropped_beyond_its_accounts_shares() {
+    let limits = RouterLimits {
+        // One stanza at once of the account's share, and one join or
+        // change of presence at once of its share of presence.
+        room_request_rate_per_account: 1,
+        room_request_burst_per_account: 1,
+        room_presence_rate_per_account: 1,
+        room_presence_burst_per_account: 1,
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-join-share", limits).await;
+    // The account spends its share on a request: a join does not count
+    // against it.
+    hosted
+        .home_b
+        .send(remote_get(BOB, MUC, "spend-1", ping()))
+        .await;
+    hosted
+        .home_b
+        .send(remote_join(BOB, ROOM, "bob", "join-1"))
+        .await;
+    hosted.seated(ROOM, BOB).await;
+    // A second join at once is beyond its share of presence: it is
+    // answered with error presence (XEP-0045 §7.2), not dropped.
+    hosted
+        .home_b
+        .send(remote_join(BOB, STUDY, "bob", "join-2"))
+        .await;
+    let refused = hosted.home_b.answered("join-2").await;
+    assert_eq!(refused.name(), "presence", "{refused:?}");
+    assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
+    assert_eq!(
+        error_condition(&refused).as_deref(),
+        Some("resource-constraint")
+    );
+    assert!(hosted.host.handled_with("join-2").is_empty());
+    assert!(hosted.seat(STUDY, BOB).is_none());
+}
+
+#[tokio::test]
+async fn a_seat_whose_join_is_answered_gets_no_notice_when_the_replica_stops() {
+    let hosted = Scripted::start("inbound-router-stop-pending", RouterLimits::default()).await;
+    // The join waits in the room, on a seat held as pending.
+    hosted.host.hold().await;
+    hosted
+        .home_b
+        .send(remote_join(BOB, ROOM, "bob", "join-pending"))
+        .await;
+    hosted.seated(ROOM, BOB).await;
+    wait_for(ARRIVES, || {
+        (!hosted.host.handled_with("join-pending").is_empty()).then_some(())
+    })
+    .await
+    .expect("the join reaches the room");
+    let router = hosted.router.clone();
+    let stopping = tokio::spawn(async move { router.shutdown(Duration::from_secs(5)).await });
+    tokio::time::sleep(QUIET).await;
+    hosted.host.release();
+    let _ = stopping.await;
+    tokio::time::sleep(QUIET).await;
+    // The occupant was never told that it entered: it is told neither
+    // that the service is shutting down (XEP-0045 §11.2) nor, after
+    // that, that it entered.
+    assert_eq!(
+        hosted
+            .home_b
+            .count(|stanza| statuses(stanza).contains(&"332".to_owned())),
+        0
+    );
+    assert_eq!(hosted.home_b.count(is_own_presence), 0);
+    assert!(hosted.router.seats().is_empty());
+}
+
+#[tokio::test]
+async fn the_streams_drain_on_the_routers_token_once_its_notices_are_out() {
+    let hosted = Scripted::start("inbound-router-drain", RouterLimits::default()).await;
+    with_bob(&hosted).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    // With a router the connection manager drains on the router's token,
+    // not on the process stop: the router's notices need the streams.
+    let drain = S2sRouter::service_stop(Some(&hosted.router), &stop);
+    stop.cancel();
+    tokio::time::sleep(QUIET).await;
+    assert!(!drain.is_cancelled());
+    hosted.router.shutdown(Duration::from_secs(5)).await;
+    assert!(drain.is_cancelled());
+    let told = hosted
+        .home_b
+        .received(is_own_departure)
+        .await
+        .expect("the occupant's own presence");
+    assert!(statuses(&told).contains(&"332".to_owned()), "{told:?}");
+    // Without one, it drains on the process stop itself.
+    assert!(S2sRouter::service_stop(None, &stop).is_cancelled());
 }
