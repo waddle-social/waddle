@@ -308,6 +308,16 @@ fn disco_info() -> Element {
     Element::builder("query", NS_DISCO_INFO).build()
 }
 
+/// The reserved-nick discovery of XEP-0045 §7.12.
+fn reserved_nick_query() -> Element {
+    Element::builder("query", NS_DISCO_INFO)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "x-roomuser-item",
+        )
+        .build()
+}
+
 fn mam_query(id: &str) -> Element {
     Element::builder("query", NS_MAM)
         .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), id)
@@ -370,6 +380,16 @@ async fn joins_archive_reads_and_disco_follow_the_canonical_grants() {
         is_error(&reply, DefinedCondition::ItemNotFound),
         "an ungranted account was shown the room: {reply:?}"
     );
+    // The reserved-nick node (XEP-0045 §7.12) is the room's as well.
+    let reply = round_trip(
+        &mut carol,
+        get("disco-nick", room.as_str(), reserved_nick_query()),
+    )
+    .await;
+    assert!(
+        is_error(&reply, DefinedCondition::ItemNotFound),
+        "an ungranted account was answered the reserved-nick node: {reply:?}"
+    );
 
     // A member reads the archive and is shown a members-only room, though
     // the catalog row says the room is open.
@@ -379,6 +399,15 @@ async fn joins_archive_reads_and_disco_follow_the_canonical_grants() {
     assert!(
         advertises(&reply, MUC_MEMBERSONLY),
         "room disco#info: {reply:?}"
+    );
+    let reply = round_trip(
+        &mut romeo,
+        get("disco-nick", room.as_str(), reserved_nick_query()),
+    )
+    .await;
+    assert!(
+        is_result(&reply),
+        "a member's reserved-nick query: {reply:?}"
     );
 
     // A ban recorded in the store takes effect at once, whatever the room

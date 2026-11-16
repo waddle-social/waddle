@@ -12,6 +12,14 @@
 //! or an administration request that was decided before the revoke when it
 //! reaches the actor.
 //!
+//! A request that awaits something between its decision and its effect
+//! decides again before the effect: an owner's configuration change that
+//! waited for the room's configuration lock, a role list read from the room
+//! actor, an extension's archive read and the room's own message after its
+//! archive write. Those cases hold the request at the point after its
+//! decision (`DecisionCheckpoint`), record and acknowledge a revoke there,
+//! and see that the effect does not follow.
+//!
 //! The cases drive the production router over loopback sockets against one
 //! or two replicas of a deployment on the fixture's PostgreSQL database
 //! (`host_grant_revocation_support`). A second replica is a second state in
@@ -31,21 +39,25 @@ mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use host_grant_revocation_support::{
     admin_item, admin_item_with_reason, connect, error_condition, groupchat, join, mam_query,
-    presence_from, receives_groupchat, role_item, room_presence, Deployment, Replica, NS_PING,
-    SWEEP_BUDGET,
+    presence_from, receives_groupchat, role_item, room_presence, Deployment, Replica, NS_MUC_ADMIN,
+    NS_PING, SWEEP_BUDGET,
 };
 use host_grant_support::{bare, subject, OWNER, PEER, SENDER};
 use jid::FullJid;
 use kameo::error::SendError;
 use waddle_server::permissions::host_grant::{
-    FenceAcknowledgement, GrantOperationId, HostGrantAction, ManagedRoomGrants, OperatorRevoke,
-    RetireScope, RoomAffiliation, RoomBinding, RoomGate, FENCE_LEASE_TTL,
+    pause_at_checkpoint, DecisionCheckpoint, FenceAcknowledgement, GrantOperationId,
+    HostGrantAction, ManagedRoomGrants, OperatorRevoke, RetireScope, RoomAffiliation, RoomBinding,
+    RoomGate, FENCE_LEASE_TTL,
 };
-use waddle_server::test_support::{sweep_host_grant_room, WebSocketState};
+use waddle_server::test_support::{
+    broadcast_room_system_message, hold_room_config_lock, sweep_host_grant_room, WebSocketState,
+};
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::stanza::{get, is_error, is_result, set};
 use waddle_xmpp::muc::admin::AdminItem;
@@ -632,6 +644,304 @@ async fn the_sweep_changes_nothing_while_the_grants_cannot_be_read() {
     assert!(sweep_host_grant_room(&server.state, &room).await);
     assert!(seated(&server.state, &room, PEER).await);
     drop(alice);
+    deployment.close().await;
+}
+
+/// Record `affiliation` for `account` by the room's owner and wait until
+/// the revocation fence has acknowledged it.
+async fn record_acknowledged(deployment: &Deployment, account: &str, affiliation: RoomAffiliation) {
+    let receipt = deployment
+        .grants
+        .set(OWNER, account, affiliation)
+        .await
+        .expect("affiliation change");
+    let acknowledged = deployment
+        .grants
+        .store
+        .await_revocation_fence(
+            deployment.grants.scope.lifecycle,
+            receipt.record().generation,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("fence reading");
+    assert!(acknowledged.acknowledged(), "{acknowledged:?}");
+}
+
+/// Make `account` an admin of the room whose grant is effective.
+async fn effective_admin(deployment: &Deployment, account: &str) {
+    deployment
+        .grants
+        .set(OWNER, account, RoomAffiliation::Admin)
+        .await
+        .expect("admin grant");
+    deployment
+        .grants
+        .activate_current(&deployment.grants.scope)
+        .await;
+}
+
+/// A muc#owner configuration form that renames the room.
+fn rename_form(name: &str) -> Element {
+    const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+    const NS_DATA: &str = "jabber:x:data";
+    let field = |var: &str, value: &str| {
+        Element::builder("field", NS_DATA)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+            .append(
+                Element::builder("value", NS_DATA)
+                    .append(value.to_owned())
+                    .build(),
+            )
+            .build()
+    };
+    Element::builder("query", NS_MUC_OWNER)
+        .append(
+            Element::builder("x", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(field(
+                    "FORM_TYPE",
+                    "http://jabber.org/protocol/muc#roomconfig",
+                ))
+                .append(field("muc#roomconfig_roomname", name))
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn an_owner_configuration_decided_before_a_demotion_applies_nothing_after_it() {
+    let Some(deployment) = Deployment::start("hg_revoke_config", 1).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    effective_admin(&deployment, PEER).await;
+    let mut alice = server.client("alice", "phone").await;
+    let joined = join(&mut alice, &room, "alice").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+
+    // An administration request holds the room's configuration lock from
+    // before it records a change until the room actor has applied it.
+    let administration = hold_room_config_lock(&room).await;
+    // The admin's configuration change is decided (an admin may configure
+    // the room) and then waits for the lock.
+    let decided = pause_at_checkpoint(DecisionCheckpoint::OwnerConfigAuthorized, room.clone());
+    let request = tokio::spawn({
+        let room = room.clone();
+        async move {
+            let reply = round_trip(
+                &mut alice,
+                set("config", room.as_str(), rename_form("renamed")),
+            )
+            .await;
+            (alice, reply)
+        }
+    });
+    decided.wait_until_reached().await;
+    decided.release();
+
+    // The admin is demoted while the request waits, and the demotion is
+    // acknowledged before the lock is released.
+    record_acknowledged(&deployment, PEER, RoomAffiliation::Member).await;
+    drop(administration);
+
+    // The configuration change decided before the demotion is refused once
+    // it holds the lock, and the room keeps its name.
+    let (alice, reply) = request.await.expect("configuration request");
+    assert!(
+        is_error(&reply, DefinedCondition::Forbidden),
+        "a configuration change decided before the demotion: {reply:?}"
+    );
+    let snapshot = room_actor(&server.state, &room)
+        .await
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot");
+    assert_ne!(snapshot.room.config.name, "renamed");
+    drop(alice);
+    deployment.close().await;
+}
+
+/// A muc#admin query for the occupants of `role`.
+fn role_list(role: &str) -> Element {
+    Element::builder("query", NS_MUC_ADMIN)
+        .append(
+            Element::builder("item", NS_MUC_ADMIN)
+                .attr(minidom::rxml::xml_ncname!("role").to_owned(), role)
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn a_role_list_read_before_a_demotion_is_not_sent_after_it() {
+    let Some(deployment) = Deployment::start("hg_revoke_role_list", 1).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    effective_admin(&deployment, PEER).await;
+    let mut alice = server.client("alice", "phone").await;
+    let joined = join(&mut alice, &room, "alice").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    let mut romeo = server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    let reply = round_trip(
+        &mut alice,
+        get("roles-1", room.as_str(), role_list("participant")),
+    )
+    .await;
+    assert!(is_result(&reply), "a moderator's role list: {reply:?}");
+
+    // The admin's role list is decided and read from the room actor; the
+    // admin is demoted, and the demotion acknowledged, before it is sent.
+    let read = pause_at_checkpoint(DecisionCheckpoint::AdminRoleListRead, room.clone());
+    let request = tokio::spawn({
+        let room = room.clone();
+        async move {
+            let reply = round_trip(
+                &mut alice,
+                get("roles-2", room.as_str(), role_list("participant")),
+            )
+            .await;
+            (alice, reply)
+        }
+    });
+    read.wait_until_reached().await;
+    record_acknowledged(&deployment, PEER, RoomAffiliation::Member).await;
+    read.release();
+    let (alice, reply) = request.await.expect("role list request");
+    assert!(
+        is_error(&reply, DefinedCondition::Forbidden),
+        "a role list read before the demotion was sent after it: {reply:?}"
+    );
+    drop((alice, romeo));
+    deployment.close().await;
+}
+
+#[tokio::test]
+async fn an_extension_archive_read_before_a_revoke_is_not_returned_after_it() {
+    use waddle_extensions::host_tools::{
+        ExtensionHostTools, InvocationContext, InvocationKind, MamQuery, MamTarget,
+    };
+    use waddle_extensions::{PluginId, WaddleId};
+    use waddle_server::server::extension_host_adapter::ExtensionHostAdapter;
+    let Some(deployment) = Deployment::start("hg_revoke_extension_mam", 1).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    let host = ExtensionHostAdapter::new(Arc::clone(&server.state));
+    let context = InvocationContext {
+        waddle_id: WaddleId::try_new("revocation").expect("waddle"),
+        plugin_id: PluginId::try_new("board").expect("plugin"),
+        requester: Some(bare(PEER)),
+        source_room: None,
+        kind: InvocationKind::Command,
+        provider_room_grants: Vec::new(),
+    };
+    let query = || MamQuery {
+        target: MamTarget::Room(room.clone()),
+        start: None,
+        end: None,
+        thread_id: None,
+        sender: None,
+        text: None,
+        max_results: 10,
+    };
+    // A member's extension reads the room's archive.
+    assert!(
+        host.query_mam(&context, query()).await.is_ok(),
+        "a member's archive query was refused"
+    );
+
+    // The read is decided and done; the member's grant is revoked, and the
+    // revoke acknowledged, before the page is returned.
+    let read = pause_at_checkpoint(DecisionCheckpoint::ExtensionArchiveRead, room.clone());
+    let request = tokio::spawn({
+        let (host, context, query) = (host.clone(), context.clone(), query());
+        async move { host.query_mam(&context, query).await }
+    });
+    read.wait_until_reached().await;
+    record_acknowledged(&deployment, PEER, RoomAffiliation::None).await;
+    read.release();
+    let answer = request.await.expect("archive query");
+    assert!(
+        answer.is_err(),
+        "an archive page read before the revoke was returned after it"
+    );
+    deployment.close().await;
+}
+
+/// Whether `client` receives the room's own message with `body` within
+/// `budget`.
+async fn receives_room_message(
+    client: &mut waddle_ws_test_support::WsXmppClient,
+    room: &jid::BareJid,
+    body: &str,
+    budget: Duration,
+) -> bool {
+    client
+        .recv_matching_within(budget, |frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                element.name() == "message"
+                    && element.attr("from") == Some(room.as_str())
+                    && element
+                        .children()
+                        .any(|child| child.name() == "body" && child.text() == body)
+            })
+        })
+        .await
+        .is_ok()
+}
+
+#[tokio::test]
+async fn a_room_message_archived_before_a_revoke_is_not_delivered_after_it() {
+    use xmpp_parsers::message::{Lang, Message, MessageType};
+    let Some(deployment) = Deployment::start("hg_revoke_system_message", 1).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    let mut alice = server.client("alice", "phone").await;
+    let joined = join(&mut alice, &room, "alice").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    let mut romeo = server.client("romeo", "phone").await;
+    let joined = join(&mut romeo, &room, "romeo").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+
+    // The room's own message is archived for an audience that includes
+    // the member; the member's grant is revoked, and the revoke
+    // acknowledged, before the message is delivered.
+    let mut message = Message::new(Some(jid::Jid::from(room.clone())));
+    message.type_ = MessageType::Groupchat;
+    message.from = Some(jid::Jid::from(room.clone()));
+    message
+        .bodies
+        .insert(Lang(String::new()), "the room speaks".to_owned());
+    let archived = pause_at_checkpoint(DecisionCheckpoint::SystemMessageArchived, room.clone());
+    let broadcast = tokio::spawn({
+        let (state, room) = (Arc::clone(&server.state), room.clone());
+        async move { broadcast_room_system_message(&state, room, message).await }
+    });
+    archived.wait_until_reached().await;
+    record_acknowledged(&deployment, PEER, RoomAffiliation::None).await;
+    archived.release();
+    assert!(
+        broadcast.await.expect("broadcast").is_some(),
+        "the room's message was not archived"
+    );
+    assert!(
+        receives_room_message(&mut romeo, &room, "the room speaks", Duration::from_secs(5)).await,
+        "a member did not receive the room's message"
+    );
+    assert!(
+        !receives_room_message(&mut alice, &room, "the room speaks", QUIET).await,
+        "a member revoked after the archive write received the room's message"
+    );
+    drop((alice, romeo));
     deployment.close().await;
 }
 
