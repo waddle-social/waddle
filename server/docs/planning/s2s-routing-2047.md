@@ -994,6 +994,10 @@ nothing, and the join's decisions name the stream's evidence.
 | Any other message | A room or an occupant | `feature-not-implemented`: private messages, invitations, voice requests and declines |
 | Error presence or message | A room or an occupant | From a seated occupant's address with a delivery-related condition of XEP-0045 §17.1.2 (`gone`, `item-not-found`, `recipient-unavailable`, `redirect`, `remote-server-not-found`, `remote-server-timeout`): the seat ends. Otherwise ignored |
 
+Every error answers with the id of the request it refuses (RFC 6120
+§8.1.3), the error presence that refuses a join included; the room's own
+presence for an occupant carries none, as for a session.
+
 A remote occupant's presence is reduced to its availability (`show`,
 `status`, `priority`) and, for a join, the bare `muc` element before the
 room sees it (XEP-0045 §17.1.1 lets a service do so): this deployment's
