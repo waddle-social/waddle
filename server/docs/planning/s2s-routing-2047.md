@@ -47,7 +47,7 @@ not run until verification (D9):
 - `crates/waddle-server/tests/xep0045_s2s_outbound_muc.rs`: joining,
   presence, groupchat, subject and private messages, nickname changes,
   joining again, leaving and leaving then joining again, a refused join,
-  room verification (a fake join to an account refused and never sent, a
+  service verification (a fake join to an account refused and never sent, a
   JID that does not answer), a room's message while joining, a join the
   room never answers, the bound on rooms, a XEP-0313 query to a joined
   room, removal with status 333 when the stream fails, leaving when a
@@ -160,10 +160,10 @@ joined it is delivered to that resource
 
 | Destination | IQ `get`/`set` | IQ `result`/`error` | Message | Presence |
 | --- | --- | --- | --- | --- |
-| Server domain | `disco#info` and `disco#items` answered (below), ping answered with an empty result; anything else `service-unavailable` | Completes the `disco#info` this server sent to verify a remote room, if it matches one pending (sender, id, payload namespace); otherwise dropped | `service-unavailable` | Ignored |
+| Server domain | `disco#info` and `disco#items` answered (below), ping answered with an empty result; anything else `service-unavailable` | Completes the `disco#info` this server sent to verify a remote room's service domain, if it matches one pending (sender, id, payload namespace); otherwise dropped | `service-unavailable` | Ignored |
 | Server domain with a resource | `service-unavailable` | Dropped | `service-unavailable` | Ignored |
 | Local account, bare JID | `service-unavailable` (D7) | Dropped | `service-unavailable` (D7) | Ignored (D7) |
-| Local account, full JID | `service-unavailable` (D7) | Delivered to that resource only if it completes a request that resource sent (D7's first exception) | From the bare JID of a verified remote room the resource's join was sent to, or from one of its occupants once the room has sent the resource its own presence, until the leave is answered or its grace ends: delivered to that resource (D7's second exception, below). Otherwise `service-unavailable` (D7) | From a verified remote room the resource's join was sent to, or has just left: delivered to that resource (D7's second exception). Otherwise ignored (D7) |
+| Local account, full JID | `service-unavailable` (D7) | Delivered to that resource only if it completes a request that resource sent (D7's first exception) | From the bare JID of a remote room at a verified service the resource's join was sent to, or from one of its occupants once the room has sent the resource its own presence, until the leave is answered or its grace ends: delivered to that resource (D7's second exception, below). Otherwise `service-unavailable` (D7) | From a remote room at a verified service the resource's join was sent to, or has just left: delivered to that resource (D7's second exception). Otherwise ignored (D7) |
 | MUC domain: service, rooms, occupants | `service-unavailable` until the inbound MUC slice (W6a) reviews its handlers for remote principals | Dropped | `service-unavailable` | Ignored |
 | Spaces PubSub domain | `service-unavailable` until the Spaces slice (W7a) reviews its handlers | Dropped | `service-unavailable` | Ignored |
 | HTTP upload, push, community, extensions, call mixer | `service-unavailable` (D10: not enabled) | Dropped | `service-unavailable` | Ignored |
@@ -191,7 +191,7 @@ these effects:
   that does not fit, or that would open a pair's queue beyond the reply
   share, is dropped;
 - one `DELETE` on the correlation table, and for a completed room
-  verification one upsert of the room verdict cache;
+  verification one upsert of the service verdict cache;
 - a change to the shared occupancy of a remote room the local resource
   holds (below), and the delivery of that room's presence and messages to
   that resource, or of the unavailable presence this server generates when
@@ -220,7 +220,7 @@ set; W6a and W7a enable them when their handlers accept a remote principal.
 Inbound, as the inventory shows: traffic to a local account is refused as
 if the account did not exist (RFC 6121 §8.5.1), except a response that
 completes a request the account's resource sent, and traffic from a
-verified remote room to the full JID of a local resource that joined it
+remote room at a verified service to the full JID of a local resource that joined it
 ([Outbound MUC](#outbound-muc-w6b)).
 
 Outbound, a local account's messages and presence for a remote JID are
@@ -509,34 +509,40 @@ resource only when two things hold:
   resource of a local account, to an occupant JID (a bare JID with a
   localpart, and a nickname as resource), carrying the
   `<x xmlns='http://jabber.org/protocol/muc'/>` element (XEP-0045 §7.2.1);
-- the JID's bare JID answered this server's XEP-0030 `disco#info` with the
-  `conference`/`text` identity or the `http://jabber.org/protocol/muc`
-  feature (XEP-0045 §6.4).
+- the JID's domain answered this server's XEP-0030 `disco#info` as a
+  multi-user chat service, with the `conference`/`text` identity or the
+  `http://jabber.org/protocol/muc` feature (XEP-0045 §6.1).
 
-The `disco#info` request goes from the local domain (the server, not the
-client) to the room's bare JID, never to the occupant JID, which a client
-could answer. It is registered in the correlation table like a client's
+Every bare JID with a localpart at such a service is a room, or one that a
+join creates (§10.1). The service is asked rather than the room because a
+room that does not exist yet answers its own `disco#info` with
+`item-not-found` (§6.4), so asking the room would refuse every room
+creation. An account's domain answers as a server (`server`/`im`), so a
+join to an account is refused. The request goes from the local domain (the
+server, not the client) to the service's domain JID, which no client can
+answer. It is registered in the correlation table like a client's
 request, with the server domain as local address and a generated id, so
-it completes at most once, on whichever replica its response arrives,
-and expires after 30 seconds. Its response reaches the router as an IQ
-result or error to the server domain (the reachability inventory). The
-replica that completes it caches the verdict in
-`s2s_remote_room_verdicts` for every replica: "room" for an hour, "not a
-room" for five minutes. A result without the identity and feature, or an
-error other than a temporary one, is "not a room"; an error of type `wait`
-or with a `remote-server-*` condition, an answer the identity profile
-refuses, and no answer at all are not cached.
+it completes at most once, on whichever replica its response arrives, and
+expires after 30 seconds. Its response reaches the router as an IQ result
+or error to the server domain (the reachability inventory). The replica
+that completes it caches the verdict per service domain in
+`s2s_remote_room_verdicts` for every replica: "service" for an hour, "not
+a service" for five minutes. A result without the identity and feature,
+or an error other than a temporary one, is "not a service"; an error of
+type `wait` or with a `remote-server-*` condition, an answer the identity
+profile refuses, and no answer at all are not cached.
 
-While the JID is not known to be a room, the join is held in memory on
-the replica that routed it, and nothing reaches the JID. When the verdict
-arrives (on this replica at once; from another replica's completion at
-the next sweep, at most five seconds later), the join is sent; for a JID
-that is not a room the client receives an error presence `item-not-found`
-from the occupant JID, with the join's id and the `muc` child; for a JID
-that did not answer, `remote-server-timeout`; for a domain that cannot be
-reached, the route's own error. A join to a JID cached as not a room is
-refused at once with `item-not-found`. A join that may not be held (more
-than 256 verifications in flight on the replica) is refused with
+The occupancy is recorded, within its bounds, before anything is asked.
+While the service is not known, the join is held in memory on the replica
+that routed it, and nothing reaches the JID. When the verdict arrives (on
+this replica at once; from another replica's completion at the next
+sweep, at most five seconds later), the join is sent; for a domain that
+is not a service the client receives an error presence `item-not-found`
+from the occupant JID, with the join's id and the `muc` child; for a
+domain that did not answer, `remote-server-timeout`; for a domain that
+cannot be reached, the route's own error. A join to a domain cached as not
+a service is refused at once with `item-not-found`. A join that may not be
+held (more than 256 services being asked on the replica) is refused with
 `resource-constraint`. Because nothing reaches an unverified JID, a
 join's `<status/>` text never does either.
 
@@ -557,8 +563,9 @@ for its new replica.
 
 The phases are:
 
-- *verifying*: the join is held while the JID is asked whether it is a
-  room; nothing is sent to it and nothing from it is admitted;
+- *verifying*: the join is held while the room's domain is asked whether
+  it is a multi-user chat service; nothing is sent to the room and nothing
+  from it is admitted;
 - *joining*: the join was sent; the room has not yet sent the occupant's
   own presence;
 - *joined*: the room sent the occupant's own available presence;
@@ -604,8 +611,8 @@ or refuses it as the reachability table says otherwise. Admitted:
   statuses and XEP-0313 results.
 
 Nothing is admitted while verifying: a client cannot open a conversation
-with an account by "joining" it, since the account's server never answers
-its disco as a room and the join is never sent. The room's own presence
+with an account by "joining" it, since the account's domain answers as a
+server, not a multi-user chat service, and the join is never sent. The room's own presence
 moves the occupancy on (status 110, or the occupant JID with the current
 nickname): available presence completes the join and records the nickname
 the room assigned (§7.2.2) and the affiliation it stated; unavailable
@@ -747,12 +754,12 @@ the durable authority has adopted its rows and is not affected.
 | Remote room occupancies of one local full JID, in every phase | 128 |
 | Remote room occupancies of one local account | 512 |
 | Remote room occupancies of the deployment | 65,536 |
-| Remote JIDs one replica is verifying at once | 256 |
+| Remote service domains one replica is asking at once | 256 |
 | How long a join is held for verification | 30 s |
 | How long a sent join waits for the room's own presence | 60 s |
 | How long a room left keeps admitting the room's answer and earlier traffic | 30 s |
-| How long a "room" verdict is cached | 1 h |
-| How long a "not a room" verdict is cached | 5 min |
+| How long a "service" verdict is cached | 1 h |
+| How long a "not a service" verdict is cached | 5 min |
 | Room traffic waiting for decision on one replica (four workers of 256) | 1,024 |
 | Room traffic waiting from one room | 64 |
 | One delivery of room traffic | 5 s |
@@ -761,8 +768,9 @@ A join beyond the occupancy bounds is refused with `resource-constraint`.
 The bounds are counted and the row inserted in one transaction; on SQLite
 it holds the write lock, and on PostgreSQL joins in flight at the same
 moment may each see a count below a bound, so a bound can be exceeded by
-the joins committed concurrently. The verdict cache holds one row per room
-bare JID asked within the TTLs and is pruned with the correlation table.
+the joins committed concurrently. The verdict cache holds one row per
+service domain asked within the TTLs and is pruned with the correlation
+table.
 
 ## Behaviour with S2S off
 
@@ -826,9 +834,10 @@ runbook (G24):
   replica's next sweep, up to five seconds later.
 - **Bounds under concurrency.** On PostgreSQL the occupancy bounds can be
   exceeded by the joins that commit at the same moment. Verifications are
-  bounded per replica (256), not per account, so one account joining many
-  unknown JIDs at once can hold all of them and delay other joins with
-  `resource-constraint` for up to the verification timeout.
+  bounded per replica (256 service domains), not per account, so one
+  account joining rooms on many unknown domains at once can hold all of
+  them and delay other joins with `resource-constraint` for up to the
+  verification timeout.
 - **A cancelled offer.** The WebSocket path waits at most two seconds for
   the route. A join or leave whose occupancy was written but whose route
   call was cancelled before its stanza was queued leaves the occupancy
@@ -841,11 +850,21 @@ runbook (G24):
   authority elsewhere. A session that kept its connection on a live
   replica is never affected. A replica whose liveness writes fail for ten
   minutes has its occupancies ended this way while it still serves them.
-- **Verdicts follow the room's own answer.** A remote server that answers
-  `disco#info` for an account's bare JID with the conference identity,
-  wrongly or deliberately, has that JID treated as a room: the join is
-  sent and its traffic admitted. Verification shows that the JID's own
-  server presents it as a room, not that it is one.
+- **Verdicts follow the remote server's own answer.** A remote server that
+  answers `disco#info` for a domain with the conference identity, wrongly
+  or deliberately, has every JID there treated as a room: joins are sent
+  and their traffic admitted. A server that hosts accounts and rooms on one
+  domain and advertises it as a conference service has its accounts
+  joinable the same way. Verification shows that the remote server
+  presents the domain as a multi-user chat service, not that a JID there
+  is a room.
+- **Two replicas dialling one peer.** A peer that keeps one stream per
+  directional pair, as Waddle does, refuses a second replica's new stream
+  with `conflict` within its replacement interval. Room stanzas a second
+  replica sends in that window fail like any of its stanzas (see
+  "Several replicas, one stream per pair"): a join or message is answered
+  with `remote-server-timeout`, and the leave sent when a resource ends is
+  dropped, so the room keeps the occupant until it notices otherwise.
 - **Private messages without the `muc#user` element.** XEP-0045 §7.5 only
   recommends the element; a remote room that omits it has its private
   messages received-carbon-copied, as other chat messages are.
