@@ -323,7 +323,10 @@ pub(crate) async fn forget_unadmitted_remote_messages(
         if !remote || snapshot_admits(app_state, sender.domain()) {
             continue;
         }
-        match storage.delete_row(&row.id).await {
+        // A flush may claim the row after it was read: only a row still
+        // unclaimed is deleted, and one a flush took is the flush's.
+        match storage.delete_unclaimed_row(&row.id).await {
+            Ok(0) => {}
             Ok(_) => telemetry::offline_unadmitted(),
             Err(error) => {
                 warn!(%error, "deleting a stored message of a domain no longer admitted failed");

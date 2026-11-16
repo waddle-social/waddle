@@ -10,7 +10,8 @@
 //! the same bounds, and what the store would not keep (a chat state alone,
 //! a `headline` other than an event notification the account asked for,
 //! an `error`, directed presence) reaches it only from a contact. A stored message whose sender's domain is no longer admitted
-//! (ADR-0020 D1) is deleted before the store is flushed. Through the
+//! (ADR-0020 D1) is deleted before the store is flushed, unless a flush
+//! claimed it after it was read. Through the
 //! production `/ws` router, the real S2S router and a loopback peer,
 //! `home-b.test`.
 #![cfg(feature = "test-support")]
@@ -253,4 +254,73 @@ async fn a_stored_message_whose_senders_domain_is_no_longer_admitted_is_never_de
         .is_some(),
         "the offline store is empty"
     );
+}
+
+#[tokio::test]
+async fn the_purge_of_an_unadmitted_senders_message_leaves_a_row_a_flush_claimed() {
+    use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{
+        PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
+    };
+
+    // The purge reads the account's rows and deletes those of a domain no
+    // longer admitted; a flush may claim one between the read and the
+    // delete, and that row is then the flush's to deliver or release.
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("pending storage");
+    let account: jid::BareJid = ALICE.parse().expect("an account JID");
+    let stored = |id: &str| PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: account.clone(),
+        original_receipt_at: chrono::Utc::now(),
+        payload: PendingPayload::Transient(Box::new(message(
+            MALLORY,
+            ALICE,
+            MessageType::Chat,
+            id,
+            "are you there",
+        ))),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    let claimed = stored("claimed");
+    let claimed_id = claimed.id.clone();
+    storage.insert(claimed).await.expect("the row is stored");
+    let session = SmSessionId::new("flushing-session");
+    let taken = storage
+        .claim_for_session(&account, &session)
+        .await
+        .expect("the flush claims the row");
+    assert_eq!(taken.len(), 1);
+    assert_eq!(
+        storage
+            .delete_unclaimed_row(&claimed_id)
+            .await
+            .expect("the purge runs"),
+        0,
+        "the purge deleted a row a flush had claimed"
+    );
+    assert_eq!(storage.list(&account).await.expect("rows").len(), 1);
+
+    // A row nobody claimed is deleted.
+    let unclaimed = stored("unclaimed");
+    let unclaimed_id = unclaimed.id.clone();
+    storage.insert(unclaimed).await.expect("the row is stored");
+    assert_eq!(
+        storage
+            .delete_unclaimed_row(&unclaimed_id)
+            .await
+            .expect("the purge runs"),
+        1
+    );
+    let left: Vec<PendingRowId> = storage
+        .list(&account)
+        .await
+        .expect("rows")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(left, vec![claimed_id]);
 }
