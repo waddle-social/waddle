@@ -5,7 +5,10 @@ use super::{
     GetSnapshot, Object, ObjectType, Relation, ResponseBatch, Session, Stanza, Subject, Tuple,
     UpdateConfig, WebSocketState, DATA_FORMS_NS,
 };
-use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
+use crate::admin::channels::{
+    acquire_room_config_lock, acquire_room_config_lock_within,
+    explicit_channel_affiliations_for_jids, ROOM_CONFIG_LOCK_WAIT,
+};
 use crate::room_effect_outbox::RoomEffectArmSupervisor;
 use crate::room_effect_outbox::RoomEffectOutboxStore;
 
@@ -540,17 +543,69 @@ async fn rollback_config_or_arm_reservation(
     }
 }
 
+/// Whether the grants of a managed room let `initiator` configure it, with
+/// a decision that is still current.
+fn owner_config_admitted(
+    grants: &crate::permissions::host_grant::ManagedRoomGrants,
+    initiator: Option<&FullJid>,
+) -> bool {
+    initiator.is_some_and(|initiator| {
+        grants.allows(
+            &initiator.to_bare(),
+            crate::permissions::host_grant::HostGrantAction::Manage,
+        )
+    })
+}
+
+/// Why an owner's configuration change was not applied.
+#[derive(Debug)]
+pub(super) enum OwnerConfigError {
+    /// The room is one an enrolled host-grant scope manages, and its grants,
+    /// read again under the room's configuration lock, no longer let the
+    /// initiator configure it.
+    Forbidden,
+    /// The room's configuration lock was not free within
+    /// [`ROOM_CONFIG_LOCK_WAIT`].
+    Busy,
+    Failed(String),
+}
+
+impl From<String> for OwnerConfigError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for OwnerConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Forbidden => f.write_str("the initiator may no longer configure the room"),
+            Self::Busy => f.write_str("the room's configuration lock is held"),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+/// Apply an owner's configuration change. The caller authorized the
+/// initiator; in a room an enrolled host-grant scope manages that decision
+/// was taken before this request waited for the room's configuration lock,
+/// which an administration request holds while it records a change and
+/// waits for its acknowledgement. The grants are therefore read again once
+/// the lock is held, and asked again (without waiting) just before the room
+/// actor applies the change: a demotion acknowledged meanwhile refuses it.
 pub(super) async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
     session: Option<&Session>,
     initiator: Option<&FullJid>,
-) -> Result<ResponseBatch, String> {
+) -> Result<ResponseBatch, OwnerConfigError> {
     let mut room_actor = get_room_actor(state, room_jid)
         .await
         .ok_or_else(|| "room actor not found".to_string())?;
-    let _config_guard = acquire_room_config_lock(room_jid).await;
+    let _config_guard = acquire_room_config_lock_within(room_jid, ROOM_CONFIG_LOCK_WAIT)
+        .await
+        .ok_or(OwnerConfigError::Busy)?;
     let snapshot = room_actor
         .ask(GetSnapshot)
         .await
@@ -643,8 +698,9 @@ pub(super) async fn apply_muc_owner_config(
     }
     // A room an enrolled host-grant scope manages stays members-only (its
     // binding's access model) and its owners are its canonical grants, so
-    // configuring it writes no owner relationship.
-    let host_grant_managed = {
+    // configuring it writes no owner relationship. Its grants are read
+    // under the configuration lock and decide the initiator again.
+    let host_grant_decision = {
         use crate::permissions::host_grant::{RoomBinding, RoomGate};
         match state
             .deps
@@ -653,13 +709,19 @@ pub(super) async fn apply_muc_owner_config(
             .room(RoomBinding::Room(room_jid))
             .await
         {
-            RoomGate::Unmanaged => false,
-            RoomGate::Managed(_) => true,
+            RoomGate::Unmanaged => None,
+            RoomGate::Managed(grants) => {
+                if !owner_config_admitted(&grants, initiator) {
+                    return Err(OwnerConfigError::Forbidden);
+                }
+                Some(grants)
+            }
             RoomGate::Unavailable => {
-                return Err("the host-grant authority is unavailable".to_string());
+                return Err("the host-grant authority is unavailable".to_string().into());
             }
         }
     };
+    let host_grant_managed = host_grant_decision.is_some();
     if host_grant_managed {
         config.members_only = true;
     }
@@ -707,6 +769,15 @@ pub(super) async fn apply_muc_owner_config(
         waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience
     };
     let mut config_reservation = None;
+    // The last check before the room actor is asked, with nothing awaited
+    // between them: a decision overtaken while this request read and
+    // prepared applies nothing.
+    if host_grant_decision
+        .as_ref()
+        .is_some_and(|grants| !owner_config_admitted(grants, initiator))
+    {
+        return Err(OwnerConfigError::Forbidden);
+    }
     let mut cancelled_commit_recovery = if !previous_members_only && config.members_only {
         let request = if let Some(affiliations) = managed_enforcement_affiliations.as_ref() {
             PendingMembersOnlyEnforcementRequest::Managed {
@@ -766,7 +837,9 @@ pub(super) async fn apply_muc_owner_config(
                 )
                 .await?;
             if !recovered_snapshot.config_committed_since(&snapshot, &config) {
-                return Err("config update outcome is being reconciled; please retry".to_string());
+                return Err("config update outcome is being reconciled; please retry"
+                    .to_string()
+                    .into());
             }
             // Seed the reconciled broadcast/voice roster from the recovered
             // (post-mutation) snapshot, not the caller's pre-mutation copy.
@@ -821,7 +894,7 @@ pub(super) async fn apply_muc_owner_config(
                             .protocol
                             .room_effect_arm_supervisor
                             .retain_staged_reservation_arming(room_jid.clone(), coordinates);
-                        return Err(format!("config reservation recovery failed: {error}"));
+                        return Err(format!("config reservation recovery failed: {error}").into());
                     }
                 };
             }
@@ -829,7 +902,7 @@ pub(super) async fn apply_muc_owner_config(
         }
         Err(error) => {
             cancelled_commit_recovery.disarm();
-            return Err(format!("config update failed: {error:?}"));
+            return Err(format!("config update failed: {error:?}").into());
         }
     };
     cancelled_commit_recovery.disarm();
@@ -954,7 +1027,7 @@ pub(super) async fn apply_muc_owner_config(
         )
         .await;
         config_reservation.clear();
-        return Err(format!("channel upsert failed: {error}"));
+        return Err(format!("channel upsert failed: {error}").into());
     }
 
     // The channel#owner tuple was written before the config update/upsert so the

@@ -426,6 +426,26 @@ impl HostGrantGate {
         }
     }
 
+    /// Whether `subject` may still perform `action` in the room `decided`
+    /// was read for, asked once an await separated that decision from the
+    /// effect it guards: the decision itself while its ticket is current,
+    /// otherwise a decision read now. A room that cannot be decided now
+    /// allows nothing.
+    pub async fn still_allows(
+        &self,
+        decided: &ManagedRoomGrants,
+        subject: &BareJid,
+        action: HostGrantAction,
+    ) -> bool {
+        if decided.fence.is_current() {
+            return decided.allows(subject, action);
+        }
+        match self.room(RoomBinding::Room(&decided.grants.room)).await {
+            RoomGate::Managed(now) => now.allows(subject, action),
+            RoomGate::Unmanaged | RoomGate::Unavailable => false,
+        }
+    }
+
     /// Whether the room whose authorization object is `channel_id` is
     /// managed by an enrolled scope. `Err` while that cannot be told.
     pub async fn channel_enrolled(&self, channel_id: &str) -> Result<bool, HostGrantUnavailable> {

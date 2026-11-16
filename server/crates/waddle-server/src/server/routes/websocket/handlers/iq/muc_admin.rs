@@ -9,7 +9,8 @@ use super::{
     Relation, ResponseBatch, Stanza, Subject, WebSocketState,
 };
 use crate::admin::channels::{
-    acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
+    acquire_room_config_lock_within, explicit_channel_affiliations_for_jids,
+    reacquire_config_actor, ROOM_CONFIG_LOCK_WAIT,
 };
 use crate::permissions::{
     AuthzUserJid, ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation,
@@ -1097,14 +1098,18 @@ impl AdminListAnswer {
 }
 
 /// Answer a muc#admin list GET for a room an enrolled host-grant scope
-/// manages.
+/// manages. The role list is read from the room actor after the sender was
+/// decided a moderator, so the sender is decided again once it has been
+/// read: a list read after a revoke acknowledged meanwhile is not sent.
 async fn answer_host_grant_admin_list_get(
+    state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     room: &crate::permissions::host_grant::ManagedRoomGrants,
     sender_jid: &FullJid,
     query: &waddle_xmpp::muc::AdminQuery,
 ) -> AdminListAnswer {
     use super::muc_admin_host_grant::{host_grant_affiliation_list, sender_moderates};
+    use crate::permissions::host_grant::{reach_checkpoint, DecisionCheckpoint, HostGrantAction};
     if query.items.iter().any(admin_item_has_role_shape) {
         if !sender_moderates(room, sender_jid) {
             return AdminListAnswer::Denied(AdminListDenial::Forbidden);
@@ -1117,6 +1122,16 @@ async fn answer_host_grant_admin_list_get(
             Ok(snapshot) => snapshot.room,
             Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
         };
+        reach_checkpoint(DecisionCheckpoint::AdminRoleListRead, &query.room_jid).await;
+        if !state
+            .deps
+            .app_state
+            .host_grants
+            .still_allows(room, &sender_jid.to_bare(), HostGrantAction::Moderate)
+            .await
+        {
+            return AdminListAnswer::Denied(AdminListDenial::Forbidden);
+        }
         let role_filter = query.items.iter().find_map(|item| item.role);
         return AdminListAnswer::Roles(
             snapshot
@@ -1162,7 +1177,8 @@ pub(super) async fn answer_admin_list_get(
         RoomGate::Unmanaged => {}
         RoomGate::Unavailable => return AdminListAnswer::Denied(AdminListDenial::Internal),
         RoomGate::Managed(room) => {
-            return answer_host_grant_admin_list_get(room_actor, &room, sender_jid, query).await
+            return answer_host_grant_admin_list_get(state, room_actor, &room, sender_jid, query)
+                .await
         }
     }
     let context = match room_actor
@@ -1322,7 +1338,17 @@ pub(super) async fn handle_muc_admin_iq(
             }
         }
     };
-    let _config_guard = acquire_room_config_lock(&query.room_jid).await;
+    let Some(_config_guard) =
+        acquire_room_config_lock_within(&query.room_jid, ROOM_CONFIG_LOCK_WAIT).await
+    else {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            resource_constraint_iq_error("The room is being administered; try again."),
+        )]
+        .into();
+    };
     let context = match room_actor
         .ask(GetAdminContext {
             sender_jid: sender_jid.clone(),

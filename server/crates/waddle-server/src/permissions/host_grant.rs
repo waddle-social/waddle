@@ -57,6 +57,7 @@
 mod admission;
 mod authority;
 mod boot_clock;
+mod checkpoint;
 mod enrolled;
 mod error;
 mod fence;
@@ -80,6 +81,10 @@ pub use admission::{AdmissionDenial, AdmissionWitness, RoomAcceptance, RoomAdmis
 pub use authority::{
     HostGrantAuthority, ProjectionContradiction, Reconciliation, VerifiedProjection,
 };
+pub(crate) use checkpoint::reached as reach_checkpoint;
+pub use checkpoint::DecisionCheckpoint;
+#[cfg(feature = "test-support")]
+pub use checkpoint::{pause_at as pause_at_checkpoint, CheckpointGate};
 pub use enrolled::{
     EnrolledScopes, EnrolledSet, Enrollment, ENROLLED_SET_REFRESH_INTERVAL,
     ENROLLED_SET_STALE_AFTER,

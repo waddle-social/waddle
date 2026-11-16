@@ -186,6 +186,14 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
             })?;
+        crate::permissions::host_grant::reach_checkpoint(
+            crate::permissions::host_grant::DecisionCheckpoint::ExtensionArchiveRead,
+            &archive,
+        )
+        .await;
+        self.archive_still_authorized(&invocation, &archive)
+            .await
+            .map_err(host_tool_error)?;
         let messages = result
             .messages
             .into_iter()

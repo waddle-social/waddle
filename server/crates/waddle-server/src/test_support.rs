@@ -1175,6 +1175,14 @@ pub async fn sweep_host_grant_room(state: &WebSocketState, room: &jid::BareJid) 
     crate::server::host_grant_revocation::sweep_room_for_test(state, room).await
 }
 
+/// Hold the configuration lock of `room` in this process until the permit
+/// is dropped, as an administration request of the room holds it from
+/// before it records a change until the room actor has applied it.
+#[cfg(feature = "test-support")]
+pub async fn hold_room_config_lock(room: &jid::BareJid) -> tokio::sync::OwnedSemaphorePermit {
+    crate::admin::channels::acquire_room_config_lock(room).await
+}
+
 /// Whether `requester` may still read `room`, decided again after a
 /// protected read: `None` for a room no enrolled host-grant scope manages.
 #[cfg(feature = "test-support")]
