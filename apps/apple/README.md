@@ -98,7 +98,8 @@ with no network. Whole screens draw system chrome that changes between OS
 releases, so they are compared only on the release the goldens were recorded
 on and skipped elsewhere (`screenGoldenOSVersion`).
 
-The goldens were recorded on iOS 27 and macOS 27. The bundled fonts render
+The goldens were recorded on iOS 27 and macOS 27, on a machine with a
+day-month-year date format; screens that show dates depend on it. The bundled fonts render
 alike on older releases; SF Symbols do not, so a snapshot with detailed
 symbols passes a lower `precision`.
 

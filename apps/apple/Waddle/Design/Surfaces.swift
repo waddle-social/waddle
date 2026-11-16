@@ -116,6 +116,16 @@ extension View {
     }
 }
 
+/// A one-pixel rule between rows or regions.
+struct HuddleDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Theme.Colors.borderSoft)
+            .frame(height: WaddleTokens.BorderWidth.hair)
+            .accessibilityHidden(true)
+    }
+}
+
 /// A card: padded content on a resting surface. `isLive` gives it the
 /// Aurora border, for a huddle that is happening now and nothing else.
 struct HuddleCard<Content: View>: View {

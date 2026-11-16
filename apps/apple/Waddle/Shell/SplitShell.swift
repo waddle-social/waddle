@@ -17,6 +17,11 @@ struct SplitShell: View {
             NavigationStack {
                 detail
                     .background(Theme.Colors.bg)
+                    #if os(macOS)
+                    // The title bar continues the page ground instead of the system grey.
+                    .toolbarBackground(Theme.Colors.bg, for: .windowToolbar)
+                    .toolbarBackground(.visible, for: .windowToolbar)
+                    #endif
             }
         }
         .tint(Theme.Colors.action)

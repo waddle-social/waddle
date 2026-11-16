@@ -13,18 +13,18 @@ struct InboxRoomCard: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             ForEach(group.messages, id: \.presentationID) { item in
-                divider
+                HuddleDivider()
                 InboxMessageRow(item: item, onOpen: onOpenRoom)
             }
             ForEach(group.threads) { thread in
-                divider
+                HuddleDivider()
                 InboxThreadRow(thread: thread) { onOpenThread(thread.key) }
                 ForEach(thread.messages, id: \.presentationID) { item in
                     InboxMessageRow(item: item, isThreadReply: true) { onOpenThread(thread.key) }
                 }
             }
             if group.isIncomplete {
-                divider
+                HuddleDivider()
                 Label("Some messages didn't load. Pull down to try again.", systemImage: "exclamationmark.triangle")
                     .huddleText(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warningText)
@@ -57,12 +57,6 @@ struct InboxRoomCard: View {
         .padding(.vertical, Theme.Spacing.xs)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(InboxCopy.groupLabel(group)))
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(Theme.Colors.borderSoft)
-            .frame(height: WaddleTokens.BorderWidth.hair)
     }
 }
 
@@ -137,23 +131,5 @@ struct InboxMessageRow: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(InboxCopy.messageLabel(item, isThreadReply: isThreadReply)))
         .accessibilityAddTraits(.isButton)
-    }
-}
-
-/// A room glyph on a quiet rounded tile, sized like an avatar.
-struct RoomSymbolTile: View {
-    let symbol: String
-    var size: CGFloat = Theme.Size.avatar
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-            .fill(Theme.Colors.surface2)
-            .frame(width: size, height: size)
-            .overlay {
-                Image(systemName: symbol)
-                    .font(.system(size: size * 0.45, weight: .semibold))
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-            .accessibilityHidden(true)
     }
 }

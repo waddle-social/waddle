@@ -33,27 +33,24 @@ func assertScreenSnapshot<V: View>(
     )
     for theme in SnapshotTheme.allCases {
         let image = try await renderScreen(view, theme: theme, size: size)
-        #if os(macOS)
+        // A whole screen is mostly ground, so a missing badge is a tiny
+        // share of its pixels: demand a near-exact match.
         assertSnapshot(
             of: image,
-            as: .image(precision: 0.99, perceptualPrecision: 0.98),
-            named: "\(theme.rawValue)-macOS",
+            as: .image(precision: 0.9995, perceptualPrecision: 0.98),
+            named: "\(theme.rawValue)-\(platformName)",
             file: file,
             testName: testName,
             line: line
         )
-        #else
-        assertSnapshot(
-            of: image,
-            as: .image(precision: 0.99, perceptualPrecision: 0.98),
-            named: "\(theme.rawValue)-iOS",
-            file: file,
-            testName: testName,
-            line: line
-        )
-        #endif
     }
 }
+
+#if os(macOS)
+private let platformName = "macOS"
+#else
+private let platformName = "iOS"
+#endif
 
 /// Time for `.task` work, list layout and image decoding to settle.
 private let settleTime: Duration = .milliseconds(900)

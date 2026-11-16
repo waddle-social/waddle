@@ -36,6 +36,7 @@ struct ConversationLink<Content: View>: View {
                         .opacity(0)
                 }
                 .navigationListRow()
+                .accessibilityAddTraits(.isButton)
         }
     }
 }

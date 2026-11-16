@@ -34,7 +34,7 @@ struct DirectMessagesList: View {
     @ViewBuilder
     private var emptyState: some View {
         if isSearching {
-            ContentUnavailableView.search(text: query)
+            NoMatchesView(query: query)
         } else {
             VStack(spacing: Theme.Spacing.m) {
                 EmptyStateView(

@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// A section label in a navigation list, with an optional trailing "+".
+/// A section label in a navigation list, with a trailing "+".
 /// It is an ordinary row, so it scrolls with its section and never floats.
 struct NavigationSectionHeader: View {
     let title: String
-    var addLabel: String?
-    var action: () -> Void = {}
+    let addLabel: String
+    let action: () -> Void
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
@@ -14,21 +14,14 @@ struct NavigationSectionHeader: View {
                 .foregroundStyle(Theme.Colors.fgSoft)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
-            if let addLabel {
-                Button(action: action) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.Colors.fgSoft)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(addLabel))
-                .help(addLabel)
+            Button(action: action) {
+                NavigationIconLabel(symbol: "plus", color: Theme.Colors.fgSoft)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(addLabel))
+            .help(addLabel)
         }
         .padding(.leading, Theme.Spacing.m)
-        .padding(.trailing, Theme.Spacing.xs)
         .navigationListRow(top: Theme.Spacing.m)
     }
 }
@@ -48,6 +41,19 @@ struct NavigationLoadingRow: View {
         .padding(.horizontal, Theme.Spacing.m)
         .navigationListRow()
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Shown when a navigation search finds nothing.
+struct NoMatchesView: View {
+    let query: String
+
+    var body: some View {
+        EmptyStateView(
+            title: "No matches",
+            message: "Nothing here is called “\(query)”. Check the spelling or try another name.",
+            symbol: "magnifyingglass"
+        )
     }
 }
 

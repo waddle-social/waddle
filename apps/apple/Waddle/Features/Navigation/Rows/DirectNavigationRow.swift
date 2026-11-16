@@ -33,7 +33,7 @@ struct CompactDirectRowLabel: View {
     let attention: ConversationAttention
 
     var body: some View {
-        NavigationRowLabel(title: title, isUnread: attention.isUnread, isDimmed: attention.isDimmed) {
+        NavigationRowLabel(title: title, isEmphasised: attention.isUnread, isDimmed: attention.isDimmed) {
             PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 20)
         } trailing: {
             ConversationRowTrailing(attention: attention)
@@ -59,7 +59,7 @@ struct PhoneDirectRowLabel: View {
             PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 40)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
-                    NavigationRowTitle(title: title, isUnread: attention.isUnread, isDimmed: attention.isDimmed)
+                    NavigationRowTitle(title: title, isEmphasised: attention.isUnread, isDimmed: attention.isDimmed)
                     Spacer(minLength: Theme.Spacing.xs)
                     Text(ListTimestamp.string(for: direct.lastActivity))
                         .huddleText(Theme.Typography.timestamp)

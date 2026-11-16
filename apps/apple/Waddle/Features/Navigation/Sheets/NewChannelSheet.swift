@@ -30,7 +30,7 @@ struct NewChannelSheet: View {
                 if let errorMessage {
                     Section {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Theme.Colors.dangerText)
                     }
                 }
             }
@@ -97,14 +97,14 @@ struct ChannelAddressPreview: View {
                 Text("Address")
                 Text("#\(slug)")
                     .font(.footnote.monospaced())
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Theme.Colors.fg)
             }
             .accessibilityElement(children: .combine)
         } else if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Text("The name becomes the room's address, like #design-reviews.")
         } else {
             Text("Use at least one letter or number.")
-                .foregroundStyle(.red)
+                .foregroundStyle(Theme.Colors.dangerText)
         }
     }
 }

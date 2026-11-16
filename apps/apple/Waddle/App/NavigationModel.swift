@@ -100,6 +100,8 @@ final class NavigationModel {
         selection = nil
         inspector = nil
         splitSection = section
+        // So an iPad that shrinks to compact width lands on the same place.
+        tab = section == .inbox ? .inbox : .home
     }
 
     /// Scrolls the conversation already on screen to `messageID`. Used from

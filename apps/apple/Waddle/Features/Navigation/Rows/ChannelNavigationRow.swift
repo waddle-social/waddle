@@ -22,7 +22,7 @@ struct ChannelRowLabel: View {
     let attention: ConversationAttention
 
     var body: some View {
-        NavigationRowLabel(title: channel.name, isUnread: attention.isUnread, isDimmed: attention.isDimmed) {
+        NavigationRowLabel(title: channel.name, isEmphasised: attention.isUnread, isDimmed: attention.isDimmed) {
             Image(systemName: ChannelSymbol.name(for: channel))
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(attention.isUnread ? Theme.Colors.fgMuted : Theme.Colors.fgSoft)

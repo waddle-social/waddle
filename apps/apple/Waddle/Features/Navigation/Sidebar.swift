@@ -12,8 +12,6 @@ struct Sidebar: View {
     @State private var query = ""
     @State private var spaceID: String?
 
-    init() {}
-
     var body: some View {
         let sections = currentSections
         VStack(spacing: 0) {
@@ -29,16 +27,10 @@ struct Sidebar: View {
                 GroupChatListSection(groups: sections.groupDMs, style: .sidebar)
                 DirectListSection(directs: sections.directs, style: .sidebar, isSearching: isSearching)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, 0)
+            .navigationListStyle(ground: Theme.Colors.bgRail)
             .overlay {
                 if isSearching && sections.isEmpty {
-                    EmptyStateView(
-                        title: "No matches",
-                        message: "Nothing here is called “\(query)”. Check the spelling or try another name.",
-                        symbol: "magnifyingglass"
-                    )
+                    NoMatchesView(query: query)
                 }
             }
             SidebarAccountBar()
@@ -65,6 +57,7 @@ struct Sidebar: View {
             title: "Inbox",
             symbol: "tray",
             unread: session.unreadOverviewRoomCount,
+            isMention: session.unread.mentions.contains { $0.isRoom },
             isSelected: isShowing(.inbox)
         ) {
             navigation.show(.inbox)
@@ -112,11 +105,7 @@ private struct SidebarHeader: View {
             Button {
                 navigation.sheet = .newMessage
             } label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Theme.Colors.fgMuted)
-                    .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+                NavigationIconLabel(symbol: "square.and.pencil")
             }
             .buttonStyle(.plain)
             .help("New message")
@@ -171,18 +160,19 @@ private struct SidebarDestinationRow: View {
     let title: String
     let symbol: String
     var unread = 0
+    var isMention = false
     let isSelected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             NavigationRowChrome(isSelected: isSelected) {
-                NavigationRowLabel(title: title, isUnread: isSelected || unread > 0) {
+                NavigationRowLabel(title: title, isEmphasised: isSelected || unread > 0) {
                     Image(systemName: symbol)
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(isSelected ? Theme.Colors.fg : Theme.Colors.fgMuted)
                 } trailing: {
-                    UnreadBadge(count: unread, isMention: true)
+                    UnreadBadge(count: unread, isMention: isMention)
                 }
             }
         }

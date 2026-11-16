@@ -48,7 +48,7 @@ struct NavigationRowChrome<Label: View>: View {
 /// Icon, title and trailing state of a navigation row.
 struct NavigationRowLabel<Icon: View, Trailing: View>: View {
     let title: String
-    var isUnread = false
+    var isEmphasised = false
     var isDimmed = false
     @ViewBuilder let icon: Icon
     @ViewBuilder let trailing: Trailing
@@ -57,7 +57,7 @@ struct NavigationRowLabel<Icon: View, Trailing: View>: View {
         HStack(spacing: Theme.Spacing.s) {
             icon
                 .frame(width: Self.iconWidth, height: Self.iconWidth)
-            NavigationRowTitle(title: title, isUnread: isUnread, isDimmed: isDimmed)
+            NavigationRowTitle(title: title, isEmphasised: isEmphasised, isDimmed: isDimmed)
             Spacer(minLength: Theme.Spacing.xs)
             trailing
         }
@@ -66,23 +66,46 @@ struct NavigationRowLabel<Icon: View, Trailing: View>: View {
     static var iconWidth: CGFloat { 20 }
 }
 
-/// A row title: bold and full-strength while unread, quiet once read,
-/// quieter still when muted.
+/// A row title: bold and full-strength when emphasised (unread, or the
+/// current place), quiet otherwise, quieter still when dimmed.
 struct NavigationRowTitle: View {
     let title: String
-    var isUnread = false
+    var isEmphasised = false
     var isDimmed = false
 
     var body: some View {
         Text(title)
-            .huddleText(Theme.Typography.sidebar.weight(isUnread ? 700 : 500))
+            .huddleText(Theme.Typography.sidebar.weight(isEmphasised ? 700 : 500))
             .foregroundStyle(color)
             .lineLimit(1)
     }
 
     private var color: Color {
-        if isUnread { return Theme.Colors.fg }
+        if isEmphasised { return Theme.Colors.fg }
         return isDimmed ? Theme.Colors.fgSoft : Theme.Colors.fgMuted
+    }
+}
+
+/// The label of a small icon-only button in navigation chrome. Touch gets
+/// the 44pt target; a pointer gets a 32pt one.
+struct NavigationIconLabel: View {
+    let symbol: String
+    var color: Color = Theme.Colors.fgMuted
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 15, weight: .medium))
+            .foregroundStyle(color)
+            .frame(width: Self.target, height: Self.target)
+            .contentShape(Rectangle())
+    }
+
+    static var target: CGFloat {
+        #if os(iOS)
+        WaddleTokens.ControlHeight.touch
+        #else
+        WaddleTokens.ControlHeight.sm
+        #endif
     }
 }
 

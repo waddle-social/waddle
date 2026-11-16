@@ -30,7 +30,7 @@ struct HomeList: View {
         .searchable(text: $query, prompt: "Search rooms and people")
         .overlay {
             if isSearching && sections.isEmpty {
-                ContentUnavailableView.search(text: query)
+                NoMatchesView(query: query)
             }
         }
         .toolbar {
@@ -71,10 +71,10 @@ struct HomeList: View {
 extension View {
     /// A navigation list on the page ground: plain rows, no system
     /// grouping or separators.
-    func navigationListStyle() -> some View {
+    func navigationListStyle(ground: Color = Theme.Colors.bg) -> some View {
         listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .background(Theme.Colors.bg)
+            .background(ground)
             .environment(\.defaultMinListRowHeight, 0)
     }
 }

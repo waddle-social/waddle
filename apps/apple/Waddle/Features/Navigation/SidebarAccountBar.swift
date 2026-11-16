@@ -34,9 +34,7 @@ struct SidebarAccountBar: View {
         .padding(.horizontal, Theme.Spacing.m)
         .padding(.vertical, Theme.Spacing.s)
         .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Theme.Colors.borderSoft)
-                .frame(height: WaddleTokens.BorderWidth.hair)
+            HuddleDivider()
         }
     }
 }
@@ -94,10 +92,6 @@ struct SidebarSettingsButton: View {
     }
 
     private var icon: some View {
-        Image(systemName: "slider.horizontal.3")
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(Theme.Colors.fgMuted)
-            .frame(width: 32, height: 32)
-            .contentShape(Rectangle())
+        NavigationIconLabel(symbol: "slider.horizontal.3")
     }
 }
