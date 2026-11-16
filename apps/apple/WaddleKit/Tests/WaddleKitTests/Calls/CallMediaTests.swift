@@ -5,6 +5,77 @@ import Testing
 
 @MainActor
 @Suite("Call media") struct CallMediaTests {
+    @Test(arguments: [false, true])
+    func teardownDuringExternalServicesFetchNeverConnectsTheOldCall(clear: Bool) async {
+        let port = FakePort()
+        port.holdExternalServicesFetch = true
+        let media = RecordingCallMedia()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { "c-reused" })
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        store.handle(CallEvent(from: callPeer, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        await eventually { port.externalServicesFetchCount == 1 }
+        #expect(port.externalServicesFetchCount == 1)
+        #expect(media.calls.isEmpty)
+        if clear { store.clear() } else { await store.hangUp() }
+        await eventually { media.calls == [.disconnect] }
+        #expect(store.state == .idle)
+        #expect(await store.startCall(to: callPeer.bare, media: callVideo))
+        store.handle(CallEvent(from: callPeer, sid: "c-reused", kind: .sessionAccept(join: callJoin, media: callVideo)))
+        port.holdExternalServicesFetch = false
+        port.releaseExternalServicesFetches()
+        // Replacement connect waits for the old task: it is a completion
+        // barrier for any stale fetch continuation or late cleanup.
+        await eventually { media.calls.last == .connect(callJoin, callVideo) }
+        #expect(media.calls == [.disconnect, .connect(callJoin, callVideo)])
+        #expect(port.externalServicesFetchCount == 2)
+        #expect(store.state == .active(ActiveCall(peer: callPeer, sid: "c-reused", media: callVideo, join: callJoin, initiator: callOwn)))
+        let teardown: [CallSend] = clear ? [] : [
+            .terminate(callPeer, "c-reused", .success), .finish(callPeer, "c-reused", nil),
+        ]
+        #expect(port.callSends == [.propose(callPeer.bare, "c-reused", callAudio)] + teardown + [
+            .propose(callPeer.bare, "c-reused", callVideo)
+        ])
+        store.clear()
+    }
+
+    @Test func invalidGrantDisconnectsWithoutFetchingOrConnectingAndEndsWithGone() async {
+        let port = FakePort()
+        let media = RecordingCallMedia()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { "c-invalid" })
+        let invalid = CallJoin(url: callJoin.url, room: callJoin.room, identity: callJoin.identity, token: "not-a-jwt")
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        store.handle(CallEvent(from: callPeer, sid: "c-invalid", kind: .sessionAccept(join: invalid, media: callAudio)))
+        await eventually { port.callSends.count == 3 }
+        #expect(store.state == .idle)
+        #expect(media.calls == [.disconnect])
+        #expect(port.externalServicesFetchCount == 0)
+        #expect(port.callSends == [
+            .propose(callPeer.bare, "c-invalid", callAudio),
+            .terminate(callPeer, "c-invalid", .gone), .finish(callPeer, "c-invalid", nil),
+        ])
+        store.clear()
+    }
+
+    @Test func externalServicesReachMediaAsIceServers() async {
+        let port = FakePort()
+        port.externalServices = [
+            ExternalService(kind: .stun, host: "stun.test", port: 3478),
+            ExternalService(kind: .turns, host: "2001:db8::1", port: 443, transport: .tcp, username: "u", password: "p"),
+            ExternalService(kind: .turn, host: "unusable.test"),
+        ]
+        let media = RecordingCallMedia()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { "c-ice" })
+        #expect(await store.startCall(to: callPeer.bare, media: callVideo))
+        store.handle(CallEvent(from: callPeer, sid: "c-ice", kind: .sessionAccept(join: callJoin, media: callVideo)))
+        await eventually { !media.calls.isEmpty }
+        #expect(media.calls == [.connect(callJoin, callVideo, [
+            IceServer(url: "stun:stun.test:3478"),
+            IceServer(url: "turns:[2001:db8::1]:443?transport=tcp", username: "u", credential: "p"),
+        ])])
+        #expect(port.externalServicesFetchCount == 1)
+        store.clear()
+    }
+
     @Test func oldConnectFailureAndCallbackCannotEndReusedSIDAfterClear() async throws {
         let port = FakePort()
         let media = RecordingCallMedia()
@@ -53,7 +124,9 @@ import Testing
         // The peer asks for video, but the user only ever agreed to audio.
         #expect(store.state == .incoming(IncomingCall(from: callPeer, sid: "c-new", media: callAudio, isAccepting: true)))
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
-        let migratedJoin = CallJoin(url: callJoin.url, room: "migrated-room", identity: callJoin.identity, token: "new-jwt")
+        let migratedJoin = CallJoin(
+            url: callJoin.url, room: "migrated-room", identity: callJoin.identity,
+            token: callToken(#"{"sub":"alice@waddle.test/waddle-apple-1","video":{"roomJoin":true,"room":"migrated-room"}}"#))
         store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .sessionInitiate(join: migratedJoin, media: callVideo)))
         await eventually { media.calls.count == 3 }
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect, .connect(migratedJoin, callAudio)])
@@ -184,7 +257,7 @@ import Testing
 
 @MainActor final class RecordingCallMedia: CallMediaController {
     enum Call: Equatable {
-        case connect(CallJoin, CallMedia)
+        case connect(CallJoin, CallMedia, [IceServer] = [])
         case disconnect
     }
     var onFailure: (@MainActor () -> Void)?
@@ -194,9 +267,9 @@ import Testing
     private var heldConnect: CheckedContinuation<Void, Never>?
     private enum Failure: Error { case unavailable }
 
-    func connect(join: CallJoin, media: CallMedia) async throws {
+    func connect(join: CallJoin, media: CallMedia, iceServers: [IceServer]) async throws {
         let shouldThrow = connectThrows
-        calls.append(.connect(join, media))
+        calls.append(.connect(join, media, iceServers))
         if holdConnect {
             holdConnect = false
             await withCheckedContinuation { heldConnect = $0 }

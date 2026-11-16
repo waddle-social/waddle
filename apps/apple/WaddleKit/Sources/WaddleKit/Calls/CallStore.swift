@@ -38,7 +38,7 @@ import Observation
         self.ownBareJID = ownBareJID
         self.newSid = newSid
         if let media {
-            self.mediaSession = CallSessionController(media: media) { [weak self] sid, reason in
+            self.mediaSession = CallSessionController(media: media, fetchExternalServices: { await port.fetchExternalServices() }) { [weak self] sid, reason in
                 await self?.hangUpActive(ifSid: sid, reason: reason)
             }
         }

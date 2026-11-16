@@ -100,7 +100,7 @@ name the issue that tracks them.
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
-| Voice/video calls | 0166, 0353, 0272 | ❌ | ❌ | Call state core exists in WaddleKit behind `handlesCalls`; media and UI are pending (#2102) |
+| Voice/video calls | 0166, 0353, 0272 | ❌ | ❌ | Call state core in WaddleKit and LiveKit media in `Waddle/Calls`, both behind `handlesCalls`; the call UI is pending (#2480) |
 | Moderation | 0425 | ❌ | ✅ | Moderator-gated with confirmation |
 | Affiliations / roles | 0045 | ❌ | ✅ | XEP-0045 member lists, affiliation changes, kick, ban. Baseline: called `/v1/space/members`, which the server does not serve |
 | Hats | 0317 | 🟡 | ✅ | Shown as author and member badges. Extension bots wear the server-assigned bot hat only while posting, so they are not listed as people. A room's bots are what its `urn:waddle:room:bots:0` disco#items node declares: shown under "Bots" by name (no presence, no actions), and their messages carry a Bot badge. Loaded on opening the room; refetched when a bot-hatted presence names an unlisted JID |

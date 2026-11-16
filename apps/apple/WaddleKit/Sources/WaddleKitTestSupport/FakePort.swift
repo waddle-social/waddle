@@ -7,6 +7,11 @@ final class FakePort: XmppPort {
     nonisolated let events: AsyncStream<XmppEvent>
     private let continuation: AsyncStream<XmppEvent>.Continuation
 
+    var externalServices: [ExternalService] = []
+    var externalServicesFetchCount = 0
+    var holdExternalServicesFetch = false
+    var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
+
     var callSends: [CallSend] = []
     var completedCallSends: [CallSend] = []
     var callResults: [String: Bool] = [:]
