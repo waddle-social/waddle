@@ -1376,6 +1376,88 @@ async fn live_spicedb_a_projection_read_that_does_not_answer_does_not_hold_the_p
     live.close().await;
 }
 
+/// The revocation fence acknowledges a revoke from PostgreSQL alone
+/// (ADR-0020 D5): the acknowledgement is given while SpiceDB still holds
+/// the projection of the revoked grant, and nothing the projection holds
+/// reopens it.
+#[tokio::test]
+#[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
+async fn live_spicedb_a_revoke_is_acknowledged_while_the_projection_still_holds_the_grant() {
+    use waddle_server::permissions::host_grant::{
+        EnrolledScopes, FenceAcknowledgement, HostGrantAttachment, HostGrantGate, RoomBinding,
+        RoomGate,
+    };
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_fence_projection").await;
+    let authority = live.replica().await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    let channel = live.channel();
+    let room = live.fixture.scope.room.clone();
+    authority.reconcile(lifecycle).await.expect("first pass");
+    assert!(spicedb_allows(&live, PEER, Permission::Read, &channel).await);
+
+    // A replica that decides for the room, with its lease.
+    let enrolled = EnrolledScopes::watch(authority.store().clone());
+    enrolled.refresh().await.expect("enrolled set");
+    let gate = HostGrantGate::with_enrolled_scopes(authority.store().clone(), enrolled);
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(authority.store(), served())
+            .await
+            .expect("attachment")
+    ));
+    let decide = || async {
+        match gate.room(RoomBinding::Room(&room)).await {
+            RoomGate::Managed(grants) => grants,
+            other => panic!("the replica does not decide the managed room: {other:?}"),
+        }
+    };
+    let before = decide().await;
+    assert!(before.allows(&bare(PEER), HostGrantAction::Read));
+
+    // The revoke is recorded; no pass has projected it.
+    let stamps = live.stamps().await;
+    let revoke = live
+        .fixture
+        .command(OWNER, PEER, RoomAffiliation::None)
+        .await;
+    let receipt = authority
+        .store()
+        .set_affiliation(&revoke, &live.fixture.policy)
+        .await
+        .expect("revoke");
+    let acknowledged = authority
+        .store()
+        .await_revocation_fence(
+            lifecycle,
+            receipt.record().generation,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("fence reading");
+    assert_eq!(
+        acknowledged,
+        FenceAcknowledgement::Acknowledged { replicas: 1 }
+    );
+    // SpiceDB still answers for the projection before the revoke, and the
+    // replica admits nothing under it: neither from the decision it made
+    // before nor from one it makes now.
+    assert_eq!(live.stamps().await, stamps);
+    assert!(spicedb_allows(&live, PEER, Permission::Read, &channel).await);
+    assert!(!before.allows(&bare(PEER), HostGrantAction::Read));
+    assert!(!decide().await.allows(&bare(PEER), HostGrantAction::Read));
+    assert!(!sql_admits(&live.fixture, PEER, HostGrantAction::Read).await);
+
+    // The projection follows on the next pass.
+    assert_eq!(
+        authority.reconcile(lifecycle).await.expect("second pass"),
+        Reconciliation::Activated(receipt.record().generation)
+    );
+    assert_ne!(live.stamps().await, stamps);
+    assert!(!spicedb_allows(&live, PEER, Permission::Read, &channel).await);
+    drop(gate);
+    live.close().await;
+}
+
 /// Run this test binary's replica entry as a separate process serving the
 /// fixture's scope, and wait for it to exit.
 async fn replica_process(live: &Live, role: &str, vars: &[(&str, String)]) -> std::process::Output {
