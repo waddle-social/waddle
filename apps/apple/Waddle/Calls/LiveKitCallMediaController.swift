@@ -1,4 +1,4 @@
-import Foundation
+import AVFoundation
 import LiveKit
 import WaddleKit
 
@@ -11,6 +11,7 @@ import WaddleKit
 final class LiveKitCallMediaController: CallMediaController {
     var onFailure: (@MainActor () -> Void)?
 
+    /// The room of the call in progress, from the moment its connect starts.
     private var room: Room?
     /// The room holds its delegates weakly.
     private var observer: RoomObserver?
@@ -19,6 +20,10 @@ final class LiveKitCallMediaController: CallMediaController {
         guard room == nil else { throw CallMediaError.alreadyConnected }
         let observer = RoomObserver { [weak self] room in self?.roomDropped(room) }
         let room = Room(delegate: observer)
+        // Owned before connecting, so a drop the SFU reports while the
+        // connect is still returning is not lost.
+        self.room = room
+        self.observer = observer
         // XEP-0215: an advertised list is the ICE set to use. An empty list
         // means no advertisement, and the SDK keeps the servers the SFU
         // hands out during signalling.
@@ -27,26 +32,48 @@ final class LiveKitCallMediaController: CallMediaController {
         )
         do {
             try await room.connect(url: join.url, token: join.token, connectOptions: options)
-            // A hang-up that raced the connect owns the slot now.
+            // A hang-up or a drop that raced the connect owns the slot now.
             try Task.checkCancellation()
+            guard self.room === room else { throw CancellationError() }
         } catch {
+            if self.room === room { forgetRoom() }
             await room.disconnect()
             throw error
         }
-        self.room = room
-        self.observer = observer
         // Publishing is best effort and separate from joining: a missing
         // device or a denied permission leaves the user in the call,
-        // receive-only, as on web and Android.
-        if media.audio { _ = try? await room.localParticipant.setMicrophone(enabled: true) }
-        if media.video { _ = try? await room.localParticipant.setCamera(enabled: true) }
+        // receive-only, as on web and Android. It runs on its own so a
+        // permission prompt neither delays the call nor outlives it.
+        Task { await publish(media, in: room) }
     }
 
     func disconnect() async {
         guard let room else { return }
-        self.room = nil
-        observer = nil
+        forgetRoom()
         await room.disconnect()
+    }
+
+    /// Asks for each permission first and starts a track only while the call
+    /// still owns `room`: a prompt can stay open long after a hang-up, and
+    /// the microphone must not start then.
+    private func publish(_ media: CallMedia, in room: Room) async {
+        if media.audio, await AVCaptureDevice.requestAccess(for: .audio), self.room === room {
+            _ = try? await room.localParticipant.setMicrophone(enabled: true)
+        }
+        if media.video, await AVCaptureDevice.requestAccess(for: .video), self.room === room {
+            _ = try? await room.localParticipant.setCamera(enabled: true)
+        }
+        // The call ended while a track was starting: `disconnect()` ran
+        // before the track was published, so release it here.
+        if self.room !== room {
+            await room.localParticipant.unpublishAll()
+            await room.disconnect()
+        }
+    }
+
+    private func forgetRoom() {
+        room = nil
+        observer = nil
     }
 
     /// `disconnect()` forgets the room first, so only a drop the SDK reports

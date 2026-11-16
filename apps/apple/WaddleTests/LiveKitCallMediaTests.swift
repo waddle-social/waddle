@@ -37,6 +37,19 @@ final class LiveKitCallMediaTests: XCTestCase {
         await media.disconnect()
     }
 
+    func testJoinsWithAdvertisedIceServers() async throws {
+        let media = LiveKitCallMediaController()
+        let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")
+        // What XEP-0215 would advertise, mapped the way the call store maps it.
+        let advertised = WaddleKit.IceServer.servers(from: [
+            ExternalService(kind: .stun, host: "127.0.0.1", port: 3478),
+            ExternalService(kind: .turn, host: "127.0.0.1", port: 3478, transport: .udp, username: "u", password: "p"),
+        ])
+
+        try await media.connect(join: join, media: CallMedia(audio: false, video: false), iceServers: advertised)
+        await media.disconnect()
+    }
+
     func testATokenTheSFUDidNotIssueCannotJoin() async {
         let media = LiveKitCallMediaController()
         let forged = TestSFU(url: sfu.url, key: sfu.key, secret: "not-the-secret")

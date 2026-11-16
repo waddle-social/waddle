@@ -39,6 +39,7 @@ import WaddleKit
     }
 
     @Test(arguments: [#"{"video":{"roomJoin":true,"room":"other-room"}}"#,
+                      #"{"video":{"roomJoin":true,"room":"  dm-room  "}}"#,
                       #"{"sub":"mallory","video":{"roomJoin":true,"room":"other-room"}}"#])
     func roomMismatchPrecedesIdentityMismatch(payload: String) {
         #expect(join(callToken(payload)).grantDefect == .roomMismatch)
@@ -51,9 +52,8 @@ import WaddleKit
     }
 
     @Test(arguments: [#"{"video":{"roomJoin":true,"room":"dm-room"}}"#,
-                      #"{"sub":null,"video":{"roomJoin":true,"room":"dm-room"}}"#,
-                      #"{"video":{"roomJoin":true,"room":"  dm-room  "}}"#])
-    func subjectIsOptionalAndTheRoomIsTrimmed(payload: String) {
+                      #"{"sub":null,"video":{"roomJoin":true,"room":"dm-room"}}"#])
+    func subjectIsOptional(payload: String) {
         #expect(join(callToken(payload)).grantDefect == nil)
     }
 }

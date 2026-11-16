@@ -26,8 +26,9 @@ public extension CallJoin {
         guard let payload = tokenPayload else { return .malformedToken }
         guard let grant = payload["video"] as? [String: Any] else { return .missingGrant }
         guard grant["roomJoin"] as? Bool == true else { return .joinNotGranted }
-        let granted = (grant["room"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !granted.isEmpty else { return .missingRoom }
+        let granted = grant["room"] as? String ?? ""
+        guard !granted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .missingRoom }
+        // Compared exactly: the media server joins the room the token names.
         guard granted == room else { return .roomMismatch }
         if let subject = payload["sub"] as? String, subject != identity { return .identityMismatch }
         return nil

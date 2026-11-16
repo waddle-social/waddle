@@ -7,7 +7,7 @@ extension FFIXmppPort {
         do {
             return try await client.fetchExternalServices().map(FFIInbound.externalService)
         } catch {
-            BridgeLog.debug("external services lookup failed")
+            BridgeLog.debug("external services lookup failed: \(error)")
             return []
         }
     }
