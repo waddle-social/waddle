@@ -75,6 +75,14 @@ impl ServedDomains {
         &self.local
     }
 
+    /// The domains `service` is served at.
+    pub fn domains_of(&self, service: ServedService) -> impl Iterator<Item = &DomainRef> {
+        self.services
+            .iter()
+            .filter(move |(_, served)| *served == service)
+            .map(|(domain, _)| &**domain)
+    }
+
     /// The service configured at exactly `domain`, if any.
     pub fn service(&self, domain: &DomainRef) -> Option<ServedService> {
         self.services
@@ -593,6 +601,15 @@ pub trait RemoteRoute: Send + Sync {
     /// only queues and must not wait for a peer. By default nothing
     /// happens.
     async fn resource_ended(&self, _resource: &FullJid) {}
+
+    /// Take over the seat the remote occupant `occupant` holds in the local
+    /// room `room` from a replica that stopped, for a room whose claim moved
+    /// to this replica: `true` when this replica holds the seat afterwards,
+    /// with the stream evidence it was admitted under. A route that seats
+    /// no remote occupant holds none.
+    async fn adopt_seat(&self, _room: &jid::BareJid, _occupant: &FullJid) -> bool {
+        false
+    }
 
     /// The local resource `resource` resumed its session on this replica,
     /// which may not be the one that held it before. A route that keeps

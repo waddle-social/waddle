@@ -19,13 +19,14 @@
 //! The decisions are recorded in `server/docs/planning/s2s-routing-2047.md`
 //! (inbound MUC).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use jid::{BareJid, FullJid};
 use thiserror::Error;
 use uuid::Uuid;
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::db::{Database, DatabaseDriver, Row};
@@ -140,6 +141,10 @@ pub trait SeatStore: Send + Sync {
         owner: &str,
         now_ms: i64,
     ) -> Result<u64, SeatStoreError>;
+
+    /// Remove every seat `owner` owns: the replica is stopping and seats
+    /// nobody any more.
+    async fn remove_owned(&self, owner: &str) -> Result<u64, SeatStoreError>;
 
     /// At most `limit` seats `owner` owns that another replica marked
     /// lost.
@@ -491,6 +496,14 @@ impl SeatStore for SqlSeatStore {
         .await
     }
 
+    async fn remove_owned(&self, owner: &str) -> Result<u64, SeatStoreError> {
+        self.execute(
+            "DELETE FROM s2s_local_room_seats WHERE owner_id = ?",
+            crate::db_params![owner],
+        )
+        .await
+    }
+
     async fn lost(&self, owner: &str, limit: usize) -> Result<Vec<Seat>, SeatStoreError> {
         let sql = [
             "SELECT ",
@@ -536,13 +549,35 @@ impl SeatStore for SqlSeatStore {
 /// remembered, so that a copy offered again is not sent twice.
 const RECENT_COPIES: usize = 64;
 
+/// How many of a room's stanzas are kept for a seat whose join is still
+/// being answered. One beyond this ends the seat.
+const PENDING_STANZAS: usize = 256;
+
 /// A seat this replica holds, with what its egress remembers for it.
 #[derive(Debug, Clone)]
 struct Held {
     seat: Seat,
     /// The archive identifiers of the room messages most recently handed
     /// to the seat's queue, oldest first.
-    recent: std::collections::VecDeque<String>,
+    recent: VecDeque<String>,
+    /// While the join that opened the seat is being answered: the room's
+    /// stanzas for the occupant that arrived meanwhile, kept until the
+    /// join's own answer is queued so that they follow it (XEP-0045 §7.1).
+    pending: Option<Vec<Stanza>>,
+}
+
+/// What became of a room's stanza offered for a seat whose join may still
+/// be under way.
+#[derive(Debug)]
+pub enum Deferred {
+    /// The seat's join is answered: the stanza goes on now.
+    Ready(Stanza),
+    /// Kept until the join's answer is queued.
+    Kept,
+    /// Too many stanzas are kept already: the seat cannot be kept in step.
+    Overflow,
+    /// No such seat is held here.
+    NotHeld(Stanza),
 }
 
 /// The seats of the remote occupants this replica seats, by room.
@@ -568,16 +603,69 @@ impl SeatIndex {
 
     /// Hold `seat`, replacing any seat of the same room and occupant.
     pub fn hold(&self, seat: Seat) {
-        self.rooms()
-            .entry(seat.room.clone())
-            .or_default()
-            .insert(
-                seat.occupant.clone(),
-                Held {
-                    seat,
-                    recent: std::collections::VecDeque::new(),
-                },
-            );
+        self.insert(seat, None);
+    }
+
+    /// Hold `seat` while the join that opened it is answered: the room's
+    /// stanzas for it are kept until [`Self::settle`].
+    pub fn hold_pending(&self, seat: Seat) {
+        self.insert(seat, Some(Vec::new()));
+    }
+
+    fn insert(&self, seat: Seat, pending: Option<Vec<Stanza>>) {
+        self.rooms().entry(seat.room.clone()).or_default().insert(
+            seat.occupant.clone(),
+            Held {
+                seat,
+                recent: VecDeque::new(),
+                pending,
+            },
+        );
+    }
+
+    /// Keep `stanza` for the seat `occupant` holds in `room` if its join is
+    /// still being answered, or hand it back to go on now.
+    pub fn defer(&self, room: &BareJid, occupant: &FullJid, stanza: Stanza) -> Deferred {
+        let mut rooms = self.rooms();
+        let Some(held) = rooms
+            .get_mut(room)
+            .and_then(|seats| seats.get_mut(occupant))
+        else {
+            return Deferred::NotHeld(stanza);
+        };
+        match &mut held.pending {
+            None => Deferred::Ready(stanza),
+            Some(kept) if kept.len() >= PENDING_STANZAS => Deferred::Overflow,
+            Some(kept) => {
+                kept.push(stanza);
+                Deferred::Kept
+            }
+        }
+    }
+
+    /// The join that opened the seat is answered: take the room's stanzas
+    /// kept for it, in order. While any were kept the seat keeps deferring,
+    /// so the caller queues them and asks again; once none is left the seat
+    /// stops deferring and an empty batch is returned. `None` when the seat
+    /// seated under `session` is no longer held.
+    pub fn settle(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> Option<Vec<Stanza>> {
+        let mut rooms = self.rooms();
+        let held = rooms.get_mut(room)?.get_mut(occupant)?;
+        if held.seat.session != session {
+            return None;
+        }
+        match &mut held.pending {
+            Some(kept) if !kept.is_empty() => Some(std::mem::take(kept)),
+            _ => {
+                held.pending = None;
+                Some(Vec::new())
+            }
+        }
     }
 
     /// The seat `occupant` holds in `room` here.
@@ -628,7 +716,10 @@ impl SeatIndex {
     /// offered again is not sent twice, or when no such seat is held.
     pub fn note_copy(&self, room: &BareJid, occupant: &FullJid, archive_id: &str) -> bool {
         let mut rooms = self.rooms();
-        let Some(held) = rooms.get_mut(room).and_then(|seats| seats.get_mut(occupant)) else {
+        let Some(held) = rooms
+            .get_mut(room)
+            .and_then(|seats| seats.get_mut(occupant))
+        else {
             return false;
         };
         if held.recent.iter().any(|seen| seen == archive_id) {
@@ -653,11 +744,12 @@ impl SeatIndex {
             .collect()
     }
 
-    /// Every seat held here.
-    pub fn all(&self) -> Vec<Seat> {
+    /// Every seat held here whose join is answered.
+    pub fn settled(&self) -> Vec<Seat> {
         self.rooms()
             .values()
             .flat_map(|seats| seats.values())
+            .filter(|held| held.pending.is_none())
             .map(|held| held.seat.clone())
             .collect()
     }

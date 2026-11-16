@@ -22,6 +22,11 @@
 //! shard keep moving. Work that ends an occupancy because a stream failed
 //! is exempt from every bound and counts towards none: there is at most one
 //! such item per occupancy, and the occupant must be told.
+//!
+//! A second set of these queues serves the rooms of this deployment: the
+//! stanzas remote principals address to the MUC service wait here for the
+//! room host, under the same bounds and in each room's order, and the end
+//! of a remote occupant's seat is queued exempt behind them.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -32,8 +37,13 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::Stanza;
 
+use super::local_rooms::SeatEnd;
 use super::occupancy::Occupancy;
+use super::principal::RemotePrincipal;
+use super::reach::RoomOperation;
+use super::seats::Seat;
 use crate::s2s::conn::VerifiedPeerStream;
+use waddle_xmpp::identity::CanonicalDomain;
 
 /// What a worker does for one room.
 #[derive(Debug)]
@@ -45,6 +55,24 @@ pub(super) enum RoomWork {
     /// An occupancy whose stream to the room's domain failed: ended, if it
     /// is still as read, and the occupant told (XEP-0045 §11.1).
     Ended(Box<Occupancy>),
+    /// A stanza a remote principal addressed to the MUC service, a local
+    /// room or one of its occupant JIDs: decided by the room host.
+    Request(Box<LocalRoomRequest>),
+    /// A remote occupant's seat in a local room that ended without the
+    /// room deciding it: the room removes the occupant.
+    Unseat(Box<(Seat, SeatEnd)>),
+}
+
+/// A stanza for a local room, as it arrived.
+#[derive(Debug)]
+pub(super) struct LocalRoomRequest {
+    pub principal: RemotePrincipal,
+    pub operation: RoomOperation,
+    pub stanza: Stanza,
+    /// The local domain the stanza was addressed to and the remote domain
+    /// it came from, as its stream authenticated them.
+    pub local: CanonicalDomain,
+    pub remote: CanonicalDomain,
 }
 
 /// A stanza that may be a room's traffic, as it arrived.

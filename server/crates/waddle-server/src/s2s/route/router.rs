@@ -18,6 +18,7 @@ use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::identity::{enforce_stanza_addresses, CanonicalDomain};
 use waddle_xmpp::s2s::into_client_content;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::disco::{DiscoInfoResult, DiscoItemsResult, Feature, Identity};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -27,6 +28,7 @@ use super::correlation::{
     PendingRequest, RequestKind,
 };
 use super::local::{LocalDelivery, LocalOrigin};
+use super::local_rooms::LocalRooms;
 use super::occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomVerdict,
     MAX_JOIN_ID_BYTES,
@@ -36,10 +38,11 @@ use super::reach::{reach, InboundReach, LocalTarget, Refusal};
 use super::replies;
 use super::room_delivery::{InboundTraffic, Placed, RoomQueues, RoomWork};
 use super::rooms::{self, Asked, Change, RoomEgress, VerificationAnswer};
+use super::seats::{SeatIndex, SeatStore};
 use super::telemetry;
 use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
-    RemoteRouteOutcome, ServedDomains, UnroutableReason,
+    RemoteRouteOutcome, ServedDomains, ServedService, UnroutableReason,
 };
 use crate::s2s::config::S2sConfig;
 use crate::s2s::conn::{
@@ -144,6 +147,56 @@ pub struct RouterLimits {
     /// How long delivering one stanza of room traffic to its occupant may
     /// take before the worker moves on.
     pub room_delivery_timeout: Duration,
+    /// Remote occupants one local room seats; a further join is refused
+    /// with `resource-constraint`.
+    pub seats_per_room: usize,
+    /// Seats of one remote domain, in every local room.
+    pub seats_per_peer: usize,
+    /// Seats of one remote account, in every local room and under every
+    /// resource.
+    pub seats_per_account: usize,
+    /// Seats of every remote occupant of the deployment, on every replica.
+    pub seats: usize,
+    /// Stanzas remote principals addressed to the MUC service waiting to
+    /// be decided by the room host, on this replica, shared equally by the
+    /// workers. A stream whose stanza finds no place beyond this, or beyond
+    /// one of the shares below, stops reading until it fits.
+    pub room_requests: usize,
+    /// Of those, the stanzas for one room.
+    pub room_requests_per_room: usize,
+    /// Of one worker's share, the stanzas from one remote domain.
+    pub room_requests_per_peer: usize,
+    /// Workers handing requests to the room host; each serves its own
+    /// share of rooms in order.
+    pub room_request_workers: usize,
+    /// How long a stream waits for one such stanza to fit, or for its
+    /// domain's request rate, before the stanza is given up and the stream
+    /// closed with `resource-constraint`.
+    pub room_request_wait: Duration,
+    /// How long the room host may take to decide one request before the
+    /// worker moves on.
+    pub room_request_timeout: Duration,
+    /// Stanzas one remote domain may address to the MUC service a second,
+    /// on average; a stream beyond it stops reading until the rate allows
+    /// its next stanza.
+    pub room_request_rate: u32,
+    /// How many such stanzas one remote domain may send at once before its
+    /// rate applies.
+    pub room_request_burst: u32,
+    /// Stanzas of local rooms waiting for one directional pair's stream:
+    /// answers to remote requests and the rooms' traffic to the seats of
+    /// that remote domain. A stanza for a seat that finds no place ends
+    /// the seat.
+    pub seat_traffic_per_peer: usize,
+    /// How long an answer to a remote request waits for a place among
+    /// them before it is given up.
+    pub room_reply_wait: Duration,
+    /// How often each seat held here is checked against the room that
+    /// seats it.
+    pub seat_reconcile_interval: Duration,
+    /// How long after its last record that it is alive a replica's seat
+    /// may be taken over by a join that reaches another replica.
+    pub seat_owner_grace: Duration,
 }
 
 impl Default for RouterLimits {
@@ -176,6 +229,22 @@ impl Default for RouterLimits {
             room_delivery_wait: Duration::from_secs(30),
             room_delivery_workers: 4,
             room_delivery_timeout: Duration::from_secs(5),
+            seats_per_room: 256,
+            seats_per_peer: 4096,
+            seats_per_account: 64,
+            seats: 65_536,
+            room_requests: 1024,
+            room_requests_per_room: 64,
+            room_requests_per_peer: 64,
+            room_request_workers: 4,
+            room_request_wait: Duration::from_secs(30),
+            room_request_timeout: Duration::from_secs(30),
+            room_request_rate: 50,
+            room_request_burst: 200,
+            seat_traffic_per_peer: 4096,
+            room_reply_wait: Duration::from_secs(10),
+            seat_reconcile_interval: Duration::from_secs(60),
+            seat_owner_grace: Duration::from_secs(30),
         }
     }
 }
@@ -249,6 +318,47 @@ enum Purpose {
         target: BareJid,
         pending: PendingRequest,
     },
+    /// A local room's stanza for the seat of a remote occupant (ADR-0020
+    /// D10): its presence and messages, one stanza for each seat. It is
+    /// sent only while the seat is held here, or as the stanza that ends
+    /// it, and while peer admission admits the domain. If it cannot be
+    /// handed to the pair's stream the seat ends.
+    Seat {
+        room: BareJid,
+        occupant: FullJid,
+        session: OccupancySessionGeneration,
+        /// The room's own presence that ends the seat: sent although the
+        /// seat is no longer held.
+        last: bool,
+    },
+    /// The answer of the MUC service, a room or an occupant JID to a
+    /// remote entity's request. Nothing answers it if it cannot be sent.
+    RoomReply,
+}
+
+/// The two queues of one directional domain pair, served by one worker.
+#[derive(Debug, Clone)]
+struct PairQueue {
+    /// Requests, responses, replies and the stanzas of local resources for
+    /// remote rooms.
+    sender: mpsc::Sender<Queued>,
+    /// The stanzas of local rooms: answers to remote requests and the
+    /// rooms' traffic to seats.
+    seats: mpsc::Sender<Queued>,
+}
+
+/// The rooms this replica hosts for remote occupants: the host that
+/// decides their requests and the shared table of their seats.
+struct Hosting {
+    host: Arc<dyn LocalRooms>,
+    store: Arc<dyn SeatStore>,
+}
+
+/// One remote domain's allowance of stanzas for the MUC service.
+#[derive(Debug, Clone, Copy)]
+struct Allowance {
+    tokens: f64,
+    refilled: Instant,
 }
 
 /// The join a queued join presence is.
@@ -410,8 +520,18 @@ struct Inner {
     limits: RouterLimits,
     transport: OnceLock<S2sHandle>,
     local: OnceLock<Arc<dyn LocalDelivery>>,
-    queues: Mutex<HashMap<Pair, mpsc::Sender<Queued>>>,
+    queues: Mutex<HashMap<Pair, PairQueue>>,
     pending: Mutex<PendingRequests>,
+    /// The room host and the seat table, once this replica hosts rooms for
+    /// remote occupants. Until then the MUC service refuses remote senders.
+    hosting: OnceLock<Hosting>,
+    /// The seats of the remote occupants this replica seats.
+    seats: Arc<SeatIndex>,
+    /// Stanzas for local rooms, decided by the room host in order per
+    /// room.
+    local_rooms: RoomQueues,
+    /// Each remote domain's allowance of stanzas for the MUC service.
+    allowances: Mutex<HashMap<String, Allowance>>,
     /// The remote room occupancies every replica shares.
     rooms: Arc<dyn RemoteRoomStore>,
     /// The verifications this replica is waiting on, by the service's
@@ -475,6 +595,15 @@ impl S2sRouter {
             local: OnceLock::new(),
             queues: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingRequests::default()),
+            hosting: OnceLock::new(),
+            seats: Arc::new(SeatIndex::default()),
+            local_rooms: RoomQueues::new(
+                options.limits.room_request_workers,
+                options.limits.room_requests,
+                options.limits.room_requests_per_room,
+                options.limits.room_requests_per_peer,
+            ),
+            allowances: Mutex::new(HashMap::new()),
             rooms: options.rooms,
             verifications: Mutex::new(HashMap::new()),
             room_queues,
@@ -488,7 +617,41 @@ impl S2sRouter {
                 .tasks
                 .spawn(deliver_room_traffic(Arc::clone(&inner), shard));
         }
+        for shard in 0..inner.local_rooms.shards() {
+            inner
+                .tasks
+                .spawn(hosting::serve_local_rooms(Arc::clone(&inner), shard));
+        }
         Self { inner }
+    }
+
+    /// Host rooms for remote occupants: `host` decides what remote
+    /// principals ask of the MUC service, and `store` holds their seats for
+    /// every replica. Until this is called the MUC service refuses remote
+    /// senders. `false` when a host was already attached.
+    pub fn attach_rooms(&self, host: Arc<dyn LocalRooms>, store: Arc<dyn SeatStore>) -> bool {
+        self.inner.hosting.set(Hosting { host, store }).is_ok()
+    }
+
+    /// The seats of the remote occupants this replica seats, with the
+    /// stream evidence each was admitted under.
+    pub fn seats(&self) -> Arc<SeatIndex> {
+        Arc::clone(&self.inner.seats)
+    }
+
+    /// Offer a local room's stanza for `occupant`. It is taken only when
+    /// `occupant` holds a seat here in the room the stanza comes from; any
+    /// other stanza is handed back, so nothing a room emits reaches a
+    /// remote JID it did not seat. A stanza taken is queued for the seat's
+    /// remote domain without waiting, one stanza for one seat; if it finds
+    /// no place the seat ends.
+    pub fn offer_to_seat(&self, occupant: &FullJid, stanza: Stanza) -> Result<(), Box<Stanza>> {
+        self.inner.offer_to_seat(occupant, stanza)
+    }
+
+    /// Whether [`Self::offer_to_seat`] would take `stanza` for `occupant`.
+    pub fn seats_recipient(&self, occupant: &FullJid, stanza: &Stanza) -> bool {
+        self.inner.seat_of(occupant, stanza).is_some()
     }
 
     /// Give the router the connection manager that carries its stanzas.
@@ -518,6 +681,14 @@ impl S2sRouter {
     /// `budget`. Stanzas still queued are answered as if their stream could
     /// not be established. `true` when every task ended.
     pub async fn shutdown(&self, budget: Duration) -> bool {
+        // The rooms this replica hosts end with it, so their remote
+        // occupants hold no seat any more.
+        if let Some(hosting) = self.inner.hosting.get() {
+            let removal = hosting.store.remove_owned(self.inner.owner.as_str());
+            if !matches!(tokio::time::timeout(budget, removal).await, Ok(Ok(_))) {
+                tracing::warn!("removing this replica's remote occupants' seats failed");
+            }
+        }
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         tokio::time::timeout(budget, self.inner.tasks.wait())
@@ -534,6 +705,10 @@ impl RemoteRoute for S2sRouter {
 
     async fn resource_ended(&self, resource: &FullJid) {
         self.inner.leave_rooms(resource).await;
+    }
+
+    async fn adopt_seat(&self, room: &BareJid, occupant: &FullJid) -> bool {
+        self.inner.adopt_seat(room, occupant).await
     }
 
     async fn resource_resumed(&self, resource: &FullJid) {
@@ -563,6 +738,7 @@ impl StanzaSink for S2sRouter {
     fn stream_ended(&self, stream: &VerifiedPeerStream, end: StreamEnd) {
         if end == StreamEnd::Lost {
             self.inner.lose_rooms(stream);
+            self.inner.lose_seats(stream);
         }
     }
 }
@@ -651,7 +827,9 @@ impl Inner {
             | Purpose::Reply
             | Purpose::Room { .. }
             | Purpose::Departure
-            | Purpose::Verify { .. } => None,
+            | Purpose::Verify { .. }
+            | Purpose::Seat { .. }
+            | Purpose::RoomReply => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
             return RemoteRouteOutcome::Accepted;
@@ -1910,9 +2088,21 @@ impl Inner {
         } else {
             self.limits.peer_queues
         };
+        self.reserve_on(pair, opens, |queue| &queue.sender)
+    }
+
+    /// Reserve a place on the queue `pick` names of `pair`'s two, without
+    /// waiting, starting the pair's worker if it has none and fewer than
+    /// `opens` pairs have one.
+    fn reserve_on(
+        self: &Arc<Self>,
+        pair: Pair,
+        opens: usize,
+        pick: impl Fn(&PairQueue) -> &mpsc::Sender<Queued>,
+    ) -> Option<OwnedPermit<Queued>> {
         let mut queues = lock(&self.queues);
-        if let Some(sender) = queues.get(&pair) {
-            match sender.clone().try_reserve_owned() {
+        if let Some(queue) = queues.get(&pair) {
+            match pick(queue).clone().try_reserve_owned() {
                 Ok(permit) => return Some(permit),
                 Err(TrySendError::Full(_)) => return None,
                 // The worker ended; start another.
@@ -1928,30 +2118,40 @@ impl Inner {
             return None;
         }
         let (sender, receiver) = mpsc::channel(self.limits.queue_per_peer.max(1));
-        let permit = sender.clone().try_reserve_owned().ok()?;
+        let (seats, seat_receiver) = mpsc::channel(self.limits.seat_traffic_per_peer.max(1));
+        let queue = PairQueue { sender, seats };
+        let permit = pick(&queue).clone().try_reserve_owned().ok()?;
         let worker = PairWorker {
             router: Arc::clone(self),
             pair: pair.clone(),
             receiver,
+            seats: seat_receiver,
             stream: None,
         };
         self.tasks.spawn(worker.run());
-        queues.insert(pair, sender);
+        queues.insert(pair, queue);
         Some(permit)
     }
 
     /// End an idle pair's queue: `true` when it holds nothing, no place on
     /// it is reserved, and no other stanza can reach it.
-    fn retire(&self, pair: &Pair, receiver: &mut mpsc::Receiver<Queued>) -> bool {
+    fn retire(
+        &self,
+        pair: &Pair,
+        receiver: &mut mpsc::Receiver<Queued>,
+        seats: &mut mpsc::Receiver<Queued>,
+    ) -> bool {
         let mut queues = lock(&self.queues);
-        let reserved = queues
-            .get(pair)
-            .is_some_and(|sender| sender.capacity() < sender.max_capacity());
-        if !receiver.is_empty() || reserved {
+        let reserved = queues.get(pair).is_some_and(|queue| {
+            queue.sender.capacity() < queue.sender.max_capacity()
+                || queue.seats.capacity() < queue.seats.max_capacity()
+        });
+        if !receiver.is_empty() || !seats.is_empty() || reserved {
             return false;
         }
         queues.remove(pair);
         receiver.close();
+        seats.close();
         true
     }
 
@@ -1995,7 +2195,22 @@ impl Inner {
                     .await;
                 return;
             }
-            Purpose::Response { .. } | Purpose::Reply | Purpose::Departure => return,
+            // A room's stanza that did not reach its seat: the occupant may
+            // have missed it, so the seat ends and the occupant joins again.
+            Purpose::Seat {
+                room,
+                occupant,
+                session,
+                last,
+            } => {
+                if !last {
+                    self.seat_undeliverable(&room, &occupant, session);
+                }
+                return;
+            }
+            Purpose::Response { .. } | Purpose::Reply | Purpose::Departure | Purpose::RoomReply => {
+                return
+            }
         };
         if registered {
             match self.correlations.withdraw(&pending.key).await {
@@ -2115,7 +2330,10 @@ impl Inner {
                 }));
             }
         }
-        match reach(target, &stanza) {
+        match reach(target, &stanza, self.reachable()) {
+            InboundReach::Room(operation) => {
+                return self.room_request(stream, principal, operation, stanza);
+            }
             InboundReach::ServerDiscoInfo => self.answer_disco_info(stream, &stanza, &home),
             InboundReach::ServerDiscoItems => self.answer_disco_items(stream, &stanza, &home),
             InboundReach::ServerPing => {
@@ -2211,8 +2429,8 @@ impl Inner {
         }
     }
 
-    /// XEP-0030 §4: no item is listed to remote askers until a service is
-    /// reachable by them.
+    /// XEP-0030 §4: an item is listed to remote askers only for a service
+    /// they reach.
     fn answer_disco_items(
         self: &Arc<Self>,
         stream: &VerifiedPeerStream,
@@ -2222,9 +2440,23 @@ impl Inner {
         if has_node(stanza) {
             return self.answer_item_not_found(stream, stanza, home);
         }
+        // A service is listed once remote senders reach it on this replica:
+        // the MUC service, while rooms are hosted for remote occupants.
+        let items = if self.reachable().rooms {
+            self.served
+                .domains_of(ServedService::Muc)
+                .map(|domain| xmpp_parsers::disco::Item {
+                    jid: Jid::from(BareJid::from_parts(None, domain)),
+                    node: None,
+                    name: None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let result = DiscoItemsResult {
             node: None,
-            items: Vec::new(),
+            items,
             rsm: None,
         };
         if let Some(reply) = server_result(stanza, Some(Element::from(result))) {
@@ -2289,7 +2521,7 @@ impl Inner {
         let Some(target) = LocalTarget::of(&self.served.classify(Some(&to))) else {
             return;
         };
-        match reach(target, &error) {
+        match reach(target, &error, self.reachable()) {
             InboundReach::CorrelatedResponse => {
                 self.complete_response(&principal, error, payload_namespace, LocalOrigin::Server);
             }
@@ -2486,6 +2718,7 @@ async fn sweep(router: Arc<Inner>) {
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_prune = Instant::now();
+    let mut last_reconcile = Instant::now();
     loop {
         tokio::select! {
             () = router.shutdown.cancelled() => return,
@@ -2506,6 +2739,11 @@ async fn sweep(router: Arc<Inner>) {
         router.sweep_completed_elsewhere().await;
         router.sweep_verifications().await;
         router.sweep_due_rooms().await;
+        router.sweep_lost_seats().await;
+        if last_reconcile.elapsed() >= router.limits.seat_reconcile_interval {
+            last_reconcile = Instant::now();
+            router.reconcile_seats().await;
+        }
         if last_prune.elapsed() >= router.limits.prune_after {
             last_prune = Instant::now();
             let before = now_ms().saturating_sub(duration_ms(router.limits.prune_after));
@@ -2521,6 +2759,7 @@ async fn sweep(router: Arc<Inner>) {
                 tracing::warn!("pruning this replica's expired s2s correlations failed");
             }
             router.sweep_orphaned_rooms(before).await;
+            router.sweep_orphaned_seats(before).await;
             if router.rooms.prune_verdicts(now_ms()).await.is_err() {
                 tracing::warn!("pruning expired remote room verdicts failed");
             }
@@ -2549,15 +2788,19 @@ async fn deliver_room_traffic(router: Arc<Inner>, shard: usize) {
                 router.room_traffic(&stream, &from, &occupant, stanza).await
             }
             RoomWork::Ended(occupancy) => router.end_lost(*occupancy).await,
+            // Work of the queues that serve local rooms.
+            RoomWork::Request(_) | RoomWork::Unseat(_) => {}
         }
     }
 }
 
-/// The worker of one directional pair's queue.
+/// The worker of one directional pair's queues.
 struct PairWorker {
     router: Arc<Inner>,
     pair: Pair,
     receiver: mpsc::Receiver<Queued>,
+    /// The stanzas of local rooms for the pair's remote domain.
+    seats: mpsc::Receiver<Queued>,
     /// The pair's established outbound stream, once dialled.
     stream: Option<VerifiedPeerStream>,
 }
@@ -2566,14 +2809,20 @@ impl PairWorker {
     async fn run(mut self) {
         loop {
             let idle = self.router.limits.queue_idle;
+            // Requests and replies first: the rooms' traffic to a domain
+            // with many seats must not hold back the answers it waits for.
             let next = tokio::select! {
                 biased;
                 () = self.router.shutdown.cancelled() => None,
-                next = tokio::time::timeout(idle, self.receiver.recv()) => match next {
-                    Ok(next) => next,
-                    Err(_) if self.router.retire(&self.pair, &mut self.receiver) => None,
-                    Err(_) => continue,
-                },
+                next = self.receiver.recv() => next,
+                next = self.seats.recv() => next,
+                () = tokio::time::sleep(idle) => {
+                    if self.router.retire(&self.pair, &mut self.receiver, &mut self.seats) {
+                        None
+                    } else {
+                        continue;
+                    }
+                }
             };
             let Some(queued) = next else {
                 break;
@@ -2582,8 +2831,15 @@ impl PairWorker {
         }
         // Shutdown or retirement: answer whatever is still queued.
         self.receiver.close();
+        self.seats.close();
         while let Ok(queued) = self.receiver.try_recv() {
             self.router.answer(queued, Failure::Timeout, false).await;
+        }
+        // A stopping replica's seats end with it; nothing is unseated.
+        if !self.router.shutdown.is_cancelled() {
+            while let Ok(queued) = self.seats.try_recv() {
+                self.router.answer(queued, Failure::Timeout, false).await;
+            }
         }
     }
 
@@ -2605,6 +2861,9 @@ impl PairWorker {
     /// established with the same failure.
     async fn fail_backlog(&mut self, failure: Failure) {
         while let Ok(queued) = self.receiver.try_recv() {
+            self.router.answer(queued, failure, false).await;
+        }
+        while let Ok(queued) = self.seats.try_recv() {
             self.router.answer(queued, failure, false).await;
         }
     }
@@ -2637,6 +2896,40 @@ impl PairWorker {
                 // never forwarded.
                 return;
             }
+        }
+        // The effect boundary of a local room's stanza for a remote JID: it
+        // leaves only for a domain peer admission admits now (ADR-0020 D1)
+        // and, when it is a room's traffic, only for a seat this replica
+        // still holds. Whatever queued it decided earlier.
+        match &queued.purpose {
+            Purpose::Seat {
+                room,
+                occupant,
+                session,
+                last,
+            } => {
+                let held = self
+                    .router
+                    .seats
+                    .get(room, occupant)
+                    .is_some_and(|seat| seat.session == *session);
+                if !self.router.admits(&self.pair.remote) || !(*last || held) {
+                    telemetry::seat_traffic_refused();
+                    return;
+                }
+            }
+            Purpose::RoomReply => {
+                if !self.router.admits(&self.pair.remote) {
+                    telemetry::seat_traffic_refused();
+                    return;
+                }
+            }
+            Purpose::Request { .. }
+            | Purpose::Response { .. }
+            | Purpose::Reply
+            | Purpose::Room { .. }
+            | Purpose::Departure
+            | Purpose::Verify { .. } => {}
         }
         let mut stream = match self.stream(&transport).await {
             Ok(stream) => stream,
@@ -2695,7 +2988,9 @@ impl PairWorker {
             Purpose::Response { .. }
             | Purpose::Reply
             | Purpose::Room { .. }
-            | Purpose::Departure => false,
+            | Purpose::Departure
+            | Purpose::Seat { .. }
+            | Purpose::RoomReply => false,
         };
         let mut element = stanza_element(&queued.stanza);
         let mut offered_again = false;
@@ -2731,12 +3026,24 @@ impl PairWorker {
                 }
                 // The stream may have written it: it is not sent again and
                 // not answered here. A request stays pending until its
-                // response or its expiry.
+                // response or its expiry. A room's stanza for a seat may be
+                // lost, so the seat ends and the occupant joins again.
                 Ok(Err(TransmitError::Unknown)) | Err(_) => {
                     self.stream = None;
+                    if let Purpose::Seat {
+                        room,
+                        occupant,
+                        session,
+                        last: false,
+                    } = &queued.purpose
+                    {
+                        self.router.seat_undeliverable(room, occupant, *session);
+                    }
                     return;
                 }
             }
         }
     }
 }
+
+mod hosting;

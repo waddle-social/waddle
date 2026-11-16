@@ -20,11 +20,18 @@
 //!   deployment's database ([`SqlRemoteRoomStore`]), with the cached
 //!   answers on which remote JIDs are rooms.
 //!
+//! - [`LocalRooms`]: the rooms of this deployment as remote occupants
+//!   reach them (ADR-0020 D10; XEP-0045, with XEP-0030, XEP-0199 and
+//!   XEP-0313), and [`SeatStore`] with [`SeatIndex`]: the seats those
+//!   occupants hold, with the stream evidence each was admitted under.
+//!   Without a room host attached the MUC service refuses remote senders.
+//!
 //! The decisions, the handoff contract and the reachability inventory are
 //! recorded in `server/docs/planning/s2s-routing-2047.md`.
 
 mod correlation;
 mod local;
+mod local_rooms;
 mod occupancy;
 mod principal;
 mod reach;
@@ -41,14 +48,15 @@ pub use correlation::{
     MAX_REQUEST_ID_BYTES,
 };
 pub use local::{LocalDelivery, LocalDeliveryOutcome, LocalOrigin};
+pub use local_rooms::{LocalRooms, RoomReplies, RoomRequest, SeatChange, SeatEnd};
 pub use occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomStoreError,
     RoomVerdict, SqlRemoteRoomStore, MAX_JOIN_ID_BYTES, MAX_OCCUPANCY_ADDRESS_BYTES,
 };
 pub use principal::{PrincipalError, RemotePrincipal};
-pub use reach::{reach, InboundReach, LocalTarget, Refusal};
+pub use reach::{reach, InboundReach, LocalTarget, Reachable, Refusal, RoomOperation};
 pub use router::{RouterLimits, RouterOptions, S2sRouter};
 pub use seats::{
-    Seat, SeatIndex, SeatInsert, SeatLimits, SeatStore, SeatStoreError, SqlSeatStore,
+    Deferred, Seat, SeatIndex, SeatInsert, SeatLimits, SeatStore, SeatStoreError, SqlSeatStore,
     MAX_SEAT_ADDRESS_BYTES,
 };

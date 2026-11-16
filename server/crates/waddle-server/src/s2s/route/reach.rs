@@ -10,6 +10,14 @@
 //! refuses everything else. No namespace handler written for client
 //! sessions sees a stanza from an S2S stream.
 //!
+//! A replica that hosts rooms for remote occupants (the inbound MUC
+//! handlers are attached to its router) also lets the operations of the MUC
+//! service reviewed for a remote principal reach those handlers
+//! ([`RoomOperation`]); every other request to the MUC service is refused
+//! as before. Which operations are open is an explicit input
+//! ([`Reachable`]), so a router without the handlers refuses the whole
+//! service.
+//!
 //! One decision depends on state and so is taken by the router before this
 //! one: a message or presence from a remote room to the full JID of a
 //! local resource that occupies, is joining or has just left that room is
@@ -25,6 +33,7 @@
 
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::xep::xep0199::NS_PING;
+use waddle_xmpp::xep::xep0430::NS_MAM;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 
@@ -61,9 +70,41 @@ impl LocalTarget {
     }
 }
 
+/// Which of the services D10 enables for remote senders have handlers
+/// reviewed for a remote principal attached on this replica.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reachable {
+    /// The inbound MUC handlers: remote occupants of local rooms.
+    pub rooms: bool,
+}
+
+/// An operation of the MUC service a remote principal reaches (XEP-0045,
+/// with XEP-0030, XEP-0199, XEP-0410 and XEP-0313). Each is decided by the
+/// room's host for that principal and the evidence of its stream; reaching
+/// the handler admits nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoomOperation {
+    /// XEP-0030 `disco#info` of the service, a room or its nodes.
+    DiscoInfo,
+    /// XEP-0030 `disco#items` of the service or a room.
+    DiscoItems,
+    /// XEP-0199 ping of the service or a room, and the XEP-0410 self-ping
+    /// of an occupant JID.
+    Ping,
+    /// A XEP-0313 query of a room's archive.
+    Archive,
+    /// Presence to a room or an occupant JID: a join, a nickname or
+    /// availability change, a leave, or an occupant's error.
+    Presence,
+    /// A message to a room or an occupant JID.
+    Message,
+}
+
 /// What the router does with a stanza from an S2S stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundReach {
+    /// An operation of the MUC service, handed to the room's host.
+    Room(RoomOperation),
     /// XEP-0030 `disco#info` of the server domain, answered by the router.
     ServerDiscoInfo,
     /// XEP-0030 `disco#items` of the server domain, answered by the router.
@@ -95,17 +136,28 @@ pub enum Refusal {
     /// service discovery and ping (D10).
     ServerRequest,
     /// MUC or the Spaces PubSub service: enabled for remote senders by D10,
-    /// but no handler has yet been reviewed for a remote principal, so
-    /// they are refused until the slices that enable them land.
+    /// but this replica has no handler reviewed for a remote principal
+    /// attached for it. MUC is refused this way wherever the inbound MUC
+    /// handlers are not attached; the Spaces service everywhere, until its
+    /// handlers are reviewed.
     AwaitingReview(ServedService),
+    /// A request to the MUC service outside the operations reviewed for a
+    /// remote principal: room administration, configuration and
+    /// destruction, registration, vCards, pins, message moderation, call
+    /// signalling and any other IQ request;
+    /// and every IQ result or error, since no room sends a request to a
+    /// remote entity.
+    RoomRequest,
     /// A service D10 does not enable for remote senders: HTTP upload,
     /// push, the community and extension services and the call mixer.
     NotEnabled(ServedService),
 }
 
-/// What `stanza`, addressed to `target`, reaches.
-pub fn reach(target: LocalTarget, stanza: &Stanza) -> InboundReach {
+/// What `stanza`, addressed to `target`, reaches on a replica where
+/// `reachable` is attached.
+pub fn reach(target: LocalTarget, stanza: &Stanza, reachable: Reachable) -> InboundReach {
     match (target, stanza) {
+        (LocalTarget::Service(ServedService::Muc), stanza) if reachable.rooms => room(stanza),
         (LocalTarget::ServerDomain, Stanza::Iq(iq)) => server_iq(iq),
         (LocalTarget::ServerDomain | LocalTarget::ServerResource, _) => {
             InboundReach::Refused(Refusal::ServerRequest)
@@ -140,4 +192,29 @@ fn server_iq(iq: &Iq) -> InboundReach {
         Iq::Result { .. } | Iq::Error { .. } => InboundReach::ServerResponse,
         Iq::Get { .. } | Iq::Set { .. } => InboundReach::Refused(Refusal::ServerRequest),
     }
+}
+
+/// A stanza addressed to the MUC service, a room or an occupant JID, on a
+/// replica that hosts rooms for remote occupants.
+fn room(stanza: &Stanza) -> InboundReach {
+    let operation = match stanza {
+        Stanza::Presence(_) => RoomOperation::Presence,
+        Stanza::Message(_) => RoomOperation::Message,
+        Stanza::Iq(iq) => match iq.as_ref() {
+            Iq::Get { payload, .. } if payload.is("query", DISCO_INFO_NS) => {
+                RoomOperation::DiscoInfo
+            }
+            Iq::Get { payload, .. } if payload.is("query", DISCO_ITEMS_NS) => {
+                RoomOperation::DiscoItems
+            }
+            Iq::Get { payload, .. } if payload.is("ping", NS_PING) => RoomOperation::Ping,
+            Iq::Get { payload, .. } | Iq::Set { payload, .. } if payload.is("query", NS_MAM) => {
+                RoomOperation::Archive
+            }
+            Iq::Get { .. } | Iq::Set { .. } | Iq::Result { .. } | Iq::Error { .. } => {
+                return InboundReach::Refused(Refusal::RoomRequest);
+            }
+        },
+    };
+    InboundReach::Room(operation)
 }
