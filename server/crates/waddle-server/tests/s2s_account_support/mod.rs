@@ -27,13 +27,16 @@ use minidom::Element;
 use waddle_server::destination::RemoteRoute;
 use waddle_server::s2s::conn::{S2sService, ServiceOptions};
 use waddle_server::s2s::route::{
-    RouterLimits, RouterOptions, S2sRouter, SqlIqCorrelations, SqlRemoteRoomStore,
+    LocalDelivery, LocalDeliveryOutcome, LocalOrigin, RouterLimits, RouterOptions, S2sRouter,
+    SqlIqCorrelations, SqlRemoteRoomStore,
 };
 use waddle_server::test_support::{
     websocket_state_with_federation, WebSocketLocalAccounts, WebSocketLocalDelivery,
 };
 use waddle_ws_test_support::iq::bound_jid;
 use waddle_ws_test_support::WsXmppClient;
+use waddle_xmpp::stream_management::{SmSessionRegistry, SM_NS};
+use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
@@ -335,6 +338,166 @@ impl Federated {
         id
     }
 
+    /// Every stanza that reached `client` before a marker this server then
+    /// delivers to it, the marker excluded. The marker takes the path the
+    /// account side delivers a remote sender's stanza by (the recipient's
+    /// user actor, then its connection's outbound queue, both in order),
+    /// so once it arrives every stanza the account side handed to
+    /// `client`'s connection before it has arrived too. After a
+    /// [`Federated::peer_barrier`], which returns only once the account
+    /// side has finished with every earlier stanza of its sender, this is
+    /// everything those stanzas delivered to `client`.
+    pub async fn client_settle(&self, client: &mut WsXmppClient) -> Vec<Element> {
+        let id = unique("settle");
+        let resource = full_jid(client);
+        let mut marker =
+            Message::new_with_type(MessageType::Headline, Some(Jid::from(resource.clone())));
+        marker.from = Some(jid(LOCAL));
+        marker.id = Some(Id(id.clone()));
+        let delivered = WebSocketLocalDelivery::new(&self.loopback.state)
+            .deliver(&resource, Stanza::Message(marker), LocalOrigin::Remote)
+            .await;
+        assert_eq!(
+            delivered,
+            LocalDeliveryOutcome::Delivered,
+            "the settle marker reaches {resource}"
+        );
+        let mut frames = receive_until(client, |element| {
+            element.name() == "message" && element.attr("id") == Some(id.as_str())
+        })
+        .await;
+        frames.pop();
+        frames
+    }
+
+    /// A detached XEP-0198 session of `localpart` with `resource` bound: a
+    /// client that has requested its roster, sent its initial presence
+    /// with `priority` and enabled stream management with resumption
+    /// (XEP-0198 §3) loses its connection without closing its stream, and
+    /// the session waits for a resumption (§5). Waits until the session
+    /// registry holds the resource as detached; the resource and the
+    /// session's stream id.
+    pub async fn detached(
+        &self,
+        localpart: &str,
+        resource: &str,
+        priority: i8,
+    ) -> (FullJid, String) {
+        let mut client = self.online(localpart, resource, priority).await;
+        let full = full_jid(&client);
+        send(
+            &mut client,
+            Element::builder("enable", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+        )
+        .await;
+        let enabled = receive_matching(&mut client, |element| element.is("enabled", SM_NS)).await;
+        let stream = enabled
+            .attr("id")
+            .expect("a resumable session names its stream")
+            .to_owned();
+        drop(client);
+        assert!(
+            routing::wait_for_async(ARRIVES, || async {
+                self.is_detached(&full).await.then_some(())
+            })
+            .await
+            .is_some(),
+            "{full} detaches"
+        );
+        (full, stream)
+    }
+
+    /// Whether the session registry holds `resource` as detached.
+    pub async fn is_detached(&self, resource: &FullJid) -> bool {
+        self.loopback
+            .state
+            .deps
+            .protocol
+            .sm_session_registry
+            .detached_resources_for_user(&resource.to_bare())
+            .await
+            .expect("the session registry is readable")
+            .contains(resource)
+    }
+
+    /// The stanzas the detached session `stream` holds for its resource
+    /// that `from` sent, as the session will replay them.
+    pub async fn held_from(&self, stream: &str, from: &str) -> Vec<Element> {
+        let session = self
+            .loopback
+            .state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(stream)
+            .await
+            .expect("the session registry is readable")
+            .expect("the session is still detached");
+        session
+            .unacked_stanzas
+            .iter()
+            .filter_map(|held| held.stanza_xml.parse::<Element>().ok())
+            .filter(|held| held.attr("from") == Some(from))
+            .collect()
+    }
+
+    /// Spend `sender`'s whole share of `account`'s offline admissions for
+    /// the window, as that many earlier messages would have.
+    pub async fn spend_offline_share(&self, account: &str, sender: &str) {
+        let store = waddle_server::db::s2s_accounts::RemoteOfflineAdmissions::new(
+            self.loopback.state.deps.app_state.db_pool.global().clone(),
+        );
+        let account: jid::BareJid = account.parse().expect("an account JID");
+        let sender: jid::BareJid = sender.parse().expect("a sender JID");
+        let now = chrono::Utc::now().timestamp_millis();
+        for _ in 0..waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER {
+            let admitted = store
+                .admit(&account, &sender, now)
+                .await
+                .expect("the admission store is writable");
+            assert_eq!(
+                admitted,
+                waddle_server::db::s2s_accounts::OfflineAdmission::Admitted
+            );
+        }
+    }
+
+    /// Fill `account`'s offline store up to its quota with messages from
+    /// another local account; the number stored.
+    pub async fn fill_offline_store(&self, account: &str) -> usize {
+        use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+        use waddle_xmpp::pending_delivery::{
+            InsertOutcome, PendingPayload, PendingRow, PendingRowId,
+        };
+        let recipient: jid::BareJid = account.parse().expect("an account JID");
+        let storage = &self.loopback.state.deps.protocol.pending_delivery_storage;
+        for stored in 0..100_000 {
+            let mut message = Message::new_with_type(MessageType::Chat, Some(jid(account)));
+            message.from = Some(jid("filler@example.com/desk"));
+            message.id = Some(Id(unique("filler")));
+            message.bodies.insert(Lang::new(), "filler".to_owned());
+            let row = PendingRow {
+                id: PendingRowId::fresh(),
+                recipient: recipient.clone(),
+                original_receipt_at: chrono::Utc::now(),
+                payload: PendingPayload::Transient(Box::new(message)),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            };
+            match storage
+                .insert(row)
+                .await
+                .expect("the offline store is writable")
+            {
+                InsertOutcome::Inserted => {}
+                InsertOutcome::QuotaExceeded => return stored,
+            }
+        }
+        panic!("the offline store of the fixture has a quota");
+    }
+
     /// Every stanza the peer received so far that `matches`.
     pub fn peer_received(&self, matches: impl Fn(&Element) -> bool) -> Vec<Element> {
         self.captured
@@ -484,24 +647,6 @@ pub async fn receive_messages(client: &mut WsXmppClient, ids: &[&str]) -> Vec<El
         ids.iter().all(|id| seen.iter().any(|seen| seen == id))
     })
     .await
-}
-
-/// Ping `client`'s own server and return every stanza that reached the
-/// client before the answer. Whatever was handed to the client's
-/// connection before the ping arrives before its answer, so after a
-/// [`Federated::peer_barrier`] this is everything a remote sender's
-/// earlier stanzas delivered to `client`.
-pub async fn client_settle(client: &mut WsXmppClient) -> Vec<Element> {
-    let id = unique("settle");
-    let mut request = Iq::from_get(id.clone(), xmpp_parsers::ping::Ping);
-    *request.to_mut() = Some(jid(LOCAL));
-    send(client, request).await;
-    let mut frames = receive_until(client, |element| {
-        element.name() == "iq" && element.attr("id") == Some(id.as_str())
-    })
-    .await;
-    frames.pop();
-    frames
 }
 
 /// Whether `frames` hold a stanza named `name` with `id`.

@@ -19,9 +19,8 @@ mod support;
 
 use minidom::Element;
 use support::{
-    block, client_settle, contact, error_condition, federated, get, holds, is_presence, jid,
-    message, pending_request, ping, presence, receive, receive_until, send, Pki, BOB, BOB_PHONE,
-    PEER,
+    block, contact, error_condition, federated, get, holds, is_presence, jid, message,
+    pending_request, ping, presence, receive, receive_until, send, Pki, BOB, BOB_PHONE, PEER,
 };
 use waddle_ws_test_support::iq::round_trip;
 use xmpp_parsers::blocking::Block;
@@ -124,7 +123,7 @@ async fn nothing_from_a_blocked_remote_sender_is_delivered_or_answered_beyond_a_
         error_condition(&received[0]).as_deref(),
         Some("service-unavailable")
     );
-    let seen = client_settle(&mut phone).await;
+    let seen = federated.client_settle(&mut phone).await;
     assert!(!holds(&seen, "message", "b1"));
     assert!(!holds(&seen, "presence", "b3"));
     assert!(!holds(&seen, "iq", "b4"));

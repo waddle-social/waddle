@@ -3,9 +3,14 @@
 //! message no resource of the local account takes is stored for the
 //! account's next session, from a contact and a stranger alike, and
 //! nothing answers its sender. A stranger is held to bounds per sender,
-//! parent domain and account; a message beyond them is dropped silently,
-//! and a contact is not held to them. Through the production `/ws` router,
-//! the real S2S router and a loopback peer, `home-b.test`.
+//! sender domain and account; a message beyond them is dropped silently,
+//! and a contact is not held to them. A detached XEP-0198 session hands
+//! what it holds to the offline store when its resume window closes, so a
+//! stranger's message to one, by full JID or bare JID, is held only within
+//! the same bounds, and what the store would not keep (a chat state alone,
+//! a `headline`, an `error`, directed presence) reaches it only from a
+//! contact. Through the production `/ws` router, the real S2S router and a
+//! loopback peer, `home-b.test`.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -13,8 +18,10 @@
 #[path = "s2s_account_support/mod.rs"]
 mod support;
 
-use support::{contact, federated, holds, message, Pki, BOB, BOB_PHONE, MALLORY};
-use xmpp_parsers::message::MessageType;
+use support::{contact, federated, holds, message, presence, Pki, BOB, BOB_PHONE, MALLORY};
+use xmpp_parsers::chatstates::ChatState;
+use xmpp_parsers::message::{Id, Message, MessageType};
+use xmpp_parsers::presence::Type as PresenceType;
 
 const ALICE: &str = "alice@example.com";
 
@@ -94,4 +101,96 @@ async fn a_strangers_messages_beyond_its_offline_bound_are_dropped_unanswered() 
         support::offline_count(&federated, ALICE).await,
         u32::try_from(bound + 1).expect("a small bound")
     );
+}
+
+/// A message from `from` to `to` that carries only a chat state
+/// (XEP-0085), which the offline store does not keep.
+fn chat_state(from: &str, to: &str, id: &str) -> Message {
+    let mut message = Message::new_with_type(MessageType::Chat, Some(support::jid(to)));
+    message.from = Some(support::jid(from));
+    message.id = Some(Id(id.to_owned()));
+    message.payloads.push(ChatState::Composing.into());
+    message
+}
+
+#[tokio::test]
+async fn a_strangers_messages_to_a_detached_full_jid_are_held_within_its_offline_bound() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let (phone, stream) = federated.detached("alice", "phone", 5).await;
+    let to = phone.to_string();
+    let mark = federated.peer_mark();
+    let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
+
+    // What the offline store would not keep never reaches the detached
+    // session from a stranger, and uses none of its share.
+    federated.from_peer(chat_state(MALLORY, &to, "state")).await;
+    federated
+        .from_peer(message(MALLORY, &to, MessageType::Headline, "news", "hi"))
+        .await;
+    federated
+        .from_peer(message(MALLORY, &to, MessageType::Error, "oops", "hi"))
+        .await;
+    federated
+        .from_peer(presence(MALLORY, &to, PresenceType::None, "here"))
+        .await;
+    // One more than its share by full JID: the last is dropped.
+    for index in 0..=bound {
+        let id = ["held-", &index.to_string()].concat();
+        federated
+            .from_peer(message(MALLORY, &to, MessageType::Chat, &id, "hello"))
+            .await;
+    }
+    let barrier = federated.peer_barrier(MALLORY, ALICE).await;
+
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
+    assert!(
+        federated.is_detached(&phone).await,
+        "{phone} is still detached, so nothing reached the offline store instead"
+    );
+    let held = federated.held_from(&stream, MALLORY).await;
+    let ids: Vec<&str> = held.iter().filter_map(|stanza| stanza.attr("id")).collect();
+    let expected: Vec<String> = (0..bound)
+        .map(|index| ["held-", &index.to_string()].concat())
+        .collect();
+    assert_eq!(ids, expected, "the session holds the stranger's share only");
+    assert_eq!(support::offline_count(&federated, ALICE).await, 0);
+
+    // The share is spent for the account's offline store too.
+    federated
+        .from_peer(message(MALLORY, ALICE, MessageType::Chat, "bare", "hello"))
+        .await;
+    federated.peer_barrier(MALLORY, ALICE).await;
+    assert_eq!(federated.held_from(&stream, MALLORY).await.len(), bound);
+    assert_eq!(support::offline_count(&federated, ALICE).await, 0);
+}
+
+#[tokio::test]
+async fn a_contacts_stanzas_reach_a_detached_full_jid_beyond_a_strangers_bound() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    contact(&federated, ALICE, BOB, "both").await;
+    let (phone, stream) = federated.detached("alice", "phone", 5).await;
+    let to = phone.to_string();
+    let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
+
+    federated
+        .from_peer(chat_state(BOB_PHONE, &to, "state"))
+        .await;
+    for index in 0..=bound {
+        let id = ["contact-", &index.to_string()].concat();
+        federated
+            .from_peer(message(BOB_PHONE, &to, MessageType::Chat, &id, "hello"))
+            .await;
+    }
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+
+    assert!(federated.is_detached(&phone).await);
+    let held = federated.held_from(&stream, BOB_PHONE).await;
+    assert_eq!(held.len(), bound + 2, "the chat state and every message");
+    assert!(held
+        .iter()
+        .all(|stanza| stanza.attr("to") == Some(to.as_str())));
 }

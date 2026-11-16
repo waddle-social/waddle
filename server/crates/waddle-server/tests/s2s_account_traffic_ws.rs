@@ -10,8 +10,9 @@
 //! the account's state, and the answers observed in the states are
 //! compared with each other. A case that asserts that nothing arrived ends
 //! with a barrier that does arrive on the same path after it (a stanza on
-//! the sender's own queue, then a ping on the same pair, then a ping of the
-//! client's own server), and checks every stanza received since, so that
+//! the sender's own queue, then a ping on the same pair, then a marker
+//! delivered to the client through its user actor and connection queue),
+//! and checks every stanza received since, so that
 //! "nothing arrived" is neither a slow delivery nor a stanza discarded
 //! while waiting for another.
 #![cfg(feature = "test-support")]
@@ -21,12 +22,12 @@
 #[path = "s2s_account_support/mod.rs"]
 mod support;
 
-use jid::{BareJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use support::{
-    block, client_settle, contact, error_condition, federated, federated_with, full_jid, get,
-    has_no_body, holds, is_message_error, is_presence, jid, message, ping, presence, receive,
-    receive_until, roster_item, send, Adjust, Federated, Pki, BOB, BOB_PHONE, LOCAL, MALLORY, PEER,
+    block, contact, error_condition, federated, federated_with, full_jid, get, has_no_body, holds,
+    is_message_error, is_presence, jid, message, ping, presence, receive, receive_until,
+    roster_item, send, Adjust, Federated, Pki, BOB, BOB_PHONE, LOCAL, MALLORY, PEER,
 };
 use waddle_ws_test_support::iq::round_trip;
 use xmpp_parsers::iq::Iq;
@@ -71,7 +72,11 @@ async fn a_chat_message_to_the_bare_jid_reaches_the_one_most_available_resource(
     // The lower-priority laptop, without Carbons, receives nothing; the
     // sender receives no answer.
     let barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
-    assert!(!holds(&client_settle(&mut laptop).await, "message", "m1"));
+    assert!(!holds(
+        &federated.client_settle(&mut laptop).await,
+        "message",
+        "m1"
+    ));
     assert!(federated.peer_received_besides(mark, &barrier).is_empty());
 }
 
@@ -95,7 +100,11 @@ async fn a_chat_message_to_a_bound_full_jid_reaches_that_resource_only() {
 
     receive(&mut laptop, "message", "m2").await;
     federated.peer_barrier(BOB_PHONE, ALICE).await;
-    assert!(!holds(&client_settle(&mut phone).await, "message", "m2"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "message",
+        "m2"
+    ));
 }
 
 #[tokio::test]
@@ -137,7 +146,11 @@ async fn a_normal_message_to_an_unbound_full_jid_is_dropped_unanswered() {
         .await;
     let barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
 
-    assert!(!holds(&client_settle(&mut phone).await, "message", "m4"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "message",
+        "m4"
+    ));
     assert!(federated.peer_received_besides(mark, &barrier).is_empty());
 }
 
@@ -163,7 +176,11 @@ async fn a_headline_reaches_every_resource_with_a_non_negative_priority() {
     receive(&mut phone, "message", "h1").await;
     receive(&mut laptop, "message", "h1").await;
     federated.peer_barrier(BOB_PHONE, ALICE).await;
-    assert!(!holds(&client_settle(&mut away).await, "message", "h1"));
+    assert!(!holds(
+        &federated.client_settle(&mut away).await,
+        "message",
+        "h1"
+    ));
 }
 
 #[tokio::test]
@@ -218,7 +235,7 @@ async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
     let mut barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
     barrier.extend(federated.peer_barrier(MALLORY, ALICE).await);
     assert!(federated.peer_received_besides(mark, &barrier).is_empty());
-    let seen = client_settle(&mut away).await;
+    let seen = federated.client_settle(&mut away).await;
     assert!(!holds(&seen, "message", "n1"));
     assert!(!holds(&seen, "message", "n2"));
 
@@ -321,6 +338,13 @@ enum AccountState {
     Offline,
     Online,
     Blocking,
+    /// Its one resource is a detached XEP-0198 session awaiting
+    /// resumption.
+    Detached,
+    /// Offline, with the non-contact's share of offline admissions spent.
+    StrangerOverBounds,
+    /// Offline, with its offline store full.
+    OfflineQuotaFull,
 }
 
 /// What a non-contact observed for one stanza.
@@ -386,6 +410,24 @@ async fn account_in(
             federated.account(localpart).await;
             block(federated, account.as_str(), "mallory@home-b.test").await;
             Some(federated.online(localpart, "phone", 5).await)
+        }
+        AccountState::Detached => {
+            federated.account(localpart).await;
+            // The resource the classes address by full JID, `phone`.
+            federated.detached(localpart, "phone", 5).await;
+            None
+        }
+        AccountState::StrangerOverBounds => {
+            federated.account(localpart).await;
+            federated
+                .spend_offline_share(account.as_str(), "mallory@home-b.test")
+                .await;
+            None
+        }
+        AccountState::OfflineQuotaFull => {
+            federated.account(localpart).await;
+            assert!(federated.fill_offline_store(account.as_str()).await > 0);
+            None
         }
     }
 }
@@ -508,6 +550,9 @@ async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
         ("asleep", AccountState::Offline),
         ("awake", AccountState::Online),
         ("guarded", AccountState::Blocking),
+        ("held", AccountState::Detached),
+        ("spent", AccountState::StrangerOverBounds),
+        ("full", AccountState::OfflineQuotaFull),
     ];
     let mut clients = Vec::new();
     for (localpart, state) in states {
@@ -539,11 +584,21 @@ async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
         }
         assert_eq!(first, expected, "{class}");
     }
+    // The detached session was still detached throughout, so that its
+    // column is not an offline account's.
+    let held: FullJid = ["held@", LOCAL, "/phone"]
+        .concat()
+        .parse()
+        .expect("a full JID");
+    assert!(
+        federated.is_detached(&held).await,
+        "{held} is still detached"
+    );
     // Nothing from Mallory reached the retired account's open stream or the
     // blocking account.
     for (localpart, client) in clients.iter_mut() {
         if let (Some(client), "gone" | "guarded") = (client.as_mut(), *localpart) {
-            let seen = client_settle(client).await;
+            let seen = federated.client_settle(client).await;
             let from_mallory: Vec<&Element> = seen
                 .iter()
                 .filter(|frame| {
@@ -616,7 +671,11 @@ async fn presence_to_the_bare_jid_reaches_available_resources_only_from_a_subscr
     receive(&mut phone, "presence", "pr1").await;
     receive(&mut laptop, "presence", "pr1").await;
     federated.peer_barrier(MALLORY, ALICE).await;
-    assert!(!holds(&client_settle(&mut phone).await, "presence", "pr2"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "presence",
+        "pr2"
+    ));
 }
 
 #[tokio::test]
@@ -644,8 +703,8 @@ async fn a_probe_from_a_contact_with_from_is_answered_with_each_available_resour
     // Bob becomes a contact once both sessions' initial presence was
     // handled, so the only available presence he receives answers his
     // probe.
-    client_settle(&mut phone).await;
-    client_settle(&mut laptop).await;
+    federated.client_settle(&mut phone).await;
+    federated.client_settle(&mut laptop).await;
     contact(&federated, ALICE, BOB, "both").await;
 
     federated
@@ -891,7 +950,11 @@ async fn subscribed_without_a_pending_request_is_ignored() {
         .await;
     federated.peer_barrier(BOB, ALICE).await;
 
-    assert!(!holds(&client_settle(&mut phone).await, "presence", "s6"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "presence",
+        "s6"
+    ));
     assert_eq!(roster_item(&federated, ALICE, BOB).await, None);
 }
 
@@ -1267,7 +1330,7 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
     let barrier = federated.peer_ping_barrier(BOB_PHONE).await;
     let received = federated.peer_received_besides(mark, &[barrier]);
     assert!(received.is_empty(), "{received:?}");
-    let seen = client_settle(&mut phone).await;
+    let seen = federated.client_settle(&mut phone).await;
     assert!(!holds(&seen, "message", "d1"));
     assert!(!holds(&seen, "iq", "d1-iq"));
     assert_eq!(support::offline_count(&federated, ALICE).await, 0);
@@ -1311,7 +1374,7 @@ async fn a_retired_accounts_open_stream_sends_nothing_to_remote_jids() {
     send(&mut phone, request).await;
     // The client's stanzas were handled once its own ping is answered; a
     // ping on the pair then follows anything they queued.
-    client_settle(&mut phone).await;
+    federated.client_settle(&mut phone).await;
     let barrier = federated.peer_ping_barrier(BOB_PHONE).await;
     let received = federated.peer_received_besides(mark, &[barrier]);
     assert!(received.is_empty(), "{received:?}");

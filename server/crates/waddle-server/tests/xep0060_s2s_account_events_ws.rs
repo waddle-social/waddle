@@ -17,8 +17,7 @@ mod support;
 
 use minidom::Element;
 use support::{
-    client_settle, contact, federated_with, holds, jid, receive, send, Adjust, Federated, Pki, BOB,
-    PEER,
+    contact, federated_with, holds, jid, receive, send, Adjust, Federated, Pki, BOB, PEER,
 };
 use waddle_server::db::s2s_accounts::RemotePubSubSubscriptions;
 use waddle_ws_test_support::WsXmppClient;
@@ -147,7 +146,11 @@ async fn a_notification_for_a_node_never_subscribed_to_is_dropped() {
         .await;
 
     let barrier = federated.peer_barrier(SERVICE, ALICE).await;
-    assert!(!holds(&client_settle(&mut phone).await, "message", "ev-2"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "message",
+        "ev-2"
+    ));
     assert!(federated.peer_received_besides(mark, &barrier).is_empty());
 }
 
@@ -167,7 +170,11 @@ async fn a_notification_after_unsubscribing_is_dropped() {
         .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-3"))
         .await;
     federated.peer_barrier(SERVICE, ALICE).await;
-    assert!(!holds(&client_settle(&mut phone).await, "message", "ev-3"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "message",
+        "ev-3"
+    ));
 }
 
 #[tokio::test]
@@ -184,7 +191,11 @@ async fn an_error_carrying_an_event_is_dropped_even_for_a_subscribed_node() {
     error.type_ = MessageType::Error;
     federated.from_peer_service(SERVICE, error).await;
     federated.peer_barrier(SERVICE, ALICE).await;
-    assert!(!holds(&client_settle(&mut phone).await, "message", "ev-4"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "message",
+        "ev-4"
+    ));
 }
 
 #[tokio::test]
@@ -234,6 +245,10 @@ async fn a_personal_eventing_notification_reaches_an_account_subscribed_to_its_o
         ))
         .await;
     federated.peer_barrier("mallory@home-b.test", ALICE).await;
-    assert!(!holds(&client_settle(&mut phone).await, "message", "pep-2"));
+    assert!(!holds(
+        &federated.client_settle(&mut phone).await,
+        "message",
+        "pep-2"
+    ));
     let _ = PEER;
 }
