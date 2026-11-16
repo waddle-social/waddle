@@ -98,12 +98,13 @@ impl Replica {
                 .await
                 .expect("replica database pool"),
         );
+        // The fenced state binds its host-grant gate to the authority's
+        // attachment gate: offering that gate again binds nothing, and the
+        // surfaces decide with the attachment acceptance holds.
         let state = websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await;
-        assert!(state
-            .deps
-            .app_state
-            .host_grants
-            .bind_attachment(authority.host_grant_gate()));
+        let host_grants = &state.deps.app_state.host_grants;
+        assert!(!host_grants.bind_attachment(authority.host_grant_gate()));
+        assert!(host_grants.attachment().is_some());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");
