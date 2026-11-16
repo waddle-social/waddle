@@ -18,6 +18,9 @@
 //!   the presence XEP-0045 prescribes: status 301 for a ban (§9.1) and
 //!   status 321 for the loss of membership in a members-only room (§9.4),
 //!   to the occupant and to everyone who stays, and ends its media session;
+//!   an occupant of a domain this deployment does not serve only when the
+//!   grants deny it whatever stream its requests arrive on (see
+//!   `correction`);
 //! - lowers an affiliation the actor mirrors above the recorded one, which
 //!   re-derives the occupant's role, with the affiliation presence of the
 //!   change;
@@ -60,7 +63,7 @@ use waddle_xmpp::{Affiliation, Stanza};
 
 use crate::permissions::host_grant::{
     HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomAffiliation,
-    RoomBinding, RoomGate, ScopeLifecycleId,
+    RoomBinding, RoomGate, ScopeLifecycleId, SubjectHome,
 };
 use crate::room_effect_outbox::RoomEffectArmSupervisor;
 use crate::server::routes::websocket::WebSocketState;
@@ -351,6 +354,15 @@ enum Correction {
 ///   membership has its entry set to it, which also refuses a join of that
 ///   account the actor has not yet applied;
 /// - any other entry above the recorded affiliation is lowered to it.
+///
+/// The sweep decides without stream evidence: no request of the account is
+/// in hand. For an account of a domain this deployment does not serve, that
+/// honours less than a request on its own stream would (no owner or admin
+/// standing, and nothing at all while host policy requires `pkix`), so such
+/// an occupant is removed only when the grants deny it whatever stream its
+/// requests arrive on: a ban, no membership recorded, or a scope that
+/// admits nobody. Its other uses of the room are each decided with the
+/// evidence of the request that makes them.
 fn correction(
     grants: &ManagedRoomGrants,
     account: &BareJid,
@@ -366,7 +378,10 @@ fn correction(
         HostGrantAction::Read,
         &grants.principals,
     );
-    if seated && !admitted {
+    let served = grants.principals.served().home_of(account) == SubjectHome::Served;
+    let denied_on_every_stream =
+        banned || recorded < Affiliation::Member || !grants.grants.scope_admits;
+    if seated && !admitted && (served || denied_on_every_stream) {
         return Some(Correction::Remove(if banned {
             Some(Affiliation::Outcast)
         } else if recorded < Affiliation::Member {

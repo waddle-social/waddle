@@ -647,6 +647,102 @@ async fn the_sweep_changes_nothing_while_the_grants_cannot_be_read() {
     deployment.close().await;
 }
 
+/// A member of a domain this deployment does not serve.
+const REMOTE_MEMBER: &str = "guest@remote.example";
+
+/// Seat `account` in the room actor of `state` as a member, as a join the
+/// replica admitted would; no stream of a remote domain reaches this
+/// replica, so its join is sent to the actor directly.
+async fn seat_member(state: &WebSocketState, room: &jid::BareJid, account: &str, nick: &str) {
+    let actor = room_actor(state, room).await;
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: format!("{account}/laptop").parse().expect("occupant JID"),
+            nick: nick.to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: snapshot.admission_revision,
+            session: OccupancySessionGeneration::mint(),
+        })
+        .await
+        .expect("the member is seated");
+    assert!(seated(state, room, account).await);
+}
+
+#[tokio::test]
+async fn the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it() {
+    let Some(deployment) = Deployment::start("hg_revoke_remote", 1).await else {
+        return;
+    };
+    let room = deployment.room().clone();
+    let server = &deployment.replicas[0];
+    deployment
+        .grants
+        .set(OWNER, REMOTE_MEMBER, RoomAffiliation::Member)
+        .await
+        .expect("remote membership");
+    deployment
+        .grants
+        .activate_current(&deployment.grants.scope)
+        .await;
+    let mut owner = server.client("owner", "desk").await;
+    let joined = join(&mut owner, &room, "owner").await;
+    assert_eq!(error_condition(&joined), None, "{joined:?}");
+    seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
+    let arrived = presence_from(&mut owner, &room, "guest", SWEEP_BUDGET)
+        .await
+        .expect("the remote member's arrival as the owner sees it");
+    assert!(!room_presence(&arrived).unavailable);
+
+    // The sweep holds no request of the remote member, and without one its
+    // membership is not honoured on this replica (S2S is off). That is not
+    // a denial on every stream: its seat stays until its own requests are
+    // decided with their stream's evidence.
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(seated(&server.state, &room, REMOTE_MEMBER).await);
+    assert!(
+        presence_from(&mut owner, &room, "guest", QUIET)
+            .await
+            .is_none(),
+        "the remote member was removed on a decision without stream evidence"
+    );
+
+    // A recorded revoke denies it on every stream: the sweep removes it,
+    // with status 321.
+    record_acknowledged(&deployment, REMOTE_MEMBER, RoomAffiliation::None).await;
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(!seated(&server.state, &room, REMOTE_MEMBER).await);
+    let seen = presence_from(&mut owner, &room, "guest", SWEEP_BUDGET)
+        .await
+        .expect("the remote member's removal as the owner sees it");
+    let seen = room_presence(&seen);
+    assert!(seen.unavailable);
+    assert!(
+        seen.statuses.contains(&"321".to_owned()),
+        "{:?}",
+        seen.statuses
+    );
+
+    // A ban of a remote member seated again is honoured the same way, with
+    // status 301.
+    deployment
+        .grants
+        .set(OWNER, REMOTE_MEMBER, RoomAffiliation::Member)
+        .await
+        .expect("membership again");
+    deployment
+        .grants
+        .activate_current(&deployment.grants.scope)
+        .await;
+    seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
+    record_acknowledged(&deployment, REMOTE_MEMBER, RoomAffiliation::Outcast).await;
+    assert!(sweep_host_grant_room(&server.state, &room).await);
+    assert!(!seated(&server.state, &room, REMOTE_MEMBER).await);
+    drop(owner);
+    deployment.close().await;
+}
+
 /// Record `affiliation` for `account` by the room's owner and wait until
 /// the revocation fence has acknowledged it.
 async fn record_acknowledged(deployment: &Deployment, account: &str, affiliation: RoomAffiliation) {
