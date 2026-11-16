@@ -1,14 +1,16 @@
 //! Routed S2S deployments for the routing suites: the connection-manager
 //! fixture (test CA, configuration files, loopback listeners and a
 //! hand-written peer) with an S2S router as the stanza sink and remote
-//! route of a deployment, its IQ correlation table in an in-memory SQLite
-//! database, and a recording [`LocalDelivery`] in place of WebSocket
+//! route of a deployment, its IQ correlation table and remote room
+//! occupancies in an in-memory SQLite database, and a recording
+//! [`LocalDelivery`] in place of WebSocket
 //! clients. A deployment without a router records what it receives with
 //! [`CapturingSink`] and sends stanzas through its own connection manager.
 
 #[path = "../s2s_connection_manager/support.rs"]
 pub mod transport;
 
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,7 +28,7 @@ use waddle_server::s2s::conn::{
 };
 use waddle_server::s2s::route::{
     LocalDelivery, LocalDeliveryOutcome, LocalOrigin, RouterLimits, RouterOptions, S2sRouter,
-    SqlIqCorrelations,
+    SqlIqCorrelations, SqlRemoteRoomStore,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -78,7 +80,8 @@ pub fn remote(served: &ServedDomains, address: &str) -> RemoteDestination {
     }
 }
 
-/// A migrated in-memory database for one deployment's correlation table.
+/// A migrated in-memory database for one deployment's correlation table
+/// and remote room occupancies. Replicas of one deployment share it.
 pub async fn correlation_database(name: &str) -> Database {
     let database = Database::in_memory(name)
         .await
@@ -218,8 +221,9 @@ impl Routed {
 }
 
 /// Start a routed deployment from `spec` on `listener`, its correlation
-/// table in `database`. The first local domain of the specification is
-/// its account domain.
+/// table and remote room occupancies in `database`. Two deployments
+/// started with the same database act as two replicas of one deployment.
+/// The first local domain of the specification is its account domain.
 pub async fn start_routed(
     pki: &Pki,
     spec: &Spec,
@@ -232,7 +236,8 @@ pub async fn start_routed(
     let router = S2sRouter::new(RouterOptions {
         config: Arc::clone(&config),
         served: served.clone(),
-        correlations: Arc::new(SqlIqCorrelations::new(database)),
+        correlations: Arc::new(SqlIqCorrelations::new(database.clone())),
+        rooms: Arc::new(SqlRemoteRoomStore::new(database)),
         limits,
         stop: None,
     });
@@ -358,6 +363,34 @@ pub async fn wait_for<T>(wait: Duration, found: impl Fn() -> Option<T>) -> Optio
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Wait up to `wait` for `found`, which may await, to return something.
+pub async fn wait_for_async<T, F, Fut>(wait: Duration, found: F) -> Option<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Some(value) = found().await {
+            return Some(value);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Wait up to [`ARRIVES`] for the deployment's shared table to hold
+/// `count` remote room occupancies: `true` once it does.
+pub async fn wait_for_rooms(router: &S2sRouter, count: usize) -> bool {
+    wait_for_async(ARRIVES, move || async move {
+        (router.remote_rooms().await == count).then_some(())
+    })
+    .await
+    .is_some()
 }
 
 /// How long a suite waits for something that should arrive.
