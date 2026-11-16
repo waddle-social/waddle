@@ -1,57 +1,98 @@
-/// Stale session and acknowledgement events never replace another sid's slot.
-func reduceCallState(_ current: CallState, _ event: CallEvent) -> CallState {
-    switch event.kind {
-    case .propose(let media):
-        if !current.isLive { return .incoming(IncomingCall(from: event.from, sid: event.sid, media: media)) }
-    case .ringing:
-        if case .outgoing(var call) = current, call.sid == event.sid, call.to == event.from.bare {
-            call.isRinging = true
-            return .outgoing(call)
-        }
-    case .proceed:
-        if current.isIncoming, current.sid == event.sid { return .idle }
-        // The first of the peer's devices to answer is the one we call.
-        if case .outgoing(var call) = current, call.sid == event.sid, call.responder == nil, call.to == event.from.bare {
-            call.responder = event.from
-            return .outgoing(call)
-        }
-    case .reject(let reason, let tieBreak):
-        if current.sid == event.sid { return .ended(sid: event.sid, reason: tieBreak && reason == .expired ? .expired : .rejected) }
-    case .retract(let reason, let tieBreak):
-        if current.sid == event.sid { return .ended(sid: event.sid, reason: tieBreak && reason == .expired ? .expired : .retracted) }
-    case .sessionInitiate(let join, let media):
-        // Media starts only for an invitation this device accepted.
-        if case .incoming(let call) = current, call.sid == event.sid, call.isAccepting {
-            return .active(
-                ActiveCall(peer: event.from, sid: event.sid, media: media.bounded(by: call.media), join: join, initiator: event.from))
-        }
-    case .sessionAccept(let join, let media):
-        if case .outgoing(let call) = current, call.sid == event.sid, call.responder == nil || call.responder == event.from {
-            return .active(
-                ActiveCall(
-                    peer: event.from, sid: event.sid, media: media.bounded(by: call.media), join: join, initiator: call.initiator))
-        }
-    case .finish(let reason, _), .sessionTerminate(let reason):
-        if current.sid == event.sid { return .ended(sid: event.sid, reason: .finished(reason)) }
+/// An event changes the slot only when it names the slot's session, comes
+/// from the party entitled to send it, and fits the slot's phase. Anything
+/// else (a replay, a late answer from another device, a stranger who learned
+/// the sid) leaves the slot as it is.
+///
+/// `isOwn` marks a carbon of something another of our own devices sent.
+func reduceCallState(_ current: CallState, _ event: CallEvent, isOwn: Bool) -> CallState {
+    if case .propose(let media) = event.kind {
+        // A redelivered proposal for the session the slot already holds,
+        // live or ended, is not a new call.
+        guard !isOwn, !current.isLive, current.sid != event.sid else { return current }
+        return .incoming(IncomingCall(from: event.from, sid: event.sid, media: media))
     }
-    return current
+    guard current.sid == event.sid else { return current }
+    return isOwn ? reduceSiblingEvent(current, event) : reducePeerEvent(current, event)
 }
 
-/// Only sibling-device answered, declined, and ended transitions touch the slot.
-func selfOriginatedEventShouldTouchCurrentCall(_ current: CallState, _ event: CallEvent) -> Bool {
-    guard current.sid == event.sid else { return false }
-    switch event.kind {
-    case .propose, .ringing, .retract: return false
-    case .proceed: return true
-    case .reject, .sessionInitiate: return current.isIncoming
-    case .sessionAccept: return current.isOutgoing
-    case .finish:
-        // A sibling that answered and hung up ends a ring this device still
-        // shows, e.g. after it missed the sibling's proceed while offline.
-        if case .active = current { return true }
-        return current.isIncoming
-    case .sessionTerminate:
-        if case .active = current { return true }
-        return false
+/// Another of our devices answered, declined or ended the call this device
+/// is still showing.
+private func reduceSiblingEvent(_ current: CallState, _ event: CallEvent) -> CallState {
+    switch (event.kind, current) {
+    case (.proceed, .incoming):
+        return .idle
+    case (.reject(let reason, let tieBreak), .incoming):
+        return .ended(sid: event.sid, reason: abortReason(reason, tieBreak: tieBreak, otherwise: .rejected))
+    case (.finish(let reason, _), .incoming), (.finish(let reason, _), .active):
+        // A sibling that answered and hung up also ends a ring this device
+        // kept, e.g. after it missed the sibling's proceed while offline.
+        return .ended(sid: event.sid, reason: .finished(reason))
+    case (.sessionTerminate(let reason), .active):
+        return .ended(sid: event.sid, reason: .finished(reason))
+    default:
+        return current
     }
+}
+
+private func reducePeerEvent(_ current: CallState, _ event: CallEvent) -> CallState {
+    switch current {
+    case .incoming(let call):
+        guard call.from.bare == event.from.bare else { return current }
+        switch event.kind {
+        case .retract(let reason, let tieBreak):
+            return .ended(sid: call.sid, reason: abortReason(reason, tieBreak: tieBreak, otherwise: .retracted))
+        case .sessionInitiate(let join, let media):
+            // Media starts only for an invitation this device accepted, from
+            // the device that proposed it, with no track beyond those agreed.
+            guard call.isAccepting, call.from == event.from else { return current }
+            return .active(
+                ActiveCall(peer: event.from, sid: call.sid, media: media.bounded(by: call.media), join: join, initiator: event.from))
+        case .finish(let reason, _), .sessionTerminate(let reason):
+            return .ended(sid: call.sid, reason: .finished(reason))
+        default:
+            return current
+        }
+
+    case .outgoing(var call):
+        // Once one of the peer's devices has answered, only that device
+        // speaks for the call.
+        guard call.to == event.from.bare, call.responder == nil || call.responder == event.from else { return current }
+        switch event.kind {
+        case .ringing:
+            call.isRinging = true
+            return .outgoing(call)
+        case .proceed:
+            guard call.responder == nil else { return current }
+            call.responder = event.from
+            return .outgoing(call)
+        case .reject(let reason, let tieBreak):
+            return .ended(sid: call.sid, reason: abortReason(reason, tieBreak: tieBreak, otherwise: .rejected))
+        case .sessionAccept(let join, let media):
+            return .active(
+                ActiveCall(peer: event.from, sid: call.sid, media: media.bounded(by: call.media), join: join, initiator: call.initiator))
+        case .finish(let reason, _), .sessionTerminate(let reason):
+            return .ended(sid: call.sid, reason: .finished(reason))
+        default:
+            return current
+        }
+
+    case .active(let call):
+        // An established session ends only on its own end events, from the
+        // device it was established with.
+        guard call.peer == event.from else { return current }
+        switch event.kind {
+        case .finish(let reason, _), .sessionTerminate(let reason):
+            return .ended(sid: call.sid, reason: .finished(reason))
+        default:
+            return current
+        }
+
+    case .idle, .ended:
+        return current
+    }
+}
+
+/// XEP-0353 tie-breaking marks the losing proposal `<expired/>` with `<tie-break/>`.
+private func abortReason(_ reason: JingleReason?, tieBreak: Bool, otherwise: CallEndReason) -> CallEndReason {
+    tieBreak && reason == .expired ? .expired : otherwise
 }

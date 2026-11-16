@@ -4,7 +4,8 @@ extension CallStore {
         guard generation == epoch else { return }
         switch event.kind {
         case .propose(let media):
-            guard !recentlyAbortedSids.contains(event.sid) else { return }
+            // A redelivered proposal for the slot's own session needs no answer.
+            guard before.sid != event.sid, !recentlyAbortedSids.contains(event.sid) else { return }
             if case .outgoing(let call) = before, call.to == event.from.bare {
                 await tieBreak(event, media: media, previous: call, epoch: epoch)
             } else if case .active(let call) = before, call.peer.bare == event.from.bare {
@@ -32,7 +33,8 @@ extension CallStore {
                 failCall(sid: event.sid, message: "call session initiate failed", epoch: epoch)
             }
         case .sessionInitiate(_, let media):
-            guard case .incoming(let call) = before, call.sid == event.sid, call.isAccepting, callStillLive(event.sid)
+            guard case .incoming(let call) = before, call.sid == event.sid, call.isAccepting, call.from == event.from,
+                callStillLive(event.sid)
             else { return }
             guard let own = ownJID() else {
                 failCall(sid: event.sid, message: "call session accept failed: no bound resource", epoch: epoch)
@@ -46,7 +48,7 @@ extension CallStore {
             // XEP-0353 has both parties send `<finish/>`. Ours answers the
             // first end event for a session we were in, so our other devices
             // and the archive learn it ended even if the peer drops offline.
-            guard case .active(let call) = before, call.sid == event.sid else { return }
+            guard case .active(let call) = before, call.sid == event.sid, call.peer == event.from else { return }
             _ = await send(epoch: epoch, error: "call finish failed") {
                 await port.sendCallFinish(to: call.peer, sid: call.sid, reason: .success)
             }

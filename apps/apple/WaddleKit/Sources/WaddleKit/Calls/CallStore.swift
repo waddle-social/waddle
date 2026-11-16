@@ -54,8 +54,7 @@ import Observation
         default: break
         }
         let isSelfOriginated = event.from.bare == ownBareJID
-        if isSelfOriginated && !selfOriginatedEventShouldTouchCurrentCall(before, event) { return }
-        transition(reduceCallState(before, event))
+        transition(reduceCallState(before, event, isOwn: isSelfOriginated))
         if before.isOutgoing, event.kind == .proceed, before.sid == event.sid {
             ringTimer?.cancel()
             ringTimer = nil
@@ -215,6 +214,11 @@ import Observation
             let outcome = await self.port.sendCallSessionTerminate(to: peer, sid: sid, reason: .timeout)
             guard self.generation == epoch else { return }
             if outcome == .error { self.lastError = "call session terminate failed" }
+            // The terminate is an IQ only the answering device sees; the
+            // finish tells the peer's other devices the call is over.
+            _ = await self.send(epoch: epoch, error: "call finish failed") {
+                await self.port.sendCallFinish(to: peer, sid: sid, reason: .timeout)
+            }
         }
     }
 
