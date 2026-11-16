@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "fbb7fb04b1594da5abe89c30415300c85e0b963b",
+  "baseline_commit": "0ac974978f2ba9a664b1964788f37e8fb2a6de18",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {

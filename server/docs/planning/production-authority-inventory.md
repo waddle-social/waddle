@@ -5,7 +5,7 @@ Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
 S2S routing and the host-grant restore incarnation through
-`fbb7fb04b1594da5abe89c30415300c85e0b963b` (see the last refresh below); the original
+`0ac974978f2ba9a664b1964788f37e8fb2a6de18` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -452,7 +452,7 @@ the fifth refresh:
   grant writer, grant store or acceptance authority was added.
 
 The selected evidence was refreshed a seventh time, through
-`fbb7fb04b1594da5abe89c30415300c85e0b963b`, after reviewing the delta of
+`0ac974978f2ba9a664b1964788f37e8fb2a6de18`, after reviewing the delta of
 the reviewed files since the sixth refresh:
 
 - The writer fence's gate (`hg-gate`) reads the attachment only while the
@@ -473,8 +473,9 @@ the reviewed files since the sixth refresh:
   are recorded in the host-grant design as preconditions for the first
   enrollment.
 - The raw scan holds 1595 records, unchanged in count and content; only
-  lines moved. No production grant writer, grant store or acceptance
-  authority was added.
+  lines moved, in the files above and in the fenced WebSocket test state,
+  which now binds its gate to the ingress authority's attachment gate. No
+  production grant writer, grant store or acceptance authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
