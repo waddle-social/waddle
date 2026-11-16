@@ -839,6 +839,67 @@ async fn a_remote_ban_is_honoured_by_the_gate_and_acceptance_on_every_stream() {
 }
 
 #[tokio::test]
+async fn a_decision_with_stream_evidence_is_fenced_like_any_other() {
+    let principals = Snapshot::trusting().principals().await;
+    let Some(fixture) = GrantFixture::active_under("hg_w5e_fenced", principals.clone()).await
+    else {
+        return;
+    };
+    grant(
+        &fixture,
+        REMOTE_MEMBER,
+        RoomAffiliation::Member,
+        &issuance_policy(&[]),
+    )
+    .await;
+    let scopes = EnrolledScopes::watch(fixture.store.clone());
+    assert!(scopes.wait_loaded(Duration::from_secs(5)).await);
+    let gate = HostGrantGate::with_enrolled_scopes(fixture.store.clone(), scopes);
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(&fixture.store, &principals)
+            .await
+            .expect("attachment")
+    ));
+    let RoomGate::Managed(decided) = gate.room(RoomBinding::Room(&fixture.scope.room)).await else {
+        panic!("the managed room was not decided");
+    };
+    let read = HostGrantAction::Read;
+    assert!(decided.allows_as(&bare(REMOTE_MEMBER), &public_pkix(), read));
+    assert_eq!(
+        decided.standing_as(&bare(REMOTE_MEMBER), &public_pkix()),
+        RoomAffiliation::Member
+    );
+
+    // Another change of the scope: once the replica has installed its
+    // generation, the decision read before it allows nothing, with the
+    // remote member's stream evidence as without it.
+    fixture
+        .set(OWNER, PEER, RoomAffiliation::None)
+        .await
+        .expect("revoke");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while decided.fence.is_current() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replica did not install the revoke"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!decided.allows_as(&bare(REMOTE_MEMBER), &public_pkix(), read));
+    assert_eq!(
+        decided.standing_as(&bare(REMOTE_MEMBER), &public_pkix()),
+        RoomAffiliation::None
+    );
+    // Deciding again reads the grants now: the remote member still reads.
+    assert!(
+        gate.still_allows(&decided, &bare(REMOTE_MEMBER), &public_pkix(), read)
+            .await
+    );
+    drop(gate);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn work_from_a_domain_no_longer_admitted_is_refused() {
     let Some(fixture) = GrantFixture::active("hg_w5e_admission").await else {
         return;
