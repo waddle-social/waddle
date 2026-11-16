@@ -288,7 +288,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         else {
             return None;
         };
-        let host_grant_room = match enrolled_room_view(state, &room_jid, req.requester).await {
+        let host_grant_room = match enrolled_room_view(state, &room_jid, req).await {
             EnrolledRoomView::Unmanaged => false,
             EnrolledRoomView::Admitted => true,
             hidden => return Some(hidden.refusal(req)),
@@ -465,7 +465,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
     // does not exist. The decision is taken again once the description is
     // built, so a description read after a revoke that committed first is
     // never sent.
-    let host_grant_room = match enrolled_room_view(state, &room_jid, req.requester).await {
+    let host_grant_room = match enrolled_room_view(state, &room_jid, req).await {
         EnrolledRoomView::Unmanaged => false,
         EnrolledRoomView::Admitted => true,
         hidden => return Some(hidden.refusal(req)),
@@ -648,8 +648,9 @@ impl EnrolledRoomView {
 async fn enrolled_room_view(
     state: &WebSocketState,
     room_jid: &BareJid,
-    requester: Option<&FullJid>,
+    req: &DiscoInfoRequest<'_>,
 ) -> EnrolledRoomView {
+    let requester = req.requester;
     use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
     match state
         .deps
@@ -662,11 +663,7 @@ async fn enrolled_room_view(
         RoomGate::Unavailable => EnrolledRoomView::Unavailable,
         RoomGate::Managed(room) => {
             if requester.is_some_and(|requester| {
-                room.allows_as(
-                    &requester.to_bare(),
-                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
-                    HostGrantAction::View,
-                )
+                room.allows_as(&requester.to_bare(), &req.evidence, HostGrantAction::View)
             }) {
                 EnrolledRoomView::Admitted
             } else {
@@ -688,7 +685,7 @@ async fn admitted_after_read<'a>(
     if !host_grant_room {
         return DiscoInfoResponse::iq(response);
     }
-    match enrolled_room_view(state, room_jid, req.requester).await {
+    match enrolled_room_view(state, room_jid, req).await {
         EnrolledRoomView::Admitted => DiscoInfoResponse::iq(response),
         other => other.refusal(req),
     }

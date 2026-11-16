@@ -60,6 +60,7 @@ pub async fn handle_muc_join(
             authenticated_session: connection.authenticated_session,
             registry_owner: connection.registry_owner,
             ordered_relay_origin: None,
+            evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
         },
     )
     .await
@@ -103,6 +104,11 @@ pub struct MucJoinRequest<'a> {
     pub authenticated_session: Option<&'a Session>,
     pub registry_owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
+    /// How the join reached the room: without an S2S stream for a session
+    /// of this deployment, or on the inbound stream that carried a remote
+    /// principal's join. Every decision the join takes for the joiner
+    /// names it.
+    pub evidence: crate::permissions::host_grant::PrincipalEvidence,
 }
 
 pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoinWork<'a> {
@@ -120,6 +126,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoin
         Option<&'a Session>,
     pub(in crate::server::routes::websocket::handlers::presence::muc) ordered_relay_origin:
         Option<OrderedRelayRouteOrigin>,
+    pub(in crate::server::routes::websocket::handlers::presence::muc) evidence:
+        crate::permissions::host_grant::PrincipalEvidence,
 }
 
 pub async fn handle_muc_join_with_ordered_relay(
@@ -146,6 +154,7 @@ pub async fn handle_muc_join_with_ordered_relay(
             registry_owner: request.registry_owner,
             authenticated_session: request.authenticated_session,
             ordered_relay_origin: request.ordered_relay_origin,
+            evidence: request.evidence,
         },
     )
     .await
@@ -392,6 +401,17 @@ pub(crate) async fn route_room_presence_to_occupant(
     recipient: &FullJid,
     stanza: Stanza,
 ) {
+    // An occupant the room seats from another server is reached through
+    // server-to-server routing, which takes only what a room sends a seat.
+    let stanza = match state
+        .deps
+        .protocol
+        .connection_registry
+        .offer_foreign(recipient, stanza)
+    {
+        Ok(()) => return,
+        Err(stanza) => *stanza,
+    };
     if super::try_deliver_registered_remote_resource(state, recipient, &stanza).await {
         return;
     }
@@ -876,9 +896,38 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         authenticated_session,
         registry_owner,
         ordered_relay_origin,
+        evidence,
     } = request;
     #[cfg(not(feature = "clustering"))]
     let _ = &ordered_relay_origin;
+    // A remote principal's join (ADR-0020 D10) is decided on the evidence
+    // of the stream that carried it. Whatever the room holds for it counts
+    // only while its domain is admitted under the S2S snapshot this replica
+    // runs (D1), which is decided here, at the join, and not taken from the
+    // stream's own admission.
+    let remote = matches!(
+        evidence,
+        crate::permissions::host_grant::PrincipalEvidence::Stream(_)
+    );
+    if remote
+        && !super::access::principal_witness(state, &sender_jid.to_bare(), &evidence)
+            .is_some_and(|witness| witness.grants_honoured())
+    {
+        return deny_join_admission(
+            room_jid,
+            sender_jid,
+            &nick,
+            false,
+            JoinAdmissionDenial {
+                condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                error_type: ErrorType::Auth,
+                deny_reason:
+                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
+                resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+                message: "This room does not admit your server.",
+            },
+        );
+    }
 
     // Resolver-derived first joins bump the admission revision, so a
     // burst of concurrent first-time joiners can hit several stale
@@ -1066,6 +1115,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             let resolved = resolve_managed_channel_admission(
                 state,
                 &session_bare,
+                &evidence,
                 room_jid,
                 &channel.id,
                 admission_members_only,
@@ -1187,6 +1237,57 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         let resolver_outcome = managed_affiliation
             .map(ManagedAdmissionResolverOutcome::Resolved)
             .unwrap_or(ManagedAdmissionResolverOutcome::NotConsulted);
+
+        // A room no channel row backs holds its affiliations in its actor.
+        // An owner or admin entry of a remote principal counts only for a
+        // trusted home on a `pkix` stream (ADR-0020 D8); one that is not
+        // honoured contributes nothing, and the actor would count it, so
+        // the join is refused. Such a room is never created for a remote
+        // principal: creating a room makes its creator the owner.
+        if remote && managed_channel.is_none() {
+            let stored = existing_room_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.room.affiliation(&sender_jid.to_bare()));
+            let refusal = match stored {
+                None => Some((
+                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ItemNotFound,
+                    ErrorType::Cancel,
+                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomCreationNotPermitted,
+                    "The room does not exist.",
+                )),
+                Some(stored)
+                    if super::access::honoured_legacy_affiliation(
+                        state,
+                        &sender_jid.to_bare(),
+                        &evidence,
+                        Some(stored),
+                    ) != Some(stored) =>
+                {
+                    Some((
+                        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                        ErrorType::Auth,
+                        waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
+                        "Your standing in this room is honoured only over a                          certificate-authenticated stream from a trusted server.",
+                    ))
+                }
+                Some(_) => None,
+            };
+            if let Some((condition, error_type, deny_reason, message)) = refusal {
+                return deny_join_admission(
+                    room_jid,
+                    sender_jid,
+                    &nick,
+                    false,
+                    JoinAdmissionDenial {
+                        condition,
+                        error_type,
+                        deny_reason,
+                        resolver_outcome,
+                        message,
+                    },
+                );
+            }
+        }
 
         let (room_actor, created_instant_room) = match existing_room_actor {
             Some(actor) => (actor, false),
@@ -1805,13 +1906,17 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         // presence carried a typed `<show/>` token; on first join (or
         // when no `<show/>` is present) we record `None` so the column
         // stays NULL until the user actually broadcasts a state.
-        crate::server::routes::interpret::record_presence_available_activity_on_state(
-            state,
-            &sender_jid.to_bare(),
-            room_jid,
-            presence_show,
-        )
-        .await;
+        // The activity projection feeds this deployment's push filter; a
+        // remote occupant has no devices here.
+        if !remote {
+            crate::server::routes::interpret::record_presence_available_activity_on_state(
+                state,
+                &sender_jid.to_bare(),
+                room_jid,
+                presence_show,
+            )
+            .await;
+        }
 
         let mut responses = Vec::new();
 

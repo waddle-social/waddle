@@ -698,6 +698,17 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
                 &websocket_state,
             ),
         ));
+        // The same state hosts the rooms remote occupants use. Their seats
+        // live in the global database, which every replica shares; a room's
+        // stanza for a remote occupant leaves through the router, which
+        // takes it only for a seat it holds; and decisions that name a
+        // seated remote occupant read the evidence its seat was admitted
+        // under.
+        crate::server::routes::websocket::s2s_rooms::host_rooms(
+            &websocket_state,
+            router,
+            state.db_pool.global().clone(),
+        );
     }
 
     // Install the OIDC → PEP profile bridge hook now that

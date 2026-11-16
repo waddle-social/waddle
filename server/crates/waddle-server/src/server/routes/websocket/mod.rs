@@ -82,6 +82,7 @@ pub(crate) mod replay;
 mod resource_binding;
 mod resume_replay;
 pub(crate) mod s2s_delivery;
+pub(crate) mod s2s_rooms;
 mod sasl;
 mod send;
 mod session_init;

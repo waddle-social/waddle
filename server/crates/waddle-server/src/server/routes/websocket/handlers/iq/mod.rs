@@ -84,6 +84,7 @@ mod community_rsvp;
 mod conn_state;
 mod destination_route;
 mod disco_info;
+pub(crate) use disco_info::muc_disco_info_for_remote;
 mod disco_items;
 pub(crate) mod errors;
 mod extension_forms;
