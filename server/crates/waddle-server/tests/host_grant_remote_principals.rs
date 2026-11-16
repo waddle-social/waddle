@@ -41,7 +41,8 @@ use host_grant_support::{
 };
 use rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, CertificateRevocationListParams,
-    DistinguishedName, DnType, IsCa, KeyIdMethod, KeyPair, KeyUsagePurpose, SerialNumber,
+    DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyIdMethod, KeyPair,
+    KeyUsagePurpose, SerialNumber,
 };
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::UnixTime;
@@ -78,8 +79,8 @@ const SUBDOMAIN_ADMIN: &str = "admin@sub.trusted.example";
 const DENIED_CHILD_MEMBER: &str = "guest@chat.parent.example";
 const SERVED_CAROL: &str = "carol@example.com";
 
-/// The fixed time the private-CA profile's certificate and CRL are checked
-/// against: 2030-06-15T00:00:00Z.
+/// The fixed time the local domain's credentials and the private-CA
+/// profile's certificate and CRL are checked against: 2030-06-15T00:00:00Z.
 const NOW_SECS: u64 = 1_907_712_000;
 
 #[derive(Debug)]
@@ -138,7 +139,7 @@ impl Snapshot {
         }
     }
 
-    fn toml(&self, ca: Option<&Ca>) -> String {
+    fn toml(&self, ca: &Ca) -> String {
         let list = |entries: &[&str]| {
             let quoted: Vec<String> = entries.iter().map(|entry| format!("{entry:?}")).collect();
             format!("[{}]", quoted.join(", "))
@@ -147,8 +148,13 @@ impl Snapshot {
             format!("generation = \"{}\"", Uuid::new_v4()),
             "local_domains = [\"example.com\"]".to_owned(),
             "peer_scope = \"public\"".to_owned(),
+            // Every local domain presents credentials.
+            "[[credentials]]".to_owned(),
+            "domain = \"example.com\"".to_owned(),
+            format!("certificate_chain = {:?}", ca.chain.display().to_string()),
+            format!("private_key = {:?}", ca.key.display().to_string()),
         ];
-        if let Some(ca) = ca {
+        if !self.private_ca.is_empty() {
             lines.push("[[private_ca]]".to_owned());
             lines.push(format!("domains = {}", list(&self.private_ca)));
             lines.push(format!("anchors = [{:?}]", ca.anchor.display().to_string()));
@@ -172,9 +178,9 @@ impl Snapshot {
     /// host-grant decisions read.
     async fn load(&self) -> FederationSnapshot {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let ca = (!self.private_ca.is_empty()).then(|| Ca::write(&dir));
+        let ca = Ca::write(&dir);
         let path = dir.path().join("s2s.toml");
-        std::fs::write(&path, self.toml(ca.as_ref())).expect("configuration file");
+        std::fs::write(&path, self.toml(&ca)).expect("configuration file");
         let settings =
             TlsSettings::new(Arc::new(default_provider())).with_time_provider(Arc::new(FixedTime));
         let config = S2sConfig::load(&path, settings)
@@ -190,10 +196,14 @@ impl Snapshot {
     }
 }
 
-/// A private CA's anchor and an empty, current CRL, as PEM files.
+/// A test CA's anchor and an empty, current CRL, used as a private-CA
+/// profile, and the local domain's certificate chain and key it issued, as
+/// PEM files.
 struct Ca {
     anchor: PathBuf,
     crl: PathBuf,
+    chain: PathBuf,
+    key: PathBuf,
 }
 
 impl Ca {
@@ -223,13 +233,29 @@ impl Ca {
         }
         .signed_by(&certificate, &key)
         .expect("a CRL");
-        let anchor = dir.path().join("ca.pem");
-        let crl_path = dir.path().join("ca.crl.pem");
-        std::fs::write(&anchor, certificate.pem()).expect("anchor file");
-        std::fs::write(&crl_path, crl.pem().expect("PEM")).expect("CRL file");
+        let mut leaf = CertificateParams::new(vec!["example.com".to_owned()]).expect("DNS name");
+        leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        leaf.not_before = date_time_ymd(2030, 6, 1);
+        leaf.not_after = date_time_ymd(2030, 7, 1);
+        leaf.use_authority_key_identifier_extension = true;
+        let leaf_key = KeyPair::generate().expect("a leaf key");
+        let leaf = leaf
+            .signed_by(&leaf_key, &certificate, &key)
+            .expect("a leaf certificate");
+        let write = |file: &str, contents: String| {
+            let path = dir.path().join(file);
+            std::fs::write(&path, contents).expect("PEM file");
+            path
+        };
         Self {
-            anchor,
-            crl: crl_path,
+            anchor: write("ca.pem", certificate.pem()),
+            crl: write("ca.crl.pem", crl.pem().expect("PEM")),
+            chain: write("example.com.chain.pem", leaf.pem()),
+            key: write("example.com.key.pem", leaf_key.serialize_pem()),
         }
     }
 }
@@ -514,7 +540,6 @@ async fn room_moderation_by_a_remote_principal_needs_a_trusted_home_on_pkix() {
         &issuance_policy(&[TRUSTED_HOME]),
     )
     .await;
-    store_outside_the_canonical_path(&fixture, UNLISTED_ADMIN, RoomAffiliation::Admin).await;
     grant(
         &fixture,
         REMOTE_MEMBER,
@@ -522,6 +547,8 @@ async fn room_moderation_by_a_remote_principal_needs_a_trusted_home_on_pkix() {
         &issuance_policy(&[]),
     )
     .await;
+    // Written last, so no activation of the fixture runs over it.
+    store_outside_the_canonical_path(&fixture, UNLISTED_ADMIN, RoomAffiliation::Admin).await;
     let trusting = Snapshot::trusting().principals().await;
     let moderate = HostGrantAction::Moderate;
     // A trusted home on `pkix` moderates; on a dialback-only stream it
