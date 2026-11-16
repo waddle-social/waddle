@@ -16,7 +16,7 @@ struct DirectMessagesList: View {
                 DirectNavigationRow(direct: direct, style: .phone)
             }
         }
-        .listStyle(.plain)
+        .navigationListStyle()
         .navigationTitle("Direct messages")
         .searchable(text: $query, prompt: "Search people")
         .overlay {
@@ -34,13 +34,15 @@ struct DirectMessagesList: View {
     @ViewBuilder
     private var emptyState: some View {
         if isSearching {
-            ContentUnavailableView.search(text: query)
+            NoMatchesView(query: query)
         } else {
-            ContentUnavailableView {
-                Label("No messages yet", systemImage: "bubble.left.and.bubble.right")
-            } description: {
-                Text("Start a conversation with anyone on your server.")
-            } actions: {
+            VStack(spacing: Theme.Spacing.m) {
+                EmptyStateView(
+                    title: "No messages yet",
+                    message: "Say hello to anyone in your community.",
+                    symbol: "bubble.left.and.bubble.right"
+                )
+                .fixedSize(horizontal: false, vertical: true)
                 Button("New message") {
                     navigation.sheet = .newMessage
                 }

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 private let other = bare("random@muc.waddle.test")
 private let thread = ThreadKey(room: room, threadID: "root-1")

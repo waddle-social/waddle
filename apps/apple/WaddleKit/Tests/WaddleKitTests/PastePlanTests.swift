@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 struct PastePlanTests {
     private func plan(_ items: [String]...) -> PastePlan {

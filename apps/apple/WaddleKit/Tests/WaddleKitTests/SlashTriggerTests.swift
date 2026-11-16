@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 struct SlashTriggerTests {
     private func parse(_ text: String) -> (String, String)? {

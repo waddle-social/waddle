@@ -39,7 +39,7 @@ struct NewMessageSheet: View {
                 if let startError {
                     Section {
                         Label(startError, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Theme.Colors.dangerText)
                     }
                 }
             }

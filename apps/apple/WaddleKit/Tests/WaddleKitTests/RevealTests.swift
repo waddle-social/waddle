@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// Jumping to a search hit or pin pages XEP-0313 history (RSM `before`)
 /// until the message is loaded.

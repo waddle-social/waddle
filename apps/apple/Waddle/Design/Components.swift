@@ -85,7 +85,7 @@ struct PresenceDot: View {
     let availability: Availability
     var size: CGFloat = 10
     /// The colour the dot sits on; its ring and cut-outs are drawn in it.
-    var ground: Color = Theme.Colors.bg
+    @Environment(\.huddleGround) private var ground
 
     var body: some View {
         mark

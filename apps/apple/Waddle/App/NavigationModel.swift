@@ -35,8 +35,16 @@ struct PeerProfileRoute: Hashable {
 enum PhoneTab: Hashable {
     case home
     case directMessages
-    case activity
+    case inbox
     case you
+}
+
+/// What the split shell (iPad, Mac) shows while no conversation is selected.
+enum SplitSection: Hashable {
+    /// Nothing picked yet.
+    case home
+    /// The unread overview.
+    case inbox
 }
 
 /// Panels shown beside the conversation on iPad and Mac.
@@ -58,14 +66,24 @@ struct FocusRequest: Equatable {
 @MainActor
 @Observable
 final class NavigationModel {
-    var selection: ConversationID?
+    var selection: ConversationID? {
+        didSet {
+            // A thread belongs to the conversation it was opened in; details
+            // and pins follow the new selection.
+            if selection != oldValue, case .thread = inspector {
+                inspector = nil
+            }
+        }
+    }
+
+    var splitSection: SplitSection = .home
     var inspector: InspectorRoute?
     var sheet: SheetRoute?
 
     var tab: PhoneTab = .home
     var homePath: [Route] = []
     var directPath: [Route] = []
-    var activityPath: [Route] = []
+    var inboxPath: [Route] = []
 
     /// Quick switcher (⌘K) visibility.
     var isQuickSwitcherPresented = false
@@ -86,6 +104,23 @@ final class NavigationModel {
         }
     }
 
+    /// Leaves the conversation on iPad and Mac for Home or Inbox.
+    func show(_ section: SplitSection) {
+        selection = nil
+        inspector = nil
+        splitSection = section
+        // So an iPad that shrinks to compact width lands on the same place,
+        // at the root of that tab.
+        switch section {
+        case .home:
+            tab = .home
+            homePath = []
+        case .inbox:
+            tab = .inbox
+            inboxPath = []
+        }
+    }
+
     /// Scrolls the conversation already on screen to `messageID`. Used from
     /// search and pins, which are only reachable from that conversation, so
     /// tabs and stacks stay put; on iPad/Mac the selection follows.
@@ -102,7 +137,7 @@ final class NavigationModel {
         switch tab {
         case .home: homePath.append(.thread(conversation, rootID: rootID))
         case .directMessages: directPath.append(.thread(conversation, rootID: rootID))
-        case .activity: activityPath.append(.thread(conversation, rootID: rootID))
+        case .inbox: inboxPath.append(.thread(conversation, rootID: rootID))
         case .you: break
         }
     }
@@ -119,7 +154,7 @@ final class NavigationModel {
         switch tab {
         case .home: homePath.append(.details(conversation))
         case .directMessages: directPath.append(.details(conversation))
-        case .activity: activityPath.append(.details(conversation))
+        case .inbox: inboxPath.append(.details(conversation))
         case .you: break
         }
     }

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 struct ComposerFormattingTests {
     private func apply(_ format: ComposerFormat, _ text: String, _ selection: Range<Int>?) -> ComposerTextEdit {

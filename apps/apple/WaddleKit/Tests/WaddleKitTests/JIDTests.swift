@@ -1,5 +1,6 @@
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 @Suite("RFC 7622 addresses")
 struct JIDTests {

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 private let dave = bare("dave@waddle.test")
 private let erin = bare("erin@waddle.test")

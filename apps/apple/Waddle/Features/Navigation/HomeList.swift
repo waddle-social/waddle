@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// iPhone Home tab: spaces, channels, group chats and recent DMs.
+/// iPhone Home tab: rooms, group chats and recent direct messages.
 struct HomeList: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -17,20 +17,20 @@ struct HomeList: View {
         let sections = currentSections
         List {
             if SpaceScope.showsPicker(spaceCount: session.directory.spaces.count) {
-                Section {
-                    SpacePickerMenu(spaces: session.directory.spaces, selection: $spaceID)
-                }
+                SpacePickerMenu(spaces: session.directory.spaces, selection: $spaceID)
+                    .padding(.horizontal, Theme.Spacing.m)
+                    .navigationListRow(top: Theme.Spacing.s)
             }
             ChannelListSection(channels: sections.channels, style: .phone, isSearching: isSearching)
             GroupChatListSection(groups: sections.groupDMs, style: .phone)
             DirectListSection(directs: sections.directs, style: .phone, isSearching: isSearching, limit: directLimit)
         }
-        .homeListStyle()
-        .navigationTitle("Home")
-        .searchable(text: $query, prompt: "Search conversations")
+        .navigationListStyle()
+        .navigationTitle(title)
+        .searchable(text: $query, prompt: "Search rooms and people")
         .overlay {
             if isSearching && sections.isEmpty {
-                ContentUnavailableView.search(text: query)
+                NoMatchesView(query: query)
             }
         }
         .toolbar {
@@ -41,10 +41,16 @@ struct HomeList: View {
                 Button {
                     navigation.sheet = .newChannel
                 } label: {
-                    Label("New channel", systemImage: "number")
+                    Label("New room", systemImage: "number")
                 }
             }
         }
+    }
+
+    /// The community's name when there is one space, as the sidebar shows.
+    private var title: String {
+        let spaces = session.directory.spaces
+        return spaces.count == 1 ? spaces[0].name : "Home"
     }
 
     private var isSearching: Bool {
@@ -62,12 +68,13 @@ struct HomeList: View {
     }
 }
 
-private extension View {
-    func homeListStyle() -> some View {
-        #if os(iOS)
-        return self.listStyle(.insetGrouped)
-        #else
-        return self.listStyle(.inset)
-        #endif
+extension View {
+    /// A navigation list on the page ground: plain rows, no system
+    /// grouping or separators.
+    func navigationListStyle(ground: Color = Theme.Colors.bg) -> some View {
+        listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(ground)
+            .environment(\.defaultMinListRowHeight, 0)
     }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 struct SlashActionTests {
     private func run(_ text: String, extensions: [ExtensionCommand] = []) -> SlashAction? {

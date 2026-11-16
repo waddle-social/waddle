@@ -1,9 +1,9 @@
 import Foundation
 import WaddleKit
 
-/// What the Activity overview depends on: room and thread unread counts
+/// What the Inbox depends on: room and thread unread counts
 /// and whether the session can fetch. A change re-runs its refresh.
-struct ActivityRefreshKey: Hashable {
+struct InboxRefreshKey: Hashable {
     let rooms: [ConversationID: Int]
     let threads: [ThreadKey: Int]
     let isOnline: Bool
@@ -16,8 +16,8 @@ struct ActivityRefreshKey: Hashable {
     }
 }
 
-/// VoiceOver copy for Activity rows.
-enum ActivityCopy {
+/// VoiceOver copy for Inbox rows.
+enum InboxCopy {
     static func groupLabel(_ group: UnreadOverviewGroup) -> String {
         var parts = [group.title]
         if group.unread > 0 {

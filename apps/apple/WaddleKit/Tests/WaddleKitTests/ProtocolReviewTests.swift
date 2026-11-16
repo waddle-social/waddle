@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// Regressions for the protocol/bridge review: room occupancy (XEP-0045)
 /// and failed archive queries (XEP-0313).
