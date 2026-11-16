@@ -6,11 +6,12 @@
 //! enumerates each subscriber's resources before it hands anything over.
 //! A ban or an unsubscription that commits in between used to be ignored:
 //! the event reached the queue of a subscriber the node no longer delivered
-//! to. Fan-out from a Space node now reads each captured subscription again
-//! immediately before the first hand-over to its subscriber, so the schedule
-//! that showed the unsafe delivery, captured subscribers, then an
-//! acknowledged ban, then the hand-over, delivers nothing to the banned
-//! subscriber. The other subscribers of the capture still receive the event,
+//! to. Fan-out from a Space node now reads the node's deliverable
+//! subscriptions again, once per publication and in one statement, before
+//! its first hand-over, and hands the event only to captured subscribers
+//! still among them. The schedule that showed the unsafe delivery, captured
+//! subscribers, then an acknowledged ban, then the hand-over, delivers
+//! nothing to the banned subscriber. The other subscribers of the capture still receive the event,
 //! a subscriber added after the capture is not added to it, and another
 //! node's fan-out proceeds while this one is held.
 //!
@@ -23,7 +24,8 @@
 //!
 //! The cases run the production fan-out against PubSub storage on a
 //! PostgreSQL database of their own, behind a wrapper that delays the return
-//! of one completed subscriber listing. A lane that sets
+//! of the first completed subscriber listing; the second listing, the read
+//! again before the hand-over, passes through. A lane that sets
 //! `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them without PostgreSQL.
 #![cfg(feature = "test-support")]
 

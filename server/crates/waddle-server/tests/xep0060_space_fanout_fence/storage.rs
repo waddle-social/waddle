@@ -229,16 +229,6 @@ impl PubSubStorage for CapturingStorage {
         }
         Ok(rows)
     }
-    async fn subscription_deliverable(
-        &self,
-        owner: &BareJid,
-        node_name: &str,
-        subid: &SubId,
-    ) -> Result<bool, XmppError> {
-        self.inner
-            .subscription_deliverable(owner, node_name, subid)
-            .await
-    }
     async fn set_affiliation(
         &self,
         owner: &BareJid,

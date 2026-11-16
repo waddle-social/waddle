@@ -236,6 +236,10 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
         already_delivered.insert(publisher_full.clone());
     }
 
+    // The subscriptions of a Space node that are deliverable when the
+    // event is handed over, read once per publication (below).
+    let mut still_deliverable: Option<HashSet<waddle_xmpp::pubsub::SubId>> = None;
+
     for sub in subscribers {
         // A room-bound extension node delivers to whoever may read the room
         // now: a subscription and its affiliation outlive a ban.
@@ -298,24 +302,35 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
         // handed over, not to whoever could when the subscribers were
         // listed: the list was captured before the event was built and the
         // resources were enumerated, and a subscription removed or an
-        // entity banned since then receives nothing. The subscription is
-        // read again here, immediately before the first hand-over, and a
-        // read that fails withholds the event from that subscriber.
+        // entity banned since then receives nothing. The node's deliverable
+        // subscriptions are read again once per publication, here, before
+        // its first hand-over, in one statement; a read that fails
+        // withholds the event from every subscriber of the node.
         if space_node {
-            match storage
-                .subscription_deliverable(owner, node, &sub.subid)
-                .await
+            if still_deliverable.is_none() {
+                still_deliverable = Some(
+                    match storage.list_deliverable_subscribers(owner, node).await {
+                        Ok(current) => current
+                            .into_iter()
+                            .map(|subscription| subscription.subid)
+                            .collect(),
+                        Err(error) => {
+                            warn!(
+                                node_kind = "space",
+                                error = %error,
+                                "Fan-out withheld an event: the captured subscriptions could not \
+                                 be read again"
+                            );
+                            HashSet::new()
+                        }
+                    },
+                );
+            }
+            if !still_deliverable
+                .as_ref()
+                .is_some_and(|deliverable| deliverable.contains(&sub.subid))
             {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    warn!(
-                        node_kind = "space",
-                        error = %error,
-                        "Fan-out withheld an event: a captured subscription could not be read again"
-                    );
-                    continue;
-                }
+                continue;
             }
         }
 
