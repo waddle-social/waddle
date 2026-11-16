@@ -765,9 +765,13 @@ async fn admit_offline(
 /// Whether `resource` is held by a detached stream-management session, on
 /// this replica or recorded durably for another, whatever its presence was
 /// when it detached, and is not connected: a session that resumed while a
-/// record of its detachment lingers is not detached. A registry that
-/// cannot be read answers `true`, so that the caller applies the stricter
-/// rule.
+/// record of its detachment lingers is not detached. A resource the
+/// connection registry has no entry for (it holds this replica's
+/// connections and the routes it mirrors for other replicas') is not
+/// connected, whatever the account coordinator still binds for it: the
+/// coordinator unbinds an ended connection only after the registry forgets
+/// it. A registry that cannot be read answers `true`, so that the caller
+/// applies the stricter rule.
 async fn is_detached(state: &WebSocketState, resource: &FullJid) -> bool {
     let account = resource.to_bare();
     let held = match state
@@ -783,7 +787,18 @@ async fn is_detached(state: &WebSocketState, resource: &FullJid) -> bool {
             true
         }
     };
-    held && !super::handlers::account_reads::resources(state, &account)
+    if !held {
+        return false;
+    }
+    if !state
+        .deps
+        .protocol
+        .connection_registry
+        .is_connected(resource)
+    {
+        return true;
+    }
+    !super::handlers::account_reads::resources(state, &account)
         .await
         .contains(resource)
 }

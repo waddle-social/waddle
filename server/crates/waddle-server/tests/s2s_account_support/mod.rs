@@ -393,7 +393,8 @@ impl Federated {
     /// with `priority` and enabled stream management with resumption
     /// (XEP-0198 §3) loses its connection without closing its stream, and
     /// the session waits for a resumption (§5). Waits until the session
-    /// registry holds the resource as detached; the resource.
+    /// registry holds the resource as detached and the account coordinator
+    /// no longer binds it as connected; the resource.
     pub async fn detached(&self, localpart: &str, resource: &str, priority: i8) -> FullJid {
         let mut client = self.online(localpart, resource, priority).await;
         let full = full_jid(&client);
@@ -408,13 +409,21 @@ impl Federated {
         drop(client);
         assert!(
             routing::wait_for_async(ARRIVES, || async {
-                self.is_detached(&full).await.then_some(())
+                (self.is_detached(&full).await && !self.is_bound(&full).await).then_some(())
             })
             .await
             .is_some(),
             "{full} detaches"
         );
         full
+    }
+
+    /// Whether the account coordinator still binds `resource` as one of
+    /// its account's connected resources.
+    pub async fn is_bound(&self, resource: &FullJid) -> bool {
+        waddle_server::test_support::account_resources(&self.loopback.state, &resource.to_bare())
+            .await
+            .contains(resource)
     }
 
     /// Whether the session registry holds `resource` as detached.

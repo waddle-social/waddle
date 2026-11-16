@@ -311,6 +311,17 @@ pub async fn reconcile_local_accounts(state: &WebSocketState) -> Result<(), Stri
     .map_err(|error| error.to_string())
 }
 
+/// Every resource the account coordinator of `state` still binds for
+/// `account`, with no presence filter: what the routes read as the
+/// account's connected resources. A connection that ended is listed until
+/// the coordinator has unbound it.
+pub async fn account_resources(
+    state: &WebSocketState,
+    account: &jid::BareJid,
+) -> Vec<jid::FullJid> {
+    crate::server::routes::websocket::handlers::account_reads::resources(state, account).await
+}
+
 /// The default in-memory WebSocket state whose app state runs the S2S
 /// snapshot of `config`, as a replica with S2S enabled does
 /// (`AppState::s2s_federation`), so that the account side of S2S traffic
