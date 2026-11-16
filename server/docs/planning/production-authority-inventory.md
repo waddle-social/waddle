@@ -7,7 +7,7 @@ Post-baseline drift was manually reviewed through target main
 S2S routing and the host-grant restore incarnation through
 `0ac974978f2ba9a664b1964788f37e8fb2a6de18`, outbound S2S rooms through
 `9766d9c8175f09d56fff6f4e6f8c65b93b0984eb`, and the host-grant revocation fence
-through `46187e69f0638041d109eeb7497d37c6402c5c09` (see the last refresh below);
+through `9b2e2d57ebd13329ddc045b2d1343f03b9619089` (see the last refresh below);
 the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -601,6 +601,16 @@ parents:
   `routes/websocket/cleanup.rs`, `routes/interpret/carbons.rs`,
   `runtime_owner.rs` and `test_support.rs` moved again, as they had there. No
   production grant writer, grant store or acceptance authority was added.
+
+The selected evidence was refreshed a twelfth time, through
+`9b2e2d57ebd13329ddc045b2d1343f03b9619089`, after reviewing the delta of the
+reviewed files since the eleventh refresh:
+
+- The room's own message (`hg-system-message` moved) reads its audience after
+  the archive write at most twice before it delivers to no occupant; the
+  second audience decision's `system_message_audience` call moved into that
+  loop, so the raw scan still holds 1596 records. It delivers to no one the
+  first decision did not name and writes nothing it did not write before.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.

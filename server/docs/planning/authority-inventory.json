@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "46187e69f0638041d109eeb7497d37c6402c5c09",
+  "baseline_commit": "9b2e2d57ebd13329ddc045b2d1343f03b9619089",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -153,7 +153,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/interpret/room_system_message.rs",
-      "sha256": "5452ec17d9954294c3dde3c172431c4f530549f5d4c25dca42e9935540f703bf"
+      "sha256": "8e9fb80548bfb917907f1ec409d5b62169615867e2bd03ba65d00725c3ebfdf4"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/archive_inbox_upload.rs",
@@ -795,7 +795,7 @@
     },
     "hg-system-message": {
       "path": "server/crates/waddle-server/src/server/routes/interpret/room_system_message.rs",
-      "line": 381,
+      "line": 412,
       "text": "async fn system_message_audience<'o>("
     },
     "hg-search": {
@@ -940,7 +940,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "80abd84b557755971b92eab43b2ce0b4a4430d1edb1d6d82c9d1371ce715d302",
+    "sha256": "a57e34c45051086e2cb3696dcd1d848d81c8032d773026c871e9f1134022ddad",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,
