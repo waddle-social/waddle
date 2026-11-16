@@ -67,7 +67,9 @@ use crate::s2s::route::reach::{reach, InboundReach, LocalTarget};
 use crate::s2s::route::reach::{Reachable, RoomOperation};
 use crate::s2s::route::replies;
 use crate::s2s::route::room_delivery::{Admitted, Full, LocalRoomRequest, RoomWork};
-use crate::s2s::route::seats::{Deferred, Seat, SeatInsert, SeatLimits, SeatStoreError};
+use crate::s2s::route::seats::{
+    Deferred, Holding, JoinAnswer, Seat, SeatInsert, SeatLimits, SeatStoreError,
+};
 use crate::s2s::route::telemetry;
 
 /// XEP-0045 status codes (§12) the seat reads in the room's own presence.
@@ -1271,22 +1273,34 @@ impl Inner {
             }
             break answer;
         };
-        // A replica that began to stop while the room decided this join
-        // gives up the seat opened for it without a notice, as it gave up
-        // the other seats whose join was being answered: the occupant is
-        // not told that it entered a room that ends with the replica.
-        if joining && self.stopping.load(Ordering::Acquire) {
-            if let Some(opened) = seat.take() {
-                self.seats
-                    .release(&opened.room, &opened.occupant, opened.session);
+        // Whether the join may be answered as entered is decided against
+        // the farewell of a stopping replica, under the seat index's lock:
+        // a seat the farewell gave up first is answered with
+        // `resource-constraint` and its occupant is never told that it
+        // entered a room that ends with the replica; a seat committed
+        // first is answered as entered and then told that the service is
+        // shutting down (XEP-0045 §11.2), here if the farewell gave it up
+        // before the answer was queued. The notice is held from now on so
+        // that the farewell waits for it.
+        let mut notice = None;
+        if let Some(opened) = seat.as_ref().filter(|_| joining) {
+            let held = self.notices.notice();
+            match self
+                .seats
+                .answer_join(&opened.room, &opened.occupant, opened.session)
+            {
+                JoinAnswer::Closed => {
+                    if let Some(reply) = replies::error_reply(
+                        &stanza,
+                        self.busy("This server is shutting down; try again later."),
+                    ) {
+                        self.offer_room_reply(&pair, reply);
+                    }
+                    return;
+                }
+                JoinAnswer::Committed if answer.seat == SeatChange::Seated => notice = Some(held),
+                JoinAnswer::Committed | JoinAnswer::NotHeld => {}
             }
-            if let Some(reply) = replies::error_reply(
-                &stanza,
-                self.busy("This server is shutting down; try again later."),
-            ) {
-                self.offer_room_reply(&pair, reply);
-            }
-            return;
         }
         // A seat stays only if the room seats the occupant. One opened for
         // a join the room did not accept is dropped. One the occupant held
@@ -1370,6 +1384,21 @@ impl Inner {
                     self.queue_seat(&held, stanza);
                 }
             }
+            // The farewell gave the seat up while its answer was queued:
+            // the occupant, now told that it entered, is told that the
+            // service is shutting down, after that answer.
+            if let Some(notice) = notice {
+                if self
+                    .seats
+                    .answered_at_close(&held.room, &held.occupant, held.session)
+                {
+                    if let Some((pair, stanza)) =
+                        Self::own_unavailable(&held, Status::ServiceShutdown)
+                    {
+                        self.offer_notice(&pair, stanza, notice);
+                    }
+                }
+            }
         }
     }
 
@@ -1438,7 +1467,14 @@ impl Inner {
         for _ in 0..2 {
             match hosting.store.insert(&seat, &limits).await {
                 Ok(SeatInsert::Inserted) => {
-                    self.seats.hold_pending(seat.clone());
+                    // The replica began to stop since the check above: the
+                    // row is its own and goes with it.
+                    if !self.seats.hold_pending(seat.clone()) {
+                        self.remove_row(&seat);
+                        return Err(Box::new(
+                            self.busy("This server is shutting down; try again later."),
+                        ));
+                    }
                     return Ok(seat);
                 }
                 Ok(SeatInsert::Bounds) => {
@@ -2239,9 +2275,25 @@ impl Inner {
             .store
             .adopt(room, occupant, self.owner.as_str(), before, now);
         match tokio::time::timeout(self.limits.room_request_timeout, adopted).await {
+            // A join of the same occupant may have opened a seat while the
+            // row was taken over: that seat is the occupant's now, and is
+            // kept.
             Ok(Ok(Some(seat))) if seat.session == session => {
-                self.seats.hold(seat);
-                SeatAdoption::Adopted
+                match self.seats.hold_if_absent(seat.clone()) {
+                    Holding::Held => return SeatAdoption::Adopted,
+                    Holding::Present(held) if held == session => return SeatAdoption::Held,
+                    // Only the row of the generation taken over is removed
+                    // below: a join's own row names another.
+                    Holding::Present(_) | Holding::Closed => {}
+                }
+                let removal = hosting.store.remove(&seat);
+                if !matches!(
+                    tokio::time::timeout(self.limits.room_request_timeout, removal).await,
+                    Ok(Ok(_))
+                ) {
+                    tracing::warn!("removing a seat taken over for another occupancy failed");
+                }
+                SeatAdoption::NotHeld
             }
             Ok(Ok(Some(seat))) => {
                 let removal = hosting.store.remove(&seat);
@@ -2296,21 +2348,21 @@ impl Inner {
     /// §11.2, status 332, with status 110) and give its seat up, then wait
     /// until the pairs' workers have handed those notices to their streams
     /// or given them up, at most the notice wait. A seat whose join is
-    /// still being answered is given up without a notice: its occupant was
-    /// never told that it entered, and is not told so afterwards. No seat
-    /// is opened from here on. Nothing is promised: a notice that no
-    /// stream takes in time is lost with the replica.
+    /// still being answered is given up without a notice here: one whose
+    /// join was not yet committed to be answered as entered is answered
+    /// with `resource-constraint`, and its occupant is never told that it
+    /// entered; one whose join was is told once its answer is queued, and
+    /// that notice is waited for too. No seat is opened from here on.
+    /// Nothing is promised: a notice that no stream takes in time is lost
+    /// with the replica.
     pub(super) async fn farewell(self: &Arc<Self>) {
         if self.stopping.swap(true, Ordering::AcqRel) || self.hosting.get().is_none() {
             return;
         }
         let (settled, _pending) = self.seats.release_all();
-        if settled.is_empty() {
-            return;
-        }
         for seat in &settled {
             if let Some((pair, stanza)) = Self::own_unavailable(seat, Status::ServiceShutdown) {
-                self.offer_notice(&pair, stanza);
+                self.offer_notice(&pair, stanza, self.notices.notice());
             }
         }
         let deadline = tokio::time::Instant::now() + self.limits.shutdown_notice_wait;
@@ -2318,11 +2370,10 @@ impl Inner {
     }
 
     /// Queue a stopping replica's notice for the occupant's domain without
-    /// waiting, if a place is free for it. It holds one of the notices
-    /// [`Self::farewell`] waits for until the pair's worker is done with
-    /// it.
-    fn offer_notice(self: &Arc<Self>, pair: &Pair, stanza: Stanza) {
-        let notice = self.notices.notice();
+    /// waiting, if a place is free for it. It holds `notice`, one of the
+    /// notices [`Self::farewell`] waits for, until the pair's worker is
+    /// done with it.
+    fn offer_notice(self: &Arc<Self>, pair: &Pair, stanza: Stanza, notice: Notice) {
         let placed = self.reserve_on(pair.clone(), self.limits.reply_queues, |queue| &queue.seats);
         if let Some(permit) = placed {
             permit.send(Queued {

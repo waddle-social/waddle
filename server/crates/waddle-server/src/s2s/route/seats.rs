@@ -19,7 +19,7 @@
 //! The decisions are recorded in `server/docs/planning/s2s-routing-2047.md`
 //! (inbound MUC).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -713,6 +713,9 @@ struct Held {
     /// Whether a leave of the occupant was taken for this seat beyond its
     /// account's allowance ([`SeatIndex::take_leave`]).
     leave_taken: bool,
+    /// Whether the join that opened the seat is being answered as
+    /// entered ([`SeatIndex::answer_join`]).
+    answering: bool,
 }
 
 impl Held {
@@ -766,6 +769,39 @@ struct HeldSeats {
     /// Seats held for each pair of a room's domain and an occupant's.
     pairs: HashMap<(String, String), usize>,
     seats: usize,
+    /// Set once every seat was given up because the replica stops: no
+    /// seat is held from then on.
+    closed: bool,
+    /// The seats given up then whose join was being answered as entered:
+    /// the occupant is told that the service is shutting down once its
+    /// join's answer is queued, by whoever queues it.
+    answering_at_close: HashSet<(BareJid, FullJid, OccupancySessionGeneration)>,
+}
+
+/// What became of a seat offered to the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holding {
+    /// The seat is held.
+    Held,
+    /// A seat of the same room and occupant, seated under this
+    /// generation, is held already, and is kept.
+    Present(OccupancySessionGeneration),
+    /// The replica stops: no seat is held any more.
+    Closed,
+}
+
+/// What a join's answer may say of the seat opened for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinAnswer {
+    /// The seat is held, and the join may be answered as entered. If the
+    /// replica stops before the join's answer is queued, its occupant is
+    /// told once that answer is ([`SeatIndex::answered_at_close`]).
+    Committed,
+    /// The replica stopped and gave the seat up before the join was
+    /// answered: the occupant must not be told that it entered.
+    Closed,
+    /// The seat is no longer held, for another reason.
+    NotHeld,
 }
 
 fn pair_of(seat: &Seat) -> (String, String) {
@@ -786,6 +822,7 @@ impl HeldSeats {
                 copies: 0,
                 pending,
                 leave_taken: false,
+                answering: false,
             },
         );
         // A seat that replaces one of the same room and occupant is of the
@@ -834,19 +871,73 @@ impl SeatIndex {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
-    /// Hold `seat`, replacing any seat of the same room and occupant.
-    pub fn hold(&self, seat: Seat) {
+    /// Hold `seat` unless a seat of the same room and occupant is held
+    /// already, which is kept, or the replica stops.
+    pub fn hold_if_absent(&self, seat: Seat) -> Holding {
         let mut held = self.held();
+        if held.closed {
+            return Holding::Closed;
+        }
+        if let Some(present) = held.get(&seat.room, &seat.occupant) {
+            return Holding::Present(present.seat.session);
+        }
         self.occupied.insert(seat.room.clone());
         held.insert(seat, None);
+        Holding::Held
     }
 
-    /// Hold `seat` while the join that opened it is answered: the room's
-    /// stanzas for it are kept until [`Self::settle`].
-    pub fn hold_pending(&self, seat: Seat) {
+    /// Hold `seat` while the join that opened it is answered, replacing any
+    /// seat of the same room and occupant: the room's stanzas for it are
+    /// kept until [`Self::settle`]. `false` when the replica stops, and no
+    /// seat is held.
+    pub fn hold_pending(&self, seat: Seat) -> bool {
         let mut held = self.held();
+        if held.closed {
+            return false;
+        }
         self.occupied.insert(seat.room.clone());
         held.insert(seat, Some(Vec::new()));
+        true
+    }
+
+    /// Decide, against [`Self::release_all`], whether the join that opened
+    /// the seat `occupant` holds in `room` under `session` may be answered
+    /// as entered. A seat this commits is either still held when its join's
+    /// answer is queued, or was given up by `release_all` after this, and
+    /// then [`Self::answered_at_close`] says so; a seat `release_all` gave
+    /// up before this is [`JoinAnswer::Closed`].
+    pub fn answer_join(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> JoinAnswer {
+        let mut held = self.held();
+        if held.closed {
+            return JoinAnswer::Closed;
+        }
+        match held.get_mut(room, occupant) {
+            Some(seat) if seat.seat.session == session => {
+                seat.answering = true;
+                JoinAnswer::Committed
+            }
+            _ => JoinAnswer::NotHeld,
+        }
+    }
+
+    /// Whether [`Self::release_all`] gave up the seat `occupant` held in
+    /// `room` under `session` while its join was being answered as
+    /// entered, so that its occupant is still to be told that the service
+    /// is shutting down. `true` once.
+    pub fn answered_at_close(
+        &self,
+        room: &BareJid,
+        occupant: &FullJid,
+        session: OccupancySessionGeneration,
+    ) -> bool {
+        self.held()
+            .answering_at_close
+            .remove(&(room.clone(), occupant.clone(), session))
     }
 
     /// Whether any seat is held here in `room`, without the index's lock:
@@ -1066,22 +1157,35 @@ impl SeatIndex {
         self.held().rooms.keys().cloned().collect()
     }
 
-    /// Stop holding every seat held here: those whose join is answered,
-    /// and then those whose join is still being answered.
+    /// Stop holding every seat held here, and hold none from now on:
+    /// those whose join is answered, and then those whose join is still
+    /// being answered. Of the latter, those committed to be answered as
+    /// entered ([`Self::answer_join`]) are remembered for
+    /// [`Self::answered_at_close`].
     pub fn release_all(&self) -> (Vec<Seat>, Vec<Seat>) {
         let mut held = self.held();
+        held.closed = true;
         let mut settled = Vec::new();
         let mut pending = Vec::new();
+        let mut answering = HashSet::new();
         for held in std::mem::take(&mut held.rooms)
             .into_values()
             .flat_map(HashMap::into_values)
         {
-            if held.pending.is_some() {
-                pending.push(held.seat);
-            } else {
+            if held.pending.is_none() {
                 settled.push(held.seat);
+                continue;
             }
+            if held.answering {
+                answering.insert((
+                    held.seat.room.clone(),
+                    held.seat.occupant.clone(),
+                    held.seat.session,
+                ));
+            }
+            pending.push(held.seat);
         }
+        held.answering_at_close = answering;
         held.pairs.clear();
         held.seats = 0;
         self.occupied.clear();
