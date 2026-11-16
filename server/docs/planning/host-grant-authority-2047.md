@@ -2602,12 +2602,15 @@ applies, per account the actor seats or lists:
 | An affiliation below the mirrored one | Any | Lowers the entry to the recorded one. The role is derived again (an admin that became a member is no moderator), with the affiliation presence. |
 
 A room's own administration request applies its change to the actor
-itself, with the administrator and the reason it names. The sweep waits for
-a request that is under way on the same process (it takes the room's
-configuration lock, which the request holds from before it records the
-change until the actor applied it), and then finds the room in line. A
-sweep that reaches the actor first, on another process or for a change that
-was not made through the room, removes without naming an actor or a reason.
+itself, with the administrator and the reason it names. The sweep does not
+look at a room while such a request is under way on the same process: it
+takes the room's configuration lock, which the request holds from before it
+records the change until the actor applied it, and then finds the room in
+line. It waits at most 1 s for that lock in one pass and comes back to the
+room in the next, so a request that waits for its acknowledgement does not
+hold up the other rooms. A sweep that reaches the actor first, on another
+process or for a change that was not made through the room, removes without
+naming an actor or a reason.
 
 The removal presence goes to the removed occupant (with status 110) and to
 everyone who stays. The removed sessions' media ends, and a changed voice is
@@ -2882,7 +2885,7 @@ SpiceDB; the case added to `host_grant_projection` does, and runs with the
 first slice's set. Three cases run the server binary's operator subcommands,
 and one starts a second process of the test binary.
 
-The set was executed on 2026-11-16 at commit `c7780f36e`, against
+The set was executed on 2026-11-16 at commit `80c940af2`, against
 PostgreSQL 17.11 and SpiceDB 1.56.1, with nextest's default parallelism and
 together with the first slice's, the writer fence's and the restore slice's
 sets, whose code it changes: two consecutive runs passed 238 of 238 cases in
