@@ -686,7 +686,8 @@ since the fourteenth refresh:
   decision it makes: `ManagedRoomGrants::allows_as` and `standing_as` and
   `HostGrantGate::allows_as` with `PrincipalEvidence::NoStream`, for the
   local sessions and named subjects every surface serves today. The
-  stream-less `allows` and `standing` (`hg-gate` moved), and the
+  stream-less `allows` and `standing` (in `gate.rs`, whose `hg-gate` anchor
+  did not move), and the
   stream-less `set_affiliation` of the store and the authority, are built
   for test support only; room administration (`hg-room-admin`) records
   through `set_affiliation_as`. Each decides exactly what it decided before.

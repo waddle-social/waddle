@@ -72,8 +72,10 @@ datastore; `integration-run6-w5b.log` ran the first slice's set on the memory
 datastore again at the later commit.
 
 The second-process cases of `host_grant_projection` (a replica process that
-stops at each stage), `xep0045_host_grant_revocation` and
-`host_grant_revocation_fence` ran in run6; no run covers Prosody, ejabberd,
+stops at each stage) and `xep0045_host_grant_revocation` (a replica that
+stops running its fence), and the cases of `host_grant_revocation_fence` and
+`account_jid_retirement` that run the `waddle-server` binary's operator
+subcommands, ran in run6; no run covers Prosody, ejabberd,
 the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 `clustering` feature.
 
@@ -136,9 +138,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run6 host-grant log |
 | `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run6 host-grant log |
 | `xep0060_extension_route_room_access` (3) | W5c | none (in-memory state, loopback) | Run 3/3, run6 host-grant log |
-| `host_grant_restore` (46; 29 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run6 host-grant log |
-| `restricted_runtime_startup` (18 in 2 modules) | W5r | PostgreSQL 17 (superuser login; the cases create roles) | Run 18/18, run6 host-grant log |
-| `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs a replica as a second process | Run 7/7, run6 host-grant log |
+| `host_grant_restore` (46; 28 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run6 host-grant log |
+| `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18 without `clustering`, run6 host-grant log |
+| `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run6 host-grant log |
 | `xep0045_host_grant_revocation` (12) | W5d, integration | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 12/12, run6 host-grant rerun log (11/12 in the run6 host-grant log; see above) |
 | `account_jid_retirement` (10) | W5d | PostgreSQL 17 | Run 10/10, run6 host-grant log |
 | `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run6 host-grant log |

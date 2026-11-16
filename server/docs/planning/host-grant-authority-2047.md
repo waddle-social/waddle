@@ -3279,7 +3279,11 @@ the scope without it, and the scope converges as after any other operation.
 An increase by an account of a served domain, or recorded without an
 initiator (an owner act), is kept. A scope that admits no mutation (retired,
 exhausted, fenced, bound to another incarnation, or closed for a restore) is
-left to the paths that handle it. Each drop is counted
+not checked. A retired, exhausted or fenced scope activates nothing; the
+reconstruction of a scope closed for a restore activates what its restored
+rows record once its projection is rebuilt, so an increase recorded there
+before the restore is not checked again on that path, and the operator's
+review before the reopen is what stands in for it. Each drop is counted
 (`waddle.host_grant.increases_dropped`) and logged with its kind, never with
 a JID.
 
