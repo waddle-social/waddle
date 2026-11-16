@@ -67,7 +67,8 @@ public enum CallEndReason: Hashable, Sendable {
 }
 
 extension CallState {
-    var sid: String? {
+    /// The session the slot holds, live or ended; nil when idle.
+    public var sid: String? {
         switch self {
         case .idle: nil
         case .incoming(let call): call.sid

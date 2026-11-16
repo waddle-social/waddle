@@ -26,11 +26,16 @@ struct CallDockView: View {
     var isCameraOn = false
     var remoteVideo: AnyView?
     var localVideo: AnyView?
+    /// Something the person should know about their own devices.
+    var notice: String?
+    /// Whether this dock speaks stage changes; one dock per screen does.
+    var announcesChanges = true
     let actions: CallDockActions
 
     @Environment(\.horizontalSizeClass) private var sizeClass
     /// An icon-only control's glyph box, so a toggle stays square as text grows.
     @ScaledMetric(relativeTo: .body) private var iconWidth: CGFloat = 20
+    @ScaledMetric(relativeTo: .body) private var endedGlyphSize: CGFloat = 17
 
     var body: some View {
         HuddleCard(isLive: stage.isInSession) {
@@ -56,7 +61,7 @@ struct CallDockView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Call"))
         .onChange(of: announcement, initial: true) { _, text in
-            AccessibilityNotification.Announcement(text).post()
+            if announcesChanges { AccessibilityNotification.Announcement(text).post() }
         }
     }
 
@@ -66,13 +71,13 @@ struct CallDockView: View {
         HStack(spacing: Theme.Spacing.m) {
             if case .ended = stage {
                 Image(systemName: "phone.down.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: endedGlyphSize, weight: .semibold))
                     .foregroundStyle(Theme.Colors.fgSoft)
-                    .frame(width: Metrics.avatar, height: Metrics.avatar)
+                    .frame(width: Theme.Size.callAvatar, height: Theme.Size.callAvatar)
                     .background(Circle().fill(Theme.Colors.surface2))
                     .accessibilityHidden(true)
             } else if !showsVideoStage {
-                avatar(size: Metrics.avatar)
+                avatar(size: Theme.Size.callAvatar)
             }
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 if case .ended(let reason) = stage {
@@ -84,6 +89,11 @@ struct CallDockView: View {
                         .huddleText(Theme.Typography.subtitle)
                         .foregroundStyle(Theme.Colors.fg)
                     status
+                    if let notice, stage.isInSession {
+                        Text(notice)
+                            .huddleText(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.warningText)
+                    }
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -225,6 +235,7 @@ struct CallDockView: View {
                 .frame(minWidth: iconWidth, maxWidth: stretched ? .infinity : iconWidth)
         }
         .buttonStyle(.huddle())
+        .disabled(!hasMedia)
         .accessibilityLabel(Text(title))
         .help(title)
     }
@@ -236,8 +247,18 @@ struct CallDockView: View {
                 .frame(minWidth: iconWidth, maxWidth: stretched ? .infinity : iconWidth)
         }
         .buttonStyle(.huddle())
+        .disabled(!hasMedia)
         .accessibilityLabel(Text(title))
         .help(title)
+    }
+
+    /// While the media session is still connecting, the devices are about
+    /// to start on their own; a toggle then would promise the opposite.
+    private var hasMedia: Bool {
+        switch stage {
+        case .inCall, .reconnecting: true
+        default: false
+        }
     }
 
     // MARK: - Video
@@ -256,7 +277,7 @@ struct CallDockView: View {
             if let remoteVideo {
                 remoteVideo
             } else {
-                avatar(size: Metrics.stageAvatar)
+                avatar(size: Theme.Size.callStageAvatar)
             }
         }
         .overlay {
@@ -287,8 +308,6 @@ struct CallDockView: View {
     static let maxWidth = Metrics.stageHeight * 16 / 9 + 2 * Theme.Spacing.l
 
     private enum Metrics {
-        static let avatar: CGFloat = 44
-        static let stageAvatar: CGFloat = 72
         static let stageHeight: CGFloat = 360
         static let compactStageHeight: CGFloat = 240
         /// Our preview's share of the stage's width.

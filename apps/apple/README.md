@@ -10,7 +10,7 @@ Waddle/                      SwiftUI app target
   App/                       AppState (auth → session), navigation, preferences
   Auth/                      device-authorization sign-in, Keychain credential
   Shell/                     iPhone tab shell, iPad/Mac split view, menu commands
-  Features/                  Conversation, Navigation, Details, Account screens
+  Features/                  Conversation, Navigation, Details, Account, Calls screens
   Design/                    Polar Huddle tokens, theme and shared components
   Resources/                 bundled fonts and their licences
   Platform/                  notifications, APNs registration
@@ -170,8 +170,9 @@ When WaddleKit's dependencies change, update it to the same pins as
 
 Signing is automatic for team `6KXCJGJ45W`; Xcode Cloud uses cloud-managed
 certificates and replaces `CURRENT_PROJECT_VERSION` with its own build number.
-The macOS app is sandboxed (App Store requirement) with outbound network
-access and read access to files the user picks.
+The macOS app is sandboxed (App Store requirement) with network access in
+both directions (call media receives on the sockets it opens), the
+microphone and camera, and read access to files the user picks.
 
 ### One-time setup
 

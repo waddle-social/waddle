@@ -97,6 +97,7 @@ private struct ConversationContent: View {
             .modifier(MessageActionDialogs(actions: actions))
             .sheet(isPresented: $showsPinsSheet) {
                 PinnedMessagesSheet(conversation: conversation)
+                    .carryingCallDock()
                     .environment(session)
                     .environment(navigation)
             }

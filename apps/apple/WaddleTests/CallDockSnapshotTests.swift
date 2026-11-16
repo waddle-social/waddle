@@ -26,7 +26,7 @@ final class CallDockSnapshotTests: XCTestCase {
 
     private func assertDock(
         _ stage: CallStage, elapsed: Duration? = nil, isMicrophoneOn: Bool = true, isCameraOn: Bool = false,
-        remoteVideo: AnyView? = nil, localVideo: AnyView? = nil, width: CGFloat = phone,
+        remoteVideo: AnyView? = nil, localVideo: AnyView? = nil, notice: String? = nil, width: CGFloat = phone,
         textSize: DynamicTypeSize = .large, testName: String = #function, line: UInt = #line
     ) {
         // SF Symbols in every control: allow for their redraws between OS releases.
@@ -34,7 +34,8 @@ final class CallDockSnapshotTests: XCTestCase {
             precision: 0.97,
             of: CallDockView(
                 stage: stage, peerName: "Mika Lindqvist", elapsed: elapsed, isMicrophoneOn: isMicrophoneOn,
-                isCameraOn: isCameraOn, remoteVideo: remoteVideo, localVideo: localVideo, actions: Self.actions
+                isCameraOn: isCameraOn, remoteVideo: remoteVideo, localVideo: localVideo, notice: notice,
+                announcesChanges: false, actions: Self.actions
             )
             .dynamicTypeSize(textSize),
             width: width,
@@ -54,6 +55,18 @@ final class CallDockSnapshotTests: XCTestCase {
 
     func testIncomingVideoWhileAccepting() {
         assertDock(.incoming(from: Self.peer, media: Self.video, isAccepting: true))
+    }
+
+    /// The devices are about to start on their own, so their controls wait.
+    func testConnecting() {
+        assertDock(.connecting(peer: Self.peer.bare, media: Self.audio), isMicrophoneOn: false)
+    }
+
+    func testInCallWithTheMicrophoneRefused() {
+        assertDock(
+            .inCall(peer: Self.peer.bare, media: Self.audio), elapsed: .seconds(12), isMicrophoneOn: false,
+            notice: "Waddle is not allowed to use the microphone. Change that in Settings."
+        )
     }
 
     func testCalling() {

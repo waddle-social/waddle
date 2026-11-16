@@ -23,6 +23,12 @@
     func update(_ state: CallState) {
         let active: ActiveCall?
         if case .active(let call) = state { active = call } else { active = nil }
+        // A migration passes through `.incoming` on its way to the next
+        // session; only an empty or ended slot is the end of the call.
+        switch state {
+        case .idle, .ended: media.forgetCaptureChoices()
+        case .incoming, .outgoing, .active: break
+        }
         if let active, targetSid == active.sid { return }
 
         revision += 1

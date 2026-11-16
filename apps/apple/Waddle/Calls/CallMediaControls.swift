@@ -10,6 +10,9 @@ protocol CallMediaControls: AnyObject, Observable {
     /// Actually publishing, not merely requested.
     var isMicrophoneOn: Bool { get }
     var isCameraOn: Bool { get }
+    /// The person has refused Waddle this device, so its control cannot turn it on.
+    var isMicrophoneBlocked: Bool { get }
+    var isCameraBlocked: Bool { get }
     /// The peer's camera, while subscribed and unmuted.
     var remoteVideo: AnyView? { get }
     /// Our camera preview.

@@ -104,12 +104,7 @@ private struct SheetHost: View {
     let route: SheetRoute
 
     var body: some View {
-        // A sheet covers the shell's dock, so it carries one too: a call
-        // that arrives while Settings is open is still seen.
-        VStack(spacing: 0) {
-            CallDock()
-            content
-        }
+        content.carryingCallDock()
     }
 
     @ViewBuilder

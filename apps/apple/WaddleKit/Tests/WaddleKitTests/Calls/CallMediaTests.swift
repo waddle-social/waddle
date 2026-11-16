@@ -110,6 +110,24 @@ import Testing
         store.clear()
     }
 
+    @Test func muteAndCameraChoicesLastThroughAMigrationAndEndWithTheCall() async {
+        let port = FakePort()
+        let media = RecordingCallMedia()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { "c-old" })
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        store.handle(CallEvent(from: callPeer, sid: "c-old", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        await eventually { media.calls.count == 1 }
+        // The peer's client replaces the session; to the person it is the same call.
+        store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .propose(callAudio)))
+        await eventually { media.calls.count == 2 }
+        store.handle(CallEvent(from: callPeer, sid: "c-new", kind: .sessionInitiate(join: callJoin, media: callAudio)))
+        await eventually { media.calls.count == 3 }
+        #expect(media.captureChoiceResets == 0)
+        await store.hangUp()
+        #expect(media.captureChoiceResets == 1)
+        store.clear()
+    }
+
     @Test func migrationDisconnectsInIncomingPhaseThenConnectsNewSession() async {
         let port = FakePort()
         let media = RecordingCallMedia()
@@ -278,6 +296,9 @@ import Testing
     }
 
     func disconnect() async { calls.append(.disconnect) }
+
+    var captureChoiceResets = 0
+    func forgetCaptureChoices() { captureChoiceResets += 1 }
 
     func releaseConnect() {
         holdConnect = false

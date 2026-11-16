@@ -31,6 +31,7 @@ struct SplitShell: View {
         }
         .sheet(isPresented: $navigation.isQuickSwitcherPresented) {
             QuickSwitcher()
+                .carryingCallDock()
         }
     }
 

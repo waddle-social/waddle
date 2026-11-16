@@ -39,6 +39,10 @@ enum Theme {
         static let avatar: CGFloat = 36
         static let smallAvatar: CGFloat = 24
         static let rowAvatar: CGFloat = 28
+        /// The person on a call, beside its controls.
+        static let callAvatar: CGFloat = 44
+        /// The person on a call, alone on the video stage.
+        static let callStageAvatar: CGFloat = 72
         /// Max width for message media so it never spans a wide Mac window.
         static let mediaMaxWidth: CGFloat = 360
         /// Readable line length for the conversation column.

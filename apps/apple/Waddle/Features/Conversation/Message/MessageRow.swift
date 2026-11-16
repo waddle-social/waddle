@@ -129,12 +129,14 @@ private struct MessageRowContent: View {
         .fullScreenCover(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
             if let imagePreviewFile {
                 MessageImagePreviewView(file: imagePreviewFile)
+                    .carryingCallDock()
             }
         }
         #elseif os(macOS)
         .sheet(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
             if let imagePreviewFile {
                 MessageImagePreviewView(file: imagePreviewFile)
+                    .carryingCallDock()
             }
         }
         #endif

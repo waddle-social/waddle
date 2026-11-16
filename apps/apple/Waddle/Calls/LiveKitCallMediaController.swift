@@ -17,6 +17,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var connectedSince: Date?
     private(set) var isMicrophoneOn = false
     private(set) var isCameraOn = false
+    private(set) var isMicrophoneBlocked = false
+    private(set) var isCameraBlocked = false
+    /// What the person last asked of each device in this call. It outlives
+    /// the room, so a reconnect or a replacement session does not unmute
+    /// them or turn their camera back on.
+    @ObservationIgnored private var captureChoices: [AVMediaType: Bool] = [:]
     private var remoteTrack: VideoTrack?
     private var localTrack: VideoTrack?
 
@@ -70,25 +76,35 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         await room.disconnect()
     }
 
+    func forgetCaptureChoices() {
+        captureChoices = [:]
+    }
+
     func setMicrophone(_ on: Bool) async {
+        captureChoices[.audio] = on
         guard let room else { return }
         await setSource(.audio, enabled: on, in: room)
     }
 
     func setCamera(_ on: Bool) async {
+        captureChoices[.video] = on
         guard let room else { return }
         await setSource(.video, enabled: on, in: room)
     }
 
+    /// Starts what the call agreed to, unless the person has since chosen
+    /// otherwise for that device.
     private func publish(_ media: CallMedia, in room: Room) async {
-        if media.audio { await setSource(.audio, enabled: true, in: room) }
-        if media.video { await setSource(.video, enabled: true, in: room) }
+        if captureChoices[.audio] ?? media.audio { await setSource(.audio, enabled: true, in: room) }
+        if captureChoices[.video] ?? media.video { await setSource(.video, enabled: true, in: room) }
     }
 
     /// Turning a device on goes through `mayCapture`; turning one off
     /// needs no permission.
     private func setSource(_ kind: AVMediaType, enabled: Bool, in room: Room) async {
         if enabled, !(await mayCapture(kind, in: room)) { return }
+        // The person changed their mind while a prompt or a start was pending.
+        if enabled, captureChoices[kind] == false { return }
         if kind == .audio {
             _ = try? await room.localParticipant.setMicrophone(enabled: enabled)
         } else {
@@ -108,8 +124,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// and checks again once the user has answered: a prompt can stay open
     /// long after a hang-up. An ended call neither prompts nor captures.
     private func mayCapture(_ kind: AVMediaType, in room: Room) async -> Bool {
-        guard self.room === room, await AVCaptureDevice.requestAccess(for: kind) else { return false }
-        return self.room === room
+        guard self.room === room else { return false }
+        let isAllowed = await AVCaptureDevice.requestAccess(for: kind)
+        // Kept for the dock, which says why the control does nothing.
+        if kind == .audio { isMicrophoneBlocked = !isAllowed } else { isCameraBlocked = !isAllowed }
+        return isAllowed && self.room === room
     }
 
     private func forgetRoom() {
@@ -127,8 +146,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard changed === room else { return }
         switch change {
         case .dropped: onFailure?()
-        case .reconnecting: phase = .reconnecting
-        case .reconnected: phase = .connected
+        // Read from the room, so two reports arriving out of order cannot
+        // leave the phase stuck on reconnecting.
+        case .connection: phase = changed.connectionState == .reconnecting ? .reconnecting : .connected
         case .tracks: refreshTracks()
         }
     }
@@ -159,8 +179,8 @@ enum CallMediaError: Error {
 private enum RoomChange {
     /// The media session died after it was established.
     case dropped
-    case reconnecting
-    case reconnected
+    /// A reconnect started or finished.
+    case connection
     /// A track was published, subscribed, muted or removed, on either side.
     case tracks
 }
@@ -184,11 +204,11 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
     }
 
     func room(_ room: Room, didStartReconnectWithMode _: ReconnectMode) {
-        forward(.reconnecting, from: room)
+        forward(.connection, from: room)
     }
 
     func room(_ room: Room, didCompleteReconnectWithMode _: ReconnectMode) {
-        forward(.reconnected, from: room)
+        forward(.connection, from: room)
     }
 
     func room(_ room: Room, participant _: LocalParticipant, didPublishTrack _: LocalTrackPublication) {
