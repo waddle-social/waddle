@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
 // Attributes GitHub Actions runner-minutes (mostly Namespace) to workflows/jobs.
@@ -126,8 +125,8 @@ export function parseRates(values: string[] = []): Record<string, number> {
 }
 
 /** Accepts an array of jobs, `{jobs}` pages, or an array of such pages. */
-export function readJobsFile(path: string): Job[] {
-  const data = JSON.parse(readFileSync(path, "utf8"));
+export function parseJobs(text: string): Job[] {
+  const data = JSON.parse(text);
   const pages: any[] = Array.isArray(data) ? data : [data];
   return pages.flatMap((p) => (Array.isArray(p?.jobs) ? p.jobs : [p]));
 }
@@ -217,12 +216,12 @@ export async function fetchJobs(repo: string, days: number, token: string, concu
   return perRun.flat();
 }
 
-export async function run(argv: string[], env: Record<string, string | undefined> = process.env): Promise<string> {
+export async function run(argv: string[], env: Record<string, string | undefined> = process.env, stdin: () => Promise<string> = () => Bun.stdin.text()): Promise<string> {
   const { values } = parseArgs({
     args: argv,
     options: {
       repo: { type: "string", default: "waddle-social/waddle" }, days: { type: "string", default: "7" },
-      json: { type: "boolean", default: false }, input: { type: "string" }, top: { type: "string", default: "25" },
+      json: { type: "boolean", default: false }, stdin: { type: "boolean", default: false }, top: { type: "string", default: "25" },
       "profile-vcpu": { type: "string", default: "8" }, rate: { type: "string", multiple: true },
     },
   });
@@ -231,10 +230,10 @@ export async function run(argv: string[], env: Record<string, string | undefined
   const rates = parseRates(values.rate);
 
   let jobs: Job[], label: string;
-  if (values.input) { jobs = readJobsFile(values.input); label = `${values.input} (offline)`; }
+  if (values.stdin) { jobs = parseJobs(await stdin()); label = "stdin (offline)"; }
   else {
     const token = env.GITHUB_TOKEN || env.GH_TOKEN;
-    if (!token) throw new Error("Set GITHUB_TOKEN (or GH_TOKEN), or pass --input <file> with saved jobs JSON.");
+    if (!token) throw new Error("Set GITHUB_TOKEN (or GH_TOKEN), or pass --stdin with saved jobs JSON on standard input.");
     jobs = await fetchJobs(values.repo!, days, token);
     label = `${values.repo}, last ${days} day(s)`;
   }

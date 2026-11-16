@@ -1,7 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { aggregate, classify, durationMinutes, fetchJobs, pages, parseRates, run, toRecords, withRetry, type Job } from "./ci-cost-report";
 
 const NS32 = "nscloud-ubuntu-24.04-amd64-32x64-with-features";
@@ -61,23 +58,20 @@ describe("aggregate", () => {
   });
 });
 
-describe("--input end to end", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ci-cost-"));
+describe("--stdin end to end", () => {
   const jobs = [job({}), job({ name: "mac", labels: ["namespace-profile-darwin-arm64"], conclusion: "cancelled" })];
   test("array and paged shapes", async () => {
-    const a = join(dir, "a.json"), b = join(dir, "b.json");
-    writeFileSync(a, JSON.stringify(jobs));
-    writeFileSync(b, JSON.stringify([{ total_count: 1, jobs: [jobs[0]] }, { jobs: [jobs[1]] }]));
-    for (const f of [a, b]) {
-      const text = await run(["--input", f], {});
+    const a = JSON.stringify(jobs), b = JSON.stringify([{ total_count: 1, jobs: [jobs[0]] }, { jobs: [jobs[1]] }]);
+    for (const input of [a, b]) {
+      const text = await run(["--stdin"], {}, async () => input);
       expect(text).toContain("assumed 8 vCPU");
       expect(text).toContain("namespace-macos");
       expect(text).toContain("Cancelled spend by workflow");
     }
-    const json = JSON.parse(await run(["--input", a, "--json", "--profile-vcpu", "4"], {}));
+    const json = JSON.parse(await run(["--stdin", "--json", "--profile-vcpu", "4"], {}, async () => a));
     expect(json.totalUnits).toBe(10 * 4 + 10);
   });
-  test("requires a token without --input", async () => {
+  test("requires a token without --stdin", async () => {
     await expect(run([], {})).rejects.toThrow(/GITHUB_TOKEN/);
   });
 });

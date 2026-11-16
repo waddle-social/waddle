@@ -608,7 +608,7 @@ measurements and were not rewritten.
 GITHUB_TOKEN=... bun scripts/ci-cost-report.ts --repo waddle-social/waddle --days 7 [--json] [--rate <class>=<usd-per-minute>]
 ```
 
-Add `--input <file>` to aggregate saved jobs JSON offline. The unit is
+Add `--stdin` to aggregate saved jobs JSON from standard input offline. The unit is
 vCPU-minutes for Namespace Linux shapes (`nscloud-*-NxM` uses N;
 `namespace-profile-linux-x86` uses `--profile-vcpu`, default 8) and plain
 minutes for macOS. GitHub-hosted minutes are listed but weighted 0. Cancelled
