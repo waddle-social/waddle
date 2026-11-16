@@ -15,7 +15,9 @@ with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
 administration, the federated setting and requests carried between
 replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
 placement of requests, the ends of a seat and the decisions that name a
-seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190` (see the last refresh below); the original
+seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
+with the bounds on that work, the takeover of a restored room's seats and
+the issuance check across replicas, through `abdf0c12a9cf182630dfea6257840eb13d570545` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -982,6 +984,65 @@ evidence was added.
 - The raw scan holds 1633 records, one more: the `offer_foreign` of the
   sender's own copy. 87 unchanged records moved because the files above
   gained lines.
+
+The selected evidence was refreshed a twentieth time, through
+`abdf0c12a9cf182630dfea6257840eb13d570545`, after reviewing the delta of the reviewed
+files since the nineteenth refresh. This refresh covers fixes to inbound
+S2S rooms: the bounds on the work that hands requests to the room host,
+how a seat ends, how a restored room's seats are taken over, and the
+issuance check of the admin command. No grant writer, storage plane or
+producer of stream evidence was added.
+
+- Issuance reads one more source. The admin command that sets a room
+  affiliation (`admin-set-affiliation`, not moved) may run on a replica
+  that does not hold the room, so it now refuses an owner or admin
+  affiliation on `seats_honour_privilege_anywhere` (`hg-seats-honour-anywhere`,
+  new anchor, in `muc_admin_host_grant.rs`): the evidence of every seat
+  the account holds in the room on any replica, read from the shared seat
+  table, as well as on this one; it refuses when the table cannot be
+  read. The `muc#admin` writer runs on the room's holder and is unchanged
+  but for its refusal text (`admin-rollback`, `e-rollback` and
+  `admin-context-honoured` moved).
+- The join handler (`join`, moved) still undoes a seat it gave on a
+  standing that is not honoured without announcing a departure, and now
+  reads the generations the room seats afterwards to send the joiner's
+  unavailable presence to the occupants that entered between the seat and
+  its undoing. The decision that undoes the seat is unchanged; nothing is
+  written.
+- Claim-move re-seating (`hg-claim-move`, moved) seats a recorded occupant
+  at another server only on a seat of the recorded generation: one this
+  replica already holds, when the room's actor was restored on the replica
+  that seats it, which goes on; or one it takes over from a replica that
+  stopped (`s2s-seat-adoption`, new anchor, in `router/hosting.rs`), which
+  ends once the room has seated its occupants (`s2s-adopted-seats`,
+  moved). A row taken over for another generation is removed, and its
+  occupant is not seated.
+- The room host (`s2s-room-host`, `s2s-room-archive`, `s2s-room-message`,
+  `s2s-room-federated`, `s2s-room-admin`, `s2s-room-owner` and
+  `s2s-room-placement` moved) answers a self-ping, and refuses a subject
+  change, with a retryable error where the room's actor or configuration
+  cannot be read, instead of the answers for "not joined" and "not
+  allowed"; a subject change is put to no room it could not decide. Its
+  removal of an occupant whose seat ended now says whether it removed that
+  generation, and it removes, pinned to its generation, an occupant of
+  another server the router holds no seat for (`s2s-unseated-removal`, new
+  anchor).
+- The router (`s2s-seat-egress` and `s2s-carried-request` moved) answers
+  that a JID at a served domain, or in a room without a seat, holds no
+  seat without reading the seat index; refuses a request for a room whose
+  share of the queues is full instead of holding its stream; removes a
+  room's occupant of another server that holds no seat; and refuses a join
+  decided while the replica stops. Each narrows what leaves for a remote
+  JID or what a room keeps seated.
+- The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`
+  moved) carries the same rooms, and reports an owner that did not answer
+  or could not be reached as such, so that the router answers that room's
+  requests without asking for a while.
+- `server/lifecycle.rs` chooses the token the S2S connection manager
+  drains on through `S2sRouter::service_stop`, the same choice as before;
+  `startup` and `startup-schema` did not move.
+- The raw scan holds 1633 records, as before. 74 unchanged records moved
+  because the files above gained lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
