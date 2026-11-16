@@ -299,3 +299,23 @@ not the machine. Both stopped shards 1 and 4 after about 30 seconds with
 - The `8x32` variant was cancelled; it had the same fault.
 
 The three smaller variants are re-run as pass 2 below.
+
+### Pass 2, 2026-11-16 (in progress)
+
+[Run 43809236991](https://github.com/waddle-social/waddle/actions/runs/43809236991):
+the three smaller variants with test threads equal to cores per shard.
+
+| Variant | Outcome | Queue wait | Lane | Compile | Slowest shard | vCPU-min | Busy cores compile (mean / max) | Busy cores tests (mean / max) | Peak memory |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `32x64` (baseline, pass 1) | pass | 72 min | 20.8 min | 5.9 min | 12.7 min | 665 | 10.1 / 26.9 | 1.6 / 11.0 | 19.6 GB |
+| `16x32` | pass | 13 min | 24.0 min | 7.5 min | 13.4 min | 384 | 6.5 / 14.0 | 1.8 / 8.1 | 18.5 GB |
+
+`16x32` passes all tests on half the machine: 3.2 minutes slower (15%) for
+42% fewer vCPU-minutes, and two fit where one 32x64 does.
+
+- Tests cost 40 s on the slowest shard (801 s against 761 s); shard times
+  were 801, 644, 656 and 450 s.
+- Compile took 448 s here but 366 s and 371 s in the two invalid pass 1 runs
+  on the same shape and settings. That 80 s spread is run-to-run noise, so
+  the compile penalty of 16 vCPUs is somewhere between 15 s and 95 s.
+- Peak memory was 18.5 GB of 32.
