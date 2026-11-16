@@ -41,6 +41,8 @@ postgres-only push_service_vapid_schema_marker
 # The canonical host-grant store (ADR-0020 D5) is PostgreSQL only: SQLite
 # holds no enrolled scope.
 postgres-only host_grant_authority
+postgres-only host_grant_fence_acks
+postgres-only host_grant_fence_replicas
 postgres-only host_grant_operation_changes
 postgres-only host_grant_operations
 postgres-only host_grant_rooms

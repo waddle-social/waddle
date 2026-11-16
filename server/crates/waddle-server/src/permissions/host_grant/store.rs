@@ -39,11 +39,11 @@ use super::error::HostGrantError;
 use super::issuance::{IssuanceBasis, IssuancePolicy, ServedAccountDomains, SubjectHome};
 use super::marker::ProjectionMarker;
 use super::model::{
-    AdmissionState, AuthorityIncarnation, CandidateAdmission, ClosedReason, EnrollScope,
-    GrantGeneration, GrantOperationId, GrantRow, GrantSubject, ManagedRoom, MutationReceipt,
-    OperationKind, OperationOutcome, OperationRecord, ProjectionDigest, RetireScope,
-    RoomAffiliation, ScopeLifecycleId, ScopeState, SetAffiliation, HOST_GRANT_POLICY_VERSION,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
+    guard_queue_key, AdmissionState, AuthorityIncarnation, CandidateAdmission, ClosedReason,
+    EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject, ManagedRoom,
+    MutationReceipt, OperationKind, OperationOutcome, OperationRecord, ProjectionDigest,
+    RetireScope, RoomAffiliation, ScopeLifecycleId, ScopeState, SetAffiliation,
+    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 use super::policy::{grant_allows, honoured_affiliation, initiator_may_change, HostGrantAction};
 use super::projection::{projection_digest, ProjectedGrant, ProjectionIntent, ProjectionPlan};
@@ -246,6 +246,11 @@ impl HostGrantStore {
         };
         tx.rollback().await?;
         Ok(unretired)
+    }
+
+    /// The database the store reads and writes.
+    pub(super) fn database(&self) -> &Database {
+        &self.db
     }
 
     async fn begin_write(&self) -> Result<EnteredTransaction<'_>, HostGrantError> {
@@ -2899,6 +2904,16 @@ pub(super) async fn load_scope(
     lifecycle: ScopeLifecycleId,
     lock: bool,
 ) -> Result<Option<ScopeState>, HostGrantError> {
+    if lock {
+        // The queue in front of the guard: a mutation waits its turn behind
+        // the acceptances that arrived before it, and those that arrive
+        // later wait behind it (`model::guard_queue_key`).
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+            crate::db_params![guard_queue_key(lifecycle)],
+        )
+        .await?;
+    }
     let suffix = if lock { " FOR UPDATE" } else { "" };
     let mut rows = tx
         .query(

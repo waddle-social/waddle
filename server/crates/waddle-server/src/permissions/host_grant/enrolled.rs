@@ -156,6 +156,20 @@ impl EnrolledSet {
         )
     }
 
+    /// Whether no scope is enrolled.
+    pub fn is_empty(&self) -> bool {
+        self.space_nodes.is_empty() && self.rooms.is_empty()
+    }
+
+    /// The canonical addresses of the rooms `lifecycle` manages.
+    pub fn scope_rooms(&self, lifecycle: ScopeLifecycleId) -> Vec<String> {
+        self.rooms
+            .iter()
+            .filter(|(_, scope)| **scope == lifecycle)
+            .map(|(room, _)| room.clone())
+            .collect()
+    }
+
     /// The channel identifiers of the rooms `lifecycle` manages.
     pub fn scope_channels(&self, lifecycle: ScopeLifecycleId) -> Vec<String> {
         self.channels

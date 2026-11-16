@@ -23,6 +23,11 @@ pub const HOST_GRANT_RESTORE_INCARNATION_VERSION: i64 = 2002;
 /// Version of the migration that creates the S2S IQ correlation table.
 pub const S2S_IQ_CORRELATIONS_VERSION: i64 = 2003;
 
+/// Version of the migration that creates the host-grant revocation fence's
+/// replica leases and acknowledgements. Version 2004 is not in this
+/// catalog.
+pub const HOST_GRANT_REVOCATION_FENCE_VERSION: i64 = 2005;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -54,6 +59,16 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2003_s2s_iq_correlations.postgres.sql"
             ),
         },
+        Migration {
+            version: HOST_GRANT_REVOCATION_FENCE_VERSION,
+            description: "host-grant revocation fence".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2005_host_grant_revocation_fence.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2005_host_grant_revocation_fence.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -62,7 +77,7 @@ mod tests {
     use super::super::BASELINE_VERSION;
     use super::{
         all, HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION,
+        HOST_GRANT_REVOCATION_FENCE_VERSION, S2S_IQ_CORRELATIONS_VERSION,
     };
 
     #[test]
@@ -75,7 +90,8 @@ mod tests {
             vec![
                 HOST_GRANT_AUTHORITY_VERSION,
                 HOST_GRANT_RESTORE_INCARNATION_VERSION,
-                S2S_IQ_CORRELATIONS_VERSION
+                S2S_IQ_CORRELATIONS_VERSION,
+                HOST_GRANT_REVOCATION_FENCE_VERSION
             ]
         );
     }

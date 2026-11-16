@@ -561,6 +561,28 @@ pub struct CandidateAdmission {
     pub generation: Option<GrantGeneration>,
 }
 
+/// The key of the queue in front of a scope's guard: a PostgreSQL advisory
+/// lock, which the lock manager grants in arrival order.
+///
+/// A row lock does not queue: a share locker joins the share lockers that
+/// hold a row whatever waits for it exclusively, so overlapping acceptances
+/// could keep a mutation of their scope waiting without bound. Whoever takes
+/// the guard takes this lock first, in the same mode and in the same
+/// transaction: an acceptance shared, a mutation exclusive. A shared request
+/// that arrives after a waiting exclusive one waits behind it.
+///
+/// The key is the first eight bytes of a hash of the lifecycle. Two scopes
+/// whose keys collide only wait for each other.
+pub(crate) fn guard_queue_key(lifecycle: ScopeLifecycleId) -> i64 {
+    let mut hash = Sha256::new();
+    hash.update(b"waddle:host-grant:guard-queue:v1\0");
+    hash.update(lifecycle.to_storage().as_bytes());
+    let digest = hash.finalize();
+    let mut key = [0_u8; 8];
+    key.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(key)
+}
+
 /// Length-prefixed hashing, so distinct field sequences never collide.
 pub(crate) struct Fingerprint(Sha256);
 

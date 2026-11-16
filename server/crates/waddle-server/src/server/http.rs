@@ -945,6 +945,12 @@ async fn attach_host_grant_store(
     // the attachment this gate holds, as the fence verifies, replaces and
     // drops it.
     state.host_grants.bind_attachment(Arc::clone(&gate));
+    // The replica registers with the revocation fence once it holds an
+    // attachment and a scope is enrolled, and decides nothing for a managed
+    // room before that.
+    if let Some(fence) = state.host_grants.fence() {
+        fence.start();
+    }
     let permissions = state.permission_actor.clone();
     let served = ServedAccountDomains::new([account_domain]);
     let issuance = service_domains.host_grant_issuance_policy(&served);

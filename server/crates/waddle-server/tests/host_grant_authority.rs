@@ -1400,6 +1400,10 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             "GRANT SELECT, INSERT ON host_grant_operations, host_grant_operation_changes \
              TO {role}"
         ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON host_grant_fence_replicas, host_grant_fence_acks \
+             TO {role}"
+        ),
         format!("GRANT SELECT ON ingress_protocol_epoch TO {role}"),
         format!("GRANT UPDATE (id) ON ingress_protocol_epoch TO {role}"),
     ] {
@@ -1585,6 +1589,11 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         "DELETE FROM host_grant_rooms".to_owned(),
         "UPDATE host_grant_authority SET incarnation = repeat('0', 32)".to_owned(),
         "DELETE FROM host_grant_authority".to_owned(),
+        // A lease or an acknowledgement of the revocation fence is never
+        // deleted either: an expired lease is a row that no longer counts.
+        "DELETE FROM host_grant_fence_replicas".to_owned(),
+        "DELETE FROM host_grant_fence_acks".to_owned(),
+        "TRUNCATE host_grant_fence_replicas".to_owned(),
     ] {
         assert_eq!(
             refused(&raw, &statement).await.as_deref(),

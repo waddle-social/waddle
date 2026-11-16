@@ -1718,6 +1718,10 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
             "GRANT SELECT, INSERT ON host_grant_operations, host_grant_operation_changes \
              TO {role}"
         ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON host_grant_fence_replicas, host_grant_fence_acks \
+             TO {role}"
+        ),
     ] {
         sqlx::query(&statement)
             .execute(&admin)
@@ -1982,6 +1986,10 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(
             "GRANT SELECT, INSERT ON host_grant_operations, host_grant_operation_changes \
+             TO {role}"
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON host_grant_fence_replicas, host_grant_fence_acks \
              TO {role}"
         ),
         format!("GRANT SELECT ON ingress_protocol_epoch TO {role}"),
