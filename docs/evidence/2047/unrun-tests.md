@@ -112,17 +112,18 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 final and run6 logs |
 | `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run5 final and run6 logs |
 | `xep0045_s2s_outbound_muc` (41) | W6b, integration | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 41/41, run5 final, stress and run6 logs |
-| `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Not run since W6c added a case (its 4 earlier cases ran: run5 final, stress and run6 logs) |
+| `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Not run since W6c added a case and changed its account side to the new `LocalAccounts` methods (its 4 earlier cases ran: run5 final, stress and run6 logs) |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
-| `s2s_account_router` (10) | W6c | loopback; in-memory SQLite | Not run |
-| `s2s_account_traffic_ws` (36), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
-| `xep0280_s2s_account_carbons_ws` (4) | W6c | as `s2s_account_traffic_ws` | Not run |
-| `xep0191_s2s_account_blocking_ws` (4) | W6c | as `s2s_account_traffic_ws` | Not run |
-| `xep0060_s2s_account_events_ws` (4) | W6c | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Not run |
+| `s2s_account_router` (13) | W6c | loopback; in-memory SQLite | Not run |
+| `s2s_account_traffic_ws` (40), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
+| `s2s_account_sm_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
+| `xep0280_s2s_account_carbons_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0191_s2s_account_blocking_ws` (8) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0060_s2s_account_events_ws` (6) | W6c | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Not run |
 | `xep0115_s2s_account_caps_ws` (1) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Not run |
-| `xep0313_s2s_account_archive_ws` (1) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0313_s2s_account_archive_ws` (2) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -206,7 +207,7 @@ verification phase.
 | `waddle-server/src/auth/directory/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/auth/native/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/db/migrations/tests.rs` | W5b | PostgreSQL for the `postgres_` cases; they skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
-| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migration 2010 in the version order) | W6c | none | Not run |
+| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2010 and 2011 in the version order) | W6c | none | Not run |
 | `waddle-server/src/ingress/room_pin_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/permissions/schema/tests.rs` | W5o | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/muc.rs` | W5c | none | Not run |
@@ -235,9 +236,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 90 (71 integration targets, 17 library test modules, 2 chat test files) |
+| Test targets listed | 91 (72 integration targets, 17 library test modules, 2 chat test files) |
 | Run, with a cited log | 38 targets, 828 cases, all passed in their latest cited run |
-| Not run | 52 targets (17 of them library modules) |
+| Not run | 53 targets (17 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
@@ -402,22 +403,30 @@ implemented unless the text says so.
 
 ### Account-traffic design (`s2s-account-traffic-2047.md`)
 
-- A remote ingress producer, shared with inbound MUC (W6a): offline
-  storage of remote senders' messages, which are dropped today (a
-  contact's is refused with `service-unavailable`), and the sender's
-  archive and inbox for local accounts' messages to remote contacts,
-  which reach the sender's other devices only as carbons.
+- A remote ingress producer, shared with inbound MUC (W6a, whose branch
+  adds `IngressPrincipal::Remote`): remote senders' messages are stored
+  offline today as `Transient` rows outside the ingress commit, without
+  the recipient's archive, inbox or push notification; at the merge the
+  account side's producer moves to the ingress path, keeping the
+  strangers' bounds, the silent drop and the no-bounce guard
+  (`sm_promotion::is_remote_sender`). The sender's archive and inbox for
+  local accounts' messages to remote contacts, which reach the sender's
+  other devices only as carbons, wait for the same producer.
 - Remote access to vCard-temp, PEP items, account discovery and last
   activity at an account's bare JID, each with its own review; PEP
   notifications from local accounts to remote contacts.
 - Directed presence tracking for remote entities.
-- Presence at login to more than about 32 remote contacts with `both`
-  (64 with `from`) on one domain overflows that pair's queue and drops the
-  excess.
-- Owner questions: whether disabling S2S should keep users' remote
-  contacts instead of pruning them at the next start, and whether a
-  stranger's message to an offline account should be answered instead of
-  dropped.
+- Presence at login to more than about 16 remote contacts with `both`
+  (32 with `from`) on one domain can find the account's share of the
+  pair's queue full and drops the excess.
+- The account lock that serialises roster read-modify-write for remote
+  contacts is per replica; the client's roster set does not take it.
+- Outbound IQ requests of a retired account's open stream still leave
+  (only messages and presence are refused); a stream left open at
+  retirement is a host-grant design question.
+- No case drives a store failure (the no-announcement rule of a failed
+  roster write, the failed request lookup) or a parent domain's shared
+  bound across subdomains; the share heuristic has no public suffix list.
 
 ### Identity profile design (`identity-profile-2047.md`)
 

@@ -1072,10 +1072,11 @@ runbook (G24):
   [the account-traffic design](s2s-account-traffic-2047.md)): both D7
   refusals are replaced once the account side is attached, inbound
   requests to local resources are registered for correlation, and the
-  router refuses a message carrying a DM pin marker for a remote peer. The
-  ingress receipt for a remote target, needed for offline storage of
-  remote senders' messages and for archiving local accounts' messages to
-  remote contacts, remains with a remote ingress producer.
+  router refuses a message carrying a DM pin marker for a remote peer.
+  Remote senders' messages no resource takes are stored offline outside
+  the ingress commit, without archive, inbox or push; the ingress receipt
+  for a remote target, needed for those and for archiving local accounts'
+  messages to remote contacts, remains with a remote ingress producer.
 - Remote principals at protected effects (W6a, W7a): pass each
   `RemotePrincipal`'s evidence (`PrincipalEvidence::of`) to the host-grant
   decision of every protected effect a remote stanza reaches, and decide

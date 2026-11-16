@@ -114,8 +114,11 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `waddle.s2s.route.account_traffic.timeouts` | counter | `{stanza}` | none | `waddle_s2s_route_account_traffic_timeouts_total` | Stanzas from S2S streams to local accounts abandoned because the account side did not decide them before the deadline. |
 | `waddle.s2s.route.account_traffic.replies_dropped` | counter | `{stanza}` | none | `waddle_s2s_route_account_traffic_replies_dropped_total` | Replies to remote senders the account side produced beyond the bound for one received stanza, dropped unsent. |
 | `waddle.s2s.route.account_requests.refused` | counter | `{stanza}` | none | `waddle_s2s_route_account_requests_refused_total` | IQ requests from S2S streams to local resources refused with `resource-constraint` because too many were pending from their domain or on the replica. |
+| `waddle.s2s.route.account_traffic.share_full` | counter | `{stanza}` | none | `waddle_s2s_route_account_traffic_share_full_total` | Messages and presence of local accounts for remote JIDs refused because the account's share of the pair queues was full. |
 | `waddle.s2s.account_traffic.not_admitted` | counter | `{stanza}` | none | `waddle_s2s_account_traffic_not_admitted_total` | Stanzas from S2S streams that reached the account side from a domain the replica's S2S snapshot no longer admits (ADR-0020 D1), applied and answered with nothing. |
 | `waddle.s2s.account_traffic.pending_dropped` | counter | `{stanza}` | none | `waddle_s2s_account_traffic_pending_dropped_total` | Subscription requests from remote senders dropped unanswered because the account's record of pending requests, or its share for the sender's domain, was full, or the request was too large to record. |
+| `waddle.s2s.account_traffic.offline_stored` | counter | `{stanza}` | none | `waddle_s2s_account_traffic_offline_stored_total` | Messages from remote senders that no resource of the local account took, stored in the account's offline store. |
+| `waddle.s2s.account_traffic.offline_dropped` | counter | `{stanza}` | none | `waddle_s2s_account_traffic_offline_dropped_total` | Messages from remote senders that no resource of the local account took, dropped unanswered because a bound on offline storage for remote senders or the offline store's quota was reached. |
 
 ## All other metrics
 
