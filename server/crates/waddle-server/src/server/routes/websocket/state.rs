@@ -1422,14 +1422,21 @@ impl XmppServiceDomains {
 
     /// The host-grant issuance policy of a replica deciding under
     /// `principals`: its served account domains, the trusted-home list of
-    /// the S2S snapshot it runs, and the domains of its own services. While
-    /// S2S is off no trusted home is listed, so an owner or admin grant to a
-    /// remote account is refused (ADR-0020 D8). `None` when a service domain
-    /// is not in canonical form, or a trusted home is one of them.
+    /// the S2S snapshot it runs, and the domains of its own services, the
+    /// call mixer of each served account domain included, as
+    /// [`Self::served_domains`] serves them. While S2S is off no trusted
+    /// home is listed, so an owner or admin grant to a remote account is
+    /// refused (ADR-0020 D8). `None` when a service domain is not in
+    /// canonical form, or a trusted home is one of them.
     pub(crate) fn host_grant_issuance_policy(
         &self,
         principals: &crate::permissions::host_grant::PrincipalPolicy,
     ) -> Option<crate::permissions::host_grant::IssuancePolicy> {
+        let mixers: Vec<String> = principals
+            .served()
+            .domains()
+            .map(|account| format!("{MIXER_LOCALPART}.{account}"))
+            .collect();
         let services = [
             &self.muc,
             &self.spaces,
@@ -1439,6 +1446,7 @@ impl XmppServiceDomains {
             &self.community,
         ]
         .into_iter()
+        .chain(&mixers)
         .map(|domain| waddle_xmpp::identity::CanonicalDomain::parse_exact(domain))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;

@@ -82,6 +82,11 @@ impl ServedAccountDomains {
         }
     }
 
+    /// The account domains, in canonical form and order.
+    pub fn domains(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+
     fn contains(&self, domain: &str) -> bool {
         self.0.contains(domain)
     }

@@ -943,7 +943,8 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
 
 /// Every trusted home of the S2S snapshot must be a remote domain host
 /// grants can be issued to (ADR-0020 D8): neither the account domain nor a
-/// domain of one of this deployment's services. The snapshot's loader
+/// domain of one of this deployment's services, the call mixer included.
+/// The snapshot's loader
 /// refuses the domains it names as local; this refuses the service domains
 /// it does not know, and a service domain that is not canonical, which no
 /// issuance policy can be built from. A deployment whose XMPP domain is not
