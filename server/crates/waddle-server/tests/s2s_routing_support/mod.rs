@@ -94,13 +94,35 @@ pub async fn correlation_database(name: &str) -> Database {
 }
 
 /// What the router delivered to local resources, and who it says
-/// generated each stanza.
+/// generated each stanza. Deliveries can be held, as a slow local session
+/// holds them, until the test lets them through.
 #[derive(Debug, Default)]
 pub struct RecordingDelivery {
     delivered: Mutex<Vec<(FullJid, Stanza, LocalOrigin)>>,
+    gate: Arc<tokio::sync::RwLock<()>>,
+    held: Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
 }
 
 impl RecordingDelivery {
+    /// Hold every delivery from now on, unrecorded, until
+    /// [`Self::release`].
+    pub async fn hold(&self) {
+        let guard = Arc::clone(&self.gate).write_owned().await;
+        match self.held.lock() {
+            Ok(mut held) => *held = Some(guard),
+            Err(poisoned) => *poisoned.into_inner() = Some(guard),
+        }
+    }
+
+    /// Let held deliveries through.
+    pub fn release(&self) {
+        let guard = match self.held.lock() {
+            Ok(mut held) => held.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        drop(guard);
+    }
+
     fn recorded(&self) -> Vec<(FullJid, Stanza, LocalOrigin)> {
         match self.delivered.lock() {
             Ok(delivered) => delivered.clone(),
@@ -146,6 +168,7 @@ impl LocalDelivery for RecordingDelivery {
         stanza: Stanza,
         origin: LocalOrigin,
     ) -> LocalDeliveryOutcome {
+        let _open = self.gate.read().await;
         match self.delivered.lock() {
             Ok(mut delivered) => delivered.push((to.clone(), stanza, origin)),
             Err(poisoned) => poisoned.into_inner().push((to.clone(), stanza, origin)),

@@ -15,7 +15,9 @@
 //! stream to the room's domain removes the occupant with status 333
 //! (§11.1); a resource that ends leaves its rooms (§7.14). Occupancies live
 //! in a table that every replica shares, so the replica the room's server
-//! dials admits its traffic for a join routed by another.
+//! dials admits its traffic for a join routed by another. One remote
+//! domain whose room traffic fills its share of the delivery queues waits
+//! alone: another domain's stream keeps moving.
 //!
 //! `home-a.test` runs the S2S router with a recording delivery in place of
 //! WebSocket clients, its tables in an in-memory SQLite database (two
@@ -43,6 +45,7 @@ use waddle_server::s2s::route::RouterLimits;
 use waddle_xmpp::disco::DISCO_INFO_NS;
 use waddle_xmpp::mam::MAM_NS;
 use waddle_xmpp::muc::presence::NS_MUC;
+use waddle_xmpp::xep::xep0199::NS_PING;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::MessageType;
@@ -1634,6 +1637,119 @@ async fn a_room_with_more_occupants_than_its_queue_holds_delivers_every_presence
     .await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
     assert_eq!(a.router.remote_rooms().await, 1);
+}
+
+/// A XEP-0199 ping from `from` to the server `home-a.test`.
+fn server_ping(from: &str, id: &str) -> Iq {
+    Iq::Get {
+        from: Some(jid(from)),
+        to: Some(jid(HOME_A)),
+        id: id.to_owned(),
+        payload: Element::builder("ping", NS_PING).build(),
+    }
+}
+
+/// Whether `home-b.test` has received the result of its ping `id`.
+fn ping_answered(muc: &support::FakeMuc, id: &str) -> bool {
+    muc.received_with_id("iq", id)
+        .iter()
+        .any(|iq| iq.attr("type") == Some("result"))
+}
+
+#[test]
+fn one_remote_domain_holds_at_most_a_quarter_of_a_delivery_workers_queue() {
+    let limits = RouterLimits::default();
+    let per_worker = limits.room_deliveries / limits.room_delivery_workers;
+    assert!(
+        limits.room_deliveries_per_peer * 4 <= per_worker,
+        "{} of {per_worker}",
+        limits.room_deliveries_per_peer
+    );
+}
+
+#[tokio::test]
+async fn a_remote_domain_at_its_share_of_the_delivery_queue_waits_alone() {
+    let pki = support::Pki::new();
+    // One worker, so that every room shares its queue, and a share for each
+    // remote domain of a quarter of it.
+    let limits = RouterLimits {
+        room_delivery_workers: 1,
+        room_deliveries: 8,
+        room_deliveries_per_room: 8,
+        room_deliveries_per_peer: 2,
+        room_delivery_timeout: Duration::from_secs(60),
+        ..RouterLimits::default()
+    };
+    let (a, _b, muc) = outbound_muc(&pki, limits).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    // The worker is held on the first of the room's messages, two more fill
+    // `muc.home-b.test`'s share, and the fourth makes its stream wait, so
+    // the ping behind it is not read.
+    a.delivery.hold().await;
+    const HELD: usize = 4;
+    for index in 0..HELD {
+        muc.send(message(
+            ROOM_HOST,
+            ALICE_PHONE,
+            MessageType::Groupchat,
+            &["held-", &index.to_string()].concat(),
+            "while the occupant's session is slow",
+        ));
+    }
+    muc.send(server_ping(ROOM_HOST, "behind-the-room"));
+
+    // `home-b.test` has its own share of the same queue: its message is
+    // queued at once and its stream reads on to the ping behind it.
+    muc.send(message(
+        BOB_PHONE,
+        ALICE_PHONE,
+        MessageType::Chat,
+        "from-bob",
+        "not room traffic",
+    ));
+    muc.send(server_ping(BOB_PHONE, "behind-bob"));
+    assert!(
+        wait_for(ARRIVES, || ping_answered(&muc, "behind-bob").then_some(()))
+            .await
+            .is_some(),
+        "the other domain's stream waited for the room's share"
+    );
+    assert!(
+        !ping_answered(&muc, "behind-the-room"),
+        "the room's stream did not wait at its share"
+    );
+
+    // Once the session takes deliveries again, the room's stream reads on
+    // and every message arrives in the room's order.
+    a.delivery.release();
+    assert!(
+        wait_for(ARRIVES, || ping_answered(&muc, "behind-the-room")
+            .then_some(()))
+        .await
+        .is_some(),
+        "the room's stream did not read on"
+    );
+    let delivered: Vec<String> = a
+        .delivery
+        .delivered()
+        .into_iter()
+        .filter_map(|(recipient, stanza)| match stanza {
+            Stanza::Message(message) if recipient == full(ALICE_PHONE) => message.id.map(|id| id.0),
+            _ => None,
+        })
+        .filter(|id| id.starts_with("held-"))
+        .collect();
+    let expected: Vec<String> = (0..HELD)
+        .map(|index| ["held-", &index.to_string()].concat())
+        .collect();
+    assert_eq!(delivered, expected);
+    // Bob's message is not room traffic and is refused (D7).
+    let refusal = message_refusal(&muc, "from-bob").await;
+    assert_eq!(
+        error_condition(&refusal).as_deref(),
+        Some("service-unavailable")
+    );
 }
 
 #[tokio::test]

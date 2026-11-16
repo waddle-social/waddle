@@ -7,9 +7,14 @@
 //!   `connection-timeout` stream error, the connection's end of file
 //!   between elements and the idle timeout with nothing unfinished are
 //!   orderly, as peers end idle streams this way; the connection's end of
-//!   file or the idle timeout while the peer is in the middle of an
-//!   element, and a first-level element left unfinished past the
-//!   incomplete-element deadline, are lost.
+//!   file, the idle timeout or the maximum age while the peer is in the
+//!   middle of an element, and a first-level element left unfinished past
+//!   the incomplete-element deadline, are lost.
+//! - Inbound, with a sink that holds a stanza until the test releases it:
+//!   the maximum age passing while the stanza waits ends the stream before
+//!   the stanzas the peer wrote meanwhile are read, which is lost; a wait
+//!   longer than the idle timeout does not end the stream, and the stanzas
+//!   written meanwhile are read once the wait ends.
 //! - Outbound, through a TCP relay that stops reading from the dialling
 //!   deployment once the stream is established: a write that does not
 //!   complete within the write deadline is lost.
@@ -34,10 +39,11 @@ use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpSocket, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use waddle_server::s2s::conn::{
-    ServiceOptions, SinkVerdict, StanzaSink, StreamDirection, StreamEnd, TransmitError,
-    VerifiedPeerStream,
+    ServiceOptions, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd, TransmitError,
+    VerifiedPeerStream, Waited,
 };
 use waddle_xmpp::s2s::{
     into_server_content, HeaderAddress, StreamEncoder, StreamErrorCondition, StreamHeader,
@@ -114,6 +120,66 @@ async fn endings(sink: &EndingSink) -> Vec<Ending> {
     sink.endings()
 }
 
+/// The id of the stanza [`HoldingSink`] holds.
+const HELD: &str = "held";
+
+/// A sink that takes every stanza at once except the one whose id is
+/// [`HELD`], which it takes only once the test releases it, as a router
+/// does with a stanza that waits for a place on its queues. It keeps the
+/// ids it was offered and every stream end it is told about.
+#[derive(Debug)]
+struct HoldingSink {
+    release: Arc<Semaphore>,
+    offered: Mutex<Vec<String>>,
+    endings: EndingSink,
+}
+
+impl HoldingSink {
+    fn new() -> Self {
+        Self {
+            release: Arc::new(Semaphore::new(0)),
+            offered: Mutex::new(Vec::new()),
+            endings: EndingSink::default(),
+        }
+    }
+
+    /// Take the held stanza.
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    fn offered(&self) -> Vec<String> {
+        match self.offered.lock() {
+            Ok(offered) => offered.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+impl StanzaSink for HoldingSink {
+    fn offer(&self, _stream: &VerifiedPeerStream, stanza: Element) -> SinkVerdict {
+        let id = stanza.attr("id").unwrap_or_default().to_owned();
+        match self.offered.lock() {
+            Ok(mut offered) => offered.push(id.clone()),
+            Err(poisoned) => poisoned.into_inner().push(id.clone()),
+        }
+        if id != HELD {
+            return SinkVerdict::Accepted;
+        }
+        let release = Arc::clone(&self.release);
+        SinkVerdict::Wait(SinkWait::new(async move {
+            match release.acquire_owned().await {
+                Ok(_permit) => Waited::Taken,
+                Err(_) => Waited::Overloaded,
+            }
+        }))
+    }
+
+    fn stream_ended(&self, stream: &VerifiedPeerStream, end: StreamEnd) {
+        self.endings.stream_ended(stream, end);
+    }
+}
+
 /// Wait until `deployment` holds `count` established streams.
 async fn holds_streams(deployment: &Deployment, count: usize) {
     assert!(
@@ -127,17 +193,28 @@ async fn holds_streams(deployment: &Deployment, count: usize) {
 /// peer for `home-a.test` with an established inbound stream to it.
 async fn inbound(pki: &Pki, limits: &[&str]) -> (Deployment, Arc<EndingSink>, RawPeer) {
     let sink = Arc::new(EndingSink::default());
+    let (b, peer) = inbound_to(pki, limits, sink.clone()).await;
+    (b, sink, peer)
+}
+
+/// `home-b.test` with `limits` and `sink`, and a hand-written peer for
+/// `home-a.test` with an established inbound stream to it.
+async fn inbound_to(
+    pki: &Pki,
+    limits: &[&str],
+    sink: Arc<dyn StanzaSink>,
+) -> (Deployment, RawPeer) {
     let (listener_b, address_b) = listener().await;
     let mut spec = Spec::new(HOME_B, HOME_A);
     spec.limits = limits.iter().map(|line| (*line).to_owned()).collect();
     let options = ServiceOptions {
-        sink: sink.clone(),
+        sink,
         ..ServiceOptions::default()
     };
     let b = start_with(pki, &spec, listener_b, options).await;
     let peer = RawPeer::establish(pki, address_b, HOME_A, HOME_B).await;
     holds_streams(&b, 1).await;
-    (b, sink, peer)
+    (b, peer)
 }
 
 fn jid(raw: &str) -> Jid {
@@ -307,6 +384,105 @@ async fn an_idle_stream_with_an_element_unfinished_is_lost() {
     assert_eq!(
         endings(&sink).await,
         vec![(StreamDirection::Inbound, HOME_A.to_owned(), StreamEnd::Lost)]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_maximum_age_with_an_element_unfinished_is_lost() {
+    let pki = Pki::new();
+    // The maximum age comes well before the incomplete-element deadline
+    // (five seconds by default) and the idle timeout.
+    let max_age = format!("max_age_ms = {SHORT_IDLE_MS}");
+    let (b, sink, mut peer) = inbound(&pki, &[max_age.as_str()]).await;
+    let stanza = peer.encode(&into_server_content(message("aged".to_owned(), 256)));
+    peer.write(&stanza[..stanza.len() / 2])
+        .await
+        .expect("write part of a stanza");
+    let (error, closed, _) = peer.read_until_closed(WAIT).await;
+    assert!(closed, "the deployment did not close the stream");
+    assert_eq!(error, Some(StreamErrorCondition::Reset));
+    assert_eq!(
+        endings(&sink).await,
+        vec![(StreamDirection::Inbound, HOME_A.to_owned(), StreamEnd::Lost)]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_maximum_age_passing_during_a_wait_for_the_sink_is_lost() {
+    let pki = Pki::new();
+    let max_age = format!("max_age_ms = {SHORT_IDLE_MS}");
+    let sink = Arc::new(HoldingSink::new());
+    let (b, mut peer) = inbound_to(&pki, &[max_age.as_str()], sink.clone()).await;
+    let held = peer.encode(&into_server_content(message(HELD.to_owned(), 64)));
+    peer.write(&held).await.expect("write the held stanza");
+    assert!(
+        eventually(WAIT, || sink.offered() == [HELD]).await,
+        "the held stanza was not offered"
+    );
+    // Written while the deployment reads nothing: it waits in the
+    // transport.
+    let behind = peer.encode(&into_server_content(message("behind".to_owned(), 64)));
+    peer.write(&behind)
+        .await
+        .expect("write a stanza behind the held one");
+    tokio::time::sleep(Duration::from_millis(SHORT_IDLE_MS * 2)).await;
+    sink.release();
+    let (error, closed, _) = peer.read_until_closed(WAIT).await;
+    assert!(closed, "the deployment did not close the stream");
+    assert_eq!(error, Some(StreamErrorCondition::Reset));
+    // The stanza behind the held one was never read, so the stream lost it.
+    assert_eq!(sink.offered(), [HELD]);
+    assert_eq!(
+        endings(&sink.endings).await,
+        vec![(StreamDirection::Inbound, HOME_A.to_owned(), StreamEnd::Lost)]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_for_the_sink_longer_than_the_idle_timeout_keeps_the_stream() {
+    let pki = Pki::new();
+    let idle = format!("idle_timeout_ms = {SHORT_IDLE_MS}");
+    let sink = Arc::new(HoldingSink::new());
+    let (b, mut peer) = inbound_to(&pki, &[idle.as_str()], sink.clone()).await;
+    let held = peer.encode(&into_server_content(message(HELD.to_owned(), 64)));
+    peer.write(&held).await.expect("write the held stanza");
+    assert!(
+        eventually(WAIT, || sink.offered() == [HELD]).await,
+        "the held stanza was not offered"
+    );
+    let behind = peer.encode(&into_server_content(message("behind".to_owned(), 64)));
+    peer.write(&behind)
+        .await
+        .expect("write a stanza behind the held one");
+    // Well past the idle timeout, counted from the held stanza.
+    tokio::time::sleep(Duration::from_millis(SHORT_IDLE_MS * 2)).await;
+    assert!(
+        sink.endings.endings().is_empty(),
+        "the stream ended during the wait"
+    );
+    sink.release();
+    // The stanza the sink took counts as traffic, so the stream reads on
+    // instead of ending idle at once.
+    assert!(
+        eventually(WAIT, || sink.offered() == [HELD, "behind"]).await,
+        "the stanza behind the held one was not read: {:?}",
+        sink.offered()
+    );
+    // Once it has read again and then idles, the stream ends in an
+    // orderly way.
+    let (error, closed, _) = peer.read_until_closed(WAIT).await;
+    assert!(closed, "the deployment did not close the idle stream");
+    assert_eq!(error, Some(StreamErrorCondition::ConnectionTimeout));
+    assert_eq!(
+        endings(&sink.endings).await,
+        vec![(
+            StreamDirection::Inbound,
+            HOME_A.to_owned(),
+            StreamEnd::Closed
+        )]
     );
     assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
 }
