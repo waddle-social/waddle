@@ -347,7 +347,10 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
 /// complete): failing it would take every replica out of the endpoint set,
 /// rooms no scope manages included, while managed rooms are refused either
 /// way. The replica stays ready and names the failure; the gate logs and
-/// counts it. A deployment with no unretired scope reports `unmanaged`.
+/// counts it. A runtime role or network path wrong on this replica alone
+/// keeps it ready as well, with the `waddle.host_grant.authority.unverified`
+/// gauge as the signal. A deployment with no unretired scope reports
+/// `unmanaged`.
 pub(crate) fn attested_readiness_response(
     gate: Option<&crate::permissions::host_grant::HostGrantGate>,
 ) -> (StatusCode, Json<serde_json::Value>) {

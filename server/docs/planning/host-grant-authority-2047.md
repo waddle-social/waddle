@@ -1461,14 +1461,22 @@ body names it in `host_grants`:
   declares the restore clears, and which every replica of a rollout ahead
   of the owner phase shares (`configuration_ahead_of_restore`);
 - a runtime role that does not match the profile, or a store that cannot be
-  read as the profile requires (`runtime_profile_mismatch`): the owner
-  phase's grant matrix, shared by every replica; the periodic pass verifies
-  again;
+  read as the profile requires (`runtime_profile_mismatch`): usually the
+  owner phase's grant matrix, shared by every replica; the periodic pass
+  verifies again;
 - three verifications in a row (`MAX_INCOMPLETE_PASSES`) that could not
   complete, the first at least 30 s earlier (`INCOMPLETE_READINESS_GRACE`):
   `spicedb_unreachable` when the last one failed on SpiceDB, otherwise
   `fence_incomplete`. Each verification that does not complete is counted
-  once; attached, the third periodic pass drops the attachment.
+  once; attached, the third periodic pass drops the attachment. A replica
+  whose configuration predates the declared restore stays not ready through
+  them: only a verification that reaches the epoch shows it corrected.
+
+A failure that is one replica's alone (its runtime role, or its own
+network path to SpiceDB or PostgreSQL) keeps that replica ready as well:
+it stays in the endpoint set and refuses every managed room while its
+peers serve them. The gauge, which is 1 on that replica only, and its error
+log are the signal.
 
 A restarted replica refuses managed rooms the same way until the cause is
 resolved. A verification that completes, passed or refused for the whole

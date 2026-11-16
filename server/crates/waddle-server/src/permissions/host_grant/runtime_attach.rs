@@ -63,16 +63,20 @@
 //!   a rollout every replica configured ahead of the owner phase shares it;
 //! - a runtime role that does not match the profile, or a store that
 //!   cannot be read as the profile requires (`runtime_profile_mismatch`),
-//!   which is the owner phase's grant matrix and so, again, every
-//!   replica's;
+//!   usually the owner phase's grant matrix and so every replica's;
 //! - [`MAX_INCOMPLETE_PASSES`] verifications in a row that could not
 //!   complete over at least [`INCOMPLETE_READINESS_GRACE`]
 //!   (`spicedb_unreachable` when the last one failed on SpiceDB,
 //!   `fence_incomplete` otherwise), which an outage every replica shares
-//!   causes as well.
+//!   causes as well. A configuration that predates the declared restore
+//!   stays the failure through them.
 //!
 //! Readiness therefore never couples a replica to SpiceDB or to a failure
-//! every replica shares; the alert does.
+//! every replica shares; the alert does. The cost is that a runtime role
+//! or a network path that is wrong on one replica alone keeps that replica
+//! in the endpoint set too, refusing every managed room while its peers
+//! serve them; the `waddle.host_grant.authority.unverified` gauge (1 on
+//! that replica) and the error log are the signal.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -110,13 +114,13 @@ pub const REVERIFY_INTERVAL: Duration = Duration::from_secs(300);
 /// Periodic passes in a row that may fail to complete (PostgreSQL or
 /// SpiceDB not answering) before the attachment they could not confirm is
 /// dropped. As many verifications in a row that cannot complete, over at
-/// least [`INCOMPLETE_READINESS_GRACE`], report the replica not ready.
+/// least [`INCOMPLETE_READINESS_GRACE`], are named by readiness
+/// (`spicedb_unreachable` or `fence_incomplete`); the replica stays ready.
 pub const MAX_INCOMPLETE_PASSES: u32 = 3;
 
 /// Least time verifications must have failed to complete, in a row, before
-/// they report the replica not ready, so that a SpiceDB that does not
-/// answer for a few seconds while a replica starts does not take it out of
-/// the endpoint set.
+/// readiness names them, so that a SpiceDB that does not answer for a few
+/// seconds while a replica starts is not reported as an outage.
 pub const INCOMPLETE_READINESS_GRACE: Duration = Duration::from_secs(30);
 
 /// Longest an acceptance waits for SpiceDB to say whether a room no scope
@@ -348,9 +352,12 @@ pub enum GateReadiness {
     /// No attachment yet, or the authority is refused as a whole. Managed
     /// rooms are refused; ready.
     Unverified,
-    /// No attachment, for the failure named, which this replica shares with
-    /// every replica or which an operator's act elsewhere clears. Managed
-    /// rooms are refused; ready.
+    /// No attachment, for the failure named. Managed rooms are refused;
+    /// ready. Most such failures are shared by every replica or cleared by
+    /// an operator's act elsewhere; one that is this replica's alone (its
+    /// own wrong runtime role, its own network path to SpiceDB or
+    /// PostgreSQL) keeps it in the endpoint set as well, and the
+    /// `waddle.host_grant.authority.unverified` gauge is the signal.
     Refusing(ReplicaFailure),
     /// This replica's configured restore epoch predates the declared one
     /// while an unretired scope is enrolled (or that cannot be read): not

@@ -549,8 +549,12 @@ impl HostGrantAuthority {
             return Ok(Reconciliation::ProjectionUnknown);
         };
         let lost = projection_lost || head.shows_lost();
-        // A journal witness that cannot be read stops the takeover below;
-        // only the mark is recorded, and the changes once it can be read.
+        // A journal witness that is not a canonical stamp shows nothing of
+        // what the database lost: the scope is marked as one that lost
+        // operations, nothing else is recorded and the takeover below does
+        // not run. Its changes are recorded by the first pass after an
+        // operator removed the witness. (A witness SpiceDB did not return
+        // stopped the pass above, with nothing recorded.)
         let changes: Vec<ReconstructionChange> = if head.malformed() {
             Vec::new()
         } else {
