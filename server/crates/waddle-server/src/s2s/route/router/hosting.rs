@@ -36,8 +36,11 @@ use super::{
 };
 use crate::permissions::host_grant::StreamEvidence;
 use crate::s2s::conn::{SinkVerdict, SinkWait, VerifiedPeerStream, Waited};
-use crate::s2s::route::local_rooms::{RoomRequest, SeatChange, SeatEnd};
+use crate::s2s::route::local_rooms::{
+    CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd,
+};
 use crate::s2s::route::principal::RemotePrincipal;
+use crate::s2s::route::reach::{reach, InboundReach, LocalTarget};
 use crate::s2s::route::reach::{Reachable, RoomOperation};
 use crate::s2s::route::replies;
 use crate::s2s::route::room_delivery::{LocalRoomRequest, Placed, RoomWork};
@@ -223,6 +226,7 @@ impl Inner {
             stanza,
             local: stream.local().clone(),
             remote: stream.remote().clone(),
+            carried: false,
         }));
         let mut pause = self.take_allowance(&peer);
         if pause.is_none() {
@@ -260,6 +264,64 @@ impl Inner {
                 Placed::Stopped => Waited::Stopping,
             }
         }))
+    }
+
+    /// Queue a stanza another replica verified on an inbound stream and
+    /// carried here because this replica holds the room it addresses. It
+    /// is queued behind the room's earlier requests, against its remote
+    /// domain's share of the queues, and decided as one from a stream of
+    /// this replica would be: the host decides peer admission and the
+    /// sender's standing again, under the snapshot this replica runs, on
+    /// the carried facts of the stream.
+    ///
+    /// The carrying replica spent its domain's request rate on the stanza;
+    /// it is not spent again here.
+    pub(super) fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {
+        if self.hosting.get().is_none() {
+            return CarriedRoomOutcome::Refused;
+        }
+        let CarriedRoomRequest { principal, stanza } = request;
+        let Ok(principal) = RemotePrincipal::carried(principal) else {
+            return CarriedRoomOutcome::Refused;
+        };
+        // The stanza's sender is the principal, and it addresses a room at
+        // the MUC service this replica serves: what a stream of this
+        // replica is checked for before its stanza reaches the router.
+        let (from, to) = replies::addresses(&stanza);
+        let (Some(from), Some(to)) = (from, to) else {
+            return CarriedRoomOutcome::Refused;
+        };
+        if from != principal.address() || to.node().is_none() {
+            return CarriedRoomOutcome::Refused;
+        }
+        let Ok(local) = CanonicalDomain::from_domain(to.domain()) else {
+            return CarriedRoomOutcome::Refused;
+        };
+        if !self.config.is_local(&local) {
+            return CarriedRoomOutcome::Refused;
+        }
+        let InboundReach::Room(operation) = reach(
+            LocalTarget::Service(crate::destination::ServedService::Muc),
+            &stanza,
+            self.reachable(),
+        ) else {
+            return CarriedRoomOutcome::Refused;
+        };
+        let room = to.to_bare();
+        let remote = principal.home().clone();
+        let peer = remote.as_domain_ref().as_str().to_owned();
+        let work = RoomWork::Request(Box::new(LocalRoomRequest {
+            principal,
+            operation,
+            stanza,
+            local,
+            remote,
+            carried: true,
+        }));
+        match self.local_rooms.try_push(room, work, &peer) {
+            Ok(()) => CarriedRoomOutcome::Queued,
+            Err(_) => CarriedRoomOutcome::Busy,
+        }
     }
 
     /// Take one stanza of `peer`'s allowance for the MUC service, or say
@@ -302,12 +364,46 @@ impl Inner {
             stanza,
             local,
             remote,
+            carried,
         } = request;
         let Some(to) = replies::addresses(&stanza).1.cloned() else {
             return;
         };
         let room = to.to_bare();
         let pair = Pair { local, remote };
+        // A room another replica holds is decided there: the request is
+        // carried with the facts of its sender's stream before anything is
+        // decided or seated for it here. What was carried here is decided
+        // here.
+        if !carried {
+            let placing = hosting.host.place(&principal, &stanza);
+            let placed = tokio::time::timeout(self.limits.room_request_timeout, placing).await;
+            let refused = match placed {
+                Ok(RoomPlacement::Here) => None,
+                Ok(RoomPlacement::Carried) => {
+                    telemetry::room_request_carried();
+                    return;
+                }
+                Ok(RoomPlacement::Refused(error)) => Some(*error),
+                Err(_) => {
+                    telemetry::room_request_timed_out();
+                    Some(replies::error(
+                        self.home(),
+                        ErrorType::Wait,
+                        DefinedCondition::ResourceConstraint,
+                        "The room is held by another server node that did not answer; try again \
+                         later.",
+                    ))
+                }
+            };
+            if let Some(error) = refused {
+                telemetry::room_request_not_carried();
+                if let Some(reply) = replies::error_reply(&stanza, error) {
+                    self.queue_room_reply(&pair, reply).await;
+                }
+                return;
+            }
+        }
         let occupant = principal.full();
         let mut seat = occupant
             .as_ref()

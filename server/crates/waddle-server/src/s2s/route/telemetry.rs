@@ -137,3 +137,24 @@ pub(super) fn seat_ended_room_closed() {
         1,
     );
 }
+
+/// A stanza for a room another replica holds was carried to that replica.
+pub(super) fn room_request_carried() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.carried",
+        "{stanza}",
+        "Stanzas from S2S streams for rooms another replica holds that were carried to that replica with their sender's stream evidence.",
+        1,
+    );
+}
+
+/// A stanza for a room another replica holds could not be carried there,
+/// and its sender was answered with an error.
+pub(super) fn room_request_not_carried() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.not_carried",
+        "{stanza}",
+        "Stanzas from S2S streams for rooms another replica holds that could not be carried to that replica, so that their sender was answered with an error.",
+        1,
+    );
+}

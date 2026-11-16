@@ -48,12 +48,15 @@ pub use correlation::{
     MAX_REQUEST_ID_BYTES,
 };
 pub use local::{LocalDelivery, LocalDeliveryOutcome, LocalOrigin};
-pub use local_rooms::{LocalRooms, RoomReplies, RoomRequest, SeatChange, SeatEnd};
+pub use local_rooms::{
+    CarriedRoomOutcome, CarriedRoomRequest, LocalRooms, RoomPlacement, RoomReplies, RoomRequest,
+    SeatChange, SeatEnd,
+};
 pub use occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomStoreError,
     RoomVerdict, SqlRemoteRoomStore, MAX_JOIN_ID_BYTES, MAX_OCCUPANCY_ADDRESS_BYTES,
 };
-pub use principal::{PrincipalError, RemotePrincipal};
+pub use principal::{CarriedPrincipal, PrincipalError, RemotePrincipal};
 pub use reach::{reach, InboundReach, LocalTarget, Reachable, Refusal, RoomOperation};
 pub use router::{RouterLimits, RouterOptions, S2sRouter};
 pub use seats::{

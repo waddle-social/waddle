@@ -67,6 +67,11 @@ pub trait ForeignDelivery: Send + Sync {
     /// Take `stanza` for `recipient` without waiting, or hand it back.
     /// Taking it is custody for transport only, not delivery.
     fn offer(&self, recipient: &FullJid, stanza: Stanza) -> Result<(), Box<Stanza>>;
+
+    /// `room` stopped being open to occupants from other servers: those it
+    /// seats are removed and told so, without waiting. By default nothing
+    /// happens.
+    fn close_room(&self, _room: &BareJid) {}
 }
 
 /// Registry for tracking active XMPP connections.
@@ -137,6 +142,14 @@ impl ConnectionRegistry {
         match self.foreign.get() {
             Some(foreign) => foreign.offer(recipient, stanza),
             None => Err(Box::new(stanza)),
+        }
+    }
+
+    /// Tell the foreign delivery that `room` stopped being open to
+    /// occupants from other servers.
+    pub fn close_foreign_room(&self, room: &BareJid) {
+        if let Some(foreign) = self.foreign.get() {
+            foreign.close_room(room);
         }
     }
 

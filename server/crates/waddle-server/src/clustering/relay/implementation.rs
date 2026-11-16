@@ -108,6 +108,7 @@ pub(in crate::clustering::relay) enum RelayDispatchKind {
     AccountBinding,
     ExtensionRoomSend,
     MucAdminQuery,
+    RemoteRoomRequest,
 }
 
 impl RelayDispatchKind {
@@ -131,6 +132,7 @@ impl RelayDispatchKind {
             Self::AccountBinding => "account_binding",
             Self::ExtensionRoomSend => "extension_room_send",
             Self::MucAdminQuery => "muc_admin_query",
+            Self::RemoteRoomRequest => "remote_room_request",
         }
     }
 }
@@ -1326,6 +1328,91 @@ impl Message<RelayMucAdminQuery> for RelayActor {
             span,
             async move { bridge.muc_admin_query_local(msg).await },
         )
+    }
+}
+
+/// How the home domain of a carried remote principal authenticated on the
+/// inbound S2S stream (ADR-0020 D2), as the relay carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayStreamStrength {
+    Pkix,
+    Dialback,
+}
+
+/// The trust profile a carried remote principal's home certificate was
+/// verified under, as the relay carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayTrustProfile {
+    PublicWebPki,
+    PrivateCa,
+}
+
+/// A stanza a principal at another server addressed to a room whose
+/// `RoomActor` the receiver owns (ADR-0020 D10), carried by the replica
+/// whose inbound S2S stream it arrived on.
+///
+/// It carries the stanza and what that stream proved of its sender: the
+/// sender's address, the authentication strength, the trust-profile kind
+/// and the configuration snapshot the stream was admitted under. Nothing
+/// decided from them travels: the owner decides peer admission and the
+/// sender's standing again, under the S2S snapshot it runs, seats the
+/// occupant and answers through its own S2S router. The owner trusts the
+/// facts as it trusts the origin of every relay message: only replicas of
+/// this deployment reach the relay.
+///
+/// The reply says only whether the owner queued the stanza; the stanza's
+/// answer never travels back. A carried stanza is never carried again.
+///
+/// Rolling deploys need no `deliver_ordered.vN` bump (#1597): this is a NEW
+/// message id, and neither [`RemoteStanzaEnvelope`] nor any ordered reply
+/// type changes. A peer that predates it answers `UnknownMessage` before any
+/// handler runs, and the origin answers the stanza's sender with a
+/// retryable error, as it did for every room another node holds before
+/// this message existed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayRemoteRoomRequest {
+    pub room: jid::BareJid,
+    /// The address the stanza came from, as the origin's stream proved it.
+    pub sender: jid::Jid,
+    pub strength: RelayStreamStrength,
+    pub trust_profile: Option<RelayTrustProfile>,
+    /// The origin's S2S configuration snapshot the stream was admitted
+    /// under.
+    pub snapshot: uuid::Uuid,
+    pub stanza: RemoteStanza,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayRemoteRoomRequestReply {
+    /// Queued for the owner's room host, behind the room's earlier
+    /// requests. The owner answers the sender itself.
+    Queued,
+    /// The owner's queues for the room host are full; nothing was queued.
+    Busy,
+    /// The room actor claim moved away from the receiver; nothing ran.
+    NotOwner,
+    /// The receiver hosts no rooms for remote occupants, or the stanza is
+    /// none a remote principal may address to a room; nothing was queued.
+    Refused,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_room_request.v1")]
+impl Message<RelayRemoteRoomRequest> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteRoomRequestReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayRemoteRoomRequest,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteRoomRequest, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.room));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.remote_room_request_local(msg).await
+        })
     }
 }
 
@@ -2641,6 +2728,45 @@ impl RelayHandle {
             request,
             trace: RelayTraceContext::capture(),
         };
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote_ref = self.resolve().await?;
+                match remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                {
+                    Ok(reply) => Ok(reply),
+                    Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                        self.cached = None;
+                        let remote_ref = self.resolve().await?;
+                        remote_ref
+                            .ask(&message)
+                            .mailbox_timeout(self.mailbox_timeout)
+                            .reply_timeout(self.reply_timeout)
+                            .await
+                            .map_err(send_error)
+                    }
+                    Err(error) => Err(send_error(error)),
+                }
+            } => result,
+        }
+    }
+
+    /// Carry a remote principal's stanza to the room owner. The owner
+    /// queues it for its room host, so the ask is not idempotent: a cached
+    /// relay ref that proves unusable before the message reached a handler
+    /// is looked up and asked once more, and any other failure is returned
+    /// with its effect classification.
+    pub(crate) async fn remote_room_request(
+        &mut self,
+        mut message: RelayRemoteRoomRequest,
+    ) -> Result<RelayRemoteRoomRequestReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;

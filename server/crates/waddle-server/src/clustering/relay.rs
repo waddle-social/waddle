@@ -140,6 +140,8 @@ pub use implementation::RelayRemoteResourceUpdateReply;
 pub use implementation::RelayRemoteResourceUpdateStatus;
 pub use implementation::RelayRemoteResourceWriteAcceptedReply;
 pub use implementation::RelayRemoteResourceWriteAcceptedStatus;
+pub use implementation::RelayRemoteRoomRequest;
+pub use implementation::RelayRemoteRoomRequestReply;
 pub use implementation::RelayRemoteUserSideEffect;
 pub use implementation::RelayRemoteUserSideEffectReply;
 pub use implementation::RelayRemoteUserSideEffectStatus;
@@ -152,6 +154,8 @@ pub use implementation::RelayRouteRemoteResourceStanzaReply;
 pub use implementation::RelaySendEffect;
 pub use implementation::RelaySendFailure;
 pub use implementation::RelaySleep;
+pub use implementation::RelayStreamStrength;
+pub use implementation::RelayTrustProfile;
 pub use implementation::RelayUnregisterRemoteUserResource;
 pub use implementation::RelayUpdateRemoteUserResource;
 

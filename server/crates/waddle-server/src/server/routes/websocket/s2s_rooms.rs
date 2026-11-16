@@ -91,7 +91,8 @@ use crate::permissions::host_grant::{
     HostGrantAction, PrincipalEvidence, RoomBinding, RoomGate, StreamEvidence,
 };
 use crate::s2s::route::{
-    LocalRooms, RoomOperation, RoomReplies, RoomRequest, Seat, SeatChange, SeatEnd,
+    LocalRooms, RemotePrincipal, RoomOperation, RoomPlacement, RoomReplies, RoomRequest, Seat,
+    SeatChange, SeatEnd,
 };
 use crate::server::routes::interpret::effects::RoomExecutionPath;
 use crate::server::routes::interpret::plan_remote_occupant_groupchat;
@@ -175,21 +176,58 @@ fn archive_write_limited() {
     );
 }
 
+/// Finds the replica that holds a room and carries a remote principal's
+/// request there when it is another one.
+///
+/// A deployment of several replicas has one (its cluster's room claims and
+/// relay); a single replica has none and decides every request itself.
+#[async_trait]
+pub trait RoomCarrier: Send + Sync {
+    /// Where `stanza`, which `principal` addressed to `room`, is decided:
+    /// here, or on the replica that holds `room`, which then took it with
+    /// the facts of `principal`'s stream.
+    async fn place(
+        &self,
+        room: &BareJid,
+        principal: &RemotePrincipal,
+        stanza: &Stanza,
+    ) -> RoomPlacement;
+}
+
 /// [`LocalRooms`] over the WebSocket state's rooms, grants and archive.
 ///
 /// It holds the state weakly: the state holds the router, which holds this.
 pub struct WebSocketLocalRooms {
     state: Weak<WebSocketState>,
     archive_writes: ArchiveAllowances,
+    carrier: Option<Arc<dyn RoomCarrier>>,
 }
 
 impl WebSocketLocalRooms {
-    /// Host the rooms of `state` for remote occupants.
-    pub fn new(state: &Arc<WebSocketState>) -> Self {
+    /// Host the rooms of `state` for remote occupants, carrying a request
+    /// for a room another replica holds through `carrier`.
+    pub fn new(state: &Arc<WebSocketState>, carrier: Option<Arc<dyn RoomCarrier>>) -> Self {
         Self {
             state: Arc::downgrade(state),
             archive_writes: ArchiveAllowances::default(),
+            carrier,
         }
+    }
+}
+
+/// The carrier of a replica of `state`'s deployment: its cluster's, when
+/// the build clusters, and otherwise none.
+fn cluster_carrier(state: &Arc<WebSocketState>) -> Option<Arc<dyn RoomCarrier>> {
+    #[cfg(feature = "clustering")]
+    {
+        Some(Arc::new(super::s2s_room_relay::ClusterRoomCarrier::new(
+            state,
+        )))
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = state;
+        None
     }
 }
 
@@ -202,13 +240,26 @@ impl WebSocketLocalRooms {
 ///   offered to the router, which takes it only for a seat it holds;
 /// - decisions that name a seated remote occupant without a request of its
 ///   own read the evidence its seat was admitted under.
+///
+/// A request for a room another replica holds is carried there by the
+/// cluster's relay.
 pub(crate) fn host_rooms(
     state: &Arc<WebSocketState>,
     router: &crate::s2s::route::S2sRouter,
     global: crate::db::Database,
 ) {
+    host_rooms_carrying(state, router, global, cluster_carrier(state));
+}
+
+/// [`host_rooms`] with `carrier` in place of the cluster's.
+pub(crate) fn host_rooms_carrying(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+    global: crate::db::Database,
+    carrier: Option<Arc<dyn RoomCarrier>>,
+) {
     router.attach_rooms(
-        Arc::new(WebSocketLocalRooms::new(state)),
+        Arc::new(WebSocketLocalRooms::new(state, carrier)),
         Arc::new(crate::s2s::route::SqlSeatStore::new(global)),
     );
     state
@@ -234,6 +285,10 @@ impl waddle_xmpp::registry::ForeignDelivery for SeatDelivery {
 
     fn offer(&self, recipient: &FullJid, stanza: Stanza) -> Result<(), Box<Stanza>> {
         self.0.offer_to_seat(recipient, stanza)
+    }
+
+    fn close_room(&self, room: &BareJid) {
+        self.0.close_room_seats(room);
     }
 }
 
@@ -878,9 +933,10 @@ impl Asked<'_> {
                 occupancy_session: seat.session,
                 authenticated_session: Some(&address),
                 registry_owner: None,
-                // A room another replica holds refuses the join here: a
-                // remote principal's request is decided where its stream
-                // landed.
+                // A join for a room another replica holds was carried
+                // there with its stream's evidence before it reached this
+                // host; the session relay, which names its requester
+                // without one, is never taken for a remote principal.
                 ordered_relay_origin: None,
                 evidence: self.evidence,
             },
@@ -1104,11 +1160,13 @@ impl Asked<'_> {
             crate::server::routes::interpret::OrderedRelayRouteOrigin::room(&room),
         ));
         let plan = plan_remote_occupant_groupchat(&deps, room.clone(), message).await;
+        // A request for a room another replica holds was carried there
+        // before it reached this host; the room's claim moved since.
         if matches!(plan.room_execution, RoomExecutionPath::Remote { .. }) {
             return self.refuse(error(
                 ErrorType::Wait,
                 DefinedCondition::ResourceConstraint,
-                "This room is held by another server node; try again later.",
+                "This room is moving between server nodes; try again later.",
             ));
         }
         let submission = IngressSubmission {
@@ -1227,6 +1285,22 @@ impl LocalRooms for WebSocketLocalRooms {
                 asked.owner_or_moderation(iq).await
             }
             _ => asked.refuse(unavailable()),
+        }
+    }
+
+    async fn place(&self, principal: &RemotePrincipal, stanza: &Stanza) -> RoomPlacement {
+        let Some(carrier) = &self.carrier else {
+            return RoomPlacement::Here;
+        };
+        let to = match stanza {
+            Stanza::Iq(iq) => iq.to(),
+            Stanza::Message(message) => message.to.as_ref(),
+            Stanza::Presence(presence) => presence.to.as_ref(),
+        };
+        // The service itself is every replica's.
+        match to.filter(|to| to.node().is_some()) {
+            Some(to) => carrier.place(&to.to_bare(), principal, stanza).await,
+            None => RoomPlacement::Here,
         }
     }
 

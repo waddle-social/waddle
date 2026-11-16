@@ -23,11 +23,13 @@ use waddle_server::auth::{NativeUserStore, RegisterRequest};
 use waddle_server::s2s::config::S2sConfig;
 use waddle_server::s2s::conn::{S2sService, ServiceOptions};
 use waddle_server::s2s::route::{
-    RouterLimits, RouterOptions, S2sRouter, Seat, SqlIqCorrelations, SqlRemoteRoomStore,
+    CarriedRoomOutcome, CarriedRoomRequest, RemotePrincipal, RoomPlacement, RouterLimits,
+    RouterOptions, S2sRouter, Seat, SqlIqCorrelations, SqlRemoteRoomStore,
 };
 use waddle_server::test_support::{
-    host_rooms_for_remote_occupants, make_deployment_owner, router, seed_local_account,
-    websocket_state_running_s2s, WebSocketLocalDelivery, WebSocketState,
+    host_rooms_for_remote_occupants, host_rooms_for_remote_occupants_carrying,
+    make_deployment_owner, router, seed_local_account, websocket_state_running_s2s, RoomCarrier,
+    WebSocketLocalDelivery, WebSocketState,
 };
 use waddle_ws_test_support::WsXmppClient;
 use xmpp_parsers::iq::Iq;
@@ -146,17 +148,22 @@ impl Hosted {
     pub async fn start(limits: RouterLimits, adjust: impl FnOnce(&mut Spec)) -> Self {
         let wiring = Wiring::new(adjust).await;
         let state = websocket_state_running_s2s(&wiring.config).await;
-        let mut hosted = Self::serve(wiring, Arc::clone(&state), limits).await;
+        let mut hosted = Self::serve(wiring, state, limits).await;
+        hosted.serve_web().await;
+        hosted
+    }
+
+    /// Serve the state's WebSocket endpoint for local clients.
+    async fn serve_web(&mut self) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");
         let address = listener.local_addr().expect("listener address");
-        let app = router(state);
+        let app = router(Arc::clone(&self.state));
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        hosted.web = Some((format!("ws://{address}/ws"), server));
-        hosted
+        self.web = Some((format!("ws://{address}/ws"), server));
     }
 
     /// Have `state`, which runs the snapshot of `wiring`, host its rooms
@@ -165,6 +172,26 @@ impl Hosted {
     /// and `home-b.test` beside it. The state's own WebSocket endpoint, if
     /// it has one, is its owner's.
     pub async fn serve(wiring: Wiring, state: Arc<WebSocketState>, limits: RouterLimits) -> Self {
+        Self::serve_with(wiring, state, limits, None).await
+    }
+
+    /// [`Self::serve`] for a replica whose requests for rooms another
+    /// replica holds are carried by `carrier`.
+    pub async fn serve_carrying(
+        wiring: Wiring,
+        state: Arc<WebSocketState>,
+        limits: RouterLimits,
+        carrier: Arc<dyn RoomCarrier>,
+    ) -> Self {
+        Self::serve_with(wiring, state, limits, Some(carrier)).await
+    }
+
+    async fn serve_with(
+        wiring: Wiring,
+        state: Arc<WebSocketState>,
+        limits: RouterLimits,
+        carrier: Option<Arc<dyn RoomCarrier>>,
+    ) -> Self {
         let Wiring {
             pki,
             config,
@@ -182,7 +209,12 @@ impl Hosted {
             stop: None,
         });
         assert!(s2s_router.attach_local(Arc::new(WebSocketLocalDelivery::new(&state))));
-        host_rooms_for_remote_occupants(&state, &s2s_router, database);
+        match carrier {
+            Some(carrier) => {
+                host_rooms_for_remote_occupants_carrying(&state, &s2s_router, database, carrier)
+            }
+            None => host_rooms_for_remote_occupants(&state, &s2s_router, database),
+        }
         let service = S2sService::start(
             config,
             Some(listener),
@@ -350,6 +382,121 @@ impl Hosted {
         })
         .await
         .is_some()
+    }
+}
+
+/// A [`RoomCarrier`] that takes the place of a cluster's room claims and
+/// relay: `room` is held by the replica of `holder`, which is handed what
+/// the relay would carry there, and every other room by the replica that
+/// asks.
+pub struct ToHolder {
+    pub room: BareJid,
+    pub holder: S2sRouter,
+}
+
+#[async_trait::async_trait]
+impl RoomCarrier for ToHolder {
+    async fn place(
+        &self,
+        room: &BareJid,
+        principal: &RemotePrincipal,
+        stanza: &waddle_xmpp::Stanza,
+    ) -> RoomPlacement {
+        if *room != self.room {
+            return RoomPlacement::Here;
+        }
+        let carried = CarriedRoomRequest {
+            principal: principal.to_carried(),
+            stanza: stanza.clone(),
+        };
+        match self.holder.carried_room_request(carried) {
+            CarriedRoomOutcome::Queued => RoomPlacement::Carried,
+            CarriedRoomOutcome::Busy | CarriedRoomOutcome::Refused => {
+                RoomPlacement::Refused(Box::new(xmpp_parsers::stanza_error::StanzaError::new(
+                    xmpp_parsers::stanza_error::ErrorType::Wait,
+                    xmpp_parsers::stanza_error::DefinedCondition::ResourceConstraint,
+                    "en",
+                    "The room's holder did not take the request.",
+                )))
+            }
+        }
+    }
+}
+
+/// Two replicas of `example.com` in one process, each with its own
+/// WebSocket state, in-memory database, S2S router and connection manager
+/// over the same S2S snapshot.
+///
+/// The streams `home-b.test` opens land on the *front* replica, which
+/// holds no room. [`ROOM`] is held by the *holder*, whose WebSocket
+/// endpoint the local clients use and whose connection manager dials
+/// `home-b.test` for what its rooms send. A request for [`ROOM`] that
+/// reaches the front is handed to the holder by [`ToHolder`], which stands
+/// for the cluster's room claims and relay; no cluster runs.
+pub struct TwoReplicas {
+    /// The replica that holds [`ROOM`], with `home-b.test` beside it.
+    pub holder: Hosted,
+    pub front_state: Arc<WebSocketState>,
+    pub front_router: S2sRouter,
+    _front_service: S2sService,
+}
+
+impl TwoReplicas {
+    /// Start both replicas and `home-b.test`, with `adjust` applied to the
+    /// S2S specification both replicas load.
+    pub async fn start(adjust: impl FnOnce(&mut Spec)) -> Self {
+        let mut wiring = Wiring::new(adjust).await;
+        let config = Arc::clone(&wiring.config);
+        // `home-b.test` dials the listener the wiring named, which the
+        // front takes; the holder listens where nobody dials.
+        let (unused, _) = listener().await;
+        let front_listener = std::mem::replace(&mut wiring.listener, unused);
+        let holder_state = websocket_state_running_s2s(&config).await;
+        let mut holder = Hosted::serve(wiring, holder_state, RouterLimits::default()).await;
+        holder.serve_web().await;
+
+        let front_state = websocket_state_running_s2s(&config).await;
+        let database = front_state.deps.app_state.db_pool.global().clone();
+        let front_router = S2sRouter::new(RouterOptions {
+            config: Arc::clone(&config),
+            served: routing::served(DOMAIN),
+            correlations: Arc::new(SqlIqCorrelations::new(database.clone())),
+            rooms: Arc::new(SqlRemoteRoomStore::new(database.clone())),
+            limits: RouterLimits::default(),
+            stop: None,
+        });
+        assert!(front_router.attach_local(Arc::new(WebSocketLocalDelivery::new(&front_state))));
+        host_rooms_for_remote_occupants_carrying(
+            &front_state,
+            &front_router,
+            database,
+            Arc::new(ToHolder {
+                room: jid(ROOM).to_bare(),
+                holder: holder.router.clone(),
+            }),
+        );
+        let front_service = S2sService::start(
+            config,
+            Some(front_listener),
+            ServiceOptions {
+                sink: Arc::new(front_router.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(front_router.attach_transport(front_service.handle()));
+        Self {
+            holder,
+            front_state,
+            front_router,
+            _front_service: front_service,
+        }
+    }
+
+    /// The seat `occupant` holds in `room` on the front replica, if any.
+    pub fn front_seat(&self, room: &str, occupant: &str) -> Option<Seat> {
+        self.front_router
+            .seats()
+            .get(&jid(room).to_bare(), &full(occupant))
     }
 }
 

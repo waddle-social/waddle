@@ -267,6 +267,7 @@ pub use crate::server::durable_membership::PermissionDurableMembershipSource;
 /// over a real loopback WebSocket and drive the live connection loop.
 pub use crate::server::routes::websocket::router;
 pub use crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery;
+pub use crate::server::routes::websocket::s2s_rooms::RoomCarrier;
 pub use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
 pub use crate::server::routes::websocket::test_state::{
     create_test_session, register_test_connection, seed_local_account,
@@ -326,6 +327,35 @@ pub fn host_rooms_for_remote_occupants(
     seats: crate::db::Database,
 ) {
     crate::server::routes::websocket::s2s_rooms::host_rooms(state, router, seats);
+}
+
+/// [`host_rooms_for_remote_occupants`] for a replica whose requests for
+/// rooms another replica holds are carried by `carrier`, in place of the
+/// cluster's room claims and relay.
+#[cfg(feature = "test-support")]
+pub fn host_rooms_for_remote_occupants_carrying(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+    seats: crate::db::Database,
+    carrier: Arc<dyn RoomCarrier>,
+) {
+    crate::server::routes::websocket::s2s_rooms::host_rooms_carrying(
+        state,
+        router,
+        seats,
+        Some(carrier),
+    );
+}
+
+/// The owner side of a remote principal's room request carried over the
+/// cluster relay (`waddle.clustering.relay.remote_room_request.v1`), as
+/// the relay's handler runs it on the replica that receives the message.
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub async fn relayed_remote_room_request(
+    state: &WebSocketState,
+    message: crate::clustering::relay::RelayRemoteRoomRequest,
+) -> crate::clustering::relay::RelayRemoteRoomRequestReply {
+    crate::server::routes::websocket::relayed_remote_room_request(state, message).await
 }
 
 /// Make the account `localpart` of the state's domain an owner of the

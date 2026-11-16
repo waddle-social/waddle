@@ -70,6 +70,42 @@ impl RoomReplies {
     }
 }
 
+/// Where a request for a room is decided.
+#[derive(Debug)]
+pub enum RoomPlacement {
+    /// On this replica: it holds the room, or no replica does.
+    Here,
+    /// On the replica that holds the room, which took the request with its
+    /// sender's stream evidence. That replica seats the occupant and
+    /// answers through its own router.
+    Carried,
+    /// Nowhere now: the room's holder could not take the request. The
+    /// sender is answered with this error.
+    Refused(Box<xmpp_parsers::stanza_error::StanzaError>),
+}
+
+/// A stanza a remote principal addressed to a room this replica does not
+/// hold, with what the inbound stream that carried it proved of its
+/// sender, as the replica that verified the stream hands it to the room's
+/// holder.
+#[derive(Debug, Clone)]
+pub struct CarriedRoomRequest {
+    pub principal: super::principal::CarriedPrincipal,
+    pub stanza: Stanza,
+}
+
+/// What the room's holder did with a carried request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarriedRoomOutcome {
+    /// Queued for the room host, behind the room's earlier requests.
+    Queued,
+    /// The queues for the room host are full; nothing was queued.
+    Busy,
+    /// This replica hosts no rooms for remote occupants, or the stanza is
+    /// none a remote principal may address to a room; nothing was queued.
+    Refused,
+}
+
 /// Why a seat ended without the room deciding it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeatEnd {
@@ -102,6 +138,16 @@ pub trait LocalRooms: Send + Sync {
     /// remote principal may do is answered with its error or ignored, as
     /// its kind requires; no error answers an error.
     async fn handle(&self, request: RoomRequest) -> RoomReplies;
+
+    /// Where `stanza`, which `principal` addressed to a room, is decided.
+    /// A deployment of several replicas keeps a room's actor on one of
+    /// them: a request that reaches another is carried there with the
+    /// facts of its sender's stream, before any seat is opened for it, so
+    /// the replica a stream lands on never seats an occupant of a room it
+    /// does not hold. A host of a single replica decides everything here.
+    async fn place(&self, _principal: &RemotePrincipal, _stanza: &Stanza) -> RoomPlacement {
+        RoomPlacement::Here
+    }
 
     /// The seat ended without the room deciding it. The room removes the
     /// occupant, if it still seats it under the seat's generation, and

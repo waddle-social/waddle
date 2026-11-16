@@ -73,6 +73,10 @@ pub(super) struct LocalRoomRequest {
     /// it came from, as its stream authenticated them.
     pub local: CanonicalDomain,
     pub remote: CanonicalDomain,
+    /// Whether another replica verified the stream and carried the stanza
+    /// here because this replica holds its room. A carried request is
+    /// decided here and never carried again.
+    pub carried: bool,
 }
 
 /// A stanza that may be a room's traffic, as it arrived.

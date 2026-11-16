@@ -611,11 +611,16 @@ pub trait RemoteRoute: Send + Sync {
         false
     }
 
-    /// The local room `room` stopped being open to accounts at other
-    /// servers: every remote occupant this replica seats in it is removed
-    /// and told so. Like [`Self::route`] it only queues and must not wait
-    /// for a peer. A route that seats no remote occupant does nothing.
-    async fn close_room_seats(&self, _room: &jid::BareJid) {}
+    /// Take a stanza a remote principal addressed to a local room this
+    /// replica holds, which another replica verified on an inbound stream
+    /// and carried here with what that stream proved of its sender. A
+    /// route that hosts no rooms for remote occupants refuses it.
+    async fn carried_room_request(
+        &self,
+        _request: crate::s2s::route::CarriedRoomRequest,
+    ) -> crate::s2s::route::CarriedRoomOutcome {
+        crate::s2s::route::CarriedRoomOutcome::Refused
+    }
 
     /// The local resource `resource` resumed its session on this replica,
     /// which may not be the one that held it before. A route that keeps

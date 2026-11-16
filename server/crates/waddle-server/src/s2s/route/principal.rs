@@ -11,10 +11,13 @@ use crate::s2s::verify::TrustProfileKind;
 /// An account or service at a remote domain, as an inbound S2S stream
 /// proved it (ADR-0020, "Remote principal").
 ///
-/// It is built only from the `from` address of a stanza on a
+/// It is built from the `from` address of a stanza on a
 /// [`VerifiedPeerStream`] whose remote domain is that address's domain, and
 /// carries the stream's authentication strength and trust-profile kind to
-/// whatever decides a protected effect. It is never a local session,
+/// whatever decides a protected effect. The replica that verified the
+/// stream may hand those facts to the replica that holds the room the
+/// stanza addresses ([`CarriedPrincipal`]), which builds the same principal
+/// from them ([`Self::carried`]); nothing else builds one. It is never a local session,
 /// account or grant: domain authentication does not grant access to
 /// anything, and a remote account's grants are decided at the effect
 /// boundary from its canonical bare JID, its home, the strength and the
@@ -28,6 +31,29 @@ pub struct RemotePrincipal {
     trust_profile: Option<TrustProfileKind>,
     connection: u64,
     generation: Uuid,
+}
+
+/// What an inbound S2S stream proved of a stanza's sender, as the replica
+/// that verified the stream hands it to another replica of this deployment
+/// with the stanza (ADR-0020 D10): the facts of the stream and nothing
+/// decided from them.
+///
+/// Only the cluster relay carries one, between replicas of one deployment
+/// that authenticate each other; it never comes from a peer server. Whether
+/// the sender's domain is admitted, and what its grants are honoured as, is
+/// decided again by the replica that receives it, under the S2S snapshot
+/// that replica runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarriedPrincipal {
+    /// The address the stanza came from, in canonical form.
+    pub address: Jid,
+    /// How the sender's home domain authenticated on the stream.
+    pub strength: AuthenticationStrength,
+    /// The trust profile its certificate was verified under, if it
+    /// presented one.
+    pub trust_profile: Option<TrustProfileKind>,
+    /// The configuration snapshot the stream was admitted under.
+    pub generation: Uuid,
 }
 
 /// Why an address cannot be a remote principal of a stream.
@@ -71,6 +97,43 @@ impl RemotePrincipal {
             connection: stream.connection(),
             generation: stream.generation(),
         })
+    }
+
+    /// The principal another replica of this deployment verified on an
+    /// inbound stream and carried here with its stanza. The address must be
+    /// canonical, as on a stream; its home is the address's domain, which
+    /// the verifying replica matched against the stream's.
+    pub fn carried(carried: CarriedPrincipal) -> Result<Self, PrincipalError> {
+        let canonical =
+            canonical_jid(&carried.address).map_err(|_| PrincipalError::NotCanonical)?;
+        if canonical.as_str() != carried.address.as_str() {
+            return Err(PrincipalError::NotCanonical);
+        }
+        let home = CanonicalDomain::from_domain(canonical.domain())
+            .map_err(|_| PrincipalError::NotCanonical)?;
+        let account =
+            CanonicalBareJid::new(canonical.to_bare()).map_err(|_| PrincipalError::NotCanonical)?;
+        Ok(Self {
+            address: canonical,
+            account,
+            home,
+            strength: carried.strength,
+            trust_profile: carried.trust_profile,
+            // The connection is another replica's.
+            connection: 0,
+            generation: carried.generation,
+        })
+    }
+
+    /// The facts of this principal's stream, for the replica that holds
+    /// the room its stanza addresses.
+    pub fn to_carried(&self) -> CarriedPrincipal {
+        CarriedPrincipal {
+            address: self.address.clone(),
+            strength: self.strength,
+            trust_profile: self.trust_profile,
+            generation: self.generation,
+        }
     }
 
     /// The address the stanza came from, full or bare, in canonical form.

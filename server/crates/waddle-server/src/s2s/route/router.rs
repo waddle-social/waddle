@@ -28,7 +28,7 @@ use super::correlation::{
     PendingRequest, RequestKind,
 };
 use super::local::{LocalDelivery, LocalOrigin};
-use super::local_rooms::LocalRooms;
+use super::local_rooms::{CarriedRoomOutcome, CarriedRoomRequest, LocalRooms};
 use super::occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomVerdict,
     MAX_JOIN_ID_BYTES,
@@ -649,6 +649,22 @@ impl S2sRouter {
         self.inner.offer_to_seat(occupant, stanza)
     }
 
+    /// Take a stanza another replica of this deployment verified on an
+    /// inbound stream and carried here because this replica holds the room
+    /// it addresses, with what that stream proved of its sender. It is
+    /// decided, seated and answered as a stanza from a stream of this
+    /// replica is, and never carried again.
+    pub fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {
+        self.inner.carried_room_request(request)
+    }
+
+    /// The local room `room` stopped being open to accounts at other
+    /// servers: every remote occupant this replica seats in it is removed
+    /// and told so, behind what the room already decides.
+    pub fn close_room_seats(&self, room: &BareJid) {
+        self.inner.close_room_seats(room);
+    }
+
     /// Whether [`Self::offer_to_seat`] would take `stanza` for `occupant`.
     pub fn seats_recipient(&self, occupant: &FullJid, stanza: &Stanza) -> bool {
         self.inner.seat_of(occupant, stanza).is_some()
@@ -714,8 +730,8 @@ impl RemoteRoute for S2sRouter {
         self.inner.adopt_seat(room, occupant).await
     }
 
-    async fn close_room_seats(&self, room: &BareJid) {
-        self.inner.close_room_seats(room);
+    async fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {
+        self.inner.carried_room_request(request)
     }
 
     async fn resource_resumed(&self, resource: &FullJid) {

@@ -87,6 +87,7 @@ mod presence;
 mod reassert;
 mod recipient_inventory;
 mod registration;
+mod remote_room_request;
 mod types;
 mod validation;
 

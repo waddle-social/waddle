@@ -945,7 +945,11 @@ pub(super) async fn apply_muc_owner_config_as(
     // of them: each remote occupant is removed and told (XEP-0045 §11.1,
     // status 333), once the change is committed.
     if previous_config.federated && !config.federated {
-        state.deps.remote_route.close_room_seats(room_jid).await;
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .close_foreign_room(room_jid);
     }
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
