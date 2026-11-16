@@ -63,10 +63,11 @@ class MachineUsage(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), 'report', '--samples', str(root / 'samples.jsonl'),
                  '--log', str(root / 'lane.log'), '--variant', '16x32', '--vcpu', '16', '--memory-gib', '32',
-                 '--outcome', 'success', '--lane-seconds', '600', '--output', str(root / 'out/16x32.json')],
+                 '--outcome', 'success', '--lane-seconds', '600'],
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            record = json.loads((root / 'out/16x32.json').read_text())
+            (root / 'out/16x32.json').write_text(result.stdout)
+            record = json.loads(result.stdout)
             self.assertEqual(record['compile_seconds'], 20.5)
             self.assertEqual(record['compile']['max_busy_cores'], 2.0)
             self.assertEqual(record['shard_seconds'], {'1': 19.5, '2': 12.0})

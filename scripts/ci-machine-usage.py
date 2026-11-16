@@ -3,7 +3,7 @@
 
   sample    append whole-machine CPU and memory samples until killed
   tee       copy stdin to stdout, and to a file with a timestamp per line
-  report    reduce one job's samples and log to a JSON record
+  report    reduce one job's samples and log to a JSON record on stdout
   summarize print a Markdown comparison of several records
 
 The runner benchmark (ci/runner-benchmark) runs the Rust shard lane on several
@@ -138,7 +138,6 @@ def report(args):
         'cpus_seen': samples[-1]['cpus'] if samples else None,
         'memory_total_gib': round(samples[-1]['mem_total_kib'] / 1024 / 1024, 1) if samples else None,
     }
-    confined(args.output).write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
     print(json.dumps(record, indent=2, sort_keys=True))
 
 
@@ -194,7 +193,7 @@ def main():
     copier = commands.add_parser('tee')
     copier.add_argument('--log', required=True)
     reporter = commands.add_parser('report')
-    for name in ('--samples', '--log', '--variant', '--outcome', '--output'):
+    for name in ('--samples', '--log', '--variant', '--outcome'):
         reporter.add_argument(name, required=True)
     reporter.add_argument('--vcpu', type=int, required=True)
     reporter.add_argument('--memory-gib', type=int, required=True)

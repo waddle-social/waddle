@@ -110,7 +110,7 @@ jobs:
           python3 scripts/ci-machine-usage.py report --samples "$RUNNER_TEMP/samples.jsonl" --log "$RUNNER_TEMP/lane.log" \
             --variant "$VARIANT" --vcpu "$VCPU" --memory-gib "$MEMORY" --outcome "${OUTCOME:-skipped}" \
             --lane-seconds "$(cat "$RUNNER_TEMP/lane-seconds" 2>/dev/null || echo 0)" \
-            --output "$RUNNER_TEMP/report/$VARIANT.json"
+            | tee "$RUNNER_TEMP/report/$VARIANT.json"
           grep -h 'WADDLE_CI_METRIC' "$RUNNER_TEMP/lane.log" | grep -v 'phase=linker_verified' \
             > "$RUNNER_TEMP/report/$VARIANT.metrics.txt" || true
           cp "$RUNNER_TEMP/samples.jsonl" "$RUNNER_TEMP/report/$VARIANT.samples.jsonl"

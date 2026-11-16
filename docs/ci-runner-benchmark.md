@@ -245,4 +245,22 @@ baseline. Its test phase is the first whole-machine measurement of the lane:
 The job waited 58 minutes for a runner. During the test phase the machine was
 about 95% idle, PostgreSQL included.
 
-Full passes follow here.
+### Pass 1, 2026-11-16 (in progress)
+
+[Run 43787962349](https://github.com/waddle-social/waddle/actions/runs/43787962349).
+Every variant compiles from scratch. Variants are added as they finish.
+
+| Variant | Outcome | Queue wait | Lane | Compile | Slowest shard | vCPU-min | Busy cores compile (mean / max) | Busy cores tests (mean / max) | Peak memory |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `32x64` (baseline) | pass | 72 min | 20.8 min | 5.9 min | 12.7 min | 665 | 10.1 / 26.9 | 1.6 / 11.0 | 19.6 GB |
+
+Baseline observations:
+
+- The machine averaged 4.1 busy cores of 32 over the whole job and never used
+  more than 20 GB of its 64.
+- Compile used 10 cores on average with `CARGO_BUILD_JOBS = 4`: rustc and the
+  linker run their own threads inside each job. The earlier 311% figure was
+  one process tree, not the machine.
+- Shard times were 761 s, 604 s, 609 s and 395 s, within 2% of the
+  preliminary run. Shard 1 sets the lane length.
+- The job waited 72 minutes for a machine and ran for 21.
