@@ -23,9 +23,9 @@ use waddle_xmpp::identity::CanonicalBareJid;
 
 use super::enrolled::EnrolledSet;
 use super::error::HostGrantError;
-use super::issuance::ServedAccountDomains;
 use super::model::{GrantGeneration, RoomAffiliation, ScopeLifecycleId};
 use super::policy::{grant_allows, honoured_affiliation, HostGrantAction};
+use super::principal::{PrincipalEvidence, PrincipalPolicy};
 use super::store::{
     affiliation_column, corrupt, load_incarnation, load_scope, scope_admits, HostGrantStore,
 };
@@ -67,44 +67,57 @@ pub struct RoomGrants {
 }
 
 impl RoomGrants {
-    /// Whether `subject` may perform `action`, decided by the admission
-    /// policy (`policy::grant_allows`) for a deployment serving `served`.
+    /// Whether `subject`, reaching the decision with `evidence`, may perform
+    /// `action`, decided by the admission policy (`policy::grant_allows`)
+    /// with the grants `principals` honours.
     pub fn allows(
         &self,
         subject: &BareJid,
+        evidence: &PrincipalEvidence,
         action: HostGrantAction,
-        served: &ServedAccountDomains,
+        principals: &PrincipalPolicy,
     ) -> bool {
         self.scope_admits
             && self
                 .grants
                 .get(subject.as_str())
                 .is_some_and(|(recorded, effective)| {
-                    grant_allows(*recorded, *effective, served.home_of(subject), action)
+                    let witness = principals.witness(subject, evidence);
+                    grant_allows(*recorded, *effective, &witness, action)
                 })
     }
 
-    /// The standing `subject` is honoured with: `Outcast` when its recorded
-    /// or effective affiliation is outcast; otherwise its effective
-    /// affiliation as admission honours it, or `None` when it holds no
-    /// grant or the scope admits nothing.
-    pub fn standing(&self, subject: &BareJid, served: &ServedAccountDomains) -> RoomAffiliation {
+    /// The standing `subject`, reaching the decision with `evidence`, is
+    /// honoured with: `Outcast` when its recorded or effective affiliation
+    /// is outcast; otherwise its effective affiliation as admission honours
+    /// it, or `None` when it holds no grant, the grant is not honoured or
+    /// the scope admits nothing.
+    pub fn standing(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+        principals: &PrincipalPolicy,
+    ) -> RoomAffiliation {
         match self.grants.get(subject.as_str()) {
             None => RoomAffiliation::None,
             Some((RoomAffiliation::Outcast, _) | (_, RoomAffiliation::Outcast)) => {
                 RoomAffiliation::Outcast
             }
             Some((_, effective)) if self.scope_admits => {
-                honoured_affiliation(*effective, served.home_of(subject))
+                honoured_affiliation(*effective, &principals.witness(subject, evidence))
             }
             Some(_) => RoomAffiliation::None,
         }
     }
 
-    /// The subjects whose grants allow `action`, in canonical order.
-    pub fn admitted(&self, action: HostGrantAction, served: &ServedAccountDomains) -> Vec<BareJid> {
+    /// The subjects whose grants allow `action`, in canonical order. Each
+    /// is decided without stream evidence: a listed subject is named, not
+    /// requesting.
+    pub fn admitted(&self, action: HostGrantAction, principals: &PrincipalPolicy) -> Vec<BareJid> {
         self.subjects()
-            .filter(|subject| self.allows(subject, action, served))
+            .filter(|subject| {
+                self.allows(subject, &PrincipalEvidence::NoStream, action, principals)
+            })
             .collect()
     }
 

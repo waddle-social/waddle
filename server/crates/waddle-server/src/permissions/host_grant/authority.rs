@@ -93,6 +93,7 @@ use super::model::{
     EnrollScope, GrantGeneration, GrantOperationId, GrantSubject, MutationReceipt, RetireScope,
     RoomAffiliation, ScopeLifecycleId, SetAffiliation,
 };
+use super::principal::PrincipalEvidence;
 use super::projection::{
     MarkerObservation, ProjectedRelationship, ProjectionObservation, ProjectionPlan,
     ProjectionWrite, RestoredPlan,
@@ -243,7 +244,8 @@ impl HostGrantAuthority {
         Ok(receipt)
     }
 
-    /// Record an affiliation change under this authority's issuance policy.
+    /// Record an affiliation change under this authority's issuance policy,
+    /// asked for by a local session whose request no S2S stream carried.
     /// A receipt means the change is recorded, not that an increase is
     /// effective: [`Self::reconcile`] makes it so. The witnesses follow the
     /// commit on a task of their own; the receipt does not wait for them.
@@ -251,7 +253,21 @@ impl HostGrantAuthority {
         &self,
         command: &SetAffiliation,
     ) -> Result<MutationReceipt, HostGrantError> {
-        let receipt = self.store.set_affiliation(command, &self.issuance).await?;
+        self.set_affiliation_as(command, &PrincipalEvidence::NoStream)
+            .await
+    }
+
+    /// [`Self::set_affiliation`] for an initiator whose request reached this
+    /// replica with `initiator` (see [`HostGrantStore::set_affiliation_as`]).
+    pub async fn set_affiliation_as(
+        &self,
+        command: &SetAffiliation,
+        initiator: &PrincipalEvidence,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let receipt = self
+            .store
+            .set_affiliation_as(command, &self.issuance, initiator)
+            .await?;
         self.after_commit(command.lifecycle);
         Ok(receipt)
     }

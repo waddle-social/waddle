@@ -128,7 +128,8 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
 /// What a room an enrolled host-grant scope manages accepts of an
 /// administration set, before anything is recorded: one affiliation change
 /// per request, so that what is recorded is what the room actor applies,
-/// and the moderator role only for accounts of a served domain.
+/// and the moderator role only for occupants whose witness honours room
+/// moderation (accounts of a served domain).
 async fn check_host_grant_admin_items(
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     room: &crate::permissions::host_grant::ManagedRoomGrants,
@@ -148,12 +149,8 @@ async fn check_host_grant_admin_items(
     if moderator_nicks.is_empty() {
         return Ok(());
     }
-    match super::muc_admin_host_grant::occupants_are_served_accounts(
-        room_actor,
-        room,
-        &moderator_nicks,
-    )
-    .await
+    match super::muc_admin_host_grant::occupants_may_moderate(room_actor, room, &moderator_nicks)
+        .await
     {
         Ok(true) => Ok(()),
         Ok(false) => Err(Box::new(not_allowed_iq_error(

@@ -7,12 +7,13 @@
 //! negative affiliations are issued to any account.
 //!
 //! The trusted-home set is an input: this module neither loads nor
-//! distributes it. Issuance records a privileged grant for a trusted home;
-//! whether a stored grant is honoured is decided where it is used. Admission
-//! and initiator authority honour a privileged or moderator grant only for
-//! an account of a served domain ([`ServedAccountDomains`]), because
-//! honouring one for a trusted home also depends on the authentication
-//! strength of the stream the principal arrived on.
+//! distributes it. A replica's policy takes it, with the served account
+//! domains, from its [`PrincipalPolicy`] ([`IssuancePolicy::for_principals`]),
+//! the value admission decides from too. Issuance records a privileged
+//! grant for a trusted home; whether a stored grant is honoured is decided
+//! where it is used, from the principal's witness at that decision
+//! ([`super::PrincipalWitness`]): for a trusted home only on a `pkix`
+//! stream, and only while the home stays admitted and listed.
 
 use std::collections::BTreeSet;
 
@@ -21,6 +22,7 @@ use thiserror::Error;
 use waddle_xmpp::identity::CanonicalDomain;
 
 use super::model::{GrantSubject, RoomAffiliation};
+use super::principal::PrincipalPolicy;
 
 /// Why issuance accepted a grant, recorded with it as provenance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,23 +103,23 @@ pub enum IssuanceRefusal {
     TrustedHomeIsLocal,
 }
 
-/// The inputs issuance decides from.
+/// The inputs issuance decides from, and the [`PrincipalPolicy`] a
+/// mutation's initiator is decided under.
 ///
-/// Its account domains and the served account domains of the replica's
-/// [`HostGrantAttachment`](super::HostGrantAttachment), which admission
-/// honours privileged grants for, must come from one configuration value.
-/// Issuance records an owner or admin grant as `local` because its subject
-/// is an account of a served domain, and admission honours the grant only
-/// if it agrees that the domain is served; were the two sets configured
-/// apart, a grant issued here could be honoured as no grant there, or the
-/// reverse. Nothing in this slice builds a policy from configuration yet;
-/// the one that does takes the domains from where the attachment takes
-/// them.
+/// Its account domains and trusted homes, and those the replica's
+/// [`HostGrantAttachment`](super::HostGrantAttachment) decides admission
+/// from, must come from one configuration value: a replica builds both from
+/// its [`PrincipalPolicy`] ([`Self::for_principals`]). Issuance records an
+/// owner or admin grant as `local` because its subject is an account of a
+/// served domain, and admission honours the grant only if it agrees that
+/// the domain is served; were the two sets configured apart, a grant issued
+/// here could be honoured as no grant there, or the reverse.
 #[derive(Clone, Debug, Default)]
 pub struct IssuancePolicy {
     account_domains: ServedAccountDomains,
     service_domains: BTreeSet<String>,
     trusted_homes: BTreeSet<String>,
+    principals: PrincipalPolicy,
 }
 
 impl IssuancePolicy {
@@ -125,7 +127,9 @@ impl IssuancePolicy {
     /// homes, `service_domains` the domains of its own services (rooms and
     /// PubSub), and `trusted_homes` the operator's trusted-home list. A
     /// trusted home must be a fully qualified DNS name that this deployment
-    /// does not serve; entries match exactly.
+    /// does not serve; entries match exactly. A mutation's initiator is
+    /// decided as on a replica with S2S off: no remote initiator's grant is
+    /// honoured.
     pub fn new(
         account_domains: impl IntoIterator<Item = CanonicalDomain>,
         service_domains: impl IntoIterator<Item = CanonicalDomain>,
@@ -144,17 +148,36 @@ impl IssuancePolicy {
             homes.insert(home.as_str().to_owned());
         }
         Ok(Self {
+            principals: PrincipalPolicy::local(account_domains.clone()),
             account_domains,
             service_domains,
             trusted_homes: homes,
         })
     }
 
+    /// The policy of a replica deciding under `principals`: exactly its
+    /// served account domains, the trusted-home list of the S2S snapshot it
+    /// runs (none while S2S is off), and the domains of its own services. A
+    /// mutation's initiator is decided under `principals` too.
+    pub fn for_principals(
+        principals: &PrincipalPolicy,
+        service_domains: impl IntoIterator<Item = CanonicalDomain>,
+    ) -> Result<Self, IssuanceRefusal> {
+        let mut policy = Self::for_served(
+            principals.served(),
+            service_domains,
+            principals.trusted_homes(),
+        )?;
+        policy.principals = principals.clone();
+        Ok(policy)
+    }
+
     /// A policy whose account domains are exactly `served`, as a replica's
     /// [`HostGrantAttachment`](super::HostGrantAttachment) holds them, so
     /// that issuance records an owner or admin grant as `local` for exactly
     /// the accounts admission honours it for. The other inputs are checked
-    /// as [`Self::new`] checks them.
+    /// as [`Self::new`] checks them, and a mutation's initiator is decided
+    /// as on a replica with S2S off.
     pub fn for_served(
         served: &ServedAccountDomains,
         service_domains: impl IntoIterator<Item = CanonicalDomain>,
@@ -162,6 +185,7 @@ impl IssuancePolicy {
     ) -> Result<Self, IssuanceRefusal> {
         let mut policy = Self::new([], service_domains, [])?;
         policy.account_domains = served.clone();
+        policy.principals = PrincipalPolicy::local(served.clone());
         for home in trusted_homes {
             if !home.kind().names_federation_peer() {
                 return Err(IssuanceRefusal::InvalidTrustedHome);
@@ -191,6 +215,11 @@ impl IssuancePolicy {
     /// The account domains this deployment serves.
     pub fn served_account_domains(&self) -> &ServedAccountDomains {
         &self.account_domains
+    }
+
+    /// What a mutation's initiator is decided under.
+    pub fn principals(&self) -> &PrincipalPolicy {
+        &self.principals
     }
 
     /// Decide whether `affiliation` may be issued to `subject`.

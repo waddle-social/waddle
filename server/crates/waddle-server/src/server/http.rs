@@ -934,7 +934,6 @@ async fn attach_host_grant_store(
     restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     stop: tokio_util::sync::CancellationToken,
 ) {
-    use crate::permissions::host_grant::ServedAccountDomains;
     use crate::permissions::host_grant::{verification_retried, HostGrantStore};
     let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
         return;
@@ -946,12 +945,15 @@ async fn attach_host_grant_store(
     // drops it.
     state.host_grants.bind_attachment(Arc::clone(&gate));
     let permissions = state.permission_actor.clone();
-    let served = ServedAccountDomains::new([account_domain]);
-    let issuance = service_domains.host_grant_issuance_policy(&served);
+    // Admission, the initiator of a room administration request and
+    // projection recovery's issuance all decide from one value: the served
+    // account domain and the S2S snapshot this replica runs.
+    let principals = state.grant_principals(account_domain);
+    let issuance = service_domains.host_grant_issuance_policy(&principals);
     gate.install_verifier(
         store.clone(),
         permissions.clone(),
-        served,
+        principals,
         restore_epoch,
         stop.clone(),
     );

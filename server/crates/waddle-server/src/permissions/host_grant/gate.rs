@@ -10,9 +10,11 @@
 //! it answers [`RoomGate::Unmanaged`] without touching PostgreSQL, and the
 //! surface keeps its existing checks. A managed room is answered from its
 //! canonical grants alone, read from PostgreSQL in one bounded snapshot,
-//! with the policy room-manifest admission applies (`policy::grant_allows`):
-//! legacy tuples, durable room affiliations, PubSub affiliations, Space
-//! membership and the room actor's occupancy admit nothing. It answers
+//! with the policy room-manifest admission applies (`policy::grant_allows`)
+//! and the replica's [`PrincipalPolicy`], which decides whose grants are
+//! honoured (ADR-0020 D1 and D8): legacy tuples, durable room affiliations,
+//! PubSub affiliations, Space membership and the room actor's occupancy
+//! admit nothing. It answers
 //! [`RoomGate::Unavailable`] when the enrolled set has not loaded, when the
 //! address reaches a managed room in a form that is not canonical, when the
 //! grants cannot be read within the bounds, and on a replica whose
@@ -28,8 +30,8 @@ use std::time::Duration;
 use jid::BareJid;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
-use super::issuance::ServedAccountDomains;
 use super::policy::HostGrantAction;
+use super::principal::{PrincipalEvidence, PrincipalPolicy, PrincipalWitness};
 use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
@@ -78,25 +80,60 @@ pub enum RoomGate<T> {
     Unavailable,
 }
 
-/// A managed room's canonical grants together with the account domains the
-/// replica serves, which decide whose privileged grants are honoured.
+/// A managed room's canonical grants together with the replica's
+/// [`PrincipalPolicy`] at the decision: the account domains it serves and
+/// the S2S snapshot it runs, which decide whose grants are honoured.
 #[derive(Clone, Debug)]
 pub struct ManagedRoomGrants {
     pub grants: RoomGrants,
-    pub served: ServedAccountDomains,
+    pub principals: PrincipalPolicy,
 }
 
 impl ManagedRoomGrants {
+    /// Whether `subject` may perform `action`, decided without stream
+    /// evidence: a local session's own request, or a subject the surface
+    /// names (an occupant, a member, a recipient).
     pub fn allows(&self, subject: &BareJid, action: HostGrantAction) -> bool {
-        self.grants.allows(subject, action, &self.served)
+        self.allows_as(subject, &PrincipalEvidence::NoStream, action)
     }
 
+    /// Whether `subject`, whose request reached the surface with
+    /// `evidence`, may perform `action`.
+    pub fn allows_as(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+        action: HostGrantAction,
+    ) -> bool {
+        self.grants
+            .allows(subject, evidence, action, &self.principals)
+    }
+
+    /// The standing `subject` is honoured with, decided without stream
+    /// evidence.
     pub fn standing(&self, subject: &BareJid) -> super::model::RoomAffiliation {
-        self.grants.standing(subject, &self.served)
+        self.standing_as(subject, &PrincipalEvidence::NoStream)
     }
 
+    /// The standing `subject`, whose request reached the surface with
+    /// `evidence`, is honoured with.
+    pub fn standing_as(
+        &self,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+    ) -> super::model::RoomAffiliation {
+        self.grants.standing(subject, evidence, &self.principals)
+    }
+
+    /// The subjects whose grants allow `action`, each decided without
+    /// stream evidence.
     pub fn admitted(&self, action: HostGrantAction) -> Vec<BareJid> {
-        self.grants.admitted(action, &self.served)
+        self.grants.admitted(action, &self.principals)
+    }
+
+    /// What `subject`, reaching the surface with `evidence`, is decided as.
+    pub fn witness(&self, subject: &BareJid, evidence: &PrincipalEvidence) -> PrincipalWitness {
+        self.principals.witness(subject, evidence)
     }
 }
 
@@ -194,7 +231,7 @@ impl HostGrantGate {
         match tokio::time::timeout(ROOM_READ_DEADLINE, store.room_grants(binding)).await {
             Ok(Ok(RoomLookup::Managed(grants))) => RoomGate::Managed(ManagedRoomGrants {
                 grants,
-                served: attachment.served().clone(),
+                principals: attachment.principals().clone(),
             }),
             // Room bindings are immutable, so a binding the enrolled set
             // holds and the store does not is not a decision either.
@@ -228,17 +265,31 @@ impl HostGrantGate {
         }
     }
 
-    /// Whether `subject` may perform `action` in the room `binding` names.
+    /// Whether `subject` may perform `action` in the room `binding` names,
+    /// decided without stream evidence.
     pub async fn allows(
         &self,
         binding: RoomBinding<'_>,
         subject: &BareJid,
         action: HostGrantAction,
     ) -> RoomGate<bool> {
+        self.allows_as(binding, subject, &PrincipalEvidence::NoStream, action)
+            .await
+    }
+
+    /// Whether `subject`, whose request reached the surface with
+    /// `evidence`, may perform `action` in the room `binding` names.
+    pub async fn allows_as(
+        &self,
+        binding: RoomBinding<'_>,
+        subject: &BareJid,
+        evidence: &PrincipalEvidence,
+        action: HostGrantAction,
+    ) -> RoomGate<bool> {
         match self.room(binding).await {
             RoomGate::Unmanaged => RoomGate::Unmanaged,
             RoomGate::Unavailable => RoomGate::Unavailable,
-            RoomGate::Managed(room) => RoomGate::Managed(room.allows(subject, action)),
+            RoomGate::Managed(room) => RoomGate::Managed(room.allows_as(subject, evidence, action)),
         }
     }
 

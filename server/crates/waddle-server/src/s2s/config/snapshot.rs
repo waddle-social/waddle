@@ -107,6 +107,7 @@ pub struct S2sConfig {
     discovery: bool,
     blocked: Arc<BlockedAddresses>,
     dialback: DialbackSettings,
+    grants_require_pkix: bool,
 }
 
 impl fmt::Debug for S2sConfig {
@@ -123,6 +124,7 @@ impl fmt::Debug for S2sConfig {
             .field("discovery", &self.discovery)
             .field("blocked_prefixes", &self.blocked.extra().len())
             .field("dialback", &self.dialback)
+            .field("grants_require_pkix", &self.grants_require_pkix)
             .finish_non_exhaustive()
     }
 }
@@ -199,6 +201,7 @@ impl S2sConfig {
             discovery: document.discovery.enabled,
             blocked: Arc::new(blocked),
             dialback,
+            grants_require_pkix: document.host_policy.require_pkix,
         })
     }
 
@@ -286,6 +289,14 @@ impl S2sConfig {
     /// dialback list and admitted (ADR-0020 D2).
     pub fn permits_inbound_dialback(&self, remote: &CanonicalDomain) -> bool {
         self.dialback.inbound && self.admission.permits_dialback(remote)
+    }
+
+    /// Whether host policy honours a remote principal's grants only on a
+    /// stream with `pkix` strength, member-level grants included
+    /// (`host_policy.require_pkix`). Privileged grants and room moderation
+    /// need `pkix` whatever this says (ADR-0020 D8).
+    pub fn grants_require_pkix(&self) -> bool {
+        self.grants_require_pkix
     }
 }
 
