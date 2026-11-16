@@ -1122,10 +1122,14 @@ impl Session {
         }
         if let Role::Outbound {
             remote,
+            dial,
             established,
             ..
         } = &mut self.role
         {
+            // The pair is free to dial again before the dialler learns of
+            // the failure, as it is when the attempt succeeds.
+            *dial = None;
             // An attempt that never established backs off when the peer or
             // the path to it failed; one that did was recorded as a
             // success.

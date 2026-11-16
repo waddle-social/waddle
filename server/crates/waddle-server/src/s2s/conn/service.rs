@@ -533,11 +533,21 @@ struct Attempt {
 
 /// Fail an attempt before its session exists.
 fn fail_attempt(shared: &Shared, attempt: Attempt, outcome: S2sOutcome) {
+    let Attempt {
+        remote,
+        dial,
+        sender,
+        ..
+    } = attempt;
+    // The pair is free to dial again before the dialler learns of the
+    // failure, so a dialler that retries at once is not refused as in
+    // progress by its own finished attempt.
+    drop(dial);
     if is_peer_failure(outcome) {
-        shared.registry.record_failure(&attempt.remote);
+        shared.registry.record_failure(&remote);
     }
     telemetry::ended(StreamDirection::Outbound, outcome);
-    let _ = attempt.sender.send(Err(outcome));
+    let _ = sender.send(Err(outcome));
 }
 
 /// Dial the attempt's endpoints in order and run a stream, with STARTTLS
