@@ -50,8 +50,8 @@ use (`design/src/preset.ts`).
 - **Type.** Three bundled variable fonts (`Resources/Fonts`), applied with
   `.huddleText(Theme.Typography.body)`. Sizes follow Dynamic Type.
 - **Surfaces, motion, controls.** `Surfaces.swift` (`huddleSurface`,
-  `HuddleCard`), `Motion.swift` (`huddleAnimation`, a fade under Reduce
-  Motion) and `Controls.swift` (button, chip, tag, toggle, segmented control).
+  `HuddleCard`), `Motion.swift` (`huddleAnimation`; under Reduce Motion a
+  view swaps movement for a fade) and `Controls.swift` (button, chip, tag, toggle, segmented control).
 
 ## Prerequisites
 

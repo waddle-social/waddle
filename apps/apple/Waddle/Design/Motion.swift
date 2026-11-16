@@ -1,7 +1,12 @@
 import SwiftUI
 
-/// Polar Huddle motion. Springs are only for what the person caused;
-/// with Reduce Motion every one of these becomes a short fade.
+/// Polar Huddle motion. Springs are only for what the person caused.
+///
+/// With Reduce Motion each of these becomes a short ease, which is only a
+/// fade if nothing in the view changes position or size. A view that
+/// moves something (a sliding thumb, a scale) must read
+/// `accessibilityReduceMotion` itself and swap the movement for an
+/// opacity change, as the switch and segmented control do.
 enum HuddleMotion {
     /// A control under the finger or pointer: 90ms.
     case press
@@ -38,8 +43,8 @@ private struct HuddleAnimation<Value: Equatable>: ViewModifier {
 }
 
 extension View {
-    /// Animates changes of `value` with a Polar Huddle motion, as a fade
-    /// when Reduce Motion is on.
+    /// Animates changes of `value` with a Polar Huddle motion; a short
+    /// ease when Reduce Motion is on (see `HuddleMotion`).
     func huddleAnimation<Value: Equatable>(_ motion: HuddleMotion, value: Value) -> some View {
         modifier(HuddleAnimation(motion: motion, value: value))
     }

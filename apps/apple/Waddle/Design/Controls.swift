@@ -222,17 +222,21 @@ struct HuddleTag: View {
 /// colour when on, and the thumb settles across with a spring.
 struct HuddleToggleStyle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: Theme.Spacing.m) {
-            configuration.label
-            Spacer(minLength: 0)
-            HuddleSwitch(isOn: configuration.isOn)
+        // A button, so the row takes keyboard focus and Space like any
+        // other control; a tap gesture would be pointer- and touch-only.
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: Theme.Spacing.m) {
+                configuration.label
+                Spacer(minLength: 0)
+                HuddleSwitch(isOn: configuration.isOn)
+            }
+            .contentShape(Rectangle())
         }
-        .contentShape(Rectangle())
-        .onTapGesture { configuration.isOn.toggle() }
-        .accessibilityElement(children: .combine)
+        .buttonStyle(.plain)
         .accessibilityValue(Text(configuration.isOn ? "On" : "Off"))
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { configuration.isOn.toggle() }
+        .accessibilityAddTraits(.isToggle)
     }
 }
 
@@ -243,6 +247,7 @@ extension ToggleStyle where Self == HuddleToggleStyle {
 private struct HuddleSwitch: View {
     let isOn: Bool
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let size = CGSize(width: 44, height: 26)
     private static let thumb: CGFloat = 20
@@ -257,14 +262,29 @@ private struct HuddleSwitch: View {
                 )
             )
             .frame(width: Self.size.width, height: Self.size.height)
-            .overlay(alignment: isOn ? .trailing : .leading) {
-                Circle()
-                    .fill(isOn ? Theme.Colors.actionFg : Theme.Colors.fgMuted)
-                    .frame(width: Self.thumb, height: Self.thumb)
-                    .padding(.horizontal, (Self.size.height - Self.thumb) / 2)
-            }
+            .overlay { thumbs }
             .opacity(isEnabled ? 1 : 0.5)
             .huddleAnimation(.settle, value: isOn)
+    }
+
+    /// One thumb that slides across; with Reduce Motion, a thumb at each
+    /// end that cross-fade, so nothing moves.
+    @ViewBuilder
+    private var thumbs: some View {
+        if reduceMotion {
+            thumb(isOn: false).opacity(isOn ? 0 : 1)
+            thumb(isOn: true).opacity(isOn ? 1 : 0)
+        } else {
+            thumb(isOn: isOn)
+        }
+    }
+
+    private func thumb(isOn: Bool) -> some View {
+        Circle()
+            .fill(isOn ? Theme.Colors.actionFg : Theme.Colors.fgMuted)
+            .frame(width: Self.thumb, height: Self.thumb)
+            .padding(.horizontal, (Self.size.height - Self.thumb) / 2)
+            .frame(maxWidth: .infinity, alignment: isOn ? .trailing : .leading)
     }
 }
 
@@ -283,6 +303,7 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
     @Binding var selection: Value
     let segments: [Segment]
     @Namespace private var thumb
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// With the 3pt inset, touch gets a 44pt control (web `seg` size `lg`).
     private static var segmentHeight: CGFloat {
@@ -323,15 +344,27 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
             .frame(minHeight: Self.segmentHeight)
             .background {
                 if isSelected {
-                    Color.clear
-                        .huddleSurface(.card, in: Capsule())
-                        .overlay(Capsule().strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair))
-                        .matchedGeometryEffect(id: "thumb", in: thumb)
+                    selectionThumb
                 }
             }
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// The raised pill behind the selected segment. It slides between
+    /// segments; with Reduce Motion the old one fades out and the new one
+    /// fades in, so nothing moves.
+    @ViewBuilder
+    private var selectionThumb: some View {
+        let pill = Color.clear
+            .huddleSurface(.card, in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair))
+        if reduceMotion {
+            pill.transition(.opacity)
+        } else {
+            pill.matchedGeometryEffect(id: "thumb", in: thumb)
+        }
     }
 }
