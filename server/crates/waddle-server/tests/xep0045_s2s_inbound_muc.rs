@@ -159,15 +159,20 @@ async fn messages_fan_out_to_and_from_a_remote_occupant() {
     .await
     .expect("the remote occupant's message for the local occupant");
     assert_eq!(received.attr("from"), Some(BOB_OCCUPANT));
+    let is_reflection = |stanza: &Element| {
+        stanza.name() == "message"
+            && stanza.attr("from") == Some(BOB_OCCUPANT)
+            && stanza.attr("to") == Some(BOB)
+    };
     let reflection = hosted
-        .at_peer(|stanza| {
-            stanza.name() == "message"
-                && stanza.attr("from") == Some(BOB_OCCUPANT)
-                && stanza.attr("to") == Some(BOB)
-        })
+        .at_peer(is_reflection)
         .await
         .expect("the reflection for the remote sender");
     assert_eq!(body(&reflection).as_deref(), Some("hello from there"));
+    // It is handed to the sender's seat where the room fans the message
+    // out, and its answer does not repeat it: one copy reaches the sender.
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(hosted.count_at_peer(is_reflection), 1, "one reflection");
 }
 
 /// A subject change of the remote occupant (XEP-0045 §8.1).
@@ -565,11 +570,33 @@ async fn an_owner_or_admin_standing_is_not_issued_to_a_home_that_is_not_trusted(
 
 #[tokio::test]
 async fn a_trusted_homes_occupant_on_a_pkix_stream_may_be_made_moderator() {
+    // The control: the same request for the same occupant on the same
+    // certificate stream is refused while its home is admitted and not
+    // trusted. What decides is the trust entry, nothing else.
+    {
+        let (_hosted, mut owner, _own) =
+            room_with_remote_occupant(RouterLimits::default(), no_change).await;
+        let refused = local_set(
+            &mut owner,
+            ROOM,
+            "role-control",
+            role_item("moderator", "bob"),
+        )
+        .await;
+        assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
+        assert_eq!(error_condition(&refused).as_deref(), Some("not-allowed"));
+    }
     // `home-b.test` is a trusted home and authenticates by certificate.
     let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
         spec.trusted_homes = vec![HOME_B];
     })
     .await;
+    // The seat that will hold the role records the stream that honours
+    // it: `pkix`, under the home's private CA. An occupant seated on a
+    // dialback stream is refused the role, and its account an owner or
+    // admin standing (`xep0045_s2s_inbound_muc_replicas`).
+    let seat = hosted.seat(ROOM, BOB).expect("the remote occupant's seat");
+    assert_eq!(seat.evidence.strength(), AuthenticationStrength::Pkix);
     let answer = local_set(&mut alice, ROOM, "role-2", role_item("moderator", "bob")).await;
     assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
     // The occupant learns its new role over S2S.
@@ -1090,6 +1117,23 @@ async fn a_rooms_stanza_leaves_only_for_a_seat_and_one_that_finds_no_place_ends_
     }
     removed_with_333(&mut alice).await;
     assert!(hosted.unseated(ROOM, BOB).await);
+    // What ended the seat is the stanza that found no place, not a lost
+    // stream: the occupant's server is still there and the occupant enters
+    // again over it. (The router-level suite reads the cause the room is
+    // told, `xep0045_s2s_inbound_muc_router`.)
+    let before = hosted.received();
+    hosted
+        .from_peer(remote_join(BOB, ROOM, "bob", "join-again"))
+        .await;
+    let own = hosted
+        .at_peer_after(before, |stanza| {
+            presence_between(stanza, BOB_OCCUPANT, BOB)
+                && stanza.attr("type").is_none()
+                && statuses(stanza).contains(&"110".to_owned())
+        })
+        .await;
+    assert!(own.is_some(), "the occupant did not enter again");
+    assert!(hosted.seat(ROOM, BOB).is_some());
 }
 
 #[tokio::test]
