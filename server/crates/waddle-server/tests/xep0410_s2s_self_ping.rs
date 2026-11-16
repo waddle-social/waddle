@@ -67,7 +67,7 @@ async fn a_self_ping_the_room_no_longer_seats_reports_not_acceptable() {
     // The room lost the occupant without telling it: this server still
     // records the occupancy, and the room's answer says otherwise.
     muc.forget_occupant(ROOM, ALICE_PHONE);
-    assert_eq!(a.router.remote_rooms(), 1);
+    assert_eq!(a.router.remote_rooms().await, 1);
 
     let offered = a.offer_iq(ROOM_ALICE, self_ping("sp2")).await;
     assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
@@ -83,7 +83,7 @@ async fn a_self_ping_the_room_no_longer_seats_reports_not_acceptable() {
 #[tokio::test]
 async fn a_self_ping_to_a_room_never_joined_is_routed_and_answered() {
     let pki = support::Pki::new();
-    let (a, _b, _muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
     let offered = a.offer_iq(ROOM_ALICE, self_ping("sp3")).await;
     assert!(matches!(offered, IqOffer::Accepted), "{offered:?}");
     let iq = answer(&a, "sp3").await;
@@ -91,7 +91,10 @@ async fn a_self_ping_to_a_room_never_joined_is_routed_and_answered() {
         error_condition(&Element::from(iq)).as_deref(),
         Some("not-acceptable")
     );
-    assert_eq!(a.router.remote_rooms(), 0);
+    // A self-ping is a request, not a join: it neither opens an occupancy
+    // nor asks whether the JID is a room.
+    assert_eq!(a.router.remote_rooms().await, 0);
+    assert!(muc.disco_requests().is_empty());
 }
 
 #[tokio::test]
