@@ -224,10 +224,7 @@ async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
 
     // A session with a non-negative priority receives both.
     let mut desk = federated.online("alice", "desk", 1).await;
-    let frames = receive_until(&mut desk, |frame| {
-        frame.name() == "message" && frame.attr("id") == Some("n2")
-    })
-    .await;
+    let frames = support::receive_messages(&mut desk, &["n1", "n2"]).await;
     assert!(holds(&frames, "message", "n1"), "{frames:?}");
 }
 

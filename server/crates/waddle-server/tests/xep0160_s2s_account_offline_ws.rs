@@ -13,7 +13,7 @@
 #[path = "s2s_account_support/mod.rs"]
 mod support;
 
-use support::{contact, federated, holds, message, receive_until, Pki, BOB, BOB_PHONE, MALLORY};
+use support::{contact, federated, holds, message, Pki, BOB, BOB_PHONE, MALLORY};
 use xmpp_parsers::message::MessageType;
 
 const ALICE: &str = "alice@example.com";
@@ -53,10 +53,7 @@ async fn a_message_to_an_account_with_no_resource_is_stored_unanswered_from_cont
 
     // Alice's next session receives both.
     let mut phone = federated.online("alice", "phone", 5).await;
-    let frames = receive_until(&mut phone, |frame| {
-        frame.name() == "message" && frame.attr("id") == Some("o2")
-    })
-    .await;
+    let frames = support::receive_messages(&mut phone, &["o1", "o2"]).await;
     assert!(holds(&frames, "message", "o1"), "{frames:?}");
 }
 

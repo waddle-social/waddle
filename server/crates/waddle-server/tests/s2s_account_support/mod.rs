@@ -470,6 +470,22 @@ pub async fn receive_until(
     }
 }
 
+/// Every stanza that reaches `client` until a message with each of `ids`
+/// has, in whatever order.
+pub async fn receive_messages(client: &mut WsXmppClient, ids: &[&str]) -> Vec<Element> {
+    let seen = std::cell::RefCell::new(Vec::new());
+    receive_until(client, |frame| {
+        if frame.name() == "message" {
+            if let Some(id) = frame.attr("id") {
+                seen.borrow_mut().push(id.to_owned());
+            }
+        }
+        let seen = seen.borrow();
+        ids.iter().all(|id| seen.iter().any(|seen| seen == id))
+    })
+    .await
+}
+
 /// Ping `client`'s own server and return every stanza that reached the
 /// client before the answer. Whatever was handed to the client's
 /// connection before the ping arrives before its answer, so after a
