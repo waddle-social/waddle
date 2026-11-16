@@ -85,6 +85,40 @@ fn environment(bins: &Binaries, git_sha: &str) -> BTreeMap<String, String> {
     environment
 }
 
+/// Step 6's S2S-off row, then the deployments with S2S, the third
+/// parties and every other row.
+async fn run_all(harness: &mut Harness, log: &mut EvidenceLog, filter: &Filter, later: &[Section]) {
+    runner::run(harness, log, filter, &[Section::S2sDisabled]).await;
+    match harness.start_standard_waddles().await {
+        Ok(()) => {
+            harness.start_third_parties().await;
+            runner::run(harness, log, filter, later).await;
+        }
+        Err(error) => runner::record_all_unverified(
+            log,
+            filter,
+            later,
+            &format!("the Waddle deployments did not start: {error:#}"),
+        ),
+    }
+}
+
+/// SIGINT or SIGTERM.
+async fn interrupt() {
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = terminate => {}
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = options()?;
@@ -112,26 +146,17 @@ async fn main() -> Result<()> {
 
     match Harness::prepare(&root, options.ports, bins, git_sha).await {
         Ok(mut harness) => {
-            runner::run(
-                &mut harness,
-                &mut log,
-                &options.filter,
-                &[Section::S2sDisabled],
-            )
-            .await;
-            match harness.start_standard_waddles().await {
-                Ok(()) => {
-                    harness.start_third_parties().await;
-                    runner::run(&mut harness, &mut log, &options.filter, &later).await;
-                }
-                Err(error) => runner::record_all_unverified(
-                    &mut log,
-                    &options.filter,
-                    &later,
-                    &format!("the Waddle deployments did not start: {error:#}"),
-                ),
-            }
+            // An interrupted run still stops every service it started: the
+            // run is abandoned at its next await and the harness shuts down.
+            let interrupted = tokio::select! {
+                () = run_all(&mut harness, &mut log, &options.filter, &later) => false,
+                () = interrupt() => true,
+            };
             harness.shutdown().await;
+            if interrupted {
+                log.write(&options.evidence)?;
+                anyhow::bail!("interrupted; partial evidence written");
+            }
         }
         Err(error) => {
             let reason = format!("the environment did not start: {error:#}");

@@ -82,6 +82,17 @@ async fn tls_upgrade(
     Ok(connector.connect(name, socket).await?)
 }
 
+/// STARTTLS to a third-party server's C2S port; see
+/// [`pki::c2s_client_config_for_third_party`].
+async fn tls_upgrade_third_party(
+    socket: TcpStream,
+    server_name: &str,
+) -> Result<TlsStream<TcpStream>> {
+    let connector = TlsConnector::from(Arc::new(pki::c2s_client_config_for_third_party()?));
+    let name = ServerName::try_from(server_name.to_owned())?;
+    Ok(connector.connect(name, socket).await?)
+}
+
 /// Read framed items from `socket` until `done` accepts one.
 async fn read_until<S: AsyncRead + Unpin>(
     socket: &mut S,
@@ -160,13 +171,7 @@ fn bound_jid(response: &Element) -> Option<String> {
 impl Session {
     /// Log in over TCP with STARTTLS and SASL PLAIN, as to Prosody or
     /// ejabberd.
-    pub async fn tcp(
-        pki: &Pki,
-        port: u16,
-        account: &Account,
-        resource: &str,
-        label: &str,
-    ) -> Result<Self> {
+    pub async fn tcp(port: u16, account: &Account, resource: &str, label: &str) -> Result<Self> {
         let deadline = Instant::now() + LOGIN_TIMEOUT;
         let mut socket = TcpStream::connect(("127.0.0.1", port))
             .await
@@ -183,7 +188,7 @@ impl Session {
             is_element(item, "proceed")
         })
         .await?;
-        let mut tls = tls_upgrade(pki, socket, &account.domain).await?;
+        let mut tls = tls_upgrade_third_party(socket, &account.domain).await?;
 
         tls.write_all(&open).await?;
         let mut framer = Framer::new();

@@ -85,7 +85,7 @@ to the server domain is answered. The transport rows use it.
 | `flow.*muc*`, `flow.two-resources-*`, `flow.remote-moderator-*` | Gated on W6a/W6b (and W5e for moderation): joins, groupchat, MAM paged two at a time, two resources, a remote moderator demoting a local occupant. |
 | `flow.*space*`, `flow.child-rooms-*`, `flow.bookmarks-*`, `flow.community-admin-*`, `flow.no-avatar-banner-fetch` | Gated on W7a/W7b/W8: XEP-0503 0.3.0 nodes with XEP-0402 room items, plain XEP-0060 reads, child-room joins, XEP-0402 restore on a fresh device, owner affiliation for home-b's admin, avatar and banner metadata items pointing at the harness fetch recorder (D4). Joined-space preferences and the web pilot's own fetches are UNVERIFIED here: the pilot is driven separately. |
 | `obs.pre-tls-from` | The peer's first header as relayed in clear. |
-| `obs.whitespace-before-header` | The tap's view of every header before and after TLS and SASL. |
+| `obs.whitespace-before-header` | The tap's view of every header before and after TLS and SASL: whitespace or U+FEFF before the first header or before a restarted one. A newline between the XML declaration and the stream element is part of that header and is not counted (Waddle's own encoder writes one). |
 | `obs.ejabberd-starttls` | The harness peer reading each ejabberd node's features: `<starttls><required/>`. |
 | `obs.mixed-case-to` | A client of the peer pings `Home-A.TEST`. The tap shows whether the peer kept the case; if it normalized it, the stanza is written into the peer's own stream through the tap. Waddle must answer from `home-a.test`. |
 | `obs.ejabberd-cluster-streams` | Clients on both nodes ping home-a in rounds; every ping must be answered while the cluster's streams replace each other; the relay counts streams for the pair. |
@@ -121,7 +121,23 @@ to the server domain is answered. The transport rows use it.
   dialback from them is not expected; the harness peer shows Waddle's
   Receiving role instead.
 - The tap writes injected stanzas between two of the peer's own writes. A
-  peer that splits one stanza across writes could have it interleaved; the
-  observation rows are the only ones that use the tap without injection.
+  peer that splits one stanza across writes could have it interleaved. The
+  `obs.pre-tls-from` and `obs.whitespace-before-header` rows use the tap
+  only to read; `obs.mixed-case-to` injects only when the peer normalized
+  the `to` itself, and says so in its `driven_by`.
+- Waddle's `/metrics` is a liveness stub (its metrics leave by OTLP), so
+  the harness reads stream outcomes from the deployments' S2S debug log
+  (`s2s stream established` with direction and strength, `s2s service
+  started`). A change to those log lines needs the harness updated.
+- The harness's own C2S clients of Prosody and ejabberd check only TLS
+  handshake signatures, not the chain: the certificate rows swap a whole
+  host's certificate, C2S included, and what they test is S2S. Waddle's
+  WSS logins and every S2S connection verify against the `.test` CA.
+- A negative row first establishes a control (a known-good stream from
+  the harness peer, or a ping through the tap); without it the row is
+  UNVERIFIED, so a harness defect cannot pass as a refusal. Refusals are
+  asserted by stage and condition: every pre-TLS refusal of a pair is
+  `policy-violation`, a pre-authentication stanza is `not-authorized`, and
+  a stream closed without a stream error does not count.
 - The relay reads a ServerHello only when it is the first record after
   `<proceed/>` and fits one record.

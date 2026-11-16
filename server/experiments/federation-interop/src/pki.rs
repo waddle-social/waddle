@@ -18,10 +18,15 @@ use rcgen::{
     DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyIdMethod, KeyPair,
     KeyUsagePurpose, SerialNumber,
 };
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring::default_provider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme,
+    SupportedProtocolVersion,
+};
 use time::{Duration, OffsetDateTime};
 
 /// Which CA issues a leaf.
@@ -268,6 +273,72 @@ impl Pki {
             builder.with_no_client_auth()
         };
         Ok(builder.with_single_cert(vec![leaf.certificate.clone()], leaf.key())?)
+    }
+}
+
+/// Client settings for a client of a third-party server's C2S port. The
+/// rows that make Prosody or ejabberd present a bad certificate swap the
+/// certificate of the whole host, C2S included, while what they test is
+/// S2S; the harness's own client therefore checks only the handshake
+/// signatures there, never the chain. S2S verification is never relaxed.
+pub fn c2s_client_config_for_third_party() -> Result<ClientConfig> {
+    let provider = Arc::new(default_provider());
+    Ok(ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&all_versions())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(SignaturesOnly { provider }))
+        .with_no_client_auth())
+}
+
+#[derive(Debug)]
+struct SignaturesOnly {
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for SignaturesOnly {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 

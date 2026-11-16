@@ -34,7 +34,9 @@ fn tap_driven(peer: Peer) -> String {
     .concat()
 }
 
-/// Whether home-a ended the tapped stream, and what it said.
+/// Whether home-a refused the tapped stream with a stream error, and
+/// what it said. A closure without a stream error is not counted: it
+/// could be the tap's own failure.
 async fn stream_refused(relay: &crate::net::relay::Relay) -> (bool, String) {
     let ended = process::eventually(QUIET, || async { newest_closed(relay) }).await;
     let said = waddle_said(relay);
@@ -45,18 +47,17 @@ async fn stream_refused(relay: &crate::net::relay::Relay) -> (bool, String) {
         "not-authorized",
         "host-unknown",
         "restricted-xml",
-        "bad-format",
+        "not-well-formed",
         "resource-constraint",
     ]
     .into_iter()
-    .find(|condition| said.contains(condition))
-    .unwrap_or("none");
+    .find(|condition| said.contains(condition));
     (
-        ended || condition != "none",
+        condition.is_some(),
         [
             "stream error ",
-            condition,
-            if ended { ", closed" } else { "" },
+            condition.unwrap_or("none"),
+            if ended { ", closed" } else { ", still open" },
         ]
         .concat(),
     )
@@ -487,6 +488,7 @@ pub async fn deep_nesting(h: &mut Harness, peer: Peer) -> Result<Outcome> {
 pub async fn preauth_large_element(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome =
         Outcome::new("harness raw peer writing a large non-control element before TLS");
+    support::raw_control(h).await?;
     let mut socket = TcpStream::connect(("127.0.0.1", h.ports.waddle_s2s(Home::A))).await?;
     socket
         .write_all(&StreamOpen::server(Some(RAW_PEER), HOME_A).encode()?)
@@ -503,22 +505,19 @@ pub async fn preauth_large_element(h: &mut Harness, _peer: Peer) -> Result<Outco
     // The write may fail once the server has closed; that is the refusal.
     let _ = socket.write_all(&bytes).await;
     let mut received = Vec::new();
-    let _ = tokio::time::timeout(QUIET, socket.read_to_end(&mut received)).await;
+    let closed = tokio::time::timeout(QUIET, socket.read_to_end(&mut received))
+        .await
+        .is_ok();
     let text = String::from_utf8_lossy(&received);
-    let refused = text.contains("policy-violation")
-        || text.contains("restricted-xml")
-        || text.contains("not-authorized")
-        || text.contains("unsupported-stanza-type");
+    // A jabber:server stanza before authentication is not-authorized when
+    // its head closes (crates/waddle-xmpp/tests/s2s_pre_authentication.rs).
+    let condition = ["not-authorized", "policy-violation"]
+        .into_iter()
+        .find(|condition| text.contains(condition));
     outcome.check(
-        "refused and closed",
-        refused || received.len() < bytes.len(),
-        text.chars()
-            .rev()
-            .take(200)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>(),
+        "refused with a stream error and closed",
+        condition.is_some() && closed,
+        format!("condition {condition:?}, closed {closed}"),
     );
     Ok(outcome)
 }
@@ -528,12 +527,14 @@ pub async fn queue_exhaustion(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         [
             "home-a's outbound path to ",
             peer.label(),
-            " cut while a client floods it",
+            " hanging while a client floods it",
         ]
         .concat(),
     );
     let relay = h.relay(Server::Waddle(Home::A), Harness::peer_server(peer))?;
-    relay.cut();
+    // A hanging peer: connections are accepted and never answered, so the
+    // pair's queue fills while the handshake waits.
+    relay.stall();
     let peer_domain = Harness::peer_domain(peer);
     let mut session = h
         .login_waddle(Home::A, "alice", &support::id("flood"))

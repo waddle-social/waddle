@@ -14,17 +14,20 @@ use crate::pki::{self, LeafSpec};
 use crate::s2s::initiator::{self, Auth, Plan, Stage};
 use crate::s2s::receiver::Behaviour;
 use crate::scenarios::harness::{Component, Harness, ANSWER};
-use crate::scenarios::support::{self, ask, describe, established, is_result, note_tls};
+use crate::scenarios::support::{self, ask, check_tls, describe, established, is_result};
 use crate::services::{ejabberd, prosody};
 use crate::topology::{Home, Server, EJABBERD_INSECURE, HOME_A, PROSODY_INSECURE, RAW_PEER};
 use crate::xml::stanza;
 
-/// Ping across in both directions and record the TLS versions.
+/// Ping across in both directions over fresh streams, and check the TLS
+/// version each relay saw and that home-a's log shows pkix streams
+/// established in both directions.
 async fn both_directions(
     h: &Harness,
     peer: Peer,
     outcome: &mut Outcome,
     label: &str,
+    expected_tls: Option<u16>,
 ) -> Result<()> {
     let peer_domain = Harness::peer_domain(peer);
     let before_out = established(h, Home::A, "outbound", "pkix").await;
@@ -42,17 +45,28 @@ async fn both_directions(
         is_result(&back),
         describe(&back),
     );
-    if let Ok(relay) = h.relay(Server::Waddle(Home::A), Harness::peer_server(peer)) {
-        note_tls(outcome, relay);
-    }
-    if let Ok(relay) = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A)) {
-        note_tls(outcome, relay);
+    for (from, to) in [
+        (Server::Waddle(Home::A), Harness::peer_server(peer)),
+        (Harness::peer_server(peer), Server::Waddle(Home::A)),
+    ] {
+        match h.relay(from, to) {
+            Ok(relay) => check_tls(outcome, relay, expected_tls),
+            Err(error) => outcome.unverified("relay", error.to_string()),
+        }
     }
     let after_out = established(h, Home::A, "outbound", "pkix").await;
     let after_in = established(h, Home::A, "inbound", "pkix").await;
-    outcome.note(format!(
-        "{label}: home-a pkix streams established outbound {before_out} -> {after_out}, inbound {before_in} -> {after_in}"
-    ));
+    outcome.check(
+        [
+            label,
+            ": home-a established pkix streams in both directions",
+        ]
+        .concat(),
+        after_out > before_out && after_in > before_in,
+        format!(
+            "outbound {before_out} -> {after_out}, inbound {before_in} -> {after_in} (home-a log)"
+        ),
+    );
     Ok(())
 }
 
@@ -77,7 +91,7 @@ pub async fn tls_external(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         Peer::Ejabberd => "stock ejabberd cluster, default and TLS-1.2-only configurations",
     });
     reset_pair(h, peer);
-    both_directions(h, peer, &mut outcome, "default TLS").await?;
+    both_directions(h, peer, &mut outcome, "default TLS", None).await?;
     match peer {
         Peer::Waddle => {
             // Waddle negotiates its highest version with itself; TLS 1.2
@@ -125,7 +139,7 @@ pub async fn tls_external(h: &mut Harness, peer: Peer) -> Result<Outcome> {
             h.dirty.insert(Component::Prosody);
             h.prosody.restart(&variant).await?;
             reset_pair(h, peer);
-            both_directions(h, peer, &mut outcome, "TLS 1.2 only").await?;
+            both_directions(h, peer, &mut outcome, "TLS 1.2 only", Some(0x0303)).await?;
         }
         Peer::Ejabberd => {
             let mut variant = h.ejabberd_variant();
@@ -139,7 +153,7 @@ pub async fn tls_external(h: &mut Harness, peer: Peer) -> Result<Outcome> {
                 return Ok(outcome);
             }
             reset_pair(h, peer);
-            both_directions(h, peer, &mut outcome, "TLS 1.2 only").await?;
+            both_directions(h, peer, &mut outcome, "TLS 1.2 only", Some(0x0303)).await?;
         }
     }
     Ok(outcome)
@@ -275,7 +289,7 @@ async fn dialback_with_stock(h: &mut Harness, peer: Peer, host: &str) -> Result<
         _ => h.ports.ejabberd_c2s(1),
     };
     let mut session =
-        crate::client::session::Session::tcp(&h.pki, port, &account, "db", "dialback host").await?;
+        crate::client::session::Session::tcp(port, &account, "db", "dialback host").await?;
     let back = ask(&mut session, stanza::ping(&support::id("db-in"), HOME_A)).await?;
     session.close().await;
     let after_in = established(h, Home::A, "inbound", "dialback").await;

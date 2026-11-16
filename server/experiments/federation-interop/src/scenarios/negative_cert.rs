@@ -53,32 +53,68 @@ async fn raw(h: &Harness, plan: &Plan) -> Result<Attempt> {
     initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), plan).await
 }
 
-fn refused(attempt: &Attempt) -> bool {
-    attempt.stage != Stage::Established
+/// Refused after admission: the pair was admitted before TLS, and the
+/// certificate, not the pair, was refused.
+fn refused_after_admission(attempt: &Attempt) -> bool {
+    matches!(attempt.stage, Stage::Tls | Stage::Authentication)
 }
 
-/// Traffic in both directions between home-a and the peer must fail.
+/// Traffic between home-a and the stock peer must fail in each direction
+/// in which the peer's relay shows that an S2S connection was attempted.
 async fn both_directions_fail(
     h: &Harness,
     peer: Peer,
     outcome: &mut Outcome,
     peer_host: &str,
 ) -> Result<()> {
+    let outbound = h.relay(
+        topology::Server::Waddle(Home::A),
+        Harness::peer_server(peer),
+    )?;
+    let before = outbound.connection_count();
     let out = support::ping_from_waddle(h, Home::A, "alice", peer_host).await;
-    outcome.check(
-        ["home-a -> ", peer_host, " refused"].concat(),
-        out.as_ref().map_or(true, |answer| !is_result(answer)),
-        out.map(|answer| describe(&answer))
-            .unwrap_or_else(|error| error.to_string()),
-    );
-    if peer_host == Harness::peer_domain(peer) {
-        let back = support::ping_from_peer(h, peer, "alice", HOME_A).await;
+    let dialled = outbound.connection_count() > before;
+    let name = ["home-a -> ", peer_host, " refused"].concat();
+    let detail = out
+        .as_ref()
+        .map(describe)
+        .unwrap_or_else(|error| error.to_string());
+    if dialled {
         outcome.check(
-            [peer.label(), " -> home-a refused"].concat(),
-            back.as_ref().map_or(true, |answer| !is_result(answer)),
-            back.map(|answer| describe(&answer))
-                .unwrap_or_else(|error| error.to_string()),
+            name,
+            out.as_ref().is_ok_and(|answer| !is_result(answer)),
+            detail,
         );
+    } else {
+        outcome.unverified(name, ["home-a did not dial the peer: ", &detail].concat());
+    }
+    if peer_host == Harness::peer_domain(peer) {
+        let inbound = h.relay(
+            Harness::peer_server(peer),
+            topology::Server::Waddle(Home::A),
+        )?;
+        let before = inbound.connection_count();
+        let streams = support::established(h, Home::A, "inbound", "").await;
+        let back = support::ping_from_peer(h, peer, "alice", HOME_A).await;
+        let attempted = inbound.connection_count() > before;
+        let opened = support::established(h, Home::A, "inbound", "").await > streams;
+        let name = [peer.label(), " -> home-a refused"].concat();
+        let detail = [
+            back.as_ref()
+                .map(describe)
+                .unwrap_or_else(|error| error.to_string()),
+            format!("; inbound streams established: {opened}"),
+        ]
+        .concat();
+        if attempted {
+            outcome.check(
+                name,
+                !opened && back.as_ref().is_ok_and(|answer| !is_result(answer)),
+                detail,
+            );
+        } else {
+            outcome.unverified(name, ["the peer did not attempt S2S: ", &detail].concat());
+        }
     }
     Ok(())
 }
@@ -129,23 +165,34 @@ pub async fn bad_certificate(h: &mut Harness, peer: Peer, bad: Bad) -> Result<Ou
             let mut outcome = Outcome::new(
                 "harness raw peer claiming home-b.test (inbound) and the peer-raw.test receiving server (outbound)",
             );
+            support::raw_control(h).await?;
             let plan = Plan::external(HOME_B, HOME_A, &bad_leaf(h, bad, HOME_B)?);
             let attempt = raw(h, &plan).await?;
-            outcome.check("inbound refused", refused(&attempt), attempt.describe());
+            outcome.check(
+                "inbound refused after admission",
+                refused_after_admission(&attempt),
+                attempt.describe(),
+            );
             h.receiver.set_leaf(RAW_PEER, bad_leaf(h, bad, RAW_PEER)?);
             h.receiver.clear();
             let answer = support::ping_from_waddle(h, Home::A, "alice", RAW_PEER).await;
+            let dialled = !h.receiver.inbound().is_empty();
             let delivered = !h.receiver.stanzas().is_empty();
-            outcome.check(
-                "outbound: home-a sends nothing to a receiving server with the bad certificate",
-                !delivered,
-                format!(
-                    "stanzas delivered: {delivered}; client answer: {}",
-                    answer
-                        .map(|answer| describe(&answer))
-                        .unwrap_or_else(|error| error.to_string())
-                ),
+            let detail = format!(
+                "dialled: {dialled}; stanzas delivered: {delivered}; client answer: {}",
+                answer
+                    .map(|answer| describe(&answer))
+                    .unwrap_or_else(|error| error.to_string())
             );
+            if dialled {
+                outcome.check(
+                    "outbound: nothing sent to a receiving server with the bad certificate",
+                    !delivered,
+                    detail,
+                );
+            } else {
+                outcome.unverified("outbound", ["home-a did not dial: ", &detail].concat());
+            }
             h.receiver.set_leaf(RAW_PEER, h.leaf(RAW_PEER)?);
             Ok(outcome)
         }
@@ -174,10 +221,15 @@ pub async fn parent_domain(h: &mut Harness, peer: Peer) -> Result<Outcome> {
             let mut outcome = Outcome::new(
                 "harness raw peer claiming muc.home-b.test with home-b.test's certificate",
             );
+            support::raw_control(h).await?;
             let muc = topology::muc_domain(HOME_B);
             let plan = Plan::external(&muc, HOME_A, &h.leaf(HOME_B)?);
             let attempt = raw(h, &plan).await?;
-            outcome.check("inbound refused", refused(&attempt), attempt.describe());
+            outcome.check(
+                "inbound refused after admission",
+                refused_after_admission(&attempt),
+                attempt.describe(),
+            );
             Ok(outcome)
         }
         Peer::Prosody | Peer::Ejabberd => {
@@ -202,22 +254,7 @@ pub async fn parent_domain(h: &mut Harness, peer: Peer) -> Result<Outcome> {
             ))?;
             swap_stock_certificate(h, peer, component, parent_leaf).await?;
             fresh_streams(h, peer);
-            let mut session = h
-                .login_waddle(Home::A, "alice", &support::id("parent"))
-                .await?;
-            let answer = support::ask(
-                &mut session,
-                crate::xml::stanza::disco_info(&support::id("parent"), component),
-            )
-            .await;
-            outcome.check(
-                ["home-a -> ", component, " refused"].concat(),
-                answer.as_ref().map_or(true, |answer| !is_result(answer)),
-                answer
-                    .map(|answer| describe(&answer))
-                    .unwrap_or_else(|error| error.to_string()),
-            );
-            session.close().await;
+            both_directions_fail(h, peer, &mut outcome, component).await?;
             Ok(outcome)
         }
     }
@@ -276,9 +313,14 @@ pub async fn server_auth_only(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
 pub async fn private_ca_for_public_profile(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome =
         Outcome::new("harness raw peer claiming public-profile.test with a .test CA leaf");
+    support::raw_control(h).await?;
     let plan = Plan::external(PUBLIC_PROFILE, HOME_A, &h.leaf(PUBLIC_PROFILE)?);
     let attempt = raw(h, &plan).await?;
-    outcome.check("refused", refused(&attempt), attempt.describe());
+    outcome.check(
+        "refused after admission",
+        refused_after_admission(&attempt),
+        attempt.describe(),
+    );
     Ok(outcome)
 }
 
@@ -297,6 +339,7 @@ pub async fn no_pre_tls_from(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
 
 pub async fn inbound_direct_tls(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer starting TLS at once on the S2S port");
+    support::raw_control(h).await?;
     let mut plan = Plan::external(RAW_PEER, HOME_A, &h.leaf(RAW_PEER)?);
     plan.direct_tls = true;
     let attempt = raw(h, &plan).await?;

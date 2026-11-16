@@ -29,6 +29,7 @@ fn dialback_plan(h: &Harness, from: &str, key: &str) -> Result<Plan> {
 
 pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer offering dialback for redirect.test, which is admitted but not dialback-listed");
+    support::raw_control(h).await?;
     let key = uuid::Uuid::new_v4().simple().to_string();
     h.redirect.issue_key(&key);
     let attempt = initiator::attempt(
@@ -37,9 +38,10 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
         &dialback_plan(h, REDIRECT, &key)?,
     )
     .await?;
+    // Admitted, so the refusal comes after TLS, when dialback is offered.
     outcome.check(
-        "dialback refused",
-        attempt.stage != Stage::Established,
+        "dialback refused after TLS",
+        attempt.stage == Stage::Authentication,
         attempt.describe(),
     );
     Ok(outcome)
@@ -47,6 +49,7 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
 
 pub async fn after_certificate_failure(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer presenting a wrong-name certificate, then offering dialback for peer-raw.test");
+    support::raw_control(h).await?;
     let key = uuid::Uuid::new_v4().simple().to_string();
     h.receiver.issue_key(&key);
     let mut plan = dialback_plan(h, RAW_PEER, &key)?;
@@ -57,7 +60,7 @@ pub async fn after_certificate_failure(h: &mut Harness, _peer: Peer) -> Result<O
     let attempt = initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), &plan).await?;
     outcome.check(
         "dialback refused after the active certificate failure",
-        attempt.stage != Stage::Established,
+        matches!(attempt.stage, Stage::Tls | Stage::Authentication),
         attempt.describe(),
     );
     Ok(outcome)
@@ -65,6 +68,7 @@ pub async fn after_certificate_failure(h: &mut Harness, _peer: Peer) -> Result<O
 
 pub async fn unsolicited(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer on an EXTERNAL-authenticated stream");
+    support::raw_control(h).await?;
     for (name, element) in [
         (
             "unsolicited db:result",
@@ -103,12 +107,7 @@ pub async fn unsolicited(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
             .any(|element| element.attr("type") == Some("valid"));
         outcome.check(
             [name, " refused"].concat(),
-            !answered_valid
-                && (ending.closed
-                    || ending
-                        .elements
-                        .iter()
-                        .all(|element| element.attr("type") != Some("valid"))),
+            !answered_valid && ending.closed && ending.stream_error.is_some(),
             format!(
                 "stream error {:?}, closed {}, answers {}",
                 ending.stream_error,
@@ -160,12 +159,24 @@ pub async fn extra_domains(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
             ))
             .await?;
         let ending = stream.watch(QUIET).await;
-        let answered = h.receiver.stanzas().iter().any(|element| {
-            element.attr("id") == Some(ping_id.as_str()) && element.attr("type") == Some("result")
-        });
+        let answer = h
+            .receiver
+            .wait_stanza(QUIET, |element| {
+                element.attr("id") == Some(ping_id.as_str())
+            })
+            .await;
+        let answered = answer
+            .as_ref()
+            .is_some_and(|element| element.attr("type") == Some("result"));
+        let malformed = answer
+            .as_ref()
+            .and_then(stanza::error_condition)
+            .is_some_and(|condition| condition == "jid-malformed");
+        // A domain outside the stream's pair is a stream error
+        // (s2s-handshake-2047.md, decisions after the G4 review).
         outcome.check(
             [name, " refused"].concat(),
-            !answered,
+            !answered && (ending.stream_error.is_some() || malformed),
             format!(
                 "stream error {:?}, closed {}, result delivered {answered}",
                 ending.stream_error, ending.closed
@@ -178,6 +189,7 @@ pub async fn extra_domains(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
 
 pub async fn verify_over_plaintext(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer sending db:verify before STARTTLS");
+    support::raw_control(h).await?;
     let mut socket = TcpStream::connect(("127.0.0.1", h.ports.waddle_s2s(Home::A))).await?;
     socket
         .write_all(
@@ -197,6 +209,7 @@ pub async fn verify_over_plaintext(h: &mut Harness, _peer: Peer) -> Result<Outco
     let mut chunk = vec![0u8; 8192];
     let mut answered = false;
     let mut stream_error = None;
+    let mut closed = false;
     let deadline = tokio::time::Instant::now() + QUIET;
     loop {
         while let Ok(Some(item)) = framer.next_item() {
@@ -206,14 +219,18 @@ pub async fn verify_over_plaintext(h: &mut Harness, _peer: Peer) -> Result<Outco
             }
         }
         match tokio::time::timeout_at(deadline, socket.read(&mut chunk)).await {
-            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(0)) | Ok(Err(_)) => {
+                closed = true;
+                break;
+            }
+            Err(_) => break,
             Ok(Ok(read)) => framer.push(chunk.get(..read).unwrap_or_default()),
         }
     }
     outcome.check(
-        "no verification answer over plaintext",
-        !answered,
-        format!("stream error {stream_error:?}"),
+        "no verification answer over plaintext; the stream is refused",
+        !answered && (closed || stream_error.is_some()),
+        format!("stream error {stream_error:?}, closed {closed}"),
     );
     Ok(outcome)
 }

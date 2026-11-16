@@ -28,8 +28,11 @@ async fn claim(h: &Harness, from: &str, leaf_domain: &str) -> Result<Attempt> {
     initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), &plan).await
 }
 
+/// Refused before TLS with `policy-violation`, as every pre-TLS refusal
+/// of a pair is.
 fn refused_at_open(attempt: &Attempt) -> bool {
     attempt.stage == Stage::BeforeTls
+        && attempt.stream_error.as_deref() == Some(support::PRE_TLS_REFUSAL)
 }
 
 /// Establish a raw stream and prove it carries traffic.
@@ -136,6 +139,7 @@ pub async fn denylisted_subdomain(h: &mut Harness, _peer: Peer) -> Result<Outcom
     let mut outcome = Outcome::new("harness raw peer; home-a with deny.test denylisted");
     let profile = h.profile(Home::A, true).with_default_deny();
     restart_a(h, &profile).await?;
+    support::raw_control(h).await?;
     for from in [DENIED, "sub.deny.test", "a.b.deny.test"] {
         let attempt = claim(h, from, DENIED).await?;
         outcome.check(
@@ -153,6 +157,7 @@ pub async fn denylisted_spellings(h: &mut Harness, _peer: Peer) -> Result<Outcom
     let mut profile = h.profile(Home::A, true).with_default_deny();
     profile.deny.push(DENIED_ALABEL.to_owned());
     restart_a(h, &profile).await?;
+    support::raw_control(h).await?;
     for from in [
         "deny.test.",
         "DENY.test",
@@ -181,6 +186,9 @@ pub async fn denylisted_each_mode(h: &mut Harness, _peer: Peer) -> Result<Outcom
     ] {
         let profile = h.profile(Home::A, true).with_default_deny().with_mode(mode);
         restart_a(h, &profile).await?;
+        if mode != Mode::Closed {
+            support::raw_control(h).await?;
+        }
         let attempt = claim(h, DENIED, DENIED).await?;
         outcome.check(
             [name, " mode: deny.test refused at open"].concat(),
@@ -199,7 +207,6 @@ pub async fn listed_fails_to_load(h: &mut Harness, _peer: Peer) -> Result<Outcom
     let mut allowed_sub = base();
     allowed_sub.allow.push("sub.deny.test".to_owned());
     let mut dialback = base();
-    dialback.allow.push("sub.deny.test".to_owned());
     dialback.dialback.push("sub.deny.test".to_owned());
     let mut trusted = base();
     trusted.trusted_homes.push(DENIED.to_owned());
@@ -221,11 +228,20 @@ pub async fn listed_fails_to_load(h: &mut Harness, _peer: Peer) -> Result<Outcom
             .waddle(Home::A)?
             .start_expecting_failure(ports, config)
             .await;
+        // ConfigError::Denied: "entry N of `<section>` is covered by the denylist".
+        let refused = result
+            .as_ref()
+            .is_ok_and(|tail| tail.contains("covered by the denylist"));
         outcome.check(
             [name, ": refused to load"].concat(),
-            result.is_ok(),
+            refused,
             match result {
-                Ok(tail) => tail.lines().last().unwrap_or_default().to_owned(),
+                Ok(tail) => tail
+                    .lines()
+                    .rev()
+                    .find(|line| line.to_ascii_lowercase().contains("error"))
+                    .unwrap_or_default()
+                    .to_owned(),
                 Err(error) => error.to_string(),
             },
         );
@@ -235,6 +251,7 @@ pub async fn listed_fails_to_load(h: &mut Harness, _peer: Peer) -> Result<Outcom
 
 pub async fn listed_subdomain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer claiming subdomains of admitted domains");
+    support::raw_control(h).await?;
     for from in [
         "sub.peer-raw.test",
         "sub.home-b.test",

@@ -7,7 +7,6 @@ use anyhow::Result;
 
 use crate::evidence::Outcome;
 use crate::manifest::Peer;
-use crate::net::http;
 use crate::process;
 use crate::scenarios::harness::{Component, Harness, ANSWER, QUIET};
 use crate::scenarios::support::{self, ask, describe, is_result};
@@ -225,14 +224,11 @@ pub async fn s2s_disabled(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
         format!("{advertised:?}"),
     );
     session.close().await;
-    let metrics = http::get(ports.waddle_http(Home::A), "/metrics").await?;
-    let s2s_metrics = http::metric_lines(&metrics.body, "waddle_s2s_");
+    let s2s_lines = support::log_count(h, Home::A, &["s2s"]);
     outcome.check(
-        "no S2S connection metrics",
-        s2s_metrics
-            .iter()
-            .all(|line| line.starts_with('#') || line.ends_with(" 0")),
-        format!("{s2s_metrics:?}"),
+        "no S2S service started (home-a's log)",
+        support::log_count(h, Home::A, &["s2s service started"]) == 0,
+        format!("{s2s_lines} log lines mention s2s"),
     );
     h.waddle(Home::A)?.stop().await?;
     Ok(outcome)

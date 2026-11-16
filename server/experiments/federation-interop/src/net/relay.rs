@@ -47,6 +47,8 @@ pub struct Rewrite {
 pub enum Mode {
     Forward,
     Cut,
+    /// Accept connections and never forward or answer: a peer that hangs.
+    Stall,
     Tap {
         pki: Arc<Pki>,
         identities: TapIdentities,
@@ -167,8 +169,19 @@ impl Relay {
         self.set_mode(Mode::Cut);
     }
 
+    /// End open connections, then return to forwarding.
     pub fn restore(&self) {
+        let stalled = matches!(*lock(&self.shared.mode), Mode::Stall);
         self.set_mode(Mode::Forward);
+        if stalled {
+            self.shared.cut.send_modify(|generation| *generation += 1);
+        }
+    }
+
+    /// Accept connections but never forward them.
+    pub fn stall(&self) {
+        self.set_mode(Mode::Cut);
+        self.set_mode(Mode::Stall);
     }
 
     pub fn connections(&self) -> Vec<Connection> {
@@ -267,6 +280,12 @@ async fn carry(
         .context("connect upstream")?;
     match mode {
         Mode::Forward | Mode::Cut => forward(shared, index, client, server).await,
+        Mode::Stall => {
+            // Hold both sockets open until the relay is cut or dropped.
+            let _held = (client, server);
+            std::future::pending::<()>().await;
+            Ok(())
+        }
         Mode::Tap {
             pki,
             identities,

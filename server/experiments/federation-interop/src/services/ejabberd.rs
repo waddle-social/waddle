@@ -188,14 +188,14 @@ impl Ejabberd {
             dir.join("ejabberd.yml"),
             serde_json::to_vec_pretty(&self.configuration(node, variant))?,
         )?;
-        let dist = self.ports.ejabberd_dist(node);
+        let (dist_min, dist_max) = self.ports.ejabberd_dist(node);
         let ctl = [
             "ERLANG_NODE=",
             &node_name(node),
             "\nFIREWALL_WINDOW=",
-            &dist.to_string(),
+            &dist_min.to_string(),
             "-",
-            &dist.to_string(),
+            &dist_max.to_string(),
             "\nINET_DIST_INTERFACE=127.0.0.1\nERL_OPTIONS=\"-setcookie ",
             &self.cookie,
             "\"\n",

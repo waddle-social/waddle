@@ -198,9 +198,12 @@ impl Ports {
         self.at(44)
     }
 
-    /// The Erlang distribution port of node 1 or 2.
-    pub fn ejabberd_dist(self, node: u8) -> u16 {
-        self.at(45 + u16::from(node.saturating_sub(1)))
+    /// The Erlang distribution port window of node 1 or 2. The window
+    /// holds ten ports because every `ejabberdctl` command starts a helper
+    /// node with the same window while the server node holds one port.
+    pub fn ejabberd_dist(self, node: u8) -> (u16, u16) {
+        let start = self.at(90 + 10 * u16::from(node.saturating_sub(1)));
+        (start, start + 9)
     }
 
     /// The relay of one directed path.

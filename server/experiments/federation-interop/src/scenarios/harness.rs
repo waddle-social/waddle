@@ -105,6 +105,8 @@ pub struct Harness {
     pub prosody_down: Option<String>,
     pub ejabberd: Ejabberd,
     pub ejabberd_down: Option<String>,
+    /// Why a Waddle deployment is unavailable, if one did not restart.
+    pub waddle_down: Option<String>,
     pub relays: BTreeMap<Link, Relay>,
     pub dns: Vec<StubDns>,
     pub receiver: Receiver,
@@ -331,6 +333,7 @@ impl Harness {
             prosody_down: Some("not started".to_owned()),
             ejabberd,
             ejabberd_down: Some("not started".to_owned()),
+            waddle_down: None,
             relays,
             dns,
             receiver,
@@ -437,7 +440,9 @@ impl Harness {
     }
 
     /// Put every service a row changed back on its standard
-    /// configuration, and every relay and harness peer back to normal.
+    /// configuration, and every relay and harness peer back to normal. A
+    /// service that does not come back is marked down, so later rows
+    /// report UNVERIFIED instead of failing on the environment.
     pub async fn restore_standard(&mut self) -> Result<()> {
         for relay in self.relays.values() {
             relay.restore();
@@ -448,28 +453,45 @@ impl Harness {
             self.receiver.set_leaf(&domain, leaf);
         }
         let dirty = std::mem::take(&mut self.dirty);
+        let mut failures = Vec::new();
         for component in dirty {
             match component {
                 Component::Waddle(home) => {
                     let profile = self.profile(home, true);
-                    self.start_waddle(&profile).await?;
+                    if let Err(error) = self.start_waddle(&profile).await {
+                        let reason = format!("{} did not restart: {error:#}", home.label());
+                        self.waddle_down = Some(reason.clone());
+                        failures.push(reason);
+                    }
                 }
                 Component::Prosody if self.prosody_down.is_none() => {
                     let variant = self.prosody_variant();
-                    self.prosody.restart(&variant).await?;
+                    if let Err(error) = self.prosody.restart(&variant).await {
+                        let reason = format!("Prosody did not restart: {error:#}");
+                        self.prosody_down = Some(reason.clone());
+                        failures.push(reason);
+                    }
                 }
                 Component::Ejabberd if self.ejabberd_down.is_none() => {
                     let variant = self.ejabberd_variant();
-                    self.ejabberd.restart(&variant).await?;
+                    if let Err(error) = self.ejabberd.restart(&variant).await {
+                        let reason = format!("ejabberd did not restart: {error:#}");
+                        self.ejabberd_down = Some(reason.clone());
+                        failures.push(reason);
+                    }
                 }
                 Component::Prosody | Component::Ejabberd => {}
             }
         }
+        anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
         Ok(())
     }
 
     /// Whether `peer` can be driven, or why not.
     pub fn available(&self, peer: Peer) -> Result<(), String> {
+        if let Some(reason) = &self.waddle_down {
+            return Err(["a Waddle deployment is down: ", reason].concat());
+        }
         match peer {
             Peer::Waddle => Ok(()),
             Peer::Prosody => match &self.prosody_down {
@@ -561,14 +583,7 @@ impl Harness {
                         .unwrap_or_default(),
                 };
                 let label = ["prosody:", &account.username, "/", resource].concat();
-                Session::tcp(
-                    &self.pki,
-                    self.ports.prosody_c2s(),
-                    &account,
-                    resource,
-                    &label,
-                )
-                .await
+                Session::tcp(self.ports.prosody_c2s(), &account, resource, &label).await
             }
             Peer::Ejabberd => self.login_ejabberd(1, account, resource).await,
         }
@@ -597,14 +612,7 @@ impl Harness {
             resource,
         ]
         .concat();
-        Session::tcp(
-            &self.pki,
-            self.ports.ejabberd_c2s(node),
-            &account,
-            resource,
-            &label,
-        )
-        .await
+        Session::tcp(self.ports.ejabberd_c2s(node), &account, resource, &label).await
     }
 
     /// Tap identities: every harness leaf by domain.

@@ -7,12 +7,13 @@ use anyhow::{Context, Result};
 use minidom::Element;
 
 use crate::client::session::Session;
-use crate::evidence::Outcome;
+use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
 use crate::net::relay::{Connection, Mode, Relay};
 use crate::process;
+use crate::s2s::initiator::{self, Plan};
 use crate::scenarios::harness::{Harness, ANSWER};
-use crate::topology::{Home, Server, HOME_A};
+use crate::topology::{Home, Server, HOME_A, RAW_PEER};
 use crate::xml::stanza;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -90,47 +91,87 @@ pub async fn ping_until_result(
     }
 }
 
-/// The sum of metric samples whose name starts with `prefix` and whose
-/// labels include every value in `values` (as `="value"`).
-pub fn metric(metrics: &str, prefix: &str, values: &[&str]) -> f64 {
-    metrics
-        .lines()
-        .filter(|line| line.starts_with(prefix))
-        .filter(|line| {
-            values.iter().all(|value| {
-                let quoted = ["=\"", value, "\""].concat();
-                line.contains(&quoted)
-            })
-        })
-        .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
-        .sum()
+/// How many lines of the deployment's current log contain every needle,
+/// compared without case. Waddle's `/metrics` endpoint is a liveness stub
+/// (its metrics leave by OTLP), so the S2S debug log is the harness's
+/// record of what each stream did: `s2s stream established` with its
+/// direction and strength, `s2s peer certificate refused`, `s2s peer not
+/// admitted`, `s2s service started`.
+pub fn log_count(h: &Harness, home: Home, needles: &[&str]) -> usize {
+    let Some(path) = h.waddle.get(&home).and_then(|waddle| waddle.log_path()) else {
+        return 0;
+    };
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let needles: Vec<String> = needles
+        .iter()
+        .map(|needle| needle.to_ascii_lowercase())
+        .collect();
+    text.lines()
+        .filter(|line| needles.iter().all(|needle| line.contains(needle.as_str())))
+        .count()
 }
 
-/// Established-stream counters of a deployment by direction and strength.
-pub async fn established(h: &Harness, home: Home, direction: &str, strength: &str) -> f64 {
-    match h.waddle.get(&home) {
-        Some(waddle) => match waddle.metrics(h.ports).await {
-            Ok(metrics) => metric(&metrics, "waddle_s2s_established", &[direction, strength]),
-            Err(_) => f64::NAN,
-        },
-        None => f64::NAN,
-    }
+/// Streams the deployment established, by direction (`inbound` or
+/// `outbound`) and strength (`pkix` or `dialback`), from its log.
+pub async fn established(h: &Harness, home: Home, direction: &str, strength: &str) -> usize {
+    log_count(h, home, &["s2s stream established", direction, strength])
 }
 
-/// Record the newest relayed connection's negotiated TLS version.
-pub fn note_tls(outcome: &mut Outcome, relay: &Relay) {
+/// Peer certificates the deployment refused, from its log.
+pub fn certificate_refusals(h: &Harness, home: Home) -> usize {
+    log_count(h, home, &["s2s peer certificate refused"])
+}
+
+/// Check the newest relayed connection's negotiated TLS version: one the
+/// G1 profile allows, or exactly `expected` when given.
+pub fn check_tls(outcome: &mut Outcome, relay: &Relay, expected: Option<u16>) {
+    let name = [relay.label.as_str(), ": negotiated TLS version"].concat();
     match relay
         .connections()
         .last()
         .and_then(Connection::server_hello)
     {
-        Some(hello) => outcome.note(format!(
-            "{}: {} cipher suite 0x{:04x}",
-            relay.label,
-            hello.version_name(),
-            hello.cipher_suite
-        )),
-        None => outcome.note(format!("{}: no ServerHello seen", relay.label)),
+        Some(hello) => {
+            let allowed = matches!(hello.version, 0x0303 | 0x0304);
+            outcome.check(
+                name,
+                allowed && expected.is_none_or(|expected| expected == hello.version),
+                format!(
+                    "{} cipher suite 0x{:04x}",
+                    hello.version_name(),
+                    hello.cipher_suite
+                ),
+            );
+        }
+        None => outcome.unverified(name, "no ServerHello seen on the relay"),
+    }
+}
+
+/// The pre-TLS refusal condition: every refusal of a pair before TLS is
+/// `policy-violation` (s2s-connection-manager-2047.md, Admission).
+pub const PRE_TLS_REFUSAL: &str = "policy-violation";
+
+/// A known-good stream from the harness peer must establish first, so a
+/// refusal the row then sees is Waddle's and not a harness defect.
+pub async fn raw_control(h: &Harness) -> Result<()> {
+    let plan = Plan::external(RAW_PEER, HOME_A, &h.leaf(RAW_PEER)?);
+    let attempt = initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), &plan).await?;
+    let detail = attempt.describe();
+    match attempt.stream {
+        Some(stream) => {
+            stream.close().await;
+            Ok(())
+        }
+        None => Err(Unverifiable(
+            [
+                "the harness peer cannot establish a control stream: ",
+                &detail,
+            ]
+            .concat(),
+        )
+        .into()),
     }
 }
 

@@ -185,7 +185,7 @@ impl Waddle {
         let deadline = Instant::now() + Duration::from_secs(120);
         while Instant::now() < deadline {
             if !process.running() {
-                return Ok(process.log_tail(20));
+                return Ok(process.log_tail(60));
             }
             if http::get(ports.waddle_http(self.spec.home), "/readyz")
                 .await

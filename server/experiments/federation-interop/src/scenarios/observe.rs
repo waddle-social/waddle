@@ -42,22 +42,29 @@ fn skip_leading_whitespace(bytes: &[u8]) -> &[u8] {
     bytes.get(start..).unwrap_or_default()
 }
 
-/// Whitespace found before a stream header: before the first token of
-/// the stream, or between the XML declaration and the stream element.
+/// Whitespace (or U+FEFF) before a stream header, initial or restarted,
+/// which Waddle refuses (s2s-handshake-2047.md): before the first token of
+/// a direction's bytes, or between the end of the previous element and a
+/// restarted header. Whitespace between an XML declaration and the stream
+/// element is part of the header's own document prolog and is not
+/// counted; Waddle's own encoder writes a newline there.
 fn whitespace_before_headers(bytes: &[u8]) -> Vec<String> {
     let mut found = Vec::new();
-    if bytes.first().is_some_and(u8::is_ascii_whitespace) {
-        found.push("before the first token".to_owned());
-    }
     let text = String::from_utf8_lossy(bytes);
-    for (index, _) in text.match_indices("<stream:stream") {
+    if text.starts_with('\u{feff}') || text.starts_with(|c: char| c.is_whitespace()) {
+        found.push("before the first header".to_owned());
+    }
+    let starts = text
+        .match_indices("<?xml")
+        .map(|(index, _)| index)
+        .chain(text.match_indices("<stream:stream").map(|(index, _)| index));
+    for index in starts {
         let before = text.get(..index).unwrap_or_default();
-        if let Some(declaration_end) = before.rfind("?>") {
-            let gap = before.get(declaration_end + 2..).unwrap_or_default();
-            if !gap.is_empty() && gap.chars().all(char::is_whitespace) {
-                found.push("between the XML declaration and <stream:stream>".to_owned());
-            }
+        let trimmed = before.trim_end_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        if trimmed.len() == before.len() || trimmed.is_empty() || trimmed.ends_with("?>") {
+            continue;
         }
+        found.push(format!("before a restarted header at byte {index}"));
     }
     found
 }
