@@ -2601,6 +2601,14 @@ applies, per account the actor seats or lists:
 | No membership recorded, or banned | An entry above that, no seat | Sets the entry, which also refuses a join of that account the actor has not applied yet. |
 | An affiliation below the mirrored one | Any | Lowers the entry to the recorded one. The role is derived again (an admin that became a member is no moderator), with the affiliation presence. |
 
+A room's own administration request applies its change to the actor
+itself, with the administrator and the reason it names. The sweep waits for
+a request that is under way on the same process (it takes the room's
+configuration lock, which the request holds from before it records the
+change until the actor applied it), and then finds the room in line. A
+sweep that reaches the actor first, on another process or for a change that
+was not made through the room, removes without naming an actor or a reason.
+
 The removal presence goes to the removed occupant (with status 110) and to
 everyone who stays. The removed sessions' media ends, and a changed voice is
 pushed to the media server. The effects travel as the actor's other
@@ -2728,8 +2736,12 @@ A home never issues the JID of a retired account to a new holder
   on both account tables before it writes. An insert that has not committed
   finishes first and is removed with the account; one that arrives later
   waits for the commit and then runs against the ledger that holds the JID.
-  SQLite runs one writing transaction at a time. Retirement therefore blocks
-  provisioning for the length of one short transaction.
+  SQLite runs one writing transaction at a time. The lock holds up every
+  writer of the account tables while the retirement waits for it and runs:
+  provisioning, session creation at every login, and changes of native
+  credentials. The retirement waits at most 2 s for the lock and runs no
+  statement longer than 5 s; one that cannot get the lock in time fails
+  without having changed anything and is run again.
 - **Not done by retirement:** it does not end the account's open streams,
   and it does not revoke the account's grants in any room, here or on
   another deployment. The [retirement runbook](../../../docs/operations/account-retirement.md)
@@ -2758,6 +2770,11 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
   earlier migrations.
 - With no scope enrolled a replica holds no lease, runs no tick and no
   sweep, and takes no queue lock. Unmanaged rooms never reach the fence.
+- With a scope enrolled, each serving replica runs four ticks a second on
+  its main connection pool, whether or not anything changes: one
+  transaction that renews its lease and reads every scope's generation
+  (two statements, plus the one that bounds them), and one more that
+  records the generations that moved.
 - For every deployment: native registration and identity-provider
   provisioning insert under the ledger's condition, and session creation
   reads the ledger once; fan-out from a node of the Spaces service reads
@@ -2865,7 +2882,7 @@ SpiceDB; the case added to `host_grant_projection` does, and runs with the
 first slice's set. Three cases run the server binary's operator subcommands,
 and one starts a second process of the test binary.
 
-The set was executed on 2026-11-16 at commit `bc9c9ae0d`, against
+The set was executed on 2026-11-16 at commit `c7780f36e`, against
 PostgreSQL 17.11 and SpiceDB 1.56.1, with nextest's default parallelism and
 together with the first slice's, the writer fence's and the restore slice's
 sets, whose code it changes: two consecutive runs passed 238 of 238 cases in

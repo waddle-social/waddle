@@ -79,8 +79,12 @@ It does not:
    error, and the command can be run again.
 
    The servers can run during the act. On PostgreSQL it locks the two account
-   tables for its one transaction, so a registration or a first login that
-   arrives meanwhile waits for it and is then decided against the ledger.
+   tables for its one transaction. Every writer of those tables waits for it
+   meanwhile: registrations, and also every login, which records a session.
+   The transaction is short, and it waits at most 2 s for the lock; if a
+   long-running transaction holds the tables it exits with code 1 without
+   having changed anything, and logins that queued behind it proceed. Run it
+   again.
 
 3. **End the account's open streams** if it must stop at once: restart the
    servers, or wait for the client to disconnect. A retired account cannot
