@@ -1378,11 +1378,17 @@ seat ends for a holder that does not answer. A leave, or an error that
 ends a seat, that cannot be placed is not dropped and not answered: it is
 kept, one for each room and sender (a leave replaces an error), within
 the bounds of what waits to be placed, and placed again at each sweep
-once its room's holder is no longer taken for silent, for up to 120 s.
-Available presence from the same sender for the same room that is taken
-meanwhile, such as a join, forgets it, so a leave from before a later join
-never ends that join's occupancy. One that finds no place to be kept, or
-whose time passes, is dropped and counted. What
+once its room's holder is no longer taken for silent, for up to 120 s
+from when it was first kept, however often it is placed again. Available
+presence from the same sender for the same room that is placed from this
+replica meanwhile, such as a join, forgets it, whether it is kept or back
+in the room's lane, so a leave from before a later join never ends that
+join's occupancy on the room's holder; a later presence that is not
+placed in the end forgets nothing. Kept leaves are bounded like what
+waits to be placed (below), and for one remote account at a quarter of
+its domain's share (16 by default), never above the seats one account
+may hold. One that finds no place to be kept, or whose time passes, is
+dropped and counted. What
 waits to be placed is bounded like the queues behind the stage (1,024 on a
 replica, 32 for one room, 64 from one remote domain), and as there a
 stanza beyond the replica's or its domain's bound holds its stream until
@@ -1972,12 +1978,6 @@ runbook (G24):
   so that one account's joins never hold the stream its domain's other
   accounts use. A client that sends joins faster than that waits for its
   own join timeout and retries.
-- **An account's allowances are bounded by its domain's one at a time.**
-  Each of an account's allowances is at most its domain's, but their sum
-  is not bounded by it: with the defaults one account can spend
-  at most 21 of its domain's 50 stanzas a second and 144 of its 200 at
-  once. A configuration whose per-account rates add up to more than the
-  domain's lets one account spend its domain's rate, and the domain's
 - **One account can fill its domain's share of the queues.** An
   account's allowances bound how fast it sends, not how long what it sent
   waits. Its stanzas for two or more rooms whose actors are slow wait in
@@ -1985,6 +1985,12 @@ runbook (G24):
   room fills at most half of it); the next stanza of any account of the
   domain then holds the stream until a place frees, and the stream is
   closed with `resource-constraint` if none frees in time.
+- **An account's allowances are bounded by its domain's one at a time.**
+  Each of an account's allowances is at most its domain's, but their sum
+  is not bounded by it: with the defaults one account can spend
+  at most 21 of its domain's 50 stanzas a second and 144 of its 200 at
+  once. A configuration whose per-account rates add up to more than the
+  domain's lets one account spend its domain's rate, and the domain's
   stream then waits for it as it waits for all its accounts together.
 - **`service-unavailable` does not end a seat.** Only the conditions
   XEP-0045 lists for ghost users (§17.1.2) do. A server answers with
@@ -1997,15 +2003,17 @@ runbook (G24):
   stream is lost or the occupant's server sends its leave.
 - **A leave that cannot be placed is late, or lost.** A leave or an
   error that ends a seat, for a room whose holder cannot be asked, is
-  kept and placed again for up to 120 s; meanwhile the holder still seats
-  the occupant and sends it the room's traffic. One that finds no place
-  to be kept (1,024 on a replica, 64 for one remote domain) or is not
-  placed in that time is dropped, and the occupant stays seated until
-  its stream is lost or its seat ends otherwise. Keeping one for each
-  room and sender means only the latest of several is placed. A join that
-  reaches another replica of the same deployment meanwhile does not
-  forget the leave kept here, which can then end that join's occupancy
-  once placed; the occupant enters again.
+  kept and placed again for up to 120 s from when it was first kept;
+  meanwhile the holder still seats the occupant and sends it the room's
+  traffic. One that finds no place to be kept (1,024 on a replica, 64 for
+  one remote domain, 16 for one remote account) or is not placed in that
+  time is dropped, and the occupant stays seated until its stream is lost
+  or its seat ends otherwise. Keeping one for each room and sender means
+  only the latest of several is placed. A later presence of the sender
+  for the room forgets it only once placed from the replica that keeps
+  it. A join that reaches another replica of the same deployment
+  meanwhile does not forget the leave kept here, which can then end that
+  join's occupancy once placed; the occupant enters again.
 - **Leaves beyond the allowance on a replica that carries requests.** The
   first leave for a seat is taken beyond its account's allowance only on
   the replica that holds the seat, which is the replica that holds its

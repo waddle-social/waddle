@@ -584,16 +584,12 @@ impl Inner {
                 None
             }
         };
-        // A sender that enters the room again, or changes its presence
-        // there, is past any leave of it still kept to be placed: placed
-        // later, that leave would end its new occupancy.
-        if staged && kind.counts_against_presence() {
-            if let Some(from) = stanza_from(&request.stanza) {
-                lock(&self.pending_leaves).forget(&room, from);
-            }
-        }
+        // A leave of the sender still kept to be placed is forgotten once
+        // a later presence of it for the room is placed, not here: one
+        // that is not placed in the end leaves the leave to be placed
+        // ([`Self::supersede_leaves`]).
         if pause.is_none() {
-            match self.admit(&room, request, &peer, staged, kind) {
+            match self.admit(&room, request, &peer, staged, kind, None) {
                 Ok(()) => return SinkVerdict::Accepted,
                 Err((refused, Full::Room)) => {
                     self.refuse_room_full(&pair, &refused.stanza, kind);
@@ -638,6 +634,7 @@ impl Inner {
                     peer: peer.clone(),
                     arrived: tokio::time::Instant::now(),
                     in_room: kind.in_room(),
+                    kept_until: None,
                 };
                 let laned = router
                     .placements
@@ -713,7 +710,8 @@ impl Inner {
 
     /// Queue `request` without waiting: for placement when the host keeps
     /// rooms on other replicas (`staged`), or else for the room host. The
-    /// request is handed back with the bound that refused it.
+    /// request is handed back with the bound that refused it. `kept_until`
+    /// is set for a leave placed again: until when it was first kept.
     fn admit(
         self: &Arc<Self>,
         room: &BareJid,
@@ -721,6 +719,7 @@ impl Inner {
         peer: &str,
         staged: bool,
         kind: Kind,
+        kept_until: Option<tokio::time::Instant>,
     ) -> Result<(), (Box<LocalRoomRequest>, Full)> {
         if !staged {
             let work = RoomWork::Request(Box::new(request));
@@ -739,6 +738,7 @@ impl Inner {
             peer: peer.to_owned(),
             arrived: tokio::time::Instant::now(),
             in_room: kind.in_room(),
+            kept_until,
         };
         match self.placements.offer(room, waiting) {
             Offered::Queued => Ok(()),
@@ -771,11 +771,12 @@ impl Inner {
             request,
             peer,
             arrived,
+            kept_until,
             ..
         } = waiting;
         if self.placements.silent(room) {
             telemetry::room_request_not_carried();
-            self.unplaced(request, &peer, self.busy(HOLDER_SILENT));
+            self.unplaced(request, &peer, self.busy(HOLDER_SILENT), kept_until);
             return;
         }
         let place = tokio::select! {
@@ -792,16 +793,22 @@ impl Inner {
             Ok(None) => return,
             Err(_) => {
                 telemetry::room_placement_crowded();
-                self.unplaced(request, &peer, self.busy(PLACES_TAKEN));
+                self.unplaced(request, &peer, self.busy(PLACES_TAKEN), kept_until);
                 return;
             }
         };
         // Another request may have found the holder silent meanwhile.
         if self.placements.silent(room) {
             telemetry::room_request_not_carried();
-            self.unplaced(request, &peer, self.busy(HOLDER_SILENT));
+            self.unplaced(request, &peer, self.busy(HOLDER_SILENT), kept_until);
             return;
         }
+        // A presence of the sender that is placed ends what any earlier
+        // leave of it still to be placed would end.
+        let supersedes = kind_of(&request.stanza, || false)
+            .counts_against_presence()
+            .then(|| stanza_from(&request.stanza).cloned())
+            .flatten();
         let placing = hosting.host.place(&request.principal, &request.stanza);
         let placed = tokio::select! {
             biased;
@@ -814,21 +821,60 @@ impl Inner {
         match placed {
             Ok(RoomPlacement::Here) => {
                 let deadline = arrived + self.limits.room_request_wait;
-                self.queue_placed(room, request, &peer, deadline).await;
+                if self.queue_placed(room, request, &peer, deadline).await {
+                    if let Some(sender) = &supersedes {
+                        self.supersede_leaves(room, sender);
+                    }
+                }
             }
-            Ok(RoomPlacement::Carried) => telemetry::room_request_carried(),
+            Ok(RoomPlacement::Carried) => {
+                telemetry::room_request_carried();
+                if let Some(sender) = &supersedes {
+                    self.supersede_leaves(room, sender);
+                }
+            }
             Ok(RoomPlacement::Refused(error)) => {
                 telemetry::room_request_not_carried();
-                self.unplaced(request, &peer, *error);
+                self.unplaced(request, &peer, *error, kept_until);
             }
             Ok(RoomPlacement::Silent) => {
                 telemetry::room_placement_silent();
-                self.holder_silent(room, request, &peer);
+                self.holder_silent(room, request, &peer, kept_until);
             }
             Err(_) => {
                 telemetry::room_placement_timed_out();
-                self.holder_silent(room, request, &peer);
+                self.holder_silent(room, request, &peer, kept_until);
             }
+        }
+    }
+
+    /// A presence of `sender` for `room` was placed: forget every leave or
+    /// error of it for the room that waits to be placed again, kept or
+    /// back in the room's lane. Each arrived before that presence, since a
+    /// room's requests are placed one at a time in the order they arrived
+    /// and a leave goes back to the lane only after it was kept, so placed
+    /// now it would end the occupancy the presence entered or changed. The
+    /// table stays locked while the lane is searched, as it does while
+    /// kept leaves go back to their lanes ([`Self::place_unplaced_leaves`]),
+    /// so that none is missed between the two.
+    fn supersede_leaves(&self, room: &BareJid, sender: &Jid) {
+        let mut pending = lock(&self.pending_leaves);
+        pending.forget(room, sender);
+        self.placements.withdraw(room, |waiting| {
+            waiting.kept_until.is_some() && stanza_from(&waiting.request.stanza) == Some(sender)
+        });
+    }
+
+    /// The bounds on the leaves and errors kept to be placed again: those
+    /// of the stage that places requests, in all and for each remote
+    /// domain, and for each remote account a quarter of its domain's
+    /// share, never above the seats one account may hold.
+    fn leave_bounds(&self) -> LeaveBounds {
+        let per_peer = self.limits.room_requests_per_peer.max(1);
+        LeaveBounds {
+            total: self.limits.room_requests,
+            per_peer,
+            per_account: (per_peer / 4).clamp(1, self.limits.seats_per_account.max(1)),
         }
     }
 
@@ -837,14 +883,14 @@ impl Inner {
     /// `deadline`. The stream that carried the stanza is not waiting for
     /// it any more, so a stanza that finds no place in time is answered
     /// as its kind is rather than its stream closed; one whose room's
-    /// share is full is answered so at once.
+    /// share is full is answered so at once. Whether it was queued.
     async fn queue_placed(
         self: &Arc<Self>,
         room: &BareJid,
         request: LocalRoomRequest,
         peer: &str,
         deadline: tokio::time::Instant,
-    ) {
+    ) -> bool {
         // This replica decides the room, so whether its sender holds a
         // seat here says whether presence enters it.
         let kind = kind_of(&request.stanza, || {
@@ -871,8 +917,12 @@ impl Inner {
             )
             .await;
         match admitted {
-            Admitted::Queued | Admitted::Stopped => {}
-            Admitted::RoomFull(_) => self.refuse_room_full(&pair, &stanza, kind),
+            Admitted::Queued => true,
+            Admitted::Stopped => false,
+            Admitted::RoomFull(_) => {
+                self.refuse_room_full(&pair, &stanza, kind);
+                false
+            }
             Admitted::TimedOut => {
                 telemetry::room_request_overloaded();
                 self.refuse_kind(
@@ -881,6 +931,7 @@ impl Inner {
                     kind,
                     self.busy("The room is busy; try again later."),
                 );
+                false
             }
         }
     }
@@ -888,15 +939,26 @@ impl Inner {
     /// `room`'s holder did not answer `request`: answer it and everything
     /// that waits for the room now, which asked the same holder, and answer
     /// the room's requests without asking it until the backoff has passed.
-    fn holder_silent(self: &Arc<Self>, room: &BareJid, request: LocalRoomRequest, peer: &str) {
+    fn holder_silent(
+        self: &Arc<Self>,
+        room: &BareJid,
+        request: LocalRoomRequest,
+        peer: &str,
+        kept_until: Option<tokio::time::Instant>,
+    ) {
         self.placements.mark_silent(
             room,
             tokio::time::Instant::now() + self.limits.room_placement_backoff,
         );
-        self.unplaced(request, peer, self.busy(HOLDER_SILENT));
+        self.unplaced(request, peer, self.busy(HOLDER_SILENT), kept_until);
         for behind in self.placements.drain(room) {
             telemetry::room_request_not_carried();
-            self.unplaced(behind.request, &behind.peer, self.busy(HOLDER_SILENT));
+            self.unplaced(
+                behind.request,
+                &behind.peer,
+                self.busy(HOLDER_SILENT),
+                behind.kept_until,
+            );
         }
     }
 
@@ -904,19 +966,23 @@ impl Inner {
     /// is kept to be placed again ([`Self::place_unplaced_leaves`]), so that
     /// the room's holder does not keep an occupant that left; any other
     /// request is answered with `error` as [`Self::refuse_unplaced`] does.
-    fn unplaced(self: &Arc<Self>, request: LocalRoomRequest, peer: &str, error: StanzaError) {
+    /// A leave that was kept before is kept until the time it was first
+    /// kept for (`kept_until`), however often it is placed again.
+    fn unplaced(
+        self: &Arc<Self>,
+        request: LocalRoomRequest,
+        peer: &str,
+        error: StanzaError,
+        kept_until: Option<tokio::time::Instant>,
+    ) {
         if kind_of(&request.stanza, || false) != Kind::Ending {
             self.refuse_unplaced(&request, error);
             return;
         }
-        let until = tokio::time::Instant::now() + PENDING_LEAVE_TTL;
-        let kept = lock(&self.pending_leaves).keep(
-            request,
-            peer,
-            until,
-            self.limits.room_requests,
-            self.limits.room_requests_per_peer,
-        );
+        let now = tokio::time::Instant::now();
+        let until = kept_until.unwrap_or(now + PENDING_LEAVE_TTL);
+        let kept = until > now
+            && lock(&self.pending_leaves).keep(request, peer, until, self.leave_bounds());
         if kept {
             telemetry::room_leave_kept();
         } else {
@@ -927,10 +993,15 @@ impl Inner {
     /// Place again the leaves and errors that could not be placed, except
     /// those for a room whose holder is still taken for silent: each is
     /// offered to the stage that places requests, and kept again if that
-    /// has no place for it. One whose time has passed is dropped.
+    /// has no place for it. One whose time has passed, or that finds no
+    /// place to be kept again, is dropped. The table stays locked until
+    /// each is back in its lane or kept again, so that a presence placed
+    /// meanwhile finds it in one or the other ([`Self::supersede_leaves`]).
     pub(super) fn place_unplaced_leaves(self: &Arc<Self>) {
         let now = tokio::time::Instant::now();
-        let due = lock(&self.pending_leaves).take(now, |room| !self.placements.silent(room));
+        let bounds = self.leave_bounds();
+        let mut pending = lock(&self.pending_leaves);
+        let due = pending.take(now, |room| !self.placements.silent(room));
         for leave in due {
             let PendingLeave {
                 request,
@@ -944,14 +1015,11 @@ impl Inner {
             let Some(room) = replies::addresses(&request.stanza).1.map(Jid::to_bare) else {
                 continue;
             };
-            if let Err((refused, _)) = self.admit(&room, request, &peer, true, Kind::Ending) {
-                lock(&self.pending_leaves).keep(
-                    *refused,
-                    &peer,
-                    until,
-                    self.limits.room_requests,
-                    self.limits.room_requests_per_peer,
-                );
+            let readmitted = self.admit(&room, request, &peer, true, Kind::Ending, Some(until));
+            if let Err((refused, _)) = readmitted {
+                if !pending.keep(*refused, &peer, until, bounds) {
+                    telemetry::room_leave_dropped();
+                }
             }
         }
     }
@@ -2504,13 +2572,34 @@ pub(super) struct PendingLeave {
     until: tokio::time::Instant,
 }
 
+/// Bounds on the leaves and errors kept to be placed again.
+#[derive(Debug, Clone, Copy)]
+struct LeaveBounds {
+    total: usize,
+    per_peer: usize,
+    per_account: usize,
+}
+
 /// The leaves and errors that could not be placed, one for each room and
 /// sender, bounded like the stage that places requests: in all, and for
-/// each remote domain.
+/// each remote domain; and for each remote account, so that one account's
+/// leaves do not take its domain's whole share.
 #[derive(Debug, Default)]
 pub(super) struct PendingLeaves {
     kept: HashMap<(BareJid, Jid), PendingLeave>,
     per_peer: HashMap<String, usize>,
+    per_account: HashMap<BareJid, usize>,
+}
+
+/// Count one less for `key` in `counts`, forgetting a count that reaches
+/// zero.
+fn uncount<K: Hash + Eq>(counts: &mut HashMap<K, usize>, key: &K) {
+    if let Some(count) = counts.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(key);
+        }
+    }
 }
 
 impl PendingLeaves {
@@ -2522,13 +2611,13 @@ impl PendingLeaves {
         request: LocalRoomRequest,
         peer: &str,
         until: tokio::time::Instant,
-        total: usize,
-        per_peer: usize,
+        bounds: LeaveBounds,
     ) -> bool {
         let (Some(from), Some(to)) = replies::addresses(&request.stanza) else {
             return false;
         };
         let key = (to.to_bare(), from.clone());
+        let account = from.to_bare();
         let leave = matches!(
             &request.stanza,
             Stanza::Presence(presence) if presence.type_ == PresenceType::Unavailable
@@ -2548,10 +2637,15 @@ impl PendingLeaves {
             return true;
         }
         let of_peer = self.per_peer.get(peer).copied().unwrap_or(0);
-        if self.kept.len() >= total || of_peer >= per_peer {
+        let of_account = self.per_account.get(&account).copied().unwrap_or(0);
+        if self.kept.len() >= bounds.total
+            || of_peer >= bounds.per_peer
+            || of_account >= bounds.per_account
+        {
             return false;
         }
         self.per_peer.insert(peer.to_owned(), of_peer + 1);
+        self.per_account.insert(account, of_account + 1);
         self.kept.insert(
             key,
             PendingLeave {
@@ -2566,12 +2660,8 @@ impl PendingLeaves {
     /// Forget what is kept for `room` and `sender`.
     fn forget(&mut self, room: &BareJid, sender: &Jid) {
         if let Some(kept) = self.kept.remove(&(room.clone(), sender.clone())) {
-            if let Some(count) = self.per_peer.get_mut(&kept.peer) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.per_peer.remove(&kept.peer);
-                }
-            }
+            uncount(&mut self.per_peer, &kept.peer);
+            uncount(&mut self.per_account, &sender.to_bare());
         }
     }
 
@@ -2591,12 +2681,8 @@ impl PendingLeaves {
         let mut taken = Vec::with_capacity(keys.len());
         for key in keys {
             if let Some(kept) = self.kept.remove(&key) {
-                if let Some(count) = self.per_peer.get_mut(&kept.peer) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        self.per_peer.remove(&kept.peer);
-                    }
-                }
+                uncount(&mut self.per_peer, &kept.peer);
+                uncount(&mut self.per_account, &key.1.to_bare());
                 taken.push(kept);
             }
         }

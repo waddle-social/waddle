@@ -51,6 +51,10 @@ pub(super) struct Waiting {
     /// Whether the request counts against its room's lane: everything but
     /// a stanza that ends a seat.
     pub in_room: bool,
+    /// For a leave or an error that could not be placed before and is
+    /// placed again: until when it was first kept. Placing it again does
+    /// not extend that.
+    pub kept_until: Option<Instant>,
 }
 
 /// Bounds on what waits to be placed and on how many lanes are placed at
@@ -250,6 +254,32 @@ impl Placements {
             self.space.notify_waiters();
         }
         drained
+    }
+
+    /// Drop from `room`'s lane the requests `withdrawn` selects; how many.
+    /// The lane stays open.
+    pub(super) fn withdraw(&self, room: &BareJid, withdrawn: impl Fn(&Waiting) -> bool) -> usize {
+        let mut lanes = lock(&self.lanes);
+        let mut taken = Vec::new();
+        if let Some(lane) = lanes.rooms.get_mut(room) {
+            let mut kept = VecDeque::with_capacity(lane.len());
+            for waiting in lane.drain(..) {
+                if withdrawn(&waiting) {
+                    taken.push(waiting);
+                } else {
+                    kept.push_back(waiting);
+                }
+            }
+            *lane = kept;
+        }
+        for waiting in &taken {
+            Self::released(&mut lanes, waiting);
+        }
+        drop(lanes);
+        if !taken.is_empty() {
+            self.space.notify_waiters();
+        }
+        taken.len()
     }
 
     /// Remember that `room`'s holder did not answer: until `until`,
