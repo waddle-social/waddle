@@ -410,9 +410,12 @@ async fn the_holder_takes_only_a_room_stanza_from_the_principal_it_names() {
         router.carried_room_request(carried(BOB, Stanza::Iq(Box::new(register)))),
         CarriedRoomOutcome::Refused
     );
-    // An address that is not in canonical form names no principal.
+    // An address that is not in canonical form names no principal: the
+    // `jid` parser keeps a domain's trailing dot (RFC 7622 §3.2 strips it
+    // only in the canonical form), while it folds a localpart's case
+    // already, so only the former reaches the check.
     assert!(RemotePrincipal::carried(CarriedPrincipal {
-        address: jid("Bob@home-b.test/phone"),
+        address: jid("bob@home-b.test./phone"),
         strength: AuthenticationStrength::Pkix,
         trust_profile: None,
         generation: uuid::Uuid::nil(),
@@ -565,8 +568,9 @@ async fn a_stored_owners_standing_counts_only_on_a_stream_that_honours_it() {
             Some("forbidden"),
             "{id}"
         );
-        // Nor is a seat taken on it: the room would count the stored
-        // entry, which is not honoured, so the join is refused.
+        // Nor is a seat taken on it: the stored entry is not honoured, so
+        // the account is not on the members-only room's member list, and
+        // the join is refused as XEP-0045 §7.2.6 refuses a non-member's.
         let id = [prefix, "-join"].concat();
         carry(
             &replicas,
@@ -578,7 +582,7 @@ async fn a_stored_owners_standing_counts_only_on_a_stream_that_honours_it() {
         assert_eq!(refused.attr("type"), Some("error"), "{id}: {refused:?}");
         assert_eq!(
             error_condition(&refused).as_deref(),
-            Some("forbidden"),
+            Some("registration-required"),
             "{id}"
         );
         assert!(replicas.holder.seat(ROOM, BOB_TABLET).is_none(), "{id}");
