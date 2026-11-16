@@ -309,9 +309,9 @@ impl Inner {
 
     /// Route a local account's message or presence for a remote JID that
     /// is not room traffic (gate G18): account traffic, routed once an
-    /// account side is attached, for an account that may send. A
-    /// `groupchat` message is room traffic only, and a message carrying the
-    /// DM pin marker never leaves.
+    /// account side is attached; [`Inner::route`] has already refused it
+    /// for an account that may not send. A `groupchat` message is room
+    /// traffic only, and a message carrying the DM pin marker never leaves.
     pub(super) async fn route_account(
         self: &Arc<Self>,
         pair: Pair,
@@ -326,10 +326,7 @@ impl Inner {
                 return Err(UnroutableReason::RefusedByPolicy);
             }
         }
-        let purpose = self.account_purpose(&sender)?;
-        if !self.account_may_send(&sender).await {
-            return Err(UnroutableReason::RefusedByPolicy);
-        }
+        let purpose = self.account_purpose(&sender, &pair)?;
         if self.enqueue(pair, Queued { stanza, purpose }) {
             Ok(())
         } else {
@@ -337,32 +334,47 @@ impl Inner {
         }
     }
 
-    /// The purpose of an account stanza from `sender`, holding one place
-    /// of the sender's share of the pair queues: an account may hold at
-    /// most [`super::RouterLimits::account_queue_per_sender`] places, so
-    /// that one account's burst never fills a pair's queue for the others.
-    /// [`UnroutableReason::EgressBusy`] when its share is full.
-    pub(super) fn account_purpose(&self, sender: &Jid) -> Result<Purpose, UnroutableReason> {
-        let account = sender.to_bare();
+    /// The purpose of an account stanza from `sender` on `pair`, holding
+    /// one place of the sender's share of that pair's queue: an account may
+    /// hold at most [`super::RouterLimits::account_queue_per_sender`] places
+    /// on one pair, so that one account's burst never fills a pair's queue
+    /// for the others. The share is per pair, so that a pair whose stream
+    /// cannot be established, and whose queue holds the account's stanzas
+    /// until they are answered, never holds back the account's traffic to
+    /// other domains. [`UnroutableReason::EgressBusy`] when its share is
+    /// full.
+    pub(super) fn account_purpose(
+        &self,
+        sender: &Jid,
+        pair: &Pair,
+    ) -> Result<Purpose, UnroutableReason> {
+        let key = (sender.to_bare(), pair.clone());
         let mut shares = lock(&self.account_shares);
-        let held = shares.get(&account).copied().unwrap_or(0);
+        let held = shares.get(&key).copied().unwrap_or(0);
         if held >= self.limits.account_queue_per_sender {
             telemetry::account_share_full();
             return Err(UnroutableReason::EgressBusy);
         }
-        shares.insert(account.clone(), held + 1);
+        shares.insert(key.clone(), held + 1);
         Ok(Purpose::Account {
             sender: sender.clone(),
             _share: AccountShare {
                 shares: Arc::clone(&self.account_shares),
-                account,
+                key,
             },
         })
     }
 
-    /// Whether the local account that `sender` names may send account
-    /// traffic now (it exists and has not been retired), as the account
-    /// side decides; any failure, or no account side, refuses.
+    /// Whether `sender`, an address of the served domain with a localpart,
+    /// is a local account's: the senders [`Self::account_may_send`] is
+    /// asked about.
+    pub(super) fn sent_by_account(&self, sender: &Jid) -> bool {
+        sender.node().is_some() && *sender.domain() == *self.served.local()
+    }
+
+    /// Whether the local account that `sender` names may send to remote
+    /// JIDs now (it exists and has not been retired), as the account side
+    /// decides; any failure, or no account side, refuses.
     pub(super) async fn account_may_send(&self, sender: &Jid) -> bool {
         let Some(accounts) = self.accounts.get().cloned() else {
             return false;
@@ -396,19 +408,19 @@ impl Inner {
     }
 }
 
-/// The places each local account's stanzas hold on the pair queues.
-pub(super) type AccountShares = Arc<Mutex<HashMap<BareJid, usize>>>;
+/// The places each local account's stanzas hold on each pair's queue.
+pub(super) type AccountShares = Arc<Mutex<HashMap<(BareJid, Pair), usize>>>;
 
-/// One place of an account's share of the pair queues, given back when the
-/// stanza holding it is sent, answered or dropped.
+/// One place of an account's share of one pair's queue, given back when
+/// the stanza holding it is sent, answered or dropped.
 #[derive(Debug)]
 pub(super) struct AccountShare {
     shares: AccountShares,
-    account: BareJid,
+    key: (BareJid, Pair),
 }
 
 impl Drop for AccountShare {
     fn drop(&mut self) {
-        super::decrement(&mut lock(&self.shares), &self.account);
+        super::decrement(&mut lock(&self.shares), &self.key);
     }
 }

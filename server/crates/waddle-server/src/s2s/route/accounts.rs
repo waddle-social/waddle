@@ -99,11 +99,11 @@ pub trait LocalAccounts: Send + Sync {
         room_occupant: bool,
     ) -> bool;
 
-    /// Whether the local account `account` may send account traffic to
-    /// remote JIDs now: it exists and has not been retired. A retired
-    /// account's stream stays open until it ends; nothing it sends, and
-    /// nothing the server sends on its behalf, leaves. Any failure answers
-    /// `false`.
+    /// Whether the local account `account` may send to remote JIDs now: it
+    /// exists and has not been retired. A retired account's stream stays
+    /// open until it ends; nothing it sends (IQ requests and responses,
+    /// room traffic and account traffic alike), and nothing the server
+    /// sends on its behalf, leaves. Any failure answers `false`.
     async fn may_send(&self, account: &BareJid) -> bool;
 }
 

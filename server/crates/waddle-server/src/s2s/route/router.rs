@@ -158,10 +158,10 @@ pub struct RouterLimits {
     /// How long a remote IQ request to a local resource waits for the
     /// resource's response.
     pub account_request_ttl: Duration,
-    /// Places on the pair queues one local account's messages and
+    /// Places on one pair's queue that one local account's messages and
     /// presence for remote JIDs, its own and those the server sends on its
-    /// behalf, may hold at once; a further one is refused as the full
-    /// queue would refuse it.
+    /// behalf, may hold at once; a further one for that pair is refused as
+    /// the full queue would refuse it. Each pair has its own share.
     pub account_queue_per_sender: usize,
 }
 
@@ -680,6 +680,25 @@ impl Inner {
             Ok(plan) => plan,
             Err(reason) => return refuse(reason, outbound),
         };
+        // A retired account's stream stays open until it ends, and nothing
+        // it sends leaves for a remote JID: no request, no response, no
+        // room traffic and no account traffic (gate G18). The account side
+        // decides, failing closed; without one, D7's interim rule already
+        // refuses account traffic and nothing can tell a retired account.
+        if self.accounts_attached()
+            && self.sent_by_account(outbound.sender())
+            && !self.account_may_send(outbound.sender()).await
+        {
+            if let Purpose::Request {
+                pending,
+                generation,
+                ..
+            } = &purpose
+            {
+                self.release_if(&pending.key, Some(*generation));
+            }
+            return refuse(UnroutableReason::RefusedByPolicy, outbound);
+        }
         let stanza = match outbound.stanza().clone() {
             Stanza::Iq(iq) => Stanza::Iq(Box::new(without_server_minted_credentials(*iq))),
             other => other,
@@ -692,12 +711,6 @@ impl Inner {
                 Ok(()) => RemoteRouteOutcome::Accepted,
                 Err(reason) => refuse(reason, outbound),
             };
-        }
-        // A retired account sends nothing (gate G18).
-        if let Purpose::Account { sender, .. } = &purpose {
-            if !self.account_may_send(sender).await {
-                return refuse(UnroutableReason::RefusedByPolicy, outbound);
-            }
         }
         let reserved = match &purpose {
             Purpose::Request {
@@ -1876,7 +1889,13 @@ impl Inner {
                 if sender.node().is_none() || *sender.domain() != *self.served.local() {
                     return Err(UnroutableReason::RefusedByPolicy);
                 }
-                self.account_purpose(&Jid::from(sender.to_bare()))?
+                self.account_purpose(
+                    &Jid::from(sender.to_bare()),
+                    &Pair {
+                        local: local.clone(),
+                        remote: remote.clone(),
+                    },
+                )?
             }
             // Other messages and presence leave from a bound resource of a
             // local account: room traffic for a room it occupies or is
