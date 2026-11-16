@@ -1532,16 +1532,12 @@ async fn create_websocket_state(
         // Account lookups match canonical keys only, so every account row
         // needs its key before the node serves; the roster prune that
         // follows uses them.
-        // With S2S enabled, contacts at domains this deployment does not
-        // serve are remote contacts and stay (gate G18).
-        let remote_contacts = state
-            .s2s_federation
-            .is_some()
-            .then(|| service_domains.served_domains(&xmpp_domain))
-            .flatten();
+        // Contacts at domains this deployment does not serve are remote
+        // contacts and stay, with S2S enabled or not (gate G18).
+        let served = service_domains.served_domains(&xmpp_domain);
         crate::auth::directory::reconcile_local_accounts(
             state.db_pool.global_actor(),
-            remote_contacts.as_ref(),
+            served.as_ref(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;

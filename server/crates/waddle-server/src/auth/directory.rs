@@ -71,13 +71,14 @@ pub(crate) fn exact_account_jid(name: &str, domain: &str) -> Option<CanonicalBar
 /// without one its canonical lookup key, then drop roster items whose
 /// contact is not an account on the owner's domain (rooms, extension bots,
 /// names nobody registered) by the same rule the roster set and subscription
-/// guards apply. With S2S enabled, `remote` names the domains this
-/// deployment serves, and a contact at any other domain is a remote
-/// contact the roster keeps (ADR-0020 D7, gate G18); with S2S off every
-/// such contact is dropped. Idempotent.
+/// guards apply. `served` names the domains this deployment serves; a
+/// contact at any other domain is a remote contact, which the roster keeps
+/// whether S2S is enabled or not (ADR-0020 D7, gate G18): while S2S is off
+/// it is unreachable, and it is reachable again once S2S is enabled.
+/// Idempotent.
 pub(crate) async fn reconcile_local_accounts(
     actor: &ActorRef<DbActor>,
-    remote: Option<&crate::destination::ServedDomains>,
+    served: Option<&crate::destination::ServedDomains>,
 ) -> Result<(), AuthError> {
     // Nodes starting together can race to key case-variant twins; the
     // loser's UPDATE trips the unique key index. A second pass sees the
@@ -86,7 +87,7 @@ pub(crate) async fn reconcile_local_accounts(
         warn!(%error, "account key backfill failed; retrying once");
         backfill_account_keys(actor).await?;
     }
-    prune_roster_contacts(actor, remote).await
+    prune_roster_contacts(actor, served).await
 }
 
 /// How often a serving node keys account rows written without one. During
@@ -121,7 +122,7 @@ pub(crate) fn spawn_account_key_backfill(actor: &ActorRef<DbActor>, every: std::
 // ponytail: reads every roster row each startup; page by owner if rosters grow large.
 async fn prune_roster_contacts(
     actor: &ActorRef<DbActor>,
-    remote: Option<&crate::destination::ServedDomains>,
+    served: Option<&crate::destination::ServedDomains>,
 ) -> Result<(), AuthError> {
     let items = query(
         actor,
@@ -138,7 +139,7 @@ async fn prune_roster_contacts(
             contact.parse::<jid::BareJid>(),
         ) {
             (Ok(_), Ok(contact))
-                if remote.is_some_and(|served| {
+                if served.is_some_and(|served| {
                     matches!(
                         served.classify(Some(&jid::Jid::from(contact.clone()))),
                         crate::destination::Destination::Remote(_)

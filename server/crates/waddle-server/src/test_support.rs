@@ -291,6 +291,26 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Run the startup reconciliation of local accounts against `state`'s
+/// database, with the domains `state` serves, as a node does before it
+/// serves: account keys are backfilled and roster items naming nobody are
+/// pruned, while contacts at domains the deployment does not serve stay.
+///
+/// # Errors
+/// Returns the reconciliation's error as text.
+pub async fn reconcile_local_accounts(state: &WebSocketState) -> Result<(), String> {
+    let served = state
+        .deps
+        .service_domains
+        .served_domains(state.deps.auth_state.xmpp_domain.as_str());
+    crate::auth::directory::reconcile_local_accounts(
+        state.deps.app_state.db_pool.global_actor(),
+        served.as_ref(),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// The default in-memory WebSocket state whose app state runs the S2S
 /// snapshot of `config`, as a replica with S2S enabled does
 /// (`AppState::s2s_federation`), so that the account side of S2S traffic
