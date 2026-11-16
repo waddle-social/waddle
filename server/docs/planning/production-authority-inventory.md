@@ -5,7 +5,7 @@ Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
 S2S routing and the host-grant restore incarnation through
-`f41951085420e0581c92e11a96d6aa3a1c25f2f4` (see the last refresh below); the original
+`fbb7fb04b1594da5abe89c30415300c85e0b963b` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -56,7 +56,7 @@ revision. The [local test backend](../../crates/waddle-server/src/permissions/ac
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1533) invokes account reconciliation behind its
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1542) invokes account reconciliation behind its
 lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L142) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L182) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
@@ -450,6 +450,31 @@ the fifth refresh:
   witness writers, both confined to the projection definition. The rest
   changed only their line or the import list they sit in. No production
   grant writer, grant store or acceptance authority was added.
+
+The selected evidence was refreshed a seventh time, through
+`fbb7fb04b1594da5abe89c30415300c85e0b963b`, after reviewing the delta of
+the reviewed files since the sixth refresh:
+
+- The writer fence's gate (`hg-gate`) reads the attachment only while the
+  attachment gate is attached (`HostGrantAttachmentGate::verified_attachment`).
+  While that gate verifies a changed authority again, and after that
+  verification failed, it still holds the earlier attachment for
+  acceptance's binding comparison, and every surface outside acceptance
+  answers unavailable for a managed room. A second, different attachment
+  gate offered to it makes it refuse every managed room; startup
+  (`startup-call` moved) checks the binding and, when it fails, logs an
+  error and verifies nothing. Projection recovery (`hg-recovery`) moved
+  without changing.
+- Room administration's background reconciliation runs no pass while the
+  attachment gate is not attached; the mirror repair (`hg-mirror-repair`)
+  moved without changing and decides through the gate above.
+- The surfaces still compare no binding per decision and do not ask the
+  attachment gate about rooms of an enrollment only SpiceDB holds; both
+  are recorded in the host-grant design as preconditions for the first
+  enrollment.
+- The raw scan holds 1595 records, unchanged in count and content; only
+  lines moved. No production grant writer, grant store or acceptance
+  authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.

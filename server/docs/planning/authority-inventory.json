@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "f41951085420e0581c92e11a96d6aa3a1c25f2f4",
+  "baseline_commit": "fbb7fb04b1594da5abe89c30415300c85e0b963b",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -57,7 +57,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
-      "sha256": "6446117906497c3022b4274d3f096ffa9b9a5aa989f089ce72f8b477d0c2ca47"
+      "sha256": "329f5d3abff309c1fd8b7bf8832b90867569fff988d39839ad592e39c5585cca"
     },
     {
       "path": "server/crates/waddle-server/src/permissions/host_grant/standing.rs",
@@ -117,7 +117,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "a685d70819d5fa73d88380535ccfae5f87f2d61e29d6368de45f9a2c4d199d61"
+      "sha256": "ced3c63fa0b81b42a0f82c986ac59a338b3ef27ac50d7fd0ae7138023846dcab"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -161,7 +161,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs",
-      "sha256": "86687736678af200e9423876271fd0cabcbf4c08982b54a2f7dba419a8fc3e0b"
+      "sha256": "e833a1754910dc570b204e63e6a4915ef3618b3da2636b8ce5dcc46c9cf5e30f"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_config.rs",
@@ -349,7 +349,7 @@
     },
     "startup-call": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1533,
+      "line": 1542,
       "text": "crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn("
     },
     "bootstrap": {
@@ -639,7 +639,7 @@
     },
     "hg-gate": {
       "path": "server/crates/waddle-server/src/permissions/host_grant/gate.rs",
-      "line": 57,
+      "line": 66,
       "text": "pub struct HostGrantGate"
     },
     "hg-room-read": {
@@ -744,7 +744,7 @@
     },
     "hg-recovery": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 988,
+      "line": 997,
       "text": "fn spawn_host_grant_recovery("
     },
     "placement": {
@@ -819,7 +819,7 @@
     },
     "hg-mirror-repair": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs",
-      "line": 342,
+      "line": 358,
       "text": "pub(super) struct MirrorRepair {"
     },
     "hg-claim-move": {
@@ -894,7 +894,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "f4718ef2fa2fd7d90aff7cd189da26c9e26e829c7e904adfcee621caff25406a",
+    "sha256": "d4cebd8a7f86dc10f6d33608d0ceac12c49e65c74d22be01bf99b82dc83842f0",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,
