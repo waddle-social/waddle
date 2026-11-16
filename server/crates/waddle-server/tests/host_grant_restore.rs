@@ -2189,6 +2189,15 @@ impl Live {
         actor
     }
 
+    /// A production actor without the host-grant guard: a guarded actor
+    /// answers no legacy read of an enrolled scope's objects.
+    async fn unguarded_actor(&self) -> ActorRef<PermissionActor> {
+        let backend = PermissionActor::from_server_config(&self.config)
+            .await
+            .expect("production SpiceDB backend");
+        PermissionActor::spawn(backend)
+    }
+
     /// A replica: a store on its own pool and its own permission actor.
     async fn replica(&self) -> (HostGrantAuthority, ActorRef<PermissionActor>) {
         let db = Database::from_config(
@@ -2398,14 +2407,16 @@ fn wire_relationship(tuple: &Tuple) -> Relationship {
     )
 }
 
-/// What SpiceDB itself answers for a channel permission.
+/// What SpiceDB itself answers for a channel permission, read through an
+/// actor without the host-grant guard.
 async fn spicedb_allows(
-    actor: &ActorRef<PermissionActor>,
+    live: &Live,
     account: &str,
     permission: Permission,
     channel: &Object,
 ) -> bool {
-    actor
+    live.unguarded_actor()
+        .await
         .ask(CheckPermission {
             subject: Subject::user(account),
             permission,
@@ -2534,8 +2545,8 @@ async fn live_spicedb_a_restore_cannot_reopen_a_projected_revoke() {
     assert_eq!(marker.incarnation, state.authority_incarnation);
     assert_eq!(live.stamps().await, vec![marker.stamp()]);
     let channel = live.channel();
-    assert!(!spicedb_allows(&actor, SENDER, Permission::Read, &channel).await);
-    assert!(spicedb_allows(&actor, PEER, Permission::Read, &channel).await);
+    assert!(!spicedb_allows(&live, SENDER, Permission::Read, &channel).await);
+    assert!(spicedb_allows(&live, PEER, Permission::Read, &channel).await);
     // Once reopened, the journal witness follows the new incarnation.
     authority
         .sync_witnesses(lifecycle)
@@ -3206,7 +3217,7 @@ async fn live_spicedb_reconstruction_keeps_lost_bans_and_grants_nothing_from_the
     let _serial = LIVE_SPICEDB.lock().await;
     let live = Live::start("hg_restore_bans").await;
     let lifecycle = live.fixture.scope.lifecycle;
-    let (authority, actor) = live.replica().await;
+    let (authority, _actor) = live.replica().await;
     authority.reconcile(lifecycle).await.expect("first pass");
     let backup = AuthorityBackup::take(&live.fixture).await;
 
@@ -3272,7 +3283,7 @@ async fn live_spicedb_reconstruction_keeps_lost_bans_and_grants_nothing_from_the
     assert!(HostGrantAuthority::verified(&plan, &observation));
     let channel = live.channel();
     for account in [PEER, DAVE, CAROL] {
-        assert!(!spicedb_allows(&actor, account, Permission::Read, &channel).await);
+        assert!(!spicedb_allows(&live, account, Permission::Read, &channel).await);
     }
     live.close().await;
 }
@@ -3340,7 +3351,7 @@ async fn live_spicedb_reconstruction_of_a_current_projection_keeps_recorded_gran
     let _serial = LIVE_SPICEDB.lock().await;
     let live = Live::start("hg_restore_current").await;
     let lifecycle = live.fixture.scope.lifecycle;
-    let (authority, actor) = live.replica().await;
+    let (authority, _actor) = live.replica().await;
     authority.reconcile(lifecycle).await.expect("first pass");
 
     // A grant recorded and not yet projected, and a relationship written
@@ -3375,8 +3386,8 @@ async fn live_spicedb_reconstruction_of_a_current_projection_keeps_recorded_gran
         Some((RoomAffiliation::None, RoomAffiliation::None))
     );
     let channel = live.channel();
-    assert!(!spicedb_allows(&actor, EVE, Permission::Read, &channel).await);
-    assert!(spicedb_allows(&actor, CAROL, Permission::Read, &channel).await);
+    assert!(!spicedb_allows(&live, EVE, Permission::Read, &channel).await);
+    assert!(spicedb_allows(&live, CAROL, Permission::Read, &channel).await);
     live.close().await;
 }
 
