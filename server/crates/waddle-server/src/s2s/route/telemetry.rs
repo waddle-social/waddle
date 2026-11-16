@@ -205,6 +205,28 @@ pub(super) fn room_request_exempt_dropped() {
     );
 }
 
+/// A leave or an error that ends a seat could not be placed, and was kept
+/// to be placed again.
+pub(super) fn room_leave_kept() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.leaves_kept",
+        "{stanza}",
+        "Leaves and errors from S2S streams for rooms another replica holds that could not be placed, kept to be placed again.",
+        1,
+    );
+}
+
+/// A leave or an error that ends a seat could not be placed and could not
+/// be kept, or was kept until its time passed, and was dropped.
+pub(super) fn room_leave_dropped() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.leaves_dropped",
+        "{stanza}",
+        "Leaves and errors from S2S streams for rooms another replica holds dropped because they could not be placed or kept to be placed again in time.",
+        1,
+    );
+}
+
 /// The replica that holds a room did not answer within the placement
 /// timeout, and the request's sender was answered with an error.
 pub(super) fn room_placement_timed_out() {

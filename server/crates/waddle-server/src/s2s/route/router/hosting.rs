@@ -100,6 +100,10 @@ const REFUSALS_PER_REQUEST: f64 = 0.1;
 /// Rooms whose seats one pass checks against the room.
 const RECONCILE_ROOMS: usize = 256;
 
+/// How long a leave or an error that could not be placed is kept to be
+/// placed again.
+const PENDING_LEAVE_TTL: Duration = Duration::from_secs(120);
+
 /// Until shutdown: hand the work of one shard of local rooms to the room
 /// host, one item at a time, so a room decides its requests in the order
 /// they arrived.
@@ -275,11 +279,20 @@ fn presence_nick(stanza: &Stanza, to: &Jid) -> Option<String> {
 
 /// Whether `stanza` is an occupant's server telling the room that its
 /// traffic does not reach the occupant: an error with one of the
-/// delivery-related conditions of XEP-0045 §17.1.2.
+/// delivery-related conditions of XEP-0045 §17.1.2, or a message error
+/// with `service-unavailable`, which a server returns for a `groupchat`
+/// message to a full JID with no such resource (RFC 6121 §8.5.3.2.1). The
+/// only messages a room sends a seat are `groupchat` messages, and a
+/// server ignores presence for an absent resource rather than answer it,
+/// so the condition is read only from a message error.
 fn is_delivery_error(stanza: &Stanza) -> bool {
-    let payloads = match stanza {
-        Stanza::Presence(presence) if presence.type_ == PresenceType::Error => &presence.payloads,
-        Stanza::Message(message) if message.type_ == MessageType::Error => &message.payloads,
+    let (payloads, message) = match stanza {
+        Stanza::Presence(presence) if presence.type_ == PresenceType::Error => {
+            (&presence.payloads, false)
+        }
+        Stanza::Message(message) if message.type_ == MessageType::Error => {
+            (&message.payloads, true)
+        }
         Stanza::Presence(_) | Stanza::Message(_) | Stanza::Iq(_) => return false,
     };
     payloads
@@ -295,7 +308,7 @@ fn is_delivery_error(stanza: &Stanza) -> bool {
                     | DefinedCondition::Redirect { .. }
                     | DefinedCondition::RemoteServerNotFound
                     | DefinedCondition::RemoteServerTimeout
-            )
+            ) || (message && error.defined_condition == DefinedCondition::ServiceUnavailable)
         })
 }
 
@@ -754,7 +767,7 @@ impl Inner {
         } = waiting;
         if self.placements.silent(room) {
             telemetry::room_request_not_carried();
-            self.refuse_unplaced(&request, self.busy(HOLDER_SILENT));
+            self.unplaced(request, &peer, self.busy(HOLDER_SILENT));
             return;
         }
         let place = tokio::select! {
@@ -771,14 +784,14 @@ impl Inner {
             Ok(None) => return,
             Err(_) => {
                 telemetry::room_placement_crowded();
-                self.refuse_unplaced(&request, self.busy(PLACES_TAKEN));
+                self.unplaced(request, &peer, self.busy(PLACES_TAKEN));
                 return;
             }
         };
         // Another request may have found the holder silent meanwhile.
         if self.placements.silent(room) {
             telemetry::room_request_not_carried();
-            self.refuse_unplaced(&request, self.busy(HOLDER_SILENT));
+            self.unplaced(request, &peer, self.busy(HOLDER_SILENT));
             return;
         }
         let placing = hosting.host.place(&request.principal, &request.stanza);
@@ -798,15 +811,15 @@ impl Inner {
             Ok(RoomPlacement::Carried) => telemetry::room_request_carried(),
             Ok(RoomPlacement::Refused(error)) => {
                 telemetry::room_request_not_carried();
-                self.refuse_unplaced(&request, *error);
+                self.unplaced(request, &peer, *error);
             }
             Ok(RoomPlacement::Silent) => {
                 telemetry::room_placement_silent();
-                self.holder_silent(room, &request);
+                self.holder_silent(room, request, &peer);
             }
             Err(_) => {
                 telemetry::room_placement_timed_out();
-                self.holder_silent(room, &request);
+                self.holder_silent(room, request, &peer);
             }
         }
     }
@@ -867,15 +880,71 @@ impl Inner {
     /// `room`'s holder did not answer `request`: answer it and everything
     /// that waits for the room now, which asked the same holder, and answer
     /// the room's requests without asking it until the backoff has passed.
-    fn holder_silent(self: &Arc<Self>, room: &BareJid, request: &LocalRoomRequest) {
+    fn holder_silent(self: &Arc<Self>, room: &BareJid, request: LocalRoomRequest, peer: &str) {
         self.placements.mark_silent(
             room,
             tokio::time::Instant::now() + self.limits.room_placement_backoff,
         );
-        self.refuse_unplaced(request, self.busy(HOLDER_SILENT));
+        self.unplaced(request, peer, self.busy(HOLDER_SILENT));
         for behind in self.placements.drain(room) {
             telemetry::room_request_not_carried();
-            self.refuse_unplaced(&behind.request, self.busy(HOLDER_SILENT));
+            self.unplaced(behind.request, &behind.peer, self.busy(HOLDER_SILENT));
+        }
+    }
+
+    /// A request could not be placed: a leave or an error that ends a seat
+    /// is kept to be placed again ([`Self::place_unplaced_leaves`]), so that
+    /// the room's holder does not keep an occupant that left; any other
+    /// request is answered with `error` as [`Self::refuse_unplaced`] does.
+    fn unplaced(self: &Arc<Self>, request: LocalRoomRequest, peer: &str, error: StanzaError) {
+        if kind_of(&request.stanza, || false) != Kind::Ending {
+            self.refuse_unplaced(&request, error);
+            return;
+        }
+        let until = tokio::time::Instant::now() + PENDING_LEAVE_TTL;
+        let kept = lock(&self.pending_leaves).keep(
+            request,
+            peer,
+            until,
+            self.limits.room_requests,
+            self.limits.room_requests_per_peer,
+        );
+        if kept {
+            telemetry::room_leave_kept();
+        } else {
+            telemetry::room_leave_dropped();
+        }
+    }
+
+    /// Place again the leaves and errors that could not be placed, except
+    /// those for a room whose holder is still taken for silent: each is
+    /// offered to the stage that places requests, and kept again if that
+    /// has no place for it. One whose time has passed is dropped.
+    pub(super) fn place_unplaced_leaves(self: &Arc<Self>) {
+        let now = tokio::time::Instant::now();
+        let due = lock(&self.pending_leaves).take(now, |room| !self.placements.silent(room));
+        for leave in due {
+            let PendingLeave {
+                request,
+                peer,
+                until,
+            } = leave;
+            if until <= now {
+                telemetry::room_leave_dropped();
+                continue;
+            }
+            let Some(room) = replies::addresses(&request.stanza).1.map(Jid::to_bare) else {
+                continue;
+            };
+            if let Err((refused, _)) = self.admit(&room, request, &peer, true, Kind::Ending) {
+                lock(&self.pending_leaves).keep(
+                    *refused,
+                    &peer,
+                    until,
+                    self.limits.room_requests,
+                    self.limits.room_requests_per_peer,
+                );
+            }
         }
     }
 
@@ -2414,6 +2483,104 @@ impl Inner {
                 purpose: Purpose::Notice { _held: notice },
             });
         }
+    }
+}
+
+/// A leave or an error that could not be placed, kept to be placed again.
+#[derive(Debug)]
+pub(super) struct PendingLeave {
+    request: LocalRoomRequest,
+    /// The remote domain whose share it counts against.
+    peer: String,
+    /// Until when it is kept.
+    until: tokio::time::Instant,
+}
+
+/// The leaves and errors that could not be placed, one for each room and
+/// sender, bounded like the stage that places requests: in all, and for
+/// each remote domain.
+#[derive(Debug, Default)]
+pub(super) struct PendingLeaves {
+    kept: HashMap<(BareJid, Jid), PendingLeave>,
+    per_peer: HashMap<String, usize>,
+}
+
+impl PendingLeaves {
+    /// Keep `request` until `until`: `false` when the bounds have no place
+    /// for it. A leave replaces what is kept for its room and sender; an
+    /// error replaces only another error.
+    fn keep(
+        &mut self,
+        request: LocalRoomRequest,
+        peer: &str,
+        until: tokio::time::Instant,
+        total: usize,
+        per_peer: usize,
+    ) -> bool {
+        let (Some(from), Some(to)) = replies::addresses(&request.stanza) else {
+            return false;
+        };
+        let key = (to.to_bare(), from.clone());
+        let leave = matches!(
+            &request.stanza,
+            Stanza::Presence(presence) if presence.type_ == PresenceType::Unavailable
+        );
+        if let Some(kept) = self.kept.get_mut(&key) {
+            let kept_leave = matches!(
+                &kept.request.stanza,
+                Stanza::Presence(presence) if presence.type_ == PresenceType::Unavailable
+            );
+            if leave || !kept_leave {
+                *kept = PendingLeave {
+                    request,
+                    peer: kept.peer.clone(),
+                    until,
+                };
+            }
+            return true;
+        }
+        let of_peer = self.per_peer.get(peer).copied().unwrap_or(0);
+        if self.kept.len() >= total || of_peer >= per_peer {
+            return false;
+        }
+        self.per_peer.insert(peer.to_owned(), of_peer + 1);
+        self.kept.insert(
+            key,
+            PendingLeave {
+                request,
+                peer: peer.to_owned(),
+                until,
+            },
+        );
+        true
+    }
+
+    /// Take out what is kept for the rooms `ready` accepts, and what has
+    /// expired by `now`.
+    fn take(
+        &mut self,
+        now: tokio::time::Instant,
+        ready: impl Fn(&BareJid) -> bool,
+    ) -> Vec<PendingLeave> {
+        let keys: Vec<(BareJid, Jid)> = self
+            .kept
+            .iter()
+            .filter(|((room, _), kept)| kept.until <= now || ready(room))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut taken = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(kept) = self.kept.remove(&key) {
+                if let Some(count) = self.per_peer.get_mut(&kept.peer) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.per_peer.remove(&kept.peer);
+                    }
+                }
+                taken.push(kept);
+            }
+        }
+        taken
     }
 }
 

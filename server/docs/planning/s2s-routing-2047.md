@@ -1047,7 +1047,7 @@ then is refused as above and removes it.
 | `muc#admin` request | A room's bare JID | The affiliation and role lists and changes to them (kick, ban, role, affiliation), decided for the requester on its stream's evidence (below). `forbidden` without a standing the effect boundary honours, `not-allowed` for a change D8 does not issue, `item-not-found` for a room that is not federated |
 | `muc#owner` request | A room's bare JID | The configuration form, a configuration change and the room's destruction, for an owner whose standing is honoured; `forbidden` otherwise. A managed room is configured by its grants' `manage` and never destroyed by a request |
 | XEP-0425 `moderate` request | A room's bare JID | A moderator's retraction of another occupant's message, for a requester whose room moderation is honoured; `forbidden` otherwise, `bad-request` for an element that asks to retract nothing |
-| Error presence or message | A room or an occupant | From a seated occupant's address with a delivery-related condition of XEP-0045 §17.1.2 (`gone`, `item-not-found`, `recipient-unavailable`, `redirect`, `remote-server-not-found`, `remote-server-timeout`): the seat ends. Otherwise ignored |
+| Error presence or message | A room or an occupant | From a seated occupant's address with a delivery-related condition of XEP-0045 §17.1.2 (`gone`, `item-not-found`, `recipient-unavailable`, `redirect`, `remote-server-not-found`, `remote-server-timeout`), or a message error with `service-unavailable`, which a server returns for a `groupchat` message to a full JID with no such resource (RFC 6121 §8.5.3.2.1): the seat ends. Otherwise ignored |
 
 Every error answers with the id of the request it refuses (RFC 6120
 §8.1.3), the error presence that refuses a join included; the room's own
@@ -1371,7 +1371,13 @@ without asking again, so a silent holder costs each of its rooms one wait
 and not one for every stanza. A holder that answers without taking the
 request (its queues are full, it no longer holds the room) is not taken
 for silent: that one request is answered. No stream is closed and no
-seat ends for a holder that does not answer. What
+seat ends for a holder that does not answer. A leave, or an error that
+ends a seat, that cannot be placed is not dropped and not answered: it is
+kept, one for each room and sender (a leave replaces an error), within
+the bounds of what waits to be placed, and placed again at each sweep
+once its room's holder is no longer taken for silent, for up to 120 s.
+One that finds no place to be kept, or whose time passes, is dropped and
+counted. What
 waits to be placed is bounded like the queues behind the stage (1,024 on a
 replica, 32 for one room, 64 from one remote domain), and as there a
 stanza beyond the replica's or its domain's bound holds its stream until
@@ -1963,6 +1969,14 @@ runbook (G24):
   once. A configuration whose per-account rates add up to more than the
   domain's lets one account spend its domain's rate, and the domain's
   stream then waits for it as it waits for all its accounts together.
+- **A leave that cannot be placed is late, or lost.** A leave or an
+  error that ends a seat, for a room whose holder cannot be asked, is
+  kept and placed again for up to 120 s; meanwhile the holder still seats
+  the occupant and sends it the room's traffic. One that finds no place
+  to be kept (1,024 on a replica, 64 for one remote domain) or is not
+  placed in that time is dropped, and the occupant stays seated until
+  its stream is lost or its seat ends otherwise. Keeping one for each
+  room and sender means only the latest of several is placed.
 - **Leaves beyond the allowance on a replica that carries requests.** The
   first leave for a seat is taken beyond its account's allowance only on
   the replica that holds the seat. A replica that carries requests to the

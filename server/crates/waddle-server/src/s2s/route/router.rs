@@ -648,6 +648,9 @@ struct Inner {
     /// Requests for local rooms waiting to be placed, where the room host
     /// keeps rooms on other replicas.
     placements: Placements,
+    /// Leaves and errors that could not be placed, kept to be placed
+    /// again.
+    pending_leaves: Mutex<hosting::PendingLeaves>,
     /// What rooms and their senders may still have queued of chat states
     /// and markers for remote seats.
     ephemeral: Mutex<hosting::EphemeralBudgets>,
@@ -764,6 +767,7 @@ impl S2sRouter {
                 placing: options.limits.room_placements,
                 placing_per_peer: options.limits.room_placements_per_peer,
             }),
+            pending_leaves: Mutex::new(hosting::PendingLeaves::default()),
             ephemeral: Mutex::new(hosting::EphemeralBudgets::default()),
             reconciling: AtomicBool::new(false),
             reconcile_after: Mutex::new(None),
@@ -3003,6 +3007,7 @@ async fn sweep(router: Arc<Inner>) {
         router.sweep_verifications().await;
         router.sweep_due_rooms().await;
         router.sweep_lost_seats().await;
+        router.place_unplaced_leaves();
         // On a task of its own: a pass asks rooms, and this loop records
         // that the replica is alive.
         if last_reconcile.elapsed() >= router.limits.seat_reconcile_interval {
