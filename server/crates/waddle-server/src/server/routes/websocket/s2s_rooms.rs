@@ -68,9 +68,7 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::cleanup::{
-    get_room_actor, get_room_actor_result, is_muc_room_jid, sweep_abandoned_room_occupancy,
-};
+use super::cleanup::{get_room_actor_result, is_muc_room_jid, sweep_abandoned_room_occupancy};
 use super::frame::{ResponseBatch, ResponseFrame};
 use super::handlers::iq::{
     muc_admin_for_remote, muc_disco_info_for_remote, muc_owner_or_moderation_for_remote,
@@ -766,6 +764,16 @@ impl Asked<'_> {
         if seat.nick != nick.as_str() {
             return self.refuse(unavailable());
         }
+        // What cannot be told now is answered with the one error XEP-0410
+        // §4 has a client take no decision from, so that it neither leaves
+        // nor enters again on it: any other error means "not joined".
+        let undecided = |text: &str| {
+            self.refuse(error(
+                ErrorType::Wait,
+                DefinedCondition::RemoteServerTimeout,
+                text,
+            ))
+        };
         match self
             .state
             .deps
@@ -781,17 +789,17 @@ impl Asked<'_> {
         {
             RoomGate::Unmanaged | RoomGate::Managed(true) => {}
             RoomGate::Managed(false) => return not_joined(),
-            // The one error XEP-0410 §4 has a client take no decision from.
             RoomGate::Unavailable => {
-                return self.refuse(error(
-                    ErrorType::Wait,
-                    DefinedCondition::RemoteServerTimeout,
-                    "The room's grants could not be read; try again.",
-                ));
+                return undecided("The room's grants could not be read; try again.");
             }
         }
-        let Some(actor) = get_room_actor(self.state, &seat.room).await else {
-            return not_joined();
+        // A room whose actor cannot be reached now (it is being restored,
+        // or its claim is moving) may still seat the occupant; only a room
+        // without an actor here seats nobody.
+        let actor = match get_room_actor_result(self.state, &seat.room).await {
+            Ok(Some(actor)) => actor,
+            Ok(None) => return not_joined(),
+            Err(_) => return undecided("The room cannot be reached now; try again."),
         };
         let asked = actor
             .ask(PingSelfCheck {
@@ -803,7 +811,7 @@ impl Asked<'_> {
         match asked {
             Ok(()) => RoomReplies::of(vec![result(iq, None)]),
             Err(kameo::error::SendError::HandlerError(_)) => not_joined(),
-            Err(_) => self.refuse(internal()),
+            Err(_) => undecided("The room did not answer; try again."),
         }
     }
 
@@ -1011,22 +1019,26 @@ impl Asked<'_> {
     /// Whether a subject change of the sender may be put to `room`: the
     /// room lets every occupant change its subject, or the sender's
     /// privileged standing is honoured on the stream that carried the
-    /// request (ADR-0020 D8). A room whose configuration cannot be read
-    /// is asked nothing.
-    async fn may_ask_subject_change(&self, room: &BareJid) -> bool {
+    /// request (ADR-0020 D8). `None` when that cannot be told now: the
+    /// room's actor cannot be reached or its configuration read. A room
+    /// that cannot say is asked nothing.
+    async fn may_ask_subject_change(&self, room: &BareJid) -> Option<bool> {
         if principal_witness(self.state, &self.account, &self.evidence)
             .is_some_and(|witness| witness.privilege_honoured())
         {
-            return true;
+            return Some(true);
         }
-        let Some(actor) = get_room_actor(self.state, room).await else {
-            return false;
+        let actor = match get_room_actor_result(self.state, room).await {
+            Ok(Some(actor)) => actor,
+            Ok(None) => return Some(false),
+            Err(_) => return None,
         };
         actor
             .ask(GetConfig)
             .reply_timeout(ROOM_ASK_TIMEOUT)
             .await
-            .is_ok_and(|config| config.occupants_may_change_subject)
+            .ok()
+            .map(|config| config.occupants_may_change_subject)
     }
 
     // --- administration -------------------------------------------------------
@@ -1160,14 +1172,20 @@ impl Asked<'_> {
         // moderator's standing counts for a remote occupant only as D8
         // honours it for the stream that carried this request; the room
         // then applies its own check to the occupant's role.
-        if waddle_xmpp::muc::is_groupchat_subject_change_message(&message)
-            && !self.may_ask_subject_change(&room).await
-        {
-            return self.refuse(forbidden(
-                "Occupants from other servers may change the subject only where the room lets \
-                 every occupant, or as a moderator over a certificate-authenticated stream from \
-                 a trusted server.",
-            ));
+        if waddle_xmpp::muc::is_groupchat_subject_change_message(&message) {
+            match self.may_ask_subject_change(&room).await {
+                Some(true) => {}
+                Some(false) => {
+                    return self.refuse(forbidden(
+                        "Occupants from other servers may change the subject only where the \
+                         room lets every occupant, or as a moderator over a \
+                         certificate-authenticated stream from a trusted server.",
+                    ));
+                }
+                // Whether the room lets it cannot be told now: the sender
+                // may try again, and is not told that it may not.
+                None => return self.refuse(internal()),
+            }
         }
         // What an admitted domain can make this deployment store is
         // bounded for each of its accounts as well as for the domain. A
