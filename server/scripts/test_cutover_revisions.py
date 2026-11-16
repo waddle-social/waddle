@@ -86,7 +86,7 @@ class CutoverRevisionTests(unittest.TestCase):
     def test_published_build_inputs_advance_the_floor_and_cannot_accompany_the_flip(self):
         for path in (
             'server/Cargo.lock', 'server/.cargo/config.toml', 'server/env.cue',
-            'server/extensions/example/env.cue', 'server/schema/migration.sql',
+            'server/extensions/example/env.cue', 'server/policy.cue',
             'server/charts/waddle-server/values.yaml', 'server/scripts/build.sh',
             'server/wit/extension.wit', 'server/vendor/kameo/src/remote/registry.rs',
             'flake.nix', 'flake.lock',
