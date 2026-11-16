@@ -656,6 +656,34 @@ pub(crate) fn seats_honour_privilege(
         })
 }
 
+/// [`seats_honour_privilege`] for a caller that may run on any replica: the
+/// seats `account` holds in `room_jid` on every replica, read from the
+/// shared seat table in `global`, as well as those this replica holds.
+/// `None` when the table cannot be read, which the caller refuses on.
+pub(crate) async fn seats_honour_privilege_anywhere(
+    state: &WebSocketState,
+    global: &crate::db::Database,
+    room_jid: &BareJid,
+    account: &BareJid,
+) -> Option<bool> {
+    if state.serves(account) {
+        return Some(true);
+    }
+    let seats = crate::s2s::route::SqlSeatStore::new(global.clone())
+        .of_account(room_jid, account)
+        .await
+        .ok()?;
+    let recorded = seats.into_iter().all(|seat| {
+        crate::server::routes::websocket::handlers::presence::principal_witness(
+            state,
+            account,
+            &crate::permissions::host_grant::PrincipalEvidence::Stream(seat.evidence),
+        )
+        .is_some_and(|witness| witness.privilege_honoured())
+    });
+    Some(recorded && seats_honour_privilege(state, room_jid, account))
+}
+
 /// Whether an owner or admin standing may be written for `account` in a
 /// room no enrolled scope manages (ADR-0020 D8 at issuance): an account of
 /// a served domain, or of a home on the trusted-home list of the S2S

@@ -165,7 +165,9 @@ fn check_privileged_seats(
     });
     if unhonoured {
         return Err(Box::new(not_allowed_iq_error(
-            "This account is in the room over a stream that does not carry owner or admin              standing. Grant it once that occupant has left, or has entered over a              certificate-authenticated stream of a trusted server.",
+            "This account is in the room over a stream that does not carry owner or admin \
+             standing. Grant it once that occupant has left, or has entered over a \
+             certificate-authenticated stream of a trusted server.",
         )));
     }
     Ok(())
