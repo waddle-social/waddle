@@ -269,12 +269,16 @@ pub(crate) fn host_rooms_carrying(
         .protocol
         .connection_registry
         .set_foreign_delivery(Arc::new(SeatDelivery(router.clone())));
-    state
-        .deps
-        .protocol
-        .ingress
-        .host_grant_gate()
-        .attach_seat_evidence(router.seats());
+    let gate = state.deps.protocol.ingress.host_grant_gate();
+    gate.attach_seat_evidence(router.seats());
+    // Decisions that name a seated remote occupant (its moderator role, an
+    // owner or admin standing for its account) read the seats' evidence
+    // through the surfaces' gate bound to this attachment gate. Startup
+    // binds it only where a canonical grant store exists (PostgreSQL);
+    // without one those decisions would find no seat at all, so it is bound
+    // here as well. Binding the gate already bound changes nothing, and the
+    // gate's store, not the binding, decides which rooms are managed.
+    let _ = state.deps.app_state.host_grants.bind_attachment(gate);
 }
 
 /// Delivery of a room's stanzas to the seats of remote occupants.
