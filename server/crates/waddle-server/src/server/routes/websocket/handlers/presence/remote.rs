@@ -642,6 +642,10 @@ pub(crate) async fn probe_remote_contacts(state: &WebSocketState, account: &Bare
         if !is_remote_contact(state, &contact) {
             continue;
         }
+        // XEP-0191 §3.3: nothing is routed to a JID the account blocks.
+        if blocks(state, account, &Jid::from(contact.clone())).await {
+            continue;
+        }
         let mut probe = Presence::new(PresenceType::Probe);
         probe.from = Some(Jid::from(account.clone()));
         probe.to = Some(Jid::from(contact));

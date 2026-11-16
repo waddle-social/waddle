@@ -332,10 +332,13 @@ pub async fn broadcast_unavailable_for_terminated_session(
             state,
             &subscriber,
         ) {
-            let _ = crate::server::routes::websocket::handlers::presence::offer_presence(
-                state, presence,
-            )
-            .await;
+            // XEP-0191 §3.3: nothing is routed to a JID the account blocks.
+            if !super::recipient_blocks_sender(state, &from_bare, &subscriber).await {
+                let _ = crate::server::routes::websocket::handlers::presence::offer_presence(
+                    state, presence,
+                )
+                .await;
+            }
             continue;
         }
         let stanza = Stanza::Presence(presence);

@@ -477,9 +477,20 @@ async fn deliver_direct(
     }
     // A connected resource that has not sent presence yet, as local
     // delivery to the bare JID does (RFC 6121 §8.5.2.1: an available or
-    // connected resource).
+    // connected resource). An available resource with a negative priority
+    // is never one (§8.5.2.1.1).
     if live.is_empty() {
-        let mut connected = super::handlers::account_reads::resources(state, account).await;
+        let available: Vec<FullJid> =
+            super::handlers::account_reads::available_resources(state, account)
+                .await
+                .into_iter()
+                .map(|(resource, _)| resource)
+                .collect();
+        let mut connected: Vec<FullJid> = super::handlers::account_reads::resources(state, account)
+            .await
+            .into_iter()
+            .filter(|resource| !available.contains(resource))
+            .collect();
         connected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         for resource in connected.iter().take(DELIVERY_ATTEMPTS) {
             match deliver(state, resource, &stanza).await {

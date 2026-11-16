@@ -236,6 +236,32 @@ async fn a_contacts_message_to_an_account_with_no_resource_is_refused_and_a_stra
 }
 
 #[tokio::test]
+async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    contact(&federated, ALICE, BOB, "from").await;
+    let mut away = federated.online("alice", "away", -1).await;
+
+    federated
+        .from_peer(message(BOB_PHONE, ALICE, MessageType::Chat, "n1", "hello"))
+        .await;
+    federated
+        .from_peer(message(MALLORY, ALICE, MessageType::Chat, "n2", "hello"))
+        .await;
+
+    // RFC 6121 §8.5.2.1.1: handled as if no resource were available.
+    let refusal = federated.peer_receives("n1").await;
+    assert_eq!(
+        error_condition(&refusal).as_deref(),
+        Some("service-unavailable")
+    );
+    assert!(federated.peer_received_after_quiet("n2").await.is_empty());
+    assert!(!support::arrives_quietly(&mut away, "message", "n1").await);
+    assert!(!support::arrives_quietly(&mut away, "message", "n2").await);
+}
+
+#[tokio::test]
 async fn private_payloads_of_a_remote_message_are_removed_before_delivery() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
