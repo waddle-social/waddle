@@ -79,10 +79,16 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_delivery() {
 
     federated.from_peer(with_ids("ids-online")).await;
 
+    // The recipient pass may stamp the id Alice's archive gives the
+    // message; none of the sender's ids in the deployment's name is left.
     let delivered = receive(&mut phone, "message", "ids-online").await;
-    assert_eq!(
-        ids(delivered.children()),
-        vec!["bobs-archive".to_owned()],
+    let delivered_ids = ids(delivered.children());
+    assert!(
+        delivered_ids.iter().all(|id| !id.starts_with("forged-")),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered_ids.contains(&"bobs-archive".to_owned()),
         "{delivered:?}"
     );
 }
