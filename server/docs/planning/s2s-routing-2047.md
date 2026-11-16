@@ -1127,10 +1127,10 @@ end a seat.
   is a change of availability where the room's update path takes it.
   Presence that enters instead (it carries the `muc` element, or the room
   no longer seats the occupant) is decided as a join: the host says so
-  without deciding it, the router gives the seat up, opens another under a
-  new generation, held as pending, and asks again. If the room does not
-  seat the occupant again, it is told to remove the occupancy whose seat
-  was given up.
+  without deciding it, and the router opens a seat under a new generation,
+  held as pending, which takes over the row and the place of the one the
+  occupant held, and asks again. If the room does not seat the occupant
+  again, it is told to remove the occupancy of the seat that was replaced.
 - *Order.* While a join is being answered, what the room sends the new
   occupant through the delivery path is kept, up to 256 stanzas, and
   queued behind the join's answer, so the occupant receives the room's
@@ -1219,7 +1219,7 @@ sender of the request it answers.
 | The host does not decide a join within 30 s | The seat opened for it ends and the room removes the occupant if it seated it |
 | The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Every 60 s a pass asks each room with seats, once, for the occupants it seats and their generations, and releases the seats the room does not name; the occupant is sent its own unavailable presence with statuses 110 and 333. A pass runs on a task of its own, takes at most 256 rooms and 60 s, and the next goes on where it stopped |
 | The seat's row could not be removed when the seat ended | The same pass reads this replica's rows, a page of 256 in the order of the table's key, and removes those older than 30 s for which it holds no seat |
-| The replica stops | It tells each occupant it seats, with the occupant's own unavailable presence and statuses 110 and 332 (XEP-0045 §10.9), gives the seats up and waits up to 2 s for those notices to be taken by their streams, which drain only after that; nothing is promised for a notice no stream takes. Its rows are removed at shutdown, within the shutdown budget. Rows a replica left without shutting down are removed by another replica once the owner has not recorded that it is alive for ten minutes; a join for the same room and occupant that reaches a live replica replaces such a row after 30 s, whatever the seat bounds say, since the row is the join's own |
+| The replica stops | It tells each occupant it seats, with the occupant's own unavailable presence and statuses 110 and 332 (XEP-0045 §11.2), gives the seats up and waits up to 2 s for those notices to be taken by their streams, which drain only after that; nothing is promised for a notice no stream takes. Its rows are removed at shutdown, within the shutdown budget. Rows a replica left without shutting down are removed by another replica once the owner has not recorded that it is alive for ten minutes; a join for the same room and occupant that reaches a live replica replaces such a row after 30 s, whatever the seat bounds say, since the row is the join's own |
 | The replica that held the room stopped without shutting down, and the room's claim moved | The replica that takes the room over takes over the seats of its recorded remote occupants, so that the room can seat them as recorded, and ends each of them once the room has: what the stopped replica had queued for an occupant is lost and cannot be told from what it received. The room removes the occupant with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 and enters again |
 | The hosting replica's snapshot no longer admits the domain | The occupant's next request is refused, nothing more is written to it, and for a managed room the revocation sweep removes it ([Seated occupants](host-grant-authority-2047.md#seated-occupants-roles-and-media-g14)). An occupant of an unmanaged room that sends nothing keeps its entry in the room until its stream is lost or the replica restarts, which a changed snapshot requires (below) |
 
@@ -1240,10 +1240,15 @@ connection writes, and it is returned as the answer to the request. A
 remote sender has no connection, and an answer is queued only after every
 effect of the message has run, behind the copies of later messages the
 room sent its seat meanwhile. So the frame is also handed to the sender's
-seat where the room fans the message out, at the sender's place among the
-occupants, and the answer does not repeat a copy handed to the seat while
-the request was decided (it is told by the identifier the room's archive
-gave the message). A message the occupant sends again is answered again.
+seat when the message's effects reach it, among the copies of the same
+message for the other occupants (the effects of one message run one after
+another, in the order the room planned them, local occupants' copies
+first), and the answer does not repeat a copy handed to the seat while the
+request was decided (it is told by the identifier the room's archive gave
+the message). A message the occupant sends again is answered again. The
+sender's copy is then ordered among other messages' copies as any
+occupant's is: the effects of two messages accepted at the same moment
+are not serialised against each other, for any occupant.
 
 The enrichment hooks of this deployment's extensions do not run for a
 remote occupant's message: they run for the messages of its own accounts,

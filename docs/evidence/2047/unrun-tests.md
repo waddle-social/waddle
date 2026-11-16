@@ -101,7 +101,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
 | `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, run5 final and run6 logs |
-| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b | loopback | Run 54/54, run5 final and run6 logs |
+| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b, W6a | loopback | Not run with W6a's changes: three cases of its `config` module now also read the router's pair queues (`max_pair_queues`: its default and ceiling, a value within range, values outside it). 54/54 before them, run5 final and run6 logs |
 | `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, run5 final and run6 logs |
 | `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run5 final and run6 logs |
 | `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 final and run6 logs |
@@ -115,15 +115,15 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 final, stress and run6 logs |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
-| `xep0045_s2s_inbound_muc` (29) | W6a | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and five cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration) | Not run |
+| `xep0045_s2s_inbound_muc` (30) | W6a | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and five cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration) | Not run |
 | `xep0045_s2s_inbound_muc_replicas` (9) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Three cases hand the holder stanzas with what a dialback stream, or a public-CA certificate, would have proved. Compiled with and without `clustering` | Not run |
 | `xep0045_s2s_inbound_muc_router` (17) | W6a | loopback; the production S2S router and connection manager with a scripted room host and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4 s | Not run |
 | `xep0313_s2s_inbound_mam` (5) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0030_s2s_inbound_muc_discovery` (6) | W6a | loopback; in-memory SQLite | Not run |
-| `xep0085_s2s_inbound_chat_states` (1) | W6a | loopback; in-memory SQLite | Not run |
+| `xep0085_s2s_inbound_chat_states` (3) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Not run |
 | `xep0115_s2s_inbound_caps` (1) | W6a | loopback; in-memory SQLite | Not run |
 | `xep0308_s2s_inbound_corrections` (2) | W6a | loopback; in-memory SQLite | Not run |
-| `xep0333_s2s_inbound_markers` (1) | W6a | loopback; in-memory SQLite | Not run |
+| `xep0333_s2s_inbound_markers` (2) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Not run |
 | `xep0359_s2s_inbound_stanza_ids` (1) | W6a | loopback; in-memory SQLite | Not run |
 | `xep0424_s2s_inbound_retraction` (2) | W6a | loopback; in-memory SQLite | Not run |
 | `xep0425_s2s_inbound_moderation` (2) | W6a | loopback; in-memory SQLite | Not run |
@@ -255,8 +255,8 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | | Count |
 | --- | --- |
 | Test targets listed | 99 (78 integration targets, 19 library test modules, 2 chat test files) |
-| Run, with a cited log | 37 targets, 806 cases, all passed in their latest cited run |
-| Not run | 62 targets (19 of them library modules) |
+| Run, with a cited log | 36 targets, 752 cases, all passed in their latest cited run |
+| Not run | 63 targets (19 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
@@ -267,9 +267,10 @@ A target is counted as run only when the whole binary's cases appear in a
 log. Skipped prerequisites are not recorded as passed: nothing here was run
 against Prosody, ejabberd or a second deployment.
 
-W6a adds fifteen targets (83 cases) and changes the cases of three that
-had run (`s2s_reachability`, `xep0045_host_grant_revocation` and
-`host_grant_remote_principals`, 32 cases in the logs), which are counted as
+W6a adds fifteen targets (87 cases) and changes the cases of four that
+had run (`s2s_reachability`, `s2s_connection_manager`,
+`xep0045_host_grant_revocation` and `host_grant_remote_principals`, 86
+cases in the logs), which are counted as
 not run until they run again: every case of W6a is compiled and none has
 been executed. Its PostgreSQL cases are the only evidence of the seat
 table, of a remote principal's message through the room's acceptance and
