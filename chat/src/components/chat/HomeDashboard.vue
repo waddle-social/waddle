@@ -694,13 +694,18 @@ const heroQuietMessage = computed(() => heroQuietMessageFor(heroTimeOfDay.value)
 /** The mascot only shows when nothing is happening: quiet is an invitation. */
 const isQuiet = computed(() => heroSummaryParts.value.length === 0 && activeCallEntries.value.length === 0);
 
+// The call you are in already has its Happening-now card and the sidebar
+// panel; the hero points somewhere new instead of a third Return, and so
+// never at the room that call lives in either.
 const heroPrimaryChannel = computed<ChannelSummary | undefined>(() => {
   if (heroPrimaryCall.value) return undefined;
-  return channelsByActivity()[0];
+  const own = currentCallFallbackEntry.value;
+  const ownChannelId = own?.kind === "channel" ? own.channelId : null;
+  return channelsByActivity().find((channel) => channel.id !== ownChannelId);
 });
 
 const heroPrimaryCall = computed<CallActivityDockEntry | null>(() =>
-  activeCallEntries.value[0] ?? null,
+  activeCallEntries.value.find((entry) => callEntryActionLabel(entry) !== "Return") ?? null,
 );
 
 const heroCtaLabel = computed(() => {
@@ -722,7 +727,6 @@ function onHeroCta() {
 
 function heroCallCtaLabel(entry: CallActivityDockEntry): string {
   const action = callEntryActionLabel(entry);
-  if (action === "Return") return `Return to ${entry.title} call`;
   if (action === "Open") {
     return entry.kind === "dm"
       ? `Open ${entry.title} conversation`

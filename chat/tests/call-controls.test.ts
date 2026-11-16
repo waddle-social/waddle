@@ -997,34 +997,23 @@ describe("call control bar hide self-view (#1021)", () => {
   });
 });
 
-describe("call control bar immersive mode (#1028)", () => {
-  test("expanded mode offers Immersive without browser fullscreen controls", async () => {
-    const html = await renderCallControls({ isExpanded: true, isImmersive: false });
-    expect(html).toContain("Collapse call to split view");
-    expect(html).toContain("Make call immersive");
-    expect(html).not.toContain("Enter browser fullscreen");
-    expect(html).not.toContain("Exit browser fullscreen");
-  });
+describe("call control bar sizes (#1028)", () => {
+  const SIZE_LABELS = [
+    "Expand call to fill the chat pane",
+    "Collapse call to split view",
+    "Show call fullscreen",
+    "Exit fullscreen",
+  ];
+  const sizeButtons = (html: string) => SIZE_LABELS.filter((label) => html.includes(`aria-label="${label}"`));
 
-  test("immersive mode offers a return action and browser fullscreen entry", async () => {
-    const html = await renderCallControls({
-      isExpanded: true,
-      isImmersive: true,
-      isNativeFullscreen: false,
-    });
-    expect(html).toContain("Return call to expanded view");
-    expect(html).toContain("Enter browser fullscreen");
-    expect(html).not.toContain("Exit browser fullscreen");
-  });
-
-  test("immersive native fullscreen action switches to exit while active", async () => {
-    const html = await renderCallControls({
-      isExpanded: true,
-      isImmersive: true,
-      isNativeFullscreen: true,
-    });
-    expect(html).toContain("Exit browser fullscreen");
-    expect(html).not.toContain("Enter browser fullscreen");
+  // Split ⇄ expanded ⇄ fullscreen, one step each way; fullscreen has nothing
+  // bigger, so the grow buttons never stack.
+  test.each([
+    ["split", { isExpanded: false, isImmersive: false }, ["Expand call to fill the chat pane"]],
+    ["expanded", { isExpanded: true, isImmersive: false }, ["Collapse call to split view", "Show call fullscreen"]],
+    ["fullscreen", { isExpanded: true, isImmersive: true }, ["Exit fullscreen"]],
+  ])("%s offers one step down and one step up at most", async (_size, props, expected) => {
+    expect(sizeButtons(await renderCallControls(props))).toEqual(expected);
   });
 });
 

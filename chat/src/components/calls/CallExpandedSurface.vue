@@ -430,16 +430,26 @@ async function toggleExpandedSurface(): Promise<void> {
   $callUiMode.set(nextMode);
 }
 
-function enterImmersive(): void {
+// Fullscreen is one step: the immersive takeover with browser fullscreen on
+// top. requestFullscreen rejects when the gesture was consumed, denied or
+// unsupported (iPhone Safari); the takeover still stands and fills the window.
+function enterFullscreen(): void {
   $callUiMode.set("immersive");
+  if (typeof document === "undefined" || document.fullscreenElement) return;
+  surfaceRef.value?.requestFullscreen?.().catch(() => {});
+}
+
+function toggleFullscreen(): void {
+  if (isImmersive.value) void toggleExpandedSurface();
+  else enterFullscreen();
 }
 
 // #1034: keyboard shortcuts while the expanded/immersive surface is focused.
 // Gated on `isOpen` because the split surface stays mounted alongside this one
-// — without the gate every shortcut would fire twice. `F` enters immersive and
-// requests native fullscreen (idempotent: it never toggles fullscreen back
-// off). `Esc` is intentionally NOT mapped here: the bespoke `onKeydown` below
-// already owns Escape (menu/settings/dock/PiP/collapse precedence).
+// — without the gate every shortcut would fire twice. `F` enters fullscreen
+// (idempotent: it never toggles fullscreen back off). `Esc` is intentionally
+// NOT mapped here: the bespoke `onKeydown` below already owns Escape
+// (menu/settings/dock/PiP/collapse precedence).
 useCallShortcuts(
   {
     "toggle-mic": () => void toggleMic(),
@@ -452,12 +462,7 @@ useCallShortcuts(
       void toggleScreenShare();
     },
     "toggle-raise-hand": () => void onToggleRaisedHand(),
-    "enter-immersive": () => {
-      enterImmersive();
-      // requestFullscreen rejects if the gesture was consumed or denied;
-      // swallow it so the immersive switch still stands.
-      if (!nativeFullscreenActive.value) void toggleNativeFullscreen().catch(() => {});
-    },
+    "enter-immersive": enterFullscreen,
   },
   () => isOpen.value,
 );
@@ -493,16 +498,6 @@ function revealImmersiveChrome(): void {
   if (typeof window === "undefined" || !isImmersive.value) return;
   clearChromeIdleTimer();
   scheduleImmersiveChromeHide();
-}
-
-async function toggleNativeFullscreen(): Promise<void> {
-  if (typeof document === "undefined") return;
-  if (document.fullscreenElement === surfaceRef.value) {
-    await document.exitFullscreen();
-    return;
-  }
-  if (document.fullscreenElement) return;
-  await surfaceRef.value?.requestFullscreen?.();
 }
 
 function onFullscreenChange(): void {
@@ -928,7 +923,6 @@ const parkingClass = css({ display: "none" });
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
         :is-immersive="isImmersive"
-        :is-native-fullscreen="nativeFullscreenActive"
         :participants-open="participantsOpen"
         :participant-count="participantCount"
         :chat-open="chatOpen"
@@ -943,8 +937,7 @@ const parkingClass = css({ display: "none" });
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="toggleExpandedSurface"
-        @toggle-immersive="enterImmersive"
-        @toggle-native-fullscreen="toggleNativeFullscreen"
+        @toggle-fullscreen="toggleFullscreen"
         @toggle-participants="toggleCallParticipants"
         @toggle-chat="toggleCallChat"
         @open-settings="settingsOpen = true"
