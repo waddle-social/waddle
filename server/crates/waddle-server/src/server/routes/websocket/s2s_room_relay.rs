@@ -62,6 +62,19 @@ impl ClusterRoomCarrier {
     }
 }
 
+/// Whether the channel catalog, which every replica reads, says `room` is
+/// not open to other servers: its `federated` setting is off, or it is a
+/// group conversation of this deployment's accounts. A room without a
+/// catalog row, or one whose row cannot be read, is not known to be closed.
+async fn closed_in_catalog(state: &WebSocketState, room: &BareJid) -> bool {
+    matches!(
+        super::handlers::presence::get_managed_channel_for_room(state, room).await,
+        Ok(Some(channel))
+            if !channel.federated
+                || channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+    )
+}
+
 fn retry_later(text: &str) -> RoomPlacement {
     RoomPlacement::Refused(Box::new(StanzaError::new(
         ErrorType::Wait,
@@ -99,9 +112,16 @@ impl RoomCarrier for ClusterRoomCarrier {
         // The claim may move between the read and the ask; follow it once.
         let mut reresolved = false;
         loop {
-            let owner = match crate::server::routes::interpret::extension_room_owner(&state, room)
-                .await
-            {
+            let resolved =
+                crate::server::routes::interpret::extension_room_owner(&state, room).await;
+            // A room the catalog says is not open to other servers is
+            // answered here, as a room that does not exist is: were it
+            // carried, a holder that is busy, moving or out of reach would
+            // answer otherwise and tell the two apart.
+            if !matches!(resolved, Ok(None)) && closed_in_catalog(&state, room).await {
+                return RoomPlacement::Here;
+            }
+            let owner = match resolved {
                 // This replica holds the room, or no replica does.
                 Ok(None) => return RoomPlacement::Here,
                 Ok(Some(owner)) => owner,

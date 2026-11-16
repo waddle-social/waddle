@@ -1008,7 +1008,8 @@ The host decides this before anything else about a room, the sender's
 grants and standing included. A room that is not open to other servers
 answers `disco#info`, a join, a XEP-0313 query and every administration
 request with `item-not-found`, in the condition, type and text of the
-answer for a room that does not exist, so nothing tells the two apart. The
+answer for a room that does not exist, so the answer does not tell the two
+apart. The
 requests that are answered alike for every address stay so: a ping of a
 room's bare JID is an empty result, `disco#items` an empty list, a message
 from a sender without a seat `not-acceptable`, and presence from such a
@@ -1273,6 +1274,10 @@ the occupant's domain, in the room's order. A later stanza carried with
 other evidence ends the seat as on a single replica. A carried stanza is
 never carried again; a holder that no longer owns the room says so, and
 the carrying replica looks the owner up once more.
+
+A room the channel catalog says is not federated, or is a group
+conversation, is not carried: the replica the stanza reached answers it as
+a room that does not exist, whatever the state of the room's holder.
 
 The relay's reply says only whether the holder queued the stanza. When it
 did not (its queues are full, it no longer holds the room, it hosts no
@@ -1625,6 +1630,20 @@ runbook (G24):
   holds one. A room without a catalog row whose actor no replica holds (a
   room its first occupant created, after every replica restarted) is not
   found until a local occupant enters it again.
+- **A room without a catalog row can be told from a missing one while its
+  holder cannot take requests.** A room its first occupant created has no
+  catalog row, so a replica that does not hold it cannot read its setting
+  and carries a request for it. While the holder is busy, out of reach,
+  moving or predates the relay message, the asker receives the retryable
+  error where a room that does not exist answers `item-not-found`, whether
+  or not the room is federated. Rooms with a catalog row are answered
+  where the request arrived and do not differ. The same holds on one
+  replica while a room's setting cannot be read (`internal-server-error`).
+- **The deployment default applies where a room is created by a request.**
+  `federate_new_rooms` sets the setting of a room its first occupant
+  creates and of a channel the channel-creation command creates. Channels
+  made any other way (the topology bootstrap, a Space's own channels)
+  start with the setting off.
 - **What an admitted domain can make this deployment store.** Its
   accounts' messages are archived by the federated rooms that accept them,
   at most at the domain's request rate and, for each account, at the
