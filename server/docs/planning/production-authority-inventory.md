@@ -1083,6 +1083,29 @@ was added, and no decision of standing moved.
 - The raw scan holds 1633 records, as before. 31 unchanged records moved
   because the files above gained lines.
 
+The selected evidence was refreshed a twenty-second time, through
+`468bc0fb99fce93441d7935f3b7ab71086ade73e`, after reviewing the delta of the reviewed
+files since the twenty-first refresh. This refresh covers the end of a
+remote seat, the leaves kept to be placed again and the carrier's
+deadline. No grant writer, storage plane or producer of stream evidence
+was added, and no decision of standing moved.
+
+- The router (`s2s-seat-egress`, `s2s-carried-request`,
+  `s2s-seat-adoption` and `s2s-adopted-seats` moved) no longer ends a
+  seat on a `service-unavailable` bounce, only on the delivery-related
+  conditions XEP-0045 §17.1.2 lists; keeps a leave that cannot be placed
+  for 120 s from when it was first kept, within a bound for each remote
+  account as well; and forgets such a leave once a later presence of its
+  sender for the room is placed, taking it out of the room's lane if it
+  waits there again. Each narrows what a room keeps seated or what a
+  stale leave can end.
+- The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`
+  moved) reports an owner as silent only for an ask that began with the
+  owner's two windows ahead of it; an ask begun later that runs out is a
+  retryable refusal that says nothing of the owner.
+- The raw scan holds 1633 records, as before. 6 unchanged records moved
+  because the files above gained lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
