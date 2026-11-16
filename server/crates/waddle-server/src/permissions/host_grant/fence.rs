@@ -8,9 +8,12 @@
 //!
 //! - A replica decides for a managed room only while it holds a *lease*
 //!   ([`ReplicaFence`]): a row of `host_grant_fence_replicas` it renews every
-//!   [`FENCE_TICK`]. It measures the lease on its own monotonic clock from
-//!   before the renewal was sent and stops deciding [`FENCE_LEASE_MARGIN`]
-//!   before the lease PostgreSQL recorded runs out.
+//!   [`FENCE_TICK`]. It measures the lease on its own boot-time clock, which
+//!   counts time the host spent suspended (`boot_clock`), from before the
+//!   renewal was sent, and stops deciding [`FENCE_LEASE_MARGIN`] before the
+//!   lease PostgreSQL recorded runs out. A renewal that comes back after the
+//!   lease it renewed ran out here does not revive it: the replica treats it
+//!   as a lapse and registers again.
 //! - Each tick the replica reads every scope's generation and *installs* the
 //!   ones that moved, in memory and under the lock every decision's validity
 //!   check takes, and only then records them in `host_grant_fence_acks`.
@@ -18,7 +21,9 @@
 //!   generation it was read under. [`FenceTicket::is_current`] and
 //!   [`FenceTicket::admit`] refuse it once the replica has installed a newer
 //!   generation of its scope, registered again, or let its lease lapse.
-//!   A check never waits and no ticket is held across an await.
+//!   A check never waits. A surface that holds a decision across an await
+//!   asks it again before the effect, and decides again once its ticket is
+//!   no longer current ([`super::HostGrantGate::still_allows`]).
 //! - A revoke is *acknowledged* ([`HostGrantStore::await_revocation_fence`])
 //!   once every replica whose lease has not been expired for
 //!   [`FENCE_EXPIRY_GRACE`] has recorded the revoke's generation. The set of
@@ -29,6 +34,15 @@
 //! generation first, and one that did not has stopped deciding. A replica
 //! whose lease lapsed registers again under a new identity and starts from
 //! nothing it decided before.
+//!
+//! The lease's end is PostgreSQL's clock and the replica's deadline its own:
+//! the margin absorbs a difference in their rates, not in their readings.
+//! The leases of every replica are compared with one database clock, so a
+//! failover to a PostgreSQL host whose clock runs ahead ends every lease
+//! early by the difference. PostgreSQL hosts are therefore kept in sync
+//! (NTP, skew well under a second), and each registration and renewal
+//! compares the replica's wall clock with PostgreSQL's `clock_timestamp()`
+//! and warns when they differ by more than [`FENCE_CLOCK_SKEW_WARNING`].
 //!
 //! The acknowledgement depends on PostgreSQL alone. It does not wait for the
 //! projection, for the room actors that seat occupants or for the media
@@ -42,6 +56,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock, Weak};
 use std::time::{Duration, Instant};
+
+use super::boot_clock::{suspend_counted, BootInstant};
 
 use tokio::sync::{watch, Notify};
 use uuid::Uuid;
@@ -65,6 +81,12 @@ pub const FENCE_LEASE_MARGIN: Duration = Duration::from_secs(1);
 /// replica. It covers the step from a validity check to the effect it
 /// guards.
 pub const FENCE_EXPIRY_GRACE: Duration = Duration::from_secs(1);
+/// The difference between this replica's wall clock and PostgreSQL's above
+/// which a registration or renewal warns. The fence measures leases on the
+/// database's clock and the replica's own deadline on a relative one, so a
+/// difference in readings alone does not void a lease; it shows a host that
+/// is not kept in sync, whose clock can also step or drift.
+pub const FENCE_CLOCK_SKEW_WARNING: Duration = Duration::from_millis(500);
 /// How often a replica renews its lease and reads the scopes' generations.
 pub const FENCE_TICK: Duration = Duration::from_millis(250);
 /// Longest a caller waits for a revoke's acknowledgement: a replica that
@@ -83,15 +105,33 @@ const LAPSED_LEASE_WAIT: Duration = Duration::from_millis(500);
 /// Longest a fence statement waits for a lock, and longest it runs.
 const FENCE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const FENCE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
-/// Longest one tick's reads and writes take, connection checkout included:
-/// a tick that overruns it is abandoned, and the lease then runs out on its
-/// own.
-const FENCE_TICK_DEADLINE: Duration = Duration::from_secs(2);
+/// What the tick deadline leaves of the margin and the grace together.
+const FENCE_TICK_SLACK: Duration = Duration::from_millis(500);
+/// Longest each of one tick's transactions takes, connection checkout
+/// included: a transaction that overruns it is abandoned, and the lease
+/// then runs out on its own.
+///
+/// It is shorter than the margin and the grace together, with
+/// [`FENCE_TICK_SLACK`] to spare. A renewal sent before the replica's own
+/// deadline therefore commits before a revoke can stop waiting for the
+/// lease it renews: that lease ends no earlier than the margin after the
+/// replica's deadline, and is waited for the grace beyond. A renewal whose
+/// generations were read before such a revoke committed would otherwise
+/// extend a lease the acknowledgement no longer counts.
+const FENCE_TICK_DEADLINE: Duration = Duration::from_millis(1_500);
+const _: () = assert!(
+    FENCE_TICK_SLACK.as_millis() > 0
+        && FENCE_TICK_DEADLINE.as_millis() + FENCE_TICK_SLACK.as_millis()
+            <= FENCE_LEASE_MARGIN.as_millis() + FENCE_EXPIRY_GRACE.as_millis()
+);
 
 /// At most one warning a minute that the replica's lease lapsed.
 static LAPSED: RateLimitedWarning = RateLimitedWarning::new();
 /// At most one warning a minute that a tick failed.
 static TICK_FAILED: RateLimitedWarning = RateLimitedWarning::new();
+/// At most one warning a minute that PostgreSQL's clock and this replica's
+/// differ.
+static CLOCK_SKEW: RateLimitedWarning = RateLimitedWarning::new();
 
 /// Whether every replica that may still decide has recorded a generation of
 /// a scope.
@@ -131,16 +171,21 @@ impl HostGrantStore {
         replica: Uuid,
     ) -> Result<Vec<(ScopeLifecycleId, GrantGeneration)>, HostGrantError> {
         let mut tx = self.begin_fence().await?;
-        tx.execute(
-            "INSERT INTO host_grant_fence_replicas (replica_id, registered_at_ms, \
-             lease_expires_at) VALUES (?, ?, now() + (? * interval '1 millisecond'))",
-            crate::db_params![
-                replica.simple().to_string(),
-                chrono::Utc::now().timestamp_millis(),
-                lease_ttl_ms()
-            ],
-        )
-        .await?;
+        let sent_ms = chrono::Utc::now().timestamp_millis();
+        let mut rows = tx
+            .query(
+                "INSERT INTO host_grant_fence_replicas (replica_id, registered_at_ms, \
+                 lease_expires_at) VALUES (?, ?, now() + (? * interval '1 millisecond')) \
+                 RETURNING (extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+                crate::db_params![replica.simple().to_string(), sent_ms, lease_ttl_ms()],
+            )
+            .await?;
+        let database_ms = match rows.next().await? {
+            Some(row) => Some(row.get::<i64>(0)?),
+            None => None,
+        };
+        drop(rows);
+        observe_clock_skew(database_ms, sent_ms, chrono::Utc::now().timestamp_millis());
         tx.commit().await?;
         // A snapshot of its own, taken after the registration committed.
         let mut tx = self.begin_fence().await?;
@@ -157,18 +202,30 @@ impl HostGrantStore {
         replica: Uuid,
     ) -> Result<Option<Vec<(ScopeLifecycleId, GrantGeneration)>>, HostGrantError> {
         let mut tx = self.begin_fence().await?;
-        let renewed = tx
-            .execute(
+        let sent_ms = chrono::Utc::now().timestamp_millis();
+        let mut rows = tx
+            .query(
                 "UPDATE host_grant_fence_replicas \
                  SET lease_expires_at = now() + (? * interval '1 millisecond') \
-                 WHERE replica_id = ? AND lease_expires_at > now()",
+                 WHERE replica_id = ? AND lease_expires_at > now() \
+                 RETURNING (extract(epoch FROM clock_timestamp()) * 1000)::bigint",
                 crate::db_params![lease_ttl_ms(), replica.simple().to_string()],
             )
             .await?;
-        if renewed == 0 {
+        let renewed = match rows.next().await? {
+            Some(row) => Some(row.get::<i64>(0)?),
+            None => None,
+        };
+        drop(rows);
+        let Some(database_ms) = renewed else {
             tx.rollback().await?;
             return Ok(None);
-        }
+        };
+        observe_clock_skew(
+            Some(database_ms),
+            sent_ms,
+            chrono::Utc::now().timestamp_millis(),
+        );
         let generations = scope_generations(&mut tx).await?;
         tx.commit().await?;
         Ok(Some(generations))
@@ -320,6 +377,38 @@ fn lease_ttl_ms() -> i64 {
     i64::try_from(FENCE_LEASE_TTL.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// Record how far PostgreSQL's clock is from this replica's wall clock, from
+/// one statement that read `clock_timestamp()` (`database_ms`) between the
+/// replica's readings `sent_ms` and `received_ms`. The difference is
+/// estimated from the middle of that round trip; a warning needs it to
+/// exceed [`FENCE_CLOCK_SKEW_WARNING`] by more than half the round trip, so a
+/// slow round trip alone does not warn.
+fn observe_clock_skew(database_ms: Option<i64>, sent_ms: i64, received_ms: i64) {
+    let Some(database_ms) = database_ms else {
+        return;
+    };
+    let round_trip = received_ms.saturating_sub(sent_ms).unsigned_abs();
+    let midpoint = sent_ms.saturating_add(received_ms.saturating_sub(sent_ms) / 2);
+    let skew = database_ms.saturating_sub(midpoint).unsigned_abs();
+    waddle_xmpp::gauge_record!(
+        "waddle.host_grant.fence.clock_skew",
+        "ms",
+        "Difference between this replica's wall clock and PostgreSQL's clock_timestamp(), \
+         measured at its last host-grant revocation fence registration or renewal",
+        skew,
+    );
+    let threshold = u64::try_from(FENCE_CLOCK_SKEW_WARNING.as_millis()).unwrap_or(u64::MAX);
+    if skew.saturating_sub(round_trip / 2) > threshold && CLOCK_SKEW.due() {
+        tracing::warn!(
+            kind = "clock_skew",
+            skew_ms = skew,
+            round_trip_ms = round_trip,
+            "PostgreSQL's clock and this replica's differ by more than the host-grant \
+             revocation fence allows for; keep the database hosts in sync"
+        );
+    }
+}
+
 fn expiry_grace_ms() -> i64 {
     i64::try_from(FENCE_EXPIRY_GRACE.as_millis()).unwrap_or(i64::MAX)
 }
@@ -351,8 +440,27 @@ pub type RevocationSweep = Arc<dyn Fn(ScopeLifecycleId) + Send + Sync>;
 #[derive(Clone, Copy, Debug)]
 struct Lease {
     replica: Uuid,
-    /// Until when, on the replica's monotonic clock, it may decide.
-    valid_until: Instant,
+    /// Until when, on the replica's boot-time clock, it may decide.
+    valid_until: BootInstant,
+}
+
+impl Lease {
+    /// The lease of `replica` renewed by a statement sent at `sent`: it may
+    /// decide until [`FENCE_LEASE_MARGIN`] before the end PostgreSQL
+    /// records, measured from `sent`.
+    fn from(replica: Uuid, sent: BootInstant) -> Option<Self> {
+        let valid_until = sent.checked_add(FENCE_LEASE_TTL.saturating_sub(FENCE_LEASE_MARGIN))?;
+        Some(Self {
+            replica,
+            valid_until,
+        })
+    }
+
+    /// Whether the replica may still decide under the lease; never when
+    /// the clock cannot be read.
+    fn valid(&self) -> bool {
+        BootInstant::now().is_some_and(|now| now < self.valid_until)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -369,8 +477,7 @@ struct FenceState {
 
 impl FenceState {
     fn lease_valid(&self) -> bool {
-        self.lease
-            .is_some_and(|lease| Instant::now() < lease.valid_until)
+        self.lease.is_some_and(|lease| lease.valid())
     }
 }
 
@@ -392,6 +499,10 @@ struct Shared {
     /// Whether the background task skips its ticks (test support).
     suspended: AtomicBool,
     sweep: OnceLock<RevocationSweep>,
+    /// Holds the answer of the next renewal until the sender fires or is
+    /// dropped, as a slow network would (test support).
+    #[cfg(feature = "test-support")]
+    held_renewal: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl Shared {
@@ -444,7 +555,15 @@ impl Shared {
             return;
         }
         let lease = self.read().lease;
-        let sent = Instant::now();
+        let Some(sent) = BootInstant::now() else {
+            // Without the clock no lease can be measured: nothing is
+            // decided here until it can be read again.
+            if let Some(replica) = self.lapse() {
+                self.note_lapse("clock_unreadable");
+                let _ = self.store.fence_release(replica).await;
+            }
+            return;
+        };
         let outcome = match lease {
             Some(lease) if sent < lease.valid_until => self.renew(lease.replica, sent).await,
             Some(lease) => {
@@ -488,21 +607,35 @@ impl Shared {
         }
     }
 
-    async fn register(&self, sent: Instant) -> Result<(), HostGrantError> {
+    /// Wait for the sender of a held renewal, if a test holds one.
+    #[cfg(feature = "test-support")]
+    async fn hold_renewal(&self) {
+        let held = self
+            .held_renewal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(held) = held {
+            let _ = held.await;
+        }
+    }
+
+    async fn register(&self, sent: BootInstant) -> Result<(), HostGrantError> {
         let replica = Uuid::new_v4();
         let generations =
             tokio::time::timeout(FENCE_TICK_DEADLINE, self.store.fence_register(replica))
                 .await
                 .map_err(|_| HostGrantError::Busy)??;
+        let Some(lease) = Lease::from(replica, sent) else {
+            let _ = self.store.fence_release(replica).await;
+            return Err(HostGrantError::Busy);
+        };
         {
             let mut state = self.write();
             state.registration = state.registration.saturating_add(1);
             state.installed = generations.iter().copied().collect();
             state.recorded.clear();
-            state.lease = Some(Lease {
-                replica,
-                valid_until: sent + (FENCE_LEASE_TTL - FENCE_LEASE_MARGIN),
-            });
+            state.lease = Some(lease);
         }
         // Whatever this replica derived from the grants before it held this
         // lease was derived without the fence.
@@ -512,36 +645,56 @@ impl Shared {
         self.record(replica).await
     }
 
-    async fn renew(&self, replica: Uuid, sent: Instant) -> Result<(), HostGrantError> {
+    async fn renew(&self, replica: Uuid, sent: BootInstant) -> Result<(), HostGrantError> {
         let renewed = tokio::time::timeout(FENCE_TICK_DEADLINE, self.store.fence_renew(replica))
             .await
             .map_err(|_| HostGrantError::Busy)??;
+        #[cfg(feature = "test-support")]
+        self.hold_renewal().await;
         let Some(generations) = renewed else {
             self.lapse();
             self.note_lapse("not_renewed");
             return Ok(());
         };
+        let Some(renewed_lease) = Lease::from(replica, sent) else {
+            return Err(HostGrantError::Busy);
+        };
         let mut moved = Vec::new();
-        {
+        let renewed_in_time = {
             let mut state = self.write();
             // Another tick may have replaced the lease meanwhile.
-            if state.lease.map(|lease| lease.replica) != Some(replica) {
+            let Some(lease) = state.lease.filter(|lease| lease.replica == replica) else {
                 return Ok(());
-            }
-            for (lifecycle, generation) in generations {
-                if state
-                    .installed
-                    .get(&lifecycle)
-                    .is_none_or(|installed| *installed < generation)
-                {
-                    state.installed.insert(lifecycle, generation);
-                    moved.push(lifecycle);
+            };
+            let in_time = lease.valid();
+            if in_time {
+                for (lifecycle, generation) in generations {
+                    if state
+                        .installed
+                        .get(&lifecycle)
+                        .is_none_or(|installed| *installed < generation)
+                    {
+                        state.installed.insert(lifecycle, generation);
+                        moved.push(lifecycle);
+                    }
                 }
+                state.lease = Some(renewed_lease);
             }
-            state.lease = Some(Lease {
-                replica,
-                valid_until: sent + (FENCE_LEASE_TTL - FENCE_LEASE_MARGIN),
-            });
+            in_time
+        };
+        if !renewed_in_time {
+            // The answer came back after the lease it renews ran out here.
+            // Decisions under that lease have been void since, and the
+            // generations this answer read may predate a revoke whose
+            // acknowledgement stopped counting the lease before the renewal
+            // committed: they are no ground to make those decisions current
+            // again. The replica lapses and registers under a new
+            // registration, which voids them for good.
+            self.lapse();
+            self.note_lapse("renewed_late");
+            let _ = self.store.fence_release(replica).await;
+            let sent = BootInstant::now().ok_or(HostGrantError::Busy)?;
+            return self.register(sent).await;
         }
         for lifecycle in moved {
             self.request_sweep(lifecycle);
@@ -653,6 +806,8 @@ impl ReplicaFence {
                 started: AtomicBool::new(false),
                 suspended: AtomicBool::new(false),
                 sweep: OnceLock::new(),
+                #[cfg(feature = "test-support")]
+                held_renewal: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -670,6 +825,13 @@ impl ReplicaFence {
             self.shared.started.store(false, Ordering::Release);
             return;
         };
+        if !suspend_counted() {
+            tracing::warn!(
+                kind = "lease_clock",
+                "The host-grant revocation fence measures leases on a clock that stops while \
+                 this host is suspended; production replicas run on Linux, where it does not"
+            );
+        }
         runtime.spawn(keep_lease(
             Arc::downgrade(&self.shared),
             Arc::clone(&self.shared.wake),
@@ -765,6 +927,20 @@ impl ReplicaFence {
     #[cfg(feature = "test-support")]
     pub fn suspend_for_test(&self, suspended: bool) {
         self.shared.suspended.store(suspended, Ordering::Release);
+    }
+
+    /// Hold the answer of the next renewal, after PostgreSQL committed it,
+    /// until the returned sender fires or is dropped: a renewal whose answer
+    /// arrives late, as over a slow network.
+    #[cfg(feature = "test-support")]
+    pub fn hold_next_renewal_for_test(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self
+            .shared
+            .held_renewal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(held);
+        release
     }
 }
 

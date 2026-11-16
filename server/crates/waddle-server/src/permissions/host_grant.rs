@@ -56,6 +56,7 @@
 
 mod admission;
 mod authority;
+mod boot_clock;
 mod enrolled;
 mod error;
 mod fence;
@@ -86,8 +87,8 @@ pub use enrolled::{
 pub use error::HostGrantError;
 pub use fence::{
     FenceAcknowledgement, FenceTicket, ReplicaFence, RevocationSweep,
-    FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_EXPIRY_GRACE, FENCE_LEASE_MARGIN, FENCE_LEASE_TTL,
-    FENCE_TICK,
+    FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_CLOCK_SKEW_WARNING, FENCE_EXPIRY_GRACE,
+    FENCE_LEASE_MARGIN, FENCE_LEASE_TTL, FENCE_TICK,
 };
 pub use gate::{HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate};
 pub use issuance::{
