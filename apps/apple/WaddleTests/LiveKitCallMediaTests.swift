@@ -58,7 +58,9 @@ final class LiveKitCallMediaTests: XCTestCase {
             try await media.connect(join: forged, media: CallMedia(audio: false, video: false), iceServers: [])
             XCTFail("a forged token joined the room")
             await media.disconnect()
-        } catch {}
+        } catch {
+            XCTAssertFalse(error is CancellationError, "the SFU refused the join; nothing cancelled it")
+        }
     }
 
     func testTheSFUClosingTheRoomIsReportedAsAFailure() async throws {
@@ -123,7 +125,7 @@ private struct TestSFU {
     }
 
     private func segment(_ object: [String: Any]) -> String {
-        base64URL(try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
+        base64URL((try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data())
     }
 
     private func base64URL(_ data: Data) -> String {

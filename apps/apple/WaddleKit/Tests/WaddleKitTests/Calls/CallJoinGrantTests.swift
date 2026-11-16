@@ -4,7 +4,7 @@ import WaddleKit
 
 @Suite("Call join grants") struct CallJoinGrantTests {
     private func join(_ token: String) -> CallJoin {
-        CallJoin(url: "wss://livekit.waddle.test", room: "dm-room", identity: "alice@waddle.test/phone", token: token)
+        CallJoin(url: callJoin.url, room: "dm-room", identity: "alice@waddle.test/phone", token: token)
     }
 
     @Test func matchingGrantPasses() {

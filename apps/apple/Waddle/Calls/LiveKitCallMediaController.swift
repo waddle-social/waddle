@@ -53,14 +53,11 @@ final class LiveKitCallMediaController: CallMediaController {
         await room.disconnect()
     }
 
-    /// Asks for each permission first and starts a track only while the call
-    /// still owns `room`: a prompt can stay open long after a hang-up, and
-    /// the microphone must not start then.
     private func publish(_ media: CallMedia, in room: Room) async {
-        if media.audio, await AVCaptureDevice.requestAccess(for: .audio), self.room === room {
+        if media.audio, await mayCapture(.audio, in: room) {
             _ = try? await room.localParticipant.setMicrophone(enabled: true)
         }
-        if media.video, await AVCaptureDevice.requestAccess(for: .video), self.room === room {
+        if media.video, await mayCapture(.video, in: room) {
             _ = try? await room.localParticipant.setCamera(enabled: true)
         }
         // The call ended while a track was starting: `disconnect()` ran
@@ -69,6 +66,14 @@ final class LiveKitCallMediaController: CallMediaController {
             await room.localParticipant.unpublishAll()
             await room.disconnect()
         }
+    }
+
+    /// Asks for the permission, but only for a call that still owns `room`,
+    /// and checks again once the user has answered: a prompt can stay open
+    /// long after a hang-up. An ended call neither prompts nor captures.
+    private func mayCapture(_ kind: AVMediaType, in room: Room) async -> Bool {
+        guard self.room === room, await AVCaptureDevice.requestAccess(for: kind) else { return false }
+        return self.room === room
     }
 
     private func forgetRoom() {
