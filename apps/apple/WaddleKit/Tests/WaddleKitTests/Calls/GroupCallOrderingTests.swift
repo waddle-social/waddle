@@ -167,7 +167,7 @@ import Testing
         // What the session coordinator does when the stream drops.
         f.store.groupPresence.clear()
         #expect(await !joining.value)
-        #expect(f.store.state == .idle)
+        #expect(f.store.state == .ended(sid: "g1", reason: .error))
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),
             .groupPresence(groupRoom, "alice", .init(state: .left)),

@@ -115,7 +115,10 @@ extension CallStore {
 
     private func rollbackGroup(_ attempt: GroupCallAttempt, identity: JID?, message: String, epoch: Int) async -> Bool {
         guard groupStillPending(attempt, epoch: epoch), case .joiningGroup(let claimed) = state else { return false }
-        _ = claimHangUp()
+        // Nobody chose this ending, so it stays on show: tapping Join must
+        // not look like nothing happened.
+        cancelTimers()
+        transition(.ended(sid: attempt.sid, reason: .error))
         await teardownGroup(.joiningGroup(claimed), identity: identity, epoch: epoch)
         reportError(message, epoch: epoch)
         return false
