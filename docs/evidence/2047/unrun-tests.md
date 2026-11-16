@@ -115,9 +115,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Not run since W6c added a case and changed its account side to the new `LocalAccounts` methods (its 4 earlier cases ran: run5 final, stress and run6 logs) |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
-| `s2s_account_router` (13) | W6c | loopback; in-memory SQLite | Not run |
+| `s2s_account_router` (14) | W6c | loopback; in-memory SQLite | Not run |
 | `s2s_account_traffic_ws` (39), the RFC 6121 account-traffic suite | W6c | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Not run |
-| `xep0160_s2s_account_offline_ws` (2) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0160_s2s_account_offline_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0198_s2s_account_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
 | `xep0280_s2s_account_carbons_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0191_s2s_account_blocking_ws` (8) | W6c | as `s2s_account_traffic_ws` | Not run |
@@ -154,7 +154,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18 without `clustering`, run6 host-grant final log |
 | `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run6 host-grant final log |
 | `xep0045_host_grant_revocation` (12) | W5d, integration | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 12/12, run6 host-grant final log (11/12 in the first run6 host-grant final log; see above) |
-| `account_jid_retirement` (10) | W5d | PostgreSQL 17 | Run 10/10, run6 host-grant final log |
+| `account_jid_retirement` (11) | W5d, W6c | PostgreSQL 17 | Not run since W6c added a case for the account-traffic rows retirement removes (its 10 earlier cases ran 10/10, run6 host-grant final log) |
 | `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run6 host-grant final log |
 | `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run6 host-grant final log |
 | `host_grant_remote_principals` (14; 1 `#[ignore]`) | W5e, integration | PostgreSQL 17; SpiceDB for the ignored case | Run 14/14, run6 host-grant final log |
@@ -238,8 +238,8 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | | Count |
 | --- | --- |
 | Test targets listed | 92 (73 integration targets, 17 library test modules, 2 chat test files) |
-| Run, with a cited log | 38 targets, 828 cases, all passed in their latest cited run |
-| Not run | 54 targets (17 of them library modules) |
+| Run, with a cited log | 37 targets, 818 cases, all passed in their latest cited run |
+| Not run | 55 targets (17 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
@@ -421,13 +421,20 @@ implemented unless the text says so.
   (32 with `from`) on one domain can find the account's share of the
   pair's queue full and drops the excess.
 - The account lock that serialises roster read-modify-write for remote
-  contacts is per replica; the client's roster set does not take it.
-- Outbound IQ requests of a retired account's open stream still leave
-  (only messages and presence are refused); a stream left open at
-  retirement is a host-grant design question.
+  contacts, the client's roster set included, is per replica; no case
+  forces an inbound subscription stanza to interleave with a roster set,
+  so the lock in the roster set is reviewed, not exercised.
+- A stream left open at retirement is a host-grant design question; the
+  router refuses everything it sends to remote JIDs, but the departure
+  presence of a resource that ends still leaves its remote rooms.
+- A detached session's queue has no bound per sender: the strangers'
+  bound of 512 per account and day keeps them below the queue's 1,000,
+  while a contact's stanzas are bounded by that queue only.
+- The admission of the sender's domain is checked again before an offline
+  flush only while S2S is enabled; messages stored while it was on are
+  delivered after it is turned off.
 - No case drives a store failure (the no-announcement rule of a failed
-  roster write, the failed request lookup) or a parent domain's shared
-  bound across subdomains; the share heuristic has no public suffix list.
+  roster write, the failed request lookup).
 
 ### Identity profile design (`identity-profile-2047.md`)
 

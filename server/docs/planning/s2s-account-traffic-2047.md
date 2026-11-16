@@ -26,18 +26,24 @@ not run until verification (D9):
   send and their bound, the deadline after which the router abandons the
   account side's work, the correlation of a remote request to a local
   resource, a domain the account side no longer admits, outbound account
-  traffic, a retired account and the account's share of the pair queues,
-  and D7's refusal while no account side is attached;
+  traffic, a retired account's requests, room traffic and account
+  traffic, and the account's share of each pair's queue, and D7's refusal
+  while no account side is attached;
 - `crates/waddle-server/tests/s2s_account_traffic_ws.rs`: the RFC 6121
   account-traffic suite, a loopback S2S peer against the production `/ws`
   router and the real router: messages, presence, subscriptions in both directions, probes, IQ requests, the
-  no-enumeration matrix, retired JIDs and a retired account's open stream,
-  D1 at the effect boundary and S2S off;
+  no-enumeration matrix (with a detached session, a stranger over its
+  bounds and a full offline store among its states), retired JIDs and a
+  retired account's open stream, D1 at the effect boundary and S2S off;
 - `crates/waddle-server/tests/xep0198_s2s_account_expiry.rs`: the expiry
   of a detached XEP-0198 session holding a stranger's message, through the
   promotion chain every expiry path runs;
 - `crates/waddle-server/tests/xep0160_s2s_account_offline_ws.rs`: offline
-  storage of remote senders' messages and the strangers' bounds;
+  storage of remote senders' messages and the strangers' bounds, at the
+  store and at a real detached session reached by full JID, and a stored
+  message whose sender's domain is no longer admitted at the flush;
+- `crates/waddle-server/tests/account_jid_retirement.rs` (edited):
+  retirement removes the account's rows of migrations 2010 and 2011;
 - `crates/waddle-server/tests/xep0280_s2s_account_carbons_ws.rs`:
   received and sent carbons of messages exchanged with remote accounts,
   and carbon wrappers removed from remote messages;
@@ -62,8 +68,13 @@ not run until verification (D9):
 A case that asserts that nothing arrived ends with a barrier on the same
 path as the stanza under test (a stanza on the sender's own queue, which
 the account side answers whatever the account's state, then a ping on the
-pair, then a ping of the client's own server, or the client's own next
-stanza on the pair) and inspects every stanza received since.
+pair, then a ping of the client's own server and a marker the server
+delivers to the client through the path the account side delivers by, its
+user actor and its connection's outbound queue, or the client's own next
+stanza on the pair) and inspects every stanza received since. The ping of
+the client's own server alone is no barrier for deliveries: the connection
+reads and answers it before it writes a delivery still waiting on its
+queue.
 
 The implementation is the router's account path in
 `crates/waddle-server/src/s2s/route/` (`accounts.rs`, `router/accounts.rs`
@@ -128,14 +139,19 @@ the account exists, has been retired, is online, or blocks it. For such a
 sender every row above produces the same remote-visible result in every
 account state:
 
-| Stanza from a non-contact | Nonexistent | Retired | Exists, offline | Exists, online | Blocks the sender |
-| --- | --- | --- | --- | --- | --- |
-| Message `chat`, `normal`, `headline`, to the bare or a full JID | Nothing | Nothing | Nothing (stored, a `headline` dropped) | Nothing (delivered) | Nothing |
-| Message `groupchat` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` |
-| Message `error`, to the bare or a full JID | Nothing | Nothing | Nothing | Nothing | Nothing |
-| Presence of any type, to the bare or a full JID | Nothing | Nothing | Nothing | Nothing | Nothing |
-| IQ request, bare JID | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` |
-| IQ request, full JID | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` |
+| Stanza from a non-contact | Nonexistent | Retired | Exists, offline | Exists, online | Blocks the sender | Detached session | Stranger over bounds | Offline store full |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Message `chat`, `normal`, `headline`, to the bare or a full JID | Nothing | Nothing | Nothing (stored, a `headline` dropped) | Nothing (delivered) | Nothing | Nothing (held within the bounds, a `headline` dropped) | Nothing (dropped) | Nothing (dropped) |
+| Message `groupchat` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` |
+| Message `error`, to the bare or a full JID | Nothing | Nothing | Nothing | Nothing | Nothing | Nothing | Nothing | Nothing |
+| Presence of any type, to the bare or a full JID | Nothing | Nothing | Nothing | Nothing | Nothing | Nothing | Nothing | Nothing |
+| IQ request, bare JID | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` |
+| IQ request, full JID | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` | `service-unavailable` |
+
+"Detached session" is an account whose one resource is a detached XEP-0198
+session awaiting resumption; "stranger over bounds" an offline account
+whose bounds for the sender are spent; "offline store full" an offline
+account whose store has reached its quota.
 
 A contact here is a JID in the account's roster with a subscription
 `from` or `both`: an entity the account has authorised to see its
@@ -165,7 +181,10 @@ the ledger of retired JIDs (`auth/retirement.rs`), before any roster row,
 blocking list or resource is read. Retirement does not end an account's
 open streams or remove every row keyed by its JID (host-grant design,
 "Non-reuse of retired account JIDs"); a retired JID is nonexistent here
-even while such rows or a resource remain.
+even while such rows or a resource remain. Retirement does remove, in its
+transaction, the rows of migrations 2010 and 2011 for the account: its
+recorded subscription requests, its remote PubSub subscription records
+and the offline admissions of strangers' messages.
 
 ## RFC 6121 server rules, per class
 
@@ -198,12 +217,16 @@ even while such rows or a resource remain.
   sender learns whether the account is online. The classifier of local
   direct messages decides what is stored (XEP-0334 hints, chat states
   alone are not), and the account's next session receives it like any
-  offline message, after its blocking list is applied again. A stranger's
+  offline message, after its blocking list is applied again and only
+  while its sender's domain is still admitted (D1, below). A stranger's
   messages are admitted within bounds per day: 32 from one sender, 128
-  from one remote parent domain and 512 from all strangers together per
-  account (`s2s_remote_offline_admissions`, migration 2011); a contact is
-  held only to the store's own quota. A message beyond a bound or the
-  quota, or one the store refuses, is dropped and nothing answers it. The
+  from one sender domain (the domain of the sender's JID, an IP literal as
+  written) and 512 from all strangers together per account
+  (`s2s_remote_offline_admissions`, migration 2011); a contact is held
+  only to the store's own quota. A message is classified before it is
+  admitted, so that one the store would not keep never uses a stranger's
+  share. A message beyond a bound or the quota, or one the store refuses,
+  is dropped and nothing answers it. The
   stored message is a row of its own (`Transient`): it is not written to
   the account's archive or inbox and raises no push notification, because
   those are written only through the ingress authority's commit, which has
@@ -216,11 +239,18 @@ even while such rows or a resource remain.
   sender is taken as remote when its `from` is neither the server domain
   nor below it; a MUC or Spaces service an operator moved outside the
   server domain is then treated the same way, its messages dropped rather
-  than retained beyond the quota. A stranger's message is handed to a
-  detached session only once admitted within the bounds above, as if it
-  were stored at once, and one beyond them is dropped. A message a live
-  resource took and had not acknowledged when its stream was lost counts
-  against the store's quota only, since the session's replay window
+  than retained beyond the quota. A stranger's `chat` or `normal` message
+  is handed to a detached session, whether the session's resource was
+  selected for the bare JID or named by the full JID, only once admitted
+  within the bounds above, as if it were stored at once, and one beyond
+  them, or one the store would not keep (a chat state alone), is dropped.
+  Nothing the store would never keep, a `headline`, an `error` message or
+  directed presence, reaches a detached full JID from a non-contact. A
+  detached session's queue holds 1,000 stanzas for every sender together;
+  the strangers' bound of 512 per account and day keeps them from filling
+  it alone, and no bound per sender within one queue is kept. A message a
+  live resource took and had not acknowledged when its stream was lost
+  counts against the store's quota only, since the session's replay window
   already bounds it.
 - **`groupchat`** to an account is answered with `service-unavailable`
   (§8.5.2.1.1 and §8.5.2.2.1 require an error for the bare JID; the full
@@ -278,8 +308,13 @@ and writes the account's roster item for the contact and never creates a
 roster item for an inbound request (§3.1.3, security warning).
 
 The read of an item, the decision and the write run under the account's
-lock on the replica, inbound and outbound alike, so that two stanzas for
-one account never interleave their read-modify-write there. An inbound
+lock on the replica, inbound and outbound alike, and the client's roster
+set of a remote contact takes the same lock before its own read, so that
+two stanzas for one account, or a stanza and the client's own change,
+never interleave their read-modify-write there and an inbound stanza
+cannot restore an item the client just changed or removed. The lock is
+taken before the roster's per-user mutation lock wherever both are
+held. An inbound
 stanza applies nothing once the router has abandoned its work (see
 "Queues"). A reply or a delivery that announces a change (`subscribed`,
 current or `unavailable` presence, a roster push) follows only once the
@@ -338,12 +373,13 @@ change is stored; when the store fails nothing is announced.
   domain no longer admitted. A refusal is still answered to the client.
 
 A request the account side records is bounded: 256 per account and 16 per
-account from one remote parent domain, the domain's last two labels, so
-that a peer cannot multiply its share by sending from many subdomains (no
-public suffix list is consulted; under a public suffix of more labels
-unrelated registrants share one share, which only makes their bound
-stricter). A request beyond either is dropped unanswered, as for a
-nonexistent account. A recorded stanza is at most 16 KiB of serialized
+account from one sender domain, the domain of the sender's JID as
+admitted. A peer that sends from many subdomains has a share for each,
+and the account's bound of 256 bounds them all together; keying by a
+parent domain instead would put unrelated registrants under a public
+suffix of several labels (`co.uk`) into one share, where one of them could
+exhaust it for the rest. A request beyond either is dropped unanswered,
+as for a nonexistent account. A recorded stanza is at most 16 KiB of serialized
 XML; a larger one is dropped the same way. A request is kept 30 days: an
 older one is neither delivered nor counted, and the account's next
 recorded request deletes it, so the requests of a domain no longer
@@ -432,11 +468,20 @@ with `not-acceptable` and `<blocked/>` (XEP-0191 §3.3), as for IQ
 requests. The router then asks the account side whether the account may
 send: a retired account's stream stays open until it ends, and nothing it
 sends, and nothing the server sends on its behalf, leaves; a failure to
-tell refuses too. Each account stanza takes its place on the pair's
-bounded queue, of which one account holds at most 32 places at once (its
-own stanzas and those the server sends on its behalf), so that one
-account's burst never fills a pair's queue for the others; a stanza beyond
-the account's share is refused as a full queue refuses it. A message that
+tell refuses too. The router asks this of every stanza a local account
+sends to a remote JID once an account side is attached, not only of
+account traffic: IQ requests and responses and room traffic are refused
+for a retired account as well, before a request is reserved or a room's
+occupancy written. The presence leaving a remote room for a resource that
+ended is the router's own and still leaves, so that the room does not keep
+an occupant that is gone. Each account stanza takes its place on the
+pair's bounded queue, of which one account holds at most 32 places at
+once on that pair (its own stanzas and those the server sends on its
+behalf), so that one account's burst never fills a pair's queue for the
+others; a stanza beyond the account's share is refused as a full queue
+refuses it. The share is per pair, so that a domain whose stream cannot
+be established, which holds the account's stanzas until they are
+answered, never holds back the account's traffic to other domains. A message that
 cannot be sent is answered with `remote-server-not-found` or
 `remote-server-timeout`, and presence that cannot be sent is dropped.
 
@@ -487,7 +532,16 @@ is off they are unreachable:
   delivers a recorded subscription request at login. A domain no longer
   admitted, a denylisted parent domain included, gets nothing applied and
   nothing answered, whether the stanza arrived just now or waited on a
-  queue, an IQ request included.
+  queue, an IQ request included. Before the offline store is flushed to a
+  session (at login, at a terminal redrive to another resource and in the
+  recovery pass), the stored messages of senders at domains the
+  deployment does not serve are deleted when the replica's snapshot no
+  longer admits their domain, so a domain removed from the allowlist or
+  denylisted after its messages were stored gets none of them delivered.
+  With S2S off this is not checked: no remote traffic arrives then, the
+  messages stored while it was on were admitted when they arrived, and a
+  deployment without federation pays no extra read of the store at each
+  login.
 - **Queues.** Account traffic shares the room delivery queues and their
   workers (routing design, outbound MUC): keyed by the sender's bare JID,
   so one sender's stanzas are decided in order, with the same bounds per
@@ -514,7 +568,7 @@ is off they are unreachable:
   one error, one `subscribed`, or one `unavailable` per resource. Nothing
   received produces traffic to any other remote JID.
 - **Stored state** per account: 256 recorded subscription requests (16
-  per remote parent domain), each kept 30 days; 1,024 PubSub subscription
+  per sender domain), each kept 30 days; 1,024 PubSub subscription
   records; and the offline admissions of strangers' messages of the last
   day (at most 512). The offline store's own quota (1,000 rows per account
   by default) bounds the messages stored.
@@ -555,7 +609,7 @@ store. This is the slice's rollout part (G24).
 | G18-2 | No enumeration: for a non-contact, every class has one remote-visible result whatever the account's state (table above). Existence, retirement included, is checked first. | RFC 6121 §8.5.1 error for nonexistent accounts and offline storage for existing ones (rejected: distinguishes them). |
 | G18-3 | IQ requests to the bare JID are answered `service-unavailable`; no namespace is answered on an account's behalf for remote requesters. | Enabling vCard, PEP and account discovery (deferred: each needs its own access review). |
 | G18-4 | IQ requests to a full JID reach the resource for a requester with `from` or `both`, or a remote room the resource occupies, registered as `inbound` correlation rows. | Directed-presence admission (not tracked). |
-| G18-5 | Messages go to one most available resource; with none, the message is stored offline, from a contact and a stranger alike, and nothing ever answers a remote sender's message (owner decision, 2026-11-16). Strangers are held to bounds per sender, parent domain and account; beyond a bound or the quota a message is dropped silently. The minimal producer writes a `Transient` offline row; archive, inbox and push wait for the remote ingress producer. | `service-unavailable` to contacts and dropping strangers' messages (replaced: a contact could tell an offline account from an online one); erroring to everybody (rejected: presence leak). |
+| G18-5 | Messages go to one most available resource; with none, the message is stored offline, from a contact and a stranger alike, and nothing ever answers a remote sender's message (owner decision, 2026-11-16). Strangers are held to bounds per sender, sender domain and account, at a detached session as at the store; beyond a bound or the quota a message is dropped silently. The minimal producer writes a `Transient` offline row; archive, inbox and push wait for the remote ingress producer. | `service-unavailable` to contacts and dropping strangers' messages (replaced: a contact could tell an offline account from an online one); erroring to everybody (rejected: presence leak). |
 | G18-6 | Broadcast presence is accepted only from contacts the account is subscribed to; probes are answered only for contacts with `from` or `both`, and otherwise ignored. | §8.5.2.1.2 delivery from anyone; `unsubscribed` to every unauthorised prober. |
 | G18-7 | Subscriptions: the account's own roster half only; inbound requests recorded durably, bounded, delivered at each new session; pre-approval supported. | The client path's in-memory pending queue (rejected: per replica, lost on restart, unbounded across requesters). |
 | G18-8 | Event notifications only for a node the account subscribed to, recorded when the request leaves, or from the PEP service of a contact the account is subscribed to. | Recording on the service's result (rejected: the `<subscription/>` element is optional and pending subscriptions would be missed). |
@@ -563,7 +617,7 @@ store. This is the slice's rollout part (G24).
 | G18-10 | Remote contacts stay in rosters with S2S off, dormant; the roster set may still refuse a new one while it is off (owner decision, 2026-11-16). | Pruning them at every start with S2S off (replaced: a deployment that turns S2S off for a while lost its users' remote contacts). |
 | G18-11 | No path answers a remote sender's message: the account side, the expiry of a detached session and the ingress quota bounce all drop instead of bouncing a sender at a domain the deployment does not serve. | Bouncing on quota as for local senders (rejected: tells the sender the account is offline). |
 | G18-12 | The router abandons account work at its deadline and the account side then applies nothing more; roster read-modify-write runs under a per-account lock; a change is announced only once stored. | Letting abandoned work run to its end (replaced: its effects could land after the sender's next stanza's). |
-| G18-13 | A retired account's open stream sends no account traffic, refused at the router's account route with a fail-closed check. | Ending the stream at retirement (out of scope: retirement does not end streams). |
+| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check; retirement removes the account's rows of migrations 2010 and 2011. | Ending the stream at retirement (out of scope: retirement does not end streams); refusing account traffic only (replaced: requests and room traffic still left). |
 
 ## Restrictions and risks
 
@@ -573,13 +627,22 @@ store. This is the slice's rollout part (G24).
   bounds, or any beyond the store's quota, is lost without notice.
 - **Strangers' bounds are a rate.** They count admissions of the last
   day, not the messages still stored; the store's quota bounds those.
+- **A detached session's queue has no bound per sender.** Strangers
+  together are held to 512 admissions per account and day, below the
+  queue's 1,000 stanzas, but a contact's stanzas are bounded by that
+  queue only, and a queue that fills drops its oldest stanzas, a
+  stranger's held message among them.
+- **Stored messages after S2S is turned off.** The admission of their
+  senders' domain is checked again before a flush only while S2S is
+  enabled; messages stored while it was on are delivered after it is
+  turned off.
 - **Outbound messages are not archived** in the sender's archive or
   projected into the sender's inbox; the sender's other devices see them
   only as carbons while online.
 - **The account lock is per replica.** Inbound and outbound subscription
-  handling for one account on two replicas, and the client's own roster
-  set on any replica, can still interleave their read-modify-write of one
-  item; the last write wins. The bounded stores are serialised across
+  handling for one account and the client's own roster set, on two
+  replicas, can still interleave their read-modify-write of one item; the
+  last write wins. The bounded stores are serialised across
   replicas by their transaction lock.
 - **Remote sender detection at session expiry** reads the `from` of the
   stored stanza; a service moved outside the server domain is treated as
@@ -644,6 +707,6 @@ store. This is the slice's rollout part (G24).
   is accepted as a consequence of XEP-0191 §3.3 (see "No enumeration").
 - **Receipts and markers** are a client's duty, per XEP-0184 §8 (see "No
   enumeration").
-- **A retired account's still-open session** sends no account traffic or
-  presence, refused at the outbound account route and failing closed
+- **A retired account's still-open session** sends nothing to remote
+  JIDs, refused at the router for every stanza it sends and failing closed
   (G18-13).

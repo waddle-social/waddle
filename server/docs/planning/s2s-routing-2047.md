@@ -231,7 +231,9 @@ attaches one whenever S2S is enabled, so in a deployment it describes no
 running router; the routing, outbound MUC and self-ping suites run without
 one and keep these rules as their evidence. With the account side
 attached, account traffic follows
-[the account-traffic design](s2s-account-traffic-2047.md) instead.
+[the account-traffic design](s2s-account-traffic-2047.md) instead, and
+the router refuses everything a retired account sends to remote JIDs, IQ
+requests and room traffic included, as that design records.
 
 Inbound, as the inventory shows: traffic to a local account is refused as
 if the account did not exist (RFC 6121 §8.5.1), except a response that
