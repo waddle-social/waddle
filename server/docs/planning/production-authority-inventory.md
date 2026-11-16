@@ -4,7 +4,8 @@ Status: source inventory for #2047 F0; **production closure is not established**
 Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
 Post-baseline drift was manually reviewed through target main
 `a020a79c588a297fe8ff90418f8bc74cbf15b676`, and the host-grant writer fence
-and S2S routing through `6e4cceebb627b36dd48931bcaf1cb30c0f0835af` (see the last refresh below); the original
+S2S routing and the host-grant restore incarnation through
+`21641f3c50dd503beac2d8f304a3e12d91e45c88` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -44,18 +45,18 @@ or legacy projection the canonical authority.
 SpiceDB backend. [Lifecycle backend selection](../../crates/waddle-server/src/server/lifecycle.rs#L214) chooses it from server
 configuration, except for the explicit missing-SpiceDB + enabled fixed-test-account
 branch; [that branch](../../crates/waddle-server/src/server/fixed_account.rs#L19) uses the local backend. Lifecycle also asks
-[EnsureSchema](../../crates/waddle-server/src/server/lifecycle.rs#L256). The backend [writes the schema](../../crates/waddle-server/src/permissions/spicedb.rs#L64),
-[creates](../../crates/waddle-server/src/permissions/spicedb.rs#L453), [deletes](../../crates/waddle-server/src/permissions/spicedb.rs#L557), [replaces a relation family](../../crates/waddle-server/src/permissions/spicedb.rs#L468), and
-[conditionally swaps a family for rollback](../../crates/waddle-server/src/permissions/spicedb.rs#L495). Each RPC has its own external
+[EnsureSchema](../../crates/waddle-server/src/server/lifecycle.rs#L256). The backend [writes the schema](../../crates/waddle-server/src/permissions/spicedb.rs#L66),
+[creates](../../crates/waddle-server/src/permissions/spicedb.rs#L450), [deletes](../../crates/waddle-server/src/permissions/spicedb.rs#L550), [replaces a relation family](../../crates/waddle-server/src/permissions/spicedb.rs#L465), and
+[conditionally swaps a family for rollback](../../crates/waddle-server/src/permissions/spicedb.rs#L492). Each RPC has its own external
 transaction/ACK. These methods return unit/status rather than a durable F0
 operation identity or selected dependency witness. Family preconditions protect
 that family; they are not a cross-store admission fence. [FullyConsistent
-checks](../../crates/waddle-server/src/permissions/spicedb.rs#L429) return boolean-style CheckResponse results without exposing the graph
-revision. The [local test backend](../../crates/waddle-server/src/permissions/actor.rs#L164) and [SQL TupleStore](../../crates/waddle-server/src/permissions/tuple/store.rs#L24) are
+checks](../../crates/waddle-server/src/permissions/spicedb.rs#L426) return boolean-style CheckResponse results without exposing the graph
+revision. The [local test backend](../../crates/waddle-server/src/permissions/actor.rs#L171) and [SQL TupleStore](../../crates/waddle-server/src/permissions/tuple/store.rs#L24) are
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1561) invokes account reconciliation behind its
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1522) invokes account reconciliation behind its
 lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L142) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L182) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
@@ -219,7 +220,7 @@ inputs. E7. A room an enrolled scope manages is answered
 [from its canonical grants](../../crates/waddle-server/src/server/durable_membership.rs#L126) instead: its durable
 recipients are the subjects whose grants allow reading it.
 
-**S5 — Canonical acceptance and replay.** [Ingress claim checks](../../crates/waddle-server/src/ingress/commit_room.rs#L417) concern
+**S5 — Canonical acceptance and replay.** [Ingress claim checks](../../crates/waddle-server/src/ingress/commit_room.rs#L460) concern
 exact actor ownership. [Admission coordinates](../../crates/waddle-server/src/ingress/commit_room.rs#L40) fence a new room snapshot
 once: later revisions do **not** revoke children of an already accepted manifest.
 Replay additionally validates occupancy/lifecycle and current claim ownership.
@@ -418,6 +419,34 @@ reviewed files since the fourth refresh:
   the room-admin call's error binding and the enrolled-set re-export. The
   rest moved lines. No token was added, and no production grant writer,
   grant store or acceptance authority was found.
+
+The selected evidence was refreshed a sixth time, through
+`21641f3c50dd503beac2d8f304a3e12d91e45c88`, the merge of the host-grant
+restore incarnation, after reviewing the delta of the reviewed files since
+the fifth refresh:
+
+- Room-manifest acceptance (`claim`, `hg-admission`) compares the authority
+  binding it reads under the scope's guard with its attachment's, refuses a
+  room of an enrollment only SpiceDB holds, and asks the replica's
+  attachment gate to verify again when the binding changed. Nothing it
+  admits was widened.
+- The permission actor gains witness messages (read, list, replace, clear)
+  and the restored-scope takeover; each writes only the host-grant
+  projection definition, conditioned on the exact stamps it read, and the
+  takeover is reachable only with a store-produced `RestoredPlan`. The
+  legacy tuple writers and their writer and reader fences are unchanged;
+  their anchors moved.
+- The writer fence's gate (`hg-gate`) reads its attachment from the
+  attachment gate at each decision, so a refused or re-verified authority
+  closes every surface. Projection recovery (`hg-recovery`) waits for the
+  first attachment. Startup moves `startup-call` without changing backend
+  selection, `EnsureSchema` or account reconciliation.
+- The raw scan holds 1595 records, five more: three documentation
+  references to `WriteHostGrantProjection` beside the new actor messages,
+  and one `write_relationships` and one `delete_relationships` in the
+  witness writers, both confined to the projection definition. The rest
+  changed only their line or the import list they sit in. No production
+  grant writer, grant store or acceptance authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
