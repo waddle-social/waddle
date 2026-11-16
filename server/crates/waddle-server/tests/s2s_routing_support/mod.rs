@@ -225,6 +225,10 @@ pub struct Routed {
     pub router: S2sRouter,
     pub delivery: Arc<RecordingDelivery>,
     pub served: ServedDomains,
+    /// The deployment's shared database: its correlation table, remote
+    /// room occupancies and, for a deployment that hosts rooms for remote
+    /// occupants, their seats.
+    pub database: Database,
 }
 
 impl Routed {
@@ -260,7 +264,7 @@ pub async fn start_routed(
         config: Arc::clone(&config),
         served: served.clone(),
         correlations: Arc::new(SqlIqCorrelations::new(database.clone())),
-        rooms: Arc::new(SqlRemoteRoomStore::new(database)),
+        rooms: Arc::new(SqlRemoteRoomStore::new(database.clone())),
         limits,
         stop: None,
     });
@@ -286,6 +290,7 @@ pub async fn start_routed(
         router,
         delivery,
         served,
+        database,
     }
 }
 
