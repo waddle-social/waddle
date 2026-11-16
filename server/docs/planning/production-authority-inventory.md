@@ -9,8 +9,9 @@ S2S routing and the host-grant restore incarnation through
 `9766d9c8175f09d56fff6f4e6f8c65b93b0984eb`, the host-grant revocation fence
 through `9b2e2d57ebd13329ddc045b2d1343f03b9619089`, and the effect boundary for
 remote principals through `c9111c714cfb821e571cc7f3b63d4a9ef37d11ba`, merged
-with them in `763988ff0b1c466d659033ca398623cf9999fc11` (see the last refresh
-below); the original baseline and its limits remain unchanged.
+with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
+`a63296597d505f0a542432654ba4e3487c799dc0` (see the last refresh below); the original
+baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
 runtime behavior, authorization gate, schema, migration, CI job or activation.
@@ -99,7 +100,7 @@ whole command committed. Room configuration, roles, explicit affiliations and
 invitations also affect acceptance independently of a channel's inherited read
 permission. E3/E6. For a room an enrolled host-grant scope manages, none of
 this applies: the handler takes the sender's authority from the canonical
-grants, [records one affiliation change in the host-grant store](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs#L115)
+grants, [records one affiliation change in the host-grant store](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin_host_grant.rs#L126)
 before the room actor applies it, writes no relationship and rolls nothing
 back; owner configuration needs the canonical `manage` action and
 [destroy is refused](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs#L1321); admin channel and Space
@@ -107,15 +108,15 @@ commands [are refused](../../crates/waddle-server/src/admin/mod.rs#L59); and a
 [mediated invitation grants nothing](../../crates/waddle-server/src/server/routes/websocket/handlers/message/muc_invite.rs#L272).
 
 **W6 — Group-DM graph and legacy SQL mirror (concrete).**
-[Member persistence](../../crates/waddle-server/src/admin/channels.rs#L3997) writes the permission actor and then
-[permission_tuples through DbExecute](../../crates/waddle-server/src/admin/channels.rs#L4055). Failure attempts compensation
-of the graph write. [Deletion](../../crates/waddle-server/src/admin/channels.rs#L4094) performs the inverse pair and may
+[Member persistence](../../crates/waddle-server/src/admin/channels.rs#L4006) writes the permission actor and then
+[permission_tuples through DbExecute](../../crates/waddle-server/src/admin/channels.rs#L4064). Failure attempts compensation
+of the graph write. [Deletion](../../crates/waddle-server/src/admin/channels.rs#L4103) performs the inverse pair and may
 restore graph membership if SQL deletion fails. These are separate commits with
 possible partial/unknown outcomes, not a PostgreSQL transaction containing the
 external graph mutation. Include the compensating paths as writers. Do not treat
 this SQL mirror as the complete canonical grant journal. E3 is adjacent recovery
 coverage, not an atomic graph/SQL proof. Both writers now
-[refuse a group-DM identifier](../../crates/waddle-server/src/admin/channels.rs#L4043) that is the authorization
+[refuse a group-DM identifier](../../crates/waddle-server/src/admin/channels.rs#L4052) that is the authorization
 object of a room an enrolled scope manages, before either statement, since
 group DMs and managed rooms share the channel identifier space.
 
@@ -153,8 +154,8 @@ and writes the channel's parent only when the channel has none or already has
 that Space, retracting the bookmark when the parent write fails; it runs no
 stale cleanup, and skips a room an enrolled scope manages or whose enrollment
 cannot be told. [Join affiliation resolution](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L25) can invoke
-[parent repair](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L425) after a denied channel check. Repair writes a graph
-parent only for a channel that has none, naming the Space of the [channel-space link](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L559)
+[parent repair](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L428) after a denied channel check. Repair writes a graph
+parent only for a channel that has none, naming the Space of the [channel-space link](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L562)
 when that Space lists the channel's bookmark; a channel with a parent keeps it,
 since only a placement moves it. Repair rechecks the bookmark after writing and
 deletes its own write when the bookmark is gone. The
@@ -188,7 +189,7 @@ room an enrolled host-grant scope manages is entered only with the standing
 its canonical grants honour (Outcast for a ban, nothing without a grant), as
 a members-only room, and only through its channel row.
 
-**S2 — Archive/discovery/extension reads.** The [MUC archive gate](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L222)
+**S2 — Archive/discovery/extension reads.** The [MUC archive gate](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L225)
 uses live room configuration when available, direct relations and managed-entry
 rules; unmanaged rooms without a live actor fail closed. It is followed by a
 separate [archive query](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/archive_inbox_upload.rs#L184). There is no shared authorization snapshot
@@ -198,7 +199,7 @@ authorizer](../../crates/waddle-server/src/server/extension_commands/pubsub.rs#L
 MAM sink. Rejection/error, returned archive rows and later network transmission
 are different boundaries. E6. For a room an enrolled scope manages, the gate
 and the room's disco#info decide from the canonical grants, and the archive
-page is sent only if [a decision taken after the read](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L357)
+page is sent only if [a decision taken after the read](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs#L360)
 still admits the requester.
 
 **S3 — PubSub delivery.** The real database [subscriber query](../../crates/waddle-server/src/pubsub/implementation.rs#L376)
@@ -675,6 +676,41 @@ both of its parents:
   `reconcile`, `topology`, `seed`, `admin-rollback`, `space-admin`,
   `space-delete`, `claim`, `e-rollback`, `hg-bootstrap-d8`, `hg-topology` and
   `hg-recovery` moved with them. No production grant writer, grant store or
+  acceptance authority was added.
+
+The selected evidence was refreshed a fifteenth time, through
+`a63296597d505f0a542432654ba4e3487c799dc0`, after reviewing the delta of the reviewed files
+since the fourteenth refresh:
+
+- Every surface of the writer fence names the stream evidence of the
+  decision it makes: `ManagedRoomGrants::allows_as` and `standing_as` and
+  `HostGrantGate::allows_as` with `PrincipalEvidence::NoStream`, for the
+  local sessions and named subjects every surface serves today. The
+  stream-less `allows` and `standing` (`hg-gate` moved), and the
+  stream-less `set_affiliation` of the store and the authority, are built
+  for test support only; room administration (`hg-room-admin`) records
+  through `set_affiliation_as`. Each decides exactly what it decided before.
+  The surfaces' anchors moved with the longer calls: `hg-owner-config`,
+  `hg-moderation`, `hg-pin-list`, `hg-system-message`, `hg-mirror-repair`,
+  `hg-read-recheck`, `archive-gate`, `join-repair`, `join-repair-link`,
+  `hg-group-dm`, `group-dm`, `group-dm-sql` and `group-dm-delete`.
+- The revocation sweep (`hg-revocation-sweep`) removes a seated occupant of
+  a domain the deployment does not serve only when its grants deny it
+  whatever stream its requests arrive on (a ban, no membership recorded, a
+  scope that admits nobody); it removes less than before, never more, and
+  writes nothing else.
+- Reconciliation drops, as an operation of its own that lowers recorded
+  rows to their effective affiliation, a recorded increase whose remote
+  initiator the replica's snapshot no longer admits or lists as a trusted
+  home (`HostGrantStore::drop_unhonoured_increases`, in
+  `permissions/host_grant/store.rs` and `authority.rs`). It lowers grant
+  rows only; it never raises one and never activates anything.
+- Startup's check of the trusted-home list (`server/lifecycle.rs`) and the
+  issuance policy count the account domain's call mixer as a service
+  domain.
+- The raw scan holds 1594 records, two fewer: the room administration's
+  call and a documentation reference of `HostGrantAuthority` no longer match
+  the `set_affiliation` token. No production grant writer, grant store or
   acceptance authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
