@@ -25,7 +25,7 @@ private struct SelfMuteMarker: ViewModifier {
 
     func body(content: Content) -> some View {
         content.task(id: marker) {
-            guard let marker, marker.isMuted != calls.confirmedSelfMute else { return }
+            guard let marker, calls.isSelfMuteOwed(marker.isMuted) else { return }
             let sinceUp = media.mediaUpSince.map { Date.now.timeIntervalSince($0) } ?? Self.settle
             if sinceUp < Self.settle {
                 try? await Task.sleep(for: .seconds(Self.settle - sinceUp))
@@ -33,9 +33,7 @@ private struct SelfMuteMarker: ViewModifier {
             for _ in 0...Self.retries {
                 // A newer state cancels this task; a moved slot ends it.
                 guard !Task.isCancelled, case .inGroup(let call) = calls.state, call.sid == marker.sid else { return }
-                // Compared with what the room heard, not with what we meant
-                // to say: a send that failed is still owed.
-                if marker.isMuted == calls.confirmedSelfMute { return }
+                if !calls.isSelfMuteOwed(marker.isMuted) { return }
                 if await calls.advertiseSelfMute(marker.isMuted) { return }
                 try? await Task.sleep(for: Self.retryDelay)
             }
@@ -46,12 +44,16 @@ private struct SelfMuteMarker: ViewModifier {
     /// a microphone to report on.
     private var marker: Marker? {
         guard isOnline, case .inGroup(let call) = calls.state, media.phase == .connected else { return nil }
-        return Marker(sid: call.sid, isMuted: !media.isMicrophoneOn)
+        let isMuted = !media.isMicrophoneOn
+        return Marker(sid: call.sid, isMuted: isMuted, isOwed: calls.isSelfMuteOwed(isMuted))
     }
 
     private struct Marker: Hashable {
         let sid: String
         let isMuted: Bool
+        /// Part of the identity so a send that lands late, or a presence
+        /// that carried an older choice, is noticed and put right.
+        let isOwed: Bool
     }
 }
 

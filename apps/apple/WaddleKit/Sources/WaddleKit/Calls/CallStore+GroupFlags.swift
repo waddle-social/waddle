@@ -18,6 +18,12 @@ extension CallStore {
         return sent
     }
 
+    /// The room needs telling that the microphone is `muted`: either it last
+    /// heard otherwise, or the next presence we send would say otherwise.
+    public func isSelfMuteOwed(_ muted: Bool) -> Bool {
+        muted != confirmedSelfMute || muted != isSelfMuteAdvertised
+    }
+
     /// Capture owns mute state, so failed broadcasts never roll it back.
     public func advertiseSelfMute(_ muted: Bool) async -> Bool {
         guard case .inGroup(let target) = state else { return false }

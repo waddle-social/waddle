@@ -149,6 +149,23 @@ extension GroupCallFlagTests {
         #expect(!f.store.confirmedSelfMute)
     }
 
+    @Test func aMuteThatFailedIsStillOwedAfterTheMicrophoneComesBackOn() async {
+        let f = GroupFixture()
+        await f.activate()
+        f.port.callResults["groupPresence"] = false
+        #expect(await !f.store.advertiseSelfMute(true))
+        // The room still thinks we are unmuted, which is true again, but
+        // the next presence would say muted: that is owed a correction.
+        #expect(f.store.isSelfMuteOwed(false))
+        f.port.callResults["groupPresence"] = true
+        #expect(await f.store.advertiseSelfMute(false))
+        #expect(!f.store.isSelfMuteOwed(false))
+        f.port.callSends.removeAll()
+        #expect(await f.store.setHandRaised(true))
+        #expect(f.port.callSends == [.groupPresence(groupRoom, "alice", .init(state: .active(video: false), isHandRaised: true, isMuted: false))])
+        f.store.clear()
+    }
+
     @Test func flagRestampsRequireActiveGroup() async {
         let f = GroupFixture()
         #expect(await !f.store.setHandRaised(true))
