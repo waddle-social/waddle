@@ -12,6 +12,10 @@ follow-ups the connection manager recorded: stanza addresses written to
 peers in U-labels, and a `jid-malformed` stanza error, with the stream kept,
 for a valid address in a spelling the identity profile refuses.
 
+The outbound MUC slice (W6b) adds D7's room exception in both directions:
+local resources join, use and leave rooms on remote domains, and the rooms'
+traffic reaches them ([Outbound MUC](#outbound-muc-w6b)).
+
 Nothing here is executed evidence. The evidence is written and compiled but
 not run until verification (D9):
 
@@ -40,6 +44,14 @@ not run until verification (D9):
   `not-acceptable` (XEP-0191 §3.3);
 - `crates/waddle-server/tests/s2s_connection_manager/limits.rs`: a peer's
   `conflict` neither backs the domain off nor counts as a peer failure;
+- `crates/waddle-server/tests/xep0045_s2s_outbound_muc.rs`: joining,
+  presence, groupchat, subject and private messages, nickname changes,
+  leaving, a refused join, the bound on rooms, a XEP-0313 query to a
+  joined room, removal with status 333 when the stream fails, leaving
+  when a resource ends, and D7 still refusing account traffic and
+  traffic from rooms never joined;
+- `crates/waddle-server/tests/xep0410_s2s_self_ping.rs`: self-ping to a
+  remote room, joined, dropped by the room, never joined, and reflected;
 - `crates/waddle-xmpp/tests/xep0178_s2s_negotiation.rs`,
   `s2s_stream_addresses.rs`, `s2s_pre_authentication.rs` and
   `s2s_codec.rs`: stanzas on established streams, U-label addresses, the
@@ -139,7 +151,7 @@ extension or call code. What a stanza reaches is decided by
 | Server domain | `disco#info` and `disco#items` answered (below), ping answered with an empty result; anything else `service-unavailable` | Dropped: this server sends no request of its own to a remote entity | `service-unavailable` | Ignored |
 | Server domain with a resource | `service-unavailable` | Dropped | `service-unavailable` | Ignored |
 | Local account, bare JID | `service-unavailable` (D7) | Dropped | `service-unavailable` (D7) | Ignored (D7) |
-| Local account, full JID | `service-unavailable` (D7) | Delivered to that resource only if it completes a request that resource sent (D7's first exception) | `service-unavailable` (D7) | Ignored (D7) |
+| Local account, full JID | `service-unavailable` (D7) | Delivered to that resource only if it completes a request that resource sent (D7's first exception) | From a remote room the resource has joined: delivered to that resource (D7's second exception, below). Otherwise `service-unavailable` (D7) | From a remote room the resource joined, is joining or has just left: delivered to that resource (D7's second exception). Otherwise ignored (D7) |
 | MUC domain: service, rooms, occupants | `service-unavailable` until the inbound MUC slice (W6a) reviews its handlers for remote principals | Dropped | `service-unavailable` | Ignored |
 | Spaces PubSub domain | `service-unavailable` until the Spaces slice (W7a) reviews its handlers | Dropped | `service-unavailable` | Ignored |
 | HTTP upload, push, community, extensions, call mixer | `service-unavailable` (D10: not enabled) | Dropped | `service-unavailable` | Ignored |
@@ -163,6 +175,10 @@ these effects:
   that does not fit, or that would open a pair's queue beyond the reply
   share, is dropped;
 - one `DELETE` on the correlation table;
+- a change to the occupancy of a remote room the local resource holds
+  (below), and the delivery of that room's presence and messages to that
+  resource, or of the unavailable presence this server generates when the
+  stream to the room's domain fails;
 - the delivery of a correlated response, or of the error that replaces a
   response this server refused, to the one local resource that sent the
   request. Delivery uses the WebSocket delivery path: on another replica
@@ -183,19 +199,21 @@ set; W6a and W7a enable them when their handlers accept a remote principal.
 
 Inbound, as the inventory shows: traffic to a local account is refused as
 if the account did not exist (RFC 6121 §8.5.1), except a response that
-completes a request the account's resource sent. The second exception,
-traffic from a remote room to a local occupant, arrives with outbound MUC
-(W6b), which has nothing to correlate with until local accounts can join
-remote rooms.
+completes a request the account's resource sent, and traffic from a remote
+room to the full JID of a local resource that joined it
+([Outbound MUC](#outbound-muc-w6b)).
 
 Outbound, a local account's messages and presence for a remote JID are
-refused by the router with `service-unavailable` (D7); the error comes back
-on the sender's own connection. Presence, subscription requests and
-responses included, is intercepted before any roster, subscription,
+refused by the router with `service-unavailable` (D7), unless they are for
+a remote room the sending resource joins, occupies or leaves; the error
+comes back on the sender's own connection. Presence, subscription requests
+and responses included, is intercepted before any roster, subscription,
 directed-presence or room handling, so no roster state changes. IQ requests
-to remote entities are routed, so discovery, ping and PubSub keep working.
+to remote entities are routed, so discovery, ping, PubSub and room
+requests (self-ping, XEP-0313 queries, room configuration) keep working.
 This outbound refusal is reviewed, not run: account-traffic work (W6c)
-replaces it and rewrites its cases before verification.
+replaces it and rewrites its cases before verification. The room exception
+is run in the outbound MUC suites.
 
 ## Egress
 
@@ -234,7 +252,9 @@ the request is refused with `internal-server-error`.
    requests for the replica, the remote domain and the resource
    (`resource-constraint`); an IQ response is queued and sent only if it
    completes a pending remote request; messages and presence are refused
-   (D7);
+   (D7) unless a bound resource of a local account sends them to a remote
+   room it joins, occupies or leaves, within the bounds on joined rooms
+   (`resource-constraint`);
 7. the stanza, with server-minted credentials removed, goes on the bounded
    queue of its directional domain pair; a full queue, or too many pairs,
    is `resource-constraint`.
@@ -409,6 +429,12 @@ unknown, and no global or exactly-once delivery.
   (RFC 6120 §8.3.1). A client request to an address on the sender's own
   blocking list never reaches `route` and is answered with
   `not-acceptable`.
+- A message or presence for a remote room that the router accepted and
+  could not write, because no stream could be established or the stream
+  provably did not take it, is answered through the local delivery path
+  with `remote-server-not-found` or `remote-server-timeout`, and a join
+  that never left is forgotten. One whose write outcome is unknown is not
+  answered.
 - A request the router accepted and could not write is answered by the
   router through the local delivery path: `remote-server-not-found`,
   `remote-server-timeout`, `bad-request` for an id already pending on
@@ -432,15 +458,163 @@ unknown, and no global or exactly-once delivery.
 **Reconciliation with the ingress effect acceptance contract.** That
 contract freezes a direct message's targets and child identities before it
 is acknowledged, and lets an unknown started send retry after its deadline.
-It is unchanged: a message for an unserved domain is refused before the
-ingress authority sees it, so no frozen target is ever remote in this
-slice. When outbound MUC (W6b) or account traffic (W6c) lets an
+It is unchanged: a message for an unserved domain is classified before the
+ingress authority sees it, so no frozen target is ever remote. Outbound MUC
+keeps it so: a groupchat or private message to a remote room goes to the
+router from the same classification and never enters the ingress
+authority, so it is not archived, carbon-copied or projected into the inbox
+by the sender's server (the room archives groupchat; XEP-0313 §5), and
+`Accepted` stays transport custody only. When account traffic (W6c) lets an
 ingress-accepted message go to a remote JID, that slice must record S2S
 egress as transport custody, never delivery, and may retry only a stanza
 the router reports as never taken; a retry after an unknown outcome would
 contradict the retry identity above.
 
+## Outbound MUC (W6b)
+
+Local resources join rooms on remote domains (XEP-0045, pinned at
+4132c531487fe9450ae90b905b8df950d0d478b2), as D7's room exception allows in
+both directions. The implementation is `crates/waddle-server/src/s2s/route/rooms.rs`
+and its use in `route/router.rs`; the stream-end notification in
+`s2s/conn/sink.rs` and `s2s/conn/session.rs`; and the leave when a resource
+ends in `server/routes/websocket/cleanup.rs`.
+
+**What makes a remote JID a room.** Nothing outside the client says what
+a remote JID is, so a room is known only from a join: presence without a
+type, from a bound resource of a local account, to an occupant JID (a
+bare JID with a localpart, and a nickname as resource), carrying the
+`<x xmlns='http://jabber.org/protocol/muc'/>` element (XEP-0045 §7.2.1).
+That join is routed, and from then on the router holds an occupancy for
+that full JID and that room's bare JID: joining, joined, or leaving.
+
+**Outbound.** For a room the resource joins or occupies, the router lets
+these leave: presence without a type to an occupant JID of the room (a
+status update or a nickname change, §7.6 and §7.7), unavailable presence
+(§7.14), error presence, and messages of every type to the room or to one of its
+occupants (groupchat, private messages, mediated invitations and voice
+requests to the room). A join is decided, queued and recorded under one
+lock, so it is recorded exactly when it is queued. Everything else is
+account traffic and refused with `service-unavailable` (D7): messages and
+presence to any other remote JID, presence to a room's bare JID,
+subscriptions and probes to anything, room traffic from a resource of the
+account that did not join, and room traffic after the resource left. A
+join beyond the bounds is refused with `resource-constraint`.
+
+**Inbound.** A message or presence from a remote JID whose bare JID is a
+room the addressed full JID occupies, is joining or has just left is
+delivered to that full JID only, through the local delivery path with the
+recipient's XEP-0191 blocking list applied; it reaches no other resource
+or account, and a bare-JID address is never room traffic. Before the room
+has sent the occupant's own presence, only presence carrying the
+`muc#user` element (or an error) is admitted, so a client that "joins" an
+account's JID opens no conversation with it: an account sends no room
+presence. After it, presence with `muc#user` or an error, and messages of
+every type, including the subject, history, private messages, MUC user
+statuses and XEP-0313 results, are admitted. The room's own presence moves
+the occupancy on (status 110, or the occupant JID with the current
+nickname): available presence completes the join and records the nickname
+the room assigned (§7.2.2) and the affiliation it stated; unavailable
+presence with status 303 records the new nickname (§7.6); any other own
+unavailable presence (left, kicked, banned, removed, destroyed) ends the
+occupancy; an error presence ends a join still in progress (§7.2.5 to
+§7.2.11). IQ requests from a room or its occupants are refused as W5a
+refuses every IQ request to a local account, and IQ responses are
+correlated as before. Traffic from a room the resource never joined, or
+for a resource that did not join it, takes the reachability table's D7
+refusal.
+
+Delivered room traffic is queued on one ordered, bounded queue per replica
+and delivered one stanza at a time, so an occupant sees a room's presence
+and messages in the order the room sent them; a stanza beyond the bound is
+dropped. The delivery runs the recipient pass a local room's traffic runs:
+a private message is archived, carbon-copied and projected into the inbox
+as one from a local room is; groupchat is none of these.
+
+**Self-ping (XEP-0410).** A self-ping is an IQ request to the occupant's
+own JID, so it is routed and correlated like any request, whether or not
+the router holds an occupancy, and the client receives the room's answer as
+the room sent it: a result while joined, `not-acceptable` once the room no
+longer seats the occupant (the router's own occupancy then stays until the
+client joins again or leaves). A room without the self-ping optimisation
+reflects the ping to the occupant (§3.2); the reflection is an IQ request
+to a local account, which this server refuses with `service-unavailable`,
+and the room relays that answer, which XEP-0410 reads as "joined, the
+client does not implement ping". If the room cannot be reached, the client
+receives `remote-server-not-found` or `remote-server-timeout`, which
+XEP-0410 treats as a timeout.
+
+**XEP-0313 queries.** A query to a room is an IQ request: routed,
+correlated and answered with its `<fin/>`. Its result messages come from
+the room's bare JID and are admitted as room traffic only while the
+resource has joined the room; a query to a room it has not joined receives
+its `<fin/>` but none of the results. The `<fin/>` is an IQ response and
+is delivered outside the ordered room queue, so it can reach the client
+before the last results.
+
+**When the stream fails.** The connection manager now tells its stanza
+sink when an established stream ends, and how:
+
+- *Lost*: a transport or TLS error (`io`, `tls`), a stream error this
+  server sent (`protocol`) or the peer sent other than `conflict`
+  (`peer-error`, which includes the peer's `system-shutdown`), a domain
+  peer admission no longer admits (`admission`), or a certificate or
+  dialback failure;
+- *Closed*: the peer closed the stream or the connection
+  (`peer-closed`), a deadline on the established stream, which is the idle
+  timeout (`timeout`), the connection's maximum age (`expired`),
+  eviction, replacement by a newer stream for the pair (`conflict`), or
+  this server shutting down.
+
+When a stream between a local domain and a remote domain is lost, in
+either direction, every resource of that local domain in a room at that
+remote domain receives its own unavailable presence from the room, with
+statuses 110 and 333 and its affiliation, role `none` (XEP-0045 §11.1,
+without 307), and its occupancy is forgotten. Stanzas either way may have
+been lost and the room removes an occupant it cannot reach, so the client
+is told and joins again. A closed stream changes nothing: membership of a
+remote room does not depend on a stream, the next stanza opens a new one,
+and peers close idle streams, as this server does. A stream that cannot be
+established for a stanza is not a loss either: the stanza's sender is
+answered with the error, and a join that never left is forgotten.
+
+**When the resource ends.** When a resource ends for good (its connection
+closed without stream management, or its detached session expired or was
+invalidated), it leaves every room it joins or occupies: the router sends
+unavailable presence from the full JID to its occupant JID in each, and
+forgets the occupancies. The WebSocket cleanup does this where it
+broadcasts the ended resource's unavailable presence, and only when no
+replacement holds the same full JID: a remote room knows its occupant only
+by that full JID, so a replacement inherits the occupancies, and a leave
+sent for the old session could reach the room after the replacement's own
+join and remove it. A detached session that may still resume keeps its
+rooms. A client's own broadcast unavailable presence does not leave rooms,
+as it does not leave local rooms either.
+
+**Bounds.**
+
+| Bound | Default |
+| --- | --- |
+| Remote rooms one local full JID joins or occupies | 128 |
+| Remote rooms every local full JID on one replica joins or occupies | 16,384 |
+| How long a room left keeps admitting the room's answer and earlier traffic | 30 s |
+| Stanzas from remote rooms waiting for delivery on one replica | 1,024 |
+
+**Durability: in memory, per replica, rebuilt by the clients.** The
+occupancies live only in the memory of the replica whose router routed
+the join. A restart forgets them and the clients rebuild them: a client
+that reconnects joins its rooms again (XEP-0045 §7.2, and XEP-0402 for
+bookmarked rooms), and one that keeps its connection checks its rooms with
+XEP-0410. A durable table was not chosen because an occupancy is only as
+good as the connection that holds it: after a restart no resource is bound
+to receive a room's traffic, and an occupancy restored without its client
+would admit traffic nobody reads. What this costs is recorded under
+restrictions.
+
 ## Behaviour with S2S off
+
+Outbound MUC changes nothing while S2S is disabled: the remote route still
+refuses a remote room's join with `remote-server-not-found`, and the leave
+when a resource ends is a registry lookup and a call that does nothing.
 
 These change behaviour while S2S is disabled, and belong to the rollout
 runbook (G24):
@@ -481,6 +655,30 @@ runbook (G24):
   UPDATE, DELETE` on the second. Both stay empty while S2S is off.
 
 ## Restrictions and risks
+
+- **Outbound MUC is per replica.** A remote room sends its traffic on its
+  own stream to this deployment, which reaches whichever replica the
+  room's server dials, and only the replica that routed the join admits
+  it. With several replicas, a room's traffic reaching another replica is
+  refused as account traffic, and the room may then remove the occupant
+  for the error. A detached session that resumes on another replica, or a
+  session whose expiry another replica settles, has the same problem: the
+  rooms are neither admitted there nor left from there. Until occupancies
+  are shared between replicas (a table like the correlation table, or the
+  cluster relay), outbound MUC works only where one replica receives the
+  room domain's streams, the same remedy as for a pair's egress.
+- **Room traffic is not checked against the sender's blocking list.**
+  Messages and presence for a remote room leave without the XEP-0191
+  check client IQ requests get; inbound room traffic does pass the
+  recipient's list.
+- **An address outside the identity profile in room presence.** A room
+  that names an occupant's real JID (`<item jid='…'/>`) in a spelling the
+  identity profile refuses has its presence answered with `jid-malformed`
+  (gate G10), and a room may remove an occupant whose server returns
+  errors. This is visible only with third-party peers.
+- **A room's self-ping reflection is refused.** Until IQ requests from
+  remote entities reach local clients (W6c), a reflected self-ping is
+  answered `service-unavailable` by this server, not by the client.
 
 - **Several replicas, one stream per pair.** Each replica dials its own
   outbound stream to a peer, and the connection manager keeps one stream
@@ -532,9 +730,21 @@ runbook (G24):
 - Inbound MUC (W6a) and Spaces (W7a): enable their handlers for remote
   principals in `reach`, the inventory and the reachability suite, and list
   them in server-domain `disco#items`.
-- Outbound MUC (W6b): messages and presence for a remote room the account
-  occupies or is joining, exempt from the outbound D7 refusal; traffic from
-  a joined remote room to the occupant's full JID.
+- Outbound MUC, shared occupancy: share remote-room occupancies between
+  replicas, so room traffic and leaves work whichever replica a room's
+  stream or a resumed session reaches.
+- Outbound MUC, blocking list: apply the sender's XEP-0191 list to
+  messages and presence for remote rooms, with W6c's check for account
+  traffic.
+- Outbound MUC, broadcast unavailable: decide, with local rooms, whether a
+  client's broadcast unavailable presence leaves rooms (RFC 6121 §4.6.3);
+  today neither local nor remote rooms are left by it.
+- Outbound MUC, carbons of remote room private messages: confirm the
+  recipient pass's XEP-0280 §6 handling of private messages from remote
+  rooms against Prosody and ejabberd clients (W10).
+- Outbound MUC, IQ requests from rooms: with W6c's inbound request
+  correlation, deliver room-reflected self-pings and occupant IQs to the
+  occupant instead of refusing them.
 - Account traffic (W6c): replace both D7 refusals for reviewed handlers,
   register inbound requests for correlation, and define the ingress receipt
   for a remote target. A message carrying a DM pin marker for a remote peer
