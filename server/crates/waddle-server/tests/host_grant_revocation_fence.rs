@@ -279,12 +279,14 @@ async fn a_renewal_answered_after_the_lease_ran_out_does_not_revive_it() {
     assert!(before.allows(&peer, HostGrantAction::Read));
 
     // The replica stops renewing for most of its lease. Its next renewal is
-    // sent while the lease still holds, and PostgreSQL commits it, but its
-    // answer is held until the lease has run out here.
+    // sent while the lease still holds (the lease has at least 3.75 s left
+    // when renewing stops, and renewing resumes within 3.05 s), and
+    // PostgreSQL commits it, but its answer is held until the lease has run
+    // out here.
     fence.suspend_for_test(true);
     tokio::time::sleep(FENCE_TICK * 2).await;
     let release = fence.hold_next_renewal_for_test();
-    tokio::time::sleep(Duration::from_millis(2800)).await;
+    tokio::time::sleep(Duration::from_millis(2300)).await;
     assert!(
         before.fence.is_current(),
         "the lease ran out before the renewal was sent"
