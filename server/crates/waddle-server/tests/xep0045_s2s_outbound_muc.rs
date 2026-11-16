@@ -1043,7 +1043,7 @@ async fn joins_beyond_the_bound_per_resource_are_refused_with_resource_constrain
         Some("resource-constraint")
     );
     // Another resource has its own share.
-    join(&a, ALICE_LAPTOP, "second@muc.home-b.test/alice2").await;
+    join(&a, ALICE_LAPTOP, "third@muc.home-b.test/alice2").await;
     assert_eq!(a.router.remote_rooms().await, 2);
 }
 

@@ -239,8 +239,8 @@ impl FakeMuc {
 
     /// Answer further joins with a challenge message from the room's bare
     /// JID (id [`CHALLENGE`]) and seat the occupant only once
-    /// [`FakeMuc::pass_challenge`] is called, as a room with a CAPTCHA
-    /// does (XEP-0045 §7.2, XEP-0158).
+    /// [`FakeMuc::pass_challenge`] is called, as a room that asks a new
+    /// occupant to solve a CAPTCHA first does.
     pub fn challenge_joins(&self) {
         self.challenge_joins.store(true, Ordering::SeqCst);
     }
@@ -732,15 +732,18 @@ fn spec_a(address_b: SocketAddr) -> Spec {
 }
 
 /// Start `home-b.test` serving `muc.home-b.test` with a [`FakeMuc`] on
-/// `listener`, dialling `home-a.test` at `address_a`.
+/// `listener`, dialling `home-a.test` at `address_a`, with `adjust`
+/// applied to its specification.
 async fn start_muc(
     pki: &Pki,
     listener: TcpListener,
     address_a: SocketAddr,
+    adjust: impl FnOnce(&mut Spec),
 ) -> (Deployment, Arc<FakeMuc>) {
     let mut spec_b = Spec::new(HOME_B, HOME_A);
     spec_b.local = vec![HOME_B, MUC_B];
     spec_b.endpoints = vec![(HOME_A, address_a)];
+    adjust(&mut spec_b);
     let muc = FakeMuc::new();
     let b = routing::transport::start_with(
         pki,
@@ -769,7 +772,7 @@ pub async fn outbound_muc(pki: &Pki, limits: RouterLimits) -> (Routed, Deploymen
         limits,
     )
     .await;
-    let (b, muc) = start_muc(pki, listener_b, address_a).await;
+    let (b, muc) = start_muc(pki, listener_b, address_a, |_| {}).await;
     (a, b, muc)
 }
 
@@ -777,7 +780,10 @@ pub async fn outbound_muc(pki: &Pki, limits: RouterLimits) -> (Routed, Deploymen
 /// table and remote room occupancies), and `home-b.test` serving
 /// `muc.home-b.test` with a [`FakeMuc`]. Both replicas dial
 /// `home-b.test`; `home-b.test` dials only the second, so every answer
-/// from the room arrives there.
+/// from the room arrives there. `home-b.test` keeps one stream per
+/// directional domain pair, so it lets a replica's new stream replace the
+/// other's at once instead of refusing it with `conflict` for the
+/// replacement interval.
 pub async fn outbound_muc_replicas(
     pki: &Pki,
     limits: RouterLimits,
@@ -789,7 +795,10 @@ pub async fn outbound_muc_replicas(
     let spec = spec_a(address_b);
     let a1 = start_routed(pki, &spec, listener_a1, database.clone(), limits).await;
     let a2 = start_routed(pki, &spec, listener_a2, database, limits).await;
-    let (b, muc) = start_muc(pki, listener_b, address_a2).await;
+    let (b, muc) = start_muc(pki, listener_b, address_a2, |spec_b| {
+        spec_b.limits = vec!["replacement_interval_ms = 1".to_owned()];
+    })
+    .await;
     (a1, a2, b, muc)
 }
 
