@@ -10,7 +10,7 @@ S2S routing and the host-grant restore incarnation through
 through `9b2e2d57ebd13329ddc045b2d1343f03b9619089`, and the effect boundary for
 remote principals through `c9111c714cfb821e571cc7f3b63d4a9ef37d11ba`, merged
 with them in `763988ff0b1c466d659033ca398623cf9999fc11` and reviewed through
-`a63296597d505f0a542432654ba4e3487c799dc0` (see the last refresh below); the original
+`8f6088ba601528090ec1bc82294b1a12422f5519` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -712,6 +712,13 @@ since the fourteenth refresh:
   call and a documentation reference of `HostGrantAuthority` no longer match
   the `set_affiliation` token. No production grant writer, grant store or
   acceptance authority was added.
+
+The selected evidence was refreshed a sixteenth time, through
+`8f6088ba601528090ec1bc82294b1a12422f5519`: no reviewed file and no anchor changed. In
+`permissions/host_grant/authority.rs`, outside the reviewed set, a
+reconciliation pass looks for increases to drop only while the scope's plan
+waits for its projection; that file's three records (`WriteHostGrantProjection`
+twice and `set_affiliation`) moved lines. The raw scan holds 1594 records, unchanged in content.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.

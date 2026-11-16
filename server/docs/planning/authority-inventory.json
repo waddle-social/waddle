@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "a63296597d505f0a542432654ba4e3487c799dc0",
+  "baseline_commit": "8f6088ba601528090ec1bc82294b1a12422f5519",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -940,7 +940,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "6cecee713ac998721a97d322426536a17ff0a4b44a50a6e532afcfe188d41d72",
+    "sha256": "15f62da83e0b9904a2707a9ba572266ad1a4720c28fb0fd6d83bbd7d41c62b76",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,
