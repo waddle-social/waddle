@@ -4520,19 +4520,42 @@ async fn live_spicedb_an_unreadable_epoch_beside_a_readable_witness_is_replaced(
     live.close().await;
 }
 
-/// Commit a row into a table of the case's own database, so the flushed
-/// position moves forward: a commit that wrote no data may be flushed
-/// later.
+/// Commit a row into a table of the case's own database, and wait until the
+/// flushed position has moved past where it stood: with asynchronous
+/// commit the WAL writer flushes a commit some time after it returns.
 async fn advance_wal(fixture: &GrantFixture) {
+    let before = fixture
+        .store
+        .postgres_position()
+        .await
+        .expect("position")
+        .lsn;
     let pool = owner_pool(fixture).await;
-    for statement in [
-        "CREATE TABLE IF NOT EXISTS wal_advance (written_at timestamptz NOT NULL)",
-        "INSERT INTO wal_advance VALUES (pg_catalog.now())",
-    ] {
-        sqlx::query(statement)
-            .execute(&pool)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        for statement in [
+            "CREATE TABLE IF NOT EXISTS wal_advance (written_at timestamptz NOT NULL)",
+            "INSERT INTO wal_advance VALUES (pg_catalog.now())",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        let now = fixture
+            .store
+            .postgres_position()
             .await
-            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+            .expect("position")
+            .lsn;
+        if now > before {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the flushed position did not move"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     pool.close().await;
 }
