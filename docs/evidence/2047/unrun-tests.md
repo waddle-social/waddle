@@ -17,7 +17,8 @@ precedence and schema version, W5r restore incarnation, W6b outbound S2S
 rooms (merged at `9766d9c81`), W5d revocation fence (merged at
 `46187e69f`) and W5e remote principals at the effect boundary (merged at
 `763988ff0`); the rows those merges add or change describe the merge and
-the commits after it. A target lists every slice that touched it,
+the commits after it. W6a is inbound S2S rooms: its rows describe that
+slice's branch, whose targets were compiled and not run. A target lists every slice that touched it,
 the first being the slice that created it; "integration" is a commit made on
 the integration branch itself.
 
@@ -105,7 +106,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run5 final and run6 logs |
 | `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 final and run6 logs |
 | `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run5 final and run6 logs |
-| `s2s_reachability` (6) | W5a, W6b | none | Run 6/6, run5 final and run6 logs |
+| `s2s_reachability` (8) | W5a, W6b, W6a | loopback | Not run with W6a's changes: two cases added (the MUC service with and without a room host) and every call of `reach` changed. 6/6 before them, run5 final and run6 logs |
 | `s2s_d7_refusal` (4) | W5a | none | Run 4/4, run5 final and run6 logs |
 | `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run5 final and run6 logs |
 | `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 final and run6 logs |
@@ -114,6 +115,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 final, stress and run6 logs |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
+| `xep0045_s2s_inbound_muc` (18) | W6a | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and two cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
+| `xep0313_s2s_inbound_mam` (4) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
+| `xep0030_s2s_inbound_muc_discovery` (5) | W6a | loopback; in-memory SQLite | Not run |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -142,11 +146,11 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `host_grant_restore` (46; 28 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run6 host-grant final log |
 | `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18 without `clustering`, run6 host-grant final log |
 | `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run6 host-grant final log |
-| `xep0045_host_grant_revocation` (12) | W5d, integration | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 12/12, run6 host-grant final log (11/12 in the first run6 host-grant final log; see above) |
+| `xep0045_host_grant_revocation` (14) | W5d, integration, W6a | PostgreSQL 17; loopback; one case runs a replica as a second process | Not run with W6a's changes: the sweep's case for a remote occupant is replaced by three (a domain that is not admitted, effective standing with a pending increase, a closed scope). 12/12 before them, run6 host-grant final log |
 | `account_jid_retirement` (10) | W5d | PostgreSQL 17 | Run 10/10, run6 host-grant final log |
 | `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run6 host-grant final log |
 | `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run6 host-grant final log |
-| `host_grant_remote_principals` (14; 1 `#[ignore]`) | W5e, integration | PostgreSQL 17; SpiceDB for the ignored case | Run 14/14, run6 host-grant final log |
+| `host_grant_remote_principals` (16; 3 `#[ignore]`) | W5e, integration, W6a | PostgreSQL 17; SpiceDB for the ignored cases | Not run with W6a's changes: two `live_spicedb_` cases added (an increase that activates while its initiator's home is trusted, and one dropped because the home is no longer admitted). 14/14 before them, run6 host-grant final log |
 | `spicedb_architecture_guard` (edited, 4) | W5o | none (reads source; names SpiceDB variables only in messages) | Not run |
 | `ingress_relation_guard_lab` (edited, 8) | W5b | PostgreSQL (17 for the definer API pilot); skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `migration_owner_lab` (edited, 5) | W5b | PostgreSQL; skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
@@ -176,8 +180,15 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 `tests/host_grant_revocation_support/mod.rs` (W5d),
 `tests/xep0060_space_fanout_fence/storage.rs` (W5d),
 `tests/ws_loopback_support/mod.rs` (W5c), `tests/s2s_routing_support/mod.rs`
-(W5a, W6b) and `tests/s2s_remote_muc_support/mod.rs` (W6b, integration) are
-compiled into the targets above and add no cases. The submodules of `s2s_verifier`,
+(W5a, W6b, W6a), `tests/s2s_remote_muc_support/mod.rs` (W6b, integration)
+and `tests/s2s_inbound_muc_support/mod.rs` with its `managed.rs` (W6a) are
+compiled into the targets above and add no cases. W6a changed
+`s2s_routing_support` and `host_grant_revocation_support` (a replica can
+run an S2S snapshot), so the targets that include them were compiled again
+and their recorded runs predate that change: `s2s_routing`,
+`s2s_iq_correlation`, `s2s_d7_refusal`, `xep0045_s2s_outbound_muc`,
+`xep0030_s2s_server_discovery`, `xep0199_s2s_ping`, `xep0410_s2s_self_ping`
+and `xep0410_host_grant_self_ping`. The submodules of `s2s_verifier`,
 `s2s_connection_manager`, `xep0220_s2s_dialback`, `xep0368_s2s_discovery` and
 `host_grant_fence_cases/sinks.rs` are counted under their parent targets.
 
@@ -224,9 +235,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 81 (63 integration targets, 16 library test modules, 2 chat test files) |
-| Run, with a cited log | 40 targets, 838 cases, all passed in their latest cited run |
-| Not run | 41 targets (16 of them library modules) |
+| Test targets listed | 84 (66 integration targets, 16 library test modules, 2 chat test files) |
+| Run, with a cited log | 37 targets, 806 cases, all passed in their latest cited run |
+| Not run | 47 targets (16 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
@@ -236,6 +247,14 @@ of those 21 on the memory datastore.
 A target is counted as run only when the whole binary's cases appear in a
 log. Skipped prerequisites are not recorded as passed: nothing here was run
 against Prosody, ejabberd or a second deployment.
+
+W6a adds three targets (27 cases) and changes the cases of three that had
+run (`s2s_reachability`, `xep0045_host_grant_revocation` and
+`host_grant_remote_principals`, 32 cases in the logs), which are counted as
+not run until they run again: every case of W6a is compiled and none has
+been executed. Its PostgreSQL cases are the only evidence of the seat
+table, and of a remote principal's message through the room's acceptance,
+on that engine.
 
 ## Deferred hardening and follow-ups
 
@@ -365,9 +384,21 @@ implemented unless the text says so.
 
 ### Routing design (`s2s-routing-2047.md`)
 
-- Inbound MUC (W6a) and Spaces (W7a): enable their handlers for remote
-  principals in `reach`, the inventory and the reachability suite, and list
-  them in server-domain `disco#items`.
+- Spaces (W7a): enable its handlers for remote principals in `reach`, the
+  inventory and the reachability suite, and list it in server-domain
+  `disco#items`.
+- Inbound MUC (W6a), written and not run: a remote principal's request is
+  served only on the replica its stream reaches, and a room held elsewhere
+  refuses it; `muc#admin` and `muc#owner` requests from remote principals,
+  private messages, invitations and every message payload beyond the text
+  are not enabled; D8 issuance covers the `muc#admin` writer of unmanaged
+  rooms and not the admin commands or the Spaces relations; a remote
+  occupant's copy is recorded delivered when the router's queue takes it,
+  and its interplay with the ingress recovery of unfinished deliveries has
+  not been executed; an unmanaged room's occupants at a domain the snapshot
+  no longer admits stay until their stream is lost or the replica
+  restarts; the per-domain bounds have no per-account share; MAM is
+  answered and not advertised to remote askers.
 - Outbound MUC (W6b), merged: a stream that waited for the router and ends
   for a deadline, eviction or replacement before reading again is reported
   as lost even when the peer wrote nothing more; end of file between
@@ -426,14 +457,15 @@ implemented unless the text says so.
   a scope's Space is served; W7a depends on it). Until then its node is
   described and listed to nobody.
 - Remote principals at the effect boundary (W5e), decided in the design's
-  "Remote principals at the effect boundary (G17)". Open there: deciding a
-  remote occupant's deliveries, and its re-seating after a claim move, from
-  the stream evidence its occupancy was established on (W6a; until then a
-  trusted home's admin is not counted as a reader, claim-move re-seating
-  leaves out a remote occupant its grants do not honour without a stream,
-  and the revocation sweep removes a remote occupant only when its grants
-  deny it on every stream); a per-scope `require_pkix`; D8 issuance for
-  the legacy privileged writers of unmanaged rooms and Spaces (W6a, W7a);
+  "Remote principals at the effect boundary (G17)". W6a decides a seated
+  remote occupant's deliveries, its removal by the revocation sweep and its
+  re-seating after a claim move on the stream evidence its seat was
+  admitted under, on the replica that holds the seat. Open there: a
+  principal named on a replica that holds no seat for it is still decided
+  without stream evidence (a trusted home's admin is then not counted as a
+  reader); a per-scope `require_pkix`; D8 issuance for the legacy
+  privileged writers other than `muc#admin` (the admin commands, and the
+  Spaces relations with W7a);
   an operation kind of its own for a dropped increase, which needs a
   migration of the kind constraint; and the rollout window in which a
   replica on an earlier snapshot can still activate an increase another
