@@ -187,10 +187,12 @@ pub(crate) struct AccountLock {
 }
 
 fn account_locks() -> std::sync::MutexGuard<'static, HashMap<BareJid, Arc<Mutex<()>>>> {
-    match ACCOUNT_LOCKS.lock() {
-        Ok(locks) => locks,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+    // Nothing that holds the table can fail: it only looks up, inserts and
+    // removes entries. A poisoned table could still hand two holders the
+    // same account's roster at once, so the process stops instead.
+    ACCOUNT_LOCKS
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 /// Take `account`'s lock, waiting for the holder.
