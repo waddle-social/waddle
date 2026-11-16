@@ -35,7 +35,18 @@ impl Managed {
     /// `None` without PostgreSQL.
     pub async fn start(label: &str, adjust: impl FnOnce(&mut Spec)) -> Option<Self> {
         let wiring = Wiring::new(adjust).await;
-        let deployment = Deployment::start_running(label, 1, &wiring.config).await?;
+        let mut deployment = Deployment::start_running(label, 1, &wiring.config).await?;
+        // Grants are written under the trusted-home list of the snapshot
+        // the replica runs, as a replica's own writer issues them; the
+        // grant fixture's default policy lists no trusted home.
+        let homes: Vec<&str> = wiring
+            .config
+            .admission()
+            .trusted_homes()
+            .iter()
+            .map(|home| home.as_str())
+            .collect();
+        deployment.grants.policy = crate::host_grant_support::issuance_policy(&homes);
         deployment
             .grants
             .set(OWNER, GUEST, RoomAffiliation::Member)
