@@ -92,7 +92,7 @@ async fn a_self_ping_to_a_room_never_joined_is_routed_and_answered() {
         Some("not-acceptable")
     );
     // A self-ping is a request, not a join: it neither opens an occupancy
-    // nor asks whether the JID is a room.
+    // nor asks the room's domain whether it is a multi-user chat service.
     assert_eq!(a.router.remote_rooms().await, 0);
     assert!(muc.disco_requests().is_empty());
 }

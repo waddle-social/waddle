@@ -7,10 +7,11 @@
 //! for remote principals refuse discovery.
 //!
 //! The server domain also asks: before a local resource's join to a remote
-//! JID leaves, the server sends that JID's bare JID a `disco#info` request
-//! of its own (XEP-0045 §6.4), and only a response from that JID with that
-//! id completes it; any other response to the server domain is dropped
-//! unanswered.
+//! room leaves, the server sends the room's domain JID a `disco#info`
+//! request of its own to learn whether it is a multi-user chat service
+//! (XEP-0045 §6.2), and only a response from that domain with that id
+//! completes it; any other response to the server domain, the room's own
+//! included, is dropped unanswered.
 //!
 //! Two in-process deployments on loopback with the connection-manager
 //! fixture's test CA. No PostgreSQL, SpiceDB or second process is involved.
@@ -37,7 +38,8 @@ use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 const ALICE: &str = "alice@home-a.test/phone";
 const BOB: &str = "bob@home-b.test/phone";
-/// A JID at the peer that a local resource joins as a room.
+/// A JID at the peer that a local resource joins as a room; the peer's
+/// domain stands for its multi-user chat service.
 const ROOM: &str = "room@home-b.test";
 const ROOM_ALICE: &str = "room@home-b.test/alice";
 
@@ -49,7 +51,8 @@ fn query(namespace: &str, node: Option<&str>) -> Element {
     builder.build()
 }
 
-/// A `disco#info` result naming a room (XEP-0045 §6.4).
+/// A `disco#info` result naming a multi-user chat service (XEP-0045
+/// §6.2).
 fn room_info() -> Element {
     Element::from(DiscoInfoResult {
         node: None,
@@ -192,7 +195,7 @@ async fn discovery_of_a_service_not_yet_reviewed_for_remote_askers_is_refused() 
 }
 
 #[tokio::test]
-async fn a_join_asks_the_bare_jid_for_disco_info_from_the_server_domain() {
+async fn a_join_asks_the_rooms_domain_for_disco_info_from_the_server_domain() {
     let pki = support::Pki::new();
     let (a, b, captured) = routed_and_capturing(&pki, RouterLimits::default(), |_| {}).await;
     let offered = offer_join(&a, "join").await;
@@ -204,10 +207,10 @@ async fn a_join_asks_the_bare_jid_for_disco_info_from_the_server_domain() {
             .find(|stanza| stanza.name() == "iq")
     })
     .await
-    .expect("the server asks the JID");
+    .expect("the server asks the room's domain");
     assert_eq!(asked.attr("type"), Some("get"));
     assert_eq!(asked.attr("from"), Some(HOME_A));
-    assert_eq!(asked.attr("to"), Some(ROOM));
+    assert_eq!(asked.attr("to"), Some(HOME_B));
     let id = asked.attr("id").expect("an id").to_owned();
     assert!(id.starts_with("room-"), "{id}");
     let queries: Vec<&Element> = asked.children().collect();
@@ -217,8 +220,13 @@ async fn a_join_asks_the_bare_jid_for_disco_info_from_the_server_domain() {
     assert_eq!(queries[0].children().count(), 0);
 
     // Responses that do not match the request complete nothing: another
-    // id, or the right id from another JID at the peer.
-    for (from, id) in [(ROOM, "room-forged"), ("other@home-b.test", id.as_str())] {
+    // id from the domain, or the right id from the room itself or another
+    // JID at the peer.
+    for (from, id) in [
+        (HOME_B, "room-forged"),
+        (ROOM, id.as_str()),
+        ("other@home-b.test", id.as_str()),
+    ] {
         let response = Iq::Result {
             from: Some(jid(from)),
             to: Some(jid(HOME_A)),
@@ -236,9 +244,10 @@ async fn a_join_asks_the_bare_jid_for_disco_info_from_the_server_domain() {
         "the join is still held"
     );
 
-    // The JID's own answer naming a room releases the join.
+    // The domain's own answer naming a multi-user chat service releases
+    // the join.
     let response = Iq::Result {
-        from: Some(jid(ROOM)),
+        from: Some(jid(HOME_B)),
         to: Some(jid(HOME_A)),
         id,
         payload: Some(room_info()),
@@ -261,7 +270,7 @@ async fn a_response_to_the_server_domain_that_completes_no_request_is_dropped_un
         HOME_B,
         HOME_A,
         Iq::Result {
-            from: Some(jid(ROOM)),
+            from: Some(jid(HOME_B)),
             to: Some(jid(HOME_A)),
             id: "room-stray".into(),
             payload: Some(room_info()),
@@ -273,7 +282,7 @@ async fn a_response_to_the_server_domain_that_completes_no_request_is_dropped_un
         HOME_B,
         HOME_A,
         Iq::Error {
-            from: Some(jid(ROOM)),
+            from: Some(jid(HOME_B)),
             to: Some(jid(HOME_A)),
             id: "room-stray-error".into(),
             payload: None,
@@ -281,7 +290,7 @@ async fn a_response_to_the_server_domain_that_completes_no_request_is_dropped_un
                 xmpp_parsers::stanza_error::ErrorType::Cancel,
                 xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
                 "en",
-                "No such room.",
+                "Not a multi-user chat service.",
             ),
         },
     )
@@ -310,16 +319,16 @@ async fn a_response_to_the_server_domain_that_completes_no_request_is_dropped_un
     assert!(captured.with_id("room-stray-error").is_empty());
     assert!(a.delivery.delivered().is_empty());
 
-    // Nothing was recorded about the JID: a join still asks it.
+    // Nothing was recorded about the domain: a join still asks it.
     let offered = offer_join(&a, "join").await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
     assert!(
         wait_for(ARRIVES, || captured.stanzas().into_iter().find(
-            |stanza| stanza.name() == "iq" && stanza.attr("to") == Some(ROOM)
+            |stanza| stanza.name() == "iq" && stanza.attr("to") == Some(HOME_B)
         ))
         .await
         .is_some(),
-        "the JID is asked"
+        "the domain is asked"
     );
     tokio::time::sleep(QUIET).await;
     assert!(captured.with_id("join").is_empty(), "the join is held");

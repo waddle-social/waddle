@@ -1,8 +1,12 @@
 //! XEP-0045 across S2S, outbound: a local resource joins, uses and leaves a
 //! room on a remote domain, and the room's traffic reaches it (ADR-0020
-//! D7's room exception). A join is sent only once the room's bare JID has
-//! answered this server's XEP-0030 `disco#info` as a room (XEP-0045
-//! §6.4), so "joining" an account opens nothing. Traffic that is not for
+//! D7's room exception). A join is sent only once the room's domain has
+//! answered this server's XEP-0030 `disco#info` as a multi-user chat
+//! service (XEP-0045 §6.2), so "joining" an account opens nothing, while a
+//! join to a room that does not exist yet creates it (§10.1). The answer is
+//! kept per service domain, so one question covers every room there. A
+//! join beyond the occupancy bounds is refused before anything is asked.
+//! Traffic that is not for
 //! or from a room the resource joined stays refused by D7 in both
 //! directions; messages leave only once the room seated the occupant; a
 //! join the room never answers ends with `remote-server-timeout`; a failed
@@ -30,7 +34,7 @@ use support::{
     delivered_messages, delivered_presence, error_condition, full, jid, join, join_presence,
     join_through, message, offer, outbound_muc, outbound_muc_replicas, presence, statuses,
     wait_for, wait_for_rooms, ALICE_LAPTOP, ALICE_PHONE, ARRIVES, BOB, BOB_PHONE, BUSY, CHALLENGE,
-    HOME_A, NOT_A_ROOM, OVERLOADED, QUIET, ROOM, STREAM_LOSS,
+    HOME_A, HOME_B, MUC_B, QUIET, ROOM, STREAM_LOSS,
 };
 use waddle_server::destination::{IqOffer, RemoteRoute, StanzaOffer, UnroutableReason};
 use waddle_server::s2s::route::RouterLimits;
@@ -42,6 +46,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::MessageType;
 use xmpp_parsers::muc::user::{Affiliation, Item, MucUser, Role, Status};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 const ROOM_ALICE: &str = "room@muc.home-b.test/alice";
 const ROOM_HOST: &str = "room@muc.home-b.test/host";
@@ -152,12 +157,13 @@ async fn a_local_resource_joins_a_remote_room_and_receives_its_presence() {
         .any(|child| child.is("x", "http://jabber.org/protocol/muc")));
     assert_eq!(muc.nick_of(ROOM, ALICE_PHONE).as_deref(), Some("alice"));
 
-    // XEP-0045 §6.4: before the join, the server asked the room's bare JID
-    // whether it is a room, from its own domain and without a node.
+    // XEP-0045 §6.2: before the join, the server asked the room's service
+    // domain whether it is a multi-user chat service, from its own domain
+    // and without a node.
     let asked = muc.disco_requests();
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(asked[0].attr("from"), Some(HOME_A));
-    assert_eq!(asked[0].attr("to"), Some(ROOM));
+    assert_eq!(asked[0].attr("to"), Some(MUC_B));
     assert!(asked[0]
         .attr("id")
         .is_some_and(|id| id.starts_with("room-")));
@@ -416,8 +422,8 @@ async fn joining_again_keeps_a_joined_occupancy_and_its_traffic() {
     );
     assert!(muc.received_with_id("message", "meanwhile").is_empty());
     assert_eq!(a.router.remote_rooms().await, 1);
-    // The room is known: joining it again does not ask again.
-    assert_eq!(muc.disco_requests_to(ROOM).len(), 1);
+    // The service is known: joining again does not ask again.
+    assert_eq!(muc.disco_requests().len(), 1);
 }
 
 #[tokio::test]
@@ -579,7 +585,7 @@ async fn account_traffic_to_and_from_remote_jids_stays_refused() {
     );
     assert!(delivered_messages(&a, ALICE_PHONE, "d8").is_empty());
     assert!(muc.received_with_id("message", "d1").is_empty());
-    // None of it asked anything of the JIDs it was for.
+    // None of it asked anything of the JIDs it was for or their domains.
     assert_eq!(muc.disco_requests().len(), 1);
 }
 
@@ -587,95 +593,142 @@ async fn account_traffic_to_and_from_remote_jids_stays_refused() {
 async fn a_join_to_an_account_is_refused_with_item_not_found_and_never_sent() {
     let pki = support::Pki::new();
     let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
-    // A "join" of an account's full JID is held while its bare JID is
-    // asked whether it is a room.
+    // A "join" of an account's full JID is held while the account's domain
+    // is asked whether it is a multi-user chat service.
     let offered = offer(
         &a,
         Stanza::Presence(join_presence(ALICE_PHONE, BOB_PHONE, "fake-join")),
     )
     .await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
-    // The account's server names an account, not a room.
+    // The account's server names itself a server, not a chat service.
     let error = join_error(&a, ALICE_PHONE, BOB_PHONE, "fake-join").await;
     assert_eq!(
         join_error_condition(error).as_deref(),
         Some("item-not-found")
     );
-    let asked = muc.disco_requests_to(BOB);
+    let asked = muc.disco_requests();
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(asked[0].attr("from"), Some(HOME_A));
+    assert_eq!(asked[0].attr("to"), Some(HOME_B));
     assert!(muc.received_with_id("presence", "fake-join").is_empty());
     assert!(muc.joins(ALICE_PHONE, BOB).is_empty());
     assert_eq!(a.router.remote_rooms().await, 0);
 
-    // The verdict is remembered: the next join is refused at once, and the
-    // account is not asked again.
-    let (reason, reply) = refused(
-        offer(
-            &a,
-            Stanza::Presence(join_presence(ALICE_PHONE, BOB_PHONE, "fake-join-2")),
-        )
-        .await,
-    );
-    assert_eq!(reason, UnroutableReason::NotARoom);
-    assert_eq!(reply.attr("type"), Some("error"));
-    assert_eq!(reply.attr("id"), Some("fake-join-2"));
-    assert_eq!(error_condition(&reply).as_deref(), Some("item-not-found"));
+    // The verdict is remembered for the domain: the next join to the same
+    // account, and a join to another account there, are refused at once,
+    // and the domain is not asked again.
+    for (occupant, id) in [
+        (BOB_PHONE, "fake-join-2"),
+        ("carol@home-b.test/laptop", "fake-join-3"),
+    ] {
+        let (reason, reply) = refused(
+            offer(
+                &a,
+                Stanza::Presence(join_presence(ALICE_PHONE, occupant, id)),
+            )
+            .await,
+        );
+        assert_eq!(reason, UnroutableReason::NotARoom);
+        assert_eq!(reply.attr("type"), Some("error"));
+        assert_eq!(reply.attr("id"), Some(id));
+        assert_eq!(error_condition(&reply).as_deref(), Some("item-not-found"));
+    }
     tokio::time::sleep(QUIET).await;
-    assert_eq!(muc.disco_requests_to(BOB).len(), 1);
+    assert_eq!(muc.disco_requests().len(), 1);
     assert!(muc.joins(ALICE_PHONE, BOB).is_empty());
+    assert!(muc.joins(ALICE_PHONE, "carol@home-b.test").is_empty());
+    assert_eq!(a.router.remote_rooms().await, 0);
+
+    // The verdict is the domain's alone: the room service is asked on its
+    // own and a join to one of its rooms is sent.
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+    assert_eq!(muc.disco_requests_to(MUC_B).len(), 1);
+    assert_eq!(muc.disco_requests_to(HOME_B).len(), 1);
 }
 
 #[tokio::test]
-async fn a_jid_whose_disco_is_answered_with_an_error_is_not_a_room() {
+async fn a_service_whose_disco_is_answered_with_an_error_is_not_a_service() {
     let pki = support::Pki::new();
     let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
-    let occupant = "notaroom@muc.home-b.test/alice";
+    muc.disco_error(ErrorType::Cancel, DefinedCondition::ServiceUnavailable);
     let offered = offer(
         &a,
-        Stanza::Presence(join_presence(ALICE_PHONE, occupant, "nr-join")),
+        Stanza::Presence(join_presence(ALICE_PHONE, ROOM_ALICE, "nr-join")),
     )
     .await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
-    let error = join_error(&a, ALICE_PHONE, occupant, "nr-join").await;
+    let error = join_error(&a, ALICE_PHONE, ROOM_ALICE, "nr-join").await;
     assert_eq!(
         join_error_condition(error).as_deref(),
         Some("item-not-found")
     );
-    assert!(muc.joins(ALICE_PHONE, NOT_A_ROOM).is_empty());
-    let (reason, _) = refused(
+    assert!(muc.joins(ALICE_PHONE, ROOM).is_empty());
+    assert_eq!(a.router.remote_rooms().await, 0);
+
+    // Remembered for the service: a join to another of its rooms is
+    // refused at once without asking again.
+    let (reason, reply) = refused(
         offer(
             &a,
-            Stanza::Presence(join_presence(ALICE_PHONE, occupant, "nr-join-2")),
+            Stanza::Presence(join_presence(
+                ALICE_PHONE,
+                "other@muc.home-b.test/alice",
+                "nr-join-2",
+            )),
         )
         .await,
     );
     assert_eq!(reason, UnroutableReason::NotARoom);
-    assert_eq!(muc.disco_requests_to(NOT_A_ROOM).len(), 1);
+    assert_eq!(reply.attr("id"), Some("nr-join-2"));
+    assert_eq!(error_condition(&reply).as_deref(), Some("item-not-found"));
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(muc.disco_requests_to(MUC_B).len(), 1);
+    assert_eq!(muc.disco_requests().len(), 1);
+    assert!(muc.joins(ALICE_PHONE, "other@muc.home-b.test").is_empty());
 }
 
 #[tokio::test]
 async fn a_temporary_disco_error_answers_the_join_with_remote_server_timeout_and_is_not_kept() {
     let pki = support::Pki::new();
     let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
-    let occupant = "overloaded@muc.home-b.test/alice";
-    for (attempt, id) in ["ov-1", "ov-2"].into_iter().enumerate() {
+    // RFC 6120 §8.3.2: an error of type `wait`, or a remote-server
+    // condition about the route, says nothing about the service.
+    let errors = [
+        (
+            ErrorType::Wait,
+            DefinedCondition::ResourceConstraint,
+            "ov-1",
+        ),
+        (
+            ErrorType::Cancel,
+            DefinedCondition::RemoteServerNotFound,
+            "ov-2",
+        ),
+        (
+            ErrorType::Cancel,
+            DefinedCondition::RemoteServerTimeout,
+            "ov-3",
+        ),
+    ];
+    for (attempt, (type_, condition, id)) in errors.into_iter().enumerate() {
+        muc.disco_error(type_, condition);
         // Not remembered: each join asks again.
         let offered = offer(
             &a,
-            Stanza::Presence(join_presence(ALICE_PHONE, occupant, id)),
+            Stanza::Presence(join_presence(ALICE_PHONE, ROOM_ALICE, id)),
         )
         .await;
         assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
-        let error = join_error(&a, ALICE_PHONE, occupant, id).await;
+        let error = join_error(&a, ALICE_PHONE, ROOM_ALICE, id).await;
         assert_eq!(
             join_error_condition(error).as_deref(),
             Some("remote-server-timeout")
         );
-        assert_eq!(muc.disco_requests_to(OVERLOADED).len(), attempt + 1);
+        assert_eq!(muc.disco_requests_to(MUC_B).len(), attempt + 1);
     }
-    assert!(muc.joins(ALICE_PHONE, OVERLOADED).is_empty());
-    assert_eq!(a.router.remote_rooms().await, 0);
+    assert!(muc.joins(ALICE_PHONE, ROOM).is_empty());
+    assert!(wait_for_rooms(&a.router, 0).await);
 }
 
 #[tokio::test]
@@ -729,7 +782,8 @@ async fn an_account_cannot_reach_a_resource_while_its_fake_join_waits_or_after_i
         ..swept()
     };
     let (a, b, muc) = outbound_muc(&pki, limits).await;
-    // The account's server never says whether the JID is a room.
+    // The account's server never says whether it is a multi-user chat
+    // service.
     muc.silence_disco();
     let offered = offer(
         &a,
@@ -738,10 +792,10 @@ async fn an_account_cannot_reach_a_resource_while_its_fake_join_waits_or_after_i
     .await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
     assert!(
-        wait_for(ARRIVES, || muc.disco_requests_to(BOB).into_iter().next())
+        wait_for(ARRIVES, || muc.disco_requests_to(HOME_B).into_iter().next())
             .await
             .is_some(),
-        "the account is asked"
+        "the account's domain is asked"
     );
 
     // While the join is held, nothing from the JID is admitted.
@@ -789,7 +843,7 @@ async fn an_account_cannot_reach_a_resource_while_its_fake_join_waits_or_after_i
 }
 
 #[tokio::test]
-async fn leaving_while_the_room_is_verified_sends_nothing_and_forgets_the_join() {
+async fn leaving_while_the_rooms_service_is_verified_sends_nothing_and_forgets_the_join() {
     let pki = support::Pki::new();
     let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
     muc.silence_disco();
@@ -800,10 +854,10 @@ async fn leaving_while_the_room_is_verified_sends_nothing_and_forgets_the_join()
     .await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
     assert!(
-        wait_for(ARRIVES, || muc.disco_requests_to(ROOM).into_iter().next())
+        wait_for(ARRIVES, || muc.disco_requests_to(MUC_B).into_iter().next())
             .await
             .is_some(),
-        "the room is asked"
+        "the room's service is asked"
     );
     assert_eq!(a.router.remote_rooms().await, 1);
     let offered = offer(
@@ -992,8 +1046,8 @@ async fn leaving_and_joining_again_before_the_room_answers_keeps_the_new_join() 
     assert!(statuses(&left).contains(&"110".to_owned()));
     assert_eq!(a.router.remote_rooms().await, 1);
     assert_eq!(muc.nick_of(ROOM, ALICE_PHONE).as_deref(), Some("alice"));
-    // The rejoin did not ask the room again.
-    assert_eq!(muc.disco_requests_to(ROOM).len(), 1);
+    // The rejoin did not ask the service again.
+    assert_eq!(muc.disco_requests().len(), 1);
 
     // Joined: room traffic flows both ways.
     let offered = offer(
@@ -1045,6 +1099,61 @@ async fn joins_beyond_the_bound_per_resource_are_refused_with_resource_constrain
     // Another resource has its own share.
     join(&a, ALICE_LAPTOP, "third@muc.home-b.test/alice2").await;
     assert_eq!(a.router.remote_rooms().await, 2);
+}
+
+#[tokio::test]
+async fn a_join_beyond_the_bound_is_refused_before_its_service_is_asked() {
+    let pki = support::Pki::new();
+    let limits = RouterLimits {
+        rooms_per_resource: 1,
+        ..RouterLimits::default()
+    };
+    let (a, _b, muc) = outbound_muc(&pki, limits).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+    // A join to a JID at a domain not yet asked, beyond the resource's
+    // bound: refused at once, and its domain is never asked.
+    let occupant = "lobby@home-b.test/alice";
+    let (reason, reply) = refused(
+        offer(
+            &a,
+            Stanza::Presence(join_presence(ALICE_PHONE, occupant, "over")),
+        )
+        .await,
+    );
+    assert_eq!(reason, UnroutableReason::EgressBusy);
+    assert_eq!(reply.attr("id"), Some("over"));
+    assert_eq!(
+        error_condition(&reply).as_deref(),
+        Some("resource-constraint")
+    );
+    tokio::time::sleep(QUIET).await;
+    assert!(muc.disco_requests_to(HOME_B).is_empty());
+    assert_eq!(muc.disco_requests().len(), 1);
+    assert!(muc.joins(ALICE_PHONE, "lobby@home-b.test").is_empty());
+    assert!(delivered_presence(&a, ALICE_PHONE, occupant).is_empty());
+    assert_eq!(a.router.remote_rooms().await, 1);
+}
+
+#[tokio::test]
+async fn a_join_to_a_room_that_does_not_exist_yet_at_a_verified_service_is_sent() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+    // XEP-0045 §10.1: a join to a room the service does not have yet
+    // creates it. The room itself could not say it is one (§6.4); the
+    // service already did.
+    let new_room = "newroom@muc.home-b.test";
+    assert!(muc.nick_of(new_room, ALICE_PHONE).is_none());
+    join(&a, ALICE_PHONE, "newroom@muc.home-b.test/alice").await;
+    assert_eq!(muc.joins(ALICE_PHONE, new_room).len(), 1);
+    assert_eq!(muc.nick_of(new_room, ALICE_PHONE).as_deref(), Some("alice"));
+    assert_eq!(a.router.remote_rooms().await, 2);
+    // One question for the service covered both rooms; no room was asked.
+    let asked = muc.disco_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].attr("to"), Some(MUC_B));
+    assert!(muc.disco_requests_to(ROOM).is_empty());
+    assert!(muc.disco_requests_to(new_room).is_empty());
 }
 
 #[tokio::test]
@@ -1156,12 +1265,14 @@ async fn a_join_routed_by_one_replica_is_completed_by_the_replica_the_room_dials
     let pki = support::Pki::new();
     let (a1, a2, _b, muc) = outbound_muc_replicas(&pki, swept()).await;
     // The first replica routes the join; the room's server dials the
-    // second, which completes the verification, records the verdict both
-    // share and admits the room's answer. The first sends the join once it
-    // reads the verdict.
+    // second, which completes the service's verification, records the
+    // verdict both share and admits the room's answer. The first sends the
+    // join once it reads the verdict.
     join_through(&a1, &a2, ALICE_PHONE, ROOM_ALICE).await;
     tokio::time::sleep(QUIET).await;
-    assert_eq!(muc.disco_requests_to(ROOM).len(), 1);
+    let asked = muc.disco_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].attr("to"), Some(MUC_B));
     let joins = muc.joins(ALICE_PHONE, ROOM);
     assert_eq!(joins.len(), 1, "the join reaches the room once: {joins:?}");
     assert!(

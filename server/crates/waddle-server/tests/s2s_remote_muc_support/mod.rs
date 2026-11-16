@@ -51,12 +51,6 @@ pub const MUC_B: &str = "muc.home-b.test";
 pub const ROOM: &str = "room@muc.home-b.test";
 /// A room on it that refuses every join with `conflict`.
 pub const BUSY: &str = "busy@muc.home-b.test";
-/// A JID on it that is not a room: its `disco#info` is answered with
-/// `item-not-found`.
-pub const NOT_A_ROOM: &str = "notaroom@muc.home-b.test";
-/// A JID on it whose `disco#info` is answered with a temporary error
-/// (`wait`, `resource-constraint`).
-pub const OVERLOADED: &str = "overloaded@muc.home-b.test";
 /// The id of the message a room sends a join it challenges.
 pub const CHALLENGE: &str = "challenge";
 /// The nickname of the occupant [`FakeMuc`] seats in every room.
@@ -141,11 +135,12 @@ struct Reflected {
 /// query with one result and its `fin`. It keeps every stanza it receives,
 /// in the `jabber:client` namespace.
 ///
-/// It also answers XEP-0030 `disco#info` for bare JIDs (XEP-0045 §6.4):
-/// a JID on `muc.home-b.test` names the `conference`/`text` identity and
-/// the MUC feature, except [`NOT_A_ROOM`] (`item-not-found`) and
-/// [`OVERLOADED`] (a temporary error); an account at `home-b.test` names
-/// the `account`/`registered` identity, as its server would.
+/// It also answers XEP-0030 `disco#info` of the domains it serves:
+/// `muc.home-b.test` names the `conference`/`text` identity and the MUC
+/// feature (XEP-0045 §6.2), or the error set with [`FakeMuc::disco_error`];
+/// `home-b.test` names the `server`/`im` identity, as a server that is not
+/// a multi-user chat service does. A room's own `disco#info` (§6.4) is
+/// left unanswered, so a join that waited on it would never be sent.
 pub struct FakeMuc {
     handle: OnceLock<S2sHandle>,
     outbox: mpsc::UnboundedSender<Element>,
@@ -156,6 +151,8 @@ pub struct FakeMuc {
     reflect_pings: AtomicBool,
     silent_joins: AtomicBool,
     silent_disco: AtomicBool,
+    /// The error `muc.home-b.test` answers `disco#info` with, if any.
+    disco_error: Mutex<Option<StanzaError>>,
     challenge_joins: AtomicBool,
     /// Joins answered with a challenge, waiting for
     /// [`FakeMuc::pass_challenge`]: the nickname and the join's id.
@@ -178,6 +175,7 @@ impl FakeMuc {
             reflect_pings: AtomicBool::new(false),
             silent_joins: AtomicBool::new(false),
             silent_disco: AtomicBool::new(false),
+            disco_error: Mutex::new(None),
             challenge_joins: AtomicBool::new(false),
             challenged: Mutex::new(HashMap::new()),
             defer_leaves: AtomicBool::new(false),
@@ -231,10 +229,21 @@ impl FakeMuc {
         self.silent_joins.store(true, Ordering::SeqCst);
     }
 
-    /// Leave further `disco#info` requests unanswered, as a JID does that
-    /// never says whether it is a room.
+    /// Leave further `disco#info` requests unanswered, as a domain does
+    /// that never says whether it is a multi-user chat service.
     pub fn silence_disco(&self) {
         self.silent_disco.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer further `disco#info` requests to `muc.home-b.test` with an
+    /// error of `type_` and `condition` instead of its identity.
+    pub fn disco_error(&self, type_: ErrorType, condition: DefinedCondition) {
+        *lock(&self.disco_error) = Some(StanzaError::new(
+            type_,
+            condition,
+            "en",
+            "No multi-user chat here.",
+        ));
     }
 
     /// Answer further joins with a challenge message from the room's bare
@@ -276,7 +285,7 @@ impl FakeMuc {
             .collect()
     }
 
-    /// The `disco#info` requests received for the bare JID `to`.
+    /// The `disco#info` requests received for the JID `to`.
     pub fn disco_requests_to(&self, to: &str) -> Vec<Element> {
         self.disco_requests()
             .into_iter()
@@ -365,8 +374,9 @@ impl FakeMuc {
         }
     }
 
-    /// XEP-0030 `disco#info` of a bare JID with a localpart, answered from
-    /// that JID. A `disco#info` of anything else is left unanswered.
+    /// XEP-0030 `disco#info` of a domain JID this side serves, answered
+    /// from that domain. A `disco#info` of anything else, a room's bare JID
+    /// among them, is left unanswered.
     fn disco(&self, iq: Iq) {
         let Iq::Get {
             from: Some(from),
@@ -378,30 +388,18 @@ impl FakeMuc {
             return;
         };
         if self.silent_disco.load(Ordering::SeqCst)
-            || to.node().is_none()
+            || to.node().is_some()
             || to.resource().is_some()
         {
             return;
         }
-        let bare = to.to_bare().to_string();
-        let answer = if to.domain().as_str() == HOME_B {
-            Ok(disco_info("account", "registered", &[DISCO_INFO_NS]))
-        } else if to.domain().as_str() != MUC_B {
-            return;
-        } else if bare == NOT_A_ROOM {
-            Err(stanza_error(
-                DefinedCondition::ItemNotFound,
-                "No such room.",
-            ))
-        } else if bare == OVERLOADED {
-            Err(StanzaError::new(
-                ErrorType::Wait,
-                DefinedCondition::ResourceConstraint,
-                "en",
-                "Try again later.",
-            ))
-        } else {
-            Ok(disco_info("conference", "text", &[DISCO_INFO_NS, NS_MUC]))
+        let answer = match to.domain().as_str() {
+            HOME_B => Ok(disco_info("server", "im", &[DISCO_INFO_NS])),
+            MUC_B => match lock(&self.disco_error).clone() {
+                Some(error) => Err(error),
+                None => Ok(disco_info("conference", "text", &[DISCO_INFO_NS, NS_MUC])),
+            },
+            _ => return,
         };
         match answer {
             Ok(payload) => self.send(Iq::Result {
