@@ -571,16 +571,48 @@ async fn receive_message(
             Vec::new()
         }
         MessageType::Chat | MessageType::Normal => {
-            if !deliver_direct(state, &account, full.as_ref(), &message, work).await {
-                // RFC 6121 §8.5.2.2.1: stored for the account's next
-                // session, from a contact and a stranger alike. Nothing
-                // answers the sender, whatever became of it, so that no
-                // sender learns whether the account is online.
-                store_offline(state, &account, &sender, &message, work).await;
-            }
+            let admitted =
+                match deliver_direct(state, &account, &sender, full.as_ref(), &message, work).await
+                {
+                    Direct::Handled => return Vec::new(),
+                    Direct::Untaken { admitted } => admitted,
+                };
+            // RFC 6121 §8.5.2.2.1: stored for the account's next session,
+            // from a contact and a stranger alike. Nothing answers the
+            // sender, whatever became of it, so that no sender learns
+            // whether the account is online.
+            store_offline(state, &account, &sender, &message, work, admitted).await;
             Vec::new()
         }
         MessageType::Groupchat => Vec::new(),
+    }
+}
+
+/// Whether a message from the remote `sender` may go to `account`'s
+/// offline store, or to a detached session that hands it there when its
+/// resume window closes: always from a contact, and from anybody else
+/// within its bounds ([`RemoteOfflineAdmissions`]), counted. A message
+/// beyond a bound is dropped by the caller; nothing tells the sender.
+async fn admit_offline(state: &WebSocketState, account: &BareJid, sender: &BareJid) -> bool {
+    if shares_presence_with(state, account, sender).await {
+        return true;
+    }
+    let Some(db) = database(state).await else {
+        return false;
+    };
+    match RemoteOfflineAdmissions::new(db)
+        .admit(account, sender, chrono::Utc::now().timestamp_millis())
+        .await
+    {
+        Ok(OfflineAdmission::Admitted) => true,
+        Ok(OfflineAdmission::Bounds) => {
+            telemetry::offline_dropped();
+            false
+        }
+        Err(error) => {
+            warn!(%error, "admitting a remote sender's message to offline storage failed");
+            false
+        }
     }
 }
 
@@ -588,39 +620,23 @@ async fn receive_message(
 /// that no resource of `account` took, in the account's offline store
 /// (XEP-0160), as the classifier of local direct messages decides for an
 /// account with no resource: hints and chat-state-only messages are
-/// honoured. A sender that is not the account's contact is admitted only
-/// within its bounds ([`RemoteOfflineAdmissions`]). A message beyond a
-/// bound, beyond the store's quota, or that cannot be stored is dropped;
-/// nothing tells the sender.
+/// honoured. Unless it was `admitted` already, it is admitted first
+/// ([`admit_offline`]). A message beyond a bound, beyond the store's quota,
+/// or that cannot be stored is dropped; nothing tells the sender.
 async fn store_offline(
     state: &WebSocketState,
     account: &BareJid,
     sender: &BareJid,
     message: &Message,
     work: &AccountWork,
+    admitted: bool,
 ) {
     let routing = classify_dm_intake(message, &OnlineResources::empty(), &Blocklist::empty());
     if matches!(routing.pending, PendingDecision::None) {
         return;
     }
-    if !shares_presence_with(state, account, sender).await {
-        let Some(db) = database(state).await else {
-            return;
-        };
-        match RemoteOfflineAdmissions::new(db)
-            .admit(account, sender, chrono::Utc::now().timestamp_millis())
-            .await
-        {
-            Ok(OfflineAdmission::Admitted) => {}
-            Ok(OfflineAdmission::Bounds) => {
-                telemetry::offline_dropped();
-                return;
-            }
-            Err(error) => {
-                warn!(%error, "admitting a remote sender's message to offline storage failed");
-                return;
-            }
-        }
+    if !admitted && !admit_offline(state, account, sender).await {
+        return;
     }
     if work.abandoned() {
         return;
@@ -648,36 +664,51 @@ async fn store_offline(
     }
 }
 
-/// Deliver a `chat` or `normal` message: to the full JID it names if that
-/// resource is bound, otherwise (a `chat` message only, §8.5.3.2.1) to the
-/// one most available resource, a connected one when none is available,
-/// or a detached one. `false` when nothing took it; `true` too once the
-/// router abandoned `work`, so that nothing more is applied for it.
+/// What became of a `chat` or `normal` message offered to the account's
+/// resources.
+enum Direct {
+    /// A resource took it, it was dropped, or the router abandoned the
+    /// work: nothing more is applied for it.
+    Handled,
+    /// Nothing took it; `admitted` when it was already admitted to the
+    /// offline store's bounds for a detached session that then did not
+    /// take it either.
+    Untaken { admitted: bool },
+}
+
+/// Deliver a `chat` or `normal` message from the remote `sender`: to the
+/// full JID it names if that resource is bound, otherwise (a `chat` message
+/// only, §8.5.3.2.1) to the one most available resource, a connected one
+/// when none is available, or a detached one. A detached session hands what
+/// it holds to the offline store when its resume window closes, so a
+/// message is handed to one only once admitted as it would be to the store
+/// ([`admit_offline`]); one beyond the bounds is dropped.
 async fn deliver_direct(
     state: &WebSocketState,
     account: &BareJid,
+    sender: &BareJid,
     full: Option<&FullJid>,
     message: &Message,
     work: &AccountWork,
-) -> bool {
+) -> Direct {
     let stanza = Stanza::Message(message.clone());
     if work.abandoned() {
-        return true;
+        return Direct::Handled;
     }
     if let Some(full) = full {
         match deliver(state, full, &stanza).await {
-            Delivery::Taken | Delivery::Dropped => return true,
-            Delivery::NotBound if message.type_ != MessageType::Chat => return true,
+            Delivery::Taken | Delivery::Dropped => return Direct::Handled,
+            Delivery::NotBound if message.type_ != MessageType::Chat => return Direct::Handled,
             Delivery::NotBound => {}
         }
     }
     let live = non_negative_resources(state, account).await;
     for resource in live.iter().take(DELIVERY_ATTEMPTS) {
         if work.abandoned() {
-            return true;
+            return Direct::Handled;
         }
         match deliver(state, resource, &stanza).await {
-            Delivery::Taken | Delivery::Dropped => return true,
+            Delivery::Taken | Delivery::Dropped => return Direct::Handled,
             Delivery::NotBound => {}
         }
     }
@@ -700,28 +731,31 @@ async fn deliver_direct(
         connected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         for resource in connected.iter().take(DELIVERY_ATTEMPTS) {
             if work.abandoned() {
-                return true;
+                return Direct::Handled;
             }
             match deliver(state, resource, &stanza).await {
-                Delivery::Taken | Delivery::Dropped => return true,
+                Delivery::Taken | Delivery::Dropped => return Direct::Handled,
                 Delivery::NotBound => {}
             }
         }
     }
-    for resource in detached_resources(state, account)
-        .await
-        .iter()
-        .take(DELIVERY_ATTEMPTS)
-    {
+    let detached = detached_resources(state, account).await;
+    if detached.is_empty() {
+        return Direct::Untaken { admitted: false };
+    }
+    if !admit_offline(state, account, sender).await {
+        return Direct::Handled;
+    }
+    for resource in detached.iter().take(DELIVERY_ATTEMPTS) {
         if work.abandoned() {
-            return true;
+            return Direct::Handled;
         }
         match deliver(state, resource, &stanza).await {
-            Delivery::Taken | Delivery::Dropped => return true,
+            Delivery::Taken | Delivery::Dropped => return Direct::Handled,
             Delivery::NotBound => {}
         }
     }
-    false
+    Direct::Untaken { admitted: true }
 }
 
 /// Deliver a `headline` (an event notification included): to the full JID
