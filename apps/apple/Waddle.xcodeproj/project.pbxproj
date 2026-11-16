@@ -12,6 +12,7 @@
 		02EBB0FB569ECB4DDC057D24 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */; };
 		03E15C9728F1BC95ABB9365E /* ComposerControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66975FAE7EAEA74929B2474 /* ComposerControls.swift */; };
 		04D96F8535FD66084A220F01 /* RichTextModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8BDF2333452BD5C877BE946 /* RichTextModel.swift */; };
+		051E95C60BE50B0B6570478D /* FFIInbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A5A81C6475212B6231EEFDC /* FFIInbound+Call.swift */; };
 		054DE9608A108047AD3BDA3E /* FFIInbound+Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3A9EC3530A183074519792C /* FFIInbound+Message.swift */; };
 		054EB87288E33AD493C3840A /* NavigationModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A24803E67A2932C18014F56 /* NavigationModelTests.swift */; };
 		062363215A04331CE0328521 /* SignInCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC2B3686BB5095FCFF4D16F /* SignInCard.swift */; };
@@ -29,6 +30,7 @@
 		0996D2FE659F4260C27E24C1 /* FFILocked.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */; };
 		09DBCB9ED5A10E02EA3E54A7 /* MessageRichBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE2907041A875E132FBDE57 /* MessageRichBody.swift */; };
 		0A0C91106F1C0C2AD2B170F9 /* FFILocked.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */; };
+		0B2C93D2ACE9FFCFA3A5A18C /* FFIOutbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */; };
 		0B6AB9FA4BD443A5B30BDB18 /* FFIXmppPort+Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDE7DDBFAF9910770EE38879 /* FFIXmppPort+Profile.swift */; };
 		0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A68A7084A9D1741E90F3447B /* HuddleSnapshot.swift */; };
 		0BDD82A8F0290DEBD9239EBE /* SnapshotTesting in Frameworks */ = {isa = PBXBuildFile; productRef = 9CBDF87FE630CD70063DE484 /* SnapshotTesting */; };
@@ -63,6 +65,7 @@
 		22DF22290670D3C4B9BABDE1 /* QuickSwitcherRanking.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB699135F2699F62EE19308 /* QuickSwitcherRanking.swift */; };
 		237686D6632D2EF5CCC21266 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
 		23BD3FD27EE7A44A5C8D6AFF /* MessageReactionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BC10F0DACB50BE25CDB8647 /* MessageReactionsBar.swift */; };
+		23CF32735FF502BC40185751 /* FFIXmppPort+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A3A86F1E3EAD9B4C5A4D0A /* FFIXmppPort+Calls.swift */; };
 		23ED4F145ABFF06B9266B8D5 /* Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B26415DB685F9A4CBE7FBB1 /* Sidebar.swift */; };
 		245003CFC33DE220AA6DE188 /* FFIInbound+Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E693082B761CBC48B8E7AE /* FFIInbound+Notify.swift */; };
 		24B2F26796B4062AE83C2E17 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CE875138305109C7CCC4E1 /* AppState.swift */; };
@@ -111,6 +114,7 @@
 		3D3CC4E01C2B3209E01ABAB7 /* HomeList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9B6166199D282F6AAEDD0C /* HomeList.swift */; };
 		3DA6E62AAD3B1DB7DAAB6C7C /* ProfileMoodEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F0CFB8B8A9EF99839CFEE4 /* ProfileMoodEditor.swift */; };
 		3E1D9FBAA270732A4CCB5EC1 /* HuddleColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17173B8296B26DFD2A19423E /* HuddleColor.swift */; };
+		3EB84E23C0D3EBEB0C46C583 /* FakePort+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */; };
 		3FB999858E8E4F236D7AFFA1 /* MessageContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E45EB2101AB889951F4F632 /* MessageContextMenu.swift */; };
 		40851AA8672CF81B98759112 /* FFIXmppPort+Upload.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6A084A6FE3A66B392B132BE /* FFIXmppPort+Upload.swift */; };
 		40F1F8FB995C1C1A601B34AC /* ComposerPresentationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C78BB80141C9DD96A8A2E1F /* ComposerPresentationState.swift */; };
@@ -139,6 +143,7 @@
 		4D270761A871BBF4F7C3F44B /* SettingsPreferenceSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2FCD21C5931F86CC13AF643 /* SettingsPreferenceSections.swift */; };
 		4D4C469D0802030C681BCB7E /* ShellScreenSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CE564FF3A2D80291A80B47B /* ShellScreenSnapshotTests.swift */; };
 		4D9CC7EDE4F38A7AD0F9C9E8 /* InboxFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59E50FF8B354FCD1CB6CF95E /* InboxFeed.swift */; };
+		4E4CCC511B25572B50FB71D3 /* FakePort+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */; };
 		4E55ADD0479162600DC23327 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0F38B78980F7FA0414198A /* Theme.swift */; };
 		4E5DBB165EE5D0332D8E7828 /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */; };
 		4F97D079734FCBDCE42528E9 /* MessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9183947CADB3940CB51F685C /* MessageRow.swift */; };
@@ -158,6 +163,7 @@
 		55652EB16569A153C8412189 /* MemberPermissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92341C99BBB49D538EC5376C /* MemberPermissions.swift */; };
 		575ED58ACEA4D11CBD6068B2 /* ComposerMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC997873DAE9A651374CF652 /* ComposerMetrics.swift */; };
 		577C86886BADE3833BC6AA25 /* DirectMessagesList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 801525ECEF92405EF6A54E00 /* DirectMessagesList.swift */; };
+		579D464CCC7A1601D2217FA7 /* FFIInbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A5A81C6475212B6231EEFDC /* FFIInbound+Call.swift */; };
 		5866C58FF16B601C0F556F84 /* RoomMembersSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C70847E6FA7388FC6231A89 /* RoomMembersSections.swift */; };
 		590DFEA0175D868801952DB2 /* ExtensionCommandFormSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF3C366FF15AFD0089E2F96 /* ExtensionCommandFormSheet.swift */; };
 		5AEC88F5B85E17A8D7B1B9FC /* NotificationModeSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F7FC6CFC6DF2EAEE334F027 /* NotificationModeSection.swift */; };
@@ -307,6 +313,7 @@
 		A2E330E99263C2025436BD8D /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3BBDDB0DC99803D3EEC777E /* EmojiCatalog.swift */; };
 		A40A369E2EB4DE78F3AB3F80 /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47CB426A26582C047EB9477 /* ConversationComposer.swift */; };
 		A4DC77BF3BFA5D27E6EF6783 /* MentionHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */; };
+		A5514123D2A2BE0352BB77F8 /* FFIOutbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */; };
 		A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
 		A98D9A45A461088AB8FF4E15 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082EE4552E0588E35D76D98 /* SearchSheet.swift */; };
 		AA7275AC30C39DDF1E59095A /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
@@ -339,6 +346,7 @@
 		B964326EE3BC2FF209F85776 /* Controls.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE739129D4CC16065C7E43F2 /* Controls.swift */; };
 		B973856979D1C525495F1345 /* MessageEmojiPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 066F30A056D21DE5AE470B9F /* MessageEmojiPicker.swift */; };
 		BA36152416EFE1405CB55BE5 /* RoomMembersModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8BA962AEDF6220C0907C63 /* RoomMembersModel.swift */; };
+		BA69DE89E7C55EAE74BB9BBC /* FFIXmppPort+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A3A86F1E3EAD9B4C5A4D0A /* FFIXmppPort+Calls.swift */; };
 		BA6EACA5A6EE61165749CB9D /* NotificationModeSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F7FC6CFC6DF2EAEE334F027 /* NotificationModeSection.swift */; };
 		BB5DD7EDB2DBC25ADC5C310A /* ConversationTypingIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EF52A43F2E37C83825989DB /* ConversationTypingIndicator.swift */; };
 		BBEC657E6C415BE435C1B634 /* ComposerTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBE71705540136F76B531A9B /* ComposerTextField.swift */; };
@@ -502,6 +510,7 @@
 		1AE36378C327949710DA48E9 /* FFIInbound+SafetyScores.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+SafetyScores.swift"; sourceTree = "<group>"; };
 		1B0C820EA40536B55023B88C /* ConversationHeaderText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHeaderText.swift; sourceTree = "<group>"; };
 		1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedAttachmentModel.swift; sourceTree = "<group>"; };
+		2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIOutbound+Call.swift"; sourceTree = "<group>"; };
 		23892C2B3A078BA52981F443 /* SplitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitShell.swift; sourceTree = "<group>"; };
 		24FC01964BF3C9A444AC8C8C /* MemberRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberRows.swift; sourceTree = "<group>"; };
 		27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentLoader.swift; sourceTree = "<group>"; };
@@ -601,6 +610,7 @@
 		9472731557D616B2F74FF441 /* MessageReplySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageReplySummary.swift; sourceTree = "<group>"; };
 		96F23CCB3265FE12326F400F /* SignInServerLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInServerLabel.swift; sourceTree = "<group>"; };
 		97D13CF6890362A3E5A3EE80 /* FFIXmppPort+ReadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+ReadState.swift"; sourceTree = "<group>"; };
+		9A5A81C6475212B6231EEFDC /* FFIInbound+Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+Call.swift"; sourceTree = "<group>"; };
 		9B26415DB685F9A4CBE7FBB1 /* Sidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sidebar.swift; sourceTree = "<group>"; };
 		9B7A4AB14D9CCBB80E6E1D64 /* ConversationLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationLink.swift; sourceTree = "<group>"; };
 		9C41898B8E69395919E06204 /* Waddle-macOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Waddle-macOS.entitlements"; sourceTree = "<group>"; };
@@ -664,10 +674,12 @@
 		D2BC3620DC7095A2FBB42549 /* ConversationDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDetailsView.swift; sourceTree = "<group>"; };
 		D66975FAE7EAEA74929B2474 /* ComposerControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerControls.swift; sourceTree = "<group>"; };
 		D66FCE4A2E446F8397C801AC /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		D7A3A86F1E3EAD9B4C5A4D0A /* FFIXmppPort+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Calls.swift"; sourceTree = "<group>"; };
 		D98A14703F39AB98C5E790EF /* ComposerPlusMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerPlusMenu.swift; sourceTree = "<group>"; };
 		DA7DB82B1A228C6DF0FC1AD4 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		DCE28B7F154186590B772FC3 /* MessageLinkDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageLinkDetector.swift; sourceTree = "<group>"; };
 		DD90267CD2CEC512024017D9 /* RemoteImageDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteImageDataView.swift; sourceTree = "<group>"; };
+		DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Calls.swift"; sourceTree = "<group>"; };
 		E0331D56B66C8F49E37D436C /* FFIXmppPort.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIXmppPort.swift; sourceTree = "<group>"; };
 		E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+Directory.swift"; sourceTree = "<group>"; };
 		E21403421F45AB27FBEED9FA /* SampleSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleSession.swift; sourceTree = "<group>"; };
@@ -816,6 +828,7 @@
 				745E4D7A386971E4AA451053 /* BridgeLog.swift */,
 				CF317440D44D33577F844A73 /* FFIEventListener.swift */,
 				9295908F61E540E4185F41C3 /* FFIInbound.swift */,
+				9A5A81C6475212B6231EEFDC /* FFIInbound+Call.swift */,
 				E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */,
 				E3A9EC3530A183074519792C /* FFIInbound+Message.swift */,
 				6F3FAA96C326A287596EF89C /* FFIInbound+MessageParts.swift */,
@@ -824,10 +837,12 @@
 				1AE36378C327949710DA48E9 /* FFIInbound+SafetyScores.swift */,
 				19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */,
 				FC140B908325AEC014CE3D7E /* FFIOutbound.swift */,
+				2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */,
 				883F76BB4172D356990947A1 /* FFIOutbound+Values.swift */,
 				62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */,
 				BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */,
 				E0331D56B66C8F49E37D436C /* FFIXmppPort.swift */,
+				D7A3A86F1E3EAD9B4C5A4D0A /* FFIXmppPort+Calls.swift */,
 				2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */,
 				D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */,
 				6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */,
@@ -959,6 +974,7 @@
 			isa = PBXGroup;
 			children = (
 				E81704B7DBD86ABF17B4778B /* FakePort.swift */,
+				DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */,
 				F693E2124F7171597B578129 /* Fixtures.swift */,
 			);
 			path = WaddleKitTestSupport;
@@ -1707,6 +1723,7 @@
 				590DFEA0175D868801952DB2 /* ExtensionCommandFormSheet.swift in Sources */,
 				8FED731BC1592BD5301690C8 /* ExtensionCommandStage.swift in Sources */,
 				2DDA5514F992810F06C5B939 /* FFIEventListener.swift in Sources */,
+				579D464CCC7A1601D2217FA7 /* FFIInbound+Call.swift in Sources */,
 				6D7FA77C3C6D0FCD91C0A013 /* FFIInbound+Directory.swift in Sources */,
 				054DE9608A108047AD3BDA3E /* FFIInbound+Message.swift in Sources */,
 				9CC22A9B7D8B0F56A19F5A3D /* FFIInbound+MessageParts.swift in Sources */,
@@ -1715,10 +1732,12 @@
 				8EC1ABA94053BAFEBBEBE55E /* FFIInbound+SafetyScores.swift in Sources */,
 				32E1AE53B5B835EF28107EB6 /* FFIInbound.swift in Sources */,
 				0A0C91106F1C0C2AD2B170F9 /* FFILocked.swift in Sources */,
+				0B2C93D2ACE9FFCFA3A5A18C /* FFIOutbound+Call.swift in Sources */,
 				38AE4281C3EEF348D3AEA4B2 /* FFIOutbound+Values.swift in Sources */,
 				09836B94B95F7A6A3009EDE7 /* FFIOutbound.swift in Sources */,
 				237686D6632D2EF5CCC21266 /* FFIRFC3339.swift in Sources */,
 				909661C228C254D296DCD120 /* FFISessionSignals.swift in Sources */,
+				BA69DE89E7C55EAE74BB9BBC /* FFIXmppPort+Calls.swift in Sources */,
 				C76968A921D4D393D54F1A2F /* FFIXmppPort+Commands.swift in Sources */,
 				97EA83659EDC249D123EBA04 /* FFIXmppPort+Directory.swift in Sources */,
 				8AC1D9BC64BFCCD6AED35DC8 /* FFIXmppPort+Messaging.swift in Sources */,
@@ -1844,6 +1863,7 @@
 			files = (
 				4755D038595AD44BE0A529FE /* DesignFoundationTests.swift in Sources */,
 				7963CE39E2EB3651F155BBFD /* DesignSystemSnapshotTests.swift in Sources */,
+				4E4CCC511B25572B50FB71D3 /* FakePort+Calls.swift in Sources */,
 				FBEE73188DCB2A05B1429910 /* FakePort.swift in Sources */,
 				C05ED8BD121D90686CA6D6A8 /* Fixtures.swift in Sources */,
 				61E55FA367FF60432DFA19A7 /* HuddleSnapshot.swift in Sources */,
@@ -1933,6 +1953,7 @@
 				9D3021C05FAF1933C8BA59FF /* ExtensionCommandFormSheet.swift in Sources */,
 				6A9AC0512D50E4414D0064AB /* ExtensionCommandStage.swift in Sources */,
 				54CD31F69B304A1D9F09D689 /* FFIEventListener.swift in Sources */,
+				051E95C60BE50B0B6570478D /* FFIInbound+Call.swift in Sources */,
 				9F394219DF8DEF1D0E961EB2 /* FFIInbound+Directory.swift in Sources */,
 				DCA858F1563FFA81F8BEF93A /* FFIInbound+Message.swift in Sources */,
 				F9AA9EAB1CD94201BA23FF9E /* FFIInbound+MessageParts.swift in Sources */,
@@ -1941,10 +1962,12 @@
 				66497F2BBD161FEAF3309C55 /* FFIInbound+SafetyScores.swift in Sources */,
 				4C2A848898D5C57370AF4EB9 /* FFIInbound.swift in Sources */,
 				0996D2FE659F4260C27E24C1 /* FFILocked.swift in Sources */,
+				A5514123D2A2BE0352BB77F8 /* FFIOutbound+Call.swift in Sources */,
 				DD98F748713969B37298A3A0 /* FFIOutbound+Values.swift in Sources */,
 				6E28C165381D38973ED24039 /* FFIOutbound.swift in Sources */,
 				A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */,
 				A11359C8F42776D8A130CD28 /* FFISessionSignals.swift in Sources */,
+				23CF32735FF502BC40185751 /* FFIXmppPort+Calls.swift in Sources */,
 				B7B0453D59244126B71A44C3 /* FFIXmppPort+Commands.swift in Sources */,
 				88F2CD9DE93781F62A736BAC /* FFIXmppPort+Directory.swift in Sources */,
 				D9FACFA4B9D89DC4DA464CAA /* FFIXmppPort+Messaging.swift in Sources */,
@@ -2070,6 +2093,7 @@
 			files = (
 				5CFF1C9186158342BACB4AEF /* DesignFoundationTests.swift in Sources */,
 				35C0B0CA74318539AE2C3664 /* DesignSystemSnapshotTests.swift in Sources */,
+				3EB84E23C0D3EBEB0C46C583 /* FakePort+Calls.swift in Sources */,
 				D787293529B4CFF84AC00F21 /* FakePort.swift in Sources */,
 				66E38053AACC4ABA2CC45EB4 /* Fixtures.swift in Sources */,
 				0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */,

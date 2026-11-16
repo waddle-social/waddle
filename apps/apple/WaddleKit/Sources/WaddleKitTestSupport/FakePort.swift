@@ -7,6 +7,13 @@ final class FakePort: XmppPort {
     nonisolated let events: AsyncStream<XmppEvent>
     private let continuation: AsyncStream<XmppEvent>.Continuation
 
+    var callSends: [CallSend] = []
+    var completedCallSends: [CallSend] = []
+    var callResults: [String: Bool] = [:]
+    var callTerminateOutcome: CallTerminateOutcome = .ok
+    var heldCallVerbs: Set<String> = []
+    var heldCallSends: [CheckedContinuation<Void, Never>] = []
+
     var sent: [OutboundMessage] = []
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
     var reactions: [(target: String, emojis: [String])] = []

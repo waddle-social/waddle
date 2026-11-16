@@ -52,9 +52,8 @@ final class FFIEventListener: WaddleEventListener {
             // ADR-010 cross-device manual status: the Apple client does not
             // advertise its own presence through this bridge yet.
             return nil
-        case .call:
-            BridgeLog.debug("dropped call event: calls are not bridged")
-            return nil
+        case let .call(event):
+            return FFIInbound.callEvent(event).map(XmppEvent.call)
         case let .inboxPush(entry):
             return FFIInbound.inboxEntry(entry).map(XmppEvent.inboxPush)
         case .authenticationFailed:
