@@ -694,16 +694,28 @@ store. This is the slice's rollout part (G24).
 
 ## Follow-ups
 
-- A remote ingress producer, shared with inbound MUC (W6a, whose branch
-  adds `IngressPrincipal::Remote`), so that messages from remote senders
-  are stored offline through the ingress commit, with the recipient's
-  archive, inbox and push notification, and outbound messages archived and
-  projected, with S2S egress recorded as transport custody only. At that
-  merge the account side's `Transient` producer (`store_offline` in
-  `s2s_accounts.rs`) is replaced by the ingress path, keeping its rules:
-  the strangers' bounds, the silent drop, and no bounce to a remote sender
+- A remote ingress producer for direct messages, so that messages from
+  remote senders are stored offline through the ingress commit, with the
+  recipient's archive, inbox and push notification, and outbound messages
+  archived and projected, with S2S egress recorded as transport custody
+  only. Inbound MUC's `IngressPrincipal::Remote` does not serve it as it
+  stands, so the account side's `Transient` producer (`store_offline` in
+  `s2s_accounts.rs`) stays: the principal's acceptance
+  (`ingress::principal::assert_admission`) admits only a message to a
+  room's bare JID, decided on the room's host-grant witness, and its one
+  plan (`plan_remote_occupant_groupchat`) is a room's acceptance, in which
+  the room is the only authority that stamps the message. A direct
+  message needs a plan of its own in which the recipient account is that
+  authority and no archive of the sender's is written (it is kept by the
+  sender's server), an acceptance arm for an account target that decides
+  the D1 admission and the strangers' bounds inside the commit, and the
+  ingress receipt for a remote sender, none of which exists yet. When it
+  does, the producer keeps the account side's rules: the strangers'
+  bounds, the silent drop, and no bounce to a remote sender
   (`sm_promotion::is_remote_sender`, which already guards the ingress
-  quota bounce in `offline_delivery.rs`).
+  quota bounce in `offline_delivery.rs`). A message a live resource takes
+  already passes the recipient pass, which archives it and projects it
+  into the recipient's inbox; only a stored one misses those.
 - Remote access to vCard-temp, PEP items, account discovery and last
   activity, each with its own review, and PEP notifications from local
   accounts to remote contacts subscribed to them.
@@ -727,4 +739,10 @@ store. This is the slice's rollout part (G24).
   enumeration").
 - **A retired account's still-open session** sends nothing to remote
   JIDs, refused at the router for every stanza it sends and failing closed
-  (G18-13).
+  (G18-13). A local room's stanzas for remote occupants leave from the
+  room's address, through the seats of inbound MUC, not through that
+  check: a retired account's messages never reach them, since retiring
+  the account deletes its sessions with it and the room's ingress then
+  refuses the session's principal, but its presence in a local room it
+  still occupies, which the room handles without the ingress commit,
+  reaches the room's remote occupants until its session ends.
