@@ -37,16 +37,20 @@ not run until verification (D9):
   blocking in both directions;
 - `crates/waddle-server/tests/xep0060_s2s_account_events_ws.rs`: event
   notifications from remote PubSub services and personal eventing
-  services.
+  services;
+- `crates/waddle-server/tests/s2s_reachability.rs` (edited): the account
+  rows of the reachability matrix.
 
 The implementation is the router's account path in
-`crates/waddle-server/src/s2s/route/` (`accounts.rs`, `account_store.rs`,
-`router/accounts.rs` and the hooks in `router.rs` and `reach.rs`),
-migration 2010, the account side in
+`crates/waddle-server/src/s2s/route/` (`accounts.rs`, `router/accounts.rs`
+and the hooks in `router.rs`, `room_delivery.rs` and `reach.rs`), the
+stores in `crates/waddle-server/src/db/s2s_accounts.rs` with migration
+2010, the account side in
 `crates/waddle-server/src/server/routes/websocket/s2s_accounts.rs` and
 `handlers/presence/remote.rs`, and the outbound changes in
-`handlers/unserved_route.rs`, the presence broadcast and session-end paths,
-the roster set and the startup roster prune.
+`handlers/unserved_route.rs`, `handlers/iq/destination_route.rs`, the
+presence broadcast, block and session-end paths, the roster set and
+removal, and the startup roster prune.
 
 ## The seam
 
@@ -77,7 +81,7 @@ rows applies.
 | Account bare JID | IQ `result`/`error` | Dropped | Reviewed |
 | Account full JID | IQ `get`/`set` | Router, correlation table, local delivery to that resource | Reviewed: only for a requester the account shares presence with, or a remote room the resource occupies |
 | Account full JID | IQ `result`/`error` | Completes the resource's own request (routing design) | Unchanged |
-| Account bare or full JID | Message `chat`, `normal` | Account side, then the recipient pass of the selected resource (blocking, XEP-0359 id, XEP-0313 archive, inbox, XEP-0280 received carbons) | Reviewed |
+| Account bare or full JID | Message `chat`, `normal` | Account side, then the recipient pass of the selected resource (blocking, XEP-0359 id, XEP-0313 archive, inbox, XEP-0280 received carbons); a detached resource's session holds it raw and runs that pass when it resumes | Reviewed |
 | Account bare or full JID | Message `headline` without an event | Account side, then the recipient pass | Reviewed |
 | Account bare or full JID | Message carrying a XEP-0060 event | Account side, gated on a subscription the account made | Reviewed |
 | Account bare or full JID | Message `groupchat` | Account side: `service-unavailable`, whatever the account | Reviewed (room traffic is decided first, by the outbound MUC rules) |
@@ -87,6 +91,7 @@ rows applies.
 | Account bare or full JID | Presence `subscribe`, `subscribed`, `unsubscribe`, `unsubscribed` | Account side: the account's own roster half and the pending-request store | Reviewed |
 | Account bare or full JID | Presence `probe` | Account side: answered for a contact with a subscription from the account | Reviewed |
 | Account bare or full JID | Presence `error` | Dropped | Reviewed |
+| Account bare or full JID | Presence, or a message other than a mediated invitation or its decline, carrying a room's `muc#user` element, from a room the resource does not occupy | Dropped (stray room traffic) | Reviewed |
 | vCard-temp, PEP items, account `disco#info` and `disco#items`, last activity, private storage, roster, blocking, MAM at the bare JID | IQ | — | Not enabled: each needs its own review of access for a remote requester and of what its answer discloses |
 
 ## No enumeration
@@ -127,13 +132,18 @@ even while such rows or a resource remain.
 
 - **Selection.** A `chat` or `normal` message to the bare JID goes to the
   one most available resource: the live available resource with the
-  highest non-negative priority, ties broken by the resource's address.
+  highest non-negative priority, ties broken by the resource's address;
+  when none is available, a connected resource that has not sent presence
+  yet, as local delivery to the bare JID does (RFC 6121 §8.5.2.1 speaks of
+  an available or connected resource). A resource that is available with
+  a negative priority never receives one (§8.5.2.1.1).
   Delivering to one resource lets its recipient pass archive the message
   once, project it into the inbox once and copy it as a `<received/>`
   carbon to the account's other Carbons-enabled resources (XEP-0280 §6),
   which delivering to several would each do again. With no live
   candidate, a detached stream-management resource that is available is
-  used; its session holds the message until it resumes. A `headline`
+  used; its session holds the message raw until it resumes, and the
+  recipient pass (archive, inbox, carbons) runs on its replay. A `headline`
   goes to every available resource with non-negative priority (§8.5.2.1.1)
   and is not archived or projected.
 - **Full JID.** A message to a full JID that is bound, live or detached,
@@ -157,6 +167,13 @@ even while such rows or a resource remain.
   rule: the outbound MUC rules decide it first.
 - **`error`** messages are delivered to a bound full JID and otherwise
   dropped, never answered.
+- **Stray room traffic.** A remote room's traffic reaches an occupant
+  through the router's occupancy table before the account side sees it
+  (routing design, outbound MUC). Presence carrying the room's `muc#user`
+  element, and a message carrying it other than a mediated invitation or
+  its decline (XEP-0045 §7.8.2), that still reaches the account side
+  comes from a room the resource never joined or has left, and is
+  dropped.
 - **Payloads.** Before delivery the server removes from a remote message
   the payloads only this server may originate for a local account: the
   Waddle inbox elements (`urn:xmpp:inbox:1` and the Waddle inbox
@@ -280,9 +297,9 @@ delivered, under the headline rules above, only when one of these holds:
 
 - the account subscribed to that node of that service: a bound resource
   of the account sent the service an IQ `set` with a `<subscribe/>` for
-  the node, and the router recorded it in `s2s_remote_pubsub_subscriptions`
-  (migration 2010) when it took the request; an `<unsubscribe/>` the
-  router takes removes the record;
+  the node, and the WebSocket layer recorded it in
+  `s2s_remote_pubsub_subscriptions` (migration 2010) once the router took
+  the request; an `<unsubscribe/>` the router takes removes the record;
 - the sender is a remote account whose presence the account is subscribed
   to (`to` or `both`): its personal eventing service notifies the
   account's resources under XEP-0163's implicit subscription, which the
@@ -325,9 +342,11 @@ The server sends on the account's behalf:
   ways that local contacts get;
 - on the first available presence of each session, a probe from the
   account's bare JID to each remote contact whose item has `to` or `both`
-  (§4.2.2, §4.3.1);
+  and that the account does not block (§4.2.2, §4.3.1);
 - `unavailable` from a resource that ends for good to the same contacts as
-  its broadcast (§4.5.2).
+  its broadcast, except contacts the account blocks (§4.5.2);
+- `unavailable` to a remote contact the account blocks, and its current
+  presence to one it unblocks, as for local contacts (XEP-0191 §3.3).
 
 A message to a remote JID is not archived in the sender's archive or
 projected into the sender's inbox (follow-ups). Once the router takes it,
@@ -427,6 +446,8 @@ store. This is the slice's rollout part (G24).
   `unsubscribed`**, so a remote server whose user thinks it holds a
   subscription the account does not grant learns it only from the
   account's own `unsubscribed`.
+- **Local accounts' personal eventing notifications do not reach remote
+  contacts**: the PEP fan-out delivers to local resources only.
 - **Directed presence is not tracked**, so an entity the account sent
   directed presence to is neither told of the account's unavailability
   nor admitted to send IQ requests to its resources.
@@ -442,7 +463,8 @@ store. This is the slice's rollout part (G24).
   archived and projected through the ingress commit, with S2S egress
   recorded as transport custody only.
 - Remote access to vCard-temp, PEP items, account discovery and last
-  activity, each with its own review.
+  activity, each with its own review, and PEP notifications from local
+  accounts to remote contacts subscribed to them.
 - Directed presence tracking for remote entities.
 - Advertising any of this, in the server domain's `disco#info` for remote
   askers or elsewhere, stays with capability advertisement (W11).

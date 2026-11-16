@@ -721,6 +721,22 @@ reconciliation pass looks for increases to drop only while the scope's plan
 waits for its projection; that file's three records (`WriteHostGrantProjection`
 twice and `set_affiliation`) moved lines. The raw scan holds 1594 records, unchanged in content.
 
+The selected evidence was refreshed a seventeenth time, through
+`69beb8862c2c540a1b85e202bdcc0b457cdac5c2`, on the account-traffic branch
+(W6c of issue 2047). In the reviewed set only `server/http.rs` changed:
+startup now also attaches the S2S router's account side
+(`WebSocketLocalAccounts`) beside its local delivery, and passes the
+deployment's served domains to the startup roster prune while S2S is
+enabled, so that contacts at domains it does not serve stay in rosters.
+Neither writes a grant, a projection or a membership, and the two anchors
+in that file (`startup-call`, `hg-recovery`) moved lines only. Outside the
+reviewed set, records of `try_send_to`, `record_host_grant_affiliation`,
+`EnrolledScopes`, `record_stanza_for_detached_bound_resource` and
+`pubsub_affiliations` moved lines in `test_support.rs`,
+`handlers/iq/roster/push.rs`, `handlers/presence/subscription/delivery.rs`
+and `server/runtime_owner.rs`. The raw scan holds 1594 records, unchanged in
+content.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

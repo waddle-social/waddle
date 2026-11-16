@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "8f6088ba601528090ec1bc82294b1a12422f5519",
+  "baseline_commit": "69beb8862c2c540a1b85e202bdcc0b457cdac5c2",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -133,7 +133,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "4ce0d21f5c6a1d89db5703e46d1dec36800c772c844d858286256392b2422f38"
+      "sha256": "00b9804084ff5a913089346205d5e16d946043d62ddaccedcdcfd77b3f583914"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -365,7 +365,7 @@
     },
     "startup-call": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1550,
+      "line": 1568,
       "text": "crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn("
     },
     "bootstrap": {
@@ -760,7 +760,7 @@
     },
     "hg-recovery": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1005,
+      "line": 1013,
       "text": "fn spawn_host_grant_recovery("
     },
     "placement": {
@@ -940,7 +940,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "15f62da83e0b9904a2707a9ba572266ad1a4720c28fb0fd6d83bbd7d41c62b76",
+    "sha256": "4357723e4a0c85b0b45aee698e39eabbbc2a0a2f39cc1119d62c7da23de2d7f4",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,
