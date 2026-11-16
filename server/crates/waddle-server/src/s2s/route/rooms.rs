@@ -5,15 +5,16 @@
 //! exception each way for multi-user chat: a local account's presence and
 //! messages for a remote room it occupies leave, and traffic from such a
 //! room to the occupant's full JID arrives. A remote JID is a room for a
-//! local resource only once two things hold: the resource sent it a join
+//! local resource only once three things hold: the resource sent it a join
 //! (presence without a type, to an occupant JID, carrying the XEP-0045
-//! §7.2 `<x xmlns='http://jabber.org/protocol/muc'/>` element), and the
-//! JID's domain answered this server's XEP-0030 `disco#info` as a
-//! multi-user chat service, with the `conference/text` identity or the MUC
-//! feature (XEP-0045 §6.2). Every bare JID with a localpart at such a
-//! service is a room or, when it does not exist yet, one a join creates
-//! (§10.1). Until the domain has answered, the join is held and nothing
-//! reaches the JID.
+//! §7.2 `<x xmlns='http://jabber.org/protocol/muc'/>` element); the JID's
+//! domain answered this server's XEP-0030 `disco#info` as a multi-user
+//! chat service, with the `conference/text` identity and the MUC feature
+//! and no identity of category `server` (XEP-0045 §6.2); and then the
+//! room's own bare JID answered its `disco#info` with a `conference`
+//! identity (§6.4), or with `item-not-found`, which at such a service is a
+//! room a join creates (§10.1). Until both have answered, the join is held
+//! and nothing reaches the JID.
 //!
 //! The occupancies live in a table every replica shares
 //! ([`super::occupancy`]); this module decides, for one occupancy and one
@@ -39,9 +40,14 @@ const STATUS_SELF: &str = "110";
 const STATUS_NEW_NICK: &str = "303";
 
 /// The identity a multi-user chat service names in `disco#info` (XEP-0045
-/// §6.2).
+/// §6.2), and the category a room names (§6.4).
 const ROOM_CATEGORY: &str = "conference";
 const ROOM_TYPE: &str = "text";
+
+/// The identity category of a server (XEP-0030, the Service Discovery
+/// Identities registry). A domain that names it hosts accounts, whose bare
+/// JIDs are not rooms, whatever features it also lists.
+const SERVER_CATEGORY: &str = "server";
 
 /// What a local resource's message or presence for a remote JID asks of
 /// the occupancy of its bare JID.
@@ -322,9 +328,20 @@ pub(super) fn not_a_room(home: &jid::DomainRef) -> StanzaError {
     )
 }
 
-/// The `remote-server-timeout` a join receives when the JID's domain did
-/// not say whether it is a multi-user chat service, or the room did not
-/// answer the join, in time.
+/// The `resource-constraint` a held join receives when this server is
+/// asking too many remote services and rooms to ask its room.
+pub(super) fn busy(home: &jid::DomainRef) -> StanzaError {
+    super::replies::error(
+        home,
+        ErrorType::Wait,
+        DefinedCondition::ResourceConstraint,
+        "Too many remote rooms are being looked up; try again later.",
+    )
+}
+
+/// The `remote-server-timeout` a join receives when the JID's domain or
+/// the room did not say what it is, or the room did not answer the join,
+/// in time.
 pub(super) fn unanswered(home: &jid::DomainRef) -> StanzaError {
     super::replies::error(
         home,
@@ -334,16 +351,38 @@ pub(super) fn unanswered(home: &jid::DomainRef) -> StanzaError {
     )
 }
 
+/// What a verification asks of a remote JID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Asked {
+    /// Whether a domain JID is a multi-user chat service (XEP-0045 §6.2).
+    Service,
+    /// Whether a bare JID at a verified service is a room (§6.4).
+    Room,
+}
+
+impl Asked {
+    /// What asking `target` asks: a domain JID is asked whether it is a
+    /// service, a bare JID with a localpart whether it is a room.
+    pub(super) fn of(target: &BareJid) -> Self {
+        if target.node().is_some() {
+            Self::Room
+        } else {
+            Self::Service
+        }
+    }
+}
+
 /// The XEP-0030 `disco#info` request this server sends from its own
-/// domain `from` to the domain JID `service`, to learn whether it is a
-/// multi-user chat service (XEP-0045 §6.2). It goes to the domain, which
-/// no client can answer, never to a room or an occupant JID. Asking the
-/// service rather than the room lets a join create a room that does not
-/// exist yet, whose own `disco#info` would answer `item-not-found`.
-pub(super) fn disco_request(from: Jid, service: &BareJid, id: String) -> Stanza {
+/// domain `from` to `target`: a domain JID, to learn whether it is a
+/// multi-user chat service (XEP-0045 §6.2), or, once it is one, a room's
+/// bare JID, to learn whether it is a room (§6.4). It is the server's own
+/// request, so no client can take it over, and it never goes to an
+/// occupant JID. A room's bare JID is asked only after its service
+/// answered, so an account's bare JID at a server is never asked.
+pub(super) fn disco_request(from: Jid, target: &BareJid, id: String) -> Stanza {
     Stanza::Iq(Box::new(Iq::Get {
         from: Some(from),
-        to: Some(Jid::from(service.clone())),
+        to: Some(Jid::from(target.clone())),
         id,
         payload: Element::from(DiscoInfoQuery { node: None }),
     }))
@@ -359,36 +398,72 @@ pub(super) enum VerificationAnswer {
     Unavailable,
 }
 
-/// Read a response that completed a [`disco_request`]. `usable` is
-/// `false` for an error this server generated because the response
-/// carried an address outside the identity profile.
-pub(super) fn verification_answer(stanza: &Stanza, usable: bool) -> VerificationAnswer {
+/// Whether a service's `disco#info` names it a multi-user chat service:
+/// the `conference/text` identity and the MUC feature (XEP-0045 §6.2), and
+/// no identity of category `server`.
+fn is_service(info: &DiscoInfoResult) -> bool {
+    let conference = info
+        .identities
+        .iter()
+        .any(|identity| identity.category == ROOM_CATEGORY && identity.type_ == ROOM_TYPE);
+    let muc = info.features.iter().any(|feature| feature.var == NS_MUC);
+    let server = info
+        .identities
+        .iter()
+        .any(|identity| identity.category == SERVER_CATEGORY);
+    conference && muc && !server
+}
+
+/// Whether a bare JID's `disco#info` names it a room: an identity of
+/// category `conference` (XEP-0045 §6.4). An account, a client, a gateway
+/// user or anything else naming another identity is not one.
+fn is_room(info: &DiscoInfoResult) -> bool {
+    info.identities
+        .iter()
+        .any(|identity| identity.category == ROOM_CATEGORY)
+}
+
+/// Read a response that completed a [`disco_request`] that asked
+/// `asked`. `usable` is `false` for an error this server generated because
+/// the response carried an address outside the identity profile.
+///
+/// An error of type `wait` or with a `remote-server-*` condition is about
+/// the route or the moment, not the JID (RFC 6120 §8.3.2), and gives no
+/// verdict. For a room, `item-not-found` is a room that does not exist yet
+/// and that a join creates (XEP-0045 §10.1): its service, asked first, is
+/// a multi-user chat service. Any other error is not a service, or not a
+/// room.
+pub(super) fn verification_answer(
+    stanza: &Stanza,
+    usable: bool,
+    asked: Asked,
+) -> VerificationAnswer {
     if !usable {
         return VerificationAnswer::Unavailable;
     }
     let Stanza::Iq(iq) = stanza else {
         return VerificationAnswer::Unavailable;
     };
+    let verdict = |yes: bool| {
+        VerificationAnswer::Verdict(if yes {
+            RoomVerdict::Room
+        } else {
+            RoomVerdict::NotRoom
+        })
+    };
     match iq.as_ref() {
         Iq::Result {
             payload: Some(payload),
             ..
         } if payload.is("query", DISCO_INFO_NS) => {
-            let room = DiscoInfoResult::try_from(payload.clone()).is_ok_and(|info| {
-                info.identities.iter().any(|identity| {
-                    identity.category == ROOM_CATEGORY && identity.type_ == ROOM_TYPE
-                }) || info.features.iter().any(|feature| feature.var == NS_MUC)
-            });
-            VerificationAnswer::Verdict(if room {
-                RoomVerdict::Room
-            } else {
-                RoomVerdict::NotRoom
-            })
+            let info = DiscoInfoResult::try_from(payload.clone()).ok();
+            verdict(info.is_some_and(|info| match asked {
+                Asked::Service => is_service(&info),
+                Asked::Room => is_room(&info),
+            }))
         }
-        Iq::Result { .. } => VerificationAnswer::Verdict(RoomVerdict::NotRoom),
+        Iq::Result { .. } => verdict(false),
         Iq::Error { error, .. } => {
-            // RFC 6120 §8.3.2: `wait` is temporary; the remote-server
-            // conditions are about the route, not the JID.
             let transient = error.type_ == ErrorType::Wait
                 || matches!(
                     error.defined_condition,
@@ -397,7 +472,10 @@ pub(super) fn verification_answer(stanza: &Stanza, usable: bool) -> Verification
             if transient {
                 VerificationAnswer::Unavailable
             } else {
-                VerificationAnswer::Verdict(RoomVerdict::NotRoom)
+                verdict(
+                    asked == Asked::Room
+                        && error.defined_condition == DefinedCondition::ItemNotFound,
+                )
             }
         }
         Iq::Get { .. } | Iq::Set { .. } => VerificationAnswer::Unavailable,

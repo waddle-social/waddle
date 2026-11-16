@@ -98,14 +98,23 @@ fn stanza_error(condition: DefinedCondition, text: &str) -> StanzaError {
 
 /// A XEP-0030 `disco#info` result naming one identity and `features`.
 fn disco_info(category: &str, type_: &str, features: &[&str]) -> Element {
+    disco_identities(&[(category, type_)], features)
+}
+
+/// A XEP-0030 `disco#info` result naming `identities`, each a category and
+/// a type, and `features`.
+fn disco_identities(identities: &[(&str, &str)], features: &[&str]) -> Element {
     Element::from(DiscoInfoResult {
         node: None,
-        identities: vec![Identity {
-            category: category.to_owned(),
-            type_: type_.to_owned(),
-            lang: None,
-            name: None,
-        }],
+        identities: identities
+            .iter()
+            .map(|(category, type_)| Identity {
+                category: (*category).to_owned(),
+                type_: (*type_).to_owned(),
+                lang: None,
+                name: None,
+            })
+            .collect(),
         features: features.iter().copied().map(Feature::new).collect(),
         extensions: Vec::new(),
     })
@@ -137,10 +146,14 @@ struct Reflected {
 ///
 /// It also answers XEP-0030 `disco#info` of the domains it serves:
 /// `muc.home-b.test` names the `conference`/`text` identity and the MUC
-/// feature (XEP-0045 §6.2), or the error set with [`FakeMuc::disco_error`];
-/// `home-b.test` names the `server`/`im` identity, as a server that is not
-/// a multi-user chat service does. A room's own `disco#info` (§6.4) is
-/// left unanswered, so a join that waited on it would never be sent.
+/// feature (XEP-0045 §6.2), or what [`FakeMuc::answer_service_as`] or
+/// [`FakeMuc::disco_error`] set; `home-b.test` names the `server`/`im`
+/// identity, as a server that is not a multi-user chat service does. A
+/// bare JID at `muc.home-b.test` (§6.4) names the `conference`/`text`
+/// identity once someone was seated there and answers `item-not-found`
+/// before, as a room that does not exist yet does, unless
+/// [`FakeMuc::answer_jid_as`] or [`FakeMuc::answer_jid_with_error`] set its
+/// answer. A bare JID at `home-b.test` is left unanswered.
 pub struct FakeMuc {
     handle: OnceLock<S2sHandle>,
     outbox: mpsc::UnboundedSender<Element>,
@@ -153,6 +166,12 @@ pub struct FakeMuc {
     silent_disco: AtomicBool,
     /// The error `muc.home-b.test` answers `disco#info` with, if any.
     disco_error: Mutex<Option<StanzaError>>,
+    /// What `muc.home-b.test` answers `disco#info` with instead of a
+    /// conference service's identity and features, if set.
+    service_info: Mutex<Option<Element>>,
+    /// What bare JIDs at `muc.home-b.test` answer `disco#info` with instead
+    /// of a room's answer.
+    jid_disco: Mutex<HashMap<BareJid, Result<Element, StanzaError>>>,
     challenge_joins: AtomicBool,
     /// Joins answered with a challenge, waiting for
     /// [`FakeMuc::pass_challenge`]: the nickname and the join's id.
@@ -176,6 +195,8 @@ impl FakeMuc {
             silent_joins: AtomicBool::new(false),
             silent_disco: AtomicBool::new(false),
             disco_error: Mutex::new(None),
+            service_info: Mutex::new(None),
+            jid_disco: Mutex::new(HashMap::new()),
             challenge_joins: AtomicBool::new(false),
             challenged: Mutex::new(HashMap::new()),
             defer_leaves: AtomicBool::new(false),
@@ -244,6 +265,29 @@ impl FakeMuc {
             "en",
             "No multi-user chat here.",
         ));
+    }
+
+    /// Answer further `disco#info` requests to `muc.home-b.test` with
+    /// `identities`, each a category and a type, and `features` instead of
+    /// a conference service's.
+    pub fn answer_service_as(&self, identities: &[(&str, &str)], features: &[&str]) {
+        *lock(&self.service_info) = Some(disco_identities(identities, features));
+    }
+
+    /// Answer further `disco#info` requests to the bare JID `jid` at
+    /// `muc.home-b.test` with one identity of `category` and `type_`, as an
+    /// account, a client or a gateway's user there would.
+    pub fn answer_jid_as(&self, jid: &str, category: &str, type_: &str) {
+        let jid = jid.parse::<BareJid>().expect("a bare JID");
+        lock(&self.jid_disco).insert(jid, Ok(disco_info(category, type_, &[DISCO_INFO_NS])));
+    }
+
+    /// Answer further `disco#info` requests to the bare JID `jid` at
+    /// `muc.home-b.test` with an error of `type_` and `condition`.
+    pub fn answer_jid_with_error(&self, jid: &str, type_: ErrorType, condition: DefinedCondition) {
+        let jid = jid.parse::<BareJid>().expect("a bare JID");
+        let error = StanzaError::new(type_, condition, "en", "Not for you.");
+        lock(&self.jid_disco).insert(jid, Err(error));
     }
 
     /// Answer further joins with a challenge message from the room's bare
@@ -375,8 +419,9 @@ impl FakeMuc {
     }
 
     /// XEP-0030 `disco#info` of a domain JID this side serves, answered
-    /// from that domain. A `disco#info` of anything else, a room's bare JID
-    /// among them, is left unanswered.
+    /// from that domain, or of a bare JID at `muc.home-b.test`, answered
+    /// from that JID. A `disco#info` of anything else, a full JID or a bare
+    /// JID at `home-b.test` among them, is left unanswered.
     fn disco(&self, iq: Iq) {
         let Iq::Get {
             from: Some(from),
@@ -387,19 +432,39 @@ impl FakeMuc {
         else {
             return;
         };
-        if self.silent_disco.load(Ordering::SeqCst)
-            || to.node().is_some()
-            || to.resource().is_some()
-        {
+        if self.silent_disco.load(Ordering::SeqCst) || to.resource().is_some() {
             return;
         }
-        let answer = match to.domain().as_str() {
-            HOME_B => Ok(disco_info("server", "im", &[DISCO_INFO_NS])),
-            MUC_B => match lock(&self.disco_error).clone() {
-                Some(error) => Err(error),
-                None => Ok(disco_info("conference", "text", &[DISCO_INFO_NS, NS_MUC])),
-            },
-            _ => return,
+        let answer = if to.node().is_some() {
+            if to.domain().as_str() != MUC_B {
+                return;
+            }
+            let bare = to.to_bare();
+            let set = lock(&self.jid_disco).get(&bare).cloned();
+            match set {
+                Some(answer) => answer,
+                None if lock(&self.occupants).contains_key(&bare) => {
+                    Ok(disco_info("conference", "text", &[DISCO_INFO_NS, NS_MUC]))
+                }
+                // XEP-0045 §10.1: a room that does not exist yet.
+                None => Err(stanza_error(
+                    DefinedCondition::ItemNotFound,
+                    "No such room.",
+                )),
+            }
+        } else {
+            match to.domain().as_str() {
+                HOME_B => Ok(disco_info("server", "im", &[DISCO_INFO_NS])),
+                MUC_B => match (
+                    lock(&self.disco_error).clone(),
+                    lock(&self.service_info).clone(),
+                ) {
+                    (Some(error), _) => Err(error),
+                    (None, Some(info)) => Ok(info),
+                    (None, None) => Ok(disco_info("conference", "text", &[DISCO_INFO_NS, NS_MUC])),
+                },
+                _ => return,
+            }
         };
         match answer {
             Ok(payload) => self.send(Iq::Result {

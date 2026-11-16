@@ -12,8 +12,9 @@
 //! different replicas never overwrite each other's change unseen.
 //!
 //! The table also caches whether a remote domain is a multi-user chat
-//! service, as its XEP-0030 `disco#info` answered ([`RoomVerdict`]), keyed
-//! by the domain's JID.
+//! service, keyed by the domain's JID, and whether a bare JID at such a
+//! service is a room, keyed by that JID, as their XEP-0030 `disco#info`
+//! answered ([`RoomVerdict`]).
 //!
 //! The decisions are recorded in `server/docs/planning/s2s-routing-2047.md`
 //! (outbound MUC).
@@ -141,13 +142,16 @@ pub enum InsertOutcome {
     Bounds,
 }
 
-/// Whether a remote domain is a multi-user chat service, whose bare JIDs
-/// with a localpart are rooms, as its `disco#info` answered.
+/// Whether a remote domain is a multi-user chat service, or a bare JID at
+/// one is a room, as its `disco#info` answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomVerdict {
-    /// It names the `conference/text` identity or the MUC feature.
+    /// A domain that names the `conference/text` identity and the MUC
+    /// feature and no `server` identity; a bare JID that names a
+    /// `conference` identity, or answers `item-not-found` at such a
+    /// service.
     Room,
-    /// It answered, and is not a multi-user chat service.
+    /// It answered, and is not a multi-user chat service, or not a room.
     NotRoom,
 }
 
@@ -251,7 +255,8 @@ pub trait RemoteRoomStore: Send + Sync {
     /// Occupancies of every resource, in every phase.
     async fn count(&self) -> Result<usize, RoomStoreError>;
 
-    /// The unexpired verdict on `room`, if any.
+    /// The unexpired verdict on `room`, a service's domain JID or a room's
+    /// bare JID, if any.
     async fn verdict(
         &self,
         room: &BareJid,
