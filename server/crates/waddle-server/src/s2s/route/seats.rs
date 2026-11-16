@@ -921,7 +921,7 @@ impl SeatIndex {
     /// room message archived as `archive_id`, where `mark` was taken
     /// before the request was decided. It does not when the message was
     /// handed to the seat's queue since `mark`: the room gave the sender
-    /// its copy where it fanned the message out, and the answer would
+    /// its copy with the other occupants' copies, and the answer would
     /// repeat it. A message handed to the seat before `mark` is one the
     /// occupant sent again, whose answer is given again.
     pub fn answers_with(

@@ -100,8 +100,9 @@ impl ImmediateSink {
 /// connection writes. A remote occupant has no connection: its copy would
 /// reach it only as the answer to its request, after every other effect of
 /// the message, and so after the copies of later messages the room sent
-/// its seat meanwhile. Offered here, the copy is queued for the seat at
-/// the sender's place in the room's fan-out, like every other occupant's.
+/// its seat meanwhile. Offered here, the copy is queued for the seat when
+/// the message's effects reach it, among the other occupants' copies of
+/// the same message.
 /// The frame is still returned and settled as before; routing sends a copy
 /// of one archived message to a seat once, so the answer does not repeat
 /// it. Any other frame is for a session and is left alone.

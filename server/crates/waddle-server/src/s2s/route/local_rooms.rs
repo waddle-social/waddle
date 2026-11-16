@@ -51,9 +51,10 @@ pub enum SeatChange {
     /// The request is presence that enters the room although its sender
     /// holds a seat: the room no longer seats the occupant under the
     /// seat's generation, or the occupant asks to enter again. Nothing was
-    /// decided. The router ends the seat, opens another and asks again
-    /// with [`RoomRequest::joining`] set, so the room's answer precedes
-    /// its traffic for the new seat (XEP-0045 §7.1).
+    /// decided. The router opens a seat that replaces the one the sender
+    /// held and asks again with [`RoomRequest::joining`] set, so the
+    /// room's answer precedes its traffic for the new seat (XEP-0045
+    /// §7.1).
     Rejoin,
 }
 

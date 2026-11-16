@@ -1372,7 +1372,10 @@ impl LocalRooms for WebSocketLocalRooms {
 
     async fn seats(&self, seat: &Seat) -> Option<bool> {
         let state = self.state.upgrade()?;
-        let Some(actor) = get_room_actor(&state, &seat.room).await else {
+        // A room whose actor cannot be reached now (it is being restored,
+        // or its claim is moving) may seat the occupant: only a room this
+        // replica holds no actor for seats nobody.
+        let Some(actor) = get_room_actor_result(&state, &seat.room).await.ok()? else {
             return Some(false);
         };
         let seated = actor
@@ -1394,8 +1397,9 @@ impl LocalRooms for WebSocketLocalRooms {
         room: &BareJid,
     ) -> Option<Vec<(FullJid, waddle_xmpp_core::OccupancySessionGeneration)>> {
         let state = self.state.upgrade()?;
-        // A room without an actor here seats nobody here.
-        let Some(actor) = get_room_actor(&state, room).await else {
+        // A room without an actor here seats nobody here; one whose actor
+        // cannot be reached now is not answered for.
+        let Some(actor) = get_room_actor_result(&state, room).await.ok()? else {
             return Some(Vec::new());
         };
         actor

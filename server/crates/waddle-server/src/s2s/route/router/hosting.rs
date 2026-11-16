@@ -194,9 +194,9 @@ fn archive_id(stanza: &Stanza, room: &BareJid) -> Option<String> {
 /// Whether `stanza` is a room message that carries a chat state (XEP-0085)
 /// or a marker that answers a message (XEP-0333) and nothing an occupant
 /// would miss: no text, no subject and no other payload than the
-/// identifiers the room stamps and processing hints. An occupant that does
-/// not receive one misses nothing it could not do without, so these are
-/// what a congested path drops first.
+/// identifiers the room stamps, the thread it belongs to and processing
+/// hints. An occupant that does not receive one misses nothing it could
+/// not do without, so these are what a congested path drops first.
 fn is_ephemeral(stanza: &Stanza) -> bool {
     let Stanza::Message(message) = stanza else {
         return false;
@@ -212,7 +212,11 @@ fn is_ephemeral(stanza: &Stanza) -> bool {
         let ns = payload.ns();
         if ns == NS_CHATSTATES || (ns == NS_CHAT_MARKERS && payload.name() != "markable") {
             signal = true;
-        } else if ns != NS_SID && ns != NS_OCCUPANT_ID && ns != NS_HINTS {
+        } else if ns != NS_SID
+            && ns != NS_OCCUPANT_ID
+            && ns != NS_HINTS
+            && payload.name() != "thread"
+        {
             return false;
         }
     }
@@ -838,13 +842,15 @@ impl Inner {
                 return;
             };
             // Presence of a seated occupant that enters the room again is
-            // decided as a join: the seat it held is given up and one is
-            // opened for the join, held as pending, so the room's answer
-            // (the occupants, then the occupant's own presence) precedes
-            // whatever the room sends the new seat (XEP-0045 §7.1, §7.2.3).
+            // decided as a join: a seat is opened for it, held as pending,
+            // so the room's answer (the occupants, then the occupant's own
+            // presence) precedes whatever the room sends the new seat
+            // (XEP-0045 §7.1, §7.2.3). The seat the occupant held is not
+            // given up first: the one opened for the join takes its row
+            // and its place over, so the room's traffic finds a seat
+            // throughout.
             if answer.seat == SeatChange::Rejoin && !joining && given_up.is_none() {
                 if let Some(held) = seat.take() {
-                    self.close_seat(hosting, &held).await;
                     given_up = Some(held);
                     continue;
                 }
@@ -1692,7 +1698,7 @@ impl Inner {
 
     /// This replica is stopping, and its rooms with it: tell every remote
     /// occupant it seats that the service is shutting down (XEP-0045
-    /// §10.9, status 332, with status 110) and give its seat up, then wait
+    /// §11.2, status 332, with status 110) and give its seat up, then wait
     /// for the pairs' workers to take those stanzas, at most the notice
     /// wait. No seat is opened from here on. Nothing is promised: a
     /// stanza that no stream takes in time is lost with the replica.
