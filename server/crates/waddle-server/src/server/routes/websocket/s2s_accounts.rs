@@ -555,19 +555,21 @@ async fn receive_message(
             return Vec::new();
         }
         strip_private_payloads(&mut message);
-        deliver_headline(state, &account, full.as_ref(), &message, work).await;
+        deliver_headline(state, &account, &sender, full.as_ref(), &message, work).await;
         return Vec::new();
     }
     strip_private_payloads(&mut message);
     match message.type_ {
         MessageType::Error => {
-            if let Some(full) = full.as_ref().filter(|_| !work.abandoned()) {
-                let _ = deliver(state, full, &Stanza::Message(message)).await;
+            if let Some(full) = full.as_ref() {
+                if reaches_full_jid(state, &account, &sender, full).await && !work.abandoned() {
+                    let _ = deliver(state, full, &Stanza::Message(message)).await;
+                }
             }
             Vec::new()
         }
         MessageType::Headline => {
-            deliver_headline(state, &account, full.as_ref(), &message, work).await;
+            deliver_headline(state, &account, &sender, full.as_ref(), &message, work).await;
             Vec::new()
         }
         MessageType::Chat | MessageType::Normal => {
@@ -588,14 +590,36 @@ async fn receive_message(
     }
 }
 
-/// Whether a message from the remote `sender` may go to `account`'s
-/// offline store, or to a detached session that hands it there when its
-/// resume window closes: always from a contact, and from anybody else
-/// within its bounds ([`RemoteOfflineAdmissions`]), counted. A message
-/// beyond a bound is dropped by the caller; nothing tells the sender.
-async fn admit_offline(state: &WebSocketState, account: &BareJid, sender: &BareJid) -> bool {
+/// Whether the offline store would keep `message` for an account with no
+/// resource, as the classifier of local direct messages decides: XEP-0334
+/// hints are honoured, and a message carrying only a chat state is not
+/// kept.
+fn storable(message: &Message) -> bool {
+    !matches!(
+        classify_dm_intake(message, &OnlineResources::empty(), &Blocklist::empty()).pending,
+        PendingDecision::None
+    )
+}
+
+/// Whether `message`, from the remote `sender`, may be held for `account`
+/// by its offline store or by a detached session, which hands what it holds
+/// to that store when its resume window closes: always from a contact; from
+/// anybody else only a message the store would keep ([`storable`]),
+/// admitted within the bounds ([`RemoteOfflineAdmissions`]) and counted. It
+/// is classified before it is counted, so that a message the store would
+/// not keep never uses a stranger's share. A message that is not admitted
+/// is dropped by the caller; nothing tells the sender.
+async fn admit_offline(
+    state: &WebSocketState,
+    account: &BareJid,
+    sender: &BareJid,
+    message: &Message,
+) -> bool {
     if shares_presence_with(state, account, sender).await {
         return true;
+    }
+    if !storable(message) {
+        return false;
     }
     let Some(db) = database(state).await else {
         return false;
@@ -616,13 +640,48 @@ async fn admit_offline(state: &WebSocketState, account: &BareJid, sender: &BareJ
     }
 }
 
+/// Whether `resource` is held by a detached stream-management session, on
+/// this replica or recorded durably for another, whatever its presence was
+/// when it detached. A registry that cannot be read answers `true`, so that
+/// the caller applies the stricter rule.
+async fn is_detached(state: &WebSocketState, resource: &FullJid) -> bool {
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .detached_resources_for_user(&resource.to_bare())
+        .await
+    {
+        Ok(resources) => resources.contains(resource),
+        Err(error) => {
+            warn!(%error, "listing detached resources for a remote sender's stanza failed");
+            true
+        }
+    }
+}
+
+/// Whether a remote `sender`'s stanza that the offline store would never
+/// keep (a `headline`, an `error` message, directed presence) may reach
+/// `account`'s full JID `resource`: always when the resource is not
+/// detached; when it is, only from a contact. A detached session holds what
+/// it is sent until it resumes, within one queue for every sender, so a
+/// non-contact's stanzas reach it only as they would reach the offline
+/// store, and these would not.
+pub(crate) async fn reaches_full_jid(
+    state: &WebSocketState,
+    account: &BareJid,
+    sender: &BareJid,
+    resource: &FullJid,
+) -> bool {
+    !is_detached(state, resource).await || shares_presence_with(state, account, sender).await
+}
+
 /// Store `message`, a `chat` or `normal` message from the remote `sender`
 /// that no resource of `account` took, in the account's offline store
-/// (XEP-0160), as the classifier of local direct messages decides for an
-/// account with no resource: hints and chat-state-only messages are
-/// honoured. Unless it was `admitted` already, it is admitted first
-/// ([`admit_offline`]). A message beyond a bound, beyond the store's quota,
-/// or that cannot be stored is dropped; nothing tells the sender.
+/// (XEP-0160), if the store would keep it ([`storable`]). Unless it was
+/// `admitted` already, it is admitted first ([`admit_offline`]). A message
+/// beyond a bound, beyond the store's quota, or that cannot be stored is
+/// dropped; nothing tells the sender.
 async fn store_offline(
     state: &WebSocketState,
     account: &BareJid,
@@ -631,11 +690,10 @@ async fn store_offline(
     work: &AccountWork,
     admitted: bool,
 ) {
-    let routing = classify_dm_intake(message, &OnlineResources::empty(), &Blocklist::empty());
-    if matches!(routing.pending, PendingDecision::None) {
+    if !storable(message) {
         return;
     }
-    if !admitted && !admit_offline(state, account, sender).await {
+    if !admitted && !admit_offline(state, account, sender, message).await {
         return;
     }
     if work.abandoned() {
@@ -672,7 +730,7 @@ enum Direct {
     Handled,
     /// Nothing took it; `admitted` when it was already admitted to the
     /// offline store's bounds for a detached session that then did not
-    /// take it either.
+    /// take it.
     Untaken { admitted: bool },
 }
 
@@ -681,8 +739,9 @@ enum Direct {
 /// only, §8.5.3.2.1) to the one most available resource, a connected one
 /// when none is available, or a detached one. A detached session hands what
 /// it holds to the offline store when its resume window closes, so a
-/// message is handed to one only once admitted as it would be to the store
-/// ([`admit_offline`]); one beyond the bounds is dropped.
+/// message is handed to one, named or selected, only once admitted as it
+/// would be to the store ([`admit_offline`]); one that is not admitted is
+/// dropped. It is admitted at most once.
 async fn deliver_direct(
     state: &WebSocketState,
     account: &BareJid,
@@ -695,7 +754,17 @@ async fn deliver_direct(
     if work.abandoned() {
         return Direct::Handled;
     }
+    let mut admitted = false;
     if let Some(full) = full {
+        if is_detached(state, full).await {
+            if !admit_offline(state, account, sender, message).await {
+                return Direct::Handled;
+            }
+            admitted = true;
+        }
+        if work.abandoned() {
+            return Direct::Handled;
+        }
         match deliver(state, full, &stanza).await {
             Delivery::Taken | Delivery::Dropped => return Direct::Handled,
             Delivery::NotBound if message.type_ != MessageType::Chat => return Direct::Handled,
@@ -741,9 +810,9 @@ async fn deliver_direct(
     }
     let detached = detached_resources(state, account).await;
     if detached.is_empty() {
-        return Direct::Untaken { admitted: false };
+        return Direct::Untaken { admitted };
     }
-    if !admit_offline(state, account, sender).await {
+    if !admitted && !admit_offline(state, account, sender, message).await {
         return Direct::Handled;
     }
     for resource in detached.iter().take(DELIVERY_ATTEMPTS) {
@@ -758,19 +827,21 @@ async fn deliver_direct(
     Direct::Untaken { admitted: true }
 }
 
-/// Deliver a `headline` (an event notification included): to the full JID
-/// it names if bound, or to every available resource with a non-negative
-/// priority (RFC 6121 §8.5.2.1.1). It is never stored.
+/// Deliver a `headline` (an event notification included) from the remote
+/// `sender`: to the full JID it names if bound, and if detached only from a
+/// contact ([`reaches_full_jid`]), or to every available resource with a
+/// non-negative priority (RFC 6121 §8.5.2.1.1). It is never stored.
 async fn deliver_headline(
     state: &WebSocketState,
     account: &BareJid,
+    sender: &BareJid,
     full: Option<&FullJid>,
     message: &Message,
     work: &AccountWork,
 ) {
     let stanza = Stanza::Message(message.clone());
     if let Some(full) = full {
-        if !work.abandoned() {
+        if reaches_full_jid(state, account, sender, full).await && !work.abandoned() {
             let _ = deliver(state, full, &stanza).await;
         }
         return;

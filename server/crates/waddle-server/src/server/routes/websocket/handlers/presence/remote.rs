@@ -44,8 +44,8 @@ use crate::server::routes::websocket::handlers::account_reads;
 use crate::server::routes::websocket::handlers::roster_fanout::send_roster_push_to_resources;
 use crate::server::routes::websocket::handlers::unserved_route::unserved_destination;
 use crate::server::routes::websocket::s2s_accounts::{
-    account_exists, admits_domain, blocklist, blocks, database, deliver, lock_account, s2s_enabled,
-    telemetry,
+    account_exists, admits_domain, blocklist, blocks, database, deliver, lock_account,
+    reaches_full_jid, s2s_enabled, telemetry,
 };
 use crate::server::routes::websocket::transport_xml::stanza_to_xml;
 use crate::server::routes::websocket::WebSocketState;
@@ -204,8 +204,9 @@ pub(crate) async fn receive_remote_presence(
     match presence.type_ {
         PresenceType::None | PresenceType::Unavailable => {
             if let Ok(full) = to.clone().try_into_full() {
-                // Directed presence to one resource (RFC 6121 §8.5.3.1).
-                if !work.abandoned() {
+                // Directed presence to one resource (RFC 6121 §8.5.3.1); a
+                // detached session holds it only from a contact.
+                if reaches_full_jid(state, &account, &contact, &full).await && !work.abandoned() {
                     let _ = deliver(state, &full, &Stanza::Presence(presence)).await;
                 }
                 return Vec::new();
