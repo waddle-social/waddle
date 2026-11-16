@@ -1810,12 +1810,15 @@ yet uses two replicas; that is verification step 4.
   scope's Space means: until then its node is described and listed to
   nobody.
 - Remote principals reaching these surfaces over S2S: the join, the
-  archive read, discovery, self-ping and the room's acceptance are reached
-  through [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a), and the
-  decision they reach is recorded under [Remote principals at the effect
-  boundary](#remote-principals-at-the-effect-boundary-g17). Room
-  administration and the other surfaces of this section are not reachable
-  over S2S.
+  archive read, discovery, self-ping, the room's acceptance and room
+  administration (the `muc#admin` lists and changes, the `muc#owner`
+  configuration and XEP-0425 moderation) are reached through
+  [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a), and the decision
+  they reach is recorded under [Remote principals at the effect
+  boundary](#remote-principals-at-the-effect-boundary-g17). The other
+  surfaces of this section (calls, pins, hats, voice requests,
+  invitations, the Space's nodes and commands) are not reachable over
+  S2S.
 - Recreation of a scope, a room or a node under a new lifecycle.
 - A deployment-wide policy guard; the first slice's community generation
   still does not fence a changed deployment override.
@@ -3314,7 +3317,24 @@ them.
   under, so the role goes to a trusted home's occupant only while every
   one of its seats is on a `pkix` stream. The same holds where a seat is
   taken: a join that would seat a remote principal as owner, admin or
-  moderator without its witness honouring that is refused.
+  moderator without its witness honouring that is refused, and one the
+  room seated all the same is undone without anyone being told that an
+  occupancy ended, since nobody was told that it began.
+- An owner or admin affiliation (an XEP-0045 affiliation change) derives
+  the moderator role for every occupant of the account, in the room actor,
+  for the account and not for each seat. So the affiliation is not
+  recorded, in a managed room or any other, while one of the account's
+  seats on the replica that holds the room would not honour it
+  (`seats_honour_privilege`): the requester is answered `not-allowed`, and
+  grants it once that occupant has left or has entered over a stream that
+  honours it. An account that holds no seat there is decided by the
+  issuance policy alone, and each seat it takes later where the seat is
+  taken.
+- A room's own message (a system message) in a managed room: each
+  occupant is named without a request, so a remote occupant is decided on
+  the evidence each of its seats on this replica was admitted under and
+  receives its copy only if all of them admit it to read, when the
+  audience is chosen and again as each copy is routed.
 - Re-seating after a claim move: a recorded remote occupant is seated
   again only when this replica takes over its seat, which it can once the
   seat's owner is no longer alive, and is then decided on the evidence

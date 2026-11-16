@@ -227,10 +227,11 @@ wiring in `server/lifecycle.rs`.
 
 Configuration may set any value from one up to its ceiling, never beyond.
 Rates and most caps default to their ceilings, so they can only be lowered;
-the unauthenticated sockets per source address (2, ceiling 4) and the
-negotiating streams per remote domain (3, ceiling 4) default below them, as
-do the idle timeout, connection age, eviction idle time, replacement
-interval and the two backoff durations, and can be raised to them. The input
+the unauthenticated sockets per source address (2, ceiling 4), the
+negotiating streams per remote domain (3, ceiling 4) and the router's pair
+queues (64, ceiling 256) default below them, as do the idle timeout,
+connection age, eviction idle time, replacement interval and the two
+backoff durations, and can be raised to them. The input
 rates (`input_per_second`, `input_burst`, `input_per_socket_per_second`,
 `input_per_socket_burst`) also have a floor of 32 KiB/s, at which a stanza
 at the 512 KiB ceiling arrives in 16 seconds, within the 30-second bound on
@@ -256,6 +257,7 @@ below the per-socket one. The values are bounds, not measured capacity.
 | Outbound backoff | Failing remote domains only; 1 s doubling to 300 s; 256 entries | A domain without an entry is never refused. An entry is kept until its wait has passed: when the table is full, a new failure replaces the entry updated longest ago among those whose wait has passed, and is not recorded when every entry is still waiting (G6). |
 | Input rate | 64 KiB/s burst 128 KiB per socket; 512 KiB/s burst 1 MiB globally; each at least 32 KiB/s | Reads pause (backpressure); the connection is not closed for its rate. Deadlines still bound a throttled negotiation; the incomplete-element deadline adds back the time reads waited for the rates (see [Deadlines](#deadlines)). |
 | Output | rustls buffer limit 64 KiB per connection; each batch written within the 1 s write deadline | Close. |
+| Router pair queues (`max_pair_queues`) | 64 (ceiling 256): the directional domain pairs the S2S router keeps a queue of outbound stanzas for. Half may be opened by what remote senders ask for | The router's, not the connection manager's: a stanza for a pair without a queue is refused, a reply to a remote sender is dropped and a remote occupant's join is refused with `resource-constraint` ([routing](s2s-routing-2047.md#egress), [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). |
 
 **Per-peer budgets.** A remote domain's budget is spent only by
 connections that have proven it: an inbound connection counts against the

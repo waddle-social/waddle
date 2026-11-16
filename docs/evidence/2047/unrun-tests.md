@@ -116,7 +116,8 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final, stress and run6 logs |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final and run6 logs |
 | `xep0045_s2s_inbound_muc` (29) | W6a | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and five cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration) | Not run |
-| `xep0045_s2s_inbound_muc_replicas` (6) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Compiled with and without `clustering` | Not run |
+| `xep0045_s2s_inbound_muc_replicas` (9) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Three cases hand the holder stanzas with what a dialback stream, or a public-CA certificate, would have proved. Compiled with and without `clustering` | Not run |
+| `xep0045_s2s_inbound_muc_router` (17) | W6a | loopback; the production S2S router and connection manager with a scripted room host and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4 s | Not run |
 | `xep0313_s2s_inbound_mam` (5) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0030_s2s_inbound_muc_discovery` (6) | W6a | loopback; in-memory SQLite | Not run |
 | `xep0085_s2s_inbound_chat_states` (1) | W6a | loopback; in-memory SQLite | Not run |
@@ -192,8 +193,8 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 `tests/xep0060_space_fanout_fence/storage.rs` (W5d),
 `tests/ws_loopback_support/mod.rs` (W5c), `tests/s2s_routing_support/mod.rs`
 (W5a, W6b, W6a), `tests/s2s_remote_muc_support/mod.rs` (W6b, integration)
-and `tests/s2s_inbound_muc_support/mod.rs` with its `managed.rs` (W6a) are
-compiled into the targets above and add no cases. The inbound MUC support
+and `tests/s2s_inbound_muc_support/mod.rs` with its `managed.rs` and
+`scripted.rs` (W6a) are compiled into the targets above and add no cases. The inbound MUC support
 creates its rooms federated (its S2S snapshot sets
 `[host_policy] federate_new_rooms`, and the managed fixture sets the
 catalog's `federated` column); a case that needs the default clears it. W6a changed
@@ -253,9 +254,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 98 (77 integration targets, 19 library test modules, 2 chat test files) |
+| Test targets listed | 99 (78 integration targets, 19 library test modules, 2 chat test files) |
 | Run, with a cited log | 37 targets, 806 cases, all passed in their latest cited run |
-| Not run | 61 targets (19 of them library modules) |
+| Not run | 62 targets (19 of them library modules) |
 
 By log: the run6 S2S log covers 19 targets (133 `waddle-xmpp` cases in 4,
 427 `waddle-server` cases in 15); the run6 host-grant final log covers 21 targets
@@ -266,7 +267,7 @@ A target is counted as run only when the whole binary's cases appear in a
 log. Skipped prerequisites are not recorded as passed: nothing here was run
 against Prosody, ejabberd or a second deployment.
 
-W6a adds fourteen targets (63 cases) and changes the cases of three that
+W6a adds fifteen targets (83 cases) and changes the cases of three that
 had run (`s2s_reachability`, `xep0045_host_grant_revocation` and
 `host_grant_remote_principals`, 32 cases in the logs), which are counted as
 not run until they run again: every case of W6a is compiled and none has
@@ -278,7 +279,13 @@ a carried request from one router to the other directly: the cluster's
 room claims and the relay hop of
 `waddle.clustering.relay.remote_room_request.v1` are compiled and not
 exercised by any case, and need two processes with the `clustering`
-feature (verification steps 6 and 8).
+feature (verification steps 6 and 8). That includes the cluster's carrier
+itself (`ClusterRoomCarrier`): which rooms it carries by their catalog
+row, and its answer for a room whose claim is moving, are read from the
+code only. The stage that places requests off the room workers, the ends
+of a seat and the request and egress allowances are held by the
+router-level target with a scripted host; the cases for what a weaker
+stream proves use carried stanzas, not a second kind of stream.
 
 ## Deferred hardening and follow-ups
 
@@ -426,9 +433,20 @@ implemented unless the text says so.
   takes them, and their interplay with the ingress recovery of unfinished
   deliveries and the room's effect outbox has not been executed; an
   unmanaged room's occupants at a domain the snapshot no longer admits
-  stay until their stream is lost or the replica restarts; the request
-  rate has no per-account share and the per-account archive allowance is
-  kept in memory on one replica; MAM is answered and not advertised to
+  stay until their stream is lost or the replica restarts; the
+  per-account share of the request rate and the per-account archive
+  allowance are kept in memory on one replica; a room's stanzas carry no
+  occupancy generation, so a presence update of an earlier occupancy that
+  is delivered again reaches the seat of an occupant that entered again
+  (presence that ends an occupancy is checked against the room, and a
+  message is told by its archive identifier); requests for one room are
+  placed one at a time, so a room whose holder does not answer delays that
+  room's other requests by up to the placement timeout; an owner or admin
+  standing is refused while a seat of the account would not honour it,
+  where holding back the role of single seats would need the room actor
+  to derive a role for each seat; a room without a catalog row that an
+  owner opened by hand while the deployment default is off is reached only
+  through the replica that holds it; MAM is answered and not advertised to
   remote askers; the web client does not offer the `federated` field.
 - Outbound MUC (W6b), merged: a stream that waited for the router and ends
   for a deadline, eviction or replacement before reading again is reported

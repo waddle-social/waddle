@@ -375,8 +375,8 @@ cannot take all of a replica's capacity.
 | Bound | Default |
 | --- | --- |
 | Stanzas queued per directional pair | 64 |
-| Directional pairs with a queue | 64 |
-| Pairs a reply to a remote sender may open a queue for | 32 |
+| Directional pairs with a queue (`[limits] max_pair_queues` of the S2S snapshot, up to 256) | 64 |
+| Pairs a reply to a remote sender, or a remote occupant's join, may open a queue for | half of them: 32 |
 | Requests pending on one replica | 4,096 |
 | Requests pending to one remote domain on one replica | 1,024 |
 | Requests pending for one local resource | 16 (below the per-pair queue) |
@@ -949,8 +949,10 @@ XEP-0425, XEP-0444 and XEP-0461 for what occupants send, pinned at
 4132c531487fe9450ae90b905b8df950d0d478b2; ADR-0020 D10). The router's part
 is in `crates/waddle-server/src/s2s/route/`: `reach.rs` (which operations
 reach the host), `local_rooms.rs` (what the router hands the host and
-expects back), `seats.rs` (the seat table and the replica's index of the
-seats it holds) and `router/hosting.rs` (queues, seats and their ends). The
+expects back), `placement.rs` (where a request waits while the replica
+that holds its room is found), `seats.rs` (the seat table and the
+replica's index of the seats it holds) and `router/hosting.rs` (rates,
+queues, seats and their ends). The
 host is `server/routes/websocket/s2s_rooms.rs`; it calls the room handlers
 client sessions use, each given the evidence it decides with
 (`handlers/iq/muc_remote_admin.rs` for administration). With clustering,
@@ -1113,10 +1115,22 @@ end a seat.
 
 - *Opening.* A join from a sender without a seat opens one, within the
   bounds (below), before the host decides it: the row is inserted and the
-  seat held as pending. The host seats the occupant under the seat's
-  occupancy generation and says whether the room seated it. A join the
-  room refused, or whose answer could not be read (the occupant is then
-  removed again), drops the seat.
+  seat held as pending. A seat is opened only where the room's stanzas for
+  it can leave: a place on the queue of the pair from the room's domain to
+  the occupant's, which a join opens within the bound on queues remote
+  senders open; otherwise the join is refused with `resource-constraint`
+  (type `wait`) and the room is not asked. The host seats the occupant
+  under the seat's occupancy generation and says whether the room seated
+  it. A join the room refused, or whose answer could not be read (the
+  occupant is then removed again), drops the seat.
+- *Entering again.* Available presence from an occupant that holds a seat
+  is a change of availability where the room's update path takes it.
+  Presence that enters instead (it carries the `muc` element, or the room
+  no longer seats the occupant) is decided as a join: the host says so
+  without deciding it, the router gives the seat up, opens another under a
+  new generation, held as pending, and asks again. If the room does not
+  seat the occupant again, it is told to remove the occupancy whose seat
+  was given up.
 - *Order.* While a join is being answered, what the room sends the new
   occupant through the delivery path is kept, up to 256 stanzas, and
   queued behind the join's answer, so the occupant receives the room's
@@ -1124,9 +1138,27 @@ end a seat.
   than that ends the seat.
 - *Following the room.* The seat follows the room's own presence for the
   occupant as it leaves: unavailable presence with status 110 and without
-  status 303 ends the seat once it is queued (a leave, a kick, a ban, a
-  revoked membership, the room's destruction); with status 303 it records
-  the new nickname.
+  status 303 ends the seat (a leave, a kick, a ban, a revoked membership,
+  the room's destruction); with status 303 it records the new nickname. In
+  the answer to the occupant's own request that presence ends the seat
+  once it is queued. When it reaches the router through the delivery path
+  instead, nothing on it says which occupancy it is for, so the room is
+  asked first, in the room's order: the presence is sent, and the seat
+  ended, only if the room no longer seats the seat's generation. Presence
+  for an earlier occupancy of an occupant that has entered again (a room
+  effect delivered a second time, a departure that was retried) is
+  dropped: it neither ends the new seat nor reaches its occupant. When the
+  room cannot say, the seat ends as for an undeliverable stanza.
+- *The generation.* The occupancy generation is minted with the seat,
+  recorded in its row and given to the room, which seats the occupant
+  under it; a removal, a check and a take-over all name it. A room's
+  stanza does not carry it: the stanzas a room sends an occupant name the
+  occupant's full JID, and the room's effect records name sessions the
+  same way. What that leaves is a copy of an older stanza that does not
+  end an occupancy and is delivered again after the occupant entered
+  again: a message is told from one already sent by its archive
+  identifier, any other such stanza (a presence update) is sent to the new
+  seat.
 - *Evidence.* A stanza from a seated occupant that arrives on a stream of
   another strength or trust profile is not the seat's: the seat ends, the
   occupant is told (below) and the stanza is decided as one from a sender
@@ -1152,7 +1184,20 @@ only:
 One stanza is queued for one seat, without waiting, on a queue of the
 seat's directional domain pair that holds only local rooms' stanzas
 (4,096 by default). Nothing fans out after that point and no recipient is
-resolved again. The pair's worker checks again before it writes: peer
+resolved again.
+
+A remote occupant can make a room send to the seats of every other remote
+domain, so what it can have queued for them is bounded where nothing
+depends on its delivery. A room message that carries only a chat state
+(XEP-0085) or a marker that answers a message (XEP-0333), with no text and
+no subject, is dropped for a seat when the queue for the seat's domain is
+more than three quarters full or has no place, and beyond an allowance of
+such copies for its room (1,024 a second, four seconds' worth at once) and
+for its sender (256 a second, on the same terms). Dropping one ends no
+seat. Every other stanza that finds no place ends the seat, as below; the
+messages an account can have archived, which are the other stanzas a
+remote account can make a room send, are bounded where they enter
+(Messages). The pair's worker checks again before it writes: peer
 admission must admit the remote domain now, and a room's stanza must be
 for a seat still held under the same occupancy generation, or be the
 presence that ends it. So nothing a room emits reaches a remote JID it
@@ -1164,15 +1209,18 @@ sender of the request it answers.
 
 | Cause | What happens |
 | --- | --- |
-| The room's own presence ends the occupancy (leave, kick, ban, revocation sweep, room destroyed) | The presence is sent to the occupant with its status codes; the seat is released and its row removed |
-| A stream between the room's domain and the occupant's domain is lost (`StreamEnd::Lost`, as [stream ends](#outbound-muc-w6b) are classified) | Every seat of that pair this replica holds ends: the room removes the occupant and tells those who stay with status 333 (XEP-0045 §11.1). Nothing is sent to the removed occupant; its server saw the stream fail. Seats of the pair that another replica holds are marked in the table, and their owner ends them at its next sweep, within five seconds. A stream that is closed in order ends no seat |
+| The room's own presence ends the occupancy (leave, kick, ban, revocation sweep, room destroyed) | The presence is sent to the occupant with its status codes; the seat is released and its row removed. Presence that did not come as the answer to the occupant's own request is sent only once the room confirms that it no longer seats that generation |
+| A stream between the room's domain and the occupant's domain is lost (`StreamEnd::Lost`, as [stream ends](#outbound-muc-w6b) are classified) | Every seat of that pair this replica holds ends: the room removes the occupant and tells those who stay with status 333 (XEP-0045 §11.1). Nothing is sent to the removed occupant; its server saw the stream fail. Seats of the pair that another replica holds are marked in the table, and their owner ends them at its next sweep, within five seconds: it gives each seat up before it queues the seat's end, so a marked row that is read again before that end removed it queues nothing more. A stream that is closed in order ends no seat |
 | A stanza of the room cannot be queued for the seat, no stream can be established for it, or the stream does not take it | The seat ends at once, so nothing more is queued for it; the room removes the occupant with status 333; the occupant is sent its own unavailable presence with statuses 110 and 333 if a place is free for it |
 | The occupant's server answers the room with a delivery error | The room removes the occupant with status 333 (§17.1.2, "ghost users") |
 | A stanza of the occupant arrives on a stream that proved something else | As for a stanza that cannot be queued |
 | The room's `federated` setting is turned off | Every seat of the room ends once the change is committed: the room removes the occupant with status 333 and the occupant is sent its own unavailable presence with statuses 110 and 333 |
+| The host refuses a request of a seated occupant in a way that ends its occupancy (its domain is no longer admitted, its room is not open to it any more, its leave could not be answered) | The seat ends, the room is told to remove the occupant, with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 after the refusal |
 | The host does not decide a join within 30 s | The seat opened for it ends and the room removes the occupant if it seated it |
-| The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Each seat is checked against its room every 60 s and released when the room says it does not seat that generation |
-| The replica stops | Its rows are removed at shutdown, within the shutdown budget. Rows a replica left without shutting down are removed by another replica once the owner has not recorded that it is alive for ten minutes; a join for the same room and occupant that reaches a live replica replaces such a row after 30 s |
+| The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Every 60 s a pass asks each room with seats, once, for the occupants it seats and their generations, and releases the seats the room does not name; the occupant is sent its own unavailable presence with statuses 110 and 333. A pass runs on a task of its own, takes at most 256 rooms and 60 s, and the next goes on where it stopped |
+| The seat's row could not be removed when the seat ended | The same pass reads this replica's rows, a page of 256 in the order of the table's key, and removes those older than 30 s for which it holds no seat |
+| The replica stops | It tells each occupant it seats, with the occupant's own unavailable presence and statuses 110 and 332 (XEP-0045 §10.9), gives the seats up and waits up to 2 s for those notices to be taken by their streams, which drain only after that; nothing is promised for a notice no stream takes. Its rows are removed at shutdown, within the shutdown budget. Rows a replica left without shutting down are removed by another replica once the owner has not recorded that it is alive for ten minutes; a join for the same room and occupant that reaches a live replica replaces such a row after 30 s, whatever the seat bounds say, since the row is the join's own |
+| The replica that held the room stopped without shutting down, and the room's claim moved | The replica that takes the room over takes over the seats of its recorded remote occupants, so that the room can seat them as recorded, and ends each of them once the room has: what the stopped replica had queued for an occupant is lost and cannot be told from what it received. The room removes the occupant with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 and enters again |
 | The hosting replica's snapshot no longer admits the domain | The occupant's next request is refused, nothing more is written to it, and for a managed room the revocation sweep removes it ([Seated occupants](host-grant-authority-2047.md#seated-occupants-roles-and-media-g14)). An occupant of an unmanaged room that sends nothing keeps its entry in the room until its stream is lost or the replica restarts, which a changed snapshot requires (below) |
 
 **Messages.** A `groupchat` message from a seated remote occupant is
@@ -1185,8 +1233,22 @@ takes part: no carbons, no blocking list, no stream-management position,
 and no archive row of the sender's own (its server keeps that). The room's
 plan is otherwise the one every occupant's message gets: the room's
 archive row, inbox projections for the room's durable members, and one
-copy for each occupant. The sender's reflection (XEP-0045 §7.4) is the
-answer to its request.
+copy for each occupant.
+
+The sender's own copy (XEP-0045 §7.4) is, for a session, a frame its
+connection writes, and it is returned as the answer to the request. A
+remote sender has no connection, and an answer is queued only after every
+effect of the message has run, behind the copies of later messages the
+room sent its seat meanwhile. So the frame is also handed to the sender's
+seat where the room fans the message out, at the sender's place among the
+occupants, and the answer does not repeat a copy handed to the seat while
+the request was decided (it is told by the identifier the room's archive
+gave the message). A message the occupant sends again is answered again.
+
+The enrichment hooks of this deployment's extensions do not run for a
+remote occupant's message: they run for the messages of its own accounts,
+and none has been reviewed to act for a principal that holds no account
+here.
 
 Nothing is kept for an account at another server beside what the room
 itself keeps. The inbox projection and the activity projection write only
@@ -1254,8 +1316,30 @@ remote sender has.
 room's claim, and a peer's inbound stream lands on whichever replica
 accepted it. A stanza for a room another replica holds is carried there
 before anything is decided or seated for it where it arrived
-(`LocalRooms::place`, asked by the router ahead of every seat decision), so
-a seat is only ever on the replica that holds the room. The stanza is
+(`LocalRooms::place`), so a seat is only ever on the replica that holds the
+room.
+
+Placing a request asks another replica, which may be slow or gone, so it
+is done in a stage of its own (`s2s/route/placement.rs`) between the
+stream and the workers that hand requests to the room host. Those workers
+serve the rooms of every remote domain in turn and never wait for another
+replica. Requests for one room wait in one lane, in arrival order, and are
+placed one at a time, so they reach the room's queue, or its holder, in
+the order they arrived. Lanes are placed concurrently: 64 rooms at once on
+a replica, and 8 for the requests of one remote domain, so a domain whose
+rooms are held by a replica that does not answer leaves the places of
+every other domain alone. Placing one request, waiting for one of those
+places included, takes at most 5 s. A request whose holder does not answer
+within that is answered with `resource-constraint` (type `wait`), and so
+is everything that waits for the same room then; for the next 5 s requests
+for that room are answered the same way without asking again, so a silent
+holder costs each of its rooms one wait and not one for every stanza. No
+stream is closed and no seat ends for a holder that does not answer. What
+waits to be placed is bounded like the queues behind the stage (1,024 on a
+replica, 64 for one room, 64 from one remote domain); a stanza beyond a
+bound holds its stream until it fits, as there. Stanzas for the service
+itself are not placed, and a host that keeps every room itself (a single
+replica) is asked nothing. The stanza is
 carried by one relay message,
 `waddle.clustering.relay.remote_room_request.v1`, with the facts of the
 stream that carried it (the sender's address, the authentication
@@ -1275,15 +1359,36 @@ other evidence ends the seat as on a single replica. A carried stanza is
 never carried again; a holder that no longer owns the room says so, and
 the carrying replica looks the owner up once more.
 
-A room the channel catalog says is not federated, or is a group
-conversation, is not carried: the replica the stanza reached answers it as
-a room that does not exist, whatever the state of the room's holder.
+A room is carried only when it may be open to other servers: its row of
+the channel catalog says so, or it has no row while the deployment opens
+its new rooms to other servers (`[host_policy] federate_new_rooms`). A
+room the catalog says is not federated, a group conversation, and, while
+that default is off, an address without a row are not carried: the replica
+the stanza reached answers them as a room that does not exist, whatever
+the state of the room's holder, so a remote sender cannot tell a closed
+room from a missing one by whether a holder answers and cannot make a
+replica ask another for any address it names. The same holds where the
+room's actor cannot be reached on the replica that decides (it is being
+restored, or its claim is moving): the answer is `internal-server-error`
+(type `wait`) only for a room that may be open, and `item-not-found` for
+any other address.
+
+What this leaves: a room without a catalog row that an owner opened by
+hand in its configuration form, in a deployment whose default for new
+rooms is off, is reached only through the replica that holds it; a
+request that lands on another replica is answered `item-not-found`. Such a
+room has no row to record the setting in. With the default on, an address
+without a row is carried, and a holder that does not answer then tells a
+remote sender that some replica holds a room of that name.
 
 The relay's reply says only whether the holder queued the stanza. When it
 did not (its queues are full, it no longer holds the room, it hosts no
-rooms, it could not be reached), the carrying replica answers the sender
-with `resource-constraint` (type `wait`). The carrying replica spends its
-domain's request rate on the stanza; the holder does not spend it again.
+rooms, it could not be reached, it did not answer in time), the carrying
+replica answers the sender with `resource-constraint` (type `wait`). The
+carrying replica spends its domain's request rate, and the sender's
+account's share of it, on the stanza; the holder does not spend them
+again. The holder takes a carried stanza only for a room at its MUC
+service's domain.
 Stanzas for the service itself are answered by the replica they reach. A
 stream lost on the carrying replica marks the pair's seats in the shared
 table, and their holder ends them at its next sweep, as before.
@@ -1337,7 +1442,21 @@ following is applied to a remote principal on top of them:
   sets a room affiliation (`channels:set-affiliation`): an owner or admin
   affiliation is granted only to an account of a domain this deployment
   serves or of a trusted home, and the moderator role only to an occupant
-  whose seat's evidence honours room moderation; otherwise `not-allowed`;
+  whose seat's evidence honours room moderation; otherwise `not-allowed`.
+  A room gives every occupant of an owner or admin the moderator role and
+  decides that for the account, not for each of its seats, so an owner or
+  admin affiliation is also not granted while one of the account's seats
+  in the room, on the replica that holds it, would not honour it
+  (`seats_honour_privilege`; `not-allowed`): it is granted once that
+  occupant has left or has entered over a stream that does. The same check
+  is applied in a room an enrolled scope manages. Refusing the grant was
+  chosen over granting it and holding back the role of single seats: the
+  room actor derives one role for an account, and the durable
+  administration batch records what the actor applies;
+- a join the room seated on a standing that is not honoured is undone
+  without anyone being told that the occupancy ended
+  (`MucRemovalCause::Unannounced`): the occupants had not been sent the
+  joiner's presence, and the joiner is answered with the refusal;
 - D8 at the request, for administration: the standing the room holds for a
   remote requester counts only as honoured for the stream that carried the
   request (above);
@@ -1361,6 +1480,10 @@ reached.
 | Seats of one remote account, under every resource | 64 |
 | Seats of the deployment | 65,536 |
 | Stanzas one remote domain may address to the MUC service, on average and at once | 50 a second, 200 |
+| Of those, the stanzas of one remote account, on average and at once | 10 a second, 40 |
+| Refusals of an account's stanzas beyond its share that are answered, for one remote domain | 5 a second, 20 |
+| Rooms being placed at once on one replica, and for the requests of one remote domain | 64, 8 |
+| How long placing one request may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s |
 | Requests waiting for the room host on one replica (four workers of 256) | 1,024 |
 | Requests waiting for one room | 64 |
 | Requests waiting from one remote domain, of one worker's 256 | 64 |
@@ -1371,21 +1494,58 @@ reached.
 | How long the holder of a room may take to queue a carried request | 1 s to take it, 3 s to answer |
 | Local rooms' stanzas waiting for one directional pair's stream | 4,096 |
 | How long an answer waits for a place among them | 10 s |
+| Copies of chat states and markers queued for remote seats, for one room and for one sender, a second (four seconds' worth at once) | 1,024, 256 |
+| Remote domains one replica seats occupants for (the pairs a remote sender may open a queue for, below) | 32 |
+| How long a stopping replica waits for its shutdown notices to be taken | 2 s |
 | Room stanzas kept for a seat while its join is answered | 256 |
-| How often seats are checked against their rooms | 60 s |
+| How often seats are checked against their rooms, and how many rooms one pass asks | 60 s, 256 |
 | How long a seat's owner must have been silent before a join elsewhere replaces it | 30 s |
 
 A join beyond a seat bound is refused with `resource-constraint` (type
-`wait`). The bounds are counted and the row inserted in one transaction;
-on PostgreSQL the transaction takes an advisory lock keyed on the remote
+`wait`). Whether a seat for the room and occupant exists is read first,
+and answered before any bound: the join then takes that row over or
+leaves it to the replica that holds it, and the row never counts against
+the join that replaces it. The bounds of the room, the remote domain and
+the account are counted and the row inserted in one transaction; on
+PostgreSQL the transaction takes an advisory lock keyed on the remote
 domain, so the joins of one domain are counted one at a time and its
-per-room, per-domain and per-account bounds hold exactly, while the
-deployment's total can be exceeded briefly by joins of different domains
-that commit together. A stream whose stanza for the MUC service finds its
-domain's rate spent or the queues full stops reading until it fits, and is
-closed with `resource-constraint` if it does not fit in time, as for
-[outbound MUC](#outbound-muc-w6b). Requests for one room are decided one at
-a time, in the order they arrived.
+per-domain and per-account bounds hold exactly, while a room's bound can
+be exceeded briefly by joins of different domains that commit together.
+The deployment's total is read from a count each replica takes at most
+every 5 s and adjusts for its own joins and ends, so the table is not
+counted for every join; the total is held to within what the replicas
+seat in that time.
+
+**How many remote domains a replica seats (G20).** A pair's queue is
+opened for a join within the bound on queues remote senders open (half
+the pair queues: 32 by default), and a pair keeps its queue while the
+replica seats an occupant of its remote domain, so a seat's traffic never
+finds every queue taken by pairs that were only idle. One replica
+therefore seats occupants of at most 32 remote domains at once with the
+default of 64 pair queues, and of at most half of `[limits]
+max_pair_queues` otherwise (ceiling 256). A join for a further domain is
+refused with `resource-constraint`. The other half stays for what local
+entities send. The connection manager's own bounds are lower today: 12
+remote domains with an established stream and 16 outbound sockets on a
+replica ([connection manager](s2s-connection-manager-2047.md)), so those
+decide first until they are raised. Before D1's default moves to `open`,
+G20's evidence must cover this share: the first domains to join hold the
+queues remote senders may open for as long as they keep an occupant
+seated.
+
+A stream whose stanza for the MUC service finds its domain's rate spent or
+the queues full stops reading until it fits, and is closed with
+`resource-constraint` if it does not fit in time, as for
+[outbound MUC](#outbound-muc-w6b). A stanza beyond its account's share of
+the domain's rate (requests, messages, chat states and markers alike; a
+leave and a delivery error are always taken) is not taken at all: the
+domain's rate is not spent on it and its stream is not held, so one
+account cannot spend what the other accounts of its domain may send. A
+request or a message with content that is refused this way is answered
+with `resource-constraint` (type `wait`) within an allowance of such
+answers for the domain; a chat state, a marker, presence and whatever
+exceeds that allowance are dropped unanswered. Requests for one room are
+decided one at a time, in the order they arrived.
 
 **Not enabled for remote principals.**
 
@@ -1734,18 +1894,24 @@ runbook (G24):
   moves to `open`, G20's evidence must cover the shares: any admitted
   domain can make the router open a reply queue, so replies are limited
   to 32 of the 64 pair queues, and a pair holds its queue until it has
-  been idle for 60 s; a local response that completes nothing still
+  been idle for 60 s, or for as long as a replica seats an occupant of
+  its remote domain ([how many remote domains a replica
+  seats](#inbound-muc-w6a)); a local response that completes nothing still
   occupies its pair's queue until then, although it is never dialled for;
   and one unresponsive remote domain can hold at most 1,024 of a replica's
   4,096 pending requests for their lifetime.
 - **Metrics.** The router counts dropped unusable presence, dropped room
   traffic and abandoned room deliveries, and for hosted rooms the requests
-  that waited, were given up or timed out at the host, were carried to
-  another replica or could not be, the stanzas refused at the effect
-  boundary, the seats ended by a lost stream, an undeliverable stanza or a
-  room that stopped being federated, and the messages refused for an
-  account's archive allowance, all with no attribute; its other decisions
-  are logged with codes only, never with an address.
+  that waited, were given up or timed out at the host, were not taken for
+  an account's spent share, were carried to another replica or could not
+  be, whose holder did not answer in time, the stanzas refused at the
+  effect boundary, the chat states and markers dropped, the presence for
+  an earlier occupancy dropped, the joins refused for want of a queue, the
+  seats ended by a lost stream, an undeliverable stanza, a room that
+  stopped being federated, a room that no longer seated the occupant or a
+  take-over from a stopped replica, the rows reclaimed, and the messages
+  refused for an account's archive allowance, all with no attribute; its
+  other decisions are logged with codes only, never with an address.
 
 ## Follow-ups
 
