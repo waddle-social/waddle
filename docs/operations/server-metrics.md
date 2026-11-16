@@ -107,6 +107,8 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `waddle.s2s.dialback` | counter | `{exchange}` | `role`, `result` | `waddle_s2s_dialback_total` | Server Dialback exchanges, by this server's role (`initiating`, `receiving`, `authoritative`) and result (`valid`, `invalid`, `error`). |
 | `waddle.s2s.discovery` | counter | `{lookup}` | `source` | `waddle_s2s_discovery_total` | Endpoint resolutions, by where the endpoints came from (`configured`, `srv`, `fallback`) or why there were none (`no_service`, `lookup_failed`, `blocked`). |
 | `waddle.s2s.route.unusable_presence` | counter | `{stanza}` | none | `waddle_s2s_route_unusable_presence_total` | Presence from S2S streams dropped unanswered because an address it carries is outside the identity profile or it is not valid presence. |
+| `waddle.s2s.route.room_traffic.dropped` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_dropped_total` | Stanzas from S2S streams to local full JIDs dropped before being decided as remote room traffic, because the room's queue or the router's was full. |
+| `waddle.s2s.route.room_traffic.delivery_timeouts` | counter | `{stanza}` | none | `waddle_s2s_route_room_traffic_delivery_timeouts_total` | Deliveries of remote room traffic to a local occupant abandoned after the delivery timeout. |
 
 ## All other metrics
 
