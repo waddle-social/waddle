@@ -20,6 +20,7 @@ use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use waddle_server::db::Database;
 use waddle_server::destination::{offer_stanza, StanzaOffer, REMOTE_ROUTE_OFFER_TIMEOUT};
 use waddle_server::s2s::conn::{
     S2sHandle, ServiceOptions, SinkVerdict, StanzaSink, VerifiedPeerStream,
@@ -852,16 +853,19 @@ async fn start_muc(
 /// `home-a.test`, routed, and `home-b.test` serving `muc.home-b.test`
 /// with a [`FakeMuc`]; each admits and dials the other's domains.
 pub async fn outbound_muc(pki: &Pki, limits: RouterLimits) -> (Routed, Deployment, Arc<FakeMuc>) {
+    let database = correlation_database("s2s-remote-muc-home-a").await;
+    outbound_muc_on(pki, limits, database).await
+}
+
+/// [`outbound_muc`], with `home-a.test`'s tables in `database`.
+pub async fn outbound_muc_on(
+    pki: &Pki,
+    limits: RouterLimits,
+    database: Database,
+) -> (Routed, Deployment, Arc<FakeMuc>) {
     let (listener_a, address_a) = listener().await;
     let (listener_b, address_b) = listener().await;
-    let a = start_routed(
-        pki,
-        &spec_a(address_b),
-        listener_a,
-        correlation_database("s2s-remote-muc-home-a").await,
-        limits,
-    )
-    .await;
+    let a = start_routed(pki, &spec_a(address_b), listener_a, database, limits).await;
     let (b, muc) = start_muc(pki, listener_b, address_a, |_| {}).await;
     (a, b, muc)
 }

@@ -23,8 +23,10 @@
 //! WebSocket clients, its tables in an in-memory SQLite database (two
 //! routers on one database stand for two replicas); `home-b.test` serves
 //! `muc.home-b.test` with a hand-written room service. Everything runs in
-//! one process on loopback; no PostgreSQL, SpiceDB or other server is
-//! involved.
+//! one process on loopback, without SpiceDB or another server. The account
+//! bound is also checked with the tables in PostgreSQL, in a schema of
+//! its own: those cases skip without `WADDLE_TEST_POSTGRES_URL` unless
+//! `WADDLE_TEST_REQUIRE_POSTGRES=1`.
 
 // Each suite uses a different part of the shared fixture.
 #[allow(dead_code, unused_imports)]
@@ -40,6 +42,8 @@ use support::{
     wait_for, wait_for_rooms, ALICE_LAPTOP, ALICE_PHONE, ARRIVES, BOB, BOB_PHONE, BUSY, CHALLENGE,
     HOME_A, HOME_B, MUC_B, QUIET, ROOM, STREAM_LOSS,
 };
+use uuid::Uuid;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_server::destination::{IqOffer, RemoteRoute, StanzaOffer, UnroutableReason};
 use waddle_server::s2s::route::RouterLimits;
 use waddle_xmpp::disco::DISCO_INFO_NS;
@@ -1752,23 +1756,155 @@ async fn a_remote_domain_at_its_share_of_the_delivery_queue_waits_alone() {
     );
 }
 
+/// Limits allowing one account two remote rooms.
+fn two_rooms_per_account() -> RouterLimits {
+    RouterLimits {
+        rooms_per_account: 2,
+        ..RouterLimits::default()
+    }
+}
+
+/// A schema of its own in the test PostgreSQL database, migrated, or `None`
+/// when no test database is configured.
+struct PostgresTables {
+    admin: sqlx::PgPool,
+    schema: String,
+    database: Database,
+}
+
+impl PostgresTables {
+    async fn open() -> Option<Self> {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+            eprintln!("skipping a PostgreSQL case: no test database is configured");
+            return None;
+        };
+        let schema = ["s2s_remote_rooms_", &Uuid::new_v4().simple().to_string()].concat();
+        let admin = sqlx::PgPool::connect(&url)
+            .await
+            .expect("an administrative pool");
+        sqlx::query(&["CREATE SCHEMA ", &schema].concat())
+            .execute(&admin)
+            .await
+            .expect("a schema of the case's own");
+        let mut scoped = url::Url::parse(&url).expect("a PostgreSQL URL");
+        let retained: Vec<(String, String)> = scoped
+            .query_pairs()
+            .filter(|(key, _)| key != "options")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        scoped
+            .query_pairs_mut()
+            .clear()
+            .extend_pairs(retained)
+            .append_pair("options", &["-c search_path=", &schema].concat());
+        let database = Database::from_config(
+            "s2s-remote-rooms-postgres",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, scoped.to_string()),
+        )
+        .await
+        .expect("the case's database");
+        MigrationRunner::single()
+            .run(&database)
+            .await
+            .expect("the deployment migrations");
+        Some(Self {
+            admin,
+            schema,
+            database,
+        })
+    }
+
+    async fn remove(self) {
+        drop(self.database);
+        sqlx::query(&["DROP SCHEMA ", &self.schema, " CASCADE"].concat())
+            .execute(&self.admin)
+            .await
+            .expect("drop the case's schema");
+    }
+}
+
 #[tokio::test]
 async fn joins_beyond_the_bound_per_account_are_refused_whichever_resource_sends_them() {
     let pki = support::Pki::new();
-    let limits = RouterLimits {
-        rooms_per_account: 2,
-        ..RouterLimits::default()
+    let (a, _b, _muc) = outbound_muc(&pki, two_rooms_per_account()).await;
+    the_account_bound_holds_for_every_resource(&a).await;
+}
+
+#[tokio::test]
+async fn joins_beyond_the_bound_per_account_are_refused_whichever_resource_sends_them_on_postgresql(
+) {
+    let Some(tables) = PostgresTables::open().await else {
+        return;
     };
-    let (a, _b, _muc) = outbound_muc(&pki, limits).await;
-    join(&a, ALICE_PHONE, ROOM_ALICE).await;
-    join(&a, ALICE_LAPTOP, "second@muc.home-b.test/alice2").await;
+    let pki = support::Pki::new();
+    let (a, b, muc) =
+        support::outbound_muc_on(&pki, two_rooms_per_account(), tables.database.clone()).await;
+    the_account_bound_holds_for_every_resource(&a).await;
+    drop((a, b, muc));
+    tables.remove().await;
+}
+
+#[tokio::test]
+async fn concurrent_joins_of_one_account_hold_its_bound_exactly_on_postgresql() {
+    let Some(tables) = PostgresTables::open().await else {
+        return;
+    };
+    let pki = support::Pki::new();
+    let (a, b, muc) =
+        support::outbound_muc_on(&pki, two_rooms_per_account(), tables.database.clone()).await;
+    // Four joins of one account from two resources at once, each to a room
+    // never asked before: the account lock lets exactly two of them in.
+    let joins = [
+        (ALICE_PHONE, "one@muc.home-b.test/alice", "race-1"),
+        (ALICE_LAPTOP, "two@muc.home-b.test/alice2", "race-2"),
+        (ALICE_PHONE, "three@muc.home-b.test/alice", "race-3"),
+        (ALICE_LAPTOP, "four@muc.home-b.test/alice2", "race-4"),
+    ];
+    let offer_join = |(from, occupant, id): (&str, &str, &str)| {
+        offer(&a, Stanza::Presence(join_presence(from, occupant, id)))
+    };
+    let (first, second, third, fourth) = tokio::join!(
+        offer_join(joins[0]),
+        offer_join(joins[1]),
+        offer_join(joins[2]),
+        offer_join(joins[3]),
+    );
+    let mut accepted = 0;
+    for offered in [first, second, third, fourth] {
+        match offered {
+            StanzaOffer::Accepted => accepted += 1,
+            other => {
+                let (reason, reply) = refused(other);
+                assert_eq!(reason, UnroutableReason::EgressBusy);
+                assert_eq!(
+                    error_condition(&reply).as_deref(),
+                    Some("resource-constraint")
+                );
+            }
+        }
+    }
+    assert_eq!(accepted, 2);
+    assert!(
+        wait_for_rooms(&a.router, 2).await,
+        "the two accepted joins are recorded"
+    );
+    assert_eq!(a.router.remote_rooms().await, 2);
+    drop((a, b, muc));
+    tables.remove().await;
+}
+
+/// With two rooms an account may occupy, a third join from either resource
+/// is refused, another account is not affected and leaving frees a place.
+async fn the_account_bound_holds_for_every_resource(a: &support::Routed) {
+    join(a, ALICE_PHONE, ROOM_ALICE).await;
+    join(a, ALICE_LAPTOP, "second@muc.home-b.test/alice2").await;
     // Each resource is within its own bound; the account is at its own.
     for (from, occupant, id) in [
         (ALICE_PHONE, "third@muc.home-b.test/alice", "over-phone"),
         (ALICE_LAPTOP, "third@muc.home-b.test/alice2", "over-laptop"),
     ] {
         let (reason, reply) =
-            refused(offer(&a, Stanza::Presence(join_presence(from, occupant, id))).await);
+            refused(offer(a, Stanza::Presence(join_presence(from, occupant, id))).await);
         assert_eq!(reason, UnroutableReason::EgressBusy);
         assert_eq!(reply.attr("id"), Some(id));
         assert_eq!(
@@ -1778,11 +1914,11 @@ async fn joins_beyond_the_bound_per_account_are_refused_whichever_resource_sends
     }
     assert_eq!(a.router.remote_rooms().await, 2);
     // Another account has its own bound.
-    join(&a, "carol@home-a.test/desk", "third@muc.home-b.test/carol").await;
+    join(a, "carol@home-a.test/desk", "third@muc.home-b.test/carol").await;
     assert_eq!(a.router.remote_rooms().await, 3);
     // Leaving a room frees a place for the account.
     let offered = offer(
-        &a,
+        a,
         Stanza::Presence(presence(
             ALICE_PHONE,
             ROOM_ALICE,
@@ -1793,7 +1929,7 @@ async fn joins_beyond_the_bound_per_account_are_refused_whichever_resource_sends
     .await;
     assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
     assert!(wait_for_rooms(&a.router, 2).await, "the leave is answered");
-    join(&a, ALICE_LAPTOP, "third@muc.home-b.test/alice2").await;
+    join(a, ALICE_LAPTOP, "third@muc.home-b.test/alice2").await;
     assert_eq!(a.router.remote_rooms().await, 3);
 }
 
