@@ -652,7 +652,8 @@ const REMOTE_MEMBER: &str = "guest@remote.example";
 
 /// Seat `account` in the room actor of `state` as a member, as a join the
 /// replica admitted would; no stream of a remote domain reaches this
-/// replica, so its join is sent to the actor directly.
+/// replica, so its join is sent to the actor directly, and the presence the
+/// join handler would route is not sent.
 async fn seat_member(state: &WebSocketState, room: &jid::BareJid, account: &str, nick: &str) {
     let actor = room_actor(state, room).await;
     let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
@@ -690,10 +691,6 @@ async fn the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it(
     let joined = join(&mut owner, &room, "owner").await;
     assert_eq!(error_condition(&joined), None, "{joined:?}");
     seat_member(&server.state, &room, REMOTE_MEMBER, "guest").await;
-    let arrived = presence_from(&mut owner, &room, "guest", SWEEP_BUDGET)
-        .await
-        .expect("the remote member's arrival as the owner sees it");
-    assert!(!room_presence(&arrived).unavailable);
 
     // The sweep holds no request of the remote member, and without one its
     // membership is not honoured on this replica (S2S is off). That is not
