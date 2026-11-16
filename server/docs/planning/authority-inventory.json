@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "69beb8862c2c540a1b85e202bdcc0b457cdac5c2",
+  "baseline_commit": "b3ec89bbe41ae4b2692f143120321de43c02c52c",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -133,7 +133,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "00b9804084ff5a913089346205d5e16d946043d62ddaccedcdcfd77b3f583914"
+      "sha256": "496f2b4c58a9635a1b93965edeaab3d3d776a3c0b92cbd8b6f28814af9478508"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -365,7 +365,7 @@
     },
     "startup-call": {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "line": 1568,
+      "line": 1564,
       "text": "crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn("
     },
     "bootstrap": {
@@ -940,7 +940,7 @@
     "with_members_only_binding"
   ],
   "lexical_snapshot": {
-    "sha256": "4357723e4a0c85b0b45aee698e39eabbbc2a0a2f39cc1119d62c7da23de2d7f4",
+    "sha256": "af530b49699197715dd1ff6c54a7b1b85eea27b036289b1aebbef9cd895d04ca",
     "occurrences": {
       "WriteTuple": 65,
       "DeleteTuple": 20,
