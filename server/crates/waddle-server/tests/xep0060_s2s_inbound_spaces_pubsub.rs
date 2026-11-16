@@ -4,14 +4,16 @@
 //! subscribes to a Space of this deployment and is notified of what the
 //! Space lists, and changes a Space only as ADR-0020 D8 allows.
 //!
-//! - §6.1 and §6.2: a remote account subscribes and unsubscribes its own
-//!   address, within bounds for the Space, the account and its domain. The
+//! - §6.1 and §6.2: a remote account subscribes and unsubscribes itself,
+//!   within bounds for the Space, the account and its domain; the service
+//!   keeps one subscription for an account, under its bare JID. Leaving is
+//!   possible once a Space is no longer open to the account. The
 //!   subscription is no grant in any room of the Space.
 //! - §7.1: an event notification leaves for a subscriber at another server
 //!   only for a subscription that account made itself, only while its
 //!   domain is admitted and its standing still lets it read the Space, and
 //!   only about a room it may be told of; one stanza for each subscribed
-//!   address.
+//!   account.
 //! - §8: publishing, retracting and everything of the `pubsub#owner`
 //!   namespace need a standing that is honoured for the request's stream:
 //!   an account of a trusted home on a certificate-authenticated stream.
@@ -126,18 +128,16 @@ fn subscriptions(federated: &Federated) -> SpaceSubscriptions {
     )
 }
 
-/// Record a subscription of `address` to `node` through the store, as one
+/// Record a subscription of `account` to `node` through the store, as one
 /// made over a `pkix` stream.
-async fn record(federated: &Federated, node: &str, created_at: i64, address: &str) {
-    let subscriber = jid(address);
-    let account = subscriber.to_bare();
+async fn record(federated: &Federated, node: &str, created_at: i64, account: &str) {
+    let account = jid(account).to_bare();
     let outcome = subscriptions(federated)
         .record(
             &spaces(),
             node,
             created_at,
             SubscriptionRequest {
-                subscriber: &subscriber,
                 account: &account,
                 evidence: recorded(AuthenticationStrength::Pkix),
                 snapshot: uuid::Uuid::new_v4(),
@@ -146,7 +146,7 @@ async fn record(federated: &Federated, node: &str, created_at: i64, address: &st
         )
         .await
         .expect("the subscription is recorded");
-    assert_eq!(outcome, SubscriptionRecord::Recorded, "{address}");
+    assert_eq!(outcome, SubscriptionRecord::Recorded, "{account}");
 }
 
 // --- XEP-0060 §6.1 and §6.2 -------------------------------------------------
@@ -166,14 +166,26 @@ async fn a_remote_account_subscribes_and_unsubscribes_its_own_address() {
     assert_eq!(answer.attr("subscription"), Some("subscribed"));
     assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
 
-    // Subscribing again changes nothing; a full JID of the account is a
-    // subscription of its own.
-    let again = subscribe(&federated, "sub-2", BOB_PHONE, BOB).await;
-    assert_eq!(again.attr("type"), Some("result"), "{again:?}");
-    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
-    let device = subscribe(&federated, "sub-3", BOB_PHONE, BOB_PHONE).await;
-    assert_eq!(device.attr("type"), Some("result"), "{device:?}");
-    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 2);
+    // The service keeps one subscription for an account, under its bare
+    // JID: subscribing again, with the bare JID or with one of the
+    // account's full JIDs, is the same subscription and is answered as
+    // such.
+    for (id, address) in [("sub-2", BOB), ("sub-3", BOB_PHONE)] {
+        let again = subscribe(&federated, id, BOB_PHONE, address).await;
+        assert_eq!(again.attr("type"), Some("result"), "{again:?}");
+        let answer = descendant(&again, "subscription").expect("the subscription");
+        assert_eq!(answer.attr("jid"), Some(BOB), "{address}");
+        assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
+    }
+    let storage = &federated.loopback.state.deps.protocol.pubsub_storage;
+    assert_eq!(
+        storage
+            .list_node_subscriptions(&spaces(), DEV)
+            .await
+            .expect("the subscriptions are read")
+            .len(),
+        1
+    );
 
     // §6.1.3.1 and §6.2.3.3: only the sender's own address.
     let other = subscribe(&federated, "sub-4", BOB_PHONE, "mallory@home-b.test").await;
@@ -191,7 +203,7 @@ async fn a_remote_account_subscribes_and_unsubscribes_its_own_address() {
     )
     .await;
     assert_eq!(error_condition(&theirs).as_deref(), Some("forbidden"));
-    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 2);
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
 
     let left = ask(
         &federated,
@@ -199,12 +211,12 @@ async fn a_remote_account_subscribes_and_unsubscribes_its_own_address() {
             BOB_PHONE,
             "unsub-2",
             true,
-            subscription("unsubscribe", DEV, BOB),
+            subscription("unsubscribe", DEV, BOB_PHONE),
         ),
     )
     .await;
     assert_eq!(left.attr("type"), Some("result"), "{left:?}");
-    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
     // §6.2.3.2: no such subscription any more.
     let twice = ask(
         &federated,
@@ -220,6 +232,54 @@ async fn a_remote_account_subscribes_and_unsubscribes_its_own_address() {
         error_condition(&twice).as_deref(),
         Some("unexpected-request")
     );
+}
+
+/// Leaving only reduces what an account receives, so it is possible once
+/// the Space is no longer open to the account; the answer is then the one
+/// a node that does not exist gets.
+#[tokio::test]
+async fn an_account_leaves_a_space_that_is_no_longer_open_to_it() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    space(&federated, DEV, NodeConfig::spaces_private()).await;
+    federate(&federated, DEV).await;
+    affiliate(&federated, DEV, BOB, Affiliation::Member).await;
+    let subscribed = subscribe(&federated, "left-1", BOB_PHONE, BOB).await;
+    assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
+    affiliate(&federated, DEV, BOB, Affiliation::None).await;
+
+    let left = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "left-2",
+            true,
+            subscription("unsubscribe", DEV, BOB),
+        ),
+    )
+    .await;
+    let missing = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "left-3",
+            true,
+            subscription("unsubscribe", "nowhere", BOB),
+        ),
+    )
+    .await;
+    assert_eq!(error_condition(&left).as_deref(), Some("item-not-found"));
+    assert_eq!(
+        left.children().find(|child| child.name() == "error"),
+        missing.children().find(|child| child.name() == "error")
+    );
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
+    let storage = &federated.loopback.state.deps.protocol.pubsub_storage;
+    assert!(storage
+        .list_node_subscriptions(&spaces(), DEV)
+        .await
+        .expect("the subscriptions are read")
+        .is_empty());
 }
 
 /// ADR-0020 D4: a subscription to a Space is not a grant in its rooms, and
@@ -441,42 +501,38 @@ async fn a_notification_leaves_only_for_a_subscription_the_remote_account_made()
     )
     .await;
     assert!(is_result(&added), "{added:?}");
-    let subscribed = subscribe(&federated, "made-2", BOB_PHONE, BOB).await;
+    // The account subscribes with one of its full JIDs: the subscription
+    // is the account's, and its notification goes to the bare JID.
+    let subscribed = subscribe(&federated, "made-2", BOB_PHONE, BOB_PHONE).await;
     assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
-    let device = subscribe(&federated, "made-3", BOB_PHONE, BOB_PHONE).await;
-    assert_eq!(device.attr("type"), Some("result"), "{device:?}");
 
     let published = round_trip(&mut victor, set("made-4", SPACES, publish(DEV, "lounge"))).await;
     assert!(is_result(&published), "{published:?}");
     let received = settled(&federated, "made-barrier-1").await;
-    // One stanza for each address the account subscribed, none for the
-    // address it did not.
+    // One stanza for the account that subscribed, none for the address
+    // that did not.
     assert_eq!(events_for(&received, BOB).len(), 1, "{received:?}");
-    assert_eq!(events_for(&received, BOB_PHONE).len(), 1, "{received:?}");
     assert!(events_for(&received, "mallory@home-b.test").is_empty());
-    assert!(!received.iter().any(|stanza| stanza.name() == "message"
-        && stanza.attr("to") != Some(BOB)
-        && stanza.attr("to") != Some(BOB_PHONE)));
+    assert!(!received
+        .iter()
+        .any(|stanza| stanza.name() == "message" && stanza.attr("to") != Some(BOB)));
 
     // A subscription that ended receives nothing more.
-    for (id, address) in [("made-5", BOB), ("made-6", BOB_PHONE)] {
-        let left = ask(
-            &federated,
-            request(
-                BOB_PHONE,
-                id,
-                true,
-                subscription("unsubscribe", DEV, address),
-            ),
-        )
-        .await;
-        assert_eq!(left.attr("type"), Some("result"), "{left:?}");
-    }
+    let left = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "made-5",
+            true,
+            subscription("unsubscribe", DEV, BOB),
+        ),
+    )
+    .await;
+    assert_eq!(left.attr("type"), Some("result"), "{left:?}");
     let retracted = round_trip(&mut victor, set("made-7", SPACES, retract(DEV, "lounge"))).await;
     assert!(is_result(&retracted), "{retracted:?}");
     let received = settled(&federated, "made-barrier-2").await;
     assert_eq!(events_for(&received, BOB).len(), 1, "{received:?}");
-    assert_eq!(events_for(&received, BOB_PHONE).len(), 1, "{received:?}");
 }
 
 /// A subscriber's standing is decided again when a notification is handed
