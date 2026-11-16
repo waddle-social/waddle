@@ -621,7 +621,16 @@ async fn receive_message(
             return Vec::new();
         }
         strip_private_payloads(&mut message);
-        deliver_headline(state, &account, &sender, full.as_ref(), &message, work).await;
+        deliver_headline(
+            state,
+            &account,
+            &sender,
+            full.as_ref(),
+            &message,
+            Notification::AskedFor,
+            work,
+        )
+        .await;
         return Vec::new();
     }
     strip_private_payloads(&mut message);
@@ -635,7 +644,16 @@ async fn receive_message(
             Vec::new()
         }
         MessageType::Headline => {
-            deliver_headline(state, &account, &sender, full.as_ref(), &message, work).await;
+            deliver_headline(
+                state,
+                &account,
+                &sender,
+                full.as_ref(),
+                &message,
+                Notification::Unsolicited,
+                work,
+            )
+            .await;
             Vec::new()
         }
         MessageType::Chat | MessageType::Normal => {
@@ -708,14 +726,17 @@ async fn admit_offline(
 
 /// Whether `resource` is held by a detached stream-management session, on
 /// this replica or recorded durably for another, whatever its presence was
-/// when it detached. A registry that cannot be read answers `true`, so that
-/// the caller applies the stricter rule.
+/// when it detached, and is not connected: a session that resumed while a
+/// record of its detachment lingers is not detached. A registry that
+/// cannot be read answers `true`, so that the caller applies the stricter
+/// rule.
 async fn is_detached(state: &WebSocketState, resource: &FullJid) -> bool {
-    match state
+    let account = resource.to_bare();
+    let held = match state
         .deps
         .protocol
         .sm_session_registry
-        .detached_resources_for_user(&resource.to_bare())
+        .detached_resources_for_user(&account)
         .await
     {
         Ok(resources) => resources.contains(resource),
@@ -723,11 +744,15 @@ async fn is_detached(state: &WebSocketState, resource: &FullJid) -> bool {
             warn!(%error, "listing detached resources for a remote sender's stanza failed");
             true
         }
-    }
+    };
+    held && !super::handlers::account_reads::resources(state, &account)
+        .await
+        .contains(resource)
 }
 
 /// Whether a remote `sender`'s stanza that the offline store would never
-/// keep (a `headline`, an `error` message, directed presence) may reach
+/// keep (a `headline` other than an event notification the account asked
+/// for, an `error` message, directed presence) may reach
 /// `account`'s full JID `resource`: always when the resource is not
 /// detached; when it is, only from a contact. A detached session holds what
 /// it is sent until it resumes, within one queue for every sender, so a
@@ -893,21 +918,36 @@ async fn deliver_direct(
     Direct::Untaken { admitted: true }
 }
 
-/// Deliver a `headline` (an event notification included) from the remote
-/// `sender`: to the full JID it names if bound, and if detached only from a
-/// contact ([`reaches_full_jid`]), or to every available resource with a
-/// non-negative priority (RFC 6121 §8.5.2.1.1). It is never stored.
+/// Whether a `headline` is an event notification the account asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Notification {
+    /// It passed the event gate ([`event_admitted`]): a subscription the
+    /// account made, or the personal eventing service of a contact it is
+    /// subscribed to.
+    AskedFor,
+    /// Any other `headline`.
+    Unsolicited,
+}
+
+/// Deliver a `headline` from the remote `sender`: to the full JID it names
+/// if bound, or to every available resource with a non-negative priority
+/// (RFC 6121 §8.5.2.1.1). It is never stored. A detached full JID receives
+/// an event notification the account asked for, and any other `headline`
+/// only from a contact ([`reaches_full_jid`]).
 async fn deliver_headline(
     state: &WebSocketState,
     account: &BareJid,
     sender: &BareJid,
     full: Option<&FullJid>,
     message: &Message,
+    notification: Notification,
     work: &AccountWork,
 ) {
     let stanza = Stanza::Message(message.clone());
     if let Some(full) = full {
-        if reaches_full_jid(state, account, sender, full).await && !work.abandoned() {
+        let reaches = notification == Notification::AskedFor
+            || reaches_full_jid(state, account, sender, full).await;
+        if reaches && !work.abandoned() {
             let _ = deliver(state, full, &stanza).await;
         }
         return;

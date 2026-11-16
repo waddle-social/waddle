@@ -244,8 +244,9 @@ and the offline admissions of strangers' messages.
   selected for the bare JID or named by the full JID, only once admitted
   within the bounds above, as if it were stored at once, and one beyond
   them, or one the store would not keep (a chat state alone), is dropped.
-  Nothing the store would never keep, a `headline`, an `error` message or
-  directed presence, reaches a detached full JID from a non-contact. A
+  Nothing the store would never keep, a `headline` other than an event
+  notification the account asked for, an `error` message or directed
+  presence, reaches a detached full JID from a non-contact. A
   detached session's queue holds 1,000 stanzas for every sender together;
   the strangers' bound of 512 per account and day keeps them from filling
   it alone, and no bound per sender within one queue is kept. A message a
