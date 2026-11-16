@@ -55,8 +55,9 @@ The effect-boundary slice for remote principals (W5e in the plan, gate
 G17) is implemented as well (`permissions/host_grant/principal.rs`, the
 `[host_policy]` table of the S2S snapshot). Its decisions are recorded
 under [Remote principals at the effect
-boundary](#remote-principals-at-the-effect-boundary-g17); its cases have
-not run.
+boundary](#remote-principals-at-the-effect-boundary-g17); its suite has
+run against disposable stores (see
+[Evidence of the effect boundary](#evidence-of-the-effect-boundary)).
 
 Each ledger entry is an ADR-0020 gate with a decision part and an evidence
 part. Under the ADR's gate semantics, the slice that owns an entry decides it
@@ -3096,13 +3097,25 @@ PostgreSQL-backed SpiceDB and nextest's default parallelism: 245 of 245
 cases passed, 32 of them in the five binaries above. No run recorded here
 shows that a new case fails without its fix.
 
+Merged with the effect boundary for remote principals, the five binaries
+above, the effect boundary's suite and every other host-grant, schema and
+codec binary (21 binaries) ran on 2026-11-16 at commit `c415ea213`, with
+the same versions and a PostgreSQL-backed SpiceDB of its own: 277 of 278
+cases passed. The one failure was the new case for a seated remote
+occupant, which waited for an arrival presence a member seated through its
+room actor is never sent; the case was corrected at `f05fed7ac` and its
+binary then passed 12 of 12. That case fails with the sweep's rule for
+remote occupants reverted, and the case for a dropped increase fails with
+reconciliation's drop disabled. The runs are recorded in
+`docs/evidence/2047/unrun-tests.md`.
+
 ## Remote principals at the effect boundary (G17)
 
 These are the decisions of the effect-boundary slice (W5e in the plan) for
 gate G17 and its part of G14. Like those of the slices before it, they are
 decisions: the acceptance-matrix rows marked W5e and the suite named under
 [Evidence of the effect boundary](#evidence-of-the-effect-boundary) are
-their evidence, and none of it has run.
+their evidence; the suite's run is recorded with them.
 
 ### The principal policy
 
@@ -3330,7 +3343,9 @@ decides a ban under a snapshot that admits and trusts the banned homes, on
 the strongest and every weaker stream, a `pkix` strength without a trust
 profile included. The sweep's rule for a seated remote occupant is
 `the_sweep_removes_a_remote_occupant_only_when_no_stream_would_admit_it` in
-`xep0045_host_grant_revocation.rs`. `host_grant_authority.rs` and
+`xep0045_host_grant_revocation.rs`. The suite ran on 2026-11-16 at
+`c415ea213`, with the revocation fence's focused set (above): 14 of 14
+cases passed, the `live_spicedb_` case against a PostgreSQL-backed SpiceDB. `host_grant_authority.rs` and
 `xep0045_host_grant_admission.rs` cover a replica with S2S off.
 
 ### Rollout part of the effect boundary (G24)
