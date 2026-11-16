@@ -395,6 +395,67 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn run_r
     }
 }
 
+/// After a remote joiner's seat was undone without being announced: tell
+/// the occupants that entered the room after it seated the joiner that the
+/// joiner left.
+///
+/// Nobody present when the room seated the joiner was told of it, which is
+/// why the removal is announced to nobody. An occupant that entered between
+/// the seat and its removal was: the answer to its own join named the
+/// joiner among those present. Those are the occupants the room seats now
+/// that were not among the ones it answered the joiner with, and each is
+/// sent the joiner's unavailable presence with status 333 (XEP-0045 §11.1).
+/// An occupant that entered after the removal is among them and is told of
+/// an occupant it never saw, which a client ignores. An occupant that left
+/// and entered again under the same full JID meanwhile is not told.
+async fn tell_later_entrants_of_undone_join(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    joiner: &FullJid,
+    nick: &str,
+    outcome: &waddle_xmpp::muc::room_actor::JoinOutcome,
+) {
+    let seated = room_actor
+        .ask(waddle_xmpp::muc::room_actor::GetSeatedSessionGenerations)
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await;
+    let Ok(seated) = seated else {
+        warn!(room = %room_jid, "the occupants of a room whose join was undone could not be read");
+        return;
+    };
+    let Ok(from) = room_jid.with_resource_str(nick) else {
+        return;
+    };
+    let present: HashSet<&FullJid> = outcome
+        .existing_occupants
+        .iter()
+        .map(|existing| &existing.jid)
+        .collect();
+    let joiner_bare = joiner.to_bare();
+    for (occupant, _) in seated {
+        if occupant == *joiner || present.contains(&occupant) {
+            continue;
+        }
+        let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+            bare_jid: &joiner_bare,
+            real_jid: Some(joiner),
+            secret: &state.deps.occupant_id_secret,
+            hats: &state.deps.app_state.server_hats,
+        };
+        let presence = waddle_xmpp::muc::build_leave_presence(
+            &from,
+            &occupant,
+            outcome.new_occupant_affiliation,
+            waddle_xmpp::muc::MucPresenceStatus::new(false, false)
+                .removed_by(waddle_xmpp::muc::MucRemovalCause::TechnicalProblem),
+            &identity,
+        );
+        route_room_presence_to_occupant(state, room_jid, &occupant, Stanza::Presence(presence))
+            .await;
+    }
+}
+
 pub(crate) async fn route_room_presence_to_occupant(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -1917,6 +1978,15 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                         occupancy_session,
                     ),
                     waddle_xmpp::muc::MucRemovalCause::Unannounced,
+                )
+                .await;
+                tell_later_entrants_of_undone_join(
+                    state,
+                    &room_actor,
+                    room_jid,
+                    sender_jid,
+                    &nick,
+                    &join_outcome,
                 )
                 .await;
                 return deny_join_admission(
