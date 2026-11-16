@@ -4,14 +4,14 @@
 //! - the subscription requests remote senders sent that an account has
 //!   neither approved nor denied (RFC 6121 §3.1.3), delivered again on the
 //!   first available presence of each new session, one per sender and
-//!   account, bounded per account and per remote parent domain, and
-//!   forgotten after [`PENDING_TTL_MS`];
+//!   account, bounded per account and per sender domain, and forgotten
+//!   after [`PENDING_TTL_MS`];
 //! - the XEP-0060 nodes of remote services an account subscribed to, which
 //!   gate the event notifications those services send it;
 //! - the messages from remote senders that are not the account's contacts
 //!   admitted to the account's offline store in the last
 //!   [`OFFLINE_WINDOW_MS`], which bound how many more each sender and each
-//!   remote parent domain may have stored.
+//!   sender domain may have stored.
 //!
 //! The bounded writes count and insert in one transaction under a lock per
 //! account: an immediate transaction on SQLite, and on PostgreSQL a
@@ -29,8 +29,8 @@ use super::{Database, DatabaseDriver, Transaction};
 /// The most subscription requests from remote senders one account holds.
 pub const MAX_PENDING_PER_ACCOUNT: usize = 256;
 
-/// The most subscription requests one account holds from one remote
-/// parent domain ([`share_domain`]).
+/// The most subscription requests one account holds from senders at one
+/// domain ([`share_domain`]).
 pub const MAX_PENDING_PER_DOMAIN: usize = 16;
 
 /// The longest recorded subscription request, serialized, in bytes.
@@ -49,9 +49,9 @@ pub const OFFLINE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 /// contact admitted to one account's offline store per window.
 pub const MAX_OFFLINE_PER_SENDER: usize = 32;
 
-/// The most messages from remote senders at one remote parent domain
-/// ([`share_domain`]) that are not the account's contacts admitted to one
-/// account's offline store per window.
+/// The most messages from remote senders at one domain ([`share_domain`])
+/// that are not the account's contacts admitted to one account's offline
+/// store per window.
 pub const MAX_OFFLINE_PER_DOMAIN: usize = 128;
 
 /// The most messages from remote senders that are not the account's
@@ -91,19 +91,16 @@ pub enum PendingOutcome {
 }
 
 /// The key under which a remote domain's senders share an account's
-/// bounds: the domain's last two labels, which name the registrable domain
-/// under every single-label public suffix. Subdomains of one parent
-/// therefore share one share, so that a peer cannot multiply its share by
-/// naming its senders at many subdomains. No public suffix list is
-/// consulted: under a public suffix of more labels (`example.co.uk`)
-/// unrelated registrants share one share, which only makes the bound
-/// stricter for them.
+/// bounds: the sender's whole domain, as admitted, or an IP literal as
+/// written. Senders at different subdomains of one registrable domain each
+/// have a share; the account's own bounds ([`MAX_PENDING_PER_ACCOUNT`],
+/// [`MAX_OFFLINE_PER_ACCOUNT`]) bound what many domains together can
+/// record, and a domain is only reachable once admitted (ADR-0020 D1).
+/// Keying by a parent domain instead would put unrelated registrants under
+/// a public suffix of several labels (`example.co.uk`) into one share,
+/// where one of them could exhaust it for the rest.
 pub fn share_domain(domain: &str) -> String {
-    let labels: Vec<&str> = domain.trim_end_matches('.').rsplitn(3, '.').collect();
-    match labels.as_slice() {
-        [last, parent, _] => [*parent, ".", *last].concat(),
-        _ => domain.trim_end_matches('.').to_owned(),
-    }
+    domain.trim_end_matches('.').to_owned()
 }
 
 /// Count, up to `limit`, the rows `sql` selects.
@@ -331,8 +328,8 @@ impl PendingSubscriptions {
 pub enum OfflineAdmission {
     /// Admitted and counted.
     Admitted,
-    /// Not admitted: the sender's, its parent domain's or the account's
-    /// bound for the window is reached.
+    /// Not admitted: the sender's, its domain's or the account's bound for
+    /// the window is reached.
     Bounds,
 }
 

@@ -6,13 +6,14 @@
 -- contact and a stranger alike, and nothing answers the sender. One row
 -- here records one such message from a sender that is not the account's
 -- contact; the rows of the last day bound how many more each sender, each
--- remote parent domain (`sender_share`, the domain's last two labels) and
--- all strangers together may have stored for the account. Rows older than
--- the window are deleted by the account's next admission.
+-- sender domain (`sender_share`, the domain of the sender's JID, an IP
+-- literal as written) and all strangers together may have stored for the
+-- account. Rows older than the window are deleted by the account's next
+-- admission.
 --
 -- The stored message itself is an ordinary row of the offline store;
 -- nothing here refers to it. In `s2s_pending_subscriptions` (migration
--- 2010) `contact_domain` holds the same parent-domain key.
+-- 2010) `contact_domain` holds the same domain key.
 CREATE TABLE s2s_remote_offline_admissions (
     id TEXT NOT NULL PRIMARY KEY,
     account_jid TEXT NOT NULL,
