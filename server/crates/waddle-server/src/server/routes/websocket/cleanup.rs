@@ -2873,6 +2873,20 @@ async fn cleanup_without_resumable_snapshot(
     Box::pin(cleanup_connection_shutdown(state, outbound_rx, conn, false)).await
 }
 
+/// XEP-0045 §7.14 for remote rooms: a resource whose session ended for
+/// good leaves every remote room it joined through the S2S route. Every
+/// caller of [`broadcast_unavailable_if_no_replacement`] has already removed
+/// its own registry entry, so an entry for the full JID now is a
+/// replacement's. A replacement holds the same full JID, which is all a
+/// remote room knows of its occupant, so its rooms are left to it: leaving
+/// them here could reach the room after the replacement's own join and
+/// remove it.
+async fn leave_remote_rooms_if_no_replacement(state: &WebSocketState, jid: &FullJid) {
+    if state.deps.protocol.connection_registry.entry(jid).is_none() {
+        state.deps.remote_route.resource_ended(jid).await;
+    }
+}
+
 /// RFC 6121 §4.5.2: an ungraceful session end (connection drop with no
 /// self-sent unavailable) requires the SERVER to broadcast `<presence
 /// type='unavailable'/>` from this full JID to the user's presence
@@ -2896,6 +2910,7 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
     jid: &FullJid,
     was_presence_available: bool,
 ) -> handlers::presence::TerminatedPresenceBroadcastOutcome {
+    leave_remote_rooms_if_no_replacement(state, jid).await;
     if !was_presence_available {
         return handlers::presence::TerminatedPresenceBroadcastOutcome::Completed;
     }
