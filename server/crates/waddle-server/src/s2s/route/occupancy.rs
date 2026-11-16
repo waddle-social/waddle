@@ -23,7 +23,7 @@ use jid::{BareJid, FullJid};
 use thiserror::Error;
 use xmpp_parsers::muc::user::Affiliation;
 
-use crate::db::{Database, Row};
+use crate::db::{Database, DatabaseDriver, Row};
 
 /// The longest occupant or room address a row stores, in bytes. Two such
 /// addresses keep the primary key below PostgreSQL's B-tree entry limit
@@ -283,6 +283,11 @@ const COLUMNS: &str = "occupant_jid, room_jid, nick, phase, affiliation, attempt
 
 const KEY_CLAUSE: &str = "occupant_jid = ? AND room_jid = ?";
 
+/// The seed of the PostgreSQL advisory lock key a join takes on its
+/// account (`hashtextextended(account, seed)`), which keeps those keys
+/// apart from the other advisory locks of the schema.
+const ACCOUNT_LOCK_SEED: i64 = 0x7332_735f_726f_6f6d;
+
 impl SqlRemoteRoomStore {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -355,12 +360,21 @@ fn decode(row: &Row) -> Result<Occupancy, RoomStoreError> {
     })
 }
 
+/// The occupancies matching `clause`, counted through no more than `bound`
+/// rows: a count at the bound means "at least the bound".
 async fn count_where(
     transaction: &mut crate::db::Transaction<'_>,
     clause: &str,
-    params: Vec<crate::db::Value>,
+    mut params: Vec<crate::db::Value>,
+    bound: usize,
 ) -> Result<usize, RoomStoreError> {
-    let sql = ["SELECT COUNT(*) FROM s2s_remote_room_occupancies", clause].concat();
+    let sql = [
+        "SELECT COUNT(*) FROM (SELECT 1 FROM s2s_remote_room_occupancies",
+        clause,
+        " LIMIT ?) AS bounded",
+    ]
+    .concat();
+    params.push(bound.into());
     let mut rows = transaction.query(&sql, params).await.map_err(storage)?;
     let count: i64 = match rows.next().await.map_err(storage)? {
         Some(row) => row.get(0).map_err(storage)?,
@@ -400,23 +414,50 @@ impl RemoteRoomStore for SqlRemoteRoomStore {
         }
         let account = occupancy.occupant.to_bare();
         // The counts and the insert are one transaction. On SQLite it holds
-        // the write lock throughout; on PostgreSQL concurrent joins may
-        // each read a count below a bound before either commits, so a
-        // bound can be exceeded by the joins in flight at once.
+        // the write lock throughout. On PostgreSQL it first takes a
+        // transaction advisory lock on the account, so the joins of one
+        // account, and so of each of its resources, are counted and
+        // inserted one at a time and their bounds hold exactly; at READ
+        // COMMITTED each count then sees every join committed before the
+        // lock was granted. Joins of different accounts run concurrently,
+        // so the deployment's total can be exceeded briefly by the joins
+        // in flight at once. Each count reads at most its bound's rows
+        // through an index (the primary key, the account index), and the
+        // total reads at most `limits.total`, so no join counts the whole
+        // table.
         let mut transaction = self.db.begin_immediate().await.map_err(storage)?;
+        if self.db.driver() == DatabaseDriver::Postgres {
+            transaction
+                .execute(
+                    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+                    crate::db_params![],
+                )
+                .await
+                .map_err(storage)?;
+            transaction
+                .query(
+                    "SELECT pg_catalog.pg_advisory_xact_lock(\
+                     pg_catalog.hashtextextended(?, ?))",
+                    crate::db_params![account.as_str(), ACCOUNT_LOCK_SEED],
+                )
+                .await
+                .map_err(storage)?;
+        }
         let resource = count_where(
             &mut transaction,
             " WHERE occupant_jid = ?",
             crate::db_params![occupancy.occupant.as_str()],
+            limits.per_resource,
         )
         .await?;
         let held_by_account = count_where(
             &mut transaction,
             " WHERE account_jid = ?",
             crate::db_params![account.as_str()],
+            limits.per_account,
         )
         .await?;
-        let total = count_where(&mut transaction, "", Vec::new()).await?;
+        let total = count_where(&mut transaction, "", Vec::new(), limits.total).await?;
         if resource >= limits.per_resource
             || held_by_account >= limits.per_account
             || total >= limits.total

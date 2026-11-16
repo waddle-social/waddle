@@ -780,10 +780,19 @@ the durable authority has adopted its rows and is not affected.
 | One delivery of room traffic | 5 s |
 
 A join beyond the occupancy bounds is refused with `resource-constraint`.
-The bounds are counted and the row inserted in one transaction; on SQLite
-it holds the write lock, and on PostgreSQL joins in flight at the same
-moment may each see a count below a bound, so a bound can be exceeded by
-the joins committed concurrently. The verdict cache holds one row per
+The bounds are counted and the row inserted in one transaction. On SQLite
+it holds the write lock, so every bound holds exactly. On PostgreSQL the
+transaction runs at READ COMMITTED and first takes a transaction advisory
+lock keyed on the account (`pg_advisory_xact_lock` of
+`hashtextextended(account, seed)`), so the joins of one account, and so
+of each of its resources, are counted and inserted one at a time and the
+per-resource and per-account bounds hold exactly. Joins of different
+accounts are not serialised, so the deployment's total can be exceeded
+briefly, by at most the joins of other accounts in flight at the same
+moment. No join counts the whole table: the per-resource and per-account
+counts read the primary key and the account index, and every count stops
+at its bound, so the total reads at most as many rows as the deployment
+bound (65,536 by default). The verdict cache holds one row per
 service domain asked within the TTLs and is pruned with the correlation
 table.
 
