@@ -20,22 +20,10 @@ let _serverRustInputs = [
 	"server/scripts/**",
 	"server/wit/**",
 	"server/charts/waddle-server/**",
-	{
-		project: "infrastructure/waddle.cloud"
-		task:    "namespaceServerRustInputs"
-		map: [
-			{
-				from: "target/cuenv/server-rust-inputs/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
-				to:   "infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
-			},
-			{
-				// Every Mimir rule file, so a second rules file is visible to
-				// the rule-drift tests in this sandbox too.
-				from: "target/cuenv/server-rust-inputs/rules/mimir"
-				to:   "infrastructure/waddle.cloud/rules/mimir"
-			},
-		]
-	},
+	"infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+	// Every Mimir rule file, so a second rules file is visible to the
+	// rule-drift tests in this sandbox too.
+	"infrastructure/waddle.cloud/rules/mimir/*.yaml",
 ]
 
 let _nativeRustEnv = {

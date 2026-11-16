@@ -2,7 +2,6 @@ package rusttests
 
 import (
 	"list"
-	"path"
 	"strings"
 	wc "github.com/waddle-social/waddle/ci/contributors"
 	server "github.com/waddle-social/waddle/server:cuenv"
@@ -12,24 +11,6 @@ import (
 // disable artifact compression. Keep the task commands and cache setup in their
 // existing CUE definitions while generating this focused workflow directly.
 let _testTask = server.tasks.nixTestShards
-
-// Retain the old workflow's task inputs and cuenv's implicit schema/module
-// triggers. Normalize parent-relative paths before passing them to GitHub.
-let _paths = {
-	for input in _testTask.inputs {
-		let normalized = path.Clean("server/\(input)")
-		(normalized): true
-		if !strings.Contains(input, "*") {
-			"\(normalized)/**": true
-		}
-	}
-	".github/workflows/waddle-server-rusttests.yml": true
-	"server/env.cue":                                true
-	"server/schema/**":                              true
-	"cue.mod/**":                                    true
-	"ci/rust-tests/**":                              true
-	"scripts/sync-rust-tests.sh":                    true
-}
 
 let _setupSteps = [
 	{
@@ -47,7 +28,9 @@ let _setupSteps = [
 
 workflow: {
 	name: "waddle-server-rustTests"
-	on: pull_request: paths: list.SortStrings([for pattern, _ in _paths {pattern}])
+	// Manual only: the shards run after merge as nixTestLocal in the server
+	// default pipeline. Dispatch this workflow to run them on a branch.
+	on: workflow_dispatch: {}
 	concurrency: {
 		group:                "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
 		"cancel-in-progress": true

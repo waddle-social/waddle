@@ -7,88 +7,292 @@ on:
     branches:
     - main
     paths:
-    - '**/env.cue'
+    - '*.cue'
     - .github/workflows/hestia-cache-gc.yml
     - .github/workflows/hestia-cache-gc.yml/**
-    - .github/workflows/waddle-*.yml
+    - .github/workflows/waddle-android-default.yml
+    - .github/workflows/waddle-android-default.yml/**
+    - .github/workflows/waddle-android-devicetests.yml
+    - .github/workflows/waddle-android-devicetests.yml/**
+    - .github/workflows/waddle-android-pullrequest.yml
+    - .github/workflows/waddle-android-pullrequest.yml/**
+    - .github/workflows/waddle-apple-default.yml
+    - .github/workflows/waddle-apple-default.yml/**
+    - .github/workflows/waddle-apple-pullrequest.yml
+    - .github/workflows/waddle-apple-pullrequest.yml/**
+    - .github/workflows/waddle-chat-default.yml
+    - .github/workflows/waddle-chat-default.yml/**
+    - .github/workflows/waddle-chat-pullrequest.yml
+    - .github/workflows/waddle-chat-pullrequest.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
+    - .github/workflows/waddle-cloud-default.yml
+    - .github/workflows/waddle-cloud-default.yml/**
+    - .github/workflows/waddle-cloud-pullrequest.yml
+    - .github/workflows/waddle-cloud-pullrequest.yml/**
+    - .github/workflows/waddle-colony-default.yml
+    - .github/workflows/waddle-colony-default.yml/**
+    - .github/workflows/waddle-colony-pullrequest.yml
+    - .github/workflows/waddle-colony-pullrequest.yml/**
+    - .github/workflows/waddle-design-pullrequest.yml
+    - .github/workflows/waddle-design-pullrequest.yml/**
     - .github/workflows/waddle-integration.yml
     - .github/workflows/waddle-integration.yml/**
-    - .github/workflows/waddle-server-*.yml
+    - .github/workflows/waddle-linux-default.yml
+    - .github/workflows/waddle-linux-default.yml/**
+    - .github/workflows/waddle-linux-pullrequest.yml
+    - .github/workflows/waddle-linux-pullrequest.yml/**
+    - .github/workflows/waddle-server-authzidcodec.yml
+    - .github/workflows/waddle-server-authzidcodec.yml/**
+    - .github/workflows/waddle-server-default.yml
+    - .github/workflows/waddle-server-default.yml/**
+    - .github/workflows/waddle-server-federationgrantfence.yml
+    - .github/workflows/waddle-server-federationgrantfence.yml/**
+    - .github/workflows/waddle-server-federationgrantfencepullrequest.yml
+    - .github/workflows/waddle-server-federationgrantfencepullrequest.yml/**
+    - .github/workflows/waddle-server-namespacerustchecks.yml
+    - .github/workflows/waddle-server-namespacerustchecks.yml/**
+    - .github/workflows/waddle-server-parentmovenative.yml
+    - .github/workflows/waddle-server-parentmovenative.yml/**
+    - .github/workflows/waddle-server-publish-tags-to-flakehub.yml
+    - .github/workflows/waddle-server-publish-tags-to-flakehub.yml/**
+    - .github/workflows/waddle-server-pullrequest.yml
+    - .github/workflows/waddle-server-pullrequest.yml/**
+    - .github/workflows/waddle-server-roomchildcontract.yml
+    - .github/workflows/waddle-server-roomchildcontract.yml/**
     - .github/workflows/waddle-server-rootsync.yml
+    - .github/workflows/waddle-server-rootsync.yml/**
+    - .github/workflows/waddle-server-rusttests.yml
+    - .github/workflows/waddle-server-rusttests.yml/**
+    - .github/workflows/waddle-server-spacefanoutcontract.yml
+    - .github/workflows/waddle-server-spacefanoutcontract.yml/**
+    - .github/workflows/waddle-server-xmppcompliance.yml
+    - .github/workflows/waddle-server-xmppcompliance.yml/**
+    - .github/workflows/waddle-server-xmppservercompliance.yml
+    - .github/workflows/waddle-server-xmppservercompliance.yml/**
+    - .github/workflows/waddle-website-default.yml
+    - .github/workflows/waddle-website-default.yml/**
+    - .github/workflows/waddle-website-pullrequest.yml
+    - .github/workflows/waddle-website-pullrequest.yml/**
     - .gitignore
     - .gitignore/**
     - .rules.cue
     - .rules.cue/**
+    - apps/android/env.cue
+    - apps/android/env.cue/**
+    - apps/linux/Cargo.toml
+    - apps/linux/Cargo.toml/**
+    - apps/linux/env.cue
+    - apps/linux/env.cue/**
+    - chat/env.cue
+    - chat/env.cue/**
+    - ci/*.cue
     - ci/cache-benchmark/**
     - ci/contributors/*.cue
+    - ci/contributors/cuenv.cue
+    - ci/contributors/cuenv.cue/**
+    - ci/contributors/nix.cue
+    - ci/contributors/nix.cue/**
     - ci/rust-tests/**
+    - colony/env.cue
+    - colony/env.cue/**
     - cue.mod/**
     - cue.mod/module.cue
     - cue.mod/module.cue/**
     - cuenv.lock
     - cuenv.lock/**
+    - design/env.cue
+    - design/env.cue/**
     - env.cue
     - env.cue/**
-    - scripts/*cache-benchmark*
-    - scripts/integration-ci*
+    - infrastructure/waddle.cloud/env.cue
+    - infrastructure/waddle.cloud/env.cue/**
+    - scripts/ci-cache-benchmark.py
+    - scripts/ci-cache-benchmark.py/**
+    - scripts/integration-ci-project.py
+    - scripts/integration-ci-project.py/**
+    - scripts/integration-ci.test.ts
+    - scripts/integration-ci.test.ts/**
+    - scripts/integration-ci.ts
+    - scripts/integration-ci.ts/**
+    - scripts/sync-cache-benchmark.sh
+    - scripts/sync-cache-benchmark.sh/**
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
+    - scripts/test-ci-cache-benchmark.py
+    - scripts/test-ci-cache-benchmark.py/**
     - scripts/test_cuenv_bootstrap.py
     - scripts/test_cuenv_bootstrap.py/**
     - scripts/test_integration_ci_project.py
     - scripts/test_integration_ci_project.py/**
-    - server/**/env.cue
+    - server/*.cue
+    - server/Cargo.toml
+    - server/Cargo.toml/**
+    - server/crates/waddle-client-session/Cargo.toml
+    - server/crates/waddle-client-session/Cargo.toml/**
+    - server/crates/waddle-xmpp-client-ffi/Cargo.toml
+    - server/crates/waddle-xmpp-client-ffi/Cargo.toml/**
+    - server/crates/waddle-xmpp-client-wasm/Cargo.toml
+    - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
+    - server/crates/waddle-xmpp-client/Cargo.toml
+    - server/crates/waddle-xmpp-client/Cargo.toml/**
+    - server/crates/waddle-xmpp-core/Cargo.toml
+    - server/crates/waddle-xmpp-core/Cargo.toml/**
     - server/deployment.cue
     - server/deployment.cue/**
     - server/env.cue
-    - server/schema/**
+    - server/env.cue/**
+    - server/scripts/test_ci_trigger_inputs.py
+    - server/scripts/test_ci_trigger_inputs.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
+    - website/env.cue
+    - website/env.cue/**
   pull_request:
     branches:
     - main
     paths:
-    - '**/env.cue'
+    - '*.cue'
     - .github/workflows/hestia-cache-gc.yml
     - .github/workflows/hestia-cache-gc.yml/**
-    - .github/workflows/waddle-*.yml
+    - .github/workflows/waddle-android-default.yml
+    - .github/workflows/waddle-android-default.yml/**
+    - .github/workflows/waddle-android-devicetests.yml
+    - .github/workflows/waddle-android-devicetests.yml/**
+    - .github/workflows/waddle-android-pullrequest.yml
+    - .github/workflows/waddle-android-pullrequest.yml/**
+    - .github/workflows/waddle-apple-default.yml
+    - .github/workflows/waddle-apple-default.yml/**
+    - .github/workflows/waddle-apple-pullrequest.yml
+    - .github/workflows/waddle-apple-pullrequest.yml/**
+    - .github/workflows/waddle-chat-default.yml
+    - .github/workflows/waddle-chat-default.yml/**
+    - .github/workflows/waddle-chat-pullrequest.yml
+    - .github/workflows/waddle-chat-pullrequest.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
+    - .github/workflows/waddle-cloud-default.yml
+    - .github/workflows/waddle-cloud-default.yml/**
+    - .github/workflows/waddle-cloud-pullrequest.yml
+    - .github/workflows/waddle-cloud-pullrequest.yml/**
+    - .github/workflows/waddle-colony-default.yml
+    - .github/workflows/waddle-colony-default.yml/**
+    - .github/workflows/waddle-colony-pullrequest.yml
+    - .github/workflows/waddle-colony-pullrequest.yml/**
+    - .github/workflows/waddle-design-pullrequest.yml
+    - .github/workflows/waddle-design-pullrequest.yml/**
     - .github/workflows/waddle-integration.yml
     - .github/workflows/waddle-integration.yml/**
-    - .github/workflows/waddle-server-*.yml
+    - .github/workflows/waddle-linux-default.yml
+    - .github/workflows/waddle-linux-default.yml/**
+    - .github/workflows/waddle-linux-pullrequest.yml
+    - .github/workflows/waddle-linux-pullrequest.yml/**
+    - .github/workflows/waddle-server-authzidcodec.yml
+    - .github/workflows/waddle-server-authzidcodec.yml/**
+    - .github/workflows/waddle-server-default.yml
+    - .github/workflows/waddle-server-default.yml/**
+    - .github/workflows/waddle-server-federationgrantfence.yml
+    - .github/workflows/waddle-server-federationgrantfence.yml/**
+    - .github/workflows/waddle-server-federationgrantfencepullrequest.yml
+    - .github/workflows/waddle-server-federationgrantfencepullrequest.yml/**
+    - .github/workflows/waddle-server-namespacerustchecks.yml
+    - .github/workflows/waddle-server-namespacerustchecks.yml/**
+    - .github/workflows/waddle-server-parentmovenative.yml
+    - .github/workflows/waddle-server-parentmovenative.yml/**
+    - .github/workflows/waddle-server-publish-tags-to-flakehub.yml
+    - .github/workflows/waddle-server-publish-tags-to-flakehub.yml/**
+    - .github/workflows/waddle-server-pullrequest.yml
+    - .github/workflows/waddle-server-pullrequest.yml/**
+    - .github/workflows/waddle-server-roomchildcontract.yml
+    - .github/workflows/waddle-server-roomchildcontract.yml/**
     - .github/workflows/waddle-server-rootsync.yml
+    - .github/workflows/waddle-server-rootsync.yml/**
+    - .github/workflows/waddle-server-rusttests.yml
+    - .github/workflows/waddle-server-rusttests.yml/**
+    - .github/workflows/waddle-server-spacefanoutcontract.yml
+    - .github/workflows/waddle-server-spacefanoutcontract.yml/**
+    - .github/workflows/waddle-server-xmppcompliance.yml
+    - .github/workflows/waddle-server-xmppcompliance.yml/**
+    - .github/workflows/waddle-server-xmppservercompliance.yml
+    - .github/workflows/waddle-server-xmppservercompliance.yml/**
+    - .github/workflows/waddle-website-default.yml
+    - .github/workflows/waddle-website-default.yml/**
+    - .github/workflows/waddle-website-pullrequest.yml
+    - .github/workflows/waddle-website-pullrequest.yml/**
     - .gitignore
     - .gitignore/**
     - .rules.cue
     - .rules.cue/**
+    - apps/android/env.cue
+    - apps/android/env.cue/**
+    - apps/linux/Cargo.toml
+    - apps/linux/Cargo.toml/**
+    - apps/linux/env.cue
+    - apps/linux/env.cue/**
+    - chat/env.cue
+    - chat/env.cue/**
+    - ci/*.cue
     - ci/cache-benchmark/**
     - ci/contributors/*.cue
+    - ci/contributors/cuenv.cue
+    - ci/contributors/cuenv.cue/**
+    - ci/contributors/nix.cue
+    - ci/contributors/nix.cue/**
     - ci/rust-tests/**
+    - colony/env.cue
+    - colony/env.cue/**
     - cue.mod/**
     - cue.mod/module.cue
     - cue.mod/module.cue/**
     - cuenv.lock
     - cuenv.lock/**
+    - design/env.cue
+    - design/env.cue/**
     - env.cue
     - env.cue/**
-    - scripts/*cache-benchmark*
-    - scripts/integration-ci*
+    - infrastructure/waddle.cloud/env.cue
+    - infrastructure/waddle.cloud/env.cue/**
+    - scripts/ci-cache-benchmark.py
+    - scripts/ci-cache-benchmark.py/**
+    - scripts/integration-ci-project.py
+    - scripts/integration-ci-project.py/**
+    - scripts/integration-ci.test.ts
+    - scripts/integration-ci.test.ts/**
+    - scripts/integration-ci.ts
+    - scripts/integration-ci.ts/**
+    - scripts/sync-cache-benchmark.sh
+    - scripts/sync-cache-benchmark.sh/**
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
+    - scripts/test-ci-cache-benchmark.py
+    - scripts/test-ci-cache-benchmark.py/**
     - scripts/test_cuenv_bootstrap.py
     - scripts/test_cuenv_bootstrap.py/**
     - scripts/test_integration_ci_project.py
     - scripts/test_integration_ci_project.py/**
-    - server/**/env.cue
+    - server/*.cue
+    - server/Cargo.toml
+    - server/Cargo.toml/**
+    - server/crates/waddle-client-session/Cargo.toml
+    - server/crates/waddle-client-session/Cargo.toml/**
+    - server/crates/waddle-xmpp-client-ffi/Cargo.toml
+    - server/crates/waddle-xmpp-client-ffi/Cargo.toml/**
+    - server/crates/waddle-xmpp-client-wasm/Cargo.toml
+    - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
+    - server/crates/waddle-xmpp-client/Cargo.toml
+    - server/crates/waddle-xmpp-client/Cargo.toml/**
+    - server/crates/waddle-xmpp-core/Cargo.toml
+    - server/crates/waddle-xmpp-core/Cargo.toml/**
     - server/deployment.cue
     - server/deployment.cue/**
     - server/env.cue
-    - server/schema/**
+    - server/env.cue/**
+    - server/scripts/test_ci_trigger_inputs.py
+    - server/scripts/test_ci_trigger_inputs.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
+    - website/env.cue
+    - website/env.cue/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -122,8 +326,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.76.1"
+        if [ "$cuenv_version" != "0.76.1" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -131,15 +335,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -158,7 +362,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.76.1" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi
@@ -204,8 +408,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.76.1"
+        if [ "$cuenv_version" != "0.76.1" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -213,15 +417,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -240,7 +444,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.76.1" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi

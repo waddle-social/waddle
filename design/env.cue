@@ -37,6 +37,8 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			// Light pull-request lane: free GitHub-hosted runner (public repository).
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				contents:   "read"
 				"id-token": "write"
@@ -52,8 +54,7 @@ schema.#Project & {
 			command: "bun"
 			args: ["test"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]},
 				"package.json",
 				"src/**",
 				"test/**",

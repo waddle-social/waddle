@@ -14,8 +14,10 @@ on:
       - server/.cargo/**
       - server/Cargo.lock
       - server/Cargo.toml
-      - server/crates/**
       - server/crates/**/.cargo/**
+      - server/crates/waddle-xmpp-client-ffi/**
+      - server/crates/waddle-xmpp-client/**
+      - server/crates/waddle-xmpp-core/**
       - server/rust-toolchain.toml
       - server/vendor/**
   workflow_dispatch: {}
