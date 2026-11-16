@@ -333,6 +333,11 @@ impl ConnectionRegistry {
         let endpoint = match self.connections.get(jid) {
             Some(entry) => entry.value().endpoint.clone(),
             None => {
+                // A recipient no connection here can hold, such as a room's
+                // occupant from another server.
+                if self.offer_foreign(jid, stanza).is_ok() {
+                    return SendResult::Sent;
+                }
                 debug!("Recipient not connected");
                 return SendResult::NotConnected;
             }
@@ -547,6 +552,11 @@ impl ConnectionRegistry {
         let endpoint = match self.connections.get(jid) {
             Some(entry) if matches(entry.value()) => entry.value().endpoint.clone(),
             None => {
+                // A recipient no connection here can hold, such as a room's
+                // occupant from another server.
+                if self.offer_foreign(jid, stanza).is_ok() {
+                    return BroadcastOutcome::Delivered;
+                }
                 crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
             }

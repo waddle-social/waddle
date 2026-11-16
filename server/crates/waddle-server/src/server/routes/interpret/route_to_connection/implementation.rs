@@ -434,6 +434,11 @@ pub(in crate::server::routes::interpret::route_to_connection) async fn route_to_
     // same closed bit and at most one of them counts.
     let delivery = if deps.effects.is_planning() {
         plan::deliver_full(deps, &full, &stanza, call_setup).await
+    } else if let Some(outcome) = deliver_to_seat(deps, &full, stanza.as_ref()) {
+        // A remote occupant's copy never takes the cluster relay: no node
+        // of this deployment holds its account.
+        close_call_setup_from_outcome(call_setup, outcome);
+        outcome
     } else {
         match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), call_setup.clone())
             .await
@@ -1201,6 +1206,36 @@ pub(crate) fn deliver_full_jid_via_ordered_relay_at<'a>(
     })
 }
 
+/// Hand a local room's stanza for a remote occupant to the deployment's
+/// server-to-server routing, when `target` holds a seat in the room the
+/// stanza comes from (ADR-0020 D10). `None` for every other target, which
+/// keeps its local delivery.
+///
+/// A stanza taken is `Delivered`: custody for transport, held in memory
+/// and written at most once, never proof that the occupant received it. A
+/// copy offered again is not sent twice, and a seat whose stanza cannot be
+/// sent ends, so the occupant joins again and reads what it missed from
+/// the room's archive.
+pub(crate) fn deliver_to_seat(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> Option<FullJidDeliveryOutcome> {
+    if !deps.connection_registry.foreign_takes(target, stanza) {
+        return None;
+    }
+    Some(
+        match deps
+            .connection_registry
+            .offer_foreign(target, stanza.clone())
+        {
+            Ok(()) => FullJidDeliveryOutcome::Delivered,
+            // The seat ended between the two reads.
+            Err(_) => FullJidDeliveryOutcome::Unavailable,
+        },
+    )
+}
+
 pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
@@ -1227,6 +1262,9 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote_at(
             },
         );
         return FullJidDeliveryOutcome::Delivered;
+    }
+    if let Some(outcome) = deliver_to_seat(deps, target, stanza) {
+        return outcome;
     }
     if let Some(outcome) = super::deliver_ordered_local_copy(
         deps,
@@ -1308,6 +1346,9 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
         );
         return FullJidDeliveryOutcome::Delivered;
     }
+    if let Some(outcome) = deliver_to_seat(deps, target, stanza) {
+        return outcome;
+    }
     if let Some(outcome) = deliver_ordered_local_copy(
         deps,
         target,
@@ -1387,6 +1428,9 @@ pub(crate) async fn deliver_direct_to_full_locally(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    if let Some(outcome) = deliver_to_seat(deps, target, stanza) {
+        return outcome;
+    }
     if let Some(outcome) = deliver_ordered_local_copy(
         deps,
         target,
