@@ -1571,3 +1571,67 @@ async fn verdicts_are_asked_again_once_they_expire() {
     assert_eq!(muc.disco_requests_to(MUC_B).len(), 2);
     assert_eq!(muc.disco_requests_to(ROOM).len(), 2);
 }
+
+#[tokio::test]
+async fn a_room_with_more_occupants_than_its_queue_holds_delivers_every_presence_and_its_own_last()
+{
+    let pki = support::Pki::new();
+    // Queues far smaller than the room's burst, so that the stream from the
+    // room's service has to wait for them to drain.
+    let limits = RouterLimits {
+        room_deliveries: 16,
+        room_deliveries_per_room: 4,
+        room_deliveries_per_peer: 4,
+        ..RouterLimits::default()
+    };
+    let (a, _b, muc) = outbound_muc(&pki, limits).await;
+    const GUESTS: usize = 200;
+    muc.crowd(ROOM, GUESTS);
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    let room = jid(ROOM).to_bare();
+    let from_room: Vec<Presence> = a
+        .delivery
+        .delivered()
+        .into_iter()
+        .filter_map(|(recipient, stanza)| match stanza {
+            Stanza::Presence(presence)
+                if recipient == full(ALICE_PHONE)
+                    && presence
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| from.to_bare() == room) =>
+            {
+                Some(presence)
+            }
+            _ => None,
+        })
+        .collect();
+    // The host, every guest in the room's order, and the occupant's own
+    // presence (XEP-0045 §7.2.3), nothing dropped.
+    assert_eq!(from_room.len(), GUESTS + 2, "{}", from_room.len());
+    assert_eq!(from_room[0].from, Some(jid(ROOM_HOST)));
+    for (index, presence) in from_room[1..=GUESTS].iter().enumerate() {
+        let expected = [ROOM, "/", &support::guest(index)].concat();
+        assert_eq!(presence.from, Some(jid(&expected)));
+        assert!(!statuses(presence).contains(&"110".to_owned()));
+    }
+    let own = &from_room[GUESTS + 1];
+    assert_eq!(own.from, Some(jid(ROOM_ALICE)));
+    assert!(statuses(own).contains(&"110".to_owned()));
+
+    // The join completed: a message, which leaves only once joined, does.
+    let offered = offer(
+        &a,
+        Stanza::Message(message(
+            ALICE_PHONE,
+            ROOM,
+            MessageType::Groupchat,
+            "crowded",
+            "hello everyone",
+        )),
+    )
+    .await;
+    assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
+    assert_eq!(a.router.remote_rooms().await, 1);
+}

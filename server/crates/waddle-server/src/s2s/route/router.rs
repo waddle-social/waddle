@@ -34,7 +34,7 @@ use super::occupancy::{
 use super::principal::RemotePrincipal;
 use super::reach::{reach, InboundReach, LocalTarget, Refusal};
 use super::replies;
-use super::room_delivery::{InboundTraffic, RoomQueues, RoomWork};
+use super::room_delivery::{InboundTraffic, Placed, RoomQueues, RoomWork};
 use super::rooms::{self, Asked, Change, RoomEgress, VerificationAnswer};
 use super::telemetry;
 use crate::destination::{
@@ -43,8 +43,8 @@ use crate::destination::{
 };
 use crate::s2s::config::S2sConfig;
 use crate::s2s::conn::{
-    ConnectError, S2sHandle, SinkVerdict, StanzaSink, StreamDirection, StreamEnd, TransmitError,
-    VerifiedPeerStream,
+    ConnectError, S2sHandle, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd,
+    TransmitError, VerifiedPeerStream, Waited,
 };
 
 /// Bounds on the router's queues and pending requests.
@@ -122,11 +122,18 @@ pub struct RouterLimits {
     /// trusted.
     pub not_room_verdict_ttl: Duration,
     /// Stanzas from remote JIDs to local full JIDs waiting to be decided as
-    /// room traffic and delivered, on this replica; a stanza beyond this is
-    /// dropped.
+    /// room traffic and delivered, on this replica, shared equally by the
+    /// workers. A stream whose stanza finds no place beyond this, or beyond
+    /// one of the shares below, stops reading until it fits.
     pub room_deliveries: usize,
     /// Of those, the stanzas from one room.
     pub room_deliveries_per_room: usize,
+    /// Of one worker's share, the stanzas from one remote domain, so that
+    /// one peer cannot fill a worker's queue for the rooms of others.
+    pub room_deliveries_per_peer: usize,
+    /// How long a stream waits for its stanza to fit before the stanza is
+    /// given up and the stream closed with `resource-constraint`.
+    pub room_delivery_wait: Duration,
     /// Workers deciding and delivering room traffic; each serves its own
     /// share of rooms in order.
     pub room_delivery_workers: usize,
@@ -161,6 +168,8 @@ impl Default for RouterLimits {
             not_room_verdict_ttl: Duration::from_secs(300),
             room_deliveries: 1024,
             room_deliveries_per_room: 64,
+            room_deliveries_per_peer: 128,
+            room_delivery_wait: Duration::from_secs(30),
             room_delivery_workers: 4,
             room_delivery_timeout: Duration::from_secs(5),
         }
@@ -449,6 +458,7 @@ impl S2sRouter {
             options.limits.room_delivery_workers,
             options.limits.room_deliveries,
             options.limits.room_deliveries_per_room,
+            options.limits.room_deliveries_per_peer,
         );
         let inner = Arc::new(Inner {
             config: options.config,
@@ -1525,11 +1535,9 @@ impl Inner {
             };
             for occupancy in occupancies {
                 if occupancy.phase.occupies() {
-                    router.room_queues.push(
-                        occupancy.room.clone(),
-                        RoomWork::Ended(Box::new(occupancy)),
-                        true,
-                    );
+                    router
+                        .room_queues
+                        .push_exempt(occupancy.room.clone(), RoomWork::Ended(Box::new(occupancy)));
                 }
             }
         });
@@ -2066,20 +2074,39 @@ impl Inner {
         // full JID of a local resource that occupies, is joining or has just
         // left it, delivered to that resource only. Whether it is room
         // traffic is decided against the shared occupancy table, off the
-        // stream's task and in the room's order.
+        // stream's task and in the room's order. A stanza that finds the
+        // queues full holds its stream until it fits: a room's presence
+        // burst is never cut short.
         if target == LocalTarget::AccountResource && !matches!(stanza, Stanza::Iq(_)) {
             if let Ok(occupant) = to.clone().try_into_full() {
                 let from = principal.address().clone();
+                let room = from.to_bare();
+                let peer = stream.remote().as_domain_ref().as_str().to_owned();
                 let work = RoomWork::Traffic(Box::new(InboundTraffic {
                     stream: stream.clone(),
-                    from: from.clone(),
+                    from,
                     occupant,
                     stanza,
                 }));
-                if !self.room_queues.push(from.to_bare(), work, false) {
-                    telemetry::room_traffic_dropped();
-                }
-                return SinkVerdict::Accepted;
+                let Err(work) = self.room_queues.try_push(room.clone(), work, &peer) else {
+                    return SinkVerdict::Accepted;
+                };
+                telemetry::room_traffic_waited();
+                let router = Arc::clone(self);
+                let deadline = tokio::time::Instant::now() + self.limits.room_delivery_wait;
+                return SinkVerdict::Wait(SinkWait::new(async move {
+                    let placed = router
+                        .room_queues
+                        .push_or_wait(room, work, &peer, deadline, &router.shutdown)
+                        .await;
+                    match placed {
+                        Placed::Queued => Waited::Taken,
+                        Placed::TimedOut => {
+                            telemetry::room_traffic_overloaded();
+                            Waited::Overloaded
+                        }
+                    }
+                }));
             }
         }
         match reach(target, &stanza) {

@@ -179,6 +179,8 @@ pub struct FakeMuc {
     defer_leaves: AtomicBool,
     /// Answers to leaves withheld until the occupant joins the room again.
     deferred_leaves: Mutex<Vec<(BareJid, FullJid, Presence)>>,
+    /// How many guests beside the host each room seats, by room.
+    crowds: Mutex<HashMap<BareJid, usize>>,
 }
 
 impl FakeMuc {
@@ -201,6 +203,7 @@ impl FakeMuc {
             challenged: Mutex::new(HashMap::new()),
             defer_leaves: AtomicBool::new(false),
             deferred_leaves: Mutex::new(Vec::new()),
+            crowds: Mutex::new(HashMap::new()),
         })
     }
 
@@ -313,6 +316,14 @@ impl FakeMuc {
     /// does that processes a leave and a rejoin in the order they came.
     pub fn defer_leaves(&self) {
         self.defer_leaves.store(true, Ordering::SeqCst);
+    }
+
+    /// Seat `guests` further occupants in `room`, named [`guest`], whose
+    /// presence a join receives after the host's and before its own
+    /// (XEP-0045 §7.2.3).
+    pub fn crowd(&self, room: &str, guests: usize) {
+        let room = room.parse::<BareJid>().expect("a room JID");
+        lock(&self.crowds).insert(room, guests);
     }
 
     /// The `disco#info` requests received, in order.
@@ -529,8 +540,8 @@ impl FakeMuc {
         self.seat(&room, &from, &nick, id);
     }
 
-    /// Seat `from` in `room` as `nick`: the host's presence, then the
-    /// occupant's own presence with the join's id.
+    /// Seat `from` in `room` as `nick`: the host's presence, each guest's
+    /// presence, then the occupant's own presence with the join's id.
     fn seat(&self, room: &BareJid, from: &FullJid, nick: &str, id: Option<String>) {
         lock(&self.occupants)
             .entry(room.clone())
@@ -544,6 +555,17 @@ impl FakeMuc {
             Item::new(Affiliation::Owner, Role::Moderator),
             Vec::new(),
         ));
+        let guests = lock(&self.crowds).get(room).copied().unwrap_or(0);
+        for index in 0..guests {
+            self.send(room_presence(
+                room,
+                &guest(index),
+                from,
+                PresenceType::None,
+                Item::new(Affiliation::None, Role::Participant),
+                Vec::new(),
+            ));
+        }
         let mut own = room_presence(
             room,
             nick,
@@ -782,6 +804,11 @@ impl StanzaSink for FakeMuc {
         self.respond(stanza);
         SinkVerdict::Accepted
     }
+}
+
+/// The nickname of the guest `index` that [`FakeMuc::crowd`] seats.
+pub fn guest(index: usize) -> String {
+    ["guest-", &index.to_string()].concat()
 }
 
 /// The specification of `home-a.test`, dialling `home-b.test` and

@@ -14,13 +14,24 @@ pub(super) fn unusable_presence_dropped() {
 }
 
 /// A stanza from an S2S stream that may be a remote room's traffic for a
-/// local resource was dropped because its room's queue, or the router's,
-/// was full.
-pub(super) fn room_traffic_dropped() {
+/// local resource found its room's queue, its worker's queue or its remote
+/// domain's share of it full, and the stream stopped reading until it fit.
+pub(super) fn room_traffic_waited() {
     counter_add!(
-        "waddle.s2s.route.room_traffic.dropped",
+        "waddle.s2s.route.room_traffic.waits",
         "{stanza}",
-        "Stanzas from S2S streams to local full JIDs dropped because the room delivery queues were full.",
+        "Stanzas from S2S streams to local full JIDs that found the room delivery queues full, so that their stream stopped reading until they fit.",
+        1,
+    );
+}
+
+/// A stanza that waited for a place on the room delivery queues found none
+/// within the wait's deadline: it was lost and its stream was closed.
+pub(super) fn room_traffic_overloaded() {
+    counter_add!(
+        "waddle.s2s.route.room_traffic.overloaded",
+        "{stanza}",
+        "Stanzas from S2S streams to local full JIDs that found no place on the room delivery queues within the wait's deadline, so that their stream was closed with resource-constraint.",
         1,
     );
 }

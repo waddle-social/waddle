@@ -1,11 +1,15 @@
 //! Where stanzas from established inbound streams go.
 
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+
 use minidom::Element;
 
 use super::peer_stream::VerifiedPeerStream;
 
 /// What a [`StanzaSink`] does with a stanza.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SinkVerdict {
     /// The sink took the stanza; the stream continues. Taking a stanza
     /// says nothing about what the sink does with it: it may answer it,
@@ -15,6 +19,50 @@ pub enum SinkVerdict {
     /// `policy-violation`, or with `improper-addressing` for a stanza
     /// offered through [`StanzaSink::offer_malformed`].
     Refuse,
+    /// The sink has no room for the stanza yet. The connection reads
+    /// nothing more from its peer, and offers nothing more, until the wait
+    /// ends: the peer's further stanzas wait in the transport, and the peer
+    /// sees its writes slow down. The wait takes the stanza when room frees
+    /// and must end within a deadline of the sink's own.
+    Wait(SinkWait),
+}
+
+/// How a [`SinkWait`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waited {
+    /// The sink took the stanza; the stream continues.
+    Taken,
+    /// The sink could not take the stanza within its deadline. The stanza
+    /// is lost, and the stream closes with `resource-constraint` and ends
+    /// as [`StreamEnd::Lost`].
+    Overloaded,
+}
+
+/// A stanza the sink takes once it has room for it.
+pub struct SinkWait(Pin<Box<dyn Future<Output = Waited> + Send>>);
+
+impl SinkWait {
+    /// A wait that ends as `wait` does.
+    pub fn new(wait: impl Future<Output = Waited> + Send + 'static) -> Self {
+        Self(Box::pin(wait))
+    }
+}
+
+impl Future for SinkWait {
+    type Output = Waited;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Waited> {
+        self.0.as_mut().poll(context)
+    }
+}
+
+impl fmt::Debug for SinkWait {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SinkWait")
+    }
 }
 
 /// How an established stream ended, as a sink learns it.
@@ -46,7 +94,9 @@ pub enum StreamEnd {
 /// `from` the stream's authenticated remote domain (RFC 6120 §4.9.3).
 ///
 /// The sink is called on the connection's task and must not wait on
-/// anything a remote peer controls.
+/// anything a remote peer controls. A sink without room for a stanza
+/// returns [`SinkVerdict::Wait`] instead of waiting itself, so that the
+/// connection stops reading from the peer while it waits.
 pub trait StanzaSink: Send + Sync {
     /// A stanza whose `to` and `from` are in the identity profile's
     /// canonical form.

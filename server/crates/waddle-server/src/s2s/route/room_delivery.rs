@@ -11,17 +11,24 @@
 //! a shard the rooms with queued work take turns, one stanza each, so one
 //! busy room does not hold back the others.
 //!
-//! A room's queue and each shard are bounded; a stanza beyond either bound
-//! is dropped and counted. Work that ends an occupancy because a stream
-//! failed is exempt from both bounds: there is at most one such item per
-//! occupancy, and the occupant must be told.
+//! A room's queue, each shard, and each remote domain's share of a shard
+//! are bounded. A stanza beyond a bound is not dropped: the stream that
+//! carried it waits, reading nothing more from its peer, until the stanza
+//! fits ([`RoomQueues::push_or_wait`]), so a room's burst, such as the
+//! presence of every occupant before the joining occupant's own (XEP-0045
+//! §7.2.3), arrives in full and in order. One remote domain cannot hold
+//! more than its share of a shard, so the rooms of other domains on that
+//! shard keep moving. Work that ends an occupancy because a stream failed
+//! is exempt from every bound and counts towards none: there is at most one
+//! such item per occupancy, and the occupant must be told.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 use std::sync::Mutex;
 
 use jid::{BareJid, FullJid, Jid};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use waddle_xmpp::Stanza;
 
 use super::occupancy::Occupancy;
@@ -48,47 +55,120 @@ pub(super) struct InboundTraffic {
     pub stanza: Stanza,
 }
 
+/// Identifies the end of one occupancy, so that it is queued once however
+/// many failed streams carried it.
+type EndKey = (FullJid, BareJid, String);
+
+fn end_key(occupancy: &Occupancy) -> EndKey {
+    (
+        occupancy.occupant.clone(),
+        occupancy.room.clone(),
+        occupancy.attempt.clone(),
+    )
+}
+
+/// One queued item: the work, and the remote domain whose share it counts
+/// against, or `None` for exempt work.
+#[derive(Debug)]
+struct Item {
+    work: RoomWork,
+    peer: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct RoomQueue {
+    items: VecDeque<Item>,
+    /// Queued items that count against the room's bound.
+    bounded: usize,
+}
+
 #[derive(Debug, Default)]
 struct Shard {
-    rooms: HashMap<BareJid, VecDeque<(RoomWork, bool)>>,
+    rooms: HashMap<BareJid, RoomQueue>,
     /// Rooms with queued work, in the order they take their turn.
     turns: VecDeque<BareJid>,
     /// Queued work that counts against the shard's bound.
     bounded: usize,
+    /// Of that, the work from each remote domain.
+    peers: HashMap<String, usize>,
+    /// The occupancy ends queued.
+    ended: HashSet<EndKey>,
 }
 
 impl Shard {
-    fn push(&mut self, room: BareJid, work: RoomWork, exempt: bool, bounds: &Bounds) -> bool {
-        let queued = self.rooms.get(&room).map_or(0, VecDeque::len);
-        if !exempt && (self.bounded >= bounds.per_shard || queued >= bounds.per_room) {
-            return false;
+    /// Queue `work` for `room`, counted against `peer`'s share (exempt when
+    /// `None`), or give it back when a bound refuses it.
+    fn push(
+        &mut self,
+        room: BareJid,
+        work: RoomWork,
+        peer: Option<String>,
+        bounds: &Bounds,
+    ) -> Result<(), RoomWork> {
+        match &peer {
+            Some(peer) => {
+                let in_room = self.rooms.get(&room).map_or(0, |queue| queue.bounded);
+                let of_peer = self.peers.get(peer).copied().unwrap_or(0);
+                if self.bounded >= bounds.per_shard
+                    || in_room >= bounds.per_room
+                    || of_peer >= bounds.per_peer
+                {
+                    return Err(work);
+                }
+                self.bounded += 1;
+                *self.peers.entry(peer.clone()).or_insert(0) += 1;
+            }
+            None => {
+                // The same occupancy, ended by a second failed stream.
+                if let RoomWork::Ended(occupancy) = &work {
+                    if !self.ended.insert(end_key(occupancy)) {
+                        return Ok(());
+                    }
+                }
+            }
         }
-        if !exempt {
-            self.bounded += 1;
+        let queue = self.rooms.entry(room.clone()).or_default();
+        if queue.items.is_empty() {
+            self.turns.push_back(room);
         }
-        if queued == 0 {
-            self.turns.push_back(room.clone());
+        if peer.is_some() {
+            queue.bounded += 1;
         }
-        self.rooms
-            .entry(room)
-            .or_default()
-            .push_back((work, exempt));
-        true
+        queue.items.push_back(Item { work, peer });
+        Ok(())
     }
 
-    fn pop(&mut self) -> Option<RoomWork> {
+    /// The next item, in the rooms' turns: the work and whether it freed a
+    /// place under the bounds.
+    fn pop(&mut self) -> Option<(RoomWork, bool)> {
         let room = self.turns.pop_front()?;
         let queue = self.rooms.get_mut(&room)?;
-        let (work, exempt) = queue.pop_front()?;
-        if queue.is_empty() {
+        let Item { work, peer } = queue.items.pop_front()?;
+        if peer.is_some() {
+            queue.bounded = queue.bounded.saturating_sub(1);
+        }
+        if queue.items.is_empty() {
             self.rooms.remove(&room);
         } else {
             self.turns.push_back(room);
         }
-        if !exempt {
-            self.bounded = self.bounded.saturating_sub(1);
+        match &peer {
+            Some(peer) => {
+                self.bounded = self.bounded.saturating_sub(1);
+                if let Some(count) = self.peers.get_mut(peer) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.peers.remove(peer);
+                    }
+                }
+            }
+            None => {
+                if let RoomWork::Ended(occupancy) = &work {
+                    self.ended.remove(&end_key(occupancy));
+                }
+            }
         }
-        Some(work)
+        Some((work, peer.is_some()))
     }
 }
 
@@ -96,11 +176,20 @@ impl Shard {
 struct Bounds {
     per_shard: usize,
     per_room: usize,
+    per_peer: usize,
+}
+
+/// One shard: its queues, the signal that work arrived, and the signal
+/// that a place under the bounds freed.
+struct ShardSlot {
+    shard: Mutex<Shard>,
+    work: Notify,
+    space: Notify,
 }
 
 /// The shards and their bounds.
 pub(super) struct RoomQueues {
-    shards: Vec<(Mutex<Shard>, Notify)>,
+    shards: Vec<ShardSlot>,
     hasher: std::collections::hash_map::RandomState,
     bounds: Bounds,
 }
@@ -114,19 +203,35 @@ fn lock(shard: &Mutex<Shard>) -> std::sync::MutexGuard<'_, Shard> {
     }
 }
 
+/// Whether a stanza that waited for a place found one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Placed {
+    Queued,
+    /// The deadline passed or the router is stopping; the stanza was not
+    /// queued.
+    TimedOut,
+}
+
 impl RoomQueues {
     /// `workers` shards sharing `total` queued stanzas, at most `per_room`
-    /// of them for one room.
-    pub(super) fn new(workers: usize, total: usize, per_room: usize) -> Self {
+    /// of them for one room and `per_peer` of a shard's for one remote
+    /// domain.
+    pub(super) fn new(workers: usize, total: usize, per_room: usize, per_peer: usize) -> Self {
         let workers = workers.max(1);
+        let per_shard = (total / workers).max(1);
         Self {
             shards: (0..workers)
-                .map(|_| (Mutex::new(Shard::default()), Notify::new()))
+                .map(|_| ShardSlot {
+                    shard: Mutex::new(Shard::default()),
+                    work: Notify::new(),
+                    space: Notify::new(),
+                })
                 .collect(),
             hasher: std::collections::hash_map::RandomState::new(),
             bounds: Bounds {
-                per_shard: (total / workers).max(1),
+                per_shard,
                 per_room: per_room.max(1),
+                per_peer: per_peer.clamp(1, per_shard),
             },
         }
     }
@@ -136,34 +241,93 @@ impl RoomQueues {
         self.shards.len()
     }
 
-    fn shard_of(&self, room: &BareJid) -> usize {
+    fn slot(&self, room: &BareJid) -> Option<&ShardSlot> {
         let hash = self.hasher.hash_one(room.as_str());
-        usize::try_from(hash % self.shards.len() as u64).unwrap_or(0)
+        let index = usize::try_from(hash % self.shards.len() as u64).unwrap_or(0);
+        self.shards.get(index)
     }
 
-    /// Queue `work` for `room`; `false` when a bound refused it. `exempt`
-    /// work is never refused.
-    pub(super) fn push(&self, room: BareJid, work: RoomWork, exempt: bool) -> bool {
-        let Some((shard, notify)) = self.shards.get(self.shard_of(&room)) else {
-            return false;
+    /// Queue `work` for `room` against `peer`'s share, or give it back when
+    /// a bound refuses it.
+    pub(super) fn try_push(
+        &self,
+        room: BareJid,
+        work: RoomWork,
+        peer: &str,
+    ) -> Result<(), RoomWork> {
+        let Some(slot) = self.slot(&room) else {
+            return Err(work);
         };
-        let pushed = lock(shard).push(room, work, exempt, &self.bounds);
-        if pushed {
-            notify.notify_one();
+        lock(&slot.shard).push(room, work, Some(peer.to_owned()), &self.bounds)?;
+        slot.work.notify_one();
+        Ok(())
+    }
+
+    /// Queue `work` for `room` against `peer`'s share, waiting for a place
+    /// until `deadline` or until `stop` is cancelled.
+    pub(super) async fn push_or_wait(
+        &self,
+        room: BareJid,
+        mut work: RoomWork,
+        peer: &str,
+        deadline: tokio::time::Instant,
+        stop: &CancellationToken,
+    ) -> Placed {
+        let Some(slot) = self.slot(&room) else {
+            return Placed::TimedOut;
+        };
+        loop {
+            // Registered before the attempt, so a place freed between the
+            // attempt and the wait is not missed.
+            let freed = slot.space.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            let pushed =
+                lock(&slot.shard).push(room.clone(), work, Some(peer.to_owned()), &self.bounds);
+            match pushed {
+                Ok(()) => {
+                    slot.work.notify_one();
+                    return Placed::Queued;
+                }
+                Err(refused) => work = refused,
+            }
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => return Placed::TimedOut,
+                () = tokio::time::sleep_until(deadline) => return Placed::TimedOut,
+                () = &mut freed => {}
+            }
         }
-        pushed
+    }
+
+    /// Queue `work`, exempt from every bound. The end of an occupancy
+    /// already queued is not queued again.
+    pub(super) fn push_exempt(&self, room: BareJid, work: RoomWork) {
+        let Some(slot) = self.slot(&room) else {
+            return;
+        };
+        if lock(&slot.shard)
+            .push(room, work, None, &self.bounds)
+            .is_ok()
+        {
+            slot.work.notify_one();
+        }
     }
 
     /// The next work of shard `index`, waiting for some.
     pub(super) async fn next(&self, index: usize) -> RoomWork {
-        let Some((shard, notify)) = self.shards.get(index) else {
+        let Some(slot) = self.shards.get(index) else {
             return std::future::pending().await;
         };
         loop {
-            if let Some(work) = lock(shard).pop() {
+            let popped = lock(&slot.shard).pop();
+            if let Some((work, freed)) = popped {
+                if freed {
+                    slot.space.notify_waiters();
+                }
                 return work;
             }
-            notify.notified().await;
+            slot.work.notified().await;
         }
     }
 }

@@ -653,9 +653,21 @@ Each worker serves its rooms in turn, one stanza each, and a room's
 stanzas in the order they arrived, so an occupant sees a room's presence
 and messages in the room's order, and the room's own presence moves the
 occupancy on before its next stanza is decided. A room may have at most
-64 stanzas waiting and a worker 256; a stanza beyond either is dropped and
-counted (`waddle.s2s.route.room_traffic.dropped`). A delivery that takes
-more than five seconds is abandoned and counted
+64 stanzas waiting, a worker 256, and one remote domain 128 of a worker's
+256, so that one peer cannot fill a worker's queue for the rooms of other
+peers. A stanza beyond any of these is not dropped: the stream that
+carried it stops reading from its peer until the stanza fits (counted as
+`waddle.s2s.route.room_traffic.waits`), so its later stanzas wait in the
+transport and the peer's writes slow down. A room's burst, such as the
+presence of every occupant a join receives before the joining occupant's
+own presence with status 110 (§7.2.3), arrives in full and in order,
+however many occupants the room has. A stream whose stanza has not fit
+within 30 seconds, or that this server shuts down, evicts or replaces
+meanwhile, loses that stanza and ends: with `resource-constraint` after
+the wait (counted as `waddle.s2s.route.room_traffic.overloaded`) and as
+*lost* (see below), so the occupants of rooms behind it are told and join
+again rather than miss a stanza unaware. A delivery that takes more than
+five seconds is abandoned and counted
 (`waddle.s2s.route.room_traffic.delivery_timeouts`).
 
 **Carbons, archive and inbox.** A private message that a local resource
@@ -741,7 +753,9 @@ remote domain ends, whichever replica routed it: the stream carried the
 rooms' traffic for all of them. When an outbound stream is lost, the
 occupancies this replica routes end: the stream carried their stanzas.
 Each end is queued on the room's worker behind the traffic already
-queued, exempt from the queue's bounds, and then removes the occupancy,
+queued, exempt from the queue's bounds and not counted towards them, once
+however many failed streams carried the occupancy, and then removes the
+occupancy,
 unless a later join replaced it, and delivers the occupant's own
 unavailable presence from the room with statuses 110 and 333 and its
 affiliation, role `none` (XEP-0045 §11.1, without 307). Stanzas either way
@@ -797,6 +811,8 @@ the durable authority has adopted its rows and is not affected.
 | How long a "not a service" or "not a room" verdict is cached | 5 min |
 | Room traffic waiting for decision on one replica (four workers of 256) | 1,024 |
 | Room traffic waiting from one room | 64 |
+| Room traffic waiting from one remote domain, of one worker's 256 | 128 |
+| How long a stream waits for its room traffic to fit | 30 s |
 | One delivery of room traffic | 5 s |
 
 A join beyond the occupancy bounds is refused with `resource-constraint`.
@@ -886,6 +902,12 @@ runbook (G24):
   of them and delay other joins with `resource-constraint` for up to the
   verification timeout. Each such room costs a verification for the room
   as well as, once, one for its service.
+- **A waiting stream holds back its other rooms.** A stream that waits
+  for its stanza to fit on the room delivery queues reads nothing else
+  meanwhile, so the peer's traffic for other rooms and other occupants on
+  that stream waits too, and IQ responses on it arrive late. The wait ends
+  within 30 seconds; a peer whose rooms keep the queues full has its
+  stream closed then and its occupants told to join again.
 - **A cancelled offer.** The WebSocket path waits at most two seconds for
   the route. A join or leave whose occupancy was written but whose route
   call was cancelled before its stanza was queued leaves the occupancy

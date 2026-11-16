@@ -51,7 +51,7 @@ use super::registry::{
     Activity, DialSlot, NegotiationSlot, RegisterRefusal, Registration, StreamSlot, StreamTokens,
 };
 use super::service::Shared;
-use super::sink::{SinkVerdict, StreamEnd};
+use super::sink::{SinkVerdict, SinkWait, StreamEnd, Waited};
 use super::telemetry;
 use super::transport::{Transport, TransportError};
 use super::verification;
@@ -546,20 +546,14 @@ impl Session {
                     Some(stream) => self.shared.sink.offer(stream, stanza),
                     None => SinkVerdict::Refuse,
                 };
-                match verdict {
-                    SinkVerdict::Accepted => Ok(Vec::new()),
-                    SinkVerdict::Refuse => Ok(self.stream.signal(Signal::PolicyViolation)),
-                }
+                self.sink_verdict(verdict, Signal::PolicyViolation).await
             }
             Output::MalformedAddress(stanza) => {
                 let verdict = match &self.peer_stream {
                     Some(stream) => self.shared.sink.offer_malformed(stream, stanza),
                     None => SinkVerdict::Refuse,
                 };
-                match verdict {
-                    SinkVerdict::Accepted => Ok(Vec::new()),
-                    SinkVerdict::Refuse => Ok(self.stream.signal(Signal::ImproperAddressing)),
-                }
+                self.sink_verdict(verdict, Signal::ImproperAddressing).await
             }
             Output::Close(reason) => {
                 if reason == CloseReason::PeerStreamError(StreamErrorCondition::ConnectionTimeout) {
@@ -581,6 +575,74 @@ impl Session {
                     self.awaiting_dialback_result = false;
                 }
                 Err(self.close_outcome(reason))
+            }
+        }
+    }
+
+    /// Act on what the sink did with a stanza: a refusal closes the stream
+    /// with `refusal`, and a wait holds the connection, reading nothing
+    /// more from the peer, until the sink takes the stanza.
+    async fn sink_verdict(
+        &mut self,
+        verdict: SinkVerdict,
+        refusal: Signal,
+    ) -> Result<Vec<Output>, S2sOutcome> {
+        match verdict {
+            SinkVerdict::Accepted => Ok(Vec::new()),
+            SinkVerdict::Refuse => Ok(self.stream.signal(refusal)),
+            SinkVerdict::Wait(wait) => Ok(self.wait_for_sink(wait).await),
+        }
+    }
+
+    /// Wait for the sink to take a stanza. The stream's own ends still
+    /// apply meanwhile: shutdown, eviction and replacement end the wait and
+    /// the stream, and the stanza is lost. A wait the sink gives up on ends
+    /// the stream with `resource-constraint` and loses the stanza. Time
+    /// spent waiting is not counted against the element the peer may have
+    /// left unfinished behind the stanza, since nothing was read.
+    async fn wait_for_sink(&mut self, wait: SinkWait) -> Vec<Output> {
+        /// What ended a wait before the sink did.
+        enum Interrupted {
+            Shutdown,
+            Evicted,
+            Replaced,
+        }
+        let started = Instant::now();
+        let shutdown = self.shared.shutdown.clone();
+        let evict = self.tokens.evict.clone();
+        let replace = self.tokens.replace.clone();
+        let interrupted = tokio::select! {
+            biased;
+            () = shutdown.cancelled(), if !self.shutdown_sent => Some(Interrupted::Shutdown),
+            () = evict.cancelled(), if !self.evicted => Some(Interrupted::Evicted),
+            () = replace.cancelled(), if !self.replaced => Some(Interrupted::Replaced),
+            waited = wait => match waited {
+                Waited::Taken => None,
+                Waited::Overloaded => {
+                    self.lost = true;
+                    return self.stream.signal(Signal::ResourceExhausted);
+                }
+            },
+        };
+        if let Some(unfinished) = &mut self.incomplete {
+            unfinished.since += started.elapsed();
+        }
+        let Some(interrupted) = interrupted else {
+            return Vec::new();
+        };
+        self.lost = true;
+        match interrupted {
+            Interrupted::Shutdown => {
+                self.shutdown_sent = true;
+                self.stream.signal(Signal::Shutdown)
+            }
+            Interrupted::Evicted => {
+                self.evicted = true;
+                self.stream.signal(Signal::ResourceExhausted)
+            }
+            Interrupted::Replaced => {
+                self.replaced = true;
+                self.stream.signal(Signal::Conflict)
             }
         }
     }
