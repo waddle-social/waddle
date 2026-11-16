@@ -47,6 +47,9 @@ not run until verification (D9):
 - `crates/waddle-server/tests/xep0280_s2s_account_carbons_ws.rs`:
   received and sent carbons of messages exchanged with remote accounts,
   and carbon wrappers removed from remote messages;
+- `crates/waddle-server/tests/xep0359_s2s_account_stanza_ids_ws.rs`:
+  stanza ids in the deployment's name removed from remote messages before
+  delivery and before storage, and a remote sender's own id kept;
 - `crates/waddle-server/tests/xep0191_s2s_account_blocking_ws.rs`:
   blocking in both directions, and the recorded subscription requests of
   blocked senders;
@@ -274,8 +277,15 @@ and the offline admissions of strangers' messages.
   `<sent/>` and `<received/>` wrappers of carbon copies and the XEP-0313
   `<result/>` wrapper of archive results. A carbon or an archive result
   names the account's own traffic; one from a remote sender is a forgery
-  a client could take for its own (XEP-0280 §11). XEP-0359 ids naming this
-  server are removed by the recipient pass, as for any peer stanza.
+  a client could take for its own (XEP-0280 §11). Every XEP-0359
+  `<stanza-id/>` this deployment could have assigned is removed too: one
+  whose `by` names an address at a served domain (the recipient account,
+  whose archive a client takes it for, among them) or nothing readable,
+  since an entity that assigns stanza ids deletes one whose `by` it would
+  set (XEP-0359 §3). It is removed here, before delivery and before
+  storage, rather than left to the recipient pass, which replaces only an
+  id in the name it stamps itself. One a remote entity assigned in its own
+  name is left, as a routing entity leaves it (§3).
 
 ### Presence (RFC 6121 §4, §8.5.2.1.2, §8.5.3.1)
 

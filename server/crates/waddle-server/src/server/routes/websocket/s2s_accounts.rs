@@ -558,10 +558,12 @@ fn refuse_message(state: &WebSocketState, message: &Message) -> Vec<Stanza> {
 /// Remove from a remote message the payloads only this server originates
 /// for its own accounts: the inbox elements, the DM pin marker, the
 /// XEP-0280 `<received/>` and `<sent/>` wrappers of carbon copies and the
-/// XEP-0313 `<result/>` wrapper of archive results. A carbon or an archive
+/// XEP-0313 `<result/>` wrapper of archive results, and the stanza ids it
+/// could have assigned ([`strip_local_stanza_ids`]). A carbon or an archive
 /// result names the account's own traffic; one from a remote sender is a
 /// forgery a client could take for its own (XEP-0280 §11).
-fn strip_private_payloads(message: &mut Message) {
+fn strip_private_payloads(message: &mut Message, served: Option<&ServedDomains>) {
+    strip_local_stanza_ids(message, served);
     message.payloads.retain(|payload| {
         let namespace = payload.ns();
         namespace != NS_INBOX
@@ -570,6 +572,35 @@ fn strip_private_payloads(message: &mut Message) {
             && !payload.is("received", CARBONS_NS)
             && !payload.is("sent", CARBONS_NS)
             && !payload.is("result", MAM_NS)
+    });
+}
+
+/// Remove from a remote message every XEP-0359 `<stanza-id/>` this
+/// deployment could have assigned: one whose `by` names an address at a
+/// domain it serves (the recipient account's archive among them), or that
+/// cannot be read as an address. A client takes an id in its own
+/// account's name for the one its archive gave the message, so a remote
+/// sender must not supply it; an entity that assigns stanza ids deletes
+/// one whose `by` it would set (XEP-0359 §3); the recipient pass replaces
+/// only an id in the name it stamps itself, and a stored message has not
+/// met it yet. An id a remote entity assigned in its own name is left, as
+/// a routing entity leaves it (§3). Without the served domains every
+/// `<stanza-id/>` is removed.
+fn strip_local_stanza_ids(message: &mut Message, served: Option<&ServedDomains>) {
+    message.payloads.retain(|payload| {
+        if !payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID) {
+            return true;
+        }
+        let Some(served) = served else {
+            return false;
+        };
+        let Some(by) = payload.attr("by").and_then(|by| by.parse::<Jid>().ok()) else {
+            return false;
+        };
+        matches!(
+            served.classify(Some(&by)).unserved(),
+            Some(UnservedDestination::Remote(_))
+        )
     });
 }
 
@@ -615,6 +646,10 @@ async fn receive_message(
     }
     let sender = principal.account().as_bare_jid().clone();
     let full = to.clone().try_into_full().ok();
+    let served = state
+        .deps
+        .service_domains
+        .served_domains(state.deps.auth_state.xmpp_domain.as_str());
     // An event notification passes its gate before anything else; one
     // carried by an error is never a notification the account asked for.
     if let Some(nodes) = event_nodes(&message) {
@@ -623,7 +658,7 @@ async fn receive_message(
         {
             return Vec::new();
         }
-        strip_private_payloads(&mut message);
+        strip_private_payloads(&mut message, served.as_ref());
         deliver_headline(
             state,
             &account,
@@ -636,7 +671,7 @@ async fn receive_message(
         .await;
         return Vec::new();
     }
-    strip_private_payloads(&mut message);
+    strip_private_payloads(&mut message, served.as_ref());
     match message.type_ {
         MessageType::Error => {
             if let Some(full) = full.as_ref() {

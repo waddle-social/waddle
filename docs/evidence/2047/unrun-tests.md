@@ -120,6 +120,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0160_s2s_account_offline_ws` (6) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0198_s2s_account_expiry` (3) | W6c | none (in-memory offline store and registries) | Not run |
 | `xep0280_s2s_account_carbons_ws` (5) | W6c | as `s2s_account_traffic_ws` | Not run |
+| `xep0359_s2s_account_stanza_ids_ws` (2) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0191_s2s_account_blocking_ws` (8) | W6c | as `s2s_account_traffic_ws` | Not run |
 | `xep0060_s2s_account_events_ws` (6) | W6c | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Not run |
 | `xep0115_s2s_account_caps_ws` (1) | W6c | as `s2s_account_traffic_ws` | Not run |
