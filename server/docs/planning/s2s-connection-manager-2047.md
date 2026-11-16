@@ -119,6 +119,13 @@ wiring in `server/lifecycle.rs`.
   of the domain can obtain one by domain validation. Each lasts until the
   operator denylists the domain or removes it from the trusted-home list.
   Accepting that is part of the activation decision (gate G22).
+- **Host policy for remote grants.** `host_policy.require_pkix` (off by
+  default) makes the host-grant boundary honour a remote principal's
+  grants only on a `pkix` stream, member-level grants included; privileged
+  grants and room moderation need a trusted home's `pkix` stream whatever
+  it says. The admission lists, the trusted-home list, `require_private_ca`
+  and this switch are read at each host-grant decision from the snapshot
+  the replica runs ([the host-grant design](host-grant-authority-2047.md#remote-principals-at-the-effect-boundary-g17)).
 - Admission is checked at stream open (the pre-TLS header on an inbound
   stream, before dialling on an outbound one) and again before SASL
   EXTERNAL succeeds. Every refusal of the pair before TLS is
