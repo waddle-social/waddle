@@ -28,6 +28,7 @@ import {
   normalizeMucCallRoomJid,
 } from "@/lib/calls/muc-call-presence";
 import { mucCallParticipantPreview } from "@/lib/calls/muc-call-indicators";
+import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
@@ -63,6 +64,7 @@ const connecting = useStore($callConnecting);
 const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const mucParticipants = useStore($mucCallParticipants);
+const { selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
 
@@ -119,6 +121,16 @@ const panel = computed<CurrentCallPanelState | null>(() => {
     participantCount: 2,
     participantLabels: [],
   };
+});
+
+// The panel is the way back to a call you are not looking at. While the
+// call's own conversation is open, its stage (split, expanded or fullscreen)
+// already carries every control, so a second bar would only duplicate them.
+// Mirrors the stage's render gate in CallSplitContainer / CallExpandedSurface.
+const stageOnScreen = computed(() => {
+  const current = panel.value;
+  if (!current?.viewing || state.value.phase !== "active") return false;
+  return current.kind === "dm" || selfInCall.value;
 });
 
 const isConnected = computed(() => panel.value?.connected === true && !connecting.value);
@@ -219,7 +231,7 @@ const hangupClass = cx(iconbtn({ size: "sm" }), css({
 
 <template>
   <aside
-    v-if="panel"
+    v-if="panel && !stageOnScreen"
     :class="rootClass"
     aria-label="Current call"
   >
