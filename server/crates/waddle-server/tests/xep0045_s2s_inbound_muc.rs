@@ -350,8 +350,19 @@ async fn a_remote_occupant_changes_the_subject_only_where_the_room_lets_occupant
 
 #[tokio::test]
 async fn a_remote_accounts_archived_messages_are_bounded() {
-    let (hosted, _alice, _own) =
-        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // The router's own bounds on one account's requests and on one room's
+    // share of the queues would refuse this burst before the archive's
+    // bound is reached; they are raised so that only the archive's bound
+    // is exercised.
+    let limits = RouterLimits {
+        room_requests: 4096,
+        room_requests_per_peer: 1024,
+        room_requests_per_room: 512,
+        room_request_burst_per_account: 200,
+        room_request_rate_per_account: 50,
+        ..RouterLimits::default()
+    };
+    let (hosted, _alice, _own) = room_with_remote_occupant(limits, no_change).await;
     // The account may have 30 messages archived at once and five more
     // each second; a burst well beyond that is refused with
     // `resource-constraint` and archives nothing.
@@ -370,6 +381,15 @@ async fn a_remote_accounts_archived_messages_are_bounded() {
         .await
         .expect("a refusal once the allowance is spent");
     assert_eq!(limited.attr("to"), Some(BOB));
+    // The archive's refusal, not one of the router's.
+    let text: String = limited
+        .children()
+        .filter(|child| child.name() == "error")
+        .flat_map(|error| error.children())
+        .filter(|child| child.name() == "text")
+        .map(|text| text.text())
+        .collect();
+    assert_eq!(text, "Too many messages; try again later.", "{limited:?}");
     tokio::time::sleep(QUIET).await;
     let reflected = hosted.count_at_peer(|stanza| {
         stanza.name() == "message"
