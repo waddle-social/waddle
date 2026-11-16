@@ -1,9 +1,19 @@
 //! XEP-0503: Server-side Spaces
 //!
-//! Implements Waddle's XEP-0503 v0.2.0 surface for native XMPP community
+//! Implements Waddle's XEP-0503 version 0.3.0 surface (xsf/xeps
+//! `4132c531487fe9450ae90b905b8df950d0d478b2`) for native XMPP community
 //! discovery. The canonical space is exposed as a pubsub node typed
 //! `urn:xmpp:spaces:0`, with channel items represented as XEP-0402
 //! `<conference>` bookmarks backed by the canonical channel catalog.
+//!
+//! Version 0.3.0 keeps the namespace of 0.2.0. Its two changes are the
+//! room `disco#info` field that names a room's Space,
+//! `muc#roomconfig_pubsub`, which the room description emits
+//! (`muc::roominfo`), and the avatar and banner items of a Space
+//! ([`ITEM_SPACE_AVATAR_METADATA`], [`ITEM_SPACE_BANNER_METADATA`]), whose
+//! XEP-0084 metadata points at image URLs. Waddle publishes neither item,
+//! and neither the server nor its clients fetch the images such items name
+//! on another service (ADR-0020 D4).
 //!
 //! The spaces service lives at `spaces.<domain>` and is advertised in
 //! `disco#items` alongside the existing MUC/upload/pubsub components.
@@ -14,6 +24,10 @@
 //! - pubsub `<items>` on `spaces.<domain>` for `node=<space_id>`: returns XEP-0402 bookmark items
 //! - pubsub `<publish/>` and `<retract/>` on the canonical space node update
 //!   channel bookmark membership.
+//!
+//! XEP-0503 defines no access control, membership or inheritance for a
+//! Space's children: a subscription to a Space node is not a grant in any
+//! of its rooms.
 
 use crate::muc::owner::FIELD_PIN_PERMISSION;
 use minidom::Element;
@@ -25,6 +39,14 @@ use crate::{managed_room_jid, ChannelInfo, ChannelType, SpaceDetails, XmppError}
 
 /// XEP-0503 Spaces namespace.
 pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
+
+/// Item identifier of a Space's avatar metadata (XEP-0503 0.3.0, "Spaces
+/// images"): a XEP-0084 `<metadata/>` payload naming where the image is.
+pub const ITEM_SPACE_AVATAR_METADATA: &str = "urn:xmpp:spaces:avatar:metadata:0";
+
+/// Item identifier of a Space's banner metadata (XEP-0503 0.3.0, "Spaces
+/// images").
+pub const ITEM_SPACE_BANNER_METADATA: &str = "urn:xmpp:spaces:banner:metadata:0";
 
 /// Waddle's service-discovery form namespace for authenticated server metadata.
 pub const NS_WADDLE_SERVER_INFO: &str = "urn:waddle:server-info:0";
@@ -157,6 +179,24 @@ pub fn build_spaces_metadata_form_for_requester_with_owners(
     }
 
     form.to_element()
+}
+
+/// Build the `pubsub#meta-data` form of a space node as an asker at another
+/// server is told it: the node's type, which is how XEP-0503 recognises a
+/// Space, and its title.
+///
+/// The addresses of the node's owners and creator, its creation date, its
+/// access model and the asker's affiliation are left out: they describe
+/// accounts and policy of this deployment, and XEP-0503 requires none of
+/// them of a Space.
+pub fn build_spaces_metadata_form_for_remote(title: &str) -> Element {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(
+            "http://jabber.org/protocol/pubsub#meta-data",
+        ))
+        .add_field(Field::text_single("pubsub#type", NS_SPACES))
+        .add_field(Field::text_single("pubsub#title", title))
+        .to_element()
 }
 
 /// Build authenticated server role metadata for XEP-0030 disco#info.
