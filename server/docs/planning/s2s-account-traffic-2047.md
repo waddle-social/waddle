@@ -670,9 +670,11 @@ store. This is the slice's rollout part (G24).
   to the 10 s bound per stanza; work abandoned at that bound applies
   nothing more but its task lives until its current read or write
   returns, so a store that hangs accumulates such tasks.
-- **Outbound account traffic reads the account's existence.** Every
-  message and presence for a remote JID, the server's own on the
-  account's behalf included, costs the two reads of the existence check.
+- **Every stanza an account sends to a remote JID reads the account's
+  existence.** Every message, presence and IQ for a remote JID, room
+  traffic and the server's own stanzas on the account's behalf included,
+  costs the two reads of the existence check while an account side is
+  attached.
 
 ## Follow-ups
 
