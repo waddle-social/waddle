@@ -6,7 +6,8 @@
 //! another account holds (also when the same provider subject returns),
 //! session creation creates neither an account row nor a session for it, and
 //! the fixed-account bootstrap does not seed it. Retirement and provisioning
-//! exclude each other, in both orders.
+//! exclude each other, in both orders; a retirement that cannot lock the
+//! account tables in time fails and changes nothing.
 //!
 //! Every case runs on SQLite; the cases that take a store run on PostgreSQL
 //! as well, on a database of their own, and the exclusion cases need
@@ -492,6 +493,64 @@ async fn a_retirement_waits_for_a_registration_and_removes_its_account() {
         .user_exists("grace", DOMAIN)
         .await
         .expect("lookup"));
+    observer.close().await;
+    store.close().await;
+}
+
+#[tokio::test]
+async fn a_retirement_that_cannot_lock_the_account_tables_in_time_changes_nothing() {
+    let Some(store) = Store::postgres("retire_lock_bound").await else {
+        return;
+    };
+    let observer = sqlx::PgPool::connect(store.db.database_url())
+        .await
+        .expect("observer connection");
+    // A registration that has inserted its account and stays uncommitted
+    // for longer than a retirement waits for the account tables.
+    let mut registering = observer.begin().await.expect("registering transaction");
+    sqlx::query(
+        "INSERT INTO native_users (username, domain, jid_key, password_hash, salt, stored_key, \
+         server_key) VALUES ('heidi', 'example.com', 'heidi@example.com', 'hash', 'c2FsdA==', \
+         '\\x00', '\\x00')",
+    )
+    .execute(&mut *registering)
+    .await
+    .expect("uncommitted account");
+
+    // The retirement gives up instead of holding up every later writer of
+    // the account tables behind its lock request.
+    let started = Instant::now();
+    let refused = retire_account(&store.db, &account("heidi")).await;
+    let waited = started.elapsed();
+    assert!(
+        matches!(refused, Err(RetireAccountError::Database(_))),
+        "{refused:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(1900),
+        "the retirement gave up after {waited:?}"
+    );
+
+    // It recorded nothing, and the registration it waited for completes.
+    assert!(!jid_is_retired(&store.db, &account("heidi"))
+        .await
+        .expect("ledger read"));
+    registering.commit().await.expect("registration commits");
+    assert!(store
+        .native()
+        .user_exists("heidi", DOMAIN)
+        .await
+        .expect("lookup"));
+
+    // Run again, it retires the account.
+    let retirement = retire_account(&store.db, &account("heidi"))
+        .await
+        .expect("retirement");
+    assert!(retirement.newly_retired);
+    assert_eq!(retirement.native_accounts, 1);
+    assert!(jid_is_retired(&store.db, &account("heidi"))
+        .await
+        .expect("ledger read"));
     observer.close().await;
     store.close().await;
 }
